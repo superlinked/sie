@@ -98,7 +98,7 @@ def _expected(case: dict[str, Any], index: int, adapter: GLiFormerAdapter) -> di
     else:
         entities = sorted((e["start"], e["end"], e["text"], e["label"], e["score"]) for e in for_text("ner", []))
     expected: dict[str, Any] = {"entities": entities}
-    if "relations" in options or metadata is not None:
+    if "relation_labels" in options or metadata is not None:
         allowed = {e["text"] for e in metadata[index]["entities"]} if metadata is not None else None
         expected["relations"] = sorted(
             (relation["relation"], relation["head"]["text"], relation["tail"]["text"], relation["score"])

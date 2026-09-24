@@ -144,7 +144,7 @@ def test_classification_task_matches_gliner2_contract() -> None:
     assert (kwargs["threshold"], kwargs["multi_label"]) == (0.3, True)
 
 
-def test_relations_option_runs_joint_extraction_over_label_entity_types() -> None:
+def test_relation_labels_run_joint_extraction_over_label_entity_types() -> None:
     text = "Alice works at Acme in London"
     adapter, model = _adapter(
         {
@@ -158,7 +158,9 @@ def test_relations_option_runs_joint_extraction_over_label_entity_types() -> Non
         }
     )
 
-    output = adapter.extract([Item(text=text)], labels=["person", "organization"], options={"relations": ["works at"]})
+    output = adapter.extract(
+        [Item(text=text)], labels=["person", "organization"], options={"relation_labels": ["works at"]}
+    )
 
     assert [entity["text"] for entity in output.entities[0]] == ["Alice", "Acme"]
     assert output.relations == [
@@ -170,6 +172,53 @@ def test_relations_option_runs_joint_extraction_over_label_entity_types() -> Non
     kwargs = _inference_kwargs(model)
     assert kwargs["entities"] is None
     assert kwargs["joint_relations"] == {None: {"entities": ["person", "organization"], "relations": ["works at"]}}
+
+
+@pytest.mark.parametrize("supplied", [False, True])
+def test_relation_threshold_filters_relations_only(supplied: bool) -> None:
+    text = "Alice works at Acme in London"
+    alice, acme = _ner(text, "Alice", "person", 0.6), _ner(text, "Acme", "organization", 0.6)
+    adapter, model = _adapter(
+        {
+            "ner": [[alice, acme]],
+            "joint_relex": [
+                [
+                    _relation("Alice", "works at", "Acme", 0.9),
+                    _relation("Alice", "located in", "Acme", 0.7),
+                    _relation("Acme", "works at", "Alice", 0.6),
+                ]
+            ],
+        }
+    )
+    relation_types = ["works at", "located in"]
+    options = {"relation_threshold": 0.7}
+
+    if supplied:
+        item = Item(text=text, metadata={"entities": [alice, acme]})
+        output = adapter.extract([item], labels=relation_types, options=options)
+    else:
+        output = adapter.extract(
+            [Item(text=text)],
+            labels=["person", "organization"],
+            options={**options, "relation_labels": relation_types},
+        )
+
+    # Kept only above relation_threshold, as the decoder keeps scores above threshold.
+    assert output.relations == [[{"head": "Alice", "tail": "Acme", "relation": "works at", "score": 0.9}]]
+    assert [entity["text"] for entity in output.entities[0]] == ["Alice", "Acme"]
+    assert _inference_kwargs(model)["threshold"] == 0.5
+
+
+def test_relation_threshold_cannot_lower_the_decoding_threshold() -> None:
+    adapter, model = _adapter({"ner": [[]], "joint_relex": [[]]})
+    options = {"relation_labels": ["knows"], "threshold": 0.5}
+
+    with pytest.raises(InvalidInputError, match="relation_threshold must be at least threshold"):
+        adapter.extract([Item(text="Ada met Bo")], labels=["person"], options={**options, "relation_threshold": 0.3})
+    model.inference.assert_not_called()
+
+    adapter.extract([Item(text="Ada met Bo")], labels=["person"], options={**options, "relation_threshold": 0.5})
+    model.inference.assert_called_once()
 
 
 def test_metadata_entities_use_the_shared_relation_contract() -> None:
@@ -313,7 +362,7 @@ def test_missing_required_property_blanks_every_task_output_and_bills_nothing() 
         [Item(text=text), Item(text=text)],
         labels=["person", "organization"],
         output_schema=schema,
-        options={"relations": ["runs"]},
+        options={"relation_labels": ["runs"]},
     )
 
     assert output.errors is not None
@@ -445,9 +494,9 @@ def test_instruction_is_accepted_and_ignored() -> None:
             "contradicts classification_type",
         ),
         ({"options": {"classification_task": "topic"}}, "classification_task requires labels"),
-        ({"options": {"relations": ["works at"]}}, "relations require labels"),
+        ({"options": {"relation_labels": ["works at"]}}, "relation_labels require labels"),
         (
-            {"labels": ["a"], "options": {"classification_task": "topic", "relations": ["r"]}},
+            {"labels": ["a"], "options": {"classification_task": "topic", "relation_labels": ["r"]}},
             "cannot be combined",
         ),
         ({"labels": ["a"], "options": {"threshold": 1.5}}, "between 0 and 1"),
@@ -459,7 +508,11 @@ def test_instruction_is_accepted_and_ignored() -> None:
         ({"labels": ["a"], "options": {"flat_ner": 1}}, "flat_ner must be boolean"),
         ({"labels": ["a", "a"]}, "labels must be unique"),
         ({"labels": ["a", " "]}, "labels must be non-empty strings"),
-        ({"labels": ["a"], "options": {"relations": "works at"}}, "relations must be a non-empty list"),
+        ({"labels": ["a"], "options": {"relation_labels": "works at"}}, "relation_labels must be a non-empty list"),
+        ({"labels": ["a"], "options": {"relations": ["works at"]}}, "options.relation_labels, not options.relations"),
+        ({"labels": ["a"], "options": {"relations": []}}, "options.relation_labels, not options.relations"),
+        ({"labels": ["a"], "options": {"relation_threshold": 1.5}}, "relation_threshold must be a number between"),
+        ({"labels": ["a"], "options": {"relation_threshold": False}}, "relation_threshold must be a number between"),
         ({"labels": ["a"], "options": {"classification_task": " "}}, "classification_task must be a non-empty string"),
         (
             {
@@ -491,7 +544,7 @@ def test_metadata_entities_must_cover_every_item_and_exclude_other_relation_mode
     with pytest.raises(InvalidInputError, match="every item metadata"):
         adapter.extract([tagged, Item(text="Grace founded Beta")], labels=["founded"])
     with pytest.raises(InvalidInputError, match="cannot be combined"):
-        adapter.extract([tagged], labels=["founded"], options={"relations": ["founded"]})
+        adapter.extract([tagged], labels=["founded"], options={"relation_labels": ["founded"]})
     bad_offsets = Item(text="Ada founded Acme", metadata={"entities": [{"text": "Ada", "start": 1, "end": 4}]})
     with pytest.raises(InvalidInputError, match="valid character offsets"):
         adapter.extract([bad_offsets], labels=["founded"])
@@ -638,7 +691,7 @@ def test_classification_only_requests_accept_any_threshold(request_kwargs: dict[
     "request_kwargs",
     [
         {"labels": ["person"]},
-        {"labels": ["person"], "options": {"relations": ["knows"]}},
+        {"labels": ["person"], "options": {"relation_labels": ["knows"]}},
         {"output_schema": _SPAN_FIELD_SCHEMA},
         {"labels": ["knows"], "items_metadata": True},
     ],
@@ -761,7 +814,7 @@ def test_relation_requests_bound_candidate_pairs_per_pass() -> None:
     adapter.extract(
         [Item(text=f"text number {index}") for index in range(20)],
         labels=["person"],
-        options={"relations": ["knows"]},
+        options={"relation_labels": ["knows"]},
     )
 
     # 100 relation entities per document -> 9900 pairs; 131072 pairs per pass.
@@ -772,7 +825,7 @@ def test_relation_types_are_bounded() -> None:
     adapter, model = _adapter({})
     with pytest.raises(InvalidInputError, match="at most 20 relation types"):
         adapter.extract(
-            [Item(text="hello world")], labels=["person"], options={"relations": [f"r{i}" for i in range(21)]}
+            [Item(text="hello world")], labels=["person"], options={"relation_labels": [f"r{i}" for i in range(21)]}
         )
     supplied = Item(
         text="Ada met Bo", metadata={"entities": [{"text": "Ada", "label": "person", "start": 0, "end": 3}]}
@@ -910,12 +963,12 @@ def test_prompt_build_failure_is_an_internal_error() -> None:
     ("kwargs", "match"),
     [
         ({"labels": ["x" * 129]}, "at most 128 characters"),
-        ({"labels": ["a"], "options": {"relations": ["r" * 129]}}, "at most 128 characters"),
+        ({"labels": ["a"], "options": {"relation_labels": ["r" * 129]}}, "at most 128 characters"),
         ({"labels": ["a"], "options": {"classification_task": "t" * 129}}, "at most 128 characters"),
         ({"options": {"label_groups": {"g" * 129: ["a"]}}}, "at most 128 characters"),
         ({"options": {"label_groups": {"g": ["a" * 129]}}}, "at most 128 characters"),
         (
-            {"labels": [f"e{i}" for i in range(600)], "options": {"relations": [f"r{i}" for i in range(401)]}},
+            {"labels": [f"e{i}" for i in range(600)], "options": {"relation_labels": [f"r{i}" for i in range(401)]}},
             "in total",
         ),
         ({"options": {"label_groups": {f"g{i}": ["a", "b"] for i in range(334)}}}, "in total"),

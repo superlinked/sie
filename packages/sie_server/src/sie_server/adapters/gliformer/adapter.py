@@ -43,6 +43,7 @@ _ERR_BLANK_TEXT = "GLiFormer requires non-blank text"
 _ERR_PROMPT_EXHAUSTS_DOCUMENT = "GLiFormer task prompt leaves no document tokens within max_sequence_length"
 _ERR_MALFORMED = "GLiFormer returned malformed {output}"
 _ERR_ITEM_OUTPUT = "GLiFormer returned malformed or non-finite output for this item"
+_ERR_RELATIONS_OPTION = "GLiFormer takes relation types as options.relation_labels, not options.relations"
 
 # The model repositories ship a multi-megabyte demo animation next to the weights.
 _SNAPSHOT_IGNORE_PATTERNS = ["*.gif"]
@@ -193,8 +194,8 @@ class GLiFormerAdapter(BaseAdapter):
     ``extract`` call can combine:
 
     - named entity recognition over ``labels``;
-    - joint relation extraction with ``options["relations"]`` (relation types,
-      with ``labels`` as the entity types);
+    - joint relation extraction with ``options["relation_labels"]`` (relation
+      types, with ``labels`` as the entity types, as in the GLiNER adapter);
     - classification of ``labels`` under ``options["classification_task"]``;
     - several named classification questions with ``options["label_groups"]``,
       reported as ``"group.label"`` classifications like the GLiClass adapter
@@ -215,6 +216,10 @@ class GLiFormerAdapter(BaseAdapter):
     Classification-only requests (``classification_task``, ``label_groups``,
     or an ``output_schema`` of root enums only) accept any threshold from 0,
     where every question gets its best answer.
+
+    ``options["relation_threshold"]`` raises the minimum score for relations
+    only. GLiFormer decodes entities and relations with one threshold, so it
+    cannot be lower than ``threshold``.
 
     Relations are scored among the 100 most confident entities of each
     document; pairs involving other entities are not reported. A request may
@@ -377,7 +382,12 @@ class GLiFormerAdapter(BaseAdapter):
         self._check_loaded()
         texts = [self._extract_text(item) for item in items]
         opts = options or {}
+        if "relations" in opts:
+            raise InvalidInputError(_ERR_RELATIONS_OPTION)
         threshold = _validate_threshold(opts.get("threshold", self._threshold))
+        relation_threshold = opts.get("relation_threshold")
+        if relation_threshold is not None:
+            relation_threshold = _validate_threshold(relation_threshold, "relation_threshold")
         flat_ner = _validate_flag(opts.get("flat_ner", self._flat_ner), "flat_ner")
         multi_label = _resolve_multi_label(opts, default=self._multi_label)
         request = _plan_request(
@@ -385,8 +395,11 @@ class GLiFormerAdapter(BaseAdapter):
             plan=compile_output_schema(output_schema) if output_schema is not None else None,
             classification_task=_validate_task(opts.get("classification_task")),
             label_groups=_validate_label_groups(opts.get("label_groups")),
-            relation_types=_validate_labels(opts["relations"], "relations") if opts.get("relations") else None,
+            relation_types=(
+                _validate_labels(opts["relation_labels"], "relation_labels") if opts.get("relation_labels") else None
+            ),
             supplied_entities=self._supplied_relation_entities(items),
+            relation_threshold=relation_threshold,
         )
         if request.decodes_spans and threshold < _MIN_SPAN_THRESHOLD:
             raise InvalidInputError(
@@ -399,6 +412,11 @@ class GLiFormerAdapter(BaseAdapter):
             if len(request.relation_types or []) > _MAX_RELATION_TYPES:
                 raise InvalidInputError(
                     f"GLiFormer relation extraction accepts at most {_MAX_RELATION_TYPES} relation types"
+                )
+            if relation_threshold is not None and relation_threshold < threshold:
+                raise InvalidInputError(
+                    "GLiFormer relation_threshold must be at least threshold: entities and relations are "
+                    "decoded with one threshold, so relation_threshold can only raise it for relations"
                 )
             max_items = max(1, _RELATION_PAIR_BUDGET // (_MAX_RELATION_ENTITIES * (_MAX_RELATION_ENTITIES - 1)))
 
@@ -724,6 +742,7 @@ class _RequestPlan:
     label_groups: dict[str, list[str]] | None
     plan: StructuredPlan | None
     supplied_entities: list[list[Entity]] | None
+    relation_threshold: float | None
 
     @property
     def relations_requested(self) -> bool:
@@ -763,6 +782,7 @@ def _plan_request(
     label_groups: dict[str, list[str]] | None,
     relation_types: list[str] | None,
     supplied_entities: list[list[Entity]] | None,
+    relation_threshold: float | None,
 ) -> _RequestPlan:
     """Resolve what ``labels`` mean and which classification groups to run.
 
@@ -794,7 +814,7 @@ def _plan_request(
     if supplied_entities is not None:
         if classification_task is not None or relation_types is not None:
             raise InvalidInputError(
-                "GLiFormer item metadata.entities cannot be combined with classification_task or relations"
+                "GLiFormer item metadata.entities cannot be combined with classification_task or relation_labels"
             )
         if labels is None:
             raise InvalidInputError("GLiFormer relation extraction requires relation labels")
@@ -802,9 +822,9 @@ def _plan_request(
     elif classification_task is None:
         entity_types = labels
         if relation_types is not None and entity_types is None:
-            raise InvalidInputError("GLiFormer relations require labels as entity types")
+            raise InvalidInputError("GLiFormer relation_labels require labels as entity types")
     elif relation_types is not None:
-        raise InvalidInputError("GLiFormer relations cannot be combined with classification_task")
+        raise InvalidInputError("GLiFormer relation_labels cannot be combined with classification_task")
     if entity_types is None and supplied_entities is None and not classes and plan is None:
         raise InvalidInputError(_ERR_REQUIRES_TASK)
 
@@ -830,6 +850,7 @@ def _plan_request(
         label_groups=label_groups,
         plan=plan,
         supplied_entities=supplied_entities,
+        relation_threshold=relation_threshold,
     )
 
 
@@ -898,7 +919,7 @@ def _assemble_item(
     else:
         entities = _to_entities(text, raw.get("ner", []))
         allowed_endpoints = None
-    relations = _to_relations(raw.get("joint_relex", []), allowed_endpoints)
+    relations = _to_relations(raw.get("joint_relex", []), allowed_endpoints, request.relation_threshold)
 
     groups = _classification_groups(raw.get("classification"), request.classes)
     classifications: list[Classification] = []
@@ -979,7 +1000,9 @@ def _to_entities(text: str, raw_entities: Any) -> list[Entity]:
     return entities
 
 
-def _to_relations(raw_relations: Any, allowed_endpoints: set[str] | None) -> list[Relation]:
+def _to_relations(
+    raw_relations: Any, allowed_endpoints: set[str] | None, relation_threshold: float | None
+) -> list[Relation]:
     if not isinstance(raw_relations, list):
         raise RuntimeError(_ERR_MALFORMED.format(output="relations"))
     relations: list[Relation] = []
@@ -994,6 +1017,9 @@ def _to_relations(raw_relations: Any, allowed_endpoints: set[str] | None) -> lis
         if allowed_endpoints is not None and (head not in allowed_endpoints or tail not in allowed_endpoints):
             continue
         score = _validate_score(raw.get("score"), "relation")
+        # Same comparison as the package's decoder applies to ``threshold``.
+        if relation_threshold is not None and score <= relation_threshold:
+            continue
         relations.append(Relation(head=head, tail=tail, relation=relation, score=score))
     relations.sort(key=lambda item: (-item["score"], item["relation"], item["head"], item["tail"]))
     return relations
@@ -1025,8 +1051,8 @@ def _is_int(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
-def _validate_threshold(value: object) -> float:
-    message = "GLiFormer threshold must be a number between 0 and 1"
+def _validate_threshold(value: object, name: str = "threshold") -> float:
+    message = f"GLiFormer {name} must be a number between 0 and 1"
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise InvalidInputError(message)
     threshold = float(value)

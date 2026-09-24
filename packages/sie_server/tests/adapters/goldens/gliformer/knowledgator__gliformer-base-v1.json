@@ -298,7 +298,7 @@
      "product"
     ],
     "options": {
-     "relations": [
+     "relation_labels": [
       "works at",
       "located in",
       "chief executive of"
@@ -787,7 +787,7 @@
      }
     },
     "options": {
-     "relations": [
+     "relation_labels": [
       "works at",
       "located in",
       "chief executive of"

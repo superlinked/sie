@@ -140,13 +140,13 @@ CASES: list[tuple[str, dict[str, Any], dict[str, Any]]] = [
     ),
     (
         "relations",
-        {"labels": ENTITY_TYPES, "options": {"relations": RELATION_TYPES}},
+        {"labels": ENTITY_TYPES, "options": {"relation_labels": RELATION_TYPES}},
         {"joint_relations": JOINT_RELATIONS},
     ),
     ("output_schema", {"output_schema": OUTPUT_SCHEMA}, {"classes": SCHEMA_CLASSES, "structures": SCHEMA_STRUCTURES}),
     (
         "combined",
-        {"labels": ENTITY_TYPES, "output_schema": OUTPUT_SCHEMA, "options": {"relations": RELATION_TYPES}},
+        {"labels": ENTITY_TYPES, "output_schema": OUTPUT_SCHEMA, "options": {"relation_labels": RELATION_TYPES}},
         {"classes": SCHEMA_CLASSES, "joint_relations": JOINT_RELATIONS, "structures": SCHEMA_STRUCTURES},
     ),
     (
