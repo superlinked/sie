@@ -1,12 +1,12 @@
-"""GLiClass request fields: instruction, examples, classification_type, label_groups."""
+"""GLiClass request fields: instruction, examples, classification_type, label_groups, group_encoding."""
 
 from __future__ import annotations
 
 import math
 import re
+from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -22,6 +22,14 @@ _TOKEN_RE = re.compile(r"<<LABEL>>|<<SEP>>|<<EXAMPLE>>|(?:(?!<<LABEL>>|<<SEP>>|<
 class _MarkerAwareTokenizer:
     """One token per word or marker; CLS/SEP wrap adds two."""
 
+    truncation_side = "right"
+
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+
+    def num_special_tokens_to_add(self, pair: bool = False) -> int:
+        return 2
+
     def __call__(
         self,
         texts: str | list[str],
@@ -31,6 +39,7 @@ class _MarkerAwareTokenizer:
         **_: Any,
     ) -> dict[str, Any]:
         batch = [texts] if isinstance(texts, str) else texts
+        self.calls.append(list(batch))
         encoded = []
         for text in batch:
             ids = [_SPECIAL_IDS.get(token, 1) for token in _TOKEN_RE.findall(text)]
@@ -42,6 +51,9 @@ class _MarkerAwareTokenizer:
             encoded.append(ids)
         return {"input_ids": encoded[0] if isinstance(texts, str) else encoded}
 
+    def decode(self, ids: list[int], skip_special_tokens: bool = True) -> str:
+        return " ".join("w" for _ in ids)
+
 
 class _StubPipe:
     """The attributes of a gliclass uni-encoder pipe that request checks read."""
@@ -51,7 +63,7 @@ class _StubPipe:
 
     def __init__(self, *, prompt_first: bool, max_length: int = 512) -> None:
         self.max_length = max_length
-        self.model = SimpleNamespace(
+        self.model: Any = SimpleNamespace(
             config=SimpleNamespace(
                 architecture_type="uni-encoder", class_token_index=_CLASS_TOKEN, prompt_first=prompt_first
             )
@@ -80,95 +92,193 @@ class _SpaceBeforeMarkerTokenizer(_MarkerAwareTokenizer):
         return super().__call__(marked[0] if isinstance(texts, str) else marked, **kwargs)
 
 
-def _pipeline(results: list[dict[str, float]]) -> MagicMock:
-    pipeline = MagicMock()
-    pipeline.return_value = results
-    return pipeline
+Logit = Callable[[str, str], float]
 
 
-def _flat_adapter(
-    single: list[dict[str, float]],
-    multi: list[dict[str, float]] | None = None,
+class _ScoringPipe(_StubPipe):
+    """A gliclass uni-encoder pipe whose model scores each (text, label) with ``logit``.
+
+    Class slots past a row's own labels (a batch of rows with different label
+    counts) get ``filler``, so a softmax that leaked across them would show.
+    """
+
+    def __init__(
+        self,
+        logit: Logit,
+        *,
+        prompt_first: bool = True,
+        max_length: int = 512,
+        filler: float = 50.0,
+        error: BaseException | None = None,
+    ) -> None:
+        super().__init__(prompt_first=prompt_first, max_length=max_length)
+        self.logit = logit
+        self.filler = filler
+        self.error = error
+        self.prepare_calls: list[dict[str, Any]] = []
+        self.model = _ScoringModel(self, prompt_first=prompt_first)
+
+    def prepare_inputs(
+        self,
+        texts: list[str],
+        labels: list[str] | list[list[str]],
+        same_labels: bool = False,
+        examples: Any = None,
+        prompt: str | None = None,
+    ) -> dict[str, torch.Tensor]:
+        if self.error is not None:
+            raise self.error
+        row_labels = [list(labels)] * len(texts) if same_labels else [list(row) for row in labels]
+        self.prepare_calls.append(
+            {
+                "texts": list(texts),
+                "labels": row_labels,
+                "same_labels": same_labels,
+                "examples": examples,
+                "prompt": prompt,
+            }
+        )
+        width = max(len(row) for row in row_labels) + 2
+        return {
+            "input_ids": torch.ones(len(texts), width, dtype=torch.long),
+            "attention_mask": torch.ones(len(texts), width, dtype=torch.long),
+        }
+
+    def _resolve_max_num_classes(self, labels: list[str] | list[list[str]], same_labels: bool) -> int:
+        return len(labels) if same_labels else max(len(row) for row in labels)
+
+
+class _ScoringModel:
+    def __init__(self, pipe: _ScoringPipe, *, prompt_first: bool) -> None:
+        self._pipe = pipe
+        self.config = SimpleNamespace(
+            class_token_index=_CLASS_TOKEN, architecture_type="uni-encoder", prompt_first=prompt_first
+        )
+        self.forward_kwargs: list[dict[str, Any]] = []
+
+    def __call__(self, *, input_ids: torch.Tensor, attention_mask: torch.Tensor, **kwargs: Any) -> SimpleNamespace:
+        self.forward_kwargs.append(kwargs)
+        call = self._pipe.prepare_calls[-1]
+        width = kwargs["max_num_classes"]
+        rows = [
+            [self._pipe.logit(text, label) for label in labels] + [self._pipe.filler] * (width - len(labels))
+            for text, labels in zip(call["texts"], call["labels"], strict=True)
+        ]
+        return SimpleNamespace(logits=torch.tensor(rows, dtype=torch.float32))
+
+
+def _adapter(
+    logit: Logit,
     *,
     classification_type: str = "single-label",
-) -> GLiClassAdapter:
-    adapter = GLiClassAdapter("test-model", max_seq_length=512, classification_type=classification_type)  # ty:ignore[invalid-argument-type]
-    pipelines = {"single-label": _pipeline(single), "multi-label": _pipeline(multi or single)}
-    adapter._pipelines = pipelines  # ty:ignore[invalid-assignment]
-    adapter._pipeline = pipelines[classification_type]  # ty:ignore[invalid-assignment]
-    adapter._tokenizer = _MarkerAwareTokenizer()  # ty:ignore[invalid-assignment]
-    adapter._special_count = 2
-    return adapter
+    prompt_first: bool = True,
+    max_length: int = 512,
+    tokenizer: Any = None,
+    error: BaseException | None = None,
+) -> tuple[GLiClassAdapter, _ScoringPipe]:
+    adapter = GLiClassAdapter("test-model", max_seq_length=max_length, classification_type=classification_type)  # ty:ignore[invalid-argument-type]
+    pipe = _ScoringPipe(logit, prompt_first=prompt_first, max_length=max_length, error=error)
+    adapter._attach(pipe, tokenizer or _MarkerAwareTokenizer())  # ty:ignore[invalid-argument-type]
+    return adapter, pipe
 
 
 _LABELS = ["billing", "bug report", "feature request"]
 _SCORES = {"billing": 0.2, "bug report": 0.7, "feature request": 0.1}
 
 
-class TestUnchangedRequests:
-    """A request that sets none of the new fields runs the historical call."""
+def _score_logit(text: str, label: str) -> float:
+    """Log-probabilities: a softmax over all three labels gives back ``_SCORES``."""
+    return math.log(_SCORES[label])
 
-    def test_pipeline_call_and_output_are_unchanged(self) -> None:
-        adapter = _flat_adapter([dict(_SCORES)])
+
+def _flat_adapter(**kwargs: Any) -> tuple[GLiClassAdapter, _ScoringPipe]:
+    return _adapter(_score_logit, **kwargs)
+
+
+def _softmax(values: list[float]) -> list[float]:
+    exps = [math.exp(v) for v in values]
+    return [e / sum(exps) for e in exps]
+
+
+def _sigmoid(value: float) -> float:
+    return 1 / (1 + math.exp(-value))
+
+
+class TestUnchangedRequests:
+    """A request that sets none of the newer fields builds the historical model input."""
+
+    def test_model_input_and_output_are_unchanged(self) -> None:
+        adapter, pipe = _flat_adapter()
 
         output = adapter.extract([Item(text="The app crashes")], labels=list(_LABELS))
 
-        pipeline = adapter._pipeline
-        assert isinstance(pipeline, MagicMock)
-        pipeline.assert_called_once_with(["The app crashes"], _LABELS, threshold=0.0, return_hierarchical=True)
-        assert adapter._pipelines is not None
-        other = adapter._pipelines["multi-label"]
-        assert isinstance(other, MagicMock)
-        other.assert_not_called()
-        assert output.classifications == [
-            [
-                {"label": "bug report", "score": 0.7},
-                {"label": "billing", "score": 0.2},
-                {"label": "feature request", "score": 0.1},
-            ]
+        assert pipe.prepare_calls == [
+            {"texts": ["The app crashes"], "labels": [_LABELS], "same_labels": True, "examples": None, "prompt": None}
         ]
+        assert pipe.model.forward_kwargs == [{"max_num_classes": 3}]
+        assert output.classifications is not None
+        assert [c["label"] for c in output.classifications[0]] == ["bug report", "billing", "feature request"]
+        assert [c["score"] for c in output.classifications[0]] == pytest.approx([0.7, 0.2, 0.1], abs=1e-6)
         assert output.data is None
         assert output.entities == [[]]
 
     def test_threshold_filter_is_unchanged(self) -> None:
-        adapter = _flat_adapter([dict(_SCORES)])
+        adapter, _ = _flat_adapter()
 
         output = adapter.extract([Item(text="x")], labels=list(_LABELS), options={"threshold": 0.15})
 
-        assert output.classifications == [[{"label": "bug report", "score": 0.7}, {"label": "billing", "score": 0.2}]]
+        assert output.classifications is not None
+        assert [c["label"] for c in output.classifications[0]] == ["bug report", "billing"]
 
     def test_blank_instruction_and_empty_examples_are_ignored(self) -> None:
-        adapter = _flat_adapter([dict(_SCORES)])
+        adapter, pipe = _flat_adapter()
 
         adapter.extract([Item(text="x")], labels=list(_LABELS), instruction="  ", options={"examples": []})
 
-        pipeline = adapter._pipeline
-        assert isinstance(pipeline, MagicMock)
-        pipeline.assert_called_once_with(["x"], _LABELS, threshold=0.0, return_hierarchical=True)
+        assert pipe.prepare_calls[0]["prompt"] is None
+        assert pipe.prepare_calls[0]["examples"] is None
 
-    def test_default_classification_type_uses_the_load_time_pipeline(self) -> None:
-        adapter = _flat_adapter([dict(_SCORES)])
+    def test_items_run_in_forward_passes_of_eight(self) -> None:
+        adapter, pipe = _flat_adapter()
+        texts = [f"text {i}" for i in range(10)]
 
-        adapter.extract([Item(text="x")], labels=list(_LABELS), options={"classification_type": "single-label"})
+        output = adapter.extract([Item(text=t) for t in texts], labels=list(_LABELS))
 
-        pipeline = adapter._pipeline
-        assert isinstance(pipeline, MagicMock)
-        assert pipeline.call_count == 1
+        assert [call["texts"] for call in pipe.prepare_calls] == [texts[:8], texts[8:]]
+        assert output.classifications is not None
+        assert len(output.classifications) == 10
+
+    def test_a_request_tokenizes_each_document_and_its_labels_once(self) -> None:
+        tokenizer = _MarkerAwareTokenizer()
+        adapter, _ = _flat_adapter(prompt_first=False, tokenizer=tokenizer)
+        items = [Item(text="The app crashes"), Item(text="Charged twice")]
+
+        adapter.extract(items, labels=list(_LABELS), options={"overflow_policy": "truncate_text"})
+        first = list(tokenizer.calls)
+        tokenizer.calls.clear()
+        adapter.extract(items, labels=list(_LABELS), options={"overflow_policy": "truncate_text"})
+
+        # One call for the label prompt (as the fit check and the overflow
+        # policy each measure it), one for the documents; the model input
+        # itself is tokenized by the pipe. The overflow policy, fit check and
+        # metering share the document tokens.
+        label_prompt = "<<LABEL>>billing<<LABEL>>bug report<<LABEL>>feature request<<SEP>>"
+        assert first == [[label_prompt, label_prompt], ["The app crashes", "Charged twice"]]
+        # Nothing carries over from one request to the next.
+        assert tokenizer.calls == first
 
 
 class TestInstructionAndExamples:
-    def test_instruction_becomes_the_pipeline_prompt(self) -> None:
-        adapter = _flat_adapter([dict(_SCORES)])
+    def test_instruction_becomes_the_model_prompt(self) -> None:
+        adapter, pipe = _flat_adapter()
 
         adapter.extract([Item(text="x")], labels=list(_LABELS), instruction="Classify the support ticket.")
 
-        pipeline = adapter._pipeline
-        assert isinstance(pipeline, MagicMock)
-        assert pipeline.call_args.kwargs["prompt"] == "Classify the support ticket."
-        assert "examples" not in pipeline.call_args.kwargs
+        assert pipe.prepare_calls[0]["prompt"] == "Classify the support ticket."
+        assert pipe.prepare_calls[0]["examples"] is None
 
     def test_examples_are_normalized_and_forwarded(self) -> None:
-        adapter = _flat_adapter([dict(_SCORES)])
+        adapter, pipe = _flat_adapter()
         examples = [
             {"text": "I was charged twice", "labels": [" billing "]},
             {"text": "Nothing applies here", "labels": []},
@@ -176,13 +286,11 @@ class TestInstructionAndExamples:
 
         adapter.extract([Item(text="x")], labels=list(_LABELS), options={"examples": examples})
 
-        pipeline = adapter._pipeline
-        assert isinstance(pipeline, MagicMock)
-        assert pipeline.call_args.kwargs["examples"] == [
+        assert pipe.prepare_calls[0]["examples"] == [
             {"text": "I was charged twice", "labels": ["billing"]},
             {"text": "Nothing applies here", "labels": []},
         ]
-        assert "prompt" not in pipeline.call_args.kwargs
+        assert pipe.prepare_calls[0]["prompt"] is None
 
     @pytest.mark.parametrize(
         ("examples", "match"),
@@ -202,13 +310,13 @@ class TestInstructionAndExamples:
         ],
     )
     def test_malformed_examples_are_rejected(self, examples: object, match: str) -> None:
-        adapter = _flat_adapter([dict(_SCORES)])
+        adapter, _ = _flat_adapter()
 
         with pytest.raises(InvalidInputError, match=match):
             adapter.extract([Item(text="x")], labels=list(_LABELS), options={"examples": examples})
 
     def test_repeated_example_labels_are_sent_once(self) -> None:
-        adapter = _flat_adapter([dict(_SCORES)])
+        adapter, pipe = _flat_adapter()
 
         adapter.extract(
             [Item(text="x")],
@@ -216,12 +324,10 @@ class TestInstructionAndExamples:
             options={"examples": [{"text": "charged twice", "labels": ["billing", " billing"]}]},
         )
 
-        pipeline = adapter._pipeline
-        assert isinstance(pipeline, MagicMock)
-        assert pipeline.call_args.kwargs["examples"] == [{"text": "charged twice", "labels": ["billing"]}]
+        assert pipe.prepare_calls[0]["examples"] == [{"text": "charged twice", "labels": ["billing"]}]
 
     def test_label_text_that_cannot_fit_the_window_is_refused_before_tokenizing(self) -> None:
-        adapter = _flat_adapter([dict(_SCORES)])
+        adapter, _ = _flat_adapter()
         calls: list[object] = []
         tokenizer = adapter._tokenizer
 
@@ -234,13 +340,15 @@ class TestInstructionAndExamples:
         adapter._max_seq_length = 8  # 4 x 8 = 32 characters, exactly the length of _LABELS
 
         adapter.extract([Item(text="x")], labels=list(_LABELS))
+        accepted = len(calls)
         with pytest.raises(InvalidInputError, match="at most 32 can fit"):
             adapter.extract([Item(text="x")], labels=[*_LABELS[:2], "x" * 2_000_000])
 
-        assert len(calls) == 1  # only the accepted request tokenized anything
+        assert accepted > 0
+        assert len(calls) == accepted  # the refused request tokenized nothing
 
     def test_label_limit_ignores_vocabularies_with_very_long_tokens(self) -> None:
-        adapter = _flat_adapter([dict(_SCORES)])
+        adapter, _ = _flat_adapter()
         adapter._max_token_chars = 512  # e.g. a vocabulary holding a long whitespace run
         adapter._max_seq_length = 8  # 16 characters per token x 8 = 128
 
@@ -248,19 +356,19 @@ class TestInstructionAndExamples:
             adapter.extract([Item(text="x")], labels=[*_LABELS[:2], "x" * 200])
 
     def test_overlong_instruction_is_rejected(self) -> None:
-        adapter = _flat_adapter([dict(_SCORES)])
+        adapter, _ = _flat_adapter()
 
         with pytest.raises(InvalidInputError, match="at most 2048 characters"):
             adapter.extract([Item(text="x")], labels=list(_LABELS), instruction="x" * 2049)
 
     def test_item_without_text_is_invalid_input(self) -> None:
-        adapter = _flat_adapter([dict(_SCORES)])
+        adapter, _ = _flat_adapter()
 
         with pytest.raises(InvalidInputError, match="must have text"):
             adapter.extract([Item(text="")], labels=list(_LABELS))
 
     def test_non_string_instruction_is_rejected(self) -> None:
-        adapter = _flat_adapter([dict(_SCORES)])
+        adapter, _ = _flat_adapter()
 
         with pytest.raises(InvalidInputError, match="instruction must be a string"):
             adapter.extract([Item(text="x")], labels=list(_LABELS), instruction=3)  # ty:ignore[invalid-argument-type]
@@ -268,32 +376,29 @@ class TestInstructionAndExamples:
 
 class TestClassificationType:
     def test_request_can_switch_to_multi_label(self) -> None:
-        multi = {"billing": 0.9, "bug report": 0.8, "feature request": 0.05}
-        adapter = _flat_adapter([dict(_SCORES)], [multi])
+        adapter, _ = _flat_adapter()
 
         output = adapter.extract([Item(text="x")], labels=list(_LABELS), options={"classification_type": "multi-label"})
 
-        assert adapter._pipelines is not None
-        single = adapter._pipelines["single-label"]
-        assert isinstance(single, MagicMock)
-        single.assert_not_called()
         assert output.classifications is not None
-        assert [c["label"] for c in output.classifications[0]] == ["billing", "bug report", "feature request"]
+        scores = {c["label"]: c["score"] for c in output.classifications[0]}
+        expected = {label: _sigmoid(math.log(p)) for label, p in _SCORES.items()}
+        assert scores == pytest.approx(expected, abs=1e-6)
 
     def test_multi_label_model_can_switch_to_single_label(self) -> None:
-        multi = {"billing": 0.9, "bug report": 0.8, "feature request": 0.05}
-        adapter = _flat_adapter([dict(_SCORES)], [multi], classification_type="multi-label")
+        adapter, _ = _flat_adapter(classification_type="multi-label")
 
         output = adapter.extract(
             [Item(text="x")], labels=list(_LABELS), options={"classification_type": "single-label"}
         )
 
         assert output.classifications is not None
-        assert output.classifications[0][0] == {"label": "bug report", "score": 0.7}
+        assert output.classifications[0][0]["label"] == "bug report"
+        assert output.classifications[0][0]["score"] == pytest.approx(0.7, abs=1e-6)
 
     @pytest.mark.parametrize("value", ["multi_label", "binary", None, 1])
     def test_unknown_classification_type_is_rejected(self, value: object) -> None:
-        adapter = _flat_adapter([dict(_SCORES)])
+        adapter, _ = _flat_adapter()
 
         with pytest.raises(InvalidInputError, match="classification_type"):
             adapter.extract([Item(text="x")], labels=list(_LABELS), options={"classification_type": value})
@@ -303,118 +408,59 @@ class TestClassificationType:
             GLiClassAdapter("test-model", classification_type="multilabel")  # ty:ignore[invalid-argument-type]
 
 
-class _FakeGroupPipe(_StubPipe):
-    """Stands in for the gliclass uni-encoder pipe used by the grouped path."""
-
-    def __init__(
-        self, logits_by_text: dict[str, list[float]], *, prompt_first: bool = True, max_length: int = 512
-    ) -> None:
-        super().__init__(prompt_first=prompt_first, max_length=max_length)
-        self.logits_by_text = logits_by_text
-        self.prepare_calls: list[dict[str, Any]] = []
-        self.model = _FakeGroupModel(self, prompt_first=prompt_first)
-
-    def prepare_inputs(
-        self,
-        texts: list[str],
-        labels: list[str],
-        same_labels: bool = False,
-        examples: list[dict[str, Any]] | None = None,
-        prompt: str | None = None,
-    ) -> dict[str, torch.Tensor]:
-        self.prepare_calls.append(
-            {
-                "texts": list(texts),
-                "labels": list(labels),
-                "same_labels": same_labels,
-                "examples": examples,
-                "prompt": prompt,
-            }
-        )
-        row = [1] + [_CLASS_TOKEN] * len(labels) + [2, 3, 4]
-        return {
-            "input_ids": torch.tensor([row] * len(texts)),
-            "attention_mask": torch.ones(len(texts), len(row), dtype=torch.long),
-        }
-
-    def _resolve_max_num_classes(self, labels: list[str], same_labels: bool) -> int:
-        assert same_labels is True
-        return len(labels)
-
-
-class _FakeGroupModel:
-    def __init__(self, pipe: _FakeGroupPipe, *, prompt_first: bool) -> None:
-        self._pipe = pipe
-        self.config = SimpleNamespace(
-            class_token_index=_CLASS_TOKEN, architecture_type="uni-encoder", prompt_first=prompt_first
-        )
-        self.forward_kwargs: list[dict[str, Any]] = []
-
-    def __call__(self, *, input_ids: torch.Tensor, attention_mask: torch.Tensor, **kwargs: Any) -> SimpleNamespace:
-        self.forward_kwargs.append(kwargs)
-        texts = self._pipe.prepare_calls[-1]["texts"]
-        logits = torch.tensor([self._pipe.logits_by_text[text] for text in texts], dtype=torch.float16)
-        return SimpleNamespace(logits=logits)
-
-
 _GROUPS = {"urgency": ["low", "high"], "topic": ["billing", "bug", "feature"]}
-# Flattened order: urgency.low, urgency.high, topic.billing, topic.bug, topic.feature
 _LOGITS = {
-    "Charged twice, fix today": [-1.0, 2.0, 3.0, 0.5, -2.0],
-    "Dark mode someday?": [1.5, -1.0, -3.0, -2.0, 4.0],
+    "Charged twice, fix today": {"low": -1.0, "high": 2.0, "billing": 3.0, "bug": 0.5, "feature": -2.0},
+    "Dark mode someday?": {"low": 1.5, "high": -1.0, "billing": -3.0, "bug": -2.0, "feature": 4.0},
 }
 
 
-def _group_adapter(
-    logits: dict[str, list[float]] | None = None, *, prompt_first: bool = True, max_length: int = 512
-) -> tuple[GLiClassAdapter, _FakeGroupPipe]:
-    adapter = GLiClassAdapter("test-model", max_seq_length=max_length)
-    pipe = _FakeGroupPipe(logits or _LOGITS, prompt_first=prompt_first, max_length=max_length)
-    pipeline = MagicMock()
-    pipeline.pipe = pipe
-    adapter._pipeline = pipeline  # ty:ignore[invalid-assignment]
-    adapter._pipelines = {"single-label": pipeline, "multi-label": MagicMock()}  # ty:ignore[invalid-assignment]
-    adapter._tokenizer = _MarkerAwareTokenizer()  # ty:ignore[invalid-assignment]
-    adapter._special_count = 2
-    return adapter, pipe
+def _table_logit(text: str, label: str) -> float:
+    """Scores a plain label ("low") and its joint form ("urgency.low") alike."""
+    return _LOGITS[text][label.rsplit(".", 1)[-1]]
 
 
-def _softmax(values: list[float]) -> list[float]:
-    exps = [math.exp(v) for v in values]
-    return [e / sum(exps) for e in exps]
+def _group_adapter(**kwargs: Any) -> tuple[GLiClassAdapter, _ScoringPipe]:
+    return _adapter(_table_logit, **kwargs)
+
+
+def _group_options(**options: Any) -> dict[str, Any]:
+    return {"label_groups": _GROUPS, **options}
+
+
+@pytest.fixture(params=["separate", "joint"])
+def group_encoding(request: pytest.FixtureRequest) -> str:
+    return request.param
 
 
 class TestLabelGroups:
-    def test_single_label_scores_are_normalized_per_group(self) -> None:
-        adapter, pipe = _group_adapter()
+    """What both group encodings share: answer shape, normalization, validation."""
+
+    def test_single_label_scores_are_normalized_per_group(self, group_encoding: str) -> None:
+        adapter, _ = _group_adapter()
         texts = list(_LOGITS)
 
-        output = adapter.extract([Item(text=t) for t in texts], options={"label_groups": _GROUPS})
+        output = adapter.extract([Item(text=t) for t in texts], options=_group_options(group_encoding=group_encoding))
 
-        assert pipe.prepare_calls[0]["labels"] == [
-            "urgency.low",
-            "urgency.high",
-            "topic.billing",
-            "topic.bug",
-            "topic.feature",
-        ]
         assert output.data is not None
         for text, data in zip(texts, output.data, strict=True):
-            logits = [float(torch.tensor(v, dtype=torch.float16)) for v in _LOGITS[text]]
+            logits = _LOGITS[text]
             assert list(data) == ["urgency", "topic"]
             urgency, topic = data["urgency"]["probabilities"], data["topic"]["probabilities"]
             assert list(urgency) == ["low", "high"]
-            assert list(urgency.values()) == pytest.approx(_softmax(logits[:2]), abs=1e-6)
-            assert list(topic.values()) == pytest.approx(_softmax(logits[2:]), abs=1e-6)
-            assert sum(urgency.values()) == pytest.approx(1.0)
-            assert sum(topic.values()) == pytest.approx(1.0)
+            assert list(urgency.values()) == pytest.approx(_softmax([logits["low"], logits["high"]]), abs=1e-6)
+            assert list(topic.values()) == pytest.approx(
+                _softmax([logits["billing"], logits["bug"], logits["feature"]]), abs=1e-6
+            )
         assert output.data[0]["topic"]["choice"] == "billing"
         assert output.data[1]["urgency"]["choice"] == "low"
 
-    def test_single_label_groups_answer_like_choice_questions(self) -> None:
+    def test_single_label_groups_answer_like_choice_questions(self, group_encoding: str) -> None:
         adapter, _ = _group_adapter()
 
-        output = adapter.extract([Item(text="Charged twice, fix today")], options={"label_groups": _GROUPS})
+        output = adapter.extract(
+            [Item(text="Charged twice, fix today")], options=_group_options(group_encoding=group_encoding)
+        )
 
         assert output.data is not None
         answer = output.data[0]["topic"]
@@ -425,11 +471,12 @@ class TestLabelGroups:
         assert answer["confidence"] == pytest.approx(1 - entropy / math.log(3))
         assert 0.0 < answer["confidence"] < 1.0
 
-    def test_classifications_use_group_dot_label_and_honor_threshold(self) -> None:
+    def test_classifications_use_group_dot_label_and_honor_threshold(self, group_encoding: str) -> None:
         adapter, _ = _group_adapter()
 
         output = adapter.extract(
-            [Item(text="Charged twice, fix today")], options={"label_groups": _GROUPS, "threshold": 0.5}
+            [Item(text="Charged twice, fix today")],
+            options=_group_options(group_encoding=group_encoding, threshold=0.5),
         )
 
         assert output.classifications is not None
@@ -437,81 +484,50 @@ class TestLabelGroups:
         assert output.data is not None
         assert len(output.data[0]["topic"]["probabilities"]) == 3  # never threshold-filtered
 
-    def test_multi_label_uses_independent_sigmoids(self) -> None:
+    def test_multi_label_uses_independent_sigmoids(self, group_encoding: str) -> None:
         adapter, _ = _group_adapter()
 
         output = adapter.extract(
             [Item(text="Charged twice, fix today")],
-            options={"label_groups": _GROUPS, "classification_type": "multi-label"},
+            options=_group_options(group_encoding=group_encoding, classification_type="multi-label"),
         )
 
         assert output.data is not None
-        expected = [1 / (1 + math.exp(-v)) for v in _LOGITS["Charged twice, fix today"]]
+        expected = [_sigmoid(v) for v in _LOGITS["Charged twice, fix today"].values()]
         urgency, topic = output.data[0]["urgency"], output.data[0]["topic"]
         assert set(urgency) == {"labels", "probabilities"}
         actual = [*urgency["probabilities"].values(), *topic["probabilities"].values()]
-        assert actual == pytest.approx(expected, abs=1e-3)
+        assert actual == pytest.approx(expected, abs=1e-6)
         # Without a request threshold, labels at or above 0.5 are selected.
         assert urgency["labels"] == ["high"]
         assert topic["labels"] == ["billing", "bug"]
 
-    def test_multi_label_selection_follows_the_request_threshold(self) -> None:
+    def test_multi_label_selection_follows_the_request_threshold(self, group_encoding: str) -> None:
         adapter, _ = _group_adapter()
 
         output = adapter.extract(
             [Item(text="Charged twice, fix today")],
-            options={"label_groups": _GROUPS, "classification_type": "multi-label", "threshold": 0.9},
+            options=_group_options(group_encoding=group_encoding, classification_type="multi-label", threshold=0.9),
         )
 
         assert output.data is not None
         assert output.data[0]["topic"]["labels"] == ["billing"]
         assert output.data[0]["urgency"]["labels"] == []
 
-    def test_prompt_examples_and_forward_kwargs_reach_the_model(self) -> None:
-        adapter, pipe = _group_adapter()
-
-        adapter.extract(
-            [Item(text="Charged twice, fix today")],
-            instruction="Triage the ticket.",
-            options={
-                "label_groups": _GROUPS,
-                "examples": [
-                    {"text": "Refund please", "labels": {"topic": "billing", "urgency": ["low"]}},
-                    {"text": "App crashes", "labels": ["topic.bug"]},
-                ],
-            },
-        )
-
-        call = pipe.prepare_calls[0]
-        assert call["prompt"] == "Triage the ticket."
-        assert call["same_labels"] is True
-        assert call["examples"] == [
-            {"text": "Refund please", "labels": ["topic.billing", "urgency.low"]},
-            {"text": "App crashes", "labels": ["topic.bug"]},
-        ]
-        assert pipe.model.forward_kwargs == [{"max_num_classes": 5}]
-
-    def test_batches_follow_the_pipeline_sub_batch_size(self) -> None:
-        texts = [f"text {i}" for i in range(10)]
-        logits = {text: [0.0, 1.0, 0.0, 1.0, 2.0] for text in texts}
-        adapter, pipe = _group_adapter(logits)
-
-        output = adapter.extract([Item(text=t) for t in texts], options={"label_groups": _GROUPS})
-
-        assert [len(call["texts"]) for call in pipe.prepare_calls] == [8, 2]
-        assert output.data is not None
-        assert len(output.data) == 10
-
-    def test_a_document_that_pushes_labels_out_fails_only_its_own_item(self) -> None:
+    def test_a_document_that_pushes_labels_out_fails_only_its_own_item(self, group_encoding: str) -> None:
         long_text = "attacker " * 600
-        logits = {"Charged twice, fix today": _LOGITS["Charged twice, fix today"], long_text: [0.0] * 5}
-        adapter, pipe = _group_adapter(logits, prompt_first=False)
+        logits = {
+            "Charged twice, fix today": _LOGITS["Charged twice, fix today"],
+            long_text: _LOGITS["Dark mode someday?"],
+        }
+        adapter, pipe = _adapter(lambda text, label: logits[text][label.rsplit(".", 1)[-1]], prompt_first=False)
 
         output = adapter.extract(
-            [Item(text="Charged twice, fix today"), Item(text=long_text)], options={"label_groups": _GROUPS}
+            [Item(text="Charged twice, fix today"), Item(text=long_text)],
+            options=_group_options(group_encoding=group_encoding),
         )
 
-        assert [call["texts"] for call in pipe.prepare_calls] == [["Charged twice, fix today"]]
+        assert {text for call in pipe.prepare_calls for text in call["texts"]} == {"Charged twice, fix today"}
         assert output.errors is not None
         assert output.errors[0] is None
         assert output.errors[1] is not None
@@ -524,17 +540,21 @@ class TestLabelGroups:
         assert output.input_token_counts is not None
         assert output.input_token_counts[1] == 0
 
-    def test_labels_that_alone_overflow_the_window_are_refused(self) -> None:
+    def test_labels_that_alone_overflow_the_window_are_refused(self, group_encoding: str) -> None:
         adapter, _ = _group_adapter(max_length=6)
 
         with pytest.raises(InputTooLongError):
-            adapter.extract([Item(text="Charged twice, fix today")], options={"label_groups": _GROUPS})
+            adapter.extract(
+                [Item(text="Charged twice, fix today")], options=_group_options(group_encoding=group_encoding)
+            )
 
-    def test_a_marker_inside_the_document_is_not_an_overflow(self) -> None:
+    def test_a_marker_inside_the_document_is_not_an_overflow(self, group_encoding: str) -> None:
         text = "Charged twice, fix today"
-        adapter, _ = _group_adapter({f"{text} <<LABEL>>": _LOGITS[text]})
+        adapter, _ = _adapter(lambda _text, label: _table_logit(text, label))
 
-        output = adapter.extract([Item(text=f"{text} <<LABEL>>")], options={"label_groups": _GROUPS})
+        output = adapter.extract(
+            [Item(text=f"{text} <<LABEL>>")], options=_group_options(group_encoding=group_encoding)
+        )
 
         assert output.errors is None
         assert output.data is not None
@@ -574,23 +594,317 @@ class TestLabelGroups:
             ),
         ],
     )
-    def test_malformed_groups_are_rejected(self, options: dict[str, Any], labels: list[str] | None, match: str) -> None:
+    def test_malformed_groups_are_rejected(
+        self, group_encoding: str, options: dict[str, Any], labels: list[str] | None, match: str
+    ) -> None:
         adapter, _ = _group_adapter()
 
         with pytest.raises(InvalidInputError, match=match):
-            adapter.extract([Item(text="x")], labels=labels, options=options)
+            adapter.extract([Item(text="x")], labels=labels, options={**options, "group_encoding": group_encoding})
 
-    def test_single_label_group_of_one_is_allowed_in_multi_label_mode(self) -> None:
-        logits = {"x": [0.3]}
-        adapter, _ = _group_adapter(logits)
+    def test_single_label_group_of_one_is_allowed_in_multi_label_mode(self, group_encoding: str) -> None:
+        adapter, _ = _adapter(lambda text, label: 0.3)
 
         output = adapter.extract(
-            [Item(text="x")], options={"label_groups": {"spam": ["yes"]}, "classification_type": "multi-label"}
+            [Item(text="x")],
+            options={
+                "label_groups": {"spam": ["yes"]},
+                "classification_type": "multi-label",
+                "group_encoding": group_encoding,
+            },
         )
 
         assert output.data is not None
-        assert output.data[0]["spam"]["probabilities"]["yes"] == pytest.approx(1 / (1 + math.exp(-0.3)), abs=1e-3)
+        assert output.data[0]["spam"]["probabilities"]["yes"] == pytest.approx(_sigmoid(0.3), abs=1e-6)
         assert output.data[0]["spam"]["labels"] == ["yes"]
+
+    @pytest.mark.parametrize("value", ["Joint", "per-group", 1, True])
+    def test_unknown_group_encoding_is_rejected(self, value: object) -> None:
+        adapter, _ = _group_adapter()
+
+        with pytest.raises(InvalidInputError, match="group_encoding must be 'separate' or 'joint'"):
+            adapter.extract([Item(text="x")], options=_group_options(group_encoding=value))
+
+    def test_group_encoding_without_label_groups_is_rejected(self) -> None:
+        adapter, _ = _flat_adapter()
+
+        with pytest.raises(InvalidInputError, match=r"only with options\.label_groups"):
+            adapter.extract([Item(text="x")], labels=list(_LABELS), options={"group_encoding": "separate"})
+
+
+class TestJointGroupEncoding:
+    def test_all_groups_share_one_row_per_item(self) -> None:
+        adapter, pipe = _group_adapter()
+        texts = list(_LOGITS)
+
+        adapter.extract([Item(text=t) for t in texts], options=_group_options(group_encoding="joint"))
+
+        assert len(pipe.prepare_calls) == 1
+        assert pipe.prepare_calls[0]["texts"] == texts
+        assert pipe.prepare_calls[0]["same_labels"] is True
+        assert pipe.prepare_calls[0]["labels"][0] == [
+            "urgency.low",
+            "urgency.high",
+            "topic.billing",
+            "topic.bug",
+            "topic.feature",
+        ]
+
+    def test_prompt_examples_and_forward_kwargs_reach_the_model(self) -> None:
+        adapter, pipe = _group_adapter()
+
+        adapter.extract(
+            [Item(text="Charged twice, fix today")],
+            instruction="Triage the ticket.",
+            options=_group_options(
+                group_encoding="joint",
+                examples=[
+                    {"text": "Refund please", "labels": {"topic": "billing", "urgency": ["low"]}},
+                    {"text": "App crashes", "labels": ["topic.bug"]},
+                ],
+            ),
+        )
+
+        call = pipe.prepare_calls[0]
+        assert call["prompt"] == "Triage the ticket."
+        assert call["examples"] == [
+            {"text": "Refund please", "labels": ["topic.billing", "urgency.low"]},
+            {"text": "App crashes", "labels": ["topic.bug"]},
+        ]
+        assert pipe.model.forward_kwargs == [{"max_num_classes": 5}]
+
+    def test_batches_follow_the_pipeline_sub_batch_size(self) -> None:
+        texts = [f"text {i}" for i in range(10)]
+        adapter, pipe = _adapter(lambda text, label: 0.5)
+
+        output = adapter.extract([Item(text=t) for t in texts], options=_group_options(group_encoding="joint"))
+
+        assert [len(call["texts"]) for call in pipe.prepare_calls] == [8, 2]
+        assert output.data is not None
+        assert len(output.data) == 10
+
+    def test_joint_groups_bill_the_document_once(self) -> None:
+        adapter, _ = _group_adapter()
+
+        output = adapter.extract(
+            [Item(text="Charged twice, fix today")], options=_group_options(group_encoding="joint")
+        )
+
+        assert output.input_token_counts == [4 + 2]
+
+
+class TestSeparateGroupEncoding:
+    def test_separate_is_the_default(self) -> None:
+        adapter, pipe = _group_adapter()
+
+        adapter.extract([Item(text="Charged twice, fix today")], options=_group_options())
+
+        assert pipe.prepare_calls[0]["same_labels"] is False
+        assert sorted(pipe.prepare_calls[0]["labels"]) == [["billing", "bug", "feature"], ["low", "high"]]
+
+    def test_rows_of_every_item_and_group_share_one_forward_pass(self) -> None:
+        adapter, pipe = _group_adapter()
+        texts = list(_LOGITS)
+
+        adapter.extract([Item(text=t) for t in texts], options=_group_options())
+
+        # One row per (item, group), the longest rows first.
+        assert len(pipe.prepare_calls) == 1
+        call = pipe.prepare_calls[0]
+        assert list(zip(call["texts"], call["labels"], strict=True)) == [
+            (texts[0], ["billing", "bug", "feature"]),
+            (texts[1], ["billing", "bug", "feature"]),
+            (texts[0], ["low", "high"]),
+            (texts[1], ["low", "high"]),
+        ]
+        assert pipe.model.forward_kwargs == [{"max_num_classes": 3}]
+
+    def test_many_short_rows_share_one_forward_pass(self) -> None:
+        texts = [f"text {i}" for i in range(20)]
+        adapter, pipe = _adapter(lambda text, label: 0.5)
+
+        output = adapter.extract([Item(text=t) for t in texts], options=_group_options())
+
+        assert [len(call["texts"]) for call in pipe.prepare_calls] == [40]
+        assert output.data is not None
+        assert len(output.data) == 20
+
+    def test_rows_are_packed_into_passes_of_eight_full_windows(self) -> None:
+        # Window 64, so a pass holds 8 x 64 = 512 padded tokens. Forty-word
+        # documents make 49-token topic rows and 47-token urgency rows:
+        # ten rows fit in the first pass.
+        texts = [" ".join(f"w{i}x{j}" for j in range(40)) for i in range(6)]
+        adapter, pipe = _adapter(lambda text, label: 0.5, max_length=64)
+
+        output = adapter.extract([Item(text=t) for t in texts], options=_group_options())
+
+        assert [len(call["texts"]) for call in pipe.prepare_calls] == [10, 2]
+        assert [len(labels) for labels in pipe.prepare_calls[0]["labels"]] == [3] * 6 + [2] * 4
+        assert output.data is not None
+        assert all(list(answers) == ["urgency", "topic"] for answers in output.data)
+
+    def test_each_group_scores_like_a_labels_request_with_its_labels(self) -> None:
+        # The filler logit (50.0) sits in the class slot a two-label row gets
+        # when it shares a forward pass with a three-label row. A softmax over
+        # it would push every urgency probability to zero.
+        adapter, _ = _group_adapter()
+        items = [Item(text=t) for t in _LOGITS]
+
+        grouped = adapter.extract(items, options=_group_options())
+
+        assert grouped.data is not None
+        for group, labels in _GROUPS.items():
+            alone = adapter.extract(items, labels=labels)
+            assert alone.classifications is not None
+            for index, row in enumerate(alone.classifications):
+                expected = {c["label"]: c["score"] for c in row}
+                assert grouped.data[index][group]["probabilities"] == expected
+
+    def test_each_row_gets_only_its_groups_example_labels(self) -> None:
+        adapter, pipe = _group_adapter()
+
+        adapter.extract(
+            [Item(text="Charged twice, fix today")],
+            instruction="Triage the ticket.",
+            options=_group_options(
+                examples=[
+                    {"text": "Refund please", "labels": {"topic": "billing", "urgency": ["low"]}},
+                    {"text": "App crashes", "labels": ["topic.bug"]},
+                ],
+            ),
+        )
+
+        call = pipe.prepare_calls[0]
+        assert call["prompt"] == "Triage the ticket."
+        examples_by_labels = {
+            tuple(labels): examples for labels, examples in zip(call["labels"], call["examples"], strict=True)
+        }
+        assert examples_by_labels == {
+            ("low", "high"): [{"text": "Refund please", "labels": ["low"]}, {"text": "App crashes", "labels": []}],
+            ("billing", "bug", "feature"): [
+                {"text": "Refund please", "labels": ["billing"]},
+                {"text": "App crashes", "labels": ["bug"]},
+            ],
+        }
+
+    def test_every_row_is_billed(self) -> None:
+        adapter, _ = _group_adapter()
+        items = [Item(text="Charged twice, fix today"), Item(text="Dark mode someday?")]
+
+        plain = adapter.extract(items, options=_group_options())
+        with_context = adapter.extract(
+            items,
+            instruction="Triage the ticket now",
+            options=_group_options(examples=[{"text": "Refund please", "labels": ["topic.billing"]}]),
+        )
+
+        # Documents of 4 and 3 words plus CLS/SEP, once per group.
+        assert plain.input_token_counts == [2 * (4 + 2), 2 * (3 + 2)]
+        # Each row also encodes the instruction (4) and the example text (2).
+        assert with_context.input_token_counts == [2 * (4 + 2 + 6), 2 * (3 + 2 + 6)]
+
+    def test_truncate_text_cuts_each_row_to_its_own_budget(self) -> None:
+        # max_length 14: the urgency label prompt is 5 tokens (two markers, two
+        # labels, the separator) and topic's is 7. With CLS/SEP the ten-word
+        # document keeps 7 tokens next to urgency and 5 next to topic.
+        text = "one two three four five six seven eight nine ten"
+        adapter, pipe = _adapter(lambda _text, label: 0.5, max_length=14)
+
+        output = adapter.extract([Item(text=text)], options=_group_options(overflow_policy="truncate_text"))
+
+        call = pipe.prepare_calls[0]
+        texts_by_labels = {tuple(labels): text for labels, text in zip(call["labels"], call["texts"], strict=True)}
+        assert texts_by_labels == {
+            ("low", "high"): " ".join(["w"] * 7),
+            ("billing", "bug", "feature"): " ".join(["w"] * 5),
+        }
+        assert output.input_token_counts == [(7 + 2) + (5 + 2)]
+
+    def test_an_item_whose_labels_miss_any_row_fails_alone(self) -> None:
+        # Text-first model keeping 10 content tokens: the six-word document leaves
+        # room for both urgency markers but pushes the third topic marker out.
+        adapter, pipe = _adapter(lambda _text, label: 0.5, prompt_first=False, max_length=12)
+        items = [Item(text="one two three four five six"), Item(text="short")]
+
+        output = adapter.extract(items, options=_group_options())
+
+        assert output.errors is not None
+        assert output.errors[0] is not None
+        assert output.errors[0].code == "INPUT_TOO_LONG"
+        assert output.errors[1] is None
+        assert {text for call in pipe.prepare_calls for text in call["texts"]} == {"short"}
+        assert output.input_token_counts is not None
+        assert output.input_token_counts[0] == 0
+        assert output.input_token_counts[1] == 2 * (1 + 2)
+
+    def test_the_group_count_is_capped_by_rows_per_item(self) -> None:
+        adapter, _ = _adapter(lambda _text, label: 0.5)
+        groups = {f"q{i}": ["yes", "no"] for i in range(65)}
+
+        with pytest.raises(InvalidInputError, match="at most 64 groups"):
+            adapter.extract([Item(text="x")], options={"label_groups": groups})
+        # A 1024-token window allows half as many rows per item.
+        adapter._max_seq_length = 1024
+        with pytest.raises(InvalidInputError, match="at most 32 groups"):
+            adapter.extract([Item(text="x")], options={"label_groups": dict(list(groups.items())[:33])})
+        # The joint encoding is one row per item and keeps its label cap only.
+        output = adapter.extract([Item(text="x")], options={"label_groups": groups, "group_encoding": "joint"})
+        assert output.data is not None
+        assert len(output.data[0]) == 65
+
+    def test_the_group_cap_is_checked_before_tokenizing(self) -> None:
+        tokenizer = _MarkerAwareTokenizer()
+        adapter, _ = _adapter(lambda _text, label: 0.5, tokenizer=tokenizer)
+
+        with pytest.raises(InvalidInputError, match="groups"):
+            adapter.extract([Item(text="x")], options={"label_groups": {f"q{i}": ["a", "b"] for i in range(65)}})
+
+        assert tokenizer.calls == []
+
+    def test_each_groups_label_text_is_checked_against_the_window(self) -> None:
+        adapter, _ = _adapter(lambda _text, label: 0.5)
+        adapter._max_seq_length = 8  # 16 characters per token x 8 = 128 per row
+
+        # Every group fits alone although together they exceed one row.
+        groups = {f"q{i}": ["x" * 60, "y" * 60] for i in range(3)}
+        output = adapter.extract([Item(text="x")], options={"label_groups": groups})
+        assert output.data is not None
+        with pytest.raises(InvalidInputError, match="at most 128 can fit"):
+            adapter.extract([Item(text="x")], options={"label_groups": {"q": ["x" * 70, "y" * 70]}})
+
+
+class TestBatchingCost:
+    def test_separate_groups_cost_every_rows_characters(self) -> None:
+        adapter, _ = _group_adapter()
+        items = [Item(text="abcd"), Item(text="abcdefgh")]
+        label_chars = len("low" + "high" + "billing" + "bug" + "feature")
+
+        assert adapter.extract_item_costs(items, options={"label_groups": _GROUPS}) == [
+            2 * 4 + label_chars,
+            2 * 8 + label_chars,
+        ]
+        # Each row also encodes the instruction and the example texts.
+        costs = adapter.extract_item_costs(
+            items,
+            instruction="Triage",
+            options={"label_groups": _GROUPS, "examples": [{"text": "Refund", "labels": ["topic.billing"]}]},
+        )
+        assert costs == [2 * (4 + 12) + label_chars, 2 * (8 + 12) + label_chars]
+
+    @pytest.mark.parametrize(
+        "options",
+        [
+            None,
+            {},
+            {"label_groups": _GROUPS, "group_encoding": "joint"},
+            {"label_groups": "not a mapping"},
+            {"label_groups": {f"q{i}": ["a", "b"] for i in range(65)}},
+        ],
+    )
+    def test_other_requests_keep_the_default_cost(self, options: dict[str, Any] | None) -> None:
+        adapter, _ = _group_adapter()
+
+        assert adapter.extract_item_costs([Item(text="abcd")], labels=["a"], options=options) is None
 
 
 class TestOverflowBudget:
@@ -600,7 +914,9 @@ class TestOverflowBudget:
         adapter._special_count = 2
 
         class _Tokenizer:
-            def __call__(self, text: str, add_special_tokens: bool = False) -> dict[str, list[str]]:
+            def __call__(self, text: str | list[str], add_special_tokens: bool = False) -> dict[str, Any]:
+                if isinstance(text, list):
+                    return {"input_ids": [t.split() for t in text]}
                 return {"input_ids": text.split()}
 
             def decode(self, ids: list[str], skip_special_tokens: bool = True) -> str:
@@ -623,7 +939,7 @@ class TestOverflowBudget:
                 return " ".join(part for part in parts if part)
 
         adapter._tokenizer = _Tokenizer()  # ty:ignore[invalid-assignment]
-        adapter._pipeline = SimpleNamespace(pipe=_Pipe())  # ty:ignore[invalid-assignment]
+        adapter._pipe = _Pipe()
         text = " ".join(f"w{i}" for i in range(12))
 
         plain = adapter._apply_overflow_policy([text], ["a"], "truncate_text")
@@ -644,6 +960,9 @@ class TestOverflowBudget:
 class _WordTokenizer:
     """One token per whitespace word; specials add two unless disabled."""
 
+    def num_special_tokens_to_add(self, pair: bool = False) -> int:
+        return 2
+
     def __call__(self, texts: list[str], add_special_tokens: bool = True, **kwargs: Any) -> dict[str, list[list[int]]]:
         extra = 2 if add_special_tokens else 0
         counts = [len(text.split()) + extra for text in texts]
@@ -653,10 +972,9 @@ class _WordTokenizer:
 
 
 class TestMetering:
-    def _adapter(self, max_seq_length: int = 512, items: int = 2) -> GLiClassAdapter:
-        adapter = _flat_adapter([dict(_SCORES)] * items)
+    def _adapter(self, max_seq_length: int = 512) -> GLiClassAdapter:
+        adapter, _ = _flat_adapter(tokenizer=_WordTokenizer())
         adapter._max_seq_length = max_seq_length
-        adapter._tokenizer = _WordTokenizer()  # ty:ignore[invalid-assignment]
         return adapter
 
     def test_requests_without_context_bill_the_document_only(self) -> None:
@@ -684,7 +1002,7 @@ class TestMetering:
         assert output.input_token_counts == [4 + 11, 5 + 11]
 
     def test_billing_is_capped_at_the_model_window(self) -> None:
-        adapter = self._adapter(max_seq_length=12, items=1)
+        adapter = self._adapter(max_seq_length=12)
 
         output = adapter.extract(
             [Item(text="two words")], labels=list(_LABELS), instruction="one two three four five six seven eight nine"
@@ -692,29 +1010,27 @@ class TestMetering:
 
         assert output.input_token_counts == [12]
 
+    def test_long_documents_bill_at_most_the_model_window(self) -> None:
+        adapter = self._adapter(max_seq_length=12)
+
+        output = adapter.extract([Item(text=" ".join(["word"] * 40))], labels=list(_LABELS))
+
+        assert output.input_token_counts == [12]
+
 
 class TestFlatLabelOverflow:
-    def _adapter(
-        self, results: list[dict[str, float]], *, prompt_first: bool, max_length: int = 512
-    ) -> GLiClassAdapter:
-        adapter = _flat_adapter(results)
-        adapter._max_seq_length = max_length
-        pipeline = adapter._pipeline
-        assert isinstance(pipeline, MagicMock)
-        pipeline.pipe = _StubPipe(prompt_first=prompt_first, max_length=max_length)
-        return adapter
+    def _adapter(self, *, prompt_first: bool, max_length: int = 512) -> tuple[GLiClassAdapter, _ScoringPipe]:
+        return _flat_adapter(prompt_first=prompt_first, max_length=max_length)
 
     def test_one_oversized_document_does_not_fail_the_batch(self) -> None:
-        adapter = self._adapter([dict(_SCORES)], prompt_first=False)
+        adapter, pipe = self._adapter(prompt_first=False)
         attacker = "attacker " * 600
 
         output = adapter.extract([Item(text="short victim text"), Item(text=attacker)], labels=list(_LABELS))
 
-        pipeline = adapter._pipeline
-        assert isinstance(pipeline, MagicMock)
-        pipeline.assert_called_once_with(["short victim text"], _LABELS, threshold=0.0, return_hierarchical=True)
+        assert [call["texts"] for call in pipe.prepare_calls] == [["short victim text"]]
         assert output.classifications is not None
-        assert output.classifications[0][0] == {"label": "bug report", "score": 0.7}
+        assert output.classifications[0][0]["label"] == "bug report"
         assert output.classifications[1] == []
         assert output.errors is not None
         assert output.errors[0] is None
@@ -723,38 +1039,36 @@ class TestFlatLabelOverflow:
         assert output.input_token_counts == [5, 0]
 
     def test_only_oversized_documents_skip_inference(self) -> None:
-        adapter = self._adapter([], prompt_first=False)
+        adapter, pipe = self._adapter(prompt_first=False)
 
         output = adapter.extract([Item(text="attacker " * 600)], labels=list(_LABELS))
 
-        pipeline = adapter._pipeline
-        assert isinstance(pipeline, MagicMock)
-        pipeline.assert_not_called()
+        assert pipe.prepare_calls == []
         assert output.errors is not None
         assert output.errors[0] is not None
 
     def test_labels_first_models_are_not_affected_by_document_length(self) -> None:
-        adapter = self._adapter([dict(_SCORES)], prompt_first=True)
+        adapter, _ = self._adapter(prompt_first=True)
 
         output = adapter.extract([Item(text="attacker " * 600)], labels=list(_LABELS))
 
         assert output.errors is None
 
     def test_labels_that_alone_overflow_the_window_are_refused(self) -> None:
-        adapter = self._adapter([dict(_SCORES)], prompt_first=True, max_length=6)
+        adapter, _ = self._adapter(prompt_first=True, max_length=6)
 
         with pytest.raises(InputTooLongError):
             adapter.extract([Item(text="The app crashes")], labels=list(_LABELS))
 
     def test_a_marker_inside_the_document_is_not_an_overflow(self) -> None:
-        adapter = self._adapter([dict(_SCORES)], prompt_first=False)
+        adapter, _ = self._adapter(prompt_first=False)
 
         output = adapter.extract([Item(text="quoted <<LABEL>> marker")], labels=list(_LABELS))
 
         assert output.errors is None
 
     def test_context_that_leaves_no_room_for_the_document_is_refused(self) -> None:
-        adapter = self._adapter([dict(_SCORES)], prompt_first=True, max_length=24)
+        adapter, _ = self._adapter(prompt_first=True, max_length=24)
 
         with pytest.raises(InvalidInputError, match="no room for the document"):
             adapter.extract(
@@ -769,8 +1083,7 @@ class TestFlatLabelOverflow:
         # label prompt. Twelve words look like they fit (12 + 5 < 18), but the
         # trailing space becomes a token next to the first marker, so the last
         # marker falls out of the window.
-        adapter = self._adapter([dict(_SCORES)], prompt_first=False, max_length=20)
-        adapter._tokenizer = _SpaceBeforeMarkerTokenizer()  # ty:ignore[invalid-assignment]
+        adapter, _ = _flat_adapter(prompt_first=False, max_length=20, tokenizer=_SpaceBeforeMarkerTokenizer())
 
         output = adapter.extract([Item(text="word " * words)], labels=list(_LABELS))
 
@@ -782,7 +1095,7 @@ class TestFlatLabelOverflow:
             assert output.errors[0].code == "INPUT_TOO_LONG"
 
     def test_billing_with_context_is_capped_at_window_minus_labels(self) -> None:
-        adapter = self._adapter([dict(_SCORES)], prompt_first=True, max_length=40)
+        adapter, _ = self._adapter(prompt_first=True, max_length=40)
         text = " ".join(["doc"] * 30)
 
         output = adapter.extract([Item(text=text)], labels=list(_LABELS), instruction="one two three")
@@ -792,3 +1105,10 @@ class TestFlatLabelOverflow:
         assert output.input_token_counts == [32]
         short = adapter.extract([Item(text="doc doc")], labels=list(_LABELS), instruction="one two three")
         assert short.input_token_counts == [4 + 3]
+
+    def test_a_model_with_fewer_class_slots_than_labels_is_an_overflow(self) -> None:
+        adapter, pipe = self._adapter(prompt_first=True)
+        pipe._resolve_max_num_classes = lambda labels, same_labels: 2  # ty:ignore[invalid-assignment]
+
+        with pytest.raises(InputTooLongError):
+            adapter.extract([Item(text="The app crashes")], labels=list(_LABELS))

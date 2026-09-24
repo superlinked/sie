@@ -1000,6 +1000,31 @@ def test_knowledgator_gliclass_instruct_large_v1_0_extract() -> None:
     _assert_gliclass_groups(adapter, "bug report")
 
 
+def test_knowledgator_gliclass_large_v1_0_extract() -> None:
+    adapter = _get_adapter("knowledgator/gliclass-large-v1.0")
+    assert _gliclass_top(adapter, _TICKET, _TICKET_LABELS) == "bug report"
+
+    # Separate label groups (the default) score each group as a labels request
+    # with that group's labels, and meter the document once per group.
+    grouped = adapter.extract([Item(text=_TICKET)], options={"label_groups": _TICKET_GROUPS})
+    assert grouped.data is not None
+    assert grouped.input_token_counts is not None
+    usage = 0
+    for group, labels in _TICKET_GROUPS.items():
+        alone = adapter.extract([Item(text=_TICKET)], labels=labels)
+        assert alone.classifications is not None
+        assert alone.input_token_counts is not None
+        expected = {c["label"]: c["score"] for c in alone.classifications[0]}
+        assert grouped.data[0][group]["probabilities"] == pytest.approx(expected, abs=1e-5)
+        usage += alone.input_token_counts[0]
+    assert grouped.input_token_counts == [usage]
+    assert grouped.data[0]["topic"]["choice"] == "bug report"
+
+    joint = adapter.extract([Item(text=_TICKET)], options={"label_groups": _TICKET_GROUPS, "group_encoding": "joint"})
+    assert joint.data is not None
+    assert list(joint.data[0]) == list(_TICKET_GROUPS)
+
+
 def test_knowledgator_gliclass_large_v3_0_extract() -> None:
     # A request without instruction, examples, or label_groups keeps the scores
     # the adapter has always returned for this model.

@@ -87,8 +87,7 @@ document can push them out of the model's window; send
 `options={"overflow_policy": "truncate_text"}` to shorten the document instead.
 
 To answer several questions in one call, pass named `label_groups` instead of
-`labels`. Scores are normalized within each group, and `data` holds one answer
-per group:
+`labels`. `data` holds one answer per group:
 
 ```python
 result = client.extract(
@@ -108,6 +107,19 @@ print(urgency["choice"], urgency["confidence"])  # e.g. medium 0.78
 print(urgency["probabilities"])  # {"low": ..., "medium": ..., "high": ...}
 ```
 
+By default the model reads each group as its own row: the document with only
+that group's labels, plus the instruction and examples. A group then scores as
+a request whose `labels` are that group's labels would. The rows of a call
+share forward passes, so on a GPU, fp16 rounding can move a probability by a
+few thousandths against the one-group request. Batching several items into one
+call does the same. A call takes at most 64 groups, or 32 on models with a
+1,024-token window.
+
+`options={"group_encoding": "joint"}` reads all the groups in one row per item
+instead: the document next to every group's labels, written as `group.label`.
+That row costs less, but each group's scores then depend on the other groups'
+labels. Single-label scores are still normalized within each group.
+
 Each group answers `{"type": "choice", "choice", "probabilities",
 "confidence"}`, where `confidence` is `1 - entropy / log(number of labels)`.
 With `"classification_type": "multi-label"` a group answers `{"labels",
@@ -115,15 +127,19 @@ With `"classification_type": "multi-label"` a group answers `{"labels",
 at or above `options.threshold` (0.5 when no threshold is set).
 `classifications` lists the same scores under `group.label` names. In a
 grouped request, an example's labels may be written as `"urgency.high"` or as
-`{"urgency": "high"}`.
+`{"urgency": "high"}`. With separate rows, each row reads every example with
+only that group's labels.
 
-Usage counts each item's document tokens plus the tokens of the instruction
-and example texts sent with it, since the model encodes them for every item.
-Label names are not counted. With an instruction or examples, each item's
-count is capped at the model window minus the label prompt, unless the
-document count alone is already higher. An item whose document pushes the
-labels out of the window comes back with an `INPUT_TOO_LONG` error in its
-`error` field, and the other items still succeed.
+Usage counts the tokens of every row the model encodes: the document plus the
+instruction and example texts sent with it. Label names are not counted. A
+labels request or a joint call encodes one row per item. A call with separate
+groups encodes one row per item and group, so it counts the document once per
+group: three groups cost what three one-group requests cost. With an
+instruction or examples, each row's count is capped at the model window minus
+that row's label prompt, unless the document count alone is already higher.
+An item whose document pushes the labels out of the window, in any of its rows,
+comes back with an `INPUT_TOO_LONG` error in its `error` field and is not
+billed. The other items still succeed.
 
 ## Generation prompts and guard verdicts
 

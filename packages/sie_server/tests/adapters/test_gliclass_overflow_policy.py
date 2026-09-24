@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from sie_server.adapters.errors import InputTooLongError
@@ -8,7 +9,9 @@ from sie_server.adapters.gliclass import GLiClassAdapter
 
 
 class _FakeTokenizer:
-    def __call__(self, text: str, add_special_tokens: bool = False) -> dict[str, list[str]]:
+    def __call__(self, text: str | list[str], add_special_tokens: bool = False) -> dict[str, Any]:
+        if isinstance(text, list):
+            return {"input_ids": [t.split() for t in text]}
         return {"input_ids": text.split()}
 
     def decode(self, ids: list[str], skip_special_tokens: bool = True) -> str:
@@ -19,10 +22,6 @@ class _FakePipe:
     def prepare_input(self, text: str, labels: list[str]) -> str:
         prefix = "<LABEL> " + " <SEP> ".join(labels)
         return f"{prefix} {text}".strip()
-
-
-class _FakePipeline:
-    pipe = _FakePipe()
 
 
 # With _FakeTokenizer + _FakePipe, N labels produce a 2N-token label_prompt.
@@ -36,7 +35,7 @@ def _make_adapter(*, max_seq_length: int = 10, special_count: int = 2) -> GLiCla
     adapter._max_seq_length = max_seq_length
     adapter._special_count = special_count
     adapter._tokenizer = _FakeTokenizer()  # ty:ignore[invalid-assignment]
-    adapter._pipeline = _FakePipeline()  # ty:ignore[invalid-assignment]
+    adapter._pipe = _FakePipe()
     return adapter
 
 
@@ -104,25 +103,25 @@ class TestApplyOverflowPolicy:
         assert adapter._apply_overflow_policy(texts, _LABELS, "default") == texts
 
 
-class _RaisingPipeline:
-    """Fake gliclass pipeline whose __call__ raises a chosen exception.
+class _RaisingPipe:
+    """Fake gliclass pipe whose model input preparation raises a chosen exception.
 
-    Exercises the except-block crash-signature mapping in
-    ``GLiClassAdapter.extract`` end-to-end (not just ``_apply_overflow_policy``).
-    The default overflow policy returns texts without touching ``.pipe``, so the
-    pipeline only needs to be callable.
+    Exercises the crash-signature mapping in ``GLiClassAdapter.extract``
+    end-to-end (not just ``_apply_overflow_policy``). The default overflow
+    policy returns texts without tokenizing, so the pipe only needs to fail
+    when the rows are prepared.
     """
 
     def __init__(self, exc: BaseException) -> None:
         self._exc = exc
 
-    def __call__(self, *args: object, **kwargs: object) -> object:
+    def prepare_inputs(self, *args: object, **kwargs: object) -> object:
         raise self._exc
 
 
 def _make_raising_adapter(exc: BaseException) -> GLiClassAdapter:
     adapter = GLiClassAdapter("test-model")
-    adapter._pipeline = _RaisingPipeline(exc)  # ty:ignore[invalid-assignment]
+    adapter._pipe = _RaisingPipe(exc)
     return adapter
 
 

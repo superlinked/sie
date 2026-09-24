@@ -10,26 +10,42 @@ Performance note (Dec 2025):
     like NLI cross-encoders), so the gliclass library pipeline has minimal overhead.
     No separate "GLiClassFlashAdapter" is needed - the library is already efficient.
 
-Request surface (all optional; a request that sets none of them runs exactly the
-pipeline call used before these fields existed):
+Scoring runs the gliclass model directly with the library's own prompt assembly
+and tokenization, in the pipeline's sub-batches of eight rows, and applies the
+pipeline's softmax or sigmoid. The scores equal the pipeline's. The adapter skips
+the pipeline's progress bar and its per-label reads from the device, and it
+tokenizes each document once for its length checks and metering.
 
-- ``instruction``: task description passed to the pipeline as ``prompt``.
+Request surface (all optional; a request that sets none of them scores exactly
+like the pipeline call used before these fields existed):
+
+- ``instruction``: task description passed to the model as the pipeline's ``prompt``.
 - ``options.examples``: few-shot examples, ``[{"text": ..., "labels": [...]}]``.
 - ``options.classification_type``: ``"single-label"`` or ``"multi-label"`` for
   this request, overriding the load-time default.
 - ``options.label_groups``: named label groups, ``{"urgency": ["low", "high"],
-  ...}``, used instead of ``labels``. Single-label scores are normalized within
-  each group, and ``data`` holds one answer per group.
+  ...}``, used instead of ``labels``. ``data`` holds one answer per group.
+- ``options.group_encoding``: how label groups are encoded. ``"separate"`` (the
+  default) encodes the document once per group, with only that group's labels.
+  Each group scores like a request whose ``labels`` are that group's labels.
+  The rows of a request share forward passes, and padding them together can
+  move fp16 probabilities by a few thousandths. ``"joint"`` encodes every
+  group's labels, as ``group.label``, next to one copy of the document, and
+  normalizes single-label scores within each group.
 
-Usage counts each item's document tokens plus the instruction and example
-texts encoded with it; label names are not counted.
+Usage counts, for every encoded row, the document tokens plus the instruction
+and example texts encoded with it. Label names are not counted. A separate-group
+request encodes the document once per group, so it counts it once per group.
 """
 
 from __future__ import annotations
 
 import math
 import re
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
+from itertools import islice
 from numbers import Real
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
@@ -48,7 +64,6 @@ from sie_server.types.overflow_policy import DEFAULT_OVERFLOW_POLICY, OverflowPo
 from sie_server.types.responses import Classification, ErrorCode
 
 if TYPE_CHECKING:
-    from gliclass import ZeroShotClassificationPipeline  # ty:ignore[unresolved-import]
     from transformers import PreTrainedTokenizerBase  # ty:ignore[unresolved-import]
 
     from sie_server.types.inputs import Item
@@ -67,13 +82,19 @@ _ERR_INPUT_TOO_LONG = (
 # never matches at all.
 _INDEX_OOB_RE = re.compile(r"index (\d+) is out of bounds for dimension \d+ with size (\d+)")
 ClassificationType = Literal["single-label", "multi-label"]
-_CLASSIFICATION_TYPES: tuple[ClassificationType, ...] = ("single-label", "multi-label")
+GroupEncoding = Literal["separate", "joint"]
+_DEFAULT_GROUP_ENCODING: GroupEncoding = "separate"
 # gliclass joins a label group and its labels with this separator (the
 # pipeline's default ``label_separator``); the model sees "urgency.high".
 _LABEL_GROUP_SEPARATOR = "."
-# ``ZeroShotClassificationPipeline.__call__`` default. The grouped path runs the
-# model directly and mirrors the pipeline's sub-batching so padding matches.
+# ``ZeroShotClassificationPipeline.__call__`` default: rows per forward pass.
+# The flat path keeps it so that items share padding exactly as before.
 _PIPELINE_BATCH_SIZE = 8
+# Separate group encoding runs one row of up to the model window per (item,
+# group). An item may occupy at most this many row tokens: 64 groups at a
+# 512-token window, 32 at 1024.
+_MAX_ITEM_ROW_TOKENS = 32_768
+_MAX_LABEL_GROUPS = 64
 _MAX_EXAMPLES = 32
 _EXAMPLE_KEYS = frozenset({"text", "labels"})
 _DEFAULT_MULTI_LABEL_THRESHOLD = 0.5
@@ -105,7 +126,9 @@ class _RequestLayout:
     ``window`` is the number of non-special tokens the model keeps. The label
     prompt (markers, label names, separator) is ``label_tokens`` long and its
     last marker sits at ``last_marker``. ``context_tokens`` counts the
-    billable instruction and example texts.
+    billable instruction and example texts. ``overhead_tokens`` is everything
+    a row encodes besides its document and special tokens: the label prompt,
+    the instruction and the formatted examples.
     """
 
     prompt_first: bool
@@ -113,12 +136,73 @@ class _RequestLayout:
     label_tokens: int
     last_marker: int
     context_tokens: int
+    overhead_tokens: int
 
     def labels_fit(self, document_tokens: int) -> bool:
         """Whether every label marker survives truncation next to this document."""
         if self.prompt_first:
             return self.last_marker < self.window
         return document_tokens + self.last_marker < self.window
+
+
+@dataclass
+class _Context:
+    """One (labels, instruction, examples) context of a request, tokenized once.
+
+    ``parts`` holds the token ids of the label prompt, the instruction, each
+    example text and the formatted examples; it stays empty for models
+    without in-sequence label markers. ``overflow_tokens`` is the length of
+    the pipeline input with an empty document. The layout is evaluated from
+    ``parts`` when a request first needs it, so errors keep their order.
+    """
+
+    parts: list[list[int]] | None = None
+    overflow_tokens: int | None = None
+    layout: _RequestLayout | None = None
+    has_layout: bool = False
+
+
+class _RequestTokens:
+    """What one request tokenizes, each distinct text at most once.
+
+    ``full`` keeps every token of a document (the overflow policies need them
+    all). ``cut`` returns ids truncated the way the tokenizer truncates to a
+    fixed length, sliced from ``full`` when a text has already been tokenized
+    in full. ``contexts`` holds the request's label contexts. Nothing is kept
+    across requests, so one request's timing cannot reveal what another sent.
+    """
+
+    def __init__(self, tokenizer: Any) -> None:
+        self._tokenizer = tokenizer
+        self._full: dict[str, list[int]] = {}
+        self._cut: dict[str, list[int]] = {}
+        self._cut_length: int | None = None
+        self.contexts: dict[tuple[Any, ...], _Context] = {}
+
+    def full(self, texts: list[str]) -> list[list[int]]:
+        missing = [text for text in dict.fromkeys(texts) if text not in self._full]
+        if missing:
+            encoded = self._tokenizer(missing, add_special_tokens=False)["input_ids"]
+            self._full.update(zip(missing, encoded, strict=True))
+        return [self._full[text] for text in texts]
+
+    def cut(self, texts: list[str], length: int) -> list[list[int]]:
+        if length != self._cut_length:
+            self._cut = {}
+            self._cut_length = length
+        missing = [text for text in dict.fromkeys(texts) if text not in self._cut and text not in self._full]
+        if missing:
+            encoded = self._tokenizer(missing, add_special_tokens=False, truncation=True, max_length=length)
+            self._cut.update(zip(missing, encoded["input_ids"], strict=True))
+        left = getattr(self._tokenizer, "truncation_side", "right") == "left"
+        ids: list[list[int]] = []
+        for text in texts:
+            cached = self._cut.get(text)
+            if cached is None:
+                full = self._full[text]
+                cached = full[len(full) - length :] if left and len(full) > length else full[:length]
+            ids.append(cached)
+        return ids
 
 
 def _choice_confidence(probabilities: list[float]) -> float:
@@ -133,7 +217,7 @@ def _pipeline_context(prompt: str | None, examples: list[dict[str, Any]] | None)
     """Pipeline keyword arguments for the fields a request actually set.
 
     Leaving unset fields out keeps a request without them on exactly the
-    pipeline call the adapter has always made.
+    pipeline input the adapter has always built.
     """
     context: dict[str, Any] = {}
     if prompt is not None:
@@ -156,6 +240,33 @@ def _string_list(value: Any) -> list[str] | None:
     if isinstance(value, list) and all(isinstance(item, str) for item in value):
         return cast("list[str]", value)
     return None
+
+
+@contextmanager
+def _overflow_errors_as_input_too_long() -> Iterator[None]:
+    """Report the known gliclass overflow crash signatures as ``InputTooLongError``.
+
+    Inputs past the model's position capacity used to crash inside the
+    gliclass pipeline with empty intermediate tensors. The match is specific,
+    so unrelated errors keep propagating. Caught signatures:
+
+    - RuntimeError "argmax(): ... numel() == 0": argmax on an empty tensor.
+    - IndexError "index N is out of bounds for dimension D with size N"
+      (index == size: an exhausted dimension), both the empty-tensor case
+      (index 0 / size 0) and a label window that shrank under truncation
+      (e.g. index 79 / size 79). A generic out-of-range bug (index > size,
+      e.g. index 5 / size 3) is not this and propagates.
+    """
+    try:
+        yield
+    except (RuntimeError, IndexError) as exc:
+        msg = str(exc)
+        if isinstance(exc, RuntimeError) and "numel() == 0" in msg and "argmax" in msg:
+            raise InputTooLongError(_ERR_INPUT_TOO_LONG) from exc
+        oob = _INDEX_OOB_RE.search(msg)
+        if isinstance(exc, IndexError) and oob is not None and oob.group(1) == oob.group(2):
+            raise InputTooLongError(_ERR_INPUT_TOO_LONG) from exc
+        raise
 
 
 def _restore_modernbert_rope_fields(encoder_config: Any) -> bool:
@@ -202,8 +313,8 @@ def _restore_modernbert_rope_fields(encoder_config: Any) -> bool:
 class GLiClassAdapter(BaseAdapter):
     """Adapter for GLiClass zero-shot classification models.
 
-    Uses the gliclass library's ZeroShotClassificationPipeline.
-    Works with models like knowledgator/gliclass-base-v1.0.
+    Runs gliclass models with the library's input format. Works with models
+    like knowledgator/gliclass-base-v1.0.
 
     GLiClass performs classification in a single forward pass (not NLI-based),
     making it much faster than cross-encoder approaches.
@@ -212,7 +323,7 @@ class GLiClassAdapter(BaseAdapter):
     spec: ClassVar[AdapterSpec] = AdapterSpec(
         inputs=("text",),
         outputs=("json",),
-        unload_fields=("_pipeline", "_pipelines", "_tokenizer"),
+        unload_fields=("_pipe", "_tokenizer"),
     )
 
     def __init__(
@@ -238,8 +349,8 @@ class GLiClassAdapter(BaseAdapter):
                 to 0.0 so all requested labels are returned with their scores.
                 Callers can override per-request via ``options={"threshold": ...}``.
             max_seq_length: Maximum input sequence length in tokens. Used to bound
-                tokenization inside the gliclass pipeline so inputs cannot exceed
-                the model's position-embedding capacity.
+                tokenization so inputs cannot exceed the model's
+                position-embedding capacity.
             compute_precision: Precision for inference (float16, float32, bfloat16).
             revision: Optional HuggingFace revision/branch/commit SHA to pin when
                 loading model artifacts.
@@ -252,10 +363,9 @@ class GLiClassAdapter(BaseAdapter):
         self._compute_precision = compute_precision
         self._revision = revision
 
-        self._pipeline: ZeroShotClassificationPipeline | None = None
-        # One pipeline per classification type, sharing the model and
-        # tokenizer; ``_pipeline`` is the load-time type's entry.
-        self._pipelines: dict[ClassificationType, ZeroShotClassificationPipeline] | None = None
+        # The gliclass pipe for the model's architecture: it assembles and
+        # tokenizes model inputs and holds the model.
+        self._pipe: Any | None = None
         self._tokenizer: PreTrainedTokenizerBase | None = None
         self._special_count: int = 0
         self._max_token_chars: int = _DEFAULT_MAX_TOKEN_CHARS
@@ -295,36 +405,37 @@ class GLiClassAdapter(BaseAdapter):
         else:
             model = GLiClassModel.from_pretrained(self._model_name_or_path, **shared_kwargs)
         model = model.to(device, dtype=torch_dtype)
-        self._tokenizer = self._load_tokenizer(shared_kwargs)
+        tokenizer = self._load_tokenizer(shared_kwargs)
 
         # Bound the tokenizer's max length so any internal tokenization in the
         # gliclass library auto-truncates to the model's actual capacity.
         if self._max_seq_length is not None:
-            self._tokenizer.model_max_length = self._max_seq_length
+            tokenizer.model_max_length = self._max_seq_length
 
-        # Create pipeline. Pass max_length explicitly so the pipeline's
+        # Pass max_length explicitly so the pipe's
         # ``tokenizer(..., truncation=True, max_length=self.max_length)`` calls
         # cap inputs at the model's position-embedding limit. Without this the
         # library defaults to 1024, which exceeds the 512-token capacity of the
         # current GLiClass models and causes argmax-on-empty-tensor crashes for
-        # long inputs.
+        # long inputs. The classification type only matters to the pipeline's
+        # own ``__call__``, which the adapter does not use.
         pipeline_kwargs: dict[str, Any] = {
             "model": model,
-            "tokenizer": self._tokenizer,
+            "tokenizer": tokenizer,
             "device": device,
+            "classification_type": self._classification_type,
+            "progress_bar": False,
         }
         if self._max_seq_length is not None:
             pipeline_kwargs["max_length"] = self._max_seq_length
+        self._attach(ZeroShotClassificationPipeline(**pipeline_kwargs).pipe, tokenizer)
 
-        self._special_count = int(self._tokenizer.num_special_tokens_to_add(pair=False))
-        self._max_token_chars = _longest_token_chars(self._tokenizer)
-        self._pipelines = {
-            classification_type: ZeroShotClassificationPipeline(
-                **pipeline_kwargs, classification_type=classification_type
-            )
-            for classification_type in _CLASSIFICATION_TYPES
-        }
-        self._pipeline = self._pipelines[self._classification_type]
+    def _attach(self, pipe: Any, tokenizer: PreTrainedTokenizerBase) -> None:
+        """Use ``pipe`` (a gliclass pipe holding the model) and its tokenizer."""
+        self._pipe = pipe
+        self._tokenizer = tokenizer
+        self._special_count = int(tokenizer.num_special_tokens_to_add(pair=False))
+        self._max_token_chars = _longest_token_chars(tokenizer)
 
     def _load_tokenizer(self, shared_kwargs: dict[str, Any]) -> PreTrainedTokenizerBase:
         try:
@@ -336,6 +447,11 @@ class GLiClassAdapter(BaseAdapter):
             if "TokenizersBackend" not in str(exc):
                 raise
             return PreTrainedTokenizerFast.from_pretrained(self._model_name_or_path, **shared_kwargs)
+
+    def _require_pipe(self) -> Any:
+        if self._pipe is None:
+            raise RuntimeError(ERR_NOT_LOADED)
+        return self._pipe
 
     def _extract_text(self, item: Item) -> str:
         if not item.text:
@@ -351,22 +467,22 @@ class GLiClassAdapter(BaseAdapter):
         *,
         prompt: str | None = None,
         examples: list[dict[str, Any]] | None = None,
+        tokens: _RequestTokens | None = None,
     ) -> list[str]:
         """Enforce overflow_policy by pre-tokenizing text and label_prompt separately.
 
-        At inference the gliclass pipeline tokenizes the fused string with
-        ``add_special_tokens=True``, so the model sees
-        ``observed = text_tokens + label_prompt_tokens + special_count``, where
-        ``special_count`` is the BERT-style ``[CLS]``/``[SEP]`` wrap (2 for all
-        current gliclass models). We recover the same total without running the
-        model by tokenizing each part with ``add_special_tokens=False``. The
-        label prompt includes the task prompt and few-shot examples when the
-        request sets them, so ``truncate_text`` shortens only the document.
+        The model sees ``observed = text_tokens + label_prompt_tokens +
+        special_count``, where ``special_count`` is the BERT-style
+        ``[CLS]``/``[SEP]`` wrap (2 for all current gliclass models). We
+        recover the same total without running the model by tokenizing each
+        part with ``add_special_tokens=False``. The label prompt includes the
+        task prompt and few-shot examples when the request sets them, so
+        ``truncate_text`` shortens only the document.
 
         On overflow:
         - ``default`` returns texts unchanged (upstream as-is — may crash inside
-          the pipeline; the ``c0ce823c`` ``try/except`` in ``extract`` is the
-          defense-in-depth backstop).
+          the model; ``_overflow_errors_as_input_too_long`` in ``extract`` is
+          the defense-in-depth backstop).
         - ``error`` raises ``InputTooLongError`` (whole batch fails, no partial
           responses).
         - ``truncate_text`` slices text to
@@ -378,16 +494,11 @@ class GLiClassAdapter(BaseAdapter):
         if policy == "default":
             return texts
 
-        if self._pipeline is None:
-            raise RuntimeError(ERR_NOT_LOADED)
-        if self._tokenizer is None:
-            raise RuntimeError(ERR_NOT_LOADED)
-        if self._max_seq_length is None:
+        if self._pipe is None or self._tokenizer is None or self._max_seq_length is None:
             raise RuntimeError(ERR_NOT_LOADED)
 
-        context = _pipeline_context(prompt, examples)
-        label_prompt = self._pipeline.pipe.prepare_input(text="", labels=labels, **context)  # ty:ignore[unresolved-attribute]
-        label_prompt_tokens = len(self._tokenizer(label_prompt, add_special_tokens=False)["input_ids"])
+        tokens = tokens or _RequestTokens(self._tokenizer)
+        label_prompt_tokens = self._overflow_label_tokens(labels, prompt, examples, tokens)
         overhead = label_prompt_tokens + self._special_count
         budget = self._max_seq_length - overhead
 
@@ -398,8 +509,7 @@ class GLiClassAdapter(BaseAdapter):
             )
 
         new_texts: list[str] = []
-        for i, text in enumerate(texts):
-            text_ids = self._tokenizer(text, add_special_tokens=False)["input_ids"]
+        for i, (text, text_ids) in enumerate(zip(texts, tokens.full(texts), strict=True)):
             text_tokens = len(text_ids)
             observed = text_tokens + overhead
             if observed <= self._max_seq_length:
@@ -434,13 +544,14 @@ class GLiClassAdapter(BaseAdapter):
             labels: Classification labels (e.g., ["positive", "negative", "neutral"]).
                 Required unless ``options["label_groups"]`` is set.
             output_schema: Unused (included for interface compatibility).
-            instruction: Optional task description, passed to the gliclass
-                pipeline as its ``prompt``.
+            instruction: Optional task description, passed to the model as the
+                gliclass pipeline's ``prompt``.
             options: Adapter options to override model config defaults.
                 Supported: ``threshold`` (float), ``classification_type``
                 ("single-label" or "multi-label"), ``examples`` (few-shot
                 ``[{"text": str, "labels": [str, ...]}]``), ``label_groups``
-                (``{group: [label, ...]}``, used instead of ``labels``), and
+                (``{group: [label, ...]}``, used instead of ``labels``),
+                ``group_encoding`` ("separate" or "joint") and
                 ``overflow_policy``.
 
         Returns:
@@ -456,14 +567,13 @@ class GLiClassAdapter(BaseAdapter):
             RuntimeError: If model not loaded.
             InvalidInputError: If labels are missing or options are malformed.
             InputTooLongError: If the labels do not fit in the model window.
-            ValueError: If items lack text or the pipeline returns malformed
-                scores.
+            ValueError: If items lack text or the model returns invalid scores.
         """
-        if self._pipeline is None:
-            raise RuntimeError(ERR_NOT_LOADED)
+        self._require_pipe()
 
         opts = options or {}
         label_groups = self._validate_label_groups(opts.get("label_groups"))
+        group_encoding = self._validate_group_encoding(opts.get("group_encoding"), label_groups)
         classification_type = self._validate_classification_type(
             opts.get("classification_type", self._classification_type)
         )
@@ -473,7 +583,12 @@ class GLiClassAdapter(BaseAdapter):
             raise InvalidInputError("GLiClass accepts either labels or options.label_groups, not both")
         else:
             normalized_labels = self._flatten_label_groups(label_groups, classification_type)
-        self._check_label_size(normalized_labels)
+        if label_groups is not None and group_encoding == "separate":
+            self._check_group_count(label_groups)
+            for _, group_labels in label_groups:
+                self._check_label_size(group_labels)
+        else:
+            self._check_label_size(normalized_labels)
         prompt = self._validate_instruction(instruction)
         examples = self._validate_examples(opts.get("examples"), normalized_labels, label_groups)
         self._check_context_size(prompt, examples)
@@ -482,31 +597,50 @@ class GLiClassAdapter(BaseAdapter):
         texts = [self._extract_text(item) for item in items]
 
         # Get options with fallback to model defaults. The threshold is applied
-        # server-side as a post-filter so we always get all label scores from the
-        # underlying pipeline regardless of caller preferences.
+        # server-side as a post-filter so every label's score is computed
+        # regardless of caller preferences.
         effective_threshold = self._validate_threshold(opts.get("threshold", self._threshold))
 
         overflow_policy = opts.get("overflow_policy", DEFAULT_OVERFLOW_POLICY)
-        texts = self._apply_overflow_policy(texts, normalized_labels, overflow_policy, prompt=prompt, examples=examples)
-        layout = self._request_layout(normalized_labels, prompt, examples)
-        fits = self._items_fit(texts, layout, normalized_labels, prompt, examples)
-        input_token_counts = self._input_token_counts(texts, prompt, examples, layout, fits)
+        tokens = _RequestTokens(self._tokenizer)
+
+        if label_groups is not None and group_encoding == "separate":
+            return self._extract_separate(
+                texts,
+                label_groups,
+                classification_type=classification_type,
+                prompt=prompt,
+                examples=examples,
+                threshold=effective_threshold,
+                overflow_policy=overflow_policy,
+                tokens=tokens,
+            )
+
+        texts = self._apply_overflow_policy(
+            texts, normalized_labels, overflow_policy, prompt=prompt, examples=examples, tokens=tokens
+        )
+        layout = self._request_layout(normalized_labels, prompt, examples, tokens)
+        fits = self._items_fit(texts, layout, normalized_labels, prompt, examples, tokens=tokens)
+        input_token_counts = self._input_token_counts(texts, prompt, examples, layout, fits, tokens=tokens)
         errors = self._item_errors(fits)
         kept = [index for index, ok in enumerate(fits) if ok]
         kept_texts = [texts[index] for index in kept]
 
         if label_groups is not None:
-            return self._extract_grouped(
-                kept_texts,
+            rows = (
+                self._joint_scores(kept_texts, label_groups, normalized_labels, classification_type, prompt, examples)
+                if kept_texts
+                else []
+            )
+            return self._grouped_output(
+                rows,
                 label_groups,
-                normalized_labels,
                 classification_type=classification_type,
-                prompt=prompt,
-                examples=examples,
                 threshold=effective_threshold,
-                input_token_counts=input_token_counts,
                 kept=kept,
+                item_count=len(items),
                 errors=errors,
+                input_token_counts=input_token_counts,
             )
 
         if not kept_texts:
@@ -517,68 +651,21 @@ class GLiClassAdapter(BaseAdapter):
                 input_token_counts=input_token_counts,
             )
 
-        context = _pipeline_context(prompt, examples)
-        pipeline = self._select_pipeline(classification_type)
-
-        # Run batch classification.
-        # - threshold=0.0: never let the gliclass library drop labels for us
-        #   (in single-label mode the lib returns only argmax anyway, so we
-        #   need return_hierarchical=True to recover all label scores).
-        # - return_hierarchical=True with a flat ``labels`` list yields a list
-        #   of ``{label: score}`` dicts with every requested label present.
-        try:
-            with torch.inference_mode():
-                batch_results = pipeline(
-                    kept_texts,
-                    normalized_labels,
-                    threshold=0.0,
-                    return_hierarchical=True,
-                    **context,
-                )
-        except (RuntimeError, IndexError) as exc:
-            # The gliclass library crashes inside the pipeline when inputs exceed
-            # the model's position-embedding capacity, producing empty intermediate
-            # tensors that downstream ops then operate on. Surface the known crash
-            # signatures as InputTooLongError (validation) instead of leaking as
-            # 500 INFERENCE_ERROR. Match must be specific to avoid swallowing
-            # unrelated errors. Catalog of caught signatures:
-            #   - RuntimeError "argmax(): ... numel() == 0"
-            #     torch.argmax on an empty tensor inside the classification head.
-            #   - IndexError  "index N is out of bounds for dimension D with size N"
-            #     (index == size: off-by-one / exhausted dimension). Covers both the
-            #     empty-tensor case (#860, index 0 / size 0) and the label-window
-            #     overflow (#1434, e.g. index 79 / size 79): when too many labels
-            #     overflow the shared 512-token window only some survive truncation
-            #     and the single-label hierarchical decode then indexes exactly one
-            #     past the shrunk label window.
-            msg = str(exc)
-            if isinstance(exc, RuntimeError) and "numel() == 0" in msg and "argmax" in msg:
-                raise InputTooLongError(_ERR_INPUT_TOO_LONG) from exc
-            oob = _INDEX_OOB_RE.search(msg)
-            if isinstance(exc, IndexError) and oob is not None and oob.group(1) == oob.group(2):
-                # Off-by-one: the gliclass single-label hierarchical decode indexes
-                # exactly one past an exhausted dimension (index == size) when the
-                # label/text window overflows max_sequence_length. Covers both the
-                # empty-tensor case (#860, index 0 / size 0) and the label-window
-                # overflow (#1434, e.g. index 79 / size 79). A generic out-of-range
-                # bug (index > size, e.g. index 5 / size 3) is NOT this and must keep
-                # propagating via the bare ``raise`` below.
-                raise InputTooLongError(_ERR_INPUT_TOO_LONG) from exc
-            raise
+        with _overflow_errors_as_input_too_long():
+            batch_scores = self._score_rows(
+                kept_texts,
+                normalized_labels,
+                classification_type=classification_type,
+                prompt=prompt,
+                examples=examples,
+            )
 
         all_classifications: list[list[Classification]] = [[] for _ in items]
-        for index, item_results in zip(kept, batch_results, strict=True):
-            # With return_hierarchical=True and a flat label list the library
-            # returns a dict {label: score}. Anything else (e.g. None for an
-            # empty input) yields no classifications rather than crashing.
-            if isinstance(item_results, dict):
-                if set(item_results) != set(normalized_labels):
-                    raise ValueError("GLiClass returned classifications outside the requested label set")
-                pairs = [(label, self._validate_score(item_results[label])) for label in normalized_labels]
-            else:
-                pairs = []
-
-            classifications: list[Classification] = [Classification(label=label, score=score) for label, score in pairs]
+        for index, scores in zip(kept, batch_scores, strict=True):
+            classifications: list[Classification] = [
+                Classification(label=label, score=self._validate_score(score))
+                for label, score in zip(normalized_labels, scores, strict=True)
+            ]
 
             # Server-side post-filter when the caller explicitly requested one.
             if effective_threshold > 0.0:
@@ -596,49 +683,367 @@ class GLiClassAdapter(BaseAdapter):
             input_token_counts=input_token_counts,
         )
 
-    def _select_pipeline(self, classification_type: ClassificationType) -> ZeroShotClassificationPipeline:
-        if classification_type == self._classification_type:
-            if self._pipeline is None:
-                raise RuntimeError(ERR_NOT_LOADED)
-            return self._pipeline
-        if self._pipelines is None:
-            raise RuntimeError(ERR_NOT_LOADED)
-        return self._pipelines[classification_type]
+    def extract_item_costs(
+        self,
+        items: list[Item],
+        *,
+        labels: list[str] | None = None,
+        output_schema: dict[str, Any] | None = None,
+        instruction: str | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> list[int] | None:
+        """Batching cost per item: the characters of every row it encodes.
 
-    def _extract_grouped(
+        Separate label groups encode each document once per group, next to
+        that group's labels and the request's instruction and examples, so
+        the default per-item character count would undercount such a request
+        by its group count. Other requests keep the default (None). This runs
+        before batching and before validation, so it walks at most
+        ``MAX_EXTRACT_LABELS`` labels and ``_MAX_EXAMPLES`` examples.
+        Best-effort: never raises; malformed requests fail in ``extract``.
+        """
+        _ = labels, output_schema
+        try:
+            opts = options or {}
+            groups = opts.get("label_groups")
+            if not isinstance(groups, dict) or not groups or len(groups) > _MAX_LABEL_GROUPS:
+                return None
+            if opts.get("group_encoding", _DEFAULT_GROUP_ENCODING) != "separate":
+                return None
+            group_labels = (label for values in groups.values() if isinstance(values, list) for label in values)
+            label_chars = sum(
+                len(label) for label in islice(group_labels, MAX_EXTRACT_LABELS) if isinstance(label, str)
+            )
+            context_chars = len(instruction) if isinstance(instruction, str) else 0
+            examples = opts.get("examples")
+            if isinstance(examples, list):
+                for example in islice(cast("list[Any]", examples), _MAX_EXAMPLES):
+                    text = cast("dict[str, Any]", example).get("text") if isinstance(example, dict) else None
+                    context_chars += len(text) if isinstance(text, str) else 0
+            return [len(groups) * (len(item.text or "") + context_chars) + label_chars for item in items]
+        except Exception:  # noqa: BLE001 -- a cost estimate must never fail the request
+            return None
+
+    def _score_rows(
+        self,
+        texts: list[str],
+        labels: list[str] | list[list[str]],
+        *,
+        classification_type: ClassificationType,
+        prompt: str | None,
+        examples: list[dict[str, Any]] | list[list[dict[str, Any]]] | None,
+        batch_size: int = _PIPELINE_BATCH_SIZE,
+    ) -> list[list[float]]:
+        """Each row's label scores, computed as the gliclass pipeline computes them.
+
+        ``labels`` is one label list shared by every row, or one list per row
+        (then ``examples`` is also one list per row, or None). Rows run in
+        forward passes of at most ``batch_size``, by default the pipeline's
+        sub-batches. A single-label row gets a softmax over the label slots a
+        call with only its labels would have; a multi-label row a sigmoid per
+        label. Each forward's scores come back in one device-to-host copy.
+        """
+        pipe = self._require_pipe()
+        shared = isinstance(labels[0], str)
+        scores: list[list[float]] = []
+        with torch.inference_mode():
+            for start in range(0, len(texts), batch_size):
+                batch_texts = texts[start : start + batch_size]
+                end = start + len(batch_texts)
+                batch_labels = labels if shared else labels[start:end]
+                batch_examples = examples if shared or examples is None else examples[start:end]
+                inputs = pipe.prepare_inputs(
+                    batch_texts, batch_labels, same_labels=shared, examples=batch_examples, prompt=prompt
+                )
+                logits = self._forward(pipe, inputs, batch_labels, same_labels=shared)
+                row_labels = cast("list[list[str]]", [batch_labels] * len(batch_texts) if shared else batch_labels)
+                probs = torch.sigmoid(logits) if classification_type == "multi-label" else None
+                rows: list[torch.Tensor] = []
+                for row, row_label_list in enumerate(row_labels):
+                    count = len(row_label_list)
+                    width = self._row_width(pipe, row_label_list, logits.shape[-1])
+                    if width < count:
+                        raise InputTooLongError(_ERR_INPUT_TOO_LONG)
+                    if probs is not None:
+                        rows.append(probs[row, :count])
+                    elif width == logits.shape[-1]:
+                        rows.append(torch.softmax(logits[row], dim=-1)[:count])
+                    else:
+                        rows.append(torch.softmax(logits[row, :width], dim=-1)[:count])
+                values = torch.cat(rows).tolist()
+                position = 0
+                for row_label_list in row_labels:
+                    scores.append(values[position : position + len(row_label_list)])
+                    position += len(row_label_list)
+        return scores
+
+    @staticmethod
+    def _forward(pipe: Any, inputs: Any, labels: list[str] | list[list[str]], *, same_labels: bool) -> torch.Tensor:
+        """Run the model on tokenized rows, passing the class-slot count the pipeline passes."""
+        forward_kwargs: dict[str, Any] = {}
+        resolve_max_num_classes = getattr(pipe, "_resolve_max_num_classes", None)
+        if resolve_max_num_classes is not None:
+            forward_kwargs["max_num_classes"] = resolve_max_num_classes(labels, same_labels)
+        return pipe.model(**inputs, **forward_kwargs).logits
+
+    @staticmethod
+    def _row_width(pipe: Any, labels: list[str], batch_width: int) -> int:
+        """Class slots a forward over only this row's labels would score.
+
+        With the default dynamic allocation that is one slot per label, fewer
+        than a batch of rows with more labels gets. Fixed allocations give
+        every row the batch's width.
+        """
+        resolve_max_num_classes = getattr(pipe, "_resolve_max_num_classes", None)
+        width = resolve_max_num_classes(labels, True) if resolve_max_num_classes is not None else None
+        return batch_width if width is None else min(int(width), batch_width)
+
+    def _joint_scores(
         self,
         texts: list[str],
         label_groups: list[tuple[str, list[str]]],
         flat_labels: list[str],
+        classification_type: ClassificationType,
+        prompt: str | None,
+        examples: list[dict[str, Any]] | None,
+    ) -> list[list[float]]:
+        """Score all groups' labels in one row per text and normalize per group.
+
+        All groups share one forward pass per text, as the gliclass pipeline
+        encodes a dict of labels ("group.label" after flattening). The
+        pipeline's own single-label mode applies one softmax across every
+        flattened label, which makes a group's scores depend on the other
+        groups. Here each group gets its own softmax over the raw logits
+        instead; multi-label scores are independent sigmoids either way.
+        """
+        pipe = self._require_pipe()
+        num_labels = len(flat_labels)
+
+        chunks: list[torch.Tensor] = []
+        with torch.inference_mode(), _overflow_errors_as_input_too_long():
+            for start in range(0, len(texts), _PIPELINE_BATCH_SIZE):
+                inputs = pipe.prepare_inputs(
+                    texts[start : start + _PIPELINE_BATCH_SIZE],
+                    flat_labels,
+                    same_labels=True,
+                    examples=examples,
+                    prompt=prompt,
+                )
+                logits = self._forward(pipe, inputs, flat_labels, same_labels=True)
+                if logits.shape[-1] < num_labels:
+                    raise InputTooLongError(_ERR_INPUT_TOO_LONG)
+                chunks.append(logits[:, :num_labels].float())
+
+            logits = torch.cat(chunks)
+            if classification_type == "multi-label":
+                scores = torch.sigmoid(logits)
+            else:
+                scores = torch.empty_like(logits)
+                start = 0
+                for _, group_labels in label_groups:
+                    end = start + len(group_labels)
+                    scores[:, start:end] = torch.softmax(logits[:, start:end], dim=-1)
+                    start = end
+        return scores.cpu().tolist()
+
+    def _extract_separate(
+        self,
+        texts: list[str],
+        label_groups: list[tuple[str, list[str]]],
         *,
         classification_type: ClassificationType,
         prompt: str | None,
         examples: list[dict[str, Any]] | None,
         threshold: float,
-        input_token_counts: list[int] | None,
-        kept: list[int],
-        errors: list[ExtractItemError | None] | None,
+        overflow_policy: OverflowPolicy,
+        tokens: _RequestTokens,
     ) -> ExtractOutput:
-        """Score grouped labels and return one answer per group.
+        """Encode the document once per group, with only that group's labels.
 
-        All groups share one forward pass per text, exactly as the gliclass
-        pipeline encodes a dict of labels ("group.label" after flattening).
-        The pipeline's own single-label mode applies one softmax across every
-        flattened label, which makes a group's scores depend on the other
-        groups. Here each group gets its own softmax over the raw logits
-        instead; multi-label scores are independent sigmoids either way.
+        Each row is what a request with ``labels`` set to the group's labels
+        encodes: its overflow policy, window check and metering apply per
+        row. An item whose labels do not fit in one of its rows fails with
+        ``INPUT_TOO_LONG`` and is billed nothing; the other items still run.
+        """
+        group_examples = self._examples_by_group(examples, label_groups)
+        self._contexts(
+            tokens,
+            [
+                (group_labels, prompt, group_examples[group] if group_examples is not None else None)
+                for group, (_, group_labels) in enumerate(label_groups)
+            ],
+            overflow=overflow_policy != "default",
+        )
+        item_count = len(texts)
+        fits = [True] * item_count
+        counts: list[int] | None = [0] * item_count
+        group_texts: list[list[str]] = []
+        group_lengths: list[list[int]] | None = []
+        for group, (_, group_labels) in enumerate(label_groups):
+            row_examples = group_examples[group] if group_examples is not None else None
+            row_texts = self._apply_overflow_policy(
+                texts, group_labels, overflow_policy, prompt=prompt, examples=row_examples, tokens=tokens
+            )
+            layout = self._request_layout(group_labels, prompt, row_examples, tokens)
+            row_fits = self._items_fit(row_texts, layout, group_labels, prompt, row_examples, tokens=tokens)
+            row_counts = self._input_token_counts(
+                row_texts, prompt, row_examples, layout, [True] * item_count, tokens=tokens
+            )
+            fits = [ok and row_ok for ok, row_ok in zip(fits, row_fits, strict=True)]
+            counts = (
+                None
+                if counts is None or row_counts is None
+                else [total + count for total, count in zip(counts, row_counts, strict=True)]
+            )
+            group_texts.append(row_texts)
+            group_lengths = (
+                None
+                if group_lengths is None or layout is None
+                else [*group_lengths, self._row_lengths(row_texts, layout, tokens)]
+            )
+        if counts is not None:
+            counts = [count if ok else 0 for count, ok in zip(counts, fits, strict=True)]
+        errors = self._item_errors(fits)
+        kept = [index for index, ok in enumerate(fits) if ok]
+        rows = self._separate_scores(
+            [[group_texts[group][index] for group in range(len(label_groups))] for index in kept],
+            label_groups,
+            classification_type=classification_type,
+            prompt=prompt,
+            group_examples=group_examples,
+            row_lengths=(
+                None
+                if group_lengths is None
+                else [[group_lengths[group][index] for group in range(len(label_groups))] for index in kept]
+            ),
+        )
+        return self._grouped_output(
+            rows,
+            label_groups,
+            classification_type=classification_type,
+            threshold=threshold,
+            kept=kept,
+            item_count=item_count,
+            errors=errors,
+            input_token_counts=counts,
+        )
+
+    def _separate_scores(
+        self,
+        item_rows: list[list[str]],
+        label_groups: list[tuple[str, list[str]]],
+        *,
+        classification_type: ClassificationType,
+        prompt: str | None,
+        group_examples: list[list[dict[str, Any]]] | None,
+        row_lengths: list[list[int]] | None = None,
+    ) -> list[list[float]]:
+        """Scores of every (item, group) row, flattened per item in group order.
+
+        ``item_rows[i][g]`` is item ``i``'s document as group ``g`` encodes it,
+        and ``row_lengths[i][g]`` that row's estimated token length.
+        Uni-encoder rows of different groups share forward passes, packed by
+        ``_row_chunks``. Other architectures take one label set per forward,
+        so their rows run group by group.
+        """
+        if not item_rows:
+            return []
+        group_count = len(label_groups)
+        pipe = self._require_pipe()
+        config = getattr(getattr(pipe, "model", None), "config", None)
+        per_row: list[list[float]] = []
+        with _overflow_errors_as_input_too_long():
+            if getattr(config, "architecture_type", None) == "uni-encoder":
+                row_texts = [text for texts in item_rows for text in texts]
+                row_labels = [group_labels for _ in item_rows for _, group_labels in label_groups]
+                row_examples = (
+                    [group_examples[group] for _ in item_rows for group in range(group_count)]
+                    if group_examples is not None
+                    else None
+                )
+                lengths = None if row_lengths is None else [length for item in row_lengths for length in item]
+                per_row = [[] for _ in row_texts]
+                for chunk in self._row_chunks(lengths, len(row_texts), pipe.max_length):
+                    scored = self._score_rows(
+                        [row_texts[row] for row in chunk],
+                        [row_labels[row] for row in chunk],
+                        classification_type=classification_type,
+                        prompt=prompt,
+                        examples=None if row_examples is None else [row_examples[row] for row in chunk],
+                        batch_size=len(chunk),
+                    )
+                    for row, row_scores in zip(chunk, scored, strict=True):
+                        per_row[row] = row_scores
+            else:
+                by_group = [
+                    self._score_rows(
+                        [texts[group] for texts in item_rows],
+                        group_labels,
+                        classification_type=classification_type,
+                        prompt=prompt,
+                        examples=group_examples[group] if group_examples is not None else None,
+                    )
+                    for group, (_, group_labels) in enumerate(label_groups)
+                ]
+                per_row = [by_group[group][item] for item in range(len(item_rows)) for group in range(group_count)]
+        return [
+            [score for row in per_row[item * group_count : (item + 1) * group_count] for score in row]
+            for item in range(len(item_rows))
+        ]
+
+    def _row_lengths(self, texts: list[str], layout: _RequestLayout, tokens: _RequestTokens) -> list[int]:
+        """Estimated token length of each row: its document, label prompt, context and special tokens.
+
+        The parts are tokenized apart, so a row can differ from its estimate
+        by a token or two where they meet.
+        """
+        pipe = self._require_pipe()
+        overhead = layout.overhead_tokens + self._special_count
+        return [min(pipe.max_length, len(ids) + overhead) for ids in tokens.cut(texts, layout.window)]
+
+    @staticmethod
+    def _row_chunks(lengths: list[int] | None, count: int, max_length: int) -> list[list[int]]:
+        """Group row indices into forward passes of at most ``_PIPELINE_BATCH_SIZE * max_length`` padded tokens.
+
+        That is the most a labels request's sub-batch of eight full-window
+        rows pads to. Rows are packed longest first, so rows of similar
+        length share padding and many short rows share one forward pass.
+        Without length estimates, rows run in order, eight per forward.
+        """
+        if lengths is None:
+            return [
+                list(range(start, min(start + _PIPELINE_BATCH_SIZE, count)))
+                for start in range(0, count, _PIPELINE_BATCH_SIZE)
+            ]
+        budget = _PIPELINE_BATCH_SIZE * max_length
+        order = sorted(range(count), key=lambda row: lengths[row], reverse=True)
+        chunks: list[list[int]] = []
+        start = 0
+        while start < count:
+            size = max(1, min(count - start, budget // max(1, lengths[order[start]])))
+            chunks.append(order[start : start + size])
+            start += size
+        return chunks
+
+    def _grouped_output(
+        self,
+        rows: list[list[float]],
+        label_groups: list[tuple[str, list[str]]],
+        *,
+        classification_type: ClassificationType,
+        threshold: float,
+        kept: list[int],
+        item_count: int,
+        errors: list[ExtractItemError | None] | None,
+        input_token_counts: list[int] | None,
+    ) -> ExtractOutput:
+        """One answer per group from each kept item's scores, in flattened group order.
 
         A single-label group answers like a choice question:
         ``{"type": "choice", "choice", "probabilities", "confidence"}`` with
         ``confidence = 1 - H(p) / log(k)``. A multi-label group answers
         ``{"labels", "probabilities"}``.
         """
-        rows = (
-            self._grouped_scores(texts, label_groups, flat_labels, classification_type, prompt, examples)
-            if texts
-            else []
-        )
-        item_count = len(errors) if errors is not None else len(texts)
         # Multi-label groups list the labels at or above the request threshold,
         # or at or above 0.5 (an even sigmoid) when no threshold is set.
         selection_threshold = threshold if threshold > 0.0 else _DEFAULT_MULTI_LABEL_THRESHOLD
@@ -682,52 +1087,32 @@ class GLiClassAdapter(BaseAdapter):
             input_token_counts=input_token_counts,
         )
 
-    def _grouped_scores(
-        self,
-        texts: list[str],
-        label_groups: list[tuple[str, list[str]]],
-        flat_labels: list[str],
-        classification_type: ClassificationType,
-        prompt: str | None,
+    @staticmethod
+    def _examples_by_group(
         examples: list[dict[str, Any]] | None,
-    ) -> list[list[float]]:
-        """Run the model on flattened group labels and normalize per group."""
-        if self._pipeline is None:
-            raise RuntimeError(ERR_NOT_LOADED)
-        pipe = self._pipeline.pipe  # ty:ignore[unresolved-attribute]
-        model = pipe.model
-        num_labels = len(flat_labels)
-        forward_kwargs: dict[str, Any] = {}
-        resolve_max_num_classes = getattr(pipe, "_resolve_max_num_classes", None)
-        if resolve_max_num_classes is not None:
-            forward_kwargs["max_num_classes"] = resolve_max_num_classes(flat_labels, True)
+        label_groups: list[tuple[str, list[str]]],
+    ) -> list[list[dict[str, Any]]] | None:
+        """Each group's view of the examples: every example, with only that group's labels.
 
-        chunks: list[torch.Tensor] = []
-        with torch.inference_mode():
-            for start in range(0, len(texts), _PIPELINE_BATCH_SIZE):
-                inputs = pipe.prepare_inputs(
-                    texts[start : start + _PIPELINE_BATCH_SIZE],
-                    flat_labels,
-                    same_labels=True,
-                    examples=examples,
-                    prompt=prompt,
-                )
-                logits = model(**inputs, **forward_kwargs).logits
-                if logits.shape[-1] < num_labels:
-                    raise InputTooLongError(_ERR_INPUT_TOO_LONG)
-                chunks.append(logits[:, :num_labels].float())
-
-            logits = torch.cat(chunks)
-            if classification_type == "multi-label":
-                scores = torch.sigmoid(logits)
-            else:
-                scores = torch.empty_like(logits)
-                start = 0
-                for _, group_labels in label_groups:
-                    end = start + len(group_labels)
-                    scores[:, start:end] = torch.softmax(logits[:, start:end], dim=-1)
-                    start = end
-        return scores.cpu().tolist()
+        Example labels arrive flattened (``"group.label"``); the flattened
+        names are unique, so each maps back to one group.
+        """
+        if examples is None:
+            return None
+        owner = {
+            f"{group}{_LABEL_GROUP_SEPARATOR}{label}": (index, label)
+            for index, (group, group_labels) in enumerate(label_groups)
+            for label in group_labels
+        }
+        by_group: list[list[dict[str, Any]]] = [[] for _ in label_groups]
+        for example in examples:
+            chosen: list[list[str]] = [[] for _ in label_groups]
+            for flat in example["labels"]:
+                group, label = owner[flat]
+                chosen[group].append(label)
+            for group, group_labels in enumerate(chosen):
+                by_group[group].append({"text": example["text"], "labels": group_labels})
+        return by_group
 
     @staticmethod
     def _validate_classification_type(value: object) -> ClassificationType:
@@ -736,6 +1121,28 @@ class GLiClassAdapter(BaseAdapter):
         if value == "multi-label":
             return "multi-label"
         raise InvalidInputError("GLiClass classification_type must be 'single-label' or 'multi-label'")
+
+    @staticmethod
+    def _validate_group_encoding(value: object, label_groups: list[tuple[str, list[str]]] | None) -> GroupEncoding:
+        if value is None:
+            return _DEFAULT_GROUP_ENCODING
+        if value not in ("separate", "joint"):
+            raise InvalidInputError("GLiClass group_encoding must be 'separate' or 'joint'")
+        if label_groups is None:
+            raise InvalidInputError("GLiClass group_encoding applies only with options.label_groups")
+        return cast("GroupEncoding", value)
+
+    def _check_group_count(self, label_groups: list[tuple[str, list[str]]]) -> None:
+        """Bound the rows a separate-group request adds per item: one full row per group."""
+        window = self._max_seq_length or getattr(self._pipe, "max_length", None)
+        limit = _MAX_LABEL_GROUPS
+        if isinstance(window, int) and window > 0:
+            limit = max(1, min(limit, _MAX_ITEM_ROW_TOKENS // window))
+        if len(label_groups) > limit:
+            raise InvalidInputError(
+                f"GLiClass encodes the document once per label group and accepts at most {limit} groups "
+                f"per request (got {len(label_groups)}); send fewer groups, or options.group_encoding='joint'"
+            )
 
     @staticmethod
     def _validate_instruction(instruction: object) -> str | None:
@@ -887,13 +1294,112 @@ class GLiClassAdapter(BaseAdapter):
             raise ValueError("GLiClass returned an invalid classification score")
         return score
 
+    def _contexts(
+        self,
+        tokens: _RequestTokens,
+        contexts: list[tuple[list[str], str | None, list[dict[str, Any]] | None]],
+        *,
+        overflow: bool,
+    ) -> list[_Context]:
+        """Tokenize the (labels, instruction, examples) contexts a request encodes, in one call.
+
+        ``overflow`` also tokenizes each context's pipeline input with an
+        empty document, which the overflow policies measure. Contexts the
+        request already tokenized are reused.
+        """
+        entries: list[_Context] = []
+        strings: list[str] = []
+        pending: list[tuple[_Context, int, int, bool]] = []
+        for labels, prompt, examples in contexts:
+            key = (
+                tuple(labels),
+                prompt,
+                None if examples is None else tuple((e["text"], tuple(e["labels"])) for e in examples),
+            )
+            context = tokens.contexts.setdefault(key, _Context())
+            entries.append(context)
+            first = len(strings)
+            if context.parts is None:
+                strings.extend(self._layout_strings(labels, prompt, examples))
+            layout_count = len(strings) - first if context.parts is None else -1
+            with_overflow = overflow and context.overflow_tokens is None
+            if with_overflow:
+                pipe = self._require_pipe()
+                strings.append(pipe.prepare_input(text="", labels=labels, **_pipeline_context(prompt, examples)))
+            pending.append((context, first, layout_count, with_overflow))
+        encoded: list[list[int]] = []
+        if strings:
+            if self._tokenizer is None:
+                raise RuntimeError(ERR_NOT_LOADED)
+            encoded = self._tokenizer(strings, add_special_tokens=False)["input_ids"]
+        for context, first, layout_count, with_overflow in pending:
+            if layout_count >= 0:
+                context.parts = encoded[first : first + layout_count]
+            if with_overflow:
+                context.overflow_tokens = len(encoded[first + max(layout_count, 0)])
+        return entries
+
+    def _layout_strings(
+        self,
+        labels: list[str],
+        prompt: str | None,
+        examples: list[dict[str, Any]] | None,
+    ) -> list[str]:
+        """The parts of a context the label-fit check measures; none unless the model is a uni-encoder.
+
+        Only uni-encoder GLiClass models put label markers in their input.
+        """
+        pipe = self._pipe
+        config = getattr(getattr(pipe, "model", None), "config", None)
+        if (
+            pipe is None
+            or config is None
+            or self._tokenizer is None
+            or getattr(config, "architecture_type", None) != "uni-encoder"
+        ):
+            return []
+        label_prompt = "".join(f"{pipe.label_token}{label}" for label in labels) + pipe.sep_token
+        parts = [label_prompt, *([prompt] if prompt else []), *(example["text"] for example in examples or [])]
+        if examples:
+            parts.append(pipe._format_examples_for_input(examples))
+        return parts
+
     def _request_layout(
         self,
         labels: list[str],
         prompt: str | None,
         examples: list[dict[str, Any]] | None,
+        tokens: _RequestTokens | None = None,
     ) -> _RequestLayout | None:
-        """Tokenize the parts every item shares, once per request.
+        """The token layout every item of a request shares (see ``_compute_layout``)."""
+        tokens = tokens or _RequestTokens(self._tokenizer)
+        (context,) = self._contexts(tokens, [(labels, prompt, examples)], overflow=False)
+        if not context.has_layout:
+            context.layout = self._compute_layout(context.parts or [], labels, prompt, examples)
+            context.has_layout = True
+        return context.layout
+
+    def _overflow_label_tokens(
+        self,
+        labels: list[str],
+        prompt: str | None,
+        examples: list[dict[str, Any]] | None,
+        tokens: _RequestTokens,
+    ) -> int:
+        """Tokens of the pipeline input with an empty document: labels, instruction and examples."""
+        (context,) = self._contexts(tokens, [(labels, prompt, examples)], overflow=True)
+        if context.overflow_tokens is None:
+            raise RuntimeError(ERR_NOT_LOADED)
+        return context.overflow_tokens
+
+    def _compute_layout(
+        self,
+        parts: list[list[int]],
+        labels: list[str],
+        prompt: str | None,
+        examples: list[dict[str, Any]] | None,
+    ) -> _RequestLayout | None:
+        """The layout of a context from its tokenized parts (see ``_layout_strings``).
 
         Returns None when the model does not put label markers in its input
         (only uni-encoder GLiClass models do), so there is nothing to check.
@@ -903,43 +1409,34 @@ class GLiClassAdapter(BaseAdapter):
             InvalidInputError: If the instruction and examples leave no room
                 for the document.
         """
-        pipe = getattr(self._pipeline, "pipe", None)
+        pipe = self._pipe
         config = getattr(getattr(pipe, "model", None), "config", None)
-        tokenizer = self._tokenizer
-        if (
-            pipe is None
-            or config is None
-            or tokenizer is None
-            or getattr(config, "architecture_type", None) != "uni-encoder"
-        ):
+        if not parts or pipe is None or config is None:
             return None
-
-        def count(text: str) -> int:
-            return len(tokenizer(text, add_special_tokens=False)["input_ids"])
-
-        label_prompt = "".join(f"{pipe.label_token}{label}" for label in labels) + pipe.sep_token
-        label_ids = tokenizer(label_prompt, add_special_tokens=False)["input_ids"]
+        label_ids = parts[0]
         markers = [position for position, token in enumerate(label_ids) if token == config.class_token_index]
         if len(markers) < len(labels):
             return None
         window = pipe.max_length - self._special_count
         if markers[-1] >= window:
             raise InputTooLongError(_ERR_INPUT_TOO_LONG)
-        prompt_tokens = count(prompt) if prompt else 0
-        example_text_tokens = sum(count(example["text"]) for example in examples or [])
-        if prompt or examples:
-            examples_tokens = count(pipe._format_examples_for_input(examples)) if examples else 0
-            if len(label_ids) + prompt_tokens + examples_tokens >= window:
-                raise InvalidInputError(
-                    "GLiClass instruction, examples and labels leave no room for the document in the "
-                    f"model's {window}-token window; shorten the instruction or send fewer examples"
-                )
+        prompt_tokens = len(parts[1]) if prompt else 0
+        first_example = 2 if prompt else 1
+        example_count = len(examples or [])
+        example_text_tokens = sum(len(ids) for ids in parts[first_example : first_example + example_count])
+        examples_tokens = len(parts[-1]) if examples else 0
+        if (prompt or examples) and len(label_ids) + prompt_tokens + examples_tokens >= window:
+            raise InvalidInputError(
+                "GLiClass instruction, examples and labels leave no room for the document in the "
+                f"model's {window}-token window; shorten the instruction or send fewer examples"
+            )
         return _RequestLayout(
             prompt_first=bool(getattr(config, "prompt_first", False)),
             window=window,
             label_tokens=len(label_ids),
             last_marker=markers[-1],
             context_tokens=prompt_tokens + example_text_tokens,
+            overhead_tokens=len(label_ids) + prompt_tokens + examples_tokens,
         )
 
     def _items_fit(
@@ -949,6 +1446,8 @@ class GLiClassAdapter(BaseAdapter):
         labels: list[str],
         prompt: str | None,
         examples: list[dict[str, Any]] | None,
+        *,
+        tokens: _RequestTokens | None = None,
     ) -> list[bool]:
         """Whether each item's label markers survive truncation.
 
@@ -959,9 +1458,9 @@ class GLiClassAdapter(BaseAdapter):
         """
         if layout is None or layout.prompt_first or self._tokenizer is None:
             return [True] * len(texts)
-        encoded = self._tokenizer(texts, add_special_tokens=False, truncation=True, max_length=layout.window)
+        tokens = tokens or _RequestTokens(self._tokenizer)
         fits: list[bool] = []
-        for text, ids in zip(texts, encoded["input_ids"], strict=True):
+        for text, ids in zip(texts, tokens.cut(texts, layout.window), strict=True):
             estimate = len(ids) + layout.last_marker
             if estimate < layout.window - _FIT_MARGIN_TOKENS:
                 fits.append(True)
@@ -980,7 +1479,7 @@ class GLiClassAdapter(BaseAdapter):
         examples: list[dict[str, Any]] | None,
     ) -> bool:
         """Exact check: count the label markers left in the truncated fused input."""
-        pipe = getattr(self._pipeline, "pipe", None)
+        pipe = self._pipe
         tokenizer = self._tokenizer
         if pipe is None or tokenizer is None:
             return False
@@ -1011,19 +1510,21 @@ class GLiClassAdapter(BaseAdapter):
         examples: list[dict[str, Any]] | None,
         layout: _RequestLayout | None,
         fits: list[bool],
+        *,
+        tokens: _RequestTokens | None = None,
     ) -> list[int] | None:
-        """Billable input tokens per item.
+        """Billable input tokens per item, for one encoded row per item.
 
-        Each item is billed for its document and for the free-form request
+        Each row is billed for its document and for the free-form request
         text encoded with it: the instruction and the few-shot example texts.
         Label names (including the labels attached to examples) and the
         pipeline's marker tokens are not billed. With an instruction or
-        examples, an item's total is capped at the model window minus the
+        examples, a row's total is capped at the model window minus the
         label prompt, the most free-form text it can encode, unless the
         document count alone is already higher. Items refused because their
         labels would be cut off are billed nothing.
         """
-        counts = self._doc_input_token_counts(texts)
+        counts = self._doc_input_token_counts(texts, tokens)
         if counts is None:
             return None
         if prompt or examples:
@@ -1059,7 +1560,7 @@ class GLiClassAdapter(BaseAdapter):
         holds, so it can never be scored correctly, and only tokenizing it
         would take time proportional to its size.
         """
-        window = self._max_seq_length or getattr(getattr(self._pipeline, "pipe", None), "max_length", None)
+        window = self._max_seq_length or getattr(self._pipe, "max_length", None)
         if not isinstance(window, int):
             return
         limit = min(self._max_token_chars, _MAX_LABEL_CHARS_PER_TOKEN) * window
@@ -1081,24 +1582,33 @@ class GLiClassAdapter(BaseAdapter):
                 f"GLiClass instruction and examples must total at most {_MAX_CONTEXT_CHARS} characters"
             )
 
-    def _doc_input_token_counts(self, texts: list[str]) -> list[int] | None:
+    def _doc_input_token_counts(self, texts: list[str], tokens: _RequestTokens | None = None) -> list[int] | None:
         """Count document-only model-tokenizer input units for billing.
 
         GLiClass fuses the request's label schema with every document. The
         label prompt is reusable request schema rather than billed content, so
         this mirrors the GLiNER family contract and counts each post-policy
         document with the model tokenizer, including its normal special tokens.
+        The tokenizer truncates content to ``max_seq_length`` minus the
+        special tokens and then adds them, so the count is the document's
+        content tokens cut to that length, plus the special tokens.
         """
         if self._tokenizer is None:
             return None
+        special = self._special_count
         try:
-            encoded = self._tokenizer(
-                texts,
-                add_special_tokens=True,
-                truncation=self._max_seq_length is not None,
-                max_length=self._max_seq_length,
-            )
-            counts = [len(input_ids) for input_ids in encoded["input_ids"]]
+            if self._max_seq_length is None:
+                content = tokens.full(texts) if tokens is not None else None
+                if content is None:
+                    encoded = self._tokenizer(texts, add_special_tokens=True)
+                    return [len(input_ids) for input_ids in encoded["input_ids"]]
+                return [len(ids) + special for ids in content]
+            if tokens is None or self._max_seq_length <= special:
+                encoded = self._tokenizer(
+                    texts, add_special_tokens=True, truncation=True, max_length=self._max_seq_length
+                )
+                counts = [len(input_ids) for input_ids in encoded["input_ids"]]
+                return counts if len(counts) == len(texts) else None
+            return [len(ids) + special for ids in tokens.cut(texts, self._max_seq_length - special)]
         except Exception:  # noqa: BLE001 -- metering must not fail classification
             return None
-        return counts if len(counts) == len(texts) else None
