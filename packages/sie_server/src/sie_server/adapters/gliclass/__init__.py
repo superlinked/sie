@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 
 import torch
+from transformers import AutoTokenizer, PreTrainedTokenizerFast
 
 from sie_server.adapters._base_adapter import BaseAdapter
 from sie_server.adapters._spec import AdapterSpec
@@ -326,8 +327,6 @@ class GLiClassAdapter(BaseAdapter):
         self._pipeline = self._pipelines[self._classification_type]
 
     def _load_tokenizer(self, shared_kwargs: dict[str, Any]) -> PreTrainedTokenizerBase:
-        from transformers import AutoTokenizer, PreTrainedTokenizerFast
-
         try:
             return AutoTokenizer.from_pretrained(self._model_name_or_path, **shared_kwargs)
         except ValueError as exc:
