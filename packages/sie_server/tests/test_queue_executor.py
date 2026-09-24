@@ -1312,6 +1312,83 @@ class TestProcessExtractBatch:
         assert requests[0].prepared_items == [prepared_item]
 
     @pytest.mark.asyncio
+    async def test_extract_rejects_a_non_string_options_instruction_per_item(self) -> None:
+        reg = _make_registry()
+        worker = AsyncMock()
+        fut: asyncio.Future[WorkerResult] = asyncio.Future()
+        fut.set_result(WorkerResult(output=ExtractOutput(entities=[[]]), timing=RequestTiming()))
+        worker.submit_extract_preformed_batch = AsyncMock(return_value=[fut])
+        reg.start_worker = AsyncMock(return_value=worker)
+
+        def item(index: int, options: dict[str, object]) -> ExtractBatchItem:
+            return ExtractBatchItem(
+                work_item_id=f"req-{index}.0",
+                request_id=f"req-{index}",
+                item_index=0,
+                total_items=1,
+                timestamp=time.time(),
+                item={"text": "Charged twice."},
+                labels=["billing"],
+                options=options,
+            )
+
+        outcome = await QueueExecutor(reg).process_extract_batch(
+            ProcessExtractBatchRequest(
+                model_id="test/model",
+                items=[item(1, {"instruction": ["x"]}), item(2, {"instruction": "Classify."})],
+            )
+        )
+
+        by_id = {o.work_item_id: o for o in outcome.outcomes}
+        assert by_id["req-1.0"].error_code == "INVALID_INPUT"
+        assert by_id["req-2.0"].disposition == "publish_and_ack"
+        requests = worker.submit_extract_preformed_batch.await_args.args[0]
+        assert [request.instruction for request in requests] == ["Classify."]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("instruction", "options", "expected"),
+        [
+            (None, {"instruction": "Classify the ticket."}, "Classify the ticket."),
+            ("From the request.", {"instruction": "From the options."}, "From the request."),
+            (None, None, None),
+        ],
+    )
+    async def test_extract_instruction_falls_back_to_options_like_http(
+        self, instruction: str | None, options: dict[str, str] | None, expected: str | None
+    ) -> None:
+        reg = _make_registry()
+        worker = AsyncMock()
+        fut: asyncio.Future[WorkerResult] = asyncio.Future()
+        fut.set_result(WorkerResult(output=ExtractOutput(entities=[[]]), timing=RequestTiming()))
+        worker.submit_extract_preformed_batch = AsyncMock(return_value=[fut])
+        reg.start_worker = AsyncMock(return_value=worker)
+
+        await QueueExecutor(reg).process_extract_batch(
+            ProcessExtractBatchRequest(
+                model_id="test/model",
+                items=[
+                    ExtractBatchItem(
+                        work_item_id="req-1.0",
+                        request_id="req-1",
+                        item_index=0,
+                        total_items=1,
+                        timestamp=time.time(),
+                        item={"text": "Charged twice."},
+                        labels=["billing"],
+                        instruction=instruction,
+                        options=options,
+                    )
+                ],
+            )
+        )
+
+        requests = worker.submit_extract_preformed_batch.await_args.args[0]
+        assert requests[0].instruction == expected
+        cost_hook = reg.get.return_value.extract_item_costs
+        assert cost_hook.call_args.kwargs["instruction"] == expected
+
+    @pytest.mark.asyncio
     async def test_extract_results_echo_or_generate_original_item_ids(self) -> None:
         reg = _make_registry()
         worker = AsyncMock()

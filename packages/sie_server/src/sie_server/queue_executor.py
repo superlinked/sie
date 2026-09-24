@@ -1424,6 +1424,12 @@ class QueueExecutor:
         for bi in req.items:
             try:
                 options = merge_runtime_options(config, bi.options)
+                # Same precedence as the HTTP extract path: the request's own
+                # instruction, else one from the options (profile defaults
+                # included).
+                instruction = bi.instruction if bi.instruction is not None else options.get("instruction")
+                if instruction is not None and not isinstance(instruction, str):
+                    raise InvalidInputError("instruction must be a string")
                 server_item = decode_item(bi.item)
                 timing = RequestTiming()
                 timing.start_tokenization()
@@ -1465,7 +1471,7 @@ class QueueExecutor:
                             model_id,
                             [server_item],
                             config,
-                            instruction=bi.instruction,
+                            instruction=instruction,
                             task=task,
                         )
                         prepared_items = prepared_batch.items
@@ -1478,7 +1484,7 @@ class QueueExecutor:
                             [server_item],
                             labels=bi.labels,
                             output_schema=bi.output_schema,
-                            instruction=bi.instruction,
+                            instruction=instruction,
                             options=options,
                         )
                         prepared_items = build_extract_prepared_items([server_item], item_costs=item_costs)
@@ -1491,7 +1497,7 @@ class QueueExecutor:
                         items=[server_item],
                         labels=bi.labels,
                         output_schema=bi.output_schema,
-                        instruction=bi.instruction,
+                        instruction=instruction,
                         options=options,
                         request_id=bi.request_id,
                         timing=timing,
