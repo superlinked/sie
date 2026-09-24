@@ -1,7 +1,7 @@
 """Tests for extract endpoint."""
 
 import asyncio
-from typing import Any
+from typing import Any, ClassVar
 from unittest.mock import AsyncMock, MagicMock
 
 import msgpack
@@ -9,7 +9,10 @@ import msgpack_numpy as m
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sie_server.adapters._base_adapter import BaseAdapter
+from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters.base import ModelCapabilities, ModelDims
+from sie_server.api.extract import _extract_via_worker
 from sie_server.api.extract import router as extract_router
 from sie_server.config.model import (
     EmbeddingDim,
@@ -892,3 +895,81 @@ class TestExtractCost:
         ]
         prepared = build_extract_prepared_items(items)
         assert [(p.cost, p.original_index) for p in prepared] == [(3, 0), (11, 1)]
+
+
+class _PlainExtractAdapter(BaseAdapter):
+    """An extract adapter that keeps ModelAdapter's default (no per-item cost hook)."""
+
+    spec: ClassVar[AdapterSpec] = AdapterSpec(inputs=("text",), outputs=("json",))
+
+    def load(self, device: str) -> None:
+        pass
+
+    def extract(self, items: list[Item], **kwargs: Any) -> ExtractOutput:
+        return ExtractOutput(entities=[[] for _ in items])
+
+
+class _RowCostAdapter(_PlainExtractAdapter):
+    """Reports its own per-item costs, like an adapter that runs several model rows per item."""
+
+    def __init__(self) -> None:
+        self.hook_calls: list[dict[str, Any]] = []
+
+    def extract_item_costs(
+        self,
+        items: list[Item],
+        *,
+        labels: list[str] | None = None,
+        output_schema: dict[str, Any] | None = None,
+        instruction: str | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> list[int] | None:
+        self.hook_calls.append(
+            {"labels": labels, "output_schema": output_schema, "instruction": instruction, "options": options}
+        )
+        return [1000 + 10 * i for i in range(len(items))]
+
+
+def _cost_capture_registry(adapter: BaseAdapter) -> tuple[MagicMock, MagicMock]:
+    registry = MagicMock(spec=["get", "get_config", "start_worker"])
+    registry.get.return_value = adapter
+    worker = MagicMock()
+
+    async def submit_extract(*, prepared_items: list[Any], items: list[Item], **kwargs: Any) -> asyncio.Future:
+        future = asyncio.get_running_loop().create_future()
+        future.set_result(WorkerResult(output=ExtractOutput(entities=[[] for _ in items]), timing=RequestTiming()))
+        return future
+
+    worker.submit_extract = AsyncMock(side_effect=submit_extract)
+    registry.start_worker = AsyncMock(return_value=worker)
+    return registry, worker
+
+
+class TestExtractItemCostHook:
+    """``_extract_via_worker`` sizes batches from the adapter's per-item cost hook when it has one."""
+
+    @pytest.mark.asyncio
+    async def test_hook_costs_reach_the_worker(self) -> None:
+        adapter = _RowCostAdapter()
+        registry, worker = _cost_capture_registry(adapter)
+        items = [Item(text="a"), Item(text="bb"), Item(metadata={"state": {"k": "v"}})]
+        schema = {"q": {"type": "noul", "instructions": "x"}}
+
+        await _extract_via_worker(registry, "m", items, output_schema=schema, instruction=None, options={"max_len": 64})
+
+        prepared = worker.submit_extract.await_args.kwargs["prepared_items"]
+        assert [(p.cost, p.original_index) for p in prepared] == [(1000, 0), (1010, 1), (1020, 2)]
+        assert adapter.hook_calls == [
+            {"labels": None, "output_schema": schema, "instruction": None, "options": {"max_len": 64}}
+        ]
+
+    @pytest.mark.asyncio
+    async def test_default_hook_keeps_character_and_byte_costs(self) -> None:
+        registry, worker = _cost_capture_registry(_PlainExtractAdapter())
+        document = {"data": b"%PDF-1.4 fake", "format": "pdf"}
+        items = [Item(text="hello"), Item(document=document)]
+
+        await _extract_via_worker(registry, "m", items, labels=["person"])
+
+        prepared = worker.submit_extract.await_args.kwargs["prepared_items"]
+        assert [p.cost for p in prepared] == [5, len(document["data"])]

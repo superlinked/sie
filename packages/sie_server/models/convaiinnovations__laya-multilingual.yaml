@@ -1,0 +1,24 @@
+sie_id: convaiinnovations/laya-multilingual
+hf_id: convaiinnovations/laya-multilingual
+hf_revision: 82d57fc4f2d1be3d2caac494045f2ec51d0842f3
+# This checkpoint ships no calibration temperatures (rl_agent_config.json has
+# temperature [1, 1, 1] and no per-option buckets), so its probabilities and
+# confidences are the raw softmax of the decision head: uncalibrated.
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: null
+  extract: {}
+max_sequence_length: 1024
+profiles:
+  default:
+    max_batch_tokens: 16384
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.laya.adapter:LayaAdapter
+    adapter_options:
+      loadtime: {}
+      runtime: {}

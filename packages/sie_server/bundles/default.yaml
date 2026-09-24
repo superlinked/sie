@@ -41,6 +41,7 @@ adapters:
 - sie_server.adapters.gliner_bi
 - sie_server.adapters.glirel
 - sie_server.adapters.gliclass
+- sie_server.adapters.laya.adapter
 - sie_server.adapters.donut
 - sie_server.adapters.florence2
 - sie_server.adapters.docling.adapter

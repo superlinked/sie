@@ -32,7 +32,7 @@ adopt it without coordinating on a calibration table.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Any, Final
 
 from sie_server.core.prepared import ExtractPreparedItem
 from sie_server.types.inputs import is_document_input
@@ -89,6 +89,7 @@ def build_extract_prepared_items(
     items: list[Item],
     *,
     decoder_max_output_tokens: int = 0,
+    item_costs: list[int] | None = None,
 ) -> list[ExtractPreparedItem]:
     """Build PreparedItems for a batch of extract items.
 
@@ -96,11 +97,50 @@ def build_extract_prepared_items(
     for each item — see that function's docstring for the rationale.
     Decoder-OCR call sites must pass this; encoder-only call sites
     leave it at the default and get the pre-#33 byte-count behaviour.
+
+    ``item_costs`` replaces the per-item input cost when an adapter reports
+    its own (``ModelAdapter.extract_item_costs``), e.g. because it runs one
+    forward row per (item, question) pair. It is ignored unless it holds one
+    non-negative integer per item, so a malformed estimate falls back to the
+    character count rather than mis-sizing a batch.
     """
-    return [
-        ExtractPreparedItem(
-            cost=extract_item_cost(item, decoder_max_output_tokens=decoder_max_output_tokens),
-            original_index=i,
-        )
-        for i, item in enumerate(items)
-    ]
+    usable_costs = _usable_item_costs(item_costs, len(items))
+    prepared: list[ExtractPreparedItem] = []
+    for i, item in enumerate(items):
+        if usable_costs is None:
+            cost = extract_item_cost(item, decoder_max_output_tokens=decoder_max_output_tokens)
+        else:
+            cost = usable_costs[i] + max(decoder_max_output_tokens, 0)
+        prepared.append(ExtractPreparedItem(cost=cost, original_index=i))
+    return prepared
+
+
+def adapter_extract_item_costs(
+    adapter: object,
+    items: list[Item],
+    *,
+    labels: list[str] | None = None,
+    output_schema: dict[str, Any] | None = None,
+    instruction: str | None = None,
+    options: dict[str, Any] | None = None,
+) -> list[int] | None:
+    """Ask ``adapter`` for per-item extract costs; ``None`` when it has none or fails."""
+    hook = getattr(adapter, "extract_item_costs", None)
+    if not callable(hook):
+        return None
+    try:
+        costs = hook(items, labels=labels, output_schema=output_schema, instruction=instruction, options=options)
+    except Exception:  # noqa: BLE001 — a cost estimate must never fail the request
+        return None
+    return _usable_item_costs(costs, len(items))
+
+
+def _usable_item_costs(costs: object, expected_len: int) -> list[int] | None:
+    if not isinstance(costs, list) or len(costs) != expected_len:
+        return None
+    usable: list[int] = []
+    for cost in costs:
+        if not isinstance(cost, int) or isinstance(cost, bool) or cost < 0:
+            return None
+        usable.append(cost)
+    return usable

@@ -993,6 +993,63 @@ def test_urchade_gliner_small_v2_1_extract() -> None:
 
 
 # =============================================================================
+# Extract models (text input - Laya typed decisions)
+# =============================================================================
+
+_LAYA_STATE = "Hi, I was charged twice for my subscription this month. Please refund one charge ASAP!"
+_LAYA_QUESTIONS = {
+    "intent": {
+        "type": "choice",
+        "instructions": "What does the customer want?",
+        "criteria": {"refund": "wants money back", "cancel": "wants to cancel", "technical": "reports a bug"},
+    },
+    "refund_requested": {"type": "noul", "instructions": "The customer explicitly requests a refund."},
+    "frustration": {
+        "type": "score",
+        "instructions": "How frustrated is the customer?",
+        "criteria": ["calm", "mildly annoyed", "frustrated", "furious"],
+    },
+}
+
+
+def _check_laya(adapter: Any, model_name: str, expected: tuple[str, bool, str] | None) -> None:
+    """Typed answers for one state: (intent choice, refund noul answer, top department label)."""
+    output = adapter.extract([Item(text=_LAYA_STATE)], output_schema=_LAYA_QUESTIONS)
+    assert output.data is not None
+    answers = output.data[0]
+    assert list(answers) == list(_LAYA_QUESTIONS)
+    assert sum(answers["intent"]["probabilities"].values()) == pytest.approx(1.0, abs=1e-5)
+    assert 0.0 <= answers["frustration"]["score"] <= 3.0
+    labels = adapter.extract([Item(text=_LAYA_STATE)], labels=["billing", "technical", "sales"])
+    assert labels.classifications is not None
+    actual = (answers["intent"]["choice"], answers["refund_requested"]["answer"], labels.classifications[0][0]["label"])
+    if expected is None:
+        msg = f"FILL: {model_name} laya = {actual}"
+        raise AssertionError(msg)
+    assert actual == expected
+
+
+def test_convaiinnovations_laya_extract() -> None:
+    _check_laya(_get_adapter("convaiinnovations/laya"), "convaiinnovations/laya", ("refund", True, "billing"))
+
+
+def test_convaiinnovations_laya_multilingual_extract() -> None:
+    _check_laya(
+        _get_adapter("convaiinnovations/laya-multilingual"),
+        "convaiinnovations/laya-multilingual",
+        ("refund", True, "billing"),
+    )
+
+
+def test_convaiinnovations_laya_typed_decisions_extract() -> None:
+    _check_laya(
+        _get_adapter("convaiinnovations/laya-typed-decisions"),
+        "convaiinnovations/laya-typed-decisions",
+        ("refund", True, "billing"),
+    )
+
+
+# =============================================================================
 # Extract models (image input - Florence-2, Donut)
 # These require image input, skipping for now as they need special handling
 # =============================================================================

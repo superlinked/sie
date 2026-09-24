@@ -354,6 +354,26 @@ class ModelAdapter(ABC):
         msg = f"{self.__class__.__name__} does not support extract()"
         raise NotImplementedError(msg)
 
+    def extract_item_costs(
+        self,
+        items: list[Item],
+        *,
+        labels: list[str] | None = None,
+        output_schema: dict[str, Any] | None = None,
+        instruction: str | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> list[int] | None:
+        """Per-item batching cost for an extract request, or ``None`` for the default.
+
+        The default extract cost is each item's text length (document byte size
+        for documents; see ``core.extract_cost``), which assumes one forward
+        row per item. Adapters that expand one item into several model rows —
+        e.g. one encoder pass per (item, question) pair — override this so the
+        batcher does not over-pack their batches. Must not raise.
+        """
+        _ = (items, labels, output_schema, instruction, options)
+        return None
+
     def count_input_tokens(self, items: list[Item]) -> list[int] | None:
         """Authoritative per-item input-token counts for the unit meter (§7.3).
 

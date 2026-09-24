@@ -4,11 +4,15 @@ import asyncio
 import time
 from contextlib import ExitStack
 from pathlib import Path
+from typing import Any, ClassVar
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import msgpack
 import numpy as np
 import pytest
+from sie_server.adapters._base_adapter import BaseAdapter
+from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters.laya.adapter import LayaAdapter
 from sie_server.config.model import EmbeddingDim, EncodeTask, ModelConfig, ProfileConfig, Tasks
 from sie_server.core.inference_output import ExtractOutput, ScoreOutput
 from sie_server.core.loader import expand_profile_variants, load_model_config
@@ -24,6 +28,7 @@ from sie_server.ipc_types import (
     ScoreBatchItem,
 )
 from sie_server.queue_executor import QueueExecutor, _validate_prepared_audio
+from sie_server.types.inputs import InvalidInputError, Item
 
 _MODELS_DIR = Path(__file__).resolve().parents[1] / "models"
 
@@ -1511,6 +1516,117 @@ class TestProcessExtractBatch:
         assert outcome.outcomes[0].nak_delay_ms == 13_000
         assert outcome.outcomes[0].error_code is None
         assert outcome.outcomes[0].error is None
+
+    @pytest.mark.asyncio
+    async def test_adapter_cost_hook_sizes_prepared_items(self) -> None:
+        reg = _make_registry()
+        adapter = _RowCostAdapter()
+        reg.get.return_value = adapter
+        worker = _extract_worker(ExtractOutput(entities=[[]]))
+        reg.start_worker = AsyncMock(return_value=worker)
+        schema = {"q": {"type": "noul", "instructions": "x"}}
+
+        await QueueExecutor(reg).process_extract_batch(
+            ProcessExtractBatchRequest(model_id="test/model", items=[_schema_extract_item(schema)])
+        )
+
+        (request,) = worker.submit_extract_preformed_batch.await_args.args[0]
+        assert [p.cost for p in request.prepared_items] == [1000]
+        assert adapter.hook_calls == [
+            {"labels": None, "output_schema": schema, "instruction": None, "options": request.options}
+        ]
+
+    @pytest.mark.asyncio
+    async def test_default_cost_hook_keeps_character_count(self) -> None:
+        reg = _make_registry()
+        reg.get.return_value = _PlainExtractAdapter()
+        worker = _extract_worker(ExtractOutput(entities=[[]]))
+        reg.start_worker = AsyncMock(return_value=worker)
+
+        await QueueExecutor(reg).process_extract_batch(
+            ProcessExtractBatchRequest(model_id="test/model", items=[_extract_item()])
+        )
+
+        (request,) = worker.submit_extract_preformed_batch.await_args.args[0]
+        assert [p.cost for p in request.prepared_items] == [len("Alice works at Acme.")]
+
+    @pytest.mark.asyncio
+    async def test_laya_request_error_publishes_invalid_input(self) -> None:
+        """A caller mistake raised as InvalidInputError (here a Laya question error) is INVALID_INPUT, not a 500."""
+        schema = {"q": {"type": "rank", "instructions": "x"}}
+        with pytest.raises(InvalidInputError) as excinfo:
+            LayaAdapter("convaiinnovations/laya")._resolve_questions(None, schema, None)
+        outcomes = []
+        for exc in (excinfo.value, ValueError("internal fault")):
+            reg = _make_registry()
+            fut: asyncio.Future[WorkerResult] = asyncio.Future()
+            fut.set_exception(exc)
+            worker = AsyncMock()
+            worker.submit_extract_preformed_batch = AsyncMock(return_value=[fut])
+            reg.start_worker = AsyncMock(return_value=worker)
+            outcome = await QueueExecutor(reg).process_extract_batch(
+                ProcessExtractBatchRequest(model_id="test/model", items=[_schema_extract_item(schema)])
+            )
+            outcomes.append(outcome.outcomes[0])
+
+        invalid, internal = outcomes
+        assert invalid.disposition == "publish_error_and_ack"
+        assert invalid.error_code == "INVALID_INPUT"
+        assert invalid.error == "question 'q': unknown type 'rank'; use one of ['choice', 'noul', 'score']"
+        assert internal.error_code == "inference_error"
+
+
+class _PlainExtractAdapter(BaseAdapter):
+    """An extract adapter that keeps ModelAdapter's default (no per-item cost hook)."""
+
+    spec: ClassVar[AdapterSpec] = AdapterSpec(inputs=("text",), outputs=("json",))
+
+    def load(self, device: str) -> None:
+        pass
+
+    def extract(self, items: list[Item], **kwargs: Any) -> ExtractOutput:
+        return ExtractOutput(entities=[[] for _ in items])
+
+
+class _RowCostAdapter(_PlainExtractAdapter):
+    """Reports its own per-item costs, like an adapter that runs several model rows per item."""
+
+    def __init__(self) -> None:
+        self.hook_calls: list[dict[str, Any]] = []
+
+    def extract_item_costs(
+        self,
+        items: list[Item],
+        *,
+        labels: list[str] | None = None,
+        output_schema: dict[str, Any] | None = None,
+        instruction: str | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> list[int] | None:
+        self.hook_calls.append(
+            {"labels": labels, "output_schema": output_schema, "instruction": instruction, "options": options}
+        )
+        return [1000 + 10 * i for i in range(len(items))]
+
+
+def _extract_worker(output: ExtractOutput) -> AsyncMock:
+    worker = AsyncMock()
+    fut: asyncio.Future[WorkerResult] = asyncio.Future()
+    fut.set_result(WorkerResult(output=output, timing=RequestTiming()))
+    worker.submit_extract_preformed_batch = AsyncMock(return_value=[fut])
+    return worker
+
+
+def _schema_extract_item(output_schema: dict[str, Any]) -> ExtractBatchItem:
+    return ExtractBatchItem(
+        work_item_id="req-1.0",
+        request_id="req-1",
+        item_index=0,
+        total_items=1,
+        timestamp=time.time(),
+        item={"text": "Alice works at Acme."},
+        output_schema=output_schema,
+    )
 
 
 # -----------------------------------------------------------------------------

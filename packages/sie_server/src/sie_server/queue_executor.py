@@ -15,7 +15,7 @@ from sie_sdk._msgpack import packb as pack_msgpack
 from sie_server.api.ws import compute_bundle_config_hash_cached
 from sie_server.config.model import ModelConfig
 from sie_server.core.encode_pipeline import EncodePipeline, resolve_encode_output_types
-from sie_server.core.extract_cost import build_extract_prepared_items
+from sie_server.core.extract_cost import adapter_extract_item_costs, build_extract_prepared_items
 from sie_server.core.oom import is_oom_error
 from sie_server.core.prepared import AudioPayload, AudioPreparedItem
 from sie_server.core.registry import ModelRegistry
@@ -1471,7 +1471,16 @@ class QueueExecutor:
                     else:
                         # Batching proxy only; authoritative text/page billing
                         # comes from the adapter's ExtractOutput unit counts.
-                        prepared_items = build_extract_prepared_items([server_item])
+                        # The sidecar sizes queue batches (cost 1 per extract item); this cost does not.
+                        item_costs = adapter_extract_item_costs(
+                            extract_adapter,
+                            [server_item],
+                            labels=bi.labels,
+                            output_schema=bi.output_schema,
+                            instruction=bi.instruction,
+                            options=options,
+                        )
+                        prepared_items = build_extract_prepared_items([server_item], item_costs=item_costs)
                 timing.end_tokenization()
 
                 lora = self._extract_lora(options)

@@ -1,0 +1,21 @@
+sie_id: convaiinnovations/laya
+hf_id: convaiinnovations/laya
+hf_revision: aa8c91ca088ec597df95a0d1c76b3063cb2ae5e8
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: null
+  extract: {}
+max_sequence_length: 512
+profiles:
+  default:
+    max_batch_tokens: 16384
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.laya.adapter:LayaAdapter
+    adapter_options:
+      loadtime: {}
+      runtime: {}

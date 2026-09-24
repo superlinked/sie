@@ -46,6 +46,7 @@ One SIE cluster runs the inference behind a whole agent. Each task is a handful 
 | **Search** | Embed, match, and rerank to retrieve the right context. | [`bge-m3`](packages/sie_server/models/BAAI__bge-m3.yaml), [`splade-v3`](packages/sie_server/models/naver__splade-v3.yaml), [`colbertv2`](packages/sie_server/models/colbert-ir__colbertv2.0.yaml), [`qwen3-reranker`](packages/sie_server/models/Qwen__Qwen3-Reranker-4B.yaml) |
 | **Document to markdown** | PDFs, Office files, and scans become clean markdown. | [`lightonocr`](packages/sie_server/models/lightonai__LightOnOCR-2-1B.yaml), [`glm-ocr`](packages/sie_server/models/zai-org__GLM-OCR.yaml), [`mineru`](packages/sie_server/models/opendatalab__MinerU2.5-Pro-2604-1.2B.yaml), [`paddleocr-vl`](packages/sie_server/models/PaddlePaddle__PaddleOCR-VL-1.5.yaml), [`docling`](packages/sie_server/models/docling.yaml) |
 | **Structured output** | Schema-valid JSON, extracted or generated. | [`gliner2`](packages/sie_server/models/fastino__gliner2-large-v1.yaml), [`nuner-zero`](packages/sie_server/models/numind__NuNER_Zero.yaml), [`qwen3.8-27b`](packages/sie_server/models/Qwen__Qwen3.8-27B-FP8.yaml), [`qwen3.6-27b`](packages/sie_server/models/Qwen__Qwen3.6-27B.yaml) |
+| **Decide** | Choice, yes/no, and score answers with probabilities to typed questions about a text or JSON state. | [`laya`](packages/sie_server/models/convaiinnovations__laya.yaml), [`laya-multilingual`](packages/sie_server/models/convaiinnovations__laya-multilingual.yaml), [`laya-typed-decisions`](packages/sie_server/models/convaiinnovations__laya-typed-decisions.yaml) |
 | **Guard content** | A Yes/No safety verdict, with the decision threshold tunable in the model config. | [`granite-guardian-2b`](packages/sie_server/models/ibm-granite__granite-guardian-3.0-2b.yaml) |
 | **Run the agent loop** | Plan steps and call tools with an open LLM, streaming included. | [`qwen3.8-27b`](packages/sie_server/models/Qwen__Qwen3.8-27B-FP8.yaml), [`qwen3.6-27b`](packages/sie_server/models/Qwen__Qwen3.6-27B.yaml) |
 | **Translate** | Text between 400+ languages. | [`madlad400-3b-mt`](packages/sie_server/models/google__madlad400-3b-mt.yaml) |
@@ -139,6 +140,28 @@ result = client.extract(
 )
 print(result["entities"][0])
 # {'text': 'Tim Cook', 'label': 'person', 'score': 0.992, 'start': 0, 'end': 8, ...}
+```
+
+Typed decisions ask one or more typed questions about each item (a text, or a JSON object or conversation passed as
+`metadata={"state": ...}`) and return an answer with probabilities per question in `data`. `laya` and
+`laya-typed-decisions` calibrate the probabilities with their shipped temperatures; `laya-multilingual` ships none, so
+its probabilities are the raw softmax. `usage.input_tokens` counts every (item, question) row the model encodes: the
+state's tokens plus the question's, once per question. An item may use up to 32,768 row tokens (questions × `max_len`),
+so the 1024-token `laya-multilingual` and `laya-typed-decisions` take up to 32 questions per request and `laya` up to 64.
+
+```python
+result = client.extract(
+    "convaiinnovations/laya",
+    Item(text="Hi, we were billed twice for March. Please refund the duplicate today."),
+    output_schema={
+        "department": {"type": "choice", "instructions": "Which team should handle this?",
+                       "criteria": {"billing": "invoices, payments, refunds", "technical": "bugs, outages"}},
+        "refund_requested": {"type": "noul", "instructions": "Does the user ask for a refund?"},
+        "urgency": {"type": "score", "instructions": "How urgent is this?", "criteria": ["low", "medium", "high"]},
+    },
+)
+print(result["data"]["department"])  # values are illustrative and rounded
+# {'type': 'choice', 'choice': 'billing', 'probabilities': {'billing': 0.987, 'technical': 0.013}, 'confidence': 0.9}
 ```
 
 Text generation runs on the GPU generation image; stop the first server, then start this one on the same port:

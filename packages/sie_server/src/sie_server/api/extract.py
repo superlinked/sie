@@ -16,7 +16,7 @@ from sie_server.api.helpers import (
 from sie_server.api.options import resolve_runtime_options
 from sie_server.api.serialization import MsgPackResponse
 from sie_server.api.validation import validate_machine_profile_header
-from sie_server.core.extract_cost import build_extract_prepared_items
+from sie_server.core.extract_cost import adapter_extract_item_costs, build_extract_prepared_items
 from sie_server.core.inference_output import ExtractOutput
 from sie_server.core.timing import RequestTiming
 from sie_server.core.worker import QueueFullError, WorkerResult
@@ -143,7 +143,20 @@ async def _extract_via_worker(
     else:
         # Text/document model: cost is text characters or document byte size.
         # GLiNER/GLiClass tokenize internally; document adapters (Docling) parse internally.
-        prepared_items = build_extract_prepared_items(items)
+        # Adapters that run several model rows per item report their own cost.
+        try:
+            adapter = registry.get(model)
+        except (AttributeError, KeyError):
+            adapter = None
+        item_costs = adapter_extract_item_costs(
+            adapter,
+            items,
+            labels=labels,
+            output_schema=output_schema,
+            instruction=instruction,
+            options=options,
+        )
+        prepared_items = build_extract_prepared_items(items, item_costs=item_costs)
 
     timing.end_tokenization()
 
