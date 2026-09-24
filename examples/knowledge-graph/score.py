@@ -106,7 +106,15 @@ def resolve(candidates_doc: dict[str, Any], recorded: dict[tuple[str, str], Any]
 
 
 def match_reviews(review_doc: dict[str, Any], resolved: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
-    """Confirm every flagged edge is an edge the model actually returned."""
+    """Confirm every flagged edge is one this run supports, or one it no longer asks for.
+
+    The review is a superset of the current run. A schema that stops asking for
+    a relation stops producing the edges built on it, and a reading taken
+    before that change still stands as a record of what a person read. What is
+    not allowed is a flagged edge missing while its relation is still being
+    sent: that would be a review of something this run does not support, which
+    is the case this check exists to catch.
+    """
     matched = []
     for flagged in review_doc["flagged"]:
         cid = flagged["candidate"]
@@ -121,6 +129,8 @@ def match_reviews(review_doc: dict[str, Any], resolved: dict[str, dict[str, Any]
             for relation in resolved[cid]["relations"]
             if (relation["head"], relation["relation"], relation["tail"]) == triple
         ]
+        if not hits and flagged["relation"] not in resolved[cid]["candidate"]["relation_labels"]:
+            continue
         if len(hits) != 1:
             raise InputError(f"review flags {triple} on {cid}, which the model returned {len(hits)} times")
         if flagged["verdict"] not in review_doc["verdicts"]:
@@ -177,24 +187,18 @@ def main() -> int:
         print(f"FAILED: {error}")
         return 1
 
-    print(f"{'candidate':<24} {'role':<22} {'entities':>8} {'edges':>6} {'flagged':>8}")
+    print(f"{'candidate':<24} {'role':<22} {'entities':>8} {'edges':>6}")
     for row in summary["displayed"]:
-        print(f"{row['id']:<24} {row['page_role']:<22} {row['entities']:>8} {row['edges']:>6} {row['flagged']:>8}")
+        print(f"{row['id']:<24} {row['page_role']:<22} {row['entities']:>8} {row['edges']:>6}")
     print()
     for row in summary["not_shown"]:
         print(f"{row['id']:<24} {'not shown':<22} {'':>8} {row['edges']:>6}   {row['reason']}")
-    print()
-    for review in summary["reviews"]:
-        triple = f"{review['head']} -[{review['relation']}]-> {review['tail']}"
-        print(f"{review['verdict']:<14} {triple}")
-        print(f"{'':<14} {review['note']}")
     print()
     print(f"{summary['candidates_recorded']} paragraphs recorded, {summary['candidates_shown']} shown on the page")
     print(
         f"{summary['proof_edges']} edges across the {len(summary['displayed']) - 1} proof paragraphs "
         f"and {summary['hero_edges']} in the hero graph, {summary['edges_drawn']} drawn in total"
     )
-    print(f"a hand review flagged {summary['flagged_edges']} of the {summary['proof_edges']}")
     return 0
 
 

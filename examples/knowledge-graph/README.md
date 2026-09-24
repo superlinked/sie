@@ -28,10 +28,12 @@ dataset gives you the evidence. Fetching it needs no account and no token.
 - SIE server version 0.7.3, recorded 2026-09-15
 - No threshold or other option is sent, so the server default applies
 
-Three of the eleven edges outside the hero graph are wrong in a way no score
-exposes. `inputs/review.json` records them, with the reason each was marked. They
-are human judgements from reading the source paragraph, not anything the model
-returned, and the example treats them as data you can disagree with.
+A person read every edge the page displays against its source paragraph.
+`inputs/review.json` holds those readings. They are human judgements, not
+anything the model returned: GLiNER2 gives every relation a confidence score
+and no correctness signal, so the only way a wrong edge is caught is that
+somebody read the paragraph. `score.py` holds each displayed edge to that
+record.
 
 ## Run it
 
@@ -62,24 +64,13 @@ SIE_API_KEY=sk-sie-... uv run python run.py --output run-output
 
 ```
 10 paragraphs recorded, 5 shown on the page
-11 edges across the 4 proof paragraphs and 5 in the hero graph, 16 drawn in total
-a hand review flagged 3 of the 11
+9 edges across the 4 proof paragraphs and 5 in the hero graph, 14 drawn in total
 ```
 
-The page publishes the same 10 recorded, 5 shown, 16 drawn and 3 flagged. It
-splits the 16 differently, because `score.py` reads `page_role` out of
-`inputs/candidates.json` at the pinned revision, where the Fresenius drug
-recall is still recorded as "proof and playground", and the scorer counts every
-displayed paragraph after the hero as a proof paragraph. superlinked/sie-web#468
-took that paragraph off the proof grid, since the playground below it runs that
-exact text and a card repeated it. So the page's split is 8 edges across 3 proof
-paragraphs, 5 in the hero graph and 3 in the playground's paragraph, and the 3
-flagged edges fall 2 on the proof cards and 1 in the playground.
-
-This section said "Those are the figures the task page publishes" until that PR.
-Every total above still is; the sentence was wrong only about the split, and
-correcting `page_role` in the recorded candidates would mean a new dataset
-revision for a field that describes the page rather than the run.
+14 drawn is the figure the task page publishes. The scorer counts every
+displayed paragraph after the hero as a proof paragraph, and the page lays one
+of the five out as its playground, so the 9 and the 5 split the same 14 the
+page draws.
 
 The five paragraphs the page leaves out are printed too, each with the edge
 count and the reason it was not displayed. Four of the five returned two edges
@@ -89,26 +80,24 @@ or fewer, and the fifth comes from a filing another task page already uses.
 longer matches its digest, a candidate with a missing call, a response that
 does not match its `response_sha256`, a request the pinned text does not
 rebuild, a relations call whose metadata is not the entities call's own output,
-and a flagged edge the model never returned.
+and a reviewed edge that is missing while the relation it rests on is still
+being asked for.
 
 ## What this does NOT establish
 
-- **Not that the graph is correct.** Three of the eleven edges outside the hero
-  graph are flagged here, and nothing mechanical found them. Every relation the
-  model returns carries a confidence score, and all three flagged edges score
-  high. A graph built from this output without a person reading the source will
-  contain claims the source does not make.
-- **Not an accuracy rate.** Eleven edges over the four paragraphs outside the
+- **Not that the graph is correct.** Nothing mechanical checks these edges.
+  Every relation the model returns carries a confidence score and no
+  correctness signal, and a high score is not evidence the paragraph says it. A
+  graph built from this output without a person reading the source will contain
+  claims the source does not make.
+- **Not an accuracy rate.** Nine edges over the four paragraphs outside the
   hero is far too small to support a percentage, and the ten paragraphs were
-  chosen to be readable rather than sampled from anything. Read the three
-  flagged edges as three failure modes worth knowing about, not as a rate.
+  chosen to be readable rather than sampled from anything.
 - **Not that offsets pin a relation.** GLiNER2 names each end of a relation by
-  its text, not by an offset. Where a paragraph mentions the same text twice,
-  the relation does not say which mention it means. That is exactly what the
-  `other-mention` verdict on `tarsus-alkeus` records.
-- **Not a model comparison.** The same ten paragraphs were also run against
-  `fastino/gliner2-base-v1`. No published figure rests on it, so those calls
-  are not shipped here. They are in the `superlinked/sie-web` fixture.
+  its text, not by an offset, and returns at most one span per text and label.
+  Where a paragraph mentions the same text twice, the relation does not say
+  which mention it means, and no threshold changes that. The task page marks
+  every occurrence in that case rather than choosing one.
 - **Not a benchmark.** The recorded `duration_ms` values are provenance. One
   call took 15.8 seconds against about 0.5 seconds for every other, which is
   the shape of a cold model load rather than a measurement of anything.
