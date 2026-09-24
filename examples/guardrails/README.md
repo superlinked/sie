@@ -11,7 +11,8 @@ XSTest.
 
 All twelve went to four models on `https://api.superlinked.com` on 2026-09-21:
 two purpose-built guard models and two open generative models asked to review
-the text. The page publishes a row per model.
+the text. This is the whole recorded run; how much of it any page renders is a
+separate decision, made in sie-web and not checked here.
 
 | model | flagged | passed | right | median |
 |---|---|---|---|---|
@@ -131,8 +132,7 @@ twelve. And the four-word question tied the carefully specified prompt on the
   their totals were 11, 11, 11, 11 and 12 of 12. The 12 came from an arm added
   after the pre-registered arms were read, so the defensible claim is at least
   11 of 12 in every arm. `score.py` checks all five rather than the best one,
-  and the page's `SOURCES.md` records the same range. The page itself shows the
-  board and does not state the arm range.
+  and the page's `SOURCES.md` records the same range.
 - **Nothing about a cascade.** Ten two-stage arrangements were scored offline
   from these same recordings and every one lost to its own second stage alone.
   A screen in front of a reviewer can only take inputs away from it.

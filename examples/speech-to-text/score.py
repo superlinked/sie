@@ -10,9 +10,13 @@ Prints one line per clip, then the two figures the page publishes:
     Across all 12 recorded clips a search finds 56 of 61 key terms, and 5 came back wrong
     Pooled word error rate 8.1% over 594 human-transcribed words
 
-It checks the per-clip figures on the four clips the page prints a word error
-rate beside, three proof cards and the hero, and that the playground's clip is
-in the scored set. All twelve are scored either way.
+It also checks the published per-clip figures for four of the clips. All twelve
+are scored either way.
+
+It checks figures, never composition. Which clips the page plays, how many, and
+which of the wrong terms it shows are decisions made in sie-web; this script
+cannot reach the page to read them, so a constant here asserting them would go
+stale on the next reselection while still exiting 0.
 
 Both counts depend on OpenAI's Whisper English text normalizer, which drops
 filler words, strips transcriber tags and writes spoken numbers as digits, so
@@ -54,19 +58,16 @@ PAGE_KEY_TERMS = (56, 61)
 PAGE_POOLED_WER = "8.1%"
 PAGE_REFERENCE_WORDS = 594
 PAGE_TERMS_WRONG = 5
-# Read off the built page, not derived from anything here: two of the five
-# wrong terms are displayed. The remainder below is computed from the scored
-# misses, so it cannot agree with a wrong constant.
-PAGE_TERMS_WRONG_SHOWN = 2
-# The per-clip figures the page prints: three proof cards and the hero.
-PAGE_PER_CLIP = {
+# Published per-clip figures, re-derived from the recordings. These are numbers,
+# not a statement about where any of them appears: which clips a page prints a
+# figure beside is the page's decision, it changes whenever the cards are
+# reselected, and nothing in this script can reach the page to check it.
+PUBLISHED_PER_CLIP = {
     "primock-uti-antibiotics": {"wer": "4.3%", "words": 23},
     "scotus-irs-levy-notices": {"wer": "20.0%", "words": 40},
     "ami-project-finance": {"wer": "3.7%", "words": 54},
     "ami-remote-control-chip": {"wer": "9.5%", "terms": (5, 5)},
 }
-PAGE_DISPLAYED_CLIPS = 5  # three proof cards, the hero and the playground
-PAGE_PLAYGROUND = "scotus-nrc-atomic-energy-act"
 
 
 def sha256_bytes(value: bytes) -> str:
@@ -298,11 +299,6 @@ def main() -> int:
     )
     for line in misses:
         print(f"  missed: {line}")
-    print(
-        f"The page shows {PAGE_TERMS_WRONG_SHOWN} of those {len(misses)} wrong terms; "
-        f"the other {len(misses) - PAGE_TERMS_WRONG_SHOWN} are counted above and displayed nowhere"
-    )
-
     if clips != PAGE_CLIPS:
         failures.append(f"clips: got {clips}, page publishes {PAGE_CLIPS}")
     if (snippet["found"], snippet["terms"]) != PAGE_KEY_TERMS:
@@ -317,21 +313,16 @@ def main() -> int:
     if len(misses) != PAGE_TERMS_WRONG:
         failures.append(f"terms wrong: got {len(misses)}, page publishes {PAGE_TERMS_WRONG}")
 
-    for case_id, expected in PAGE_PER_CLIP.items():
+    for case_id, expected in PUBLISHED_PER_CLIP.items():
         got = per_clip.get(case_id, {}).get("snippet")
+        # A clip named here and absent from the scored set is a failure, never a
+        # skip: a missing input must not let its checks quietly not run.
         if got is None:
-            failures.append(f"{case_id}: displayed on the page but not scored here")
+            failures.append(f"{case_id}: has published figures but is not in the scored set")
             continue
         for field, want in expected.items():
             if got[field] != want:
                 failures.append(f"{case_id} {field}: got {got[field]}, page publishes {want}")
-    if PAGE_PLAYGROUND not in per_clip:
-        failures.append(f"{PAGE_PLAYGROUND}: the playground clip is not in the scored set")
-    # An internal guard on the constants above, not a reading of the page: it
-    # catches a per-clip entry added here without updating the total.
-    displayed = len(PAGE_PER_CLIP) + 1
-    if displayed != PAGE_DISPLAYED_CLIPS:
-        failures.append(f"displayed clips: checked {displayed}, page says {PAGE_DISPLAYED_CLIPS}")
 
     if failures:
         print(
@@ -345,9 +336,10 @@ def main() -> int:
 
     print(
         f"\nMatches the {PAGE_KEY_TERMS[0]} of {PAGE_KEY_TERMS[1]}, the pooled {PAGE_POOLED_WER} over "
-        f"{PAGE_REFERENCE_WORDS} words, and the per-clip figures on the {len(PAGE_PER_CLIP)} clips the page "
-        f"prints one beside, published on {manifest['page']}. The playground's clip is scored too, and the "
-        f"page prints no per-clip figure for it."
+        f"{PAGE_REFERENCE_WORDS} words, and the per-clip figures for {len(PUBLISHED_PER_CLIP)} of the "
+        f"{clips} clips, published on {manifest['page']}. All {clips} are scored either way.\n"
+        "This checks figures, not composition: which clips the page plays, and how many, "
+        "is decided in sie-web and nothing here can read it."
     )
     return 0
 
