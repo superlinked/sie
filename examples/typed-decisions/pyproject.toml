@@ -1,0 +1,38 @@
+[project]
+name = "superlinked-sie-typed-decisions-example"
+version = "0.1.0"
+description = "Answer several typed triage questions about one record, with probabilities, through SIE"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "sie-sdk>=0.8.0,<0.9.0",
+]
+
+[tool.uv]
+package = false
+
+[dependency-groups]
+# The reference Laya package, only to check SIE's Laya answers against it.
+# Pulls torch and transformers; on Linux torch comes from the CPU wheel index.
+laya = [
+  "laya==0.3.11",
+  "torch>=2.4",
+]
+# Only build_inputs.py needs it, to read the workflow benchmark's parquet file.
+build = [
+  "pyarrow>=17",
+]
+dev = [
+  "ruff>=0.14",
+]
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
