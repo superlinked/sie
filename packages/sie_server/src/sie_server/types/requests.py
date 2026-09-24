@@ -58,6 +58,11 @@ class ExtractParams(msgspec.Struct):
     def __post_init__(self) -> None:
         if self.labels is not None and len(self.labels) > MAX_EXTRACT_LABELS:
             raise msgspec.ValidationError(f"Field 'labels' must contain at most {MAX_EXTRACT_LABELS} labels")
+        if self.options is not None and "instruction" in self.options:
+            try:
+                msgspec.convert(self.options["instruction"], type=str | None, strict=True)
+            except msgspec.ValidationError as exc:
+                raise msgspec.ValidationError(f"{exc} - at `$.params.options.instruction`") from exc
 
 
 class ExtractRequest(msgspec.Struct):

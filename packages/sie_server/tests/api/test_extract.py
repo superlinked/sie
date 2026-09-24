@@ -190,6 +190,19 @@ class TestExtractEndpoint:
         assert "entities" in data["items"][0]
         assert "data" in data["items"][0]
 
+    @pytest.mark.parametrize("instruction", [["x"], {"a": 1}, 3])
+    def test_extract_rejects_a_non_string_options_instruction(
+        self, client: TestClient, mock_adapter: MagicMock, instruction: object
+    ) -> None:
+        response = client.post(
+            "/v1/extract/test-extractor",
+            json={"items": [{"text": "x"}], "params": {"labels": ["a"], "options": {"instruction": instruction}}},
+            headers=JSON_HEADERS,
+        )
+
+        assert response.status_code == 400
+        mock_adapter.extract.assert_not_called()
+
     def test_extract_item_error_is_preserved_in_local_response(
         self,
         client: TestClient,

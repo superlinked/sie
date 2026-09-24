@@ -383,6 +383,12 @@ async def extract(
         # Request-level instruction takes precedence; fall back to profile instruction
         if instruction is None:
             instruction = options.get("instruction")
+        if instruction is not None and not isinstance(instruction, str):
+            span.set_attribute("error", "invalid_instruction")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"code": ErrorCode.INVALID_INPUT.value, "message": "instruction must be a string"},
+            )
 
         items = request.items
 

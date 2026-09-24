@@ -175,6 +175,35 @@ class TestModelWorkerExtract:
             await worker.stop()
 
 
+class TestModelWorkerExtractIsolation:
+    @pytest.mark.asyncio
+    async def test_a_request_that_cannot_be_batched_fails_alone(self) -> None:
+        from sie_server.core.prepared import ExtractPreparedItem
+        from sie_server.types.inputs import InvalidInputError
+
+        adapter = MagicMock()
+        adapter.extract.side_effect = lambda items, **kwargs: ExtractOutput(entities=[[] for _ in items])
+        worker = ModelWorker(adapter, WorkerConfig(max_batch_tokens=100, max_batch_requests=10, max_batch_wait_ms=20))
+        await worker.start()
+        try:
+            bad = await worker.submit_extract(
+                [ExtractPreparedItem(cost=6, original_index=0)],
+                [Item(text="Text 1")],
+                labels=["person"],
+                instruction=["not", "a", "string"],  # ty:ignore[invalid-argument-type]
+            )
+            good = await worker.submit_extract(
+                [ExtractPreparedItem(cost=6, original_index=0)], [Item(text="Text 2")], labels=["person"]
+            )
+
+            with pytest.raises(InvalidInputError):
+                await asyncio.wait_for(bad, timeout=2.0)
+            result = await asyncio.wait_for(good, timeout=2.0)
+            assert result.output.entities == [[]]
+        finally:
+            await worker.stop()
+
+
 class TestModelWorkerExtractBackpressure:
     """Tests for extract backpressure."""
 
