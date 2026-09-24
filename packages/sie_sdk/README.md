@@ -34,6 +34,30 @@ for entry in scores["scores"]:
     print(entry["item_id"], entry["score"])
 ```
 
+## Entities and relations
+
+GLiNER models extract entity spans for the labels you pass. Joint
+entity-relation models such as `knowledgator/gliner-relex-large-v1.0` also
+return relations between those entities when you name relation types in
+`options`:
+
+```python
+result = client.extract(
+    "knowledgator/gliner-relex-large-v1.0",
+    Item(text="Steve Jobs founded Apple in Cupertino."),
+    labels=["person", "organization", "location"],
+    options={"relation_labels": ["founded", "located in"], "relation_threshold": 0.7},
+)
+for relation in result["relations"]:
+    print(relation["head"], relation["relation"], relation["tail"], relation["score"])
+```
+
+Without `relation_labels` these models return entities only. Relations are
+scored among at most 100 entity candidates per item, taken in document order,
+so a very long document may not get relations for its later entities; its
+entities are still all returned. `threshold` and `relation_threshold` must be
+between 0 and 1, and these models need a `threshold` of at least 0.1.
+
 ## Zero-shot classification
 
 GLiClass models (`knowledgator/gliclass-*` and the `knowledgator/opir-*`

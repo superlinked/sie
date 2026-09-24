@@ -1049,6 +1049,77 @@ def test_knowledgator_gliner_bi_base_v2_0_extract() -> None:
     _assert_extract("knowledgator/gliner-bi-base-v2.0", _NER_LABELS, ["location", "organization", "person"])
 
 
+def test_knowledgator_gliner_bi_edge_v2_0_extract() -> None:
+    _assert_extract("knowledgator/gliner-bi-edge-v2.0", _NER_LABELS, ["location", "organization", "person"])
+
+
+def test_knowledgator_gliner_bi_large_v2_0_extract() -> None:
+    _assert_extract("knowledgator/gliner-bi-large-v2.0", _NER_LABELS, ["location", "organization", "person"])
+
+
+def test_knowledgator_gliner_bi_small_v2_0_extract() -> None:
+    _assert_extract("knowledgator/gliner-bi-small-v2.0", _NER_LABELS, ["location", "organization", "person"])
+
+
+_PII_TEXT = "Contact John Smith at john.smith@example.com or +1 555 010 9999."
+# The model card's label vocabulary; threshold 0.3 matches the served default.
+_PII_LABELS = ["name", "email address", "phone number"]
+
+
+_PII_NAME = ("name", "John Smith")
+_PII_EMAIL = ("email address", "john.smith@example.com")
+_PII_PHONE = ("phone number", "+1 555 010 9999")
+
+
+def _assert_pii(adapter: Any, expected: set[tuple[str, str]]) -> None:
+    output = adapter.extract([Item(text=_PII_TEXT)], labels=_PII_LABELS, options={"threshold": 0.3})
+    assert {(entity["label"], entity["text"]) for entity in output.entities[0]} == expected
+
+
+def test_knowledgator_gliner_pii_base_v1_0_extract() -> None:
+    _assert_pii(_get_adapter("knowledgator/gliner-pii-base-v1.0"), {_PII_NAME, _PII_EMAIL, _PII_PHONE})
+
+
+def test_knowledgator_gliner_pii_edge_v1_0_extract() -> None:
+    _assert_pii(_get_adapter("knowledgator/gliner-pii-edge-v1.0"), {_PII_NAME, _PII_EMAIL, _PII_PHONE})
+
+
+def test_knowledgator_gliner_pii_large_v1_0_extract() -> None:
+    # The large model scores the name 0.17 on this text, below the 0.3 threshold.
+    _assert_pii(_get_adapter("knowledgator/gliner-pii-large-v1.0"), {_PII_EMAIL, _PII_PHONE})
+
+
+def test_knowledgator_gliner_pii_small_v1_0_extract() -> None:
+    # The small model scores the email 0.29 on this text, just below the 0.3 threshold.
+    _assert_pii(_get_adapter("knowledgator/gliner-pii-small-v1.0"), {_PII_NAME, _PII_PHONE})
+
+
+_RELEX_TEXT = "Steve Jobs founded Apple in Cupertino."
+_RELEX_RELATIONS = ["founded", "located in"]
+
+
+def _assert_relex(adapter: Any) -> None:
+    entities_only = adapter.extract([Item(text=_RELEX_TEXT)], labels=_NER_LABELS)
+    assert entities_only.relations is None
+    assert {e["text"] for e in entities_only.entities[0]} >= {"Steve Jobs", "Apple"}
+
+    # relation_threshold 0.7 matches the served default.
+    output = adapter.extract(
+        [Item(text=_RELEX_TEXT)],
+        labels=_NER_LABELS,
+        options={"relation_labels": _RELEX_RELATIONS, "relation_threshold": 0.7},
+    )
+    assert output.relations is not None
+    entity_texts = {e["text"] for e in output.entities[0]}
+    triples = {(r["head"], r["relation"], r["tail"]) for r in output.relations[0]}
+    assert ("Steve Jobs", "founded", "Apple") in triples
+    assert all(r["head"] in entity_texts and r["tail"] in entity_texts for r in output.relations[0])
+
+
+def test_knowledgator_gliner_relex_large_v1_0_extract() -> None:
+    _assert_relex(_get_adapter("knowledgator/gliner-relex-large-v1.0"))
+
+
 def test_knowledgator_modern_gliner_bi_base_v1_0_extract() -> None:
     _assert_extract("knowledgator/modern-gliner-bi-base-v1.0", _NER_LABELS, ["location", "organization", "person"])
 

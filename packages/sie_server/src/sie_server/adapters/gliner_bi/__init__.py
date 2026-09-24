@@ -1,6 +1,8 @@
 import logging
+import math
 import threading
 from collections import OrderedDict
+from numbers import Real
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -10,15 +12,28 @@ from sie_server.adapters._base_adapter import BaseAdapter
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_REQUIRES_TEXT, ComputePrecision
 from sie_server.core.inference_output import ExtractOutput
-from sie_server.types.inputs import Item
+from sie_server.types.inputs import InvalidInputError, Item
 from sie_server.types.responses import Entity
 
 logger = logging.getLogger(__name__)
 
 _ERR_REQUIRES_LABELS = "GLiNER-bi requires labels parameter for extraction"
+_ERR_NO_RELATIONS = "GLiNER bi-encoder models do not extract relations; options.relation_labels is not supported"
 
 # Maximum number of distinct label-set embeddings to cache.
 _LABEL_CACHE_MAX_SIZE = 64
+
+
+def _validate_threshold(value: Any) -> None:
+    message = "GLiNER-bi threshold must be a finite number between 0 and 1"
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise InvalidInputError(message)
+    try:
+        threshold = float(value)
+    except OverflowError as exc:
+        raise InvalidInputError(message) from exc
+    if not math.isfinite(threshold) or not 0.0 <= threshold <= 1.0:
+        raise InvalidInputError(message)
 
 
 class GLiNERBiAdapter(BaseAdapter):
@@ -87,11 +102,12 @@ class GLiNERBiAdapter(BaseAdapter):
 
         self._model: Any = None
         self._device: str | None = None
-        # LRU cache: frozenset(labels) -> pre-computed label embeddings.
+        # LRU cache: labels in request order -> pre-computed label embeddings.
+        # The embeddings are positional, so the key must keep the order.
         # Protected by _cache_lock for thread safety (defensive — the
         # current ModelWorker uses a single-worker executor, but this
         # guards against future architectural changes).
-        self._label_cache: OrderedDict[frozenset[str], Any] = OrderedDict()
+        self._label_cache: OrderedDict[tuple[str, ...], Any] = OrderedDict()
         self._cache_lock = threading.Lock()
 
     def load(self, device: str) -> None:
@@ -186,11 +202,15 @@ class GLiNERBiAdapter(BaseAdapter):
         self._check_loaded()
 
         if not labels:
-            raise ValueError(_ERR_REQUIRES_LABELS)
+            raise InvalidInputError(_ERR_REQUIRES_LABELS)
+
+        opts = options or {}
+        if opts.get("relation_labels"):
+            raise InvalidInputError(_ERR_NO_RELATIONS)
+        _validate_threshold(opts.get("threshold", self._threshold))
 
         texts = [self._extract_text(item) for item in items]
 
-        opts = options or {}
         effective_threshold = opts.get("threshold", self._threshold)
         effective_flat_ner = opts.get("flat_ner", self._flat_ner)
         effective_multi_label = opts.get("multi_label", self._multi_label)
@@ -231,7 +251,42 @@ class GLiNERBiAdapter(BaseAdapter):
                 )
             all_entities.append(entity_results)
 
-        return ExtractOutput(entities=all_entities)
+        return ExtractOutput(entities=all_entities, input_token_counts=self._doc_input_token_counts(texts, labels))
+
+    def _doc_input_token_counts(self, texts: list[str], labels: list[str]) -> list[int] | None:
+        """Count the document tokens the bi-encoder actually encodes, per item.
+
+        A bi-encoder encodes labels separately, so its text input is the
+        document alone. Delegate word splitting and max-length word truncation
+        to the pinned GLiNER processor, then count the attended tokens of the
+        retained window, special tokens included, as the GLiNER adapter does.
+        Batches match GLiNER inference's default batch size. GLiNER skips
+        whitespace-only documents without encoding them, so they count zero.
+        """
+        processor = getattr(self._model, "data_processor", None)
+        prepare_inputs = getattr(self._model, "prepare_inputs", None)
+        prepare_base_input = getattr(self._model, "prepare_base_input", None)
+        if processor is None or prepare_inputs is None or prepare_base_input is None:
+            return None
+        encoded_positions = [index for index, text in enumerate(texts) if text.strip()]
+        counts = [0] * len(texts)
+        if not encoded_positions:
+            return counts
+        try:
+            split_texts, _, _ = prepare_inputs([texts[index] for index in encoded_positions])
+            raw_items = prepare_base_input(split_texts)
+            encoded_counts: list[int] = []
+            for start in range(0, len(raw_items), 8):
+                raw_batch = processor.collate_raw_batch(raw_items[start : start + 8], entity_types=labels)
+                encoded = processor.tokenize_inputs(raw_batch["tokens"])
+                encoded_counts.extend(int(sum(mask)) for mask in encoded["attention_mask"].tolist())
+        except Exception:  # noqa: BLE001 -- metering must never fail an extraction
+            return None
+        if len(encoded_counts) != len(encoded_positions):
+            return None
+        for index, count in zip(encoded_positions, encoded_counts, strict=True):
+            counts[index] = count
+        return counts
 
     def _predict_with_cached_embeds(
         self,
@@ -244,7 +299,8 @@ class GLiNERBiAdapter(BaseAdapter):
     ) -> list[list[dict[str, Any]]]:
         """Run prediction using pre-computed label embeddings.
 
-        Caches label embeddings keyed by the label set. When a cache hit
+        Caches label embeddings keyed by the ordered label list, because the
+        embeddings are matched to labels by position. When a cache hit
         occurs, the label encoder is skipped entirely — only the text encoder
         and span decoder run.
 
@@ -258,7 +314,7 @@ class GLiNERBiAdapter(BaseAdapter):
         Returns:
             List of entity dicts per text (same format as ``GLiNER.inference``).
         """
-        cache_key = frozenset(labels)
+        cache_key = tuple(labels)
 
         with self._cache_lock:
             if cache_key in self._label_cache:
@@ -290,5 +346,5 @@ class GLiNERBiAdapter(BaseAdapter):
     def _extract_text(self, item: Item) -> str:
         """Extract text from an item."""
         if item.text is None:
-            raise ValueError(ERR_REQUIRES_TEXT.format(adapter_name="GLiNER-bi adapter"))
+            raise InvalidInputError(ERR_REQUIRES_TEXT.format(adapter_name="GLiNER-bi adapter"))
         return item.text

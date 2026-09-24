@@ -1,0 +1,22 @@
+sie_id: knowledgator/gliner-pii-small-v1.0
+hf_id: knowledgator/gliner-pii-small-v1.0
+hf_revision: d21aad5b4a7ec82b3d0970fd1ac74a12c087d85e
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: null
+  extract: {}
+max_sequence_length: 2048
+profiles:
+  default:
+    max_batch_tokens: 16384
+    compute_precision: null
+    adapter_path: sie_server.adapters.gliner:GLiNERAdapter
+    adapter_options:
+      loadtime: {}
+      runtime:
+        threshold: 0.3
