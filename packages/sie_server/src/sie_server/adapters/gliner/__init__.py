@@ -44,6 +44,7 @@ _ERR_PROMPT_EXHAUSTS_DOCUMENT = "GLiNER label prompt leaves no document tokens f
 # controls, and a long document can have thousands. Keep at most this many per
 # item (in document order) for relation scoring; entity output is unaffected.
 _MAX_RELATION_CANDIDATES = 100
+_ERR_CANDIDATE_LAYOUT = "gliner returned an unsupported span candidate layout; the relation candidate cap cannot apply"
 # Models with an adjacency layer use this threshold to pick entity pairs; never
 # let it fall below the library's usual value because of a low entity threshold.
 _MIN_ADJACENCY_THRESHOLD = 0.5
@@ -518,15 +519,17 @@ def _cap_relation_candidates(model: Any, limit: int) -> None:
     ``limit`` candidates (and ``limit**2`` pairs) per item. Entities are
     decoded from the span scores, so entity output does not change; relations
     among candidates past the first ``limit`` (in document order) are dropped.
+    Any other output layout raises instead of running uncapped.
     """
     represent_spans = model.represent_spans
 
     def capped(*args: Any, **kwargs: Any) -> Any:
         outputs = represent_spans(*args, **kwargs)
-        mask = outputs[2]
-        if not isinstance(mask, torch.Tensor) or mask.dim() != 2 or mask.size(1) <= limit:
+        if not _has_candidate_layout(outputs):
+            raise RuntimeError(_ERR_CANDIDATE_LAYOUT)
+        width = outputs[2].size(1)
+        if width <= limit:
             return outputs
-        width = mask.size(1)
         sliced = list(outputs)
         for index in range(1, len(sliced)):
             value = sliced[index]
@@ -535,3 +538,19 @@ def _cap_relation_candidates(model: Any, limit: int) -> None:
         return tuple(sliced)
 
     model.represent_spans = capped
+
+
+def _has_candidate_layout(outputs: Any) -> bool:
+    """Whether ``represent_spans`` returned (scores, reps, mask, spans, ...) as the cap expects."""
+    if not isinstance(outputs, tuple) or len(outputs) < 4:
+        return False
+    reps, mask, spans = outputs[1:4]
+    return (
+        isinstance(mask, torch.Tensor)
+        and mask.dim() == 2
+        and isinstance(reps, torch.Tensor)
+        and reps.dim() == 3
+        and isinstance(spans, torch.Tensor)
+        and spans.dim() == 3
+        and reps.shape[:2] == mask.shape == spans.shape[:2]
+    )

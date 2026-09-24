@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 import torch
-from sie_server.adapters.gliner import GLiNERAdapter
+from sie_server.adapters.gliner import GLiNERAdapter, _cap_relation_candidates
 from sie_server.adapters.gliner_bi import GLiNERBiAdapter
 from sie_server.types.inputs import InvalidInputError, Item
 
@@ -334,8 +334,6 @@ class _SpanModel:
 
 
 def test_relation_candidates_are_sliced_per_item() -> None:
-    from sie_server.adapters.gliner import _cap_relation_candidates
-
     model = _SpanModel([150, 3], width=150)
     _, full_reps, _, _ = model.represent_spans()
     _cap_relation_candidates(model, 100)
@@ -351,14 +349,30 @@ def test_relation_candidates_are_sliced_per_item() -> None:
 
 
 def test_relation_candidates_under_the_cap_are_untouched() -> None:
-    from sie_server.adapters.gliner import _cap_relation_candidates
-
     model = _SpanModel([5, 3], width=5)
     original = model.represent_spans("x")
     _cap_relation_candidates(model, 100)
 
     capped = model.represent_spans("x")
     assert all(torch.equal(a, b) for a, b in zip(original, capped, strict=True))
+
+
+@pytest.mark.parametrize(
+    "outputs",
+    [
+        (torch.zeros(1, 150, 3), torch.zeros(1, 150, 4), None, None),
+        (torch.zeros(1, 150, 3), torch.zeros(1, 150, 4), torch.ones(1, 150)),
+        (torch.zeros(1, 150, 3), torch.zeros(1, 120, 4), torch.ones(1, 150), torch.zeros(1, 150, 2)),
+        [torch.zeros(1, 150, 3), torch.zeros(1, 150, 4), torch.ones(1, 150), torch.zeros(1, 150, 2)],
+    ],
+)
+def test_an_unknown_candidate_layout_fails_closed(outputs: Any) -> None:
+    model = MagicMock()
+    model.represent_spans.return_value = outputs
+    _cap_relation_candidates(model, 100)
+
+    with pytest.raises(RuntimeError, match="candidate layout"):
+        model.represent_spans("words", "mask", "prompts")
 
 
 def test_bi_encoder_caller_errors_are_invalid_input() -> None:
