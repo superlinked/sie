@@ -4,28 +4,39 @@ The runnable example behind [superlinked.com/redact](https://superlinked.com/red
 
 ## What this shows
 
-Twelve documents sent to `urchade/gliner_multi_pii-v1` on
-`https://api.superlinked.com`, each request naming the ID types that document
-uses as plain strings. No training set and no model per type. The response
-gives back exact character offsets, so the surrounding text stays readable.
+Twelve documents sent to `urchade/gliner_multi_pii-v1` and to
+`numind/NuNER_Zero` on `https://api.superlinked.com`, each request naming the
+ID types that document uses as plain strings. No training set and no model per
+type. The response gives back exact character offsets, so the surrounding text
+stays readable.
 
 The documents are CFPB and CMS published sample forms and synthetic records
 from NVIDIA's Nemotron-PII and Gretel's synthetic PII finance dataset, the
 latter two carrying their publishers' own gold PII annotations.
 
-The page publishes four figures, and `score.py` re-derives all of them from the
-recorded responses, offline:
+The page masks personal data in four steps, and `score.py` re-derives each one
+from the recorded responses, offline:
 
-| figure | meaning |
+| step | published PII spans masked |
 |---|---|
-| 23 of 25 | masks confirmed by the published gold spans in six benchmark documents |
-| 0 of 29 | amounts masked across the documents the page renders, so the figures stay readable |
-| 26 of 45 | published PII spans masked by one request per document, before any splitting |
-| 2 of 11 against 8 of 11 | a 564-word chat, one request against two |
+| One call to `gliner_multi_pii-v1`, whole document | 26 of 45 |
+| Split what runs past the model's input window | 33 of 45 |
+| Union a second call to `NuNER_Zero` | 41 of 45 |
+| Mask every later mention of a name already found | 45 of 45 |
 
-26 of 45 is the honest number and it is on the page. The splitting card is why:
-the model reads the first 384 words, 7 of those 11 spans sit past that
-boundary, and a second request recovers 6 of the 7.
+Both models are in the same task's catalog, so the second call is one more
+model id on the same endpoint. Both were recorded on all twelve documents in
+the same run, and the dataset has held all 24 calls since the page was first
+published.
+
+Two more figures it reproduces: 42 of the 49 masks land on a published gold
+span, and 0 of the 29 currency amounts across the ten recorded documents are
+masked.
+
+The second step is why the window matters. The model reads the first 384 words
+and punctuation marks and the reply gives no truncation signal, so a document
+longer than that has to be split by the caller, with each part's starting
+offset added back to the spans it returns.
 
 ## Run it
 
@@ -64,24 +75,31 @@ sending it.
 
 ```
 benchmark documents scored: 6
-  nemotron_insurance_claims_log        6 of 6 published spans masked
-  nemotron_insurance_application       7 of 7 published spans masked
-  gretel_customer_support_log          2 of 11 published spans masked
-  gretel_it_support_ticket             3 of 11 published spans masked
-  gretel_policyholder_report           4 of 5 published spans masked
-  gretel_german_health_claim           4 of 5 published spans masked
+  nemotron_insurance_claims_log        6 of 6 in one call, 6 composed
+  nemotron_insurance_application       7 of 7 in one call, 7 composed
+  gretel_customer_support_log          2 of 11 in one call, 11 composed
+  gretel_it_support_ticket             3 of 11 in one call, 11 composed
+  gretel_policyholder_report           4 of 5 in one call, 5 composed
+  gretel_german_health_claim           4 of 5 in one call, 5 composed
 
-23 of 25 masks confirmed by the published gold spans
-26 of 45 published PII spans masked by one request per document
-2 masks fall outside the gold spans, so neither benchmark can confirm or refute them
+published PII spans masked, by step:
+  26 of 45  one call to urchade/gliner_multi_pii-v1, whole document
+  33 of 45  splitting what runs past the model's input window
+  41 of 45  unioning a second call to numind/NuNER_Zero
+  45 of 45  masking every later mention of a name already found
 
-0 of 29 amounts masked across the 7 documents the page renders
+42 of 49 masks land on a published gold span
+7 fall outside them, so neither benchmark can confirm or refute those
 
-564-word chat, 11 published spans: 2 masked in one request, 8 when split
+the propagation step added 6 masks: Annibale, Paul
+
+0 of 29 currency amounts masked across the 10 recorded documents
+
+564-word chat, 11 published spans: 2 masked by one call, 11 by the composition
   the model reads the first 384 words, up to character 813
-  7 of those spans sit past word 384, and the second request recovers 6
+  7 of those spans sit past that point, and the second request starts at character 812
 
-Reproduced: 23 of 25, 0 of 29, 26 of 45, and 2 of 11 in one request against 8 of 11 when split.
+Reproduced: 26, 33, 41 and 45 of 45, 42 of 49 on gold, and 0 of 29 amounts masked.
 ```
 
 `score.py` exits nonzero if any figure fails to reproduce. `run.py --check`

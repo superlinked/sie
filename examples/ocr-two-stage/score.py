@@ -13,12 +13,19 @@ The verdict turns on one question: did the field's registered `printed` token
 survive into stage 1's Markdown? That is what separates an error stage 2
 inherited from stage 1 from an error stage 2 made on text it could read.
 
-The page publishes four figures and this script re-derives all of them, exiting
+This script re-derives the figures the /ocr page's evidence publishes, exiting
 nonzero if any fails:
 
     81 of 86   registered printed tokens survive into stage 1's Markdown
     78 of 89   fields match for Qwen/Qwen3.8-27B-FP8, 7 of 7 replies schema-valid
     27 of 89   fields match for Qwen/Qwen3.5-4B, 2 of 7 replies schema-valid
+
+Those are the whole recorded run, which is what
+`superlinked.com/reference/ocr-review/SOURCES.md` reports. The page's proof
+grid shows a selection of it: the schema calls that matched every field they
+registered. What this script does NOT check is which recorded cases the page
+displays, or in what order. That is the page's decision, it changes without the
+run changing, and an example has no way to read the page.
 
 Standard library only. No network, no API key, no inference spend.
 
@@ -46,8 +53,13 @@ PREDICTIONS_PATH = DATA_DIR / "inputs" / "predictions.json"
 CALLS_PATH = DATA_DIR / "calls.json"
 EVALUATION_PATH = DATA_DIR / "evaluation.json"
 
-# What the page prints. Typed out from the rendered page, not computed from the
-# recordings, so agreement means something.
+# What the page's evidence publishes. Typed out from SOURCES.md, not computed
+# from the recordings, so agreement means something.
+#
+# `documents_displayed` is the `displayed` flag in inputs.json, set before the
+# run. It is a count of the pre-run display choice, not of what the proof grid
+# renders today; the two differ by one document, and only sie-web can check the
+# second.
 EXPECTED = {
     "stage1_tokens_in_text": 81,
     "stage1_registered_tokens": 86,

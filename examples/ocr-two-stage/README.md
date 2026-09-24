@@ -71,8 +71,9 @@ so `--check`, `--show` and `--verify-inputs` keep working on a bare `python3`.
 
 ## What result to expect
 
-`score.py` prints the four figures the
-[/ocr page](https://superlinked.com/ocr) publishes:
+`score.py` prints the figures the
+[/ocr page's evidence](https://superlinked.com/reference/ocr-review/SOURCES.md)
+publishes for the whole recorded run:
 
 | | |
 |---|---|
@@ -88,6 +89,12 @@ validate against the schema they were given.
 verdict, and exits nonzero if any published figure fails to reproduce. It also
 writes `data/evaluation.json`, the per-field artifact the page's data is built
 from.
+
+The page's proof grid shows a selection of this run: the schema calls that
+matched every field they registered. Which cases it shows is the page's
+decision, it changes without the run changing, and nothing here can read the
+page, so `score.py` does not check it. `SOURCES.md` on the page names the
+selection and the figures above in the same place.
 
 ## What this does NOT establish
 
