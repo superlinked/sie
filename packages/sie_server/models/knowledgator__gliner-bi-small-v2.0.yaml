@@ -1,0 +1,25 @@
+sie_id: knowledgator/gliner-bi-small-v2.0
+hf_id: knowledgator/gliner-bi-small-v2.0
+hf_revision: 3d74c1bf459b8b1c0be1ecbddd679416ce005418
+hf_tokenizer_dependencies:
+  sentence-transformers/all-MiniLM-L12-v2: a50ef00143b4d5391434df20ae11632588ac25be
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: null
+  extract: {}
+max_sequence_length: 1024
+profiles:
+  default:
+    max_batch_tokens: 16384
+    compute_precision: float16
+    adapter_path: sie_server.adapters.gliner_bi:GLiNERBiAdapter
+    adapter_options:
+      loadtime: {}
+      runtime:
+        threshold: 0.3
+        precompute_labels: true
