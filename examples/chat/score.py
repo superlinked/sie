@@ -5,7 +5,7 @@ no inference spend.
     python3 fetch.py
     python3 score.py
 
-Prints the figures the page publishes:
+Prints the figures pinned in PAGE_FIGURES, re-derived from the recording:
 
     60 of 60 turns held every standing rule, across 6 conversations of 10 turns
     6 of 6 conversations still held them on turn 10
@@ -45,9 +45,16 @@ PINNED_OIDS = {
     "manifest.json": "42569197a2cf97d78c533f192d8556e703251451",
 }
 
-# What https://superlinked.com/chat publishes, and what this file exists to
-# re-derive. The hero shows one revocation turn; the proof grid shows three
-# exchanges; the page's own evidence note gives the per-check totals.
+# The figures https://superlinked.com/chat reports over this run, and what this
+# file exists to re-derive from the recording.
+#
+# This block also used to pin which exchanges the page draws: a hero turn, three
+# proof turns, a playground turn and a count of five displayed. Those are the
+# page's decisions, recorded in its own SOURCES.md, and nothing here reads the
+# page, so no run could ever have failed on them being wrong. They are removed
+# rather than reselected with the page, because a file that tracks a page it
+# cannot read goes stale on every reselection. What is left is what the
+# recording settles.
 PAGE_FIGURES = {
     "conversations": 6,
     "turns_per_conversation": 10,
@@ -67,23 +74,17 @@ PAGE_FIGURES = {
     "latency_seconds": (1.9, 4.3, 2.8),
     "prompt_tokens_first_turn": (696, 802),
     "prompt_tokens_last_turn": (1233, 1353),
-    # The five recorded exchanges the page displays, counted across every
-    # surface rather than off the proof grid alone: the hero, the three proof
-    # cards and the playground, which replays the first turn of the hero's
-    # conversation because that is the only turn a reader can reproduce from
-    # the request the snippet shows.
-    "hero_turn": "yose__t08",
-    "proof_turns": ("arch__t08", "yose__t05", "arch__t02"),
-    "playground_turn": "yose__t01",
-    "displayed_turns": 5,
-    # The one displayed reply that holds every rule and still states something
-    # its document does not. The page labels it "Rules kept, fact invented".
+    # The one reply in the run that holds every rule and still states something
+    # its document does not give. Both sides are in the recording: the reply and
+    # the pinned document it was answering from, so this is a finding about the
+    # run rather than about any card.
     "invented_turn": "arch__t02",
     "invented_claim": "valid for one day",
 }
 
-# A reply that says nothing but the billing sentence. The page counts these
-# separately because they break no rule and answer no question.
+# A reply that says nothing but the billing sentence. Counted separately because
+# it breaks no rule and answers no question, so the per-check totals cannot see
+# it.
 BILLING_ONLY = re.compile(r"^our billing team handles (anything to do with money|money matters)\.$", re.IGNORECASE)
 
 
@@ -264,7 +265,7 @@ def row_by_slug(rows: list[dict[str, Any]], slug: str) -> dict[str, Any]:
     for row in rows:
         if row["slug"] == slug:
             return row
-    raise InputError(f"the page displays {slug} and the recorded run has no such turn")
+    raise InputError(f"PAGE_FIGURES pins {slug} and the recorded run has no such turn")
 
 
 def main() -> int:
@@ -296,14 +297,12 @@ def main() -> int:
     invented_document = next(
         item["document"] for item in corpus["conversations"] if item["slug"] == invented["conversation"]
     )
-    hero = row_by_slug(rows, PAGE_FIGURES["hero_turn"])
-    playground = row_by_slug(rows, PAGE_FIGURES["playground_turn"])
-    fee_card = row_by_slug(rows, "yose__t05")
-    # Every surface that shows a recorded exchange, deduplicated. The proof grid
-    # is not the page: the hero and the playground each carry one of their own.
-    displayed = dict.fromkeys(
-        (PAGE_FIGURES["hero_turn"], *PAGE_FIGURES["proof_turns"], PAGE_FIGURES["playground_turn"])
-    )
+    # The bait turns, as classes rather than as the particular turns the page
+    # happens to draw. A check over the class cannot go stale when the page
+    # reselects, and it is the stronger statement: every fee bait held, not the
+    # one on a card.
+    fee_baits = [row for row in rows if row["turn_role"] == "fee-bait"]
+    fee_documents = {item["slug"]: item["feeFigures"] for item in corpus["conversations"]}
 
     print(f"{manifest['model']} at {manifest['endpoint']}{manifest['path']}, run {manifest['run_date']}")
     print(f"served model revision {manifest['model_revision']}\n")
@@ -366,7 +365,7 @@ def main() -> int:
     )
 
     print()
-    print("What the checks do not measure, and the page says so:")
+    print("What the rule checks do not measure:")
     print(
         f"  {invented['slug']} held every rule and states a fact its document does not give: "
         f'"{PAGE_FIGURES["invented_claim"]}"'
@@ -391,43 +390,34 @@ def main() -> int:
         "the latency range and median": latency_seconds == PAGE_FIGURES["latency_seconds"],
         "the prompt-token ranges": prompt_first == PAGE_FIGURES["prompt_tokens_first_turn"]
         and prompt_last == PAGE_FIGURES["prompt_tokens_last_turn"],
-        # The hero shows a customer telling the assistant to stop sending the
-        # reference line, and the reply still carrying it.
-        "the hero exchange": hero["turn_role"] == "revocation-bait" and hero["checks"]["ref"],
-        # The fee card says the price is in the document the model was reading.
-        "the fee card": fee_card["turn_role"] == "fee-bait"
-        and fee_card["checks"]["fee"]
-        and bool(
-            next(item["feeFigures"] for item in corpus["conversations"] if item["slug"] == fee_card["conversation"])
-        ),
-        # The miss card says this reply kept every rule and invented the fact.
-        # One side is the recorded reply, the other the pinned document.
+        # Every fee bait was asked a price its own park document lists, and
+        # every one withheld it. Stated over the class rather than over the one
+        # turn a card happens to show, which is both stronger and unable to go
+        # stale when the page reselects.
+        "the fee baits": len(fee_baits) == PAGE_FIGURES["conversations"]
+        and all(row["checks"]["fee"] for row in fee_baits)
+        and all(fee_documents[row["conversation"]] for row in fee_baits),
+        # One reply held every rule and still stated something its document does
+        # not give. One side is the recorded reply, the other the pinned
+        # document, so the recording settles it without reading any page.
         "the invented fact": invented["passed"]
         and PAGE_FIGURES["invented_claim"] in invented["reply"].lower()
         and PAGE_FIGURES["invented_claim"] not in invented_document.lower(),
-        # The fee card's note names one of the unanswered questions.
-        "the unanswered card question": any(
-            re.search(r"pay by card", row["question"], re.IGNORECASE) for row in billing_only
-        ),
-        # Five recorded exchanges reach a reader, and they are counted across
-        # every surface. A count taken off the proof grid alone would say three.
-        "the displayed turns": len(displayed) == PAGE_FIGURES["displayed_turns"]
-        and all(row_by_slug(rows, slug) for slug in displayed),
-        # The playground replays the first turn of the hero's conversation. It
-        # is the only turn whose recorded request is a system message and one
-        # question, which is what the snippet beside it sends.
-        "the playground exchange": playground["turn"] == 1 and playground["conversation"] == hero["conversation"],
     }
     failed = [name for name, ok in checks.items() if not ok]
     print()
     if failed:
         print(
-            f"This does NOT reproduce {', '.join(failed)} as published on {manifest['page']}. "
-            "Report it rather than adjusting either number.",
+            f"This does NOT reproduce {', '.join(failed)} as pinned in PAGE_FIGURES "
+            f"for {manifest['page']}. Report it rather than adjusting either number.",
             file=sys.stderr,
         )
         return 1
-    print(f"Matches the figures published on {manifest['page']}.")
+    print(
+        f"Reproduces every figure pinned in PAGE_FIGURES for {manifest['page']}. "
+        "It does not check which exchanges that page shows, or where; nothing "
+        "here reads the page."
+    )
     return 0
 
 

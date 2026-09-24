@@ -5,8 +5,8 @@ network, no inference spend.
     python3 fetch.py
     python3 score.py
 
-Prints "10 of 12 answers matched", the figure the page publishes under its
-proof grid.
+Prints "10 of 12 answers matched", the figure pinned in PAGE_FIGURE and
+re-derived here from the recorded calls.
 
 How a case is scored, exactly as the run recorded it: take the first non-empty
 line of the returned text, then apply the regular expressions that inputs.json
@@ -29,6 +29,14 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parent
 EVIDENCE = ROOT / "evidence"
+# The pass total over the twelve recorded cases, pinned in this file so that a
+# rescore cannot move it quietly.
+#
+# The docstring above used to call it "the figure the page publishes under its
+# proof grid". Where the task page reports a total, and which cases it shows,
+# are the page's decisions. Nothing here reads the page, so this file could
+# never have checked either, and the page's own SOURCES.md is where both are
+# recorded.
 PAGE_FIGURE = (10, 12)
 
 # The object ids these files have at the dataset revision fetch.py pins. They
@@ -264,12 +272,17 @@ def main() -> int:
     want_passed, want_total = PAGE_FIGURE
     if (passed, scored) != (want_passed, want_total):
         print(
-            f"\nThis does NOT match the {want_passed} of {want_total} published on "
-            f"{manifest['page']}. Report it rather than adjusting either number.",
+            f"\nThis does NOT reproduce the {want_passed} of {want_total} pinned in "
+            f"PAGE_FIGURE for {manifest['page']}. Report it rather than adjusting "
+            f"either number.",
             file=sys.stderr,
         )
         return 1
-    print(f"Matches the {want_passed} of {want_total} published on {manifest['page']}.")
+    print(
+        f"Reproduces the {want_passed} of {want_total} pinned in PAGE_FIGURE for "
+        f"{manifest['page']}. It does not check which of the twelve that page "
+        f"shows, or where it reports a total; nothing here reads the page."
+    )
     return 0
 
 

@@ -128,14 +128,22 @@ record as the starting point for that, not as a clearance.
   equipment photographs at this rate.
 - Not reproducible against the live API. These are recordings. A rerun goes
   through a different served revision and unfixed sampling, so it will differ.
-- Two of the twelve answers are wrong, both analogue needle gauges. That is the
-  finding the page reports, not a caveat to it.
-- The page shows three of the twelve cases in its proof grid, plus one in the
-  hero and one in the playground, and all five of those are matches. The two
-  wrong answers are printed under the grid with the value each question
-  expected, so neither miss is hidden. All twelve are here.
+- Two of the twelve answers are wrong, both analogue needle gauges. Both are
+  scored here and `score.py` prints each beside the value its question expected.
+- Not a description of what the task page shows. All twelve cases are scored
+  here and all twelve are inside the 10 of 12. Which of them the page features,
+  and where it reports a total, are the page's decisions and its own
+  `SOURCES.md` records them.
 
-  This said "five of the twelve cases in its proof grid" until
-  superlinked/sie-web#468. The grid held those two wrong answers as its last two
-  cards, so the section ended on failure; they moved under it and the grid was
-  cut to three. No figure moved, and both misses are still on the page.
+  This bullet used to name how many cases the proof grid draws and where the two
+  wrong answers appear, and it was wrong twice. It first said five grid cards,
+  which was true at the time. It was then rewritten to describe a grid of three
+  with both wrong answers printed underneath, taken from a page change that had
+  not shipped, while the page went on showing five. The page has since been
+  reselected again and reports no total over the twelve at all, so the
+  replacement was wrong in a second way.
+
+  Every run stayed green through both, because nothing in this example reads the
+  page and it never could. The claim is removed rather than corrected a third
+  time. The figure this script and the page's evidence share is 10 of 12, and
+  that has not moved.

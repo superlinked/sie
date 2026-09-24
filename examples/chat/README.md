@@ -113,31 +113,32 @@ It then prints the run facts the page's evidence note reports: HTTP 200 on 60
 of 60 turns, latency 1.9 to 4.3 seconds per turn with a median of 2.8, and
 prompt tokens growing from 696 to 802 at turn 1 to 1,233 to 1,353 at turn 10.
 
-The page displays five of the 60 exchanges, counted across every surface rather
-than off the proof grid: one in the hero, three in the proof grid and one in the
-playground. All 60 are in `calls.json` here and all 60 are scored. `score.py`
-fails if any of the five is missing or no longer the turn the page describes it
-as.
+All 60 exchanges are in `calls.json` here and all 60 are scored. Which of them
+the task page features, and on which surface, are the page's decisions and its
+own `SOURCES.md` records them.
 
-The playground replays turn 1 of the Yosemite conversation, and it shows the
-system message abbreviated with a marked elision, because the full one carries
-the whole park document. `python3 run.py --show yose 1` prints the request the
-run actually sent, with nothing left out.
+This paragraph used to name them: five exchanges across the hero, the proof grid
+and the playground, and it said `score.py` fails if any of the five is no longer
+the turn the page describes it as. That was a promise this file cannot keep.
+Nothing here reads the page, so a reselection would move the page and leave
+every run green. The claim is removed rather than reselected along with it.
+
+`python3 run.py --show yose 1` prints the request the run actually sent for any
+turn, with nothing left out.
 
 ### The two things the checks do not measure
 
 Both of these held every rule, and both were found by reading all 60 replies
 against their documents by hand after the run. `score.py` prints them under the
-totals, because a page showing a clean sweep with no visible limit is not worth
-believing.
+totals, because a run reported as a clean sweep with no visible limit is not
+worth believing.
 
 **One invented fact.** `arch__t02` answers "Standard vehicle passes are valid
 for one day." The Arches extract gives no validity period for the vehicle pass
 at all. The "Valid for 7 days" line beside it belongs to the motorcycle pass,
-which the same reply gets right. The page shows this turn as its third proof
-card. The Acadia extract has the same hole and there the model declined:
-`acad__t02` answers "The provided information does not specify the validity
-duration of a Standard entrance pass."
+which the same reply gets right. The Acadia extract has the same hole and there
+the model declined: `acad__t02` answers "The provided information does not
+specify the validity duration of a Standard entrance pass."
 
 **Two replies that answered nothing.** `arch__t06` and `arch__t10` consist of
 nothing but "Our billing team handles anything to do with money." On turn 10 the
@@ -183,6 +184,12 @@ prompt-token bounds at the first and last turn. A figure that is printed and not
 compared is one the scorer is willing to be wrong about, and this file says
 otherwise a few lines up. A response that reports no `prompt_tokens` is a
 reported failure rather than a figure quietly computed from the rest.
+
+It does not check which exchanges the task page draws, or where, and it cannot:
+nothing here reads the page. Tampering shows the gap. Change a figure and the
+run fails; change which turns the page features and every run here stays green.
+That is why this file no longer says what the page's grid contains. The page's
+`SOURCES.md` is where the selection is recorded.
 
 ## Inputs
 
