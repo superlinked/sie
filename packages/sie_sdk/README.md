@@ -149,6 +149,14 @@ An item whose document pushes the labels out of the window, in any of its rows,
 comes back with an `INPUT_TOO_LONG` error in its `error` field and is not
 billed. The other items still succeed.
 
+On a CUDA server, the DeBERTa-based GLiClass models can replay their forward
+passes as CUDA graphs, which cuts the CPU time spent launching kernels. Send
+`options={"cuda_graphs": "exact"}` to keep scores bit-identical to the default,
+or `"bucketed"` to pad sequence lengths to buckets so that fewer graphs cover
+every length. Padding can move a probability by a few thousandths, as batching
+requests together does. The default is `"off"`. See the server README for the
+supported models and memory use.
+
 ## Generation prompts and guard verdicts
 
 `generate` and `stream_generate` treat text-only prompts as raw continuation

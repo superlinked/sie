@@ -67,6 +67,33 @@ Label names are refused when their total length exceeds 16 characters per
 token of the window (8,192 characters for a 512-token model), more than any
 label prompt can fit.
 
+### GLiClass CUDA graphs
+
+A GLiClass forward on a DeBERTa encoder launches about a thousand small GPU
+kernels, so at small batch sizes the CPU that launches them is the bottleneck.
+`options={"cuda_graphs": ...}` replays forwards as CUDA graphs instead. A graph
+records the kernel launches of one input shape once; a replay launches them
+all in one call. Set it per request, or as a runtime default in a model
+profile (`adapter_options.runtime.cuda_graphs`).
+
+| Value | Shapes recorded | Scores |
+|--|--|--|
+| `off` (default) | none | eager |
+| `exact` | each (batch, sequence length, label slots) seen twice | bit-identical to eager |
+| `bucketed` | sequence lengths padded up to a multiple of 32 tokens (64 on 1,024-token models) | padding can move fp16 probabilities by a few thousandths, as batching requests together does |
+
+Graphs apply on CUDA to the DeBERTa-based GLiClass models (gliclass v1.0 and
+v3.0, the instruct models, `gliclass-multilang-mini` and the Opir multitask
+models). ModernBERT-based models, CPU and MPS run eagerly with any value.
+Recording happens on first use: the request that records a shape takes about
+one extra forward pass. Recording is rationed to 16 graphs at once, then one
+per 8 forward passes, so traffic with more shapes than the cache holds runs
+mostly eagerly instead of re-recording. A model keeps at most 64 graphs, least
+recently used first out. A graph holds at most four full windows of tokens
+(2,048 on a 512-token model); larger forwards are bound by the GPU rather than
+by kernel launches and run eagerly. All of a model's graphs share one memory
+pool sized by the largest shape recorded. Usage and billing do not change.
+
 ## Configuration
 
 `sie-server` reads its config from `SIE_*` environment variables (Pydantic
