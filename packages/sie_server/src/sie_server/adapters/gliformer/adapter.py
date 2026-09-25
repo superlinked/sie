@@ -121,7 +121,7 @@ _ITEM_ERROR = "__gliformer_item_error__"
 # windows of them) and 12 tasks up to 64 labels, 20 relation types, and
 # records schemas with 16 fields or two record types: at threshold 0.5 every
 # document used at most 21% of its allowance; at 0.1 the heaviest, 64 words
-# of names with two record types, used 29,738 of 29,952 units.
+# of names with two record types, used 29,739 of 29,952 units.
 _DECODE_FLOOR = 4096
 _DECODE_UNITS_PER_TOKEN = 256
 
@@ -592,10 +592,11 @@ class GLiFormerAdapter(BaseAdapter):
     work units plus 256 per billed token of that document. A unit is at most
     about 7 microseconds of host work: one candidate span or record field
     span, two per relation, 64 per structuring proposal or relation entity
-    candidate, and one per score cell when a stage reaches a bound. A stage that cannot
-    afford everything keeps the best-first prefix it can afford, as at the
-    fixed bounds; the document still succeeds and bills normally, and other
-    documents are unaffected.
+    candidate, and a fraction of a unit per score cell of the document that
+    a stage reads (a whole unit when it searches for a cut). A stage that
+    cannot afford everything keeps the best-first prefix it can afford, as
+    at the fixed bounds; the document still succeeds and bills normally, and
+    other documents are unaffected.
 
     ``options["relation_threshold"]`` raises the minimum score for relations
     only. GLiFormer decodes entities and relations with one threshold, so it
