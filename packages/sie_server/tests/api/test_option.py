@@ -32,3 +32,5 @@ def test_invalid_overflow_policy_type_returns_400() -> None:
 
     assert exc_info.value.status_code == 400
     assert exc_info.value.detail["code"] == "INVALID_INPUT"
+    assert exc_info.value.detail["message"].startswith("Invalid overflow_policy: ['truncate_text']")
+    span.set_attribute.assert_called_once_with("error", "invalid_overflow_policy")

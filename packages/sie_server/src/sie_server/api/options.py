@@ -3,8 +3,7 @@ from typing import Any
 from fastapi import HTTPException, status
 
 from sie_server.config.model import ModelConfig, ResolvedProfile
-from sie_server.core.runtime_options import merge_runtime_options_with_profile
-from sie_server.types.overflow_policy import VALID_OVERFLOW_POLICIES
+from sie_server.core.runtime_options import InvalidOverflowPolicyError, merge_runtime_options_with_profile
 from sie_server.types.responses import ErrorCode
 
 
@@ -43,7 +42,9 @@ def resolve_runtime_options_with_profile(
     try:
         merged, resolved_profile = merge_runtime_options_with_profile(config, request_options)
     except ValueError as e:
-        span.set_attribute("error", "invalid_profile")
+        # The same check the queue worker applies (core.runtime_options).
+        invalid = "invalid_overflow_policy" if isinstance(e, InvalidOverflowPolicyError) else "invalid_profile"
+        span.set_attribute("error", invalid)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={
@@ -51,20 +52,5 @@ def resolve_runtime_options_with_profile(
                 "message": str(e),
             },
         ) from e
-
-    overflow_policy = merged.get("overflow_policy")
-    if overflow_policy is not None and (
-        not isinstance(overflow_policy, str) or overflow_policy not in VALID_OVERFLOW_POLICIES
-    ):
-        span.set_attribute("error", "invalid_overflow_policy")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "code": ErrorCode.INVALID_INPUT.value,
-                "message": (
-                    f"Invalid overflow_policy: {overflow_policy!r}. Must be one of {sorted(VALID_OVERFLOW_POLICIES)}."
-                ),
-            },
-        )
 
     return merged, resolved_profile

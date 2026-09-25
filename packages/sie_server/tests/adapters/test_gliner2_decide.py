@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import time
 from collections.abc import Iterator
 from functools import lru_cache
 from pathlib import Path
@@ -41,11 +42,11 @@ from sie_server.adapters.gliner2.decisions import (
     parse_request,
     probabilities,
 )
+from sie_server.adapters.gliner2.words import PACKAGE_PATTERN, LinearWordSplitter
 from sie_server.types.inputs import InvalidInputError, Item
 
 SIE_SERVER = Path(__file__).resolve().parents[2]
 SPECIAL = ("[SEP_STRUCT]", "[SEP_TEXT]", "[P]", "[C]", "[E]", "[R]", "[L]", "[EXAMPLE]", "[OUTPUT]", "[DESCRIPTION]")
-_WORD = re.compile(r"\w+(?:[-_]\w+)*|\S")
 
 QUESTIONS = {
     "intent": {
@@ -84,9 +85,15 @@ class FakeTokenizer:
         return [self.vocab.setdefault(token, 2000 + len(self.vocab)) for token in tokens]
 
 
-def fake_word_splitter(text: str, lower: bool = True) -> Iterator[tuple[str, int, int]]:
-    for match in _WORD.finditer(text):
-        yield (match.group().lower() if lower else match.group()), match.start(), match.end()
+class WhitespaceTokenSplitter:
+    """gliner2 2.0.0's word splitter (the package's regex, each word lowercased): the reference rows use it."""
+
+    _PATTERN = PACKAGE_PATTERN
+
+    def __call__(self, text: str, lower: bool = True) -> Iterator[tuple[str, int, int]]:
+        for match in self._PATTERN.finditer(text):
+            word = match.group()
+            yield (word.lower() if lower else word), match.start(), match.end()
 
 
 class FakeProcessor:
@@ -94,7 +101,8 @@ class FakeProcessor:
 
     def __init__(self) -> None:
         self.tokenizer = FakeTokenizer()
-        self.word_splitter = fake_word_splitter
+        self.word_splitter = WhitespaceTokenSplitter()
+        self.reference_splitter = WhitespaceTokenSplitter()
         self._tokenize_cached = lru_cache(maxsize=100)(self.tokenizer.tokenize)
 
     def change_mode(self, is_training: bool) -> None:
@@ -112,14 +120,14 @@ class FakeProcessor:
         return schemas
 
     def transform_and_format(self, text: str, schema: dict[str, Any]) -> SimpleNamespace:
-        words = [word for word, _, _ in self.word_splitter(text, lower=True)]
+        words = [word for word, _, _ in self.reference_splitter(text, lower=True)]
         return self._format(self._schemas(schema), words)
 
     def collate_row(self, text: str, schema: dict[str, Any], max_len: int | None) -> list[int]:
         """``collate_fn_inference([(text, schema)], max_len)``'s input ids."""
         if not text.endswith((".", "!", "?")):
             text += "."
-        words = [word for word, _, _ in self.word_splitter(text, lower=True)]
+        words = [word for word, _, _ in self.reference_splitter(text, lower=True)]
         if max_len is not None:
             words = words[:max_len]
         return self._format(self._schemas(schema), words).input_ids
@@ -429,7 +437,7 @@ def test_metering_bills_document_and_free_text_not_labels(monkeypatch: pytest.Mo
 
     output = adapter.extract([Item(text=text), Item(text=None)], output_schema=QUESTIONS)
 
-    document = sum(len(tokenizer.tokenize(word)) for word, _, _ in fake_word_splitter(text))
+    document = sum(len(tokenizer.tokenize(word)) for word, _, _ in WhitespaceTokenSplitter()(text))
     free_text = sum(
         len(tokenizer.tokenize(value))
         for value in (
@@ -548,6 +556,73 @@ def test_states_render_like_laya_and_conversations_keep_the_newest_turns(monkeyp
     assert len(rows[1]) <= 64
 
 
+def test_the_adapter_splits_words_in_linear_time_like_the_package() -> None:
+    adapter, processor = make_adapter()
+    assert isinstance(processor.word_splitter, LinearWordSplitter)
+    assert adapter._word_splitter is processor.word_splitter
+    goldens = sorted((Path(__file__).parent / "goldens" / "gliner2_decide").glob("*.json"))
+    assert goldens
+    texts = [
+        text
+        for path in goldens
+        for text in (*json.loads(path.read_text())["texts"], json.loads(path.read_text())["long_text"])
+    ]
+    for text in texts:
+        assert list(adapter._word_splitter(text)) == list(processor.reference_splitter(text))
+
+
+def test_an_unknown_word_splitter_is_refused() -> None:
+    adapter = GLiNER2DecideAdapter("fake/decide", max_seq_length=256)
+    processor = FakeProcessor()
+    processor.word_splitter = lambda text, lower=True: iter(())
+    with pytest.raises(RuntimeError, match="linear-time equivalent"):
+        adapter._attach(SimpleNamespace(encoder=FakeEncoder(), classifier=fake_classifier), processor, "cpu")
+
+
+@pytest.mark.parametrize(
+    "item",
+    [
+        Item(text="." * (2 * 1024 * 1024)),
+        Item(text="a." * (1024 * 1024)),
+        Item(text="hello world. " * (2 * 1024 * 1024 // 13)),
+        Item(metadata={"state": ["." * (64 * 1024)]}),
+        Item(metadata={"state": [{"role": "user", "content": "a." * (32 * 1024)}] * 3}),
+    ],
+    ids=["dots-2MiB", "a-dots-2MiB", "prose-2MiB", "dots-state-64KiB", "a-dots-turns"],
+)
+def test_pathological_documents_are_read_in_bounded_time(item: Item) -> None:
+    adapter, _ = make_adapter(window=2048)
+    adapter.extract([Item(text="warm up")], labels=["yes", "no"])
+    started = time.perf_counter()
+    output = adapter.extract([item], labels=["yes", "no"])
+    elapsed = time.perf_counter() - started
+    assert output.errors is None
+    assert output.input_token_counts is not None
+    assert 0 < output.input_token_counts[0] <= 2048
+    # gliner2's own splitter takes 15 to 30 seconds on these; the adapter takes tens of milliseconds.
+    assert elapsed < 1.0
+
+
+def test_reading_from_the_end_keeps_the_tail_of_an_overlong_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    adapter, processor = make_adapter(window=64)
+    rows = spy_rows(adapter, monkeypatch)
+    turns = ["older turn " * 20, "x" + "." * 10_000 + "tail"]
+
+    output = adapter.extract([Item(metadata={"state": turns})], labels=["yes", "no"])
+
+    assert output.errors is None
+    inverse = {token_id: token for token, token_id in processor.tokenizer.vocab.items()}
+    prefix_len = processor.transform_and_format(
+        ".", parse_request(labels=["yes", "no"], output_schema=None, instruction=None, options={}).model_schema()
+    ).text_word_first_positions[0]
+    document = [inverse[token_id] for token_id in rows[0][prefix_len:]]
+    # The newest turn's run ('"x....tail"]' and the processor's ".") is longer than the
+    # adapter reads, so only its tail is read, and nothing of the older turn.
+    assert document[-5:] == ["tai", "l", '"', "]", "."]
+    assert set(document[:-5]) == {"."}
+    assert "old" not in document
+
+
 def test_label_groups_answer_like_gliclass(monkeypatch: pytest.MonkeyPatch) -> None:
     adapter, _ = make_adapter()
     output = adapter.extract(
@@ -619,10 +694,11 @@ def test_batching_cost_is_capped_at_the_window() -> None:
     assert adapter.extract_item_costs([Item(text="x")], output_schema={"q": object()}) is not None
 
 
-def test_invalid_overflow_policy_is_invalid_input() -> None:
+@pytest.mark.parametrize("policy", ["drop", [], {"a": 1}, 3])
+def test_invalid_overflow_policy_is_invalid_input(policy: object) -> None:
     adapter, _ = make_adapter()
     with pytest.raises(InvalidInputError, match="overflow_policy"):
-        adapter.extract([Item(text="x")], labels=["a", "b"], options={"overflow_policy": "drop"})
+        adapter.extract([Item(text="x")], labels=["a", "b"], options={"overflow_policy": policy})
 
 
 def test_constructor_bounds() -> None:

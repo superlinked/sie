@@ -94,8 +94,11 @@ characters in all. Strings that contain one of the model's prompt markers
 uncounted question and label tokens read with each item; a request needing more
 fails with `INPUT_TOO_LONG`. The
 document is read up to the whole words that fit in the rest of the window; a
-word longer than 4,096 characters, or text past 64 characters per token of the
-window, also ends what is read. An item none of whose words fits, or that does
+word longer than 4,096 characters, text past 64 characters per token of the
+window, or 4 words per token of the window also ends what is read. Words are
+split as gliner2 splits them, in linear time. A conversation (a list state) is
+read from its newest turn back; a run of more than 4,096 characters without a
+space is read only in its last 4,096 characters, and reading stops there. An item none of whose words fits, or that does
 not fit whole with `options={"overflow_policy": "error"}`, returns a per-item
 `INPUT_TOO_LONG` error while the other items succeed.
 

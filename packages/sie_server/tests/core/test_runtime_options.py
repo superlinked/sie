@@ -164,6 +164,21 @@ def test_malformed_profile_selector_raises_invalid_input(profile: object) -> Non
         merge_runtime_options(config, {"profile": profile})
 
 
+@pytest.mark.parametrize("policy", [[], ["truncate_text"], {}, {"a": 1}, 0, True, "drop", ""])
+def test_invalid_overflow_policy_raises_invalid_input_on_both_ingress_paths(policy: object) -> None:
+    """The queue worker merges options here too, so an invalid policy is a 400, not an inference error."""
+    config = _embedder_config()
+
+    with pytest.raises(InvalidInputError, match="Invalid overflow_policy"):
+        merge_runtime_options(config, {"overflow_policy": policy})
+
+
+@pytest.mark.parametrize("policy", ["default", "truncate_text", "error", None])
+def test_valid_overflow_policies_pass_through(policy: str | None) -> None:
+    merged = merge_runtime_options(_embedder_config(), {"overflow_policy": policy})
+    assert merged["overflow_policy"] == policy
+
+
 def _generation_config() -> ModelConfig:
     return ModelConfig.model_validate(
         {

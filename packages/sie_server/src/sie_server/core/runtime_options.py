@@ -25,6 +25,7 @@ import math
 from typing import TYPE_CHECKING, Any
 
 from sie_server.types.inputs import InvalidInputError
+from sie_server.types.overflow_policy import VALID_OVERFLOW_POLICIES
 
 if TYPE_CHECKING:
     from sie_server.config.model import ModelConfig, ResolvedProfile
@@ -44,15 +45,40 @@ def _resolve_profile_or_raise(
         raise InvalidInputError(str(exc)) from exc
 
 
+class InvalidOverflowPolicyError(InvalidInputError):
+    """``options.overflow_policy`` is not one of ``VALID_OVERFLOW_POLICIES``."""
+
+
+def check_overflow_policy(options: dict[str, Any]) -> None:
+    """Reject an ``overflow_policy`` that is not one of the valid policy names.
+
+    Raises:
+        InvalidOverflowPolicyError: The value is not a string naming a valid policy.
+    """
+    overflow_policy = options.get("overflow_policy")
+    if overflow_policy is not None and (
+        not isinstance(overflow_policy, str) or overflow_policy not in VALID_OVERFLOW_POLICIES
+    ):
+        raise InvalidOverflowPolicyError(
+            f"Invalid overflow_policy: {overflow_policy!r}. Must be one of {sorted(VALID_OVERFLOW_POLICIES)}."
+        )
+
+
 def merge_runtime_options_with_profile(
     config: ModelConfig,
     request_options: dict[str, Any] | None,
 ) -> tuple[dict[str, Any], ResolvedProfile]:
-    """Return merged adapter options and the profile used to derive them."""
+    """Return merged adapter options and the profile used to derive them.
+
+    Raises:
+        InvalidInputError: The request selects an unknown or malformed profile, or
+            the merged ``overflow_policy`` is not a valid policy name.
+    """
     resolved = _resolve_profile_or_raise(config, request_options)
     merged: dict[str, Any] = dict(resolved.runtime)
     if request_options:
         merged |= {key: value for key, value in request_options.items() if key != "profile"}
+    check_overflow_policy(merged)
     return merged, resolved
 
 
@@ -76,7 +102,7 @@ def merge_runtime_options(
 
     Raises:
         InvalidInputError: If ``request_options`` selects a malformed or
-            unknown profile.
+            unknown profile, or the merged ``overflow_policy`` is invalid.
     """
     merged, _ = merge_runtime_options_with_profile(config, request_options)
     return merged

@@ -68,6 +68,7 @@ from sie_server.adapters.gliner2.decisions import (
     schema_chars,
     split_logits,
 )
+from sie_server.adapters.gliner2.words import linear_equivalent
 from sie_server.adapters.laya.questions import STATE_BYTES_PER_TOKEN, serialize_state
 from sie_server.core.inference_output import ExtractItemError, ExtractOutput
 from sie_server.types.inputs import InvalidInputError, Item
@@ -90,6 +91,11 @@ _MAX_WORD_CHARS = 4096
 # ...as does reaching past this many characters per token of the window. Prose
 # spends about 5; text laid out with runs of spaces about 40.
 _MAX_CHARS_PER_TOKEN = 64
+# ...or reading this many words per token of the window: a word of characters
+# the tokenizer drops takes no room.
+_MAX_WORDS_PER_TOKEN = 4
+# A run of non-space characters. gliner2's words never cross a space.
+_RUN = re.compile(r"\S+")
 # Batching-cost estimate: characters per window token.
 _COST_CHARS_PER_TOKEN = 4
 # Token ids of recent words, kept across requests. Only words of at most
@@ -432,7 +438,19 @@ class GLiNER2DecideAdapter(BaseAdapter):
         )
 
     def _attach(self, model: Any, processor: Any, device: str) -> None:
-        """Use ``model`` (encoder and classification head) and ``processor`` (the task prompt builder)."""
+        """Use ``model`` (encoder and classification head) and ``processor`` (the task prompt builder).
+
+        Raises:
+            RuntimeError: The processor splits words with a splitter this adapter
+                has no linear-time equivalent for.
+        """
+        splitter = linear_equivalent(processor.word_splitter)
+        if splitter is None:
+            raise RuntimeError(
+                f"GLiNER2.5-Decide has no linear-time equivalent of {type(processor.word_splitter).__name__}; "
+                "gliner2's word splitter changed"
+            )
+        processor.word_splitter = splitter
         tokenizer = processor.tokenizer
 
         def tokenize(word: str) -> tuple[int, ...]:
@@ -446,7 +464,7 @@ class GLiNER2DecideAdapter(BaseAdapter):
         self._model = model
         self._processor = processor
         self._tokenizer = tokenizer
-        self._word_splitter = processor.word_splitter
+        self._word_splitter = splitter
         self._word_ids = word_ids
         self._word_cache = cached
         self._device = device
@@ -474,7 +492,7 @@ class GLiNER2DecideAdapter(BaseAdapter):
         opts = options or {}
         request = parse_request(labels=labels, output_schema=output_schema, instruction=instruction, options=opts)
         overflow_policy = opts.get("overflow_policy", DEFAULT_OVERFLOW_POLICY)
-        if overflow_policy not in VALID_OVERFLOW_POLICIES:
+        if not isinstance(overflow_policy, str) or overflow_policy not in VALID_OVERFLOW_POLICIES:
             raise InvalidInputError(
                 f"GLiNER2.5-Decide overflow_policy must be one of {sorted(VALID_OVERFLOW_POLICIES)}"
             )
@@ -609,18 +627,21 @@ class GLiNER2DecideAdapter(BaseAdapter):
 
         The processor ends a text that does not end a sentence with ``"."`` and
         reads it as one more word; that word is read when it fits but not billed.
+        Words come from a linear-time splitter, read lazily from the start; from
+        the end (conversation turns), run by run of non-space characters, each
+        split on its own (no word crosses a space), keeping only the last
+        ``_MAX_WORD_CHARS`` characters of a longer run and stopping after it.
         """
         normalized = text if text.endswith(_SENTENCE_END) else text + "."
         char_limit = room * _MAX_CHARS_PER_TOKEN
-        split = self._word_splitter(normalized, lower=True)
-        # A rendering of the newest turns is bounded, so it is split whole and read from its end.
-        words: Iterator[tuple[str, int, int]] = reversed(list(split)) if from_end else split
+        max_words = room * _MAX_WORDS_PER_TOKEN
+        words = self._words_from_end(normalized) if from_end else self._word_splitter(normalized, lower=True)
         kept: list[tuple[tuple[int, ...], int]] = []
         used = 0
         complete = whole
         for word, start, end in words:
             reach = len(normalized) - start if from_end else end
-            if end - start > _MAX_WORD_CHARS or reach > char_limit:
+            if end - start > _MAX_WORD_CHARS or reach > char_limit or len(kept) >= max_words:
                 complete = False
                 break
             ids = self._word_ids(word)
@@ -637,6 +658,17 @@ class GLiNER2DecideAdapter(BaseAdapter):
             billed_tokens=sum(len(ids) for ids, start in kept if start < len(text)),
             complete=complete,
         )
+
+    def _words_from_end(self, text: str) -> Iterator[tuple[str, int, int]]:
+        """The words of ``text``, last first; a run longer than ``_MAX_WORD_CHARS`` yields only its tail's words."""
+        for run in reversed([match.span() for match in _RUN.finditer(text)]):
+            begin, end = run
+            cut = max(begin, end - _MAX_WORD_CHARS)
+            words = list(self._word_splitter(text[cut:end], lower=True))
+            for word, start, stop in reversed(words):
+                yield word, cut + start, cut + stop
+            if cut > begin:
+                return
 
     def _score(self, rows: list[list[int]], label_positions: list[int]) -> np.ndarray:
         """Every row's label logits, ``[rows, labels]``, in padded chunks of similar length."""
