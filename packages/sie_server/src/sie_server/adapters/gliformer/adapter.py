@@ -38,6 +38,7 @@ from sie_server.adapters.gliformer.output_schema import (
     compile_output_schema,
     shape_structured_output,
 )
+from sie_server.adapters.gliformer.relation_decoding import make_relation_decode
 from sie_server.adapters.gliformer.span_decoding import (
     PROPOSAL_UNITS,
     candidate_units,
@@ -188,7 +189,9 @@ def _bound_span_decoding() -> None:
     ``SpanDecoder.decode_bio_spans_batch``, and removes overlaps in
     ``SpanDecoder.greedy_search``; the structuring head proposes spans with
     GLiNER's ``extract_spans_from_tokens`` and turns them into records in
-    ``StructuringDecoder.decode``. All four work pair by pair in Python. The
+    ``StructuringDecoder.decode``, and the relation decoder reads its scores
+    cell by cell in ``JointRelexDecoder.decode``. All of these work pair by
+    pair in Python. The
     replacements return the same spans in the same order with the same
     scores, and bound how many candidates a document row can produce (see
     ``span_decoding`` and ``structuring_decoding``). The relation head builds
@@ -276,6 +279,14 @@ def _bound_span_decoding() -> None:
         make_structuring_decode(span_class, structuring_decoder.unflatten_by_batch_origin),
         source_sha256="079bfd5f322bc10981c4150b708da41fbba6cb3742ae5e0daa4e9a4e3f31859c",
     )
+    joint_relex_decoder = importlib.import_module("gliformer.tasks.joint_relex.decoder")
+    ner_decoder = importlib.import_module("gliformer.tasks.ner.decoder")
+    _replace_package_function(
+        joint_relex_decoder.JointRelexDecoder,
+        "decode",
+        make_relation_decode(ner_decoder.NERDecoder.decode, joint_relex_decoder.unflatten_by_batch_origin),
+        source_sha256="37d5f8ca90c546ef639e58ede17778565c233c87e1576ed9c65e2f4891c69948",
+    )
     original_proposals = getattr(structuring_model, "extract_spans_from_tokens", None)
     if getattr(original_proposals, "_sie_bounded", False):
         original_proposals = original_proposals._sie_original  # ty:ignore[unresolved-attribute]
@@ -325,11 +336,13 @@ def _assert_bounded_decoding() -> None:
     """
     span_decoder = importlib.import_module("gliformer.tasks.span_decoder")
     structuring_decoder = importlib.import_module("gliformer.tasks.structuring.decoder")
+    joint_relex_decoder = importlib.import_module("gliformer.tasks.joint_relex.decoder")
     for module_name in _DECODER_MODULES:
         importlib.import_module(module_name)
     for base, names in (
         (span_decoder.SpanDecoder, ("_calculate_span_score", "greedy_search", "decode_bio_spans_batch")),
         (structuring_decoder.StructuringDecoder, ("decode",)),
+        (joint_relex_decoder.JointRelexDecoder, ("decode",)),
     ):
         for subclass in _subclasses(base):
             overridden = [name for name in names if name in vars(subclass)]
@@ -421,6 +434,29 @@ def _verify_bounded_decoding(model: Any) -> None:
         structuring_batch_origin=torch.arange(1),
         batch_size=1,
     )
+    joint_relex_decoder = importlib.import_module("gliformer.tasks.joint_relex.decoder")
+    relation_decoder = joint_relex_decoder.JointRelexDecoder(SimpleNamespace())
+    relations = SimpleNamespace(
+        ner_logits=logits,
+        ner_batch_origin=torch.arange(2),
+        span_logits=None,
+        span_idx=None,
+        span_mask=None,
+        joint_rel_logits=torch.randn(2, 6, 3, generator=generator) * 2,
+        joint_rel_idx=torch.tensor([[[0, 1], [1, 0], [0, 2], [2, 1], [1, 2], [5, 0]]] * 2),
+        joint_rel_mask=torch.tensor([[True, True, True, True, True, False], [True, False, True, True, True, True]]),
+        joint_rel_batch_origin=torch.arange(2),
+        batch_size=2,
+    )
+    relation_decode = vars(joint_relex_decoder.JointRelexDecoder)["decode"]
+    words = [[f"w{i}" for i in range(24)]] * 2
+    for threshold in (0.3, 0.5):
+        kwargs = {"threshold": threshold, "texts": words}
+        check(
+            "relation decoding",
+            relation_decode._sie_original(relation_decoder, relations, **kwargs),
+            relation_decode(relation_decoder, relations, **kwargs),
+        )
     record_decoder = structuring_decoder.StructuringDecoder(SimpleNamespace())
     decode = vars(structuring_decoder.StructuringDecoder)["decode"]
     for flat_ner in (True, False):
@@ -535,8 +571,9 @@ class GLiFormerAdapter(BaseAdapter):
     its best answer.
 
     Span decoding is bounded per document: at most 4096 candidate spans for
-    entities and relation endpoints, 2048 structuring proposals, and 65,536
-    record field spans across all record slots. Beyond that a document keeps
+    entities and relation endpoints, 2048 structuring proposals, 65,536
+    record field spans across all record slots, and 65,536 relations whose
+    heads and tails span at most 262,144 words. Beyond that a document keeps
     the candidates overlap removal would take first (best score first, and
     among equal scores in GLiFormer's own order), so it loses only results
     that rank below every kept one; nothing in the output marks such a

@@ -6,6 +6,7 @@ import gc
 import importlib
 import random
 import sys
+import time
 from dataclasses import astuple
 from types import ModuleType, SimpleNamespace
 from typing import Any
@@ -15,7 +16,7 @@ import pytest
 import torch
 from gliner.modeling.utils import extract_spans_from_tokens
 from sie_server.adapters.gliformer import adapter as adapter_module
-from sie_server.adapters.gliformer import span_decoding, structuring_decoding
+from sie_server.adapters.gliformer import relation_decoding, span_decoding, structuring_decoding
 from sie_server.adapters.gliformer.span_decoding import MAX_SPAN_CANDIDATES, pair_spans, propose_spans, select_spans
 
 # Import the package the way the adapter does (without its AutoModel
@@ -690,3 +691,135 @@ def test_padding_mask_covers_a_head_with_its_own_ner_pass() -> None:
 def test_padding_mask_fails_closed_on_an_ner_pass_it_cannot_reach(head: Any) -> None:
     with pytest.raises(RuntimeError, match="cannot mask"):
         adapter_module._mask_padded_words(SimpleNamespace(heads={"ner": torch.nn.Identity(), "joint_relex": head}))
+
+
+# -- Relations --------------------------------------------------------------------
+
+joint_relex_decoder = importlib.import_module("gliformer.tasks.joint_relex.decoder")
+_UPSTREAM_RELATION_DECODE = joint_relex_decoder.JointRelexDecoder.decode._sie_original
+_RELATIONS = joint_relex_decoder.JointRelexDecoder(SimpleNamespace())
+
+
+def _relation_output(
+    seed: int,
+    *,
+    rows: int = 2,
+    length: int = 30,
+    labels: int = 3,
+    pairs: int = 40,
+    types: int = 4,
+    entity_spans: bool = False,
+) -> SimpleNamespace:
+    generator = torch.Generator().manual_seed(seed)
+    ner = torch.stack(
+        [_bio_scores(seed * 5 + row, length=length, labels=labels, dtype=torch.float32) for row in range(rows)]
+    )
+    idx = torch.randint(0, 12, (rows, pairs, 2), generator=generator)
+    output = SimpleNamespace(
+        ner_logits=ner,
+        ner_batch_origin=torch.arange(rows),
+        span_logits=None,
+        span_idx=None,
+        span_mask=None,
+        joint_rel_logits=torch.randn(rows, pairs, types, generator=generator) * 2,
+        joint_rel_idx=idx,
+        joint_rel_mask=torch.rand(rows, pairs, generator=generator) > 0.2,
+        joint_rel_batch_origin=torch.arange(rows),
+        batch_size=rows,
+    )
+    if entity_spans:
+        starts = torch.randint(0, length - 3, (rows, 12, 1), generator=generator)
+        output.joint_rel_entity_spans = torch.cat(
+            [starts, starts + torch.randint(0, 3, (rows, 12, 1), generator=generator)], -1
+        )
+    return output
+
+
+@pytest.mark.parametrize("entity_spans", [False, True])
+@pytest.mark.parametrize("threshold", [0.1, 0.3, 0.5])
+@pytest.mark.parametrize("seed", range(5))
+def test_relation_decoding_matches_the_package(seed: int, threshold: float, entity_spans: bool) -> None:
+    output = _relation_output(seed, entity_spans=entity_spans)
+    texts = [[f"w{i}" for i in range(30)] for _ in range(2)]
+    for flat_ner in (True, False):
+        kwargs = {"threshold": threshold, "flat_ner": flat_ner, "texts": texts}
+        expected = _UPSTREAM_RELATION_DECODE(_RELATIONS, output, **kwargs)
+        assert _RELATIONS.decode(output, **kwargs) == expected
+    assert entity_spans or any(expected)
+
+
+def test_relation_decoding_without_relation_outputs_matches_the_package() -> None:
+    empty = SimpleNamespace(joint_rel_logits=None, joint_rel_idx=None)
+    assert _RELATIONS.decode(empty) == _UPSTREAM_RELATION_DECODE(_RELATIONS, empty) == []
+
+
+def _flat(relations: list) -> list[dict]:
+    return [triple for item in relations for group in item for triple in group]
+
+
+@pytest.mark.parametrize("limit", [1, 5, 40])
+def test_capped_relations_keep_the_best_first_prefix(limit: int) -> None:
+    output = _relation_output(1, rows=1, pairs=60, types=6)
+    kwargs = {"threshold": 0.1, "texts": [[f"w{i}" for i in range(30)]]}
+    full = _flat(_UPSTREAM_RELATION_DECODE(_RELATIONS, output, **kwargs))
+    assert len(full) > limit
+    capped = _flat(
+        relation_decoding.make_relation_decode(
+            importlib.import_module("gliformer.tasks.ner.decoder").NERDecoder.decode,
+            joint_relex_decoder.unflatten_by_batch_origin,
+            max_relations=limit,
+        )(_RELATIONS, output, **kwargs)
+    )
+    expected = [triple for triple in full if id(triple) in {id(t.triple) for t in _head(_scored(full), limit)}]
+    assert capped == expected
+
+
+def _scored(triples: list[dict]) -> list[Any]:
+    return [SimpleNamespace(score=triple["score"], triple=triple) for triple in triples]
+
+
+def test_relation_text_is_bounded_per_document() -> None:
+    output = _relation_output(2, rows=1, pairs=60, types=6)
+    kwargs = {"threshold": 0.1, "texts": [[f"w{i}" for i in range(30)]]}
+    full = _flat(_UPSTREAM_RELATION_DECODE(_RELATIONS, output, **kwargs))
+    words = [t["head"]["end"] - t["head"]["start"] + 1 + t["tail"]["end"] - t["tail"]["start"] + 1 for t in full]
+    budget = sum(words) // 3
+    capped = _flat(
+        relation_decoding.make_relation_decode(
+            importlib.import_module("gliformer.tasks.ner.decoder").NERDecoder.decode,
+            joint_relex_decoder.unflatten_by_batch_origin,
+            max_words=budget,
+        )(_RELATIONS, output, **kwargs)
+    )
+    ranked = sorted(range(len(full)), key=lambda index: -full[index]["score"])
+    taken, used = set(), 0
+    for index in ranked:
+        if used + words[index] > budget:
+            break
+        used += words[index]
+        taken.add(index)
+    assert capped == [triple for index, triple in enumerate(full) if index in taken]
+    assert 0 < len(capped) < len(full)
+
+
+def test_relations_within_an_allowance_keep_the_best_first_prefix() -> None:
+    output = _relation_output(3, rows=1, pairs=60, types=6)
+    kwargs = {"threshold": 0.1, "texts": [[f"w{i}" for i in range(30)]]}
+    with span_decoding.document_allowances([10**9]) as rows:
+        full = _flat(_RELATIONS.decode(output, **kwargs))
+        spent = 10**9 - rows[0].remaining
+    kept_units = relation_decoding.RELATION_UNITS * len(full)
+    # Just enough for everything but the last few relations.
+    with span_decoding.document_allowances([spent - kept_units + relation_decoding.RELATION_UNITS * 4]) as rows:
+        capped = _flat(_RELATIONS.decode(output, **kwargs))
+    head = {id(item.triple) for item in _head(_scored(full), 4)}
+    assert capped == [triple for triple in full if id(triple) in head]
+    assert rows[0].remaining == 0
+
+
+def test_relation_cells_that_all_fail_decode_quickly() -> None:
+    output = _relation_output(4, rows=1, pairs=9900, types=20)
+    output.joint_rel_logits = torch.full((1, 9900, 20), -9.0)
+    start = time.perf_counter()
+    assert _flat(_RELATIONS.decode(output, threshold=0.5, texts=[[f"w{i}" for i in range(30)]])) == []
+    assert time.perf_counter() - start < 5
