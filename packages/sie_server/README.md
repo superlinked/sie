@@ -180,7 +180,9 @@ The GLiNER2.5-Decide models (`fastino/GLiNER2.5-Decide`, `GLiNER2.5-multi-Decide
 `GLiNER2.5-Decide-1B`) run on `gliner2` 2.x, which the transformers5 bundle
 pins (the `transformers5` image, or a native install as described above). Each
 item is one encoder row: every question's (or label group's) name,
-instruction, and labels, then the document. `usage.input_tokens` counts the
+instruction, and labels, then the document. One forward pass answers them all,
+so the questions of a request are not independent: adding or changing one can
+change another's probabilities and score. `usage.input_tokens` counts the
 document tokens the model reads plus the tokens of the instructions and label
 descriptions (criteria) sent with the item, as Laya and GLiClass count
 instructions and criteria. Question ids, group names, and label names are not
