@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 import torch
+import yaml
 from gliclass.model import GLiClassUniEncoder
 from sie_server.adapters.gliclass import GLiClassAdapter
 from sie_server.adapters.gliclass import cuda_graphs as cuda_graphs_module
@@ -508,14 +509,24 @@ class TestOperatorSetting:
         assert adapter._request_cuda_graphs({}) == mode
         assert adapter._request_cuda_graphs({"cuda_graphs": "off"}) == "off"
 
-    @pytest.mark.parametrize("value", ["exact", "bucketed", "on", "Off", True, None, 1])
+    def test_a_request_may_send_false_for_off(self) -> None:
+        # A profile's runtime options read an unquoted YAML ``off`` as False.
+        assert GLiClassAdapter("tiny", cuda_graphs="bucketed")._request_cuda_graphs({"cuda_graphs": False}) == "off"
+
+    @pytest.mark.parametrize("value", ["exact", "bucketed", "on", "Off", True, None, 0, 1])
     def test_a_request_can_only_turn_graphs_off(self, value: object) -> None:
         adapter = GLiClassAdapter("tiny", cuda_graphs="bucketed")
 
         with pytest.raises(InvalidInputError, match="accepts only 'off'"):
             adapter._request_cuda_graphs({"cuda_graphs": value})
 
-    @pytest.mark.parametrize("value", ["on", "Exact", "", None])
+    @pytest.mark.parametrize(("text", "mode"), [("off", "off"), ('"off"', "off"), ("bucketed", "bucketed")])
+    def test_profiles_may_write_off_unquoted(self, text: str, mode: str) -> None:
+        loadtime = yaml.safe_load(f"cuda_graphs: {text}")  # YAML reads unquoted off as False
+
+        assert GLiClassAdapter("tiny", **loadtime)._cuda_graphs == mode
+
+    @pytest.mark.parametrize("value", ["on", "Exact", "", None, True, 0])
     def test_unknown_load_time_modes_fail_the_load(self, value: Any) -> None:
         with pytest.raises(ValueError, match="cuda_graphs must be 'off', 'exact' or 'bucketed'"):
             GLiClassAdapter("tiny", cuda_graphs=value)

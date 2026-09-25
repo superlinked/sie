@@ -471,7 +471,7 @@ class GLiClassAdapter(BaseAdapter):
         max_seq_length: int | None = None,
         compute_precision: ComputePrecision = "float16",
         revision: str | None = None,
-        cuda_graphs: str = "off",
+        cuda_graphs: str | bool = "off",
         **kwargs: Any,
     ) -> None:
         """Initialize GLiClass adapter.
@@ -494,7 +494,8 @@ class GLiClassAdapter(BaseAdapter):
             cuda_graphs: "off" (the default), "exact" or "bucketed": whether a
                 DeBERTa-based model on CUDA replays its forwards as CUDA graphs
                 (see ``cuda_graphs.py``). An operator setting: a request can
-                only opt out, with ``options={"cuda_graphs": "off"}``.
+                only opt out, with ``options={"cuda_graphs": "off"}``. YAML
+                reads an unquoted ``off`` as ``False``, which also means off.
             **kwargs: Additional arguments (ignored for compatibility).
 
         Raises:
@@ -506,7 +507,9 @@ class GLiClassAdapter(BaseAdapter):
         self._max_seq_length = max_seq_length
         self._compute_precision = compute_precision
         self._revision = revision
-        if cuda_graphs not in GRAPH_MODES:
+        if cuda_graphs is False:  # an unquoted YAML ``off``
+            cuda_graphs = "off"
+        if not isinstance(cuda_graphs, str) or cuda_graphs not in GRAPH_MODES:
             msg = f"GLiClass cuda_graphs must be 'off', 'exact' or 'bucketed', got {cuda_graphs!r}"
             raise ValueError(msg)
         self._cuda_graphs = cast("GraphMode", cuda_graphs)
@@ -1410,7 +1413,9 @@ class GLiClassAdapter(BaseAdapter):
         """The graph mode for a request: the load-time mode, unless the request opts out."""
         if "cuda_graphs" not in opts:
             return self._cuda_graphs
-        if opts["cuda_graphs"] == "off" and isinstance(opts["cuda_graphs"], str):
+        value = opts["cuda_graphs"]
+        # ``False`` is how YAML reads an unquoted ``off`` in a profile's runtime options.
+        if value is False or (isinstance(value, str) and value == "off"):
             return "off"
         raise InvalidInputError(
             "GLiClass options.cuda_graphs accepts only 'off', to run a request eagerly. "
