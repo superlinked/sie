@@ -34,6 +34,12 @@ from sie_server.adapters.gliformer.span_decoding import _FLOAT32_BITS_ONE, _scor
 # more of these than entity spans: measured with both checkpoints up to 15,291
 # per entity-dense 2048-word document at threshold 0.5 and 55,015 at 0.1.
 MAX_RECORD_SPANS = 65536
+# Words of field text one document's records may hold after overlap removal.
+# Each field copies its span's words, and nested overlap removal
+# (flat_ner=false) can keep every span of a nested chain, so without a bound
+# the text alone grows with spans x document length. Flat single-label
+# removal keeps disjoint spans per slot: at most 100 slots x 2048 words.
+MAX_RECORD_WORDS = 262144
 
 
 def make_structuring_decode(
@@ -41,6 +47,7 @@ def make_structuring_decode(
     unflatten_by_batch_origin: Callable[..., Any],
     *,
     max_spans: int = MAX_RECORD_SPANS,
+    max_words: int = MAX_RECORD_WORDS,
 ) -> Callable[..., Any]:
     """A replacement for ``gliformer.tasks.structuring.decoder.StructuringDecoder.decode``.
 
@@ -48,6 +55,7 @@ def make_structuring_decode(
         make_span: The package's ``Span`` class.
         unflatten_by_batch_origin: The package's helper of that name.
         max_spans: Most field spans per document, across its record slots.
+        max_words: Most words of field text per document, across its slots.
 
     Returns:
         The ``decode`` method.
@@ -132,8 +140,11 @@ def make_structuring_decode(
                 make_span=make_span,
                 max_spans=max_spans,
             )
-            for anchor_idx, spans in slot_spans:
-                spans = self.greedy_search(spans, flat_ner, multi_label)
+            kept = _within_word_limit(
+                [(anchor_idx, self.greedy_search(spans, flat_ner, multi_label)) for anchor_idx, spans in slot_spans],
+                max_words,
+            )
+            for anchor_idx, spans in kept:
                 fields = self._spans_to_fields(spans, texts, text_idx)
                 anchor_entries.append(
                     {
@@ -259,3 +270,31 @@ def _slot_spans(
         ]
         result.append((anchor_idx, spans))
     return result
+
+
+def _within_word_limit(slots: list[tuple[int, list[Any]]], max_words: int) -> list[tuple[int, list[Any]]]:
+    """Drop the lowest-scoring kept fields until their text fits ``max_words``.
+
+    Fields are ranked best score first, and among equal scores by slot and
+    then position; the best ones whose words add up to at most ``max_words``
+    stay, in their original order.
+    """
+    words = sum(span.end - span.start + 1 for _, spans in slots for span in spans)
+    if words <= max_words:
+        return slots
+    ranked = sorted(
+        ((slot, index, span) for slot, (_, spans) in enumerate(slots) for index, span in enumerate(spans)),
+        key=lambda entry: -entry[2].score,
+    )
+    keep: set[tuple[int, int]] = set()
+    used = 0
+    for slot, index, span in ranked:
+        width = span.end - span.start + 1
+        if used + width > max_words:
+            break
+        used += width
+        keep.add((slot, index))
+    return [
+        (anchor_idx, [span for index, span in enumerate(spans) if (slot, index) in keep])
+        for slot, (anchor_idx, spans) in enumerate(slots)
+    ]

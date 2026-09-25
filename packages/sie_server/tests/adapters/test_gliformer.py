@@ -912,17 +912,49 @@ def test_outputs_are_decoded_from_host_memory() -> None:
     assert result["batch_size"] == 1
 
 
+def _relation_head(**kwargs: Any) -> SimpleNamespace:
+    def decode(ner_scores: Any, *_: Any, **__: Any) -> Any:
+        mask = torch.tensor([[True, True, False]])
+        return torch.zeros(1, 3, 2, dtype=torch.long), mask, torch.zeros(1, 3, dtype=torch.long)
+
+    return SimpleNamespace(**kwargs, _decode_relation_entity_spans=decode)
+
+
 @pytest.mark.parametrize(("current", "expected"), [(None, 100), (40, 40), (500, 100)])
 def test_relation_candidates_are_limited_at_load(current: int | None, expected: int) -> None:
-    head = SimpleNamespace(max_relation_entities=current)
+    head = _relation_head(max_relation_entities=current)
     adapter_module._limit_relation_entities(SimpleNamespace(heads={"joint_relex": head, "ner": object()}))
     assert head.max_relation_entities == expected
+
+
+@pytest.mark.parametrize(("current", "expected"), [(None, 32), (8, 8), (500, 32)])
+def test_relation_candidate_width_is_limited_at_load(current: int | None, expected: int) -> None:
+    head = _relation_head(max_relation_entities=None, max_relation_span_width=current)
+    adapter_module._limit_relation_entities(SimpleNamespace(heads={"joint_relex": head, "ner": object()}))
+    assert head.max_relation_span_width == expected
+
+
+def test_relation_candidates_are_charged_to_the_decode_budget() -> None:
+    head = _relation_head(max_relation_entities=None)
+    adapter_module._limit_relation_entities(SimpleNamespace(heads={"joint_relex": head, "ner": object()}))
+    with span_decoding.decode_budget(1000):
+        head._decode_relation_entity_spans(torch.zeros(1))
+        assert 1000 - span_decoding._REQUEST_BUDGET.get().remaining == 2 * span_decoding.PROPOSAL_UNITS
+    with (
+        span_decoding.decode_budget(span_decoding.PROPOSAL_UNITS),
+        pytest.raises(span_decoding.DecodeBudgetExceededError),
+    ):
+        head._decode_relation_entity_spans(torch.zeros(1))
 
 
 def test_relation_limit_fails_closed_without_a_relation_head() -> None:
     for model in (SimpleNamespace(heads={"ner": object()}), SimpleNamespace()):
         with pytest.raises(RuntimeError, match="no joint relation head"):
             adapter_module._limit_relation_entities(model)
+    with pytest.raises(RuntimeError, match="no longer decodes entity candidates"):
+        adapter_module._limit_relation_entities(
+            SimpleNamespace(heads={"joint_relex": SimpleNamespace(max_relation_entities=None)})
+        )
 
 
 def test_supplied_entity_label_order_does_not_create_groups() -> None:
@@ -1207,7 +1239,7 @@ def test_encode_rejects_non_dense_outputs() -> None:
 
 def _fake_heads() -> dict[str, Any]:
     ner_head = MagicMock()
-    relation_head = SimpleNamespace(max_relation_entities=None, _owns_ner_head=False, _reused_ner_head=ner_head)
+    relation_head = _relation_head(max_relation_entities=None, _owns_ner_head=False, _reused_ner_head=ner_head)
     return {"ner": ner_head, "joint_relex": relation_head}
 
 
@@ -1235,7 +1267,7 @@ def test_load_pins_snapshot_and_places_model(device: str, precision: str | None,
     model = MagicMock()
     model.config = SimpleNamespace(max_len=2048, embedding_config=SimpleNamespace(projection_dim=768))
     ner_head = MagicMock()
-    relation_head = SimpleNamespace(max_relation_entities=None, _owns_ner_head=False, _reused_ner_head=ner_head)
+    relation_head = _relation_head(max_relation_entities=None, _owns_ner_head=False, _reused_ner_head=ner_head)
     model.model.heads = {"joint_relex": relation_head, "ner": ner_head}
     set_eval_mode = model.eval
     tokenizer = model.data_processor.transformer_tokenizer
@@ -1280,6 +1312,7 @@ def test_load_pins_snapshot_and_places_model(device: str, precision: str | None,
     assert probe.kwargs["joint_relations"] is not None
     assert probe.kwargs["structures"] is not None
     assert relation_head.max_relation_entities == 100
+    assert relation_head.max_relation_span_width == 32
     assert tokenizer.model_max_length == 2048
     assert adapter._tokenizer is tokenizer
     assert adapter._normalize_structures == "normalizer"

@@ -424,6 +424,39 @@ def test_record_spans_are_bounded_per_document_not_per_slot() -> None:
     assert len(capped) == 100
 
 
+def test_record_text_is_bounded_per_document() -> None:
+    span = upstream.Span
+    slots = [
+        (0, [span(start=0, end=99, entity_type="a", score=0.9), span(start=0, end=9, entity_type="a", score=0.5)]),
+        (1, [span(start=0, end=49, entity_type="b", score=0.7), span(start=60, end=60, entity_type="b", score=0.6)]),
+    ]
+    assert structuring_decoding._within_word_limit(slots, 161) is slots
+    # 100 + 50 words fit in 155; the next best (1 word, score 0.6) fits too; the last (10 words) does not.
+    kept = structuring_decoding._within_word_limit(slots, 155)
+    assert [(slot, [(s.start, s.end) for s in spans]) for slot, spans in kept] == [
+        (0, [(0, 99)]),
+        (1, [(0, 49), (60, 60)]),
+    ]
+    assert structuring_decoding._within_word_limit(slots, 50) == [(0, []), (1, [])]
+
+
+def test_fully_nested_records_stay_within_the_text_bound() -> None:
+    spans = [(i, 8190 - i) for i in range(4095)]
+    count = len(spans)
+    output = SimpleNamespace(
+        structuring_logits=torch.full((1, 3, count), 4.0),
+        structuring_field_logits=torch.full((1, count, 1), 4.0),
+        structuring_span_idx=torch.tensor([spans]),
+        structuring_span_mask=torch.ones(1, count, dtype=torch.bool),
+        structuring_batch_origin=torch.arange(1),
+        batch_size=1,
+    )
+    records = _STRUCTURING.decode(output, threshold=0.1, flat_ner=False, texts=[[f"w{i}" for i in range(8191)]])
+    fields = [field for group in records[0] for record in group for field in record]
+    words = sum(field["end"] - field["start"] + 1 for field in fields)
+    assert 0 < words <= structuring_decoding.MAX_RECORD_WORDS
+
+
 # -- Replacing the package's functions ---------------------------------------------
 
 
