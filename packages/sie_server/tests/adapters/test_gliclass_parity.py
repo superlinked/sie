@@ -98,7 +98,13 @@ class _Rig:
     """A tiny GLiClass model behind both the gliclass pipelines and the adapter."""
 
     def __init__(
-        self, *, prompt_first: bool, scorer: str, device: str = "cpu", dtype: torch.dtype = torch.float32
+        self,
+        *,
+        prompt_first: bool,
+        scorer: str,
+        device: str = "cpu",
+        dtype: torch.dtype = torch.float32,
+        cuda_graphs: str = "off",
     ) -> None:
         tokenizer = _tokenizer()
         model = _model(tokenizer, prompt_first=prompt_first, scorer=scorer).to(device, dtype=dtype)
@@ -113,7 +119,7 @@ class _Rig:
             )
             for classification_type in ("single-label", "multi-label")
         }
-        self.adapter = GLiClassAdapter("tiny", max_seq_length=_MAX_LENGTH)
+        self.adapter = GLiClassAdapter("tiny", max_seq_length=_MAX_LENGTH, cuda_graphs=cuda_graphs)
         self.adapter._attach(self.pipelines["single-label"].pipe, tokenizer)
 
     def pipeline_scores(
@@ -365,43 +371,69 @@ _GRAPH_REQUESTS = [
 _GRAPH_REQUEST_IDS = ["labels", "labels-context", "joint", "separate"]
 
 
-@pytest.fixture(scope="module", params=[(False, "simple"), (True, "mlp")], ids=["text-first", "labels-first"])
-def cuda_rig(request: pytest.FixtureRequest) -> _Rig:
+_LAYOUTS = {"params": [(False, "simple"), (True, "mlp")], "ids": ["text-first", "labels-first"]}
+
+
+def _cuda_rig(request: pytest.FixtureRequest, mode: str) -> _Rig:
     if not torch.cuda.is_available():
         pytest.skip("requires CUDA")
     prompt_first, scorer = request.param
-    return _Rig(prompt_first=prompt_first, scorer=scorer, device="cuda:0", dtype=torch.float16)
+    return _Rig(prompt_first=prompt_first, scorer=scorer, device="cuda:0", dtype=torch.float16, cuda_graphs=mode)
 
 
-def _graph_request(request_kwargs: dict[str, Any], mode: str) -> dict[str, Any]:
-    return {**request_kwargs, "options": {**request_kwargs.get("options", {}), "cuda_graphs": mode}}
+@pytest.fixture(scope="module", **_LAYOUTS)
+def exact_rig(request: pytest.FixtureRequest) -> _Rig:
+    return _cuda_rig(request, "exact")
+
+
+@pytest.fixture(scope="module", **_LAYOUTS)
+def bucketed_rig(request: pytest.FixtureRequest) -> _Rig:
+    return _cuda_rig(request, "bucketed")
+
+
+def _fresh_runner(rig: _Rig) -> Any:
+    """The rig's graph runner, emptied and with a full recording burst."""
+    runner = rig.adapter._graphs
+    assert runner is not None
+    runner.clear()
+    runner._recording_credit = 16.0
+    return runner
+
+
+_EAGER = {"cuda_graphs": "off"}
+
+
+def _eager_request(request_kwargs: dict[str, Any]) -> dict[str, Any]:
+    return {**request_kwargs, "options": {**request_kwargs.get("options", {}), **_EAGER}}
 
 
 @pytest.mark.gpu_hw
 @pytest.mark.parametrize("request_kwargs", _GRAPH_REQUESTS, ids=_GRAPH_REQUEST_IDS)
-def test_exact_cuda_graphs_score_bit_for_bit_like_eager(cuda_rig: _Rig, request_kwargs: dict[str, Any]) -> None:
+def test_exact_cuda_graphs_score_bit_for_bit_like_eager(exact_rig: _Rig, request_kwargs: dict[str, Any]) -> None:
     # Eleven texts of different lengths, sent three times: a shape is recorded
     # the second time it is seen and replayed the third.
     items = [Item(text=text) for text in _TEXTS]
+    runner = _fresh_runner(exact_rig)
 
-    eager = _outputs(cuda_rig.adapter.extract(items, **_graph_request(request_kwargs, "off")))
+    eager = _outputs(exact_rig.adapter.extract(items, **_eager_request(request_kwargs)))
     for _ in range(3):
-        assert _outputs(cuda_rig.adapter.extract(items, **_graph_request(request_kwargs, "exact"))) == eager
+        assert _outputs(exact_rig.adapter.extract(items, **request_kwargs)) == eager
 
-    runner = cuda_rig.adapter._graphs
-    assert runner is not None
     assert runner.graph_count > 0
     assert not runner.disabled
+    # Graphs of one length share its relative-position table.
+    assert set(runner._relative_pos) == {length for _, length, _ in runner._graphs}
 
 
 @pytest.mark.gpu_hw
 @pytest.mark.parametrize("request_kwargs", _GRAPH_REQUESTS, ids=_GRAPH_REQUEST_IDS)
-def test_bucketed_cuda_graphs_stay_close_to_eager(cuda_rig: _Rig, request_kwargs: dict[str, Any]) -> None:
+def test_bucketed_cuda_graphs_stay_close_to_eager(bucketed_rig: _Rig, request_kwargs: dict[str, Any]) -> None:
     items = [Item(text=text) for text in _TEXTS]
+    runner = _fresh_runner(bucketed_rig)
 
-    eager = cuda_rig.adapter.extract(items, **_graph_request(request_kwargs, "off"))
+    eager = bucketed_rig.adapter.extract(items, **_eager_request(request_kwargs))
     for _ in range(2):
-        graphed = cuda_rig.adapter.extract(items, **_graph_request(request_kwargs, "bucketed"))
+        graphed = bucketed_rig.adapter.extract(items, **request_kwargs)
         if eager.data:
             pairs = [
                 (a["probabilities"], b["probabilities"])
@@ -413,8 +445,7 @@ def test_bucketed_cuda_graphs_stay_close_to_eager(cuda_rig: _Rig, request_kwargs
         for expected, got in pairs:
             assert got == pytest.approx(expected, abs=2e-2)
         assert graphed.input_token_counts == eager.input_token_counts
-    runner = cuda_rig.adapter._graphs
-    assert runner is not None
+    assert runner.graph_count > 0
     assert not runner.disabled
 
 
@@ -422,18 +453,16 @@ def test_bucketed_cuda_graphs_stay_close_to_eager(cuda_rig: _Rig, request_kwargs
 def test_a_forward_that_cannot_be_recorded_falls_back_to_eager(monkeypatch: pytest.MonkeyPatch) -> None:
     if not torch.cuda.is_available():
         pytest.skip("requires CUDA")
-    rig = _Rig(prompt_first=True, scorer="mlp", device="cuda:0", dtype=torch.float16)
+    rig = _Rig(prompt_first=True, scorer="mlp", device="cuda:0", dtype=torch.float16, cuda_graphs="bucketed")
     items = [Item(text=text) for text in _TEXTS[:3]]
-    eager = _outputs(rig.adapter.extract(items, labels=_LABELS))
-    rig.adapter.extract(items, labels=_LABELS, options={"cuda_graphs": "bucketed"})
+    eager = _outputs(rig.adapter.extract(items, labels=_LABELS, options=_EAGER))
     runner = rig.adapter._graphs
     assert runner is not None
-    runner.clear()
     # Without the precomputed table, DeBERTa copies a CPU scalar to the GPU
     # while recording, which CUDA refuses: the runner turns itself off.
     monkeypatch.setattr(runner, "_build_relative_pos", lambda hidden: None)
 
-    graphed = rig.adapter.extract(items, labels=_LABELS, options={"cuda_graphs": "bucketed"})
+    graphed = rig.adapter.extract(items, labels=_LABELS)
 
     assert runner.disabled
     assert _outputs(graphed) == eager
@@ -441,17 +470,27 @@ def test_a_forward_that_cannot_be_recorded_falls_back_to_eager(monkeypatch: pyte
 
 
 @pytest.mark.parametrize("mode", ["exact", "bucketed"])
-def test_cuda_graphs_run_eagerly_on_cpu(rig: _Rig, mode: str) -> None:
+def test_cuda_graphs_run_eagerly_on_cpu(mode: str) -> None:
+    items = [Item(text=text) for text in _TEXTS]
+    graphs_rig = _Rig(prompt_first=True, scorer="mlp", cuda_graphs=mode)
+    plain_rig = _Rig(prompt_first=True, scorer="mlp")
+
+    eager = plain_rig.adapter.extract(items, labels=_LABELS)
+    for _ in range(2):
+        graphed = graphs_rig.adapter.extract(items, labels=_LABELS)
+        assert _outputs(graphed) == _outputs(eager)
+    assert graphs_rig.adapter._graphs is None
+
+
+@pytest.mark.parametrize("value", ["exact", "bucketed", "on", True, None, 1])
+def test_requests_cannot_turn_cuda_graphs_on(rig: _Rig, value: object) -> None:
+    with pytest.raises(InvalidInputError, match="accepts only 'off'"):
+        rig.adapter.extract([Item(text=_TEXTS[0])], labels=_LABELS, options={"cuda_graphs": value})
+
+
+def test_requests_may_turn_cuda_graphs_off(rig: _Rig) -> None:
     items = [Item(text=text) for text in _TEXTS]
 
-    eager = rig.adapter.extract(items, labels=_LABELS)
-    for _ in range(2):
-        graphed = rig.adapter.extract(items, labels=_LABELS, options={"cuda_graphs": mode})
-        assert _outputs(graphed) == _outputs(eager)
-    assert rig.adapter._graphs is None
-
-
-@pytest.mark.parametrize("value", ["on", "Exact", True, None, 1])
-def test_unknown_cuda_graphs_values_are_refused(rig: _Rig, value: object) -> None:
-    with pytest.raises(InvalidInputError, match="cuda_graphs must be 'off', 'exact' or 'bucketed'"):
-        rig.adapter.extract([Item(text=_TEXTS[0])], labels=_LABELS, options={"cuda_graphs": value})
+    assert _outputs(rig.adapter.extract(items, labels=_LABELS, options=_EAGER)) == _outputs(
+        rig.adapter.extract(items, labels=_LABELS)
+    )

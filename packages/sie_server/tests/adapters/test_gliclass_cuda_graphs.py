@@ -13,12 +13,16 @@ from typing import Any
 import pytest
 import torch
 from gliclass.model import GLiClassUniEncoder
+from sie_server.adapters.gliclass import GLiClassAdapter
+from sie_server.adapters.gliclass import cuda_graphs as cuda_graphs_module
 from sie_server.adapters.gliclass.cuda_graphs import (
     CudaGraphRunner,
     bucket_width,
     segment_ids,
     unsupported_reason,
 )
+from sie_server.core.loader import reject_unknown_loadtime_options
+from sie_server.types.inputs import InvalidInputError
 
 
 class _Encoder:
@@ -51,21 +55,34 @@ def _model(
 
 
 class _Runner(CudaGraphRunner):
-    """Records and replays with fakes: logits say which path produced them."""
+    """Records and replays with fakes: logits say which path produced them.
+
+    Time stands still unless a test moves ``now``; the device always has
+    memory to spare unless a test clears ``headroom``.
+    """
 
     def __init__(self, model: Any = None, *, fail: bool = False, **kwargs: Any) -> None:
-        super().__init__(model or _model(), pad_token_id=0, max_length=512, **kwargs)
+        self.now = 0.0
+        super().__init__(model or _model(), pad_token_id=0, max_length=512, clock=lambda: self.now, **kwargs)
         self.recorded: list[tuple[int, int, int]] = []
         self.replayed: list[tuple[int, int, int]] = []
         self.fail = fail
+        self.headroom = True
+        self.replay_error: Exception | None = None
+
+    def _has_headroom(self, device: torch.device) -> bool:
+        return self.headroom
 
     def _record(self, key: Any, inputs: dict[str, torch.Tensor]) -> Any:
         if self.fail:
             raise RuntimeError("operation not permitted when stream is capturing")
         self.recorded.append(key)
-        return SimpleNamespace(key=key, replays=0), torch.zeros(key[0], key[2])
+        self._relative_pos.setdefault(key[1], torch.zeros(1))
+        return SimpleNamespace(key=key), torch.zeros(key[0], key[2])
 
     def _replay(self, entry: Any, inputs: dict[str, torch.Tensor], length: int) -> torch.Tensor:
+        if self.replay_error is not None:
+            raise self.replay_error
         self.replayed.append(entry.key)
         return torch.ones(entry.key[0], entry.key[2])
 
@@ -177,40 +194,69 @@ class TestRecordingPolicy:
 
         assert runner.graph_count == 2
         assert runner.recorded == [(1, 32, 4), (1, 64, 4), (1, 96, 4), (1, 64, 4)]
+        # A length's relative-position table lives as long as a graph of that length.
+        assert set(runner._relative_pos) == {64, 96}
 
-    def test_recording_is_rationed_so_many_shapes_cannot_thrash(self) -> None:
+    def test_recording_is_rationed_in_time(self) -> None:
         runner = _Runner(max_graphs=1000)
+        shapes = iter(range(2, 10_000))
 
-        # Every call is a new shape: sixteen record at once, then one per eight calls.
-        answers = [runner.run(_inputs(1, 100), classes, "bucketed") for classes in range(2, 82)]
+        # Every call is a new shape: sixteen record at once, then none while time stands still.
+        answers = [runner.run(_inputs(1, 100), next(shapes), "bucketed") for _ in range(80)]
+        assert len(runner.recorded) == 16
+        assert answers.count(None) == 64  # the rest ran eagerly
 
-        assert 16 + 80 // 8 - 1 <= len(runner.recorded) <= 16 + 80 // 8
-        assert answers.count(None) == 80 - len(runner.recorded)  # the rest ran eagerly
+        runner.now += 2.0  # one more recording every 2 seconds
+        for _ in range(10):
+            runner.run(_inputs(1, 100), next(shapes), "bucketed")
+        assert len(runner.recorded) == 17
 
-    def test_recording_slows_while_graphs_leave_the_cache_unused(self) -> None:
-        runner = _Runner(max_graphs=4)
+        runner.now += 3600.0  # an idle hour refills only the burst
+        for _ in range(40):
+            runner.run(_inputs(1, 100), next(shapes), "bucketed")
+        assert len(runner.recorded) == 33
 
-        # Shapes that never repeat: evicted graphs were never replayed.
-        for classes in range(2, 402):
-            runner.run(_inputs(1, 100), classes, "bucketed")
-        wasteful = len(runner.recorded)
-        # Fewer than one recording per 8 forwards past the first burst.
-        assert wasteful < 16 + 400 // 8
-        assert runner._wasted > 0.5
+    def test_repeating_each_shape_does_not_buy_recordings(self) -> None:
+        runner = _Runner()
 
-        # Shapes that repeat are still recorded, one per 64 forwards, then replayed.
-        runner.recorded.clear()
-        for _ in range(100):
-            for classes in (500, 501):
+        # Each new shape sent twice, one forward per 10 ms for 80 seconds.
+        for classes in range(2, 4002):
+            for _ in range(2):
                 runner.run(_inputs(1, 100), classes, "bucketed")
-        assert set(runner.recorded) == {(1, 128, 500), (1, 128, 501)}
-        assert runner.replayed[-2:] == [(1, 128, 500), (1, 128, 501)]
+                runner.now += 0.01
+
+        # The burst, then one per 2 seconds of the 80.
+        assert 16 + 80 / 2 - 1 <= len(runner.recorded) <= 16 + 80 / 2
+
+    def test_one_recording_at_a_time_in_the_process(self) -> None:
+        runner = _Runner()
+
+        assert cuda_graphs_module._RECORDING_LOCK.acquire(blocking=False)  # another model is recording
+        try:
+            assert runner.run(_inputs(1, 100), 4, "bucketed") is None
+        finally:
+            cuda_graphs_module._RECORDING_LOCK.release()
+        assert runner.recorded == []
+        assert runner.run(_inputs(1, 100), 4, "bucketed") is not None
+        assert runner.recorded == [(1, 128, 4)]
+        assert not cuda_graphs_module._RECORDING_LOCK.locked()
+
+    def test_no_recording_while_device_memory_is_short(self) -> None:
+        runner = _Runner()
+        runner.run(_inputs(1, 100), 4, "bucketed")
+        runner.headroom = False
+
+        assert runner.run(_inputs(1, 200), 4, "bucketed") is None  # would record: runs eagerly
+        assert runner.run(_inputs(1, 100), 4, "bucketed") is not None  # replays still run
+        assert runner.recorded == [(1, 128, 4)]
+        assert runner.replayed == [(1, 128, 4)]
 
     def test_a_recording_failure_turns_graphs_off(self) -> None:
         runner = _Runner(fail=True)
 
         assert runner.run(_inputs(1, 100), 4, "bucketed") is None
         assert runner.disabled
+        assert not cuda_graphs_module._RECORDING_LOCK.locked()
         runner.fail = False
         assert runner.run(_inputs(1, 100), 4, "bucketed") is None
         assert runner.recorded == []
@@ -265,26 +311,75 @@ def test_segment_ids_are_the_libraries_own(rows: list[list[int]]) -> None:
     assert torch.equal(segment_ids(input_ids, config), expected)
 
 
+class _Pipe:
+    def _resolve_max_num_classes(self, labels: list[str], same_labels: bool) -> int:
+        return len(labels)
+
+    def model(self, **_: Any) -> Any:
+        raise torch.cuda.OutOfMemoryError("CUDA out of memory")
+
+
+def _adapter_with(runner: _Runner) -> GLiClassAdapter:
+    adapter = GLiClassAdapter("tiny", max_seq_length=512, cuda_graphs="bucketed")
+    adapter._graphs = runner
+    return adapter
+
+
 def test_an_eager_out_of_memory_drops_the_graphs() -> None:
-    from sie_server.adapters.gliclass import GLiClassAdapter
-
-    class _Pipe:
-        def _resolve_max_num_classes(self, labels: list[str], same_labels: bool) -> int:
-            return len(labels)
-
-        def model(self, **_: Any) -> Any:
-            raise torch.cuda.OutOfMemoryError("CUDA out of memory")
-
     runner = _Runner()
     runner.run(_inputs(1, 100), 2, "bucketed")
     assert runner.graph_count == 1
     runner._recording_credit = 0.0  # the next shape is not recorded and runs eagerly
-    adapter = GLiClassAdapter("tiny", max_seq_length=512)
-    adapter._graphs = runner
 
     with pytest.raises(torch.cuda.OutOfMemoryError):
-        adapter._forward(_Pipe(), _inputs(1, 300), ["a", "b"], same_labels=True, graphs="bucketed")
+        _adapter_with(runner)._forward(_Pipe(), _inputs(1, 300), ["a", "b"], same_labels=True, graphs="bucketed")
 
     assert runner.graph_count == 0
     assert runner.recorded == [(1, 128, 2)]
     assert not runner.disabled
+
+
+def test_an_out_of_memory_error_in_a_replay_drops_the_graphs() -> None:
+    runner = _Runner()
+    runner.run(_inputs(1, 100), 2, "bucketed")
+    runner.replay_error = torch.cuda.OutOfMemoryError("CUDA out of memory")
+
+    with pytest.raises(torch.cuda.OutOfMemoryError):
+        _adapter_with(runner)._forward(_Pipe(), _inputs(1, 100), ["a", "b"], same_labels=True, graphs="bucketed")
+
+    assert runner.graph_count == 0
+
+
+class TestOperatorSetting:
+    """Graphs are chosen when the model loads; a request can only opt out."""
+
+    @pytest.mark.parametrize("mode", ["off", "exact", "bucketed"])
+    def test_requests_use_the_load_time_mode(self, mode: str) -> None:
+        adapter = GLiClassAdapter("tiny", cuda_graphs=mode)
+
+        assert adapter._request_cuda_graphs({}) == mode
+        assert adapter._request_cuda_graphs({"cuda_graphs": "off"}) == "off"
+
+    @pytest.mark.parametrize("value", ["exact", "bucketed", "on", "Off", True, None, 1])
+    def test_a_request_can_only_turn_graphs_off(self, value: object) -> None:
+        adapter = GLiClassAdapter("tiny", cuda_graphs="bucketed")
+
+        with pytest.raises(InvalidInputError, match="accepts only 'off'"):
+            adapter._request_cuda_graphs({"cuda_graphs": value})
+
+    @pytest.mark.parametrize("value", ["on", "Exact", "", None])
+    def test_unknown_load_time_modes_fail_the_load(self, value: Any) -> None:
+        with pytest.raises(ValueError, match="cuda_graphs must be 'off', 'exact' or 'bucketed'"):
+            GLiClassAdapter("tiny", cuda_graphs=value)
+
+    def test_profiles_may_set_it_at_load(self) -> None:
+        reject_unknown_loadtime_options(GLiClassAdapter, {"cuda_graphs": "bucketed"}, model_name="tiny")
+
+    def test_a_request_that_opts_out_runs_eagerly(self) -> None:
+        runner = _Runner()
+        runner.run(_inputs(1, 100), 2, "bucketed")
+
+        with pytest.raises(torch.cuda.OutOfMemoryError):  # the fake pipe's eager forward
+            _adapter_with(runner)._forward(_Pipe(), _inputs(1, 100), ["a", "b"], same_labels=True, graphs="off")
+
+        assert runner.replayed == []
