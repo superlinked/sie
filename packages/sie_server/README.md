@@ -93,14 +93,27 @@ A request can send `options={"cuda_graphs": "off"}` to run eagerly on a model
 loaded with graphs. It cannot turn graphs on: any other value is refused.
 
 Padding is masked, but a longer sequence rounds fp16 sums differently, the same
-kind of change batching requests together makes. Against eager execution on
-CVE descriptions from `examples/typed-decisions` (384 for
-`gliclass-large-v1.0`, 100 for the other models, three questions each, asked
-one at a time and as separate groups), `bucketed` moved probabilities by at
-most 0.004 on `gliclass-small-v1.0`, 0.006 on `gliclass-large-v1.0`, 0.010 on
-`gliclass-instruct-large-v1.0`, 0.013 on `opir-multitask-large-v1.0` and 0.023
-on `gliclass-multilang-mini`, where 3 of 900 separate-group answers changed
-their top label. `exact` changed nothing.
+kind of change batching requests together makes. We compared `bucketed` with
+eager execution on the 384 CVE descriptions from `examples/typed-decisions`,
+three questions each, asked one at a time, as separate groups and as joint
+groups, plus 65 long documents. Each input was sent three times (long
+documents twice), so that graphs were recorded and then replayed: 11,538
+answers per model. A small change can still flip a near tie between the top
+two labels:
+
+| Model | Largest probability change | Top label changed |
+|--|--|--|
+| `gliclass-small-v1.0` | 0.004 | 3 answers |
+| `gliclass-base-v1.0` | 0.005 | none |
+| `gliclass-large-v1.0` | 0.006 | none |
+| `gliclass-base-v3.0` | 0.005 | 3 |
+| `gliclass-large-v3.0` | 0.009 | 3 |
+| `gliclass-instruct-base-v1.0` | 0.008 | 12 |
+| `gliclass-instruct-large-v1.0` | 0.010 | 18 |
+| `opir-multitask-large-v1.0` | 0.014 | none |
+| `gliclass-multilang-mini` (100 descriptions, no joint groups: 2,016 answers) | 0.023 | 3 |
+
+`exact` changed nothing.
 
 Graphs apply on CUDA to the DeBERTa-based GLiClass models: the v1.0 models,
 `gliclass-base-v3.0` and `gliclass-large-v3.0`, the base and large instruct
