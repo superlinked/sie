@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import importlib
+import inspect
 import logging
 import math
 import threading
@@ -34,6 +36,8 @@ from sie_server.adapters.gliformer.output_schema import (
     compile_output_schema,
     shape_structured_output,
 )
+from sie_server.adapters.gliformer.span_decoding import pair_spans, propose_spans, select_spans
+from sie_server.adapters.gliformer.structuring_decoding import make_structuring_decode
 from sie_server.core.extract_cost import MAX_EXTRACT_LABELS
 from sie_server.core.inference_output import EncodeOutput, ExtractItemError, ExtractOutput
 from sie_server.types.inputs import InvalidInputError, Item
@@ -52,12 +56,12 @@ _ERR_RELATIONS_OPTION = "GLiFormer takes relation types as options.relation_labe
 _SNAPSHOT_IGNORE_PATTERNS = ["*.gif"]
 
 # Lowest threshold for requests that decode spans (entities, relations,
-# output_schema fields). GLiFormer's span decoder pairs every start above the
-# threshold with every end above it in Python, so a near-zero threshold turns
-# decoding quadratic in words x labels (seconds at a few hundred words); the
-# relation head decodes its entities the same way. Classification decoding is
-# a sigmoid and a filter per label, so classification-only requests accept any
-# threshold.
+# output_schema fields). Span decoding keeps at most MAX_SPAN_CANDIDATES
+# (span_decoding) candidates per document, but candidates multiply as the
+# threshold falls (an entity-dense 2048-word document with 64 labels has 691
+# at 0.5 and 1334 at 0.1), and the floor keeps ordinary documents well inside
+# that bound. Classification decoding is a sigmoid and a filter per label, so
+# classification-only requests accept any threshold.
 _MIN_SPAN_THRESHOLD = 0.1
 # GLiFormer's classification decoder reads a threshold of 0 as "unset" and
 # falls back to 0.5, so 0 is passed on as the smallest positive threshold.
@@ -119,6 +123,7 @@ def _import_gliformer() -> ModuleType:
         import gliformer  # ty:ignore[unresolved-import]
 
         _drop_builtin_auto_model_overrides()
+        _bound_span_decoding()
     return gliformer
 
 
@@ -156,6 +161,118 @@ def _drop_builtin_auto_model_overrides() -> None:
     for config_class in overridden:
         if getattr(mapping[config_class], "__module__", "").startswith("gliformer."):
             raise RuntimeError(f"AutoModel for {config_class.__name__} still resolves to a gliformer class")
+
+
+def _bound_span_decoding() -> None:
+    """Replace GLiFormer's span decoding hot spots with bounded, equivalent code, or fail.
+
+    Every BIO span decoder in the package (entities, the relation head's
+    entity candidates, structuring fields) pairs starts with ends in
+    ``SpanDecoder._calculate_span_score`` and removes overlaps in
+    ``SpanDecoder.greedy_search``; the structuring head proposes spans with
+    GLiNER's ``extract_spans_from_tokens`` and turns them into records in
+    ``StructuringDecoder.decode``. All four work pair by pair in Python. The
+    replacements return the same spans in the same order with the same
+    scores, and bound how many candidates a document row can produce (see
+    ``span_decoding`` and ``structuring_decoding``). The relation head builds
+    a new span decoder for every forward pass, so methods are replaced on the
+    classes.
+
+    Raises:
+        RuntimeError: A replaced function is missing, or no longer has the
+            parameters (and, in the exactly pinned gliformer package, the
+            source) that its replacement was verified against.
+    """
+    span_decoder = importlib.import_module("gliformer.tasks.span_decoder")
+    structuring_model = importlib.import_module("gliformer.tasks.structuring.model")
+    structuring_decoder = importlib.import_module("gliformer.tasks.structuring.decoder")
+    span_class = span_decoder.Span
+
+    def calculate_span_score(
+        self: Any,
+        start_idx: Any,
+        end_idx: Any,
+        scores_inside: torch.Tensor,
+        scores_start: torch.Tensor,
+        scores_end: torch.Tensor,
+        id_to_classes: Mapping[int, Any],
+        threshold: float,
+        max_width: int | None = None,
+    ) -> list[Any]:
+        _ = self
+        return pair_spans(
+            start_idx,
+            end_idx,
+            scores_inside,
+            scores_start,
+            scores_end,
+            id_to_classes,
+            threshold,
+            make_span=span_class,
+            max_width=max_width,
+        )
+
+    def greedy_search(self: Any, spans: list[Any], flat_ner: bool = True, multi_label: bool = False) -> list[Any]:
+        _ = self
+        return select_spans(spans, flat_ner, multi_label)
+
+    _replace_package_function(
+        span_decoder.SpanDecoder,
+        "_calculate_span_score",
+        calculate_span_score,
+        source_sha256="5e05a885577dbedbf52f3d98ad391e7cb37b7762d518b12d82a338cd2976f546",
+    )
+    _replace_package_function(
+        span_decoder.SpanDecoder,
+        "greedy_search",
+        greedy_search,
+        source_sha256="8a08975bc767870ef5e3ed9bc9ec1d2284c19c0604a9eed48480b922dbc099ad",
+    )
+    _replace_package_function(
+        structuring_decoder.StructuringDecoder,
+        "decode",
+        make_structuring_decode(span_class, structuring_decoder.unflatten_by_batch_origin),
+        source_sha256="079bfd5f322bc10981c4150b708da41fbba6cb3742ae5e0daa4e9a4e3f31859c",
+    )
+    original_proposals = getattr(structuring_model, "extract_spans_from_tokens", None)
+    if not callable(original_proposals):
+        raise RuntimeError("GLiFormer's structuring head has no span proposal function to bound")
+
+    def extract_spans_from_tokens(
+        scores: torch.Tensor, labels: torch.Tensor | None = None, threshold: float = 0.5
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return propose_spans(scores, labels, threshold, original=original_proposals)
+
+    # GLiNER's version is not pinned exactly, so only its parameters are checked.
+    _replace_package_function(structuring_model, "extract_spans_from_tokens", extract_spans_from_tokens)
+
+
+def _replace_package_function(
+    owner: Any, name: str, replacement: Callable[..., Any], *, source_sha256: str | None = None
+) -> None:
+    """Set ``owner.name`` to ``replacement`` once, if the original still matches.
+
+    Raises:
+        RuntimeError: ``owner.name`` is missing, takes other parameters than
+            ``replacement``, or its source no longer hashes to ``source_sha256``.
+    """
+    original: Any = getattr(owner, name, None)
+    label = f"{getattr(owner, '__name__', owner)}.{name}"
+    if not callable(original):
+        raise RuntimeError(f"GLiFormer's {label} is missing")
+    if getattr(original, "_sie_bounded", False):
+        return
+    if tuple(inspect.signature(original).parameters) != tuple(inspect.signature(replacement).parameters):
+        raise RuntimeError(f"GLiFormer's {label} changed its parameters")
+    if source_sha256 is not None:
+        try:
+            source = inspect.getsource(original)
+        except (OSError, TypeError) as exc:
+            raise RuntimeError(f"GLiFormer's {label} source cannot be verified") from exc
+        if hashlib.sha256(source.encode()).hexdigest() != source_sha256:
+            raise RuntimeError(f"GLiFormer's {label} changed; its bounded replacement must be verified again")
+    vars(replacement).update(_sie_bounded=True, _sie_original=original)
+    setattr(owner, name, replacement)
 
 
 class _NonFiniteScoresError(RuntimeError):
@@ -219,11 +336,19 @@ class GLiFormerAdapter(BaseAdapter):
 
     ``options["threshold"]`` (default 0.5) applies to every task in the
     request. Requests that extract entities, relations, or span-valued
-    ``output_schema`` fields need at least 0.1: below that, GLiFormer's span
-    decoding grows quadratically with the document and label count.
-    Classification-only requests (``classification_task``, ``label_groups``,
-    or an ``output_schema`` of root enums only) accept any threshold from 0,
-    where every question gets its best answer.
+    ``output_schema`` fields need at least 0.1. Classification-only requests
+    (``classification_task``, ``label_groups``, or an ``output_schema`` of
+    root enums only) accept any threshold from 0, where every question gets
+    its best answer.
+
+    Span decoding is bounded: a document keeps at most 4096 candidate spans
+    for entities and relation endpoints, and at most 4096 structuring
+    proposals, each record slot at most 4096 candidate fields. Beyond that
+    only the highest-scoring candidates are kept, and candidates tied at the
+    cut are dropped together; ordinary documents stay far below the bound, so
+    their results are unchanged. Each document of a batch decodes as it would
+    alone: the padding of shorter documents never forms spans or lowers
+    scores.
 
     ``options["relation_threshold"]`` raises the minimum score for relations
     only. GLiFormer decodes entities and relations with one threshold, so it
@@ -356,6 +481,7 @@ class GLiFormerAdapter(BaseAdapter):
         model.eval()
         _skip_redundant_eval(model)
         model.model.register_forward_hook(_upcast_score_outputs)
+        _mask_padded_words(model.model)
         _limit_relation_entities(model.model)
 
         embedding_config = getattr(model.config, "embedding_config", None)
@@ -730,6 +856,50 @@ def _skip_redundant_eval(model: Any) -> None:
         return current
 
     model.eval = eval_if_training
+
+
+def _mask_padded_words(model: Any) -> None:
+    """Keep the padding of shorter documents out of span decoding.
+
+    A forward pass pads every document to the longest one in its chunk, and
+    the NER head scores padded word positions with logit 0: probability 0.5
+    for start, end, and inside. Below a 0.5 threshold the span decoder then
+    pairs every padded position with every other, quadratic in the padding
+    (about 100 s for 40 short records at threshold 0.3), only for the mapping
+    step to drop those spans. At any threshold, a span that ends a shorter
+    document took the padding's 0.5 as its right neighbour and was reported
+    with score 0.5. The relation and structuring heads run this head for
+    their own entity candidates, so masking its output once covers every
+    decoder: padded positions get logit -inf and each document decodes as it
+    would alone.
+
+    Raises:
+        RuntimeError: The checkpoint has no NER head.
+    """
+    heads = getattr(model, "heads", None)
+    if heads is None or "ner" not in heads:
+        raise RuntimeError("GLiFormer checkpoint has no NER head to mask")
+    heads["ner"].register_forward_hook(_mask_padded_ner_logits)
+
+
+def _mask_padded_ner_logits(_module: torch.nn.Module, _args: Any, output: Any) -> Any:
+    """Forward hook: set the NER logits of padded word positions to -inf.
+
+    Raises:
+        RuntimeError: The head returned logits without a word mask of the
+            same batch and length.
+    """
+    logits = getattr(output, "logits", None)
+    if not isinstance(logits, torch.Tensor):
+        return output
+    extra = getattr(output, "extra", None)
+    mask = extra.get("mask") if isinstance(extra, Mapping) else None
+    if not isinstance(mask, torch.Tensor) or logits.dim() != 4 or tuple(mask.shape) != tuple(logits.shape[:2]):
+        raise RuntimeError("GLiFormer NER logits came without a matching word mask")
+    padded = ~mask.bool()
+    if bool(padded.any()):
+        output.logits = logits.masked_fill(padded[:, :, None, None], float("-inf"))
+    return output
 
 
 def _limit_relation_entities(model: Any) -> None:

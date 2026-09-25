@@ -1187,7 +1187,8 @@ def test_load_pins_snapshot_and_places_model(device: str, precision: str | None,
     model = MagicMock()
     model.config = SimpleNamespace(max_len=2048, embedding_config=SimpleNamespace(projection_dim=768))
     relation_head = SimpleNamespace(max_relation_entities=None)
-    model.model.heads = {"joint_relex": relation_head}
+    ner_head = MagicMock()
+    model.model.heads = {"joint_relex": relation_head, "ner": ner_head}
     set_eval_mode = model.eval
     tokenizer = model.data_processor.transformer_tokenizer
     precision_kwargs = {} if precision is None else {"compute_precision": precision}
@@ -1202,6 +1203,7 @@ def test_load_pins_snapshot_and_places_model(device: str, precision: str | None,
 
     with (
         patch.dict(sys.modules, {"gliformer": module}),
+        patch.object(adapter_module, "_bound_span_decoding") as bound_span_decoding,
         patch.object(adapter_module, "snapshot_download", return_value="/staged/gliformer") as download,
     ):
         adapter.load(device)
@@ -1220,6 +1222,8 @@ def test_load_pins_snapshot_and_places_model(device: str, precision: str | None,
     model.to.assert_called_once_with(device=device, dtype=dtype)
     set_eval_mode.assert_called_once_with()
     model.model.register_forward_hook.assert_called_once_with(adapter_module._upcast_score_outputs)
+    ner_head.register_forward_hook.assert_called_once_with(adapter_module._mask_padded_ner_logits)
+    bound_span_decoding.assert_called_once_with()
     assert relation_head.max_relation_entities == 100
     assert tokenizer.model_max_length == 2048
     assert adapter._tokenizer is tokenizer
@@ -1234,7 +1238,7 @@ def test_load_pins_snapshot_and_places_model(device: str, precision: str | None,
 def test_per_request_eval_walks_the_model_only_when_it_is_training() -> None:
     model = MagicMock()
     model.config = SimpleNamespace(max_len=2048, embedding_config=SimpleNamespace(projection_dim=768))
-    model.model.heads = {"joint_relex": SimpleNamespace(max_relation_entities=None)}
+    model.model.heads = {"joint_relex": SimpleNamespace(max_relation_entities=None), "ner": MagicMock()}
     set_eval_mode = model.eval
     set_eval_mode.side_effect = lambda: setattr(model, "training", False) or model
     model.train.side_effect = lambda mode: setattr(model, "training", mode) or model
@@ -1242,6 +1246,7 @@ def test_per_request_eval_walks_the_model_only_when_it_is_training() -> None:
     adapter = GLiFormerAdapter("/local/checkpoint")
     with (
         patch.dict(sys.modules, {"gliformer": _fake_gliformer_module(model)}),
+        patch.object(adapter_module, "_bound_span_decoding"),
         patch.object(adapter_module.Path, "is_dir", return_value=True),
     ):
         adapter.load("cpu")
@@ -1274,10 +1279,11 @@ def test_per_request_eval_shortcut_does_not_keep_the_model_alive() -> None:
 def test_load_rejects_embedding_dimension_mismatch() -> None:
     model = MagicMock()
     model.config = SimpleNamespace(max_len=2048, embedding_config=SimpleNamespace(projection_dim=768))
-    model.model.heads = {"joint_relex": SimpleNamespace(max_relation_entities=None)}
+    model.model.heads = {"joint_relex": SimpleNamespace(max_relation_entities=None), "ner": MagicMock()}
     adapter = GLiFormerAdapter("/local/checkpoint", dense_dim=1024)
     with (
         patch.dict(sys.modules, {"gliformer": _fake_gliformer_module(model)}),
+        patch.object(adapter_module, "_bound_span_decoding"),
         patch.object(adapter_module.Path, "is_dir", return_value=True),
         pytest.raises(ValueError, match="dimension mismatch"),
     ):
@@ -1344,6 +1350,8 @@ def test_importing_gliformer_through_the_adapter_keeps_transformers_auto_models(
         "from gliformer.backbones import LayoutDebertaConfig, LayoutDebertaModel\n"
         "assert MODEL_MAPPING[Qwen3Config] is Qwen3Model, MODEL_MAPPING[Qwen3Config]\n"
         "assert MODEL_MAPPING[LayoutDebertaConfig] is LayoutDebertaModel\n"
+        "from gliformer.tasks.span_decoder import SpanDecoder\n"
+        "assert SpanDecoder._calculate_span_score._sie_bounded is True\n"
     )
     result = subprocess.run(  # noqa: S603 — fixed interpreter and script
         [sys.executable, "-c", script], capture_output=True, text=True, timeout=600, check=False
