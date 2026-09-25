@@ -534,7 +534,8 @@ def test_a_warm_up_that_runs_out_of_memory_is_tried_again(exact_rig: _Rig, monke
     assert not runner.disabled
 
     runner._recording_credit = 16.0  # skip the pause
-    for _ in range(2):  # warms up again, records, then replays
+    # Dropping the graphs reset the sightings: seen, then warmed up and recorded, then replayed.
+    for _ in range(3):
         assert _outputs(exact_rig.adapter.extract(items, labels=_LABELS)) == eager
     assert runner._stream is not None
     assert runner.graph_count > 0
