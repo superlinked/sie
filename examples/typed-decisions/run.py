@@ -212,10 +212,17 @@ TRANSPORTS = {
 # need 573 tokens before any record text, over the model's 512-token window.
 DEV_PHRASINGS = {
     "gliclass-instruct-large-grouped": (SHORT, CONCRETE),
+    # GLiNER2.5-Decide reads every question's prompt and labels in at most 256 of
+    # its 512 tokens; the described questions take 369.
+    "gliner2.5-decide": (SHORT, CONCRETE),
     # One-call GLiClass takes the per-question backend's settings (tune.INHERITS),
     # so on dev it is recorded only in that tuned mix, to judge it by the page rule.
     "gliclass-large-v1-one-call": (),
 }
+# Backends that cannot take the workflow set's questions as the source writes
+# them: GLiNER2.5-Decide's 256-token prompt budget holds none of the four
+# workflows' question sets (305 to 425 tokens, checked with a placeholder text).
+WORKFLOWS_UNFIT = ("gliner2.5-decide",)
 # The LLM backend sends one fixed prompt, so it has one phrasing and nothing to
 # tune; its prompt is about CVSS, so it answers only the vulnerability set.
 LLM_BACKENDS = tuple(backend for backend, spec in SIE_MODELS.items() if spec["family"] == "llm")
@@ -231,7 +238,11 @@ PLAN: dict[str, dict[str, dict[str, tuple[str, ...]]]] = {
         )
         for backend in SIE_MODELS
     },
-    WORKFLOWS: {backend: {"test": (DESCRIBED,)} for backend in SIE_MODELS if backend not in LLM_BACKENDS},
+    WORKFLOWS: {
+        backend: {"test": (DESCRIBED,)}
+        for backend in SIE_MODELS
+        if backend not in LLM_BACKENDS and backend not in WORKFLOWS_UNFIT
+    },
 }
 VARIANT_CHOICES = (SHORT, DESCRIBED, CONCRETE, TUNED)
 

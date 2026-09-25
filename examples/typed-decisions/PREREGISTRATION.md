@@ -391,3 +391,52 @@ can.
 - Each joins the catalog with the questions it passes on dev (`page.CATALOG`).
   This amendment reassigns no lane. Where Decide stands against Fast and Smart
   is reported, not decided here.
+
+## Amendment 2, 2026-09-25: the dev results, before the test slice
+
+These are the dev recordings on the new server. This section was committed
+before any test record was sent to it.
+
+**Earlier settings.** Every earlier backend's phrasing and rules came out
+unchanged. That includes grouped instruct GLiClass, whose joint-encoded
+recordings reproduce its earlier dev figures exactly.
+
+**Smart, one call.**
+- It matches the per-question calls on all 672 dev answers, with no change of
+  top option and at most 0.0038 difference in probability.
+- Its dev verdicts are the per-question ones. All three questions pass:
+  - weakness 0.879, 5th percentile 0.845;
+  - attack vector 0.924 accuracy, 0.774 balanced, 5th percentile 0.706;
+  - remote without a login 0.821, 5th percentile 0.774.
+- Its median on dev is 28 ms per record for one call. The per-question backend
+  on the earlier server took 139 ms for its three calls.
+
+**The cascade.** On dev it again matches Smart with zero regressions. It
+escalates 73.7% of weakness answers and every attack-vector answer, and makes
+2.00 calls per record against Smart's 1.00. It fails its control and stays off
+the page.
+
+**GLiNER2.5-Decide.**
+- `gliner2.5-decide` is recorded on dev in `short` and `concrete` only. Its
+  prompt budget is 256 of its 512 tokens, and the described questions take
+  369.
+- For the same reason it cannot take any workflow's questions as the source
+  writes them (305 to 425 tokens). A placeholder document was used to check
+  this, and no benchmark record was sent. It is left out of the workflow set
+  (`run.WORKFLOWS_UNFIT`).
+
+The settings chosen by the procedure:
+
+| Backend | Phrasing (weakness, attack vector, remote) | Rules | `weakness` | `attack_vector` | `remote_unauthenticated` | Median per record |
+|---|---|---|---|---|---|---|
+| `gliner2.5-decide` | concrete, short, short | prior, argmax, cut-off 0.81 | **passes**: 0.920, 5th pct 0.887 | fails: 0.799, under the majority's 0.844 | fails: 0.593 balanced; "exploitable remotely" right 27 of 120 | 61 ms |
+| `gliner2.5-multi-decide` | concrete, concrete, short | prior, argmax, cut-off 0.88 | **passes**: 0.866, 5th pct 0.826 | fails: 0.705, under the majority's | fails: 0.574 balanced; "exploitable remotely" right 19 of 120 | 37 ms |
+| `gliner2.5-decide-1b` | described, short, described | prior, argmax, cut-off 0.46 | **passes**: 0.902, 5th pct 0.867 | **passes**: 0.933, 0.804 balanced, 5th pct 0.737 | fails: 0.543 balanced; "needs local access or a login" right 15 of 104 | 42 ms |
+
+- In the catalog, each Decide backend shows the questions it passes above:
+  - `gliner2.5-decide`: weakness.
+  - `gliner2.5-multi-decide`: weakness.
+  - `gliner2.5-decide-1b`: weakness and attack vector.
+- No lane changes. None of the three passes the yes-or-no question, so none can
+  answer everything Smart answers. The README reports how they compare with
+  Fast and Smart on test.

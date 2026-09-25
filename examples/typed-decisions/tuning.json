@@ -1284,6 +1284,105 @@
     }
    },
    "gliclass-large-v1-one-call": {
+    "dev": {
+     "attack_vector": {
+      "accuracy": 0.9241071428571429,
+      "balanced_accuracy": 0.7741207594148771,
+      "bootstrap_p05": {
+       "accuracy_over_majority": 0.049107142857142794,
+       "balanced_accuracy": 0.7055245189323401
+      },
+      "eligible": true,
+      "macro_f1": 0.8824769433465086,
+      "majority_accuracy": 0.84375,
+      "n": 224,
+      "reasons": [],
+      "recall": {
+       "adjacent": [
+        1,
+        1
+       ],
+       "local": [
+        19,
+        34
+       ],
+       "network": [
+        187,
+        189
+       ]
+      }
+     },
+     "remote_unauthenticated": {
+      "accuracy": 0.8214285714285714,
+      "balanced_accuracy": 0.8166666666666667,
+      "bootstrap_p05": {
+       "accuracy_over_majority": 0.2276785714285714,
+       "balanced_accuracy": 0.7739463601532567
+      },
+      "eligible": true,
+      "macro_f1": 0.81859410430839,
+      "majority_accuracy": 0.5357142857142857,
+      "n": 224,
+      "reasons": [],
+      "recall": {
+       "false": [
+        78,
+        104
+       ],
+       "true": [
+        106,
+        120
+       ]
+      }
+     },
+     "weakness": {
+      "accuracy": 0.8794642857142857,
+      "balanced_accuracy": 0.8794642857142857,
+      "bootstrap_p05": {
+       "accuracy_over_majority": 0.6785714285714286,
+       "balanced_accuracy": 0.8452305809110244
+      },
+      "eligible": true,
+      "macro_f1": 0.8785389706276832,
+      "majority_accuracy": 0.125,
+      "n": 224,
+      "reasons": [],
+      "recall": {
+       "access_control": [
+        23,
+        28
+       ],
+       "command_injection": [
+        24,
+        28
+       ],
+       "cross_site_scripting": [
+        27,
+        28
+       ],
+       "file_upload": [
+        24,
+        28
+       ],
+       "memory_corruption": [
+        18,
+        28
+       ],
+       "path_traversal": [
+        27,
+        28
+       ],
+       "request_forgery": [
+        27,
+        28
+       ],
+       "sql_injection": [
+        27,
+        28
+       ]
+      }
+     }
+    },
     "same_as": "gliclass-large-v1"
    },
    "gliclass-small-v1": {
@@ -2188,6 +2287,759 @@
      }
     }
    },
+   "gliner2.5-decide": {
+    "phrasing": {
+     "attack_vector": {
+      "dev": {
+       "concrete": {
+        "accuracy": 0.6651785714285714,
+        "balanced_accuracy": 0.7292250233426704,
+        "p05_balanced_accuracy": 0.6689303904923599,
+        "passes": false,
+        "rule": {
+         "kind": "argmax"
+        }
+       },
+       "short": {
+        "accuracy": 0.7991071428571429,
+        "balanced_accuracy": 0.7724089635854342,
+        "p05_balanced_accuracy": 0.7045617816091954,
+        "passes": false,
+        "rule": {
+         "kind": "argmax"
+        }
+       }
+      },
+      "phrasing": "short"
+     },
+     "remote_unauthenticated": {
+      "dev": {
+       "concrete": {
+        "accuracy": 0.5580357142857143,
+        "balanced_accuracy": 0.5272435897435898,
+        "p05_balanced_accuracy": 0.4989973262032085,
+        "passes": false,
+        "rule": {
+         "cutoff": 0.44,
+         "kind": "cutoff"
+        }
+       },
+       "short": {
+        "accuracy": 0.5714285714285714,
+        "balanced_accuracy": 0.5935897435897436,
+        "p05_balanced_accuracy": 0.5518217332376625,
+        "passes": false,
+        "rule": {
+         "cutoff": 0.76,
+         "kind": "cutoff"
+        }
+       }
+      },
+      "phrasing": "short"
+     },
+     "weakness": {
+      "dev": {
+       "concrete": {
+        "accuracy": 0.9151785714285714,
+        "balanced_accuracy": 0.9151785714285714,
+        "p05_balanced_accuracy": 0.8818117935305435,
+        "passes": true,
+        "rule": {
+         "kind": "prior",
+         "weights": {
+          "access_control": 7.413773411871413,
+          "command_injection": 7.159002854226448,
+          "cross_site_scripting": 8.669658774637675,
+          "file_upload": 6.984877903645131,
+          "memory_corruption": 11.134685324781621,
+          "path_traversal": 8.486770881527942,
+          "request_forgery": 7.767596004265464,
+          "sql_injection": 7.660452881028643
+         }
+        }
+       },
+       "short": {
+        "accuracy": 0.90625,
+        "balanced_accuracy": 0.90625,
+        "p05_balanced_accuracy": 0.8727225209080047,
+        "passes": true,
+        "rule": {
+         "kind": "prior",
+         "weights": {
+          "access_control": 7.5469741683244,
+          "command_injection": 6.941470955294189,
+          "cross_site_scripting": 8.476246802593076,
+          "file_upload": 6.917438666069473,
+          "memory_corruption": 13.671520435804982,
+          "path_traversal": 8.11964366491385,
+          "request_forgery": 7.581345014272981,
+          "sql_injection": 7.536341706194211
+         }
+        }
+       }
+      },
+      "phrasing": "concrete"
+     }
+    },
+    "questions": {
+     "attack_vector": {
+      "dev": {
+       "accuracy": 0.7991071428571429,
+       "balanced_accuracy": 0.7724089635854342,
+       "bootstrap_p05": {
+        "accuracy_over_majority": -0.1026785714285714,
+        "balanced_accuracy": 0.7045617816091954
+       },
+       "eligible": false,
+       "macro_f1": 0.5196466973886329,
+       "majority_accuracy": 0.84375,
+       "n": 224,
+       "reasons": [
+        "accuracy over the majority answer -0.045, 5th percentile -0.103"
+       ],
+       "recall": {
+        "adjacent": [
+         1,
+         1
+        ],
+        "local": [
+         25,
+         34
+        ],
+        "network": [
+         153,
+         189
+        ]
+       }
+      },
+      "rule": {
+       "kind": "argmax"
+      }
+     },
+     "remote_unauthenticated": {
+      "dev": {
+       "accuracy": 0.5669642857142857,
+       "balanced_accuracy": 0.5932692307692308,
+       "bootstrap_p05": {
+        "accuracy_over_majority": -0.0714285714285714,
+        "balanced_accuracy": 0.5589571872757714
+       },
+       "eligible": false,
+       "macro_f1": 0.5155082837202043,
+       "majority_accuracy": 0.5357142857142857,
+       "n": 224,
+       "reasons": [
+        "balanced accuracy 0.593, 5th percentile 0.559",
+        "accuracy over the majority answer +0.031, 5th percentile -0.071",
+        "true right 27 of 120"
+       ],
+       "recall": {
+        "false": [
+         100,
+         104
+        ],
+        "true": [
+         27,
+         120
+        ]
+       }
+      },
+      "rule": {
+       "cutoff": 0.81,
+       "kind": "cutoff"
+      }
+     },
+     "weakness": {
+      "dev": {
+       "accuracy": 0.9196428571428571,
+       "balanced_accuracy": 0.9196428571428572,
+       "bootstrap_p05": {
+        "accuracy_over_majority": 0.7232142857142857,
+        "balanced_accuracy": 0.8873388471550236
+       },
+       "eligible": true,
+       "macro_f1": 0.9199865732979268,
+       "majority_accuracy": 0.125,
+       "n": 224,
+       "reasons": [],
+       "recall": {
+        "access_control": [
+         26,
+         28
+        ],
+        "command_injection": [
+         27,
+         28
+        ],
+        "cross_site_scripting": [
+         28,
+         28
+        ],
+        "file_upload": [
+         25,
+         28
+        ],
+        "memory_corruption": [
+         26,
+         28
+        ],
+        "path_traversal": [
+         21,
+         28
+        ],
+        "request_forgery": [
+         26,
+         28
+        ],
+        "sql_injection": [
+         27,
+         28
+        ]
+       }
+      },
+      "rule": {
+       "kind": "prior",
+       "weights": {
+        "access_control": 7.559838882851704,
+        "command_injection": 7.313985434381895,
+        "cross_site_scripting": 8.592908540967995,
+        "file_upload": 6.929251664688557,
+        "memory_corruption": 10.970650471110693,
+        "path_traversal": 8.375443108972515,
+        "request_forgery": 7.7271819411955684,
+        "sql_injection": 7.671966648872116
+       }
+      }
+     }
+    }
+   },
+   "gliner2.5-decide-1b": {
+    "phrasing": {
+     "attack_vector": {
+      "dev": {
+       "concrete": {
+        "accuracy": 0.9330357142857143,
+        "balanced_accuracy": 0.8035325241207594,
+        "p05_balanced_accuracy": 0.7371134020618557,
+        "passes": true,
+        "rule": {
+         "kind": "argmax"
+        }
+       },
+       "described": {
+        "accuracy": 0.9285714285714286,
+        "balanced_accuracy": 0.7767662620603797,
+        "p05_balanced_accuracy": 0.7056595365418895,
+        "passes": true,
+        "rule": {
+         "kind": "argmax"
+        }
+       },
+       "short": {
+        "accuracy": 0.9196428571428571,
+        "balanced_accuracy": 0.8197167755991286,
+        "p05_balanced_accuracy": 0.7534534534534535,
+        "passes": true,
+        "rule": {
+         "kind": "argmax"
+        }
+       }
+      },
+      "phrasing": "short"
+     },
+     "remote_unauthenticated": {
+      "dev": {
+       "concrete": {
+        "accuracy": 0.5714285714285714,
+        "balanced_accuracy": 0.5423076923076923,
+        "p05_balanced_accuracy": 0.5110047846889952,
+        "passes": false,
+        "rule": {
+         "cutoff": 0.54,
+         "kind": "cutoff"
+        }
+       },
+       "described": {
+        "accuracy": 0.5803571428571429,
+        "balanced_accuracy": 0.5493589743589743,
+        "p05_balanced_accuracy": 0.5217252650880969,
+        "passes": false,
+        "rule": {
+         "cutoff": 0.31,
+         "kind": "cutoff"
+        }
+       },
+       "short": {
+        "accuracy": 0.5669642857142857,
+        "balanced_accuracy": 0.5471153846153846,
+        "p05_balanced_accuracy": 0.5026026604973973,
+        "passes": false,
+        "rule": {
+         "cutoff": 0.58,
+         "kind": "cutoff"
+        }
+       }
+      },
+      "phrasing": "described"
+     },
+     "weakness": {
+      "dev": {
+       "concrete": {
+        "accuracy": 0.8883928571428571,
+        "balanced_accuracy": 0.8883928571428572,
+        "p05_balanced_accuracy": 0.8501648922502312,
+        "passes": true,
+        "rule": {
+         "kind": "prior",
+         "weights": {
+          "access_control": 9.870609051177622,
+          "command_injection": 8.150556638920788,
+          "cross_site_scripting": 6.896181989072268,
+          "file_upload": 6.602206474564733,
+          "memory_corruption": 9.891735968122996,
+          "path_traversal": 10.273361934496746,
+          "request_forgery": 6.656498630379785,
+          "sql_injection": 7.6415738510348845
+         }
+        }
+       },
+       "described": {
+        "accuracy": 0.8973214285714286,
+        "balanced_accuracy": 0.8973214285714286,
+        "p05_balanced_accuracy": 0.8626028361772438,
+        "passes": true,
+        "rule": {
+         "kind": "prior",
+         "weights": {
+          "access_control": 8.211113457551315,
+          "command_injection": 6.383483554850092,
+          "cross_site_scripting": 6.877169155593291,
+          "file_upload": 7.513218491342839,
+          "memory_corruption": 17.14373378676815,
+          "path_traversal": 8.976190770543367,
+          "request_forgery": 6.369786837259156,
+          "sql_injection": 8.596616544592102
+         }
+        }
+       },
+       "short": {
+        "accuracy": 0.8883928571428571,
+        "balanced_accuracy": 0.8883928571428572,
+        "p05_balanced_accuracy": 0.8535923487432108,
+        "passes": true,
+        "rule": {
+         "kind": "prior",
+         "weights": {
+          "access_control": 9.467287784070272,
+          "command_injection": 7.1746862434172085,
+          "cross_site_scripting": 6.865965162027873,
+          "file_upload": 6.458273938334908,
+          "memory_corruption": 15.733142671888015,
+          "path_traversal": 9.166872203068674,
+          "request_forgery": 6.63947138348642,
+          "sql_injection": 7.6193277940667805
+         }
+        }
+       }
+      },
+      "phrasing": "described"
+     }
+    },
+    "questions": {
+     "attack_vector": {
+      "dev": {
+       "accuracy": 0.9330357142857143,
+       "balanced_accuracy": 0.8035325241207594,
+       "bootstrap_p05": {
+        "accuracy_over_majority": 0.0580357142857143,
+        "balanced_accuracy": 0.7371134020618557
+       },
+       "eligible": true,
+       "macro_f1": 0.6778598971722365,
+       "majority_accuracy": 0.84375,
+       "n": 224,
+       "reasons": [],
+       "recall": {
+        "adjacent": [
+         1,
+         1
+        ],
+        "local": [
+         21,
+         34
+        ],
+        "network": [
+         187,
+         189
+        ]
+       }
+      },
+      "rule": {
+       "kind": "argmax"
+      }
+     },
+     "remote_unauthenticated": {
+      "dev": {
+       "accuracy": 0.5714285714285714,
+       "balanced_accuracy": 0.5429487179487179,
+       "bootstrap_p05": {
+        "accuracy_over_majority": -0.008928571428571397,
+        "balanced_accuracy": 0.5111288392500997
+       },
+       "eligible": false,
+       "macro_f1": 0.46997929606625255,
+       "majority_accuracy": 0.5357142857142857,
+       "n": 224,
+       "reasons": [
+        "balanced accuracy 0.543, 5th percentile 0.511",
+        "accuracy over the majority answer +0.036, 5th percentile -0.009",
+        "false right 15 of 104"
+       ],
+       "recall": {
+        "false": [
+         15,
+         104
+        ],
+        "true": [
+         113,
+         120
+        ]
+       }
+      },
+      "rule": {
+       "cutoff": 0.46,
+       "kind": "cutoff"
+      }
+     },
+     "weakness": {
+      "dev": {
+       "accuracy": 0.9017857142857143,
+       "balanced_accuracy": 0.9017857142857143,
+       "bootstrap_p05": {
+        "accuracy_over_majority": 0.7008928571428571,
+        "balanced_accuracy": 0.866991659330369
+       },
+       "eligible": true,
+       "macro_f1": 0.9031916720607572,
+       "majority_accuracy": 0.125,
+       "n": 224,
+       "reasons": [],
+       "recall": {
+        "access_control": [
+         22,
+         28
+        ],
+        "command_injection": [
+         26,
+         28
+        ],
+        "cross_site_scripting": [
+         26,
+         28
+        ],
+        "file_upload": [
+         26,
+         28
+        ],
+        "memory_corruption": [
+         26,
+         28
+        ],
+        "path_traversal": [
+         22,
+         28
+        ],
+        "request_forgery": [
+         27,
+         28
+        ],
+        "sql_injection": [
+         27,
+         28
+        ]
+       }
+      },
+      "rule": {
+       "kind": "prior",
+       "weights": {
+        "access_control": 7.965732290382141,
+        "command_injection": 6.60760442679789,
+        "cross_site_scripting": 6.866368877100924,
+        "file_upload": 7.023229435078475,
+        "memory_corruption": 17.47006756629641,
+        "path_traversal": 9.314821436979257,
+        "request_forgery": 6.509621417381238,
+        "sql_injection": 8.555480373591248
+       }
+      }
+     }
+    }
+   },
+   "gliner2.5-multi-decide": {
+    "phrasing": {
+     "attack_vector": {
+      "dev": {
+       "concrete": {
+        "accuracy": 0.75,
+        "balanced_accuracy": 0.7071272953625896,
+        "p05_balanced_accuracy": 0.6380832282471627,
+        "passes": false,
+        "rule": {
+         "kind": "argmax"
+        }
+       },
+       "described": {
+        "accuracy": 0.5758928571428571,
+        "balanced_accuracy": 0.6763149704326175,
+        "p05_balanced_accuracy": 0.616346292816881,
+        "passes": false,
+        "rule": {
+         "kind": "argmax"
+        }
+       },
+       "short": {
+        "accuracy": 0.7276785714285714,
+        "balanced_accuracy": 0.6938997821350763,
+        "p05_balanced_accuracy": 0.6252321981424149,
+        "passes": false,
+        "rule": {
+         "kind": "argmax"
+        }
+       }
+      },
+      "phrasing": "concrete"
+     },
+     "remote_unauthenticated": {
+      "dev": {
+       "concrete": {
+        "accuracy": 0.5401785714285714,
+        "balanced_accuracy": 0.5073717948717948,
+        "p05_balanced_accuracy": 0.48518821603927986,
+        "passes": false,
+        "rule": {
+         "cutoff": 0.28,
+         "kind": "cutoff"
+        }
+       },
+       "described": {
+        "accuracy": 0.5714285714285714,
+        "balanced_accuracy": 0.5416666666666667,
+        "p05_balanced_accuracy": 0.5119047619047619,
+        "passes": false,
+        "rule": {
+         "cutoff": 0.35,
+         "kind": "cutoff"
+        }
+       },
+       "short": {
+        "accuracy": 0.5401785714285714,
+        "balanced_accuracy": 0.5701923076923077,
+        "p05_balanced_accuracy": 0.5438299927553731,
+        "passes": false,
+        "rule": {
+         "cutoff": 0.88,
+         "kind": "cutoff"
+        }
+       }
+      },
+      "phrasing": "short"
+     },
+     "weakness": {
+      "dev": {
+       "concrete": {
+        "accuracy": 0.8705357142857143,
+        "balanced_accuracy": 0.8705357142857143,
+        "p05_balanced_accuracy": 0.8304482153852523,
+        "passes": true,
+        "rule": {
+         "kind": "prior",
+         "weights": {
+          "access_control": 8.727809880558361,
+          "command_injection": 7.5982296684121025,
+          "cross_site_scripting": 6.425874911259648,
+          "file_upload": 7.596565545344709,
+          "memory_corruption": 14.509487231871825,
+          "path_traversal": 8.345166645700795,
+          "request_forgery": 6.9740646379202955,
+          "sql_injection": 7.43958067475173
+         }
+        }
+       },
+       "described": {
+        "accuracy": 0.8660714285714286,
+        "balanced_accuracy": 0.8660714285714286,
+        "p05_balanced_accuracy": 0.8249237193202711,
+        "passes": true,
+        "rule": {
+         "kind": "prior",
+         "weights": {
+          "access_control": 6.142343640482597,
+          "command_injection": 7.359504483929905,
+          "cross_site_scripting": 9.21235978041554,
+          "file_upload": 8.081077628580905,
+          "memory_corruption": 27.798734428024705,
+          "path_traversal": 6.343802788838736,
+          "request_forgery": 5.8287424753433505,
+          "sql_injection": 9.629210186990765
+         }
+        }
+       },
+       "short": {
+        "accuracy": 0.8616071428571429,
+        "balanced_accuracy": 0.8616071428571429,
+        "p05_balanced_accuracy": 0.8239439453942496,
+        "passes": true,
+        "rule": {
+         "kind": "prior",
+         "weights": {
+          "access_control": 8.248007139550978,
+          "command_injection": 7.313660730780948,
+          "cross_site_scripting": 6.348848754932183,
+          "file_upload": 7.329521748236985,
+          "memory_corruption": 20.727341579307215,
+          "path_traversal": 8.282743680286892,
+          "request_forgery": 6.911256286058866,
+          "sql_injection": 7.439654223505508
+         }
+        }
+       }
+      },
+      "phrasing": "concrete"
+     }
+    },
+    "questions": {
+     "attack_vector": {
+      "dev": {
+       "accuracy": 0.7053571428571429,
+       "balanced_accuracy": 0.680672268907563,
+       "bootstrap_p05": {
+        "accuracy_over_majority": -0.1964285714285715,
+        "balanced_accuracy": 0.6105820105820106
+       },
+       "eligible": false,
+       "macro_f1": 0.6233675373134329,
+       "majority_accuracy": 0.84375,
+       "n": 224,
+       "reasons": [
+        "balanced accuracy 0.681, 5th percentile 0.611",
+        "accuracy over the majority answer -0.138, 5th percentile -0.196"
+       ],
+       "recall": {
+        "adjacent": [
+         1,
+         1
+        ],
+        "local": [
+         22,
+         34
+        ],
+        "network": [
+         135,
+         189
+        ]
+       }
+      },
+      "rule": {
+       "kind": "argmax"
+      }
+     },
+     "remote_unauthenticated": {
+      "dev": {
+       "accuracy": 0.5446428571428571,
+       "balanced_accuracy": 0.5743589743589743,
+       "bootstrap_p05": {
+        "accuracy_over_majority": -0.09375000000000006,
+        "balanced_accuracy": 0.5470085470085471
+       },
+       "eligible": false,
+       "macro_f1": 0.47012987012987006,
+       "majority_accuracy": 0.5357142857142857,
+       "n": 224,
+       "reasons": [
+        "balanced accuracy 0.574, 5th percentile 0.547",
+        "accuracy over the majority answer +0.009, 5th percentile -0.094",
+        "true right 19 of 120"
+       ],
+       "recall": {
+        "false": [
+         103,
+         104
+        ],
+        "true": [
+         19,
+         120
+        ]
+       }
+      },
+      "rule": {
+       "cutoff": 0.88,
+       "kind": "cutoff"
+      }
+     },
+     "weakness": {
+      "dev": {
+       "accuracy": 0.8660714285714286,
+       "balanced_accuracy": 0.8660714285714286,
+       "bootstrap_p05": {
+        "accuracy_over_majority": 0.6607142857142857,
+        "balanced_accuracy": 0.8256002703013573
+       },
+       "eligible": true,
+       "macro_f1": 0.8661919471448787,
+       "majority_accuracy": 0.125,
+       "n": 224,
+       "reasons": [],
+       "recall": {
+        "access_control": [
+         24,
+         28
+        ],
+        "command_injection": [
+         25,
+         28
+        ],
+        "cross_site_scripting": [
+         27,
+         28
+        ],
+        "file_upload": [
+         24,
+         28
+        ],
+        "memory_corruption": [
+         18,
+         28
+        ],
+        "path_traversal": [
+         24,
+         28
+        ],
+        "request_forgery": [
+         25,
+         28
+        ],
+        "sql_injection": [
+         27,
+         28
+        ]
+       }
+      },
+      "rule": {
+       "kind": "prior",
+       "weights": {
+        "access_control": 8.825749553762895,
+        "command_injection": 7.636205151132178,
+        "cross_site_scripting": 6.362523384719162,
+        "file_upload": 7.488613055600675,
+        "memory_corruption": 14.476685913631519,
+        "path_traversal": 8.38722792467163,
+        "request_forgery": 7.016359197069325,
+        "sql_injection": 7.4513367610524135
+       }
+      }
+     }
+    }
+   },
    "laya": {
     "phrasing": {
      "attack_vector": {
@@ -2981,7 +3833,7 @@
  },
  "cascade": {
   "backend": "gliformer-large",
-  "calls_per_record": 3.736607142857143,
+  "calls_per_record": 2.0,
   "control": {
    "costs_less": false,
    "matches_smart": true,
@@ -2992,8 +3844,8 @@
    "attack_vector": 1.01,
    "weakness": 0.95
   },
-  "escalate_to": "gliclass-large-v1",
-  "latency_ms_median": 178.985,
+  "escalate_to": "gliclass-large-v1-one-call",
+  "latency_ms_median": 73.175,
   "questions": {
    "attack_vector": {
     "accuracy": 0.9241071428571429,
@@ -3350,9 +4202,9 @@
    }
   },
   "smart": {
-   "backend": "gliclass-large-v1",
-   "calls_per_record": 3.0,
-   "latency_ms_median": 139.19,
+   "backend": "gliclass-large-v1-one-call",
+   "calls_per_record": 1.0,
+   "latency_ms_median": 27.96,
    "questions": {
     "attack_vector": {
      "accuracy": 0.9241071428571429,
