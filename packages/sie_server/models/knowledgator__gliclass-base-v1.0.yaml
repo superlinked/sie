@@ -19,5 +19,8 @@ profiles:
     adapter_options:
       loadtime:
         classification_type: single-label
+        # Replay forwards as CUDA graphs over bucketed lengths; "off" runs them eagerly.
+        # See "GLiClass CUDA graphs" in packages/sie_server/README.md.
+        cuda_graphs: bucketed
       runtime:
         threshold: 0.0

@@ -16,7 +16,7 @@ import pytest
 import torch
 from gliclass import GLiClassModel, GLiClassModelConfig, ZeroShotClassificationPipeline
 from sie_server.adapters.gliclass import GLiClassAdapter
-from sie_server.types.inputs import Item
+from sie_server.types.inputs import InvalidInputError, Item
 from tokenizers import Tokenizer, models, pre_tokenizers, processors
 from transformers import DebertaV2Config, PreTrainedTokenizerFast
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
@@ -97,21 +97,29 @@ def _model(tokenizer: PreTrainedTokenizerFast, *, prompt_first: bool, scorer: st
 class _Rig:
     """A tiny GLiClass model behind both the gliclass pipelines and the adapter."""
 
-    def __init__(self, *, prompt_first: bool, scorer: str) -> None:
+    def __init__(
+        self,
+        *,
+        prompt_first: bool,
+        scorer: str,
+        device: str = "cpu",
+        dtype: torch.dtype = torch.float32,
+        cuda_graphs: str = "off",
+    ) -> None:
         tokenizer = _tokenizer()
-        model = _model(tokenizer, prompt_first=prompt_first, scorer=scorer)
+        model = _model(tokenizer, prompt_first=prompt_first, scorer=scorer).to(device, dtype=dtype)
         self.pipelines = {
             classification_type: ZeroShotClassificationPipeline(
                 model,
                 tokenizer,
                 max_length=_MAX_LENGTH,
                 classification_type=classification_type,
-                device="cpu",
+                device=device,
                 progress_bar=False,
             )
             for classification_type in ("single-label", "multi-label")
         }
-        self.adapter = GLiClassAdapter("tiny", max_seq_length=_MAX_LENGTH)
+        self.adapter = GLiClassAdapter("tiny", max_seq_length=_MAX_LENGTH, cuda_graphs=cuda_graphs)
         self.adapter._attach(self.pipelines["single-label"].pipe, tokenizer)
 
     def pipeline_scores(
@@ -352,3 +360,231 @@ def test_a_document_that_cannot_be_cut_costs_what_reading_it_whole_does(
     # document is then tokenized once for every check and for metering.
     search_bound = 2 * 64 * (_MAX_LENGTH - 2 + 8)
     assert with_search <= sum(seen) + search_bound
+
+
+_GRAPH_REQUESTS = [
+    {"labels": _LABELS},
+    {"labels": _LABELS, "instruction": _INSTRUCTION, "options": {"classification_type": "multi-label"}},
+    {"options": {"label_groups": _GROUPS, "group_encoding": "joint"}},
+    {"options": {"label_groups": _GROUPS}},
+]
+_GRAPH_REQUEST_IDS = ["labels", "labels-context", "joint", "separate"]
+
+
+_LAYOUTS = {"params": [(False, "simple"), (True, "mlp")], "ids": ["text-first", "labels-first"]}
+
+
+def _cuda_rig(request: pytest.FixtureRequest, mode: str) -> _Rig:
+    if not torch.cuda.is_available():
+        pytest.skip("requires CUDA")
+    prompt_first, scorer = request.param
+    return _Rig(prompt_first=prompt_first, scorer=scorer, device="cuda:0", dtype=torch.float16, cuda_graphs=mode)
+
+
+@pytest.fixture(scope="module", **_LAYOUTS)
+def exact_rig(request: pytest.FixtureRequest) -> _Rig:
+    return _cuda_rig(request, "exact")
+
+
+@pytest.fixture(scope="module", **_LAYOUTS)
+def bucketed_rig(request: pytest.FixtureRequest) -> _Rig:
+    return _cuda_rig(request, "bucketed")
+
+
+def _fresh_runner(rig: _Rig, monkeypatch: pytest.MonkeyPatch) -> Any:
+    """The rig's graph runner, emptied, with a full recording burst, counting replays."""
+    runner = rig.adapter._graphs
+    assert runner is not None
+    runner.clear()
+    runner._recording_credit = 16.0
+    runner.replayed = []
+    replay = runner._replay
+
+    def counted(entry: Any, inputs: dict[str, torch.Tensor], length: int) -> torch.Tensor:
+        runner.replayed.append(length)
+        return replay(entry, inputs, length)
+
+    monkeypatch.setattr(runner, "_replay", counted)
+    return runner
+
+
+_EAGER = {"cuda_graphs": "off"}
+
+
+def _eager_request(request_kwargs: dict[str, Any]) -> dict[str, Any]:
+    return {**request_kwargs, "options": {**request_kwargs.get("options", {}), **_EAGER}}
+
+
+@pytest.mark.gpu_hw
+@pytest.mark.parametrize("request_kwargs", _GRAPH_REQUESTS, ids=_GRAPH_REQUEST_IDS)
+def test_exact_cuda_graphs_score_bit_for_bit_like_eager(
+    exact_rig: _Rig, request_kwargs: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Eleven texts of different lengths, sent three times: a shape is recorded
+    # the second time it is seen and replayed the third.
+    items = [Item(text=text) for text in _TEXTS]
+    runner = _fresh_runner(exact_rig, monkeypatch)
+
+    eager = _outputs(exact_rig.adapter.extract(items, **_eager_request(request_kwargs)))
+    for _ in range(3):
+        assert _outputs(exact_rig.adapter.extract(items, **request_kwargs)) == eager
+
+    assert runner.graph_count > 0
+    assert runner.replayed  # the third pass replayed
+    assert not runner.disabled
+    # Graphs of one length share its relative-position table.
+    assert set(runner._relative_pos) == {length for _, length, _ in runner._graphs}
+
+
+@pytest.mark.gpu_hw
+@pytest.mark.parametrize("request_kwargs", _GRAPH_REQUESTS, ids=_GRAPH_REQUEST_IDS)
+def test_bucketed_cuda_graphs_stay_close_to_eager(
+    bucketed_rig: _Rig, request_kwargs: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    items = [Item(text=text) for text in _TEXTS]
+    runner = _fresh_runner(bucketed_rig, monkeypatch)
+
+    eager = bucketed_rig.adapter.extract(items, **_eager_request(request_kwargs))
+    for _ in range(2):
+        graphed = bucketed_rig.adapter.extract(items, **request_kwargs)
+        if eager.data:
+            pairs = [
+                (a["probabilities"], b["probabilities"])
+                for row_a, row_b in zip(eager.data, graphed.data or [], strict=True)
+                for a, b in zip(row_a.values(), row_b.values(), strict=True)
+            ]
+        else:
+            pairs = list(zip(_scores(eager), _scores(graphed), strict=True))
+        for expected, got in pairs:
+            assert got == pytest.approx(expected, abs=2e-2)
+        assert graphed.input_token_counts == eager.input_token_counts
+    assert runner.graph_count > 0
+    assert runner.replayed  # the second pass replayed
+    assert not runner.disabled
+
+
+@pytest.mark.gpu_hw
+def test_graphs_over_their_memory_budget_are_dropped(exact_rig: _Rig, monkeypatch: pytest.MonkeyPatch) -> None:
+    items = [Item(text=text) for text in _TEXTS]
+    runner = _fresh_runner(exact_rig, monkeypatch)
+    monkeypatch.setattr(runner, "_memory_budget", lambda device: 0)  # every recording goes over
+
+    eager = _outputs(exact_rig.adapter.extract(items, labels=_LABELS, options=_EAGER))
+    torch.cuda.synchronize()
+    reserved = torch.cuda.memory_reserved()
+    for _ in range(3):
+        assert _outputs(exact_rig.adapter.extract(items, labels=_LABELS)) == eager
+
+    assert runner.graph_count == 0
+    assert not runner.disabled
+    assert runner._device_bytes == 0
+    # The dropped graphs' pool went back to the device.
+    assert torch.cuda.memory_reserved() <= reserved
+
+
+class _OutOfMemoryGraph:
+    """A CUDA graph whose recording runs out of memory."""
+
+    def capture_begin(self, **_: Any) -> None:
+        raise torch.cuda.OutOfMemoryError("CUDA out of memory while recording")
+
+    def capture_end(self) -> None:
+        pass
+
+
+@pytest.mark.gpu_hw
+def test_running_out_of_memory_while_recording_answers_eagerly(
+    exact_rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    items = [Item(text=text) for text in _TEXTS]
+    runner = _fresh_runner(exact_rig, monkeypatch)
+    eager = _outputs(exact_rig.adapter.extract(items, labels=_LABELS, options=_EAGER))
+    monkeypatch.setattr(torch.cuda, "CUDAGraph", _OutOfMemoryGraph)
+
+    # The second sighting records; the recording fails, and the call still gets its answer.
+    for _ in range(2):
+        assert _outputs(exact_rig.adapter.extract(items, labels=_LABELS)) == eager
+
+    assert runner.graph_count == 0
+    assert not runner.disabled
+    assert runner._recording_credit < 1  # paused
+
+
+@pytest.mark.gpu_hw
+def test_a_warm_up_that_runs_out_of_memory_is_tried_again(exact_rig: _Rig, monkeypatch: pytest.MonkeyPatch) -> None:
+    items = [Item(text=text) for text in _TEXTS[:3]]
+    runner = _fresh_runner(exact_rig, monkeypatch)
+    runner._stream = None  # the next recording creates and warms up its stream
+    model = runner._model
+    failures = []
+
+    def warm_up_fails_once(**inputs: Any) -> Any:
+        # The warm-up is the only one-row forward of a three-item request.
+        if inputs["input_ids"].shape[0] == 1 and not failures:
+            failures.append(True)
+            raise torch.cuda.OutOfMemoryError("CUDA out of memory during warm-up")
+        return model(**inputs)
+
+    monkeypatch.setattr(runner, "_model", warm_up_fails_once)
+    eager = _outputs(exact_rig.adapter.extract(items, labels=_LABELS, options=_EAGER))
+    for _ in range(2):  # the second sighting records; its warm-up fails
+        assert _outputs(exact_rig.adapter.extract(items, labels=_LABELS)) == eager
+    assert failures
+    assert runner._stream is None
+    assert not runner.disabled
+
+    runner._recording_credit = 16.0  # skip the pause
+    # Dropping the graphs reset the sightings: seen, then warmed up and recorded, then replayed.
+    for _ in range(3):
+        assert _outputs(exact_rig.adapter.extract(items, labels=_LABELS)) == eager
+    assert runner._stream is not None
+    assert runner.graph_count > 0
+    assert runner.replayed
+    assert not runner.disabled
+
+
+@pytest.mark.gpu_hw
+def test_a_forward_that_cannot_be_recorded_falls_back_to_eager(monkeypatch: pytest.MonkeyPatch) -> None:
+    if not torch.cuda.is_available():
+        pytest.skip("requires CUDA")
+    rig = _Rig(prompt_first=True, scorer="mlp", device="cuda:0", dtype=torch.float16, cuda_graphs="bucketed")
+    items = [Item(text=text) for text in _TEXTS[:3]]
+    eager = _outputs(rig.adapter.extract(items, labels=_LABELS, options=_EAGER))
+    runner = rig.adapter._graphs
+    assert runner is not None
+    # Without the precomputed table, DeBERTa copies a CPU scalar to the GPU
+    # while recording, which CUDA refuses: the runner turns itself off.
+    monkeypatch.setattr(runner, "_build_relative_pos", lambda hidden: None)
+
+    graphed = rig.adapter.extract(items, labels=_LABELS)
+
+    assert runner.disabled
+    assert _outputs(graphed) == eager
+    assert _outputs(rig.adapter.extract(items, labels=_LABELS)) == eager
+
+
+@pytest.mark.parametrize("mode", ["exact", "bucketed"])
+def test_cuda_graphs_run_eagerly_on_cpu(mode: str) -> None:
+    items = [Item(text=text) for text in _TEXTS]
+    graphs_rig = _Rig(prompt_first=True, scorer="mlp", cuda_graphs=mode)
+    plain_rig = _Rig(prompt_first=True, scorer="mlp")
+
+    eager = plain_rig.adapter.extract(items, labels=_LABELS)
+    for _ in range(2):
+        graphed = graphs_rig.adapter.extract(items, labels=_LABELS)
+        assert _outputs(graphed) == _outputs(eager)
+    assert graphs_rig.adapter._graphs is None
+
+
+@pytest.mark.parametrize("value", ["exact", "bucketed", "on", True, None, 1])
+def test_requests_cannot_turn_cuda_graphs_on(rig: _Rig, value: object) -> None:
+    with pytest.raises(InvalidInputError, match="accepts only 'off'"):
+        rig.adapter.extract([Item(text=_TEXTS[0])], labels=_LABELS, options={"cuda_graphs": value})
+
+
+def test_requests_may_turn_cuda_graphs_off(rig: _Rig) -> None:
+    items = [Item(text=text) for text in _TEXTS]
+
+    assert _outputs(rig.adapter.extract(items, labels=_LABELS, options=_EAGER)) == _outputs(
+        rig.adapter.extract(items, labels=_LABELS)
+    )

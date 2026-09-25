@@ -25,6 +25,10 @@ like the pipeline call used before these fields existed):
   this request, overriding the load-time default.
 - ``options.label_groups``: named label groups, ``{"urgency": ["low", "high"],
   ...}``, used instead of ``labels``. ``data`` holds one answer per group.
+- ``options.cuda_graphs``: only ``"off"``, which runs this request eagerly
+  when the model was loaded with CUDA graphs. Graphs are enabled by the
+  operator, at load, with ``adapter_options.loadtime.cuda_graphs``: ``"off"``
+  (the default), ``"exact"`` or ``"bucketed"`` (see ``cuda_graphs.py``).
 - ``options.group_encoding``: how label groups are encoded. ``"separate"`` (the
   default) encodes the document once per group, with only that group's labels.
   Each group scores like a request whose ``labels`` are that group's labels.
@@ -52,6 +56,7 @@ document needing more fails alone with ``INPUT_TOO_LONG``.
 
 from __future__ import annotations
 
+import logging
 import math
 import re
 from collections.abc import Iterator
@@ -69,8 +74,10 @@ from sie_server.adapters._base_adapter import BaseAdapter
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_NOT_LOADED, ComputePrecision
 from sie_server.adapters.errors import InputTooLongError
+from sie_server.adapters.gliclass.cuda_graphs import GRAPH_MODES, CudaGraphRunner, GraphMode, unsupported_reason
 from sie_server.core.extract_cost import MAX_EXTRACT_LABELS
 from sie_server.core.inference_output import ExtractItemError, ExtractOutput
+from sie_server.core.oom import is_oom_error
 from sie_server.types.inputs import InvalidInputError
 from sie_server.types.overflow_policy import DEFAULT_OVERFLOW_POLICY, OverflowPolicy
 from sie_server.types.responses import Classification, ErrorCode
@@ -79,6 +86,8 @@ if TYPE_CHECKING:
     from transformers import PreTrainedTokenizerBase  # ty:ignore[unresolved-import]
 
     from sie_server.types.inputs import Item
+
+logger = logging.getLogger(__name__)
 
 _ERR_REQUIRES_LABELS = "Zero-shot classification requires labels parameter."
 _ERR_INPUT_TOO_LONG = (
@@ -450,7 +459,7 @@ class GLiClassAdapter(BaseAdapter):
     spec: ClassVar[AdapterSpec] = AdapterSpec(
         inputs=("text",),
         outputs=("json",),
-        unload_fields=("_pipe", "_tokenizer"),
+        unload_fields=("_pipe", "_tokenizer", "_graphs"),
     )
 
     def __init__(
@@ -462,6 +471,7 @@ class GLiClassAdapter(BaseAdapter):
         max_seq_length: int | None = None,
         compute_precision: ComputePrecision = "float16",
         revision: str | None = None,
+        cuda_graphs: str | bool = "off",
         **kwargs: Any,
     ) -> None:
         """Initialize GLiClass adapter.
@@ -481,7 +491,15 @@ class GLiClassAdapter(BaseAdapter):
             compute_precision: Precision for inference (float16, float32, bfloat16).
             revision: Optional HuggingFace revision/branch/commit SHA to pin when
                 loading model artifacts.
+            cuda_graphs: "off" (the default), "exact" or "bucketed": whether a
+                DeBERTa-based model on CUDA replays its forwards as CUDA graphs
+                (see ``cuda_graphs.py``). An operator setting: a request can
+                only opt out, with ``options={"cuda_graphs": "off"}``. YAML
+                reads an unquoted ``off`` as ``False``, which also means off.
             **kwargs: Additional arguments (ignored for compatibility).
+
+        Raises:
+            ValueError: If ``cuda_graphs`` is not one of the three modes.
         """
         self._model_name_or_path = str(model_name_or_path)
         self._classification_type = self._validate_classification_type(classification_type)
@@ -489,10 +507,19 @@ class GLiClassAdapter(BaseAdapter):
         self._max_seq_length = max_seq_length
         self._compute_precision = compute_precision
         self._revision = revision
+        if cuda_graphs is False:  # an unquoted YAML ``off``
+            cuda_graphs = "off"
+        if not isinstance(cuda_graphs, str) or cuda_graphs not in GRAPH_MODES:
+            msg = f"GLiClass cuda_graphs must be 'off', 'exact' or 'bucketed', got {cuda_graphs!r}"
+            raise ValueError(msg)
+        self._cuda_graphs = cast("GraphMode", cuda_graphs)
 
         # The gliclass pipe for the model's architecture: it assembles and
         # tokenizes model inputs and holds the model.
         self._pipe: Any | None = None
+        # Records and replays forwards as CUDA graphs, when the operator
+        # enabled them and the model and device support them.
+        self._graphs: CudaGraphRunner | None = None
         self._tokenizer: PreTrainedTokenizerBase | None = None
         self._special_count: int = 0
         self._max_token_chars: int = _DEFAULT_MAX_TOKEN_CHARS
@@ -563,6 +590,7 @@ class GLiClassAdapter(BaseAdapter):
         self._tokenizer = tokenizer
         self._special_count = int(tokenizer.num_special_tokens_to_add(pair=False))
         self._max_token_chars = _longest_token_chars(tokenizer)
+        self._graphs = self._graph_runner(pipe, tokenizer)
 
     def _load_tokenizer(self, shared_kwargs: dict[str, Any]) -> PreTrainedTokenizerBase:
         try:
@@ -704,8 +732,8 @@ class GLiClassAdapter(BaseAdapter):
                 ("single-label" or "multi-label"), ``examples`` (few-shot
                 ``[{"text": str, "labels": [str, ...]}]``), ``label_groups``
                 (``{group: [label, ...]}``, used instead of ``labels``),
-                ``group_encoding`` ("separate" or "joint") and
-                ``overflow_policy``.
+                ``group_encoding`` ("separate" or "joint"), ``cuda_graphs``
+                (only "off", to run eagerly) and ``overflow_policy``.
 
         Returns:
             ExtractOutput where ``classifications[i]`` is the list of
@@ -755,6 +783,7 @@ class GLiClassAdapter(BaseAdapter):
         effective_threshold = self._validate_threshold(opts.get("threshold", self._threshold))
 
         overflow_policy = opts.get("overflow_policy", DEFAULT_OVERFLOW_POLICY)
+        graphs = self._request_cuda_graphs(opts)
         tokens = _RequestTokens(self._tokenizer, self._visible_tokens())
 
         if label_groups is not None and group_encoding == "separate":
@@ -768,6 +797,7 @@ class GLiClassAdapter(BaseAdapter):
                 threshold=effective_threshold,
                 overflow_policy=overflow_policy,
                 tokens=tokens,
+                graphs=graphs,
             )
 
         texts = [tokens.visible(text) or text for text in texts]
@@ -783,7 +813,9 @@ class GLiClassAdapter(BaseAdapter):
 
         if label_groups is not None:
             rows = (
-                self._joint_scores(kept_texts, label_groups, normalized_labels, classification_type, prompt, examples)
+                self._joint_scores(
+                    kept_texts, label_groups, normalized_labels, classification_type, prompt, examples, graphs=graphs
+                )
                 if kept_texts
                 else []
             )
@@ -813,6 +845,7 @@ class GLiClassAdapter(BaseAdapter):
                 classification_type=classification_type,
                 prompt=prompt,
                 examples=examples,
+                graphs=graphs,
             )
 
         all_classifications: list[list[Classification]] = [[] for _ in items]
@@ -888,6 +921,7 @@ class GLiClassAdapter(BaseAdapter):
         prompt: str | None,
         examples: list[dict[str, Any]] | list[list[dict[str, Any]]] | None,
         batch_size: int = _PIPELINE_BATCH_SIZE,
+        graphs: GraphMode = "off",
     ) -> list[list[float]]:
         """Each row's label scores, computed as the gliclass pipeline computes them.
 
@@ -897,6 +931,7 @@ class GLiClassAdapter(BaseAdapter):
         sub-batches. A single-label row gets a softmax over the label slots a
         call with only its labels would have; a multi-label row a sigmoid per
         label. Each forward's scores come back in one device-to-host copy.
+        ``graphs`` chooses how forwards run on CUDA (see ``cuda_graphs``).
         """
         pipe = self._require_pipe()
         shared = isinstance(labels[0], str)
@@ -910,7 +945,7 @@ class GLiClassAdapter(BaseAdapter):
                 inputs = pipe.prepare_inputs(
                     batch_texts, batch_labels, same_labels=shared, examples=batch_examples, prompt=prompt
                 )
-                logits = self._forward(pipe, inputs, batch_labels, same_labels=shared)
+                logits = self._forward(pipe, inputs, batch_labels, same_labels=shared, graphs=graphs)
                 row_labels = cast("list[list[str]]", [batch_labels] * len(batch_texts) if shared else batch_labels)
                 probs = torch.sigmoid(logits) if classification_type == "multi-label" else None
                 rows: list[torch.Tensor] = []
@@ -932,14 +967,58 @@ class GLiClassAdapter(BaseAdapter):
                     position += len(row_label_list)
         return scores
 
-    @staticmethod
-    def _forward(pipe: Any, inputs: Any, labels: list[str] | list[list[str]], *, same_labels: bool) -> torch.Tensor:
-        """Run the model on tokenized rows, passing the class-slot count the pipeline passes."""
+    def _forward(
+        self,
+        pipe: Any,
+        inputs: Any,
+        labels: list[str] | list[list[str]],
+        *,
+        same_labels: bool,
+        graphs: GraphMode = "off",
+    ) -> torch.Tensor:
+        """Run the model on tokenized rows, passing the class-slot count the pipeline passes.
+
+        With ``graphs`` other than "off", a CUDA graph replays the forward
+        when the model and shape allow it; otherwise it runs eagerly.
+        """
         forward_kwargs: dict[str, Any] = {}
         resolve_max_num_classes = getattr(pipe, "_resolve_max_num_classes", None)
         if resolve_max_num_classes is not None:
             forward_kwargs["max_num_classes"] = resolve_max_num_classes(labels, same_labels)
-        return pipe.model(**inputs, **forward_kwargs).logits
+        classes = forward_kwargs.get("max_num_classes")
+        try:
+            if self._graphs is not None and isinstance(classes, int):
+                logits = self._graphs.run(dict(inputs), classes, graphs)
+                if logits is not None:
+                    return logits
+            return pipe.model(**inputs, **forward_kwargs).logits
+        except Exception as exc:
+            # Graph memory is held until its graphs go; drop them so the
+            # worker's OOM recovery can reuse it.
+            if self._graphs is not None and is_oom_error(exc):
+                self._graphs.clear()
+            raise
+
+    def _graph_runner(self, pipe: Any, tokenizer: PreTrainedTokenizerBase) -> CudaGraphRunner | None:
+        """The CUDA graph runner for a loaded model; None when graphs are off or unsupported."""
+        model = getattr(pipe, "model", None)
+        if self._cuda_graphs == "off" or model is None:
+            return None
+        reason = unsupported_reason(model, getattr(pipe, "device", "cpu"))
+        if reason is not None:
+            logger.warning(
+                "GLiClass cuda_graphs=%s does not apply to %s, which runs eagerly: %s",
+                self._cuda_graphs,
+                self._model_name_or_path,
+                reason,
+            )
+            return None
+        return CudaGraphRunner(
+            model,
+            pad_token_id=int(tokenizer.pad_token_id),
+            pad_token_type_id=int(getattr(tokenizer, "pad_token_type_id", 0) or 0),
+            max_length=int(pipe.max_length),
+        )
 
     @staticmethod
     def _row_width(pipe: Any, labels: list[str], batch_width: int) -> int:
@@ -961,6 +1040,8 @@ class GLiClassAdapter(BaseAdapter):
         classification_type: ClassificationType,
         prompt: str | None,
         examples: list[dict[str, Any]] | None,
+        *,
+        graphs: GraphMode = "off",
     ) -> list[list[float]]:
         """Score all groups' labels in one row per text and normalize per group.
 
@@ -984,7 +1065,7 @@ class GLiClassAdapter(BaseAdapter):
                     examples=examples,
                     prompt=prompt,
                 )
-                logits = self._forward(pipe, inputs, flat_labels, same_labels=True)
+                logits = self._forward(pipe, inputs, flat_labels, same_labels=True, graphs=graphs)
                 if logits.shape[-1] < num_labels:
                     raise InputTooLongError(_ERR_INPUT_TOO_LONG)
                 chunks.append(logits[:, :num_labels].float())
@@ -1012,6 +1093,7 @@ class GLiClassAdapter(BaseAdapter):
         threshold: float,
         overflow_policy: OverflowPolicy,
         tokens: _RequestTokens,
+        graphs: GraphMode = "off",
     ) -> ExtractOutput:
         """Encode the document once per group, with only that group's labels.
 
@@ -1094,6 +1176,7 @@ class GLiClassAdapter(BaseAdapter):
             prompt=prompt,
             group_examples=group_examples,
             row_lengths=None if item_lengths is None else [item_lengths[index] for index in kept],
+            graphs=graphs,
         )
         return self._grouped_output(
             rows,
@@ -1115,6 +1198,7 @@ class GLiClassAdapter(BaseAdapter):
         prompt: str | None,
         group_examples: list[list[dict[str, Any]]] | None,
         row_lengths: list[list[int]] | None = None,
+        graphs: GraphMode = "off",
     ) -> list[list[float]]:
         """Scores of every (item, group) row, flattened per item in group order.
 
@@ -1149,6 +1233,7 @@ class GLiClassAdapter(BaseAdapter):
                         prompt=prompt,
                         examples=None if row_examples is None else [row_examples[row] for row in chunk],
                         batch_size=len(chunk),
+                        graphs=graphs,
                     )
                     for row, row_scores in zip(chunk, scored, strict=True):
                         per_row[row] = row_scores
@@ -1160,6 +1245,7 @@ class GLiClassAdapter(BaseAdapter):
                         classification_type=classification_type,
                         prompt=prompt,
                         examples=group_examples[group] if group_examples is not None else None,
+                        graphs=graphs,
                     )
                     for group, (_, group_labels) in enumerate(label_groups)
                 ]
@@ -1322,6 +1408,19 @@ class GLiClassAdapter(BaseAdapter):
         if "group_encoding" in options and label_groups is None:
             raise InvalidInputError("GLiClass group_encoding applies only with options.label_groups")
         return encoding
+
+    def _request_cuda_graphs(self, opts: dict[str, Any]) -> GraphMode:
+        """The graph mode for a request: the load-time mode, unless the request opts out."""
+        if "cuda_graphs" not in opts:
+            return self._cuda_graphs
+        value = opts["cuda_graphs"]
+        # ``False`` is how YAML reads an unquoted ``off`` in a profile's runtime options.
+        if value is False or (isinstance(value, str) and value == "off"):
+            return "off"
+        raise InvalidInputError(
+            "GLiClass options.cuda_graphs accepts only 'off', to run a request eagerly. "
+            "CUDA graphs are enabled when the model loads, with adapter_options.loadtime.cuda_graphs."
+        )
 
     def _check_group_count(self, label_groups: list[tuple[str, list[str]]]) -> None:
         """Bound the rows a separate-group request adds per item: one full row per group."""

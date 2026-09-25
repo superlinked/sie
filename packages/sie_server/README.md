@@ -72,6 +72,108 @@ Label names are refused when their total length exceeds 16 characters per
 token of the window (8,192 characters for a 512-token model), more than any
 label prompt can fit.
 
+### GLiClass CUDA graphs
+
+A GLiClass forward on a DeBERTa encoder launches about a thousand small GPU
+kernels, so at small batch sizes the CPU that launches them is the bottleneck.
+A CUDA graph records the kernel launches of one input shape once; a replay
+launches them all in one call. Graphs are an operator setting, fixed when the
+model loads, in the model profile:
+
+```yaml
+profiles:
+  default:
+    adapter_options:
+      loadtime:
+        cuda_graphs: bucketed
+```
+
+| Value | Shapes recorded | Scores |
+|--|--|--|
+| `off` (default) | none | eager |
+| `exact` | each (batch, sequence length, label slots) seen twice | bit-identical to eager |
+| `bucketed` | sequence lengths padded up to a multiple of 32 tokens (64 on 1,024-token models) | padding moves fp16 probabilities (see below) |
+
+A request can send `options={"cuda_graphs": "off"}` to run eagerly on a model
+loaded with graphs. It cannot turn graphs on: any other value is refused.
+
+Padding is masked, but a longer sequence rounds fp16 sums differently, the same
+kind of change batching requests together makes. We compared `bucketed` with
+eager execution on the 384 CVE descriptions from `examples/typed-decisions`,
+three questions each, asked one at a time, as separate groups and as joint
+groups, plus 65 long documents. Each input was sent three times (long
+documents twice), so that graphs were recorded and then replayed: 11,538
+answers per model. A small change can still flip a near tie between the top
+two labels:
+
+| Model | Largest probability change | Top label changed | Shipped profile |
+|--|--|--|--|
+| `gliclass-small-v1.0` | 0.0039 | 3 answers | `off` |
+| `gliclass-base-v1.0` | 0.0049 | none | `bucketed` |
+| `gliclass-large-v1.0` | 0.0056 | none | `bucketed` |
+| `gliclass-base-v3.0` | 0.0054 | 3 | `off` |
+| `gliclass-large-v3.0` | 0.0093 | 3 | `off` |
+| `gliclass-instruct-base-v1.0` | 0.0076 | 12 | `off` |
+| `gliclass-instruct-large-v1.0` | 0.0098 | 18 | `off` |
+| `opir-multitask-large-v1.0` | 0.0144 | none | `bucketed` |
+| `gliclass-multilang-mini` (100 descriptions, no joint groups: 2,016 answers) | 0.0227 | 3 | `off` |
+
+`exact` changed nothing.
+
+The shipped profiles load with `bucketed` graphs only where no top label
+changed: `gliclass-base-v1.0`, `gliclass-large-v1.0` and
+`opir-multitask-large-v1.0`. Their probabilities can differ from eager
+execution by up to the amounts above. To run one of them eagerly, set
+`cuda_graphs: off` in its profile, or send `options={"cuda_graphs": "off"}` with
+a request. The other models load with `off`.
+
+Graphs apply on CUDA to the DeBERTa-based GLiClass models: the v1.0 models,
+`gliclass-base-v3.0` and `gliclass-large-v3.0`, the base and large instruct
+models, the Opir multitask models and `gliclass-multilang-mini`. The
+ModernBERT-based models (the edge models, `gliclass-multilang-edge` and the
+Opir edge models), CPU and MPS run eagerly with any value, and the load logs a
+warning.
+
+Nothing is recorded at load. A shape is recorded the first time a request
+needs it (the second time in `exact` mode), and that request takes a little
+over two eager forwards (76 ms against 33 ms on `gliclass-large-v1.0` on an
+L4). A model keeps at most 64 graphs, least recently used first
+out. A graph holds at most 2,048 tokens (batch times padded length); larger
+forwards are bound by the GPU rather than by kernel launches and run eagerly.
+
+**Memory, and other models on the same GPU.** Graph memory counts as device
+memory in use, but it is not attributed to the model: under memory pressure
+the server evicts whole models, least recently used first, which may be
+another model. A model's graphs share one memory pool, and the driver keeps a
+copy of each graph: about 8 MB for a `gliclass-large-v1.0` forward. On
+`gliclass-large-v1.0` in `bucketed` mode, the 31 graphs recorded for the CVE
+descriptions above took 555 MB of device memory: 490 MB for the pool and
+the graphs, 60 MB cached on the recording stream (its cuBLAS workspace and one
+warm-up row) and 5 MB of relative-position tables. The pool keeps what evicted
+graphs used, so traffic with many shapes keeps growing it. The runner therefore
+adds up the device memory its graphs hold (what each recording took, plus the
+tables and buffers they read), and past 4% of the device's memory (900 MB on
+an L4) it drops every graph, returns their memory to the device and records
+again. Graphs are also released when the model unloads, and
+when one of its forwards runs out of memory.
+
+While a graph records, PyTorch's caching allocator does not free cached blocks
+to satisfy other allocations, so another model on the same GPU that needs
+memory in that window (about one forward) can run out of memory where it
+otherwise would not. Recording is kept rare to limit this: one recording at a
+time in the process, none while less than a tenth of the device's memory is
+free, and per model at most 16 recordings at once, then one per 2 seconds. If a
+recording itself runs out of memory, the request still gets its eager answer;
+the model drops its graphs and records nothing for a minute.
+
+Both limits are approximate. The free-memory check reads the device once,
+before recording, so a model loading at the same moment can still meet one
+recording. The memory budget is checked after each recording, so a model's
+graphs can exceed it by one recording: up to about 330 MB, one graph of the
+largest shape on `gliclass-large-v1.0`. On a GPU shared with other models,
+leave memory headroom, or enable graphs only where the model has the GPU to
+itself. Usage and billing do not change.
+
 ### GLiNER2.5-Decide usage and limits
 
 The GLiNER2.5-Decide models (`fastino/GLiNER2.5-Decide`, `GLiNER2.5-multi-Decide`,
