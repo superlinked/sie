@@ -112,9 +112,10 @@ _MAX_TYPE_GROUPS = 64
 # Marks an item whose model output could not be used.
 _ITEM_ERROR = "__gliformer_item_error__"
 # Span decoding work each document may do, in span_decoding's allowance units
-# (1 to 5 microseconds of host work each on an L4 host): a floor plus an
-# allowance per billed token of that document. A document that needs more
-# keeps the best-first prefix of each stage it can afford (see span_decoding).
+# (at most about 7 microseconds of host work each on an L4 host, 1.3 at the
+# median): a floor plus an allowance per billed token of that document. A
+# document that needs more keeps the best-first prefix of each stage it can
+# afford (see span_decoding).
 # Measured with both checkpoints on 4,416 documents (short records, 2048-word
 # entity-dense text, prose, a list of names, repeated text, and 64-word
 # windows of them) and 12 tasks up to 64 labels, 20 relation types, and
@@ -588,10 +589,10 @@ class GLiFormerAdapter(BaseAdapter):
     padding of shorter documents never forms spans or lowers scores.
 
     Each document's span decoding also draws on its own allowance: 4,096
-    work units plus 256 per billed token of that document. A unit is 1 to 5
-    microseconds of host work: one candidate span or record field span, two
-    per relation, 64 per structuring proposal or relation entity candidate,
-    and one per score cell when a stage reaches a bound. A stage that cannot
+    work units plus 256 per billed token of that document. A unit is at most
+    about 7 microseconds of host work: one candidate span or record field
+    span, two per relation, 64 per structuring proposal or relation entity
+    candidate, and one per score cell when a stage reaches a bound. A stage that cannot
     afford everything keeps the best-first prefix it can afford, as at the
     fixed bounds; the document still succeeds and bills normally, and other
     documents are unaffected.

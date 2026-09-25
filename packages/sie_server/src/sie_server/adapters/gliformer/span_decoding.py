@@ -21,8 +21,8 @@ order. Overlap removal keeps spans best first, so a cut changes the entities
 only by leaving out spans that rank below every kept one.
 
 Work is also bounded per document (:func:`document_allowances`): each
-document gets an allowance of work units, 1 to 5 microseconds of host time
-apiece, from its own billed tokens. Every kept candidate, proposal,
+document gets an allowance of work units, at most about 7 microseconds of
+host time apiece, from its own billed tokens. Every kept candidate, proposal,
 and bounded search draws on the allowance of the document it belongs to, and
 a stage that cannot afford everything keeps the best-first prefix it can
 afford, exactly as it does at the fixed bounds. One document's allowance
@@ -51,8 +51,8 @@ MAX_SPAN_CANDIDATES = 4096
 # threshold 0.5 and 1184 at 0.1 (a list of names, 64 fields).
 MAX_STRUCTURING_PROPOSALS = 2048
 
-# Allowance units (1 to 5 microseconds of host work each, measured on an
-# L4 host). A structuring proposal or a relation entity candidate costs its
+# Allowance units (at most about 7 microseconds of host work each, measured
+# on an L4 host). A structuring proposal or a relation entity candidate costs its
 # head far more than a span: it is pooled, scored, and walked in Python.
 PROPOSAL_UNITS = 64
 # One unit per this many score cells for the pass that counts candidates.
