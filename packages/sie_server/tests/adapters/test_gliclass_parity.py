@@ -391,12 +391,26 @@ def bucketed_rig(request: pytest.FixtureRequest) -> _Rig:
     return _cuda_rig(request, "bucketed")
 
 
-def _fresh_runner(rig: _Rig) -> Any:
-    """The rig's graph runner, emptied and with a full recording burst."""
+def _fresh_runner(rig: _Rig, monkeypatch: pytest.MonkeyPatch) -> Any:
+    """The rig's graph runner, emptied and with a full recording burst.
+
+    The tiny model's window is 64 tokens, so four windows would leave an
+    8-row sub-batch to eager execution; the bound is raised so that every
+    forward in these tests goes through a graph.
+    """
     runner = rig.adapter._graphs
     assert runner is not None
     runner.clear()
     runner._recording_credit = 16.0
+    runner._max_tokens = 16 * _MAX_LENGTH
+    runner.replayed = []
+    replay = runner._replay
+
+    def counted(entry: Any, inputs: dict[str, torch.Tensor], length: int) -> torch.Tensor:
+        runner.replayed.append(length)
+        return replay(entry, inputs, length)
+
+    monkeypatch.setattr(runner, "_replay", counted)
     return runner
 
 
@@ -409,17 +423,20 @@ def _eager_request(request_kwargs: dict[str, Any]) -> dict[str, Any]:
 
 @pytest.mark.gpu_hw
 @pytest.mark.parametrize("request_kwargs", _GRAPH_REQUESTS, ids=_GRAPH_REQUEST_IDS)
-def test_exact_cuda_graphs_score_bit_for_bit_like_eager(exact_rig: _Rig, request_kwargs: dict[str, Any]) -> None:
+def test_exact_cuda_graphs_score_bit_for_bit_like_eager(
+    exact_rig: _Rig, request_kwargs: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
     # Eleven texts of different lengths, sent three times: a shape is recorded
     # the second time it is seen and replayed the third.
     items = [Item(text=text) for text in _TEXTS]
-    runner = _fresh_runner(exact_rig)
+    runner = _fresh_runner(exact_rig, monkeypatch)
 
     eager = _outputs(exact_rig.adapter.extract(items, **_eager_request(request_kwargs)))
     for _ in range(3):
         assert _outputs(exact_rig.adapter.extract(items, **request_kwargs)) == eager
 
     assert runner.graph_count > 0
+    assert runner.replayed  # the third pass replayed
     assert not runner.disabled
     # Graphs of one length share its relative-position table.
     assert set(runner._relative_pos) == {length for _, length, _ in runner._graphs}
@@ -427,9 +444,11 @@ def test_exact_cuda_graphs_score_bit_for_bit_like_eager(exact_rig: _Rig, request
 
 @pytest.mark.gpu_hw
 @pytest.mark.parametrize("request_kwargs", _GRAPH_REQUESTS, ids=_GRAPH_REQUEST_IDS)
-def test_bucketed_cuda_graphs_stay_close_to_eager(bucketed_rig: _Rig, request_kwargs: dict[str, Any]) -> None:
+def test_bucketed_cuda_graphs_stay_close_to_eager(
+    bucketed_rig: _Rig, request_kwargs: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
     items = [Item(text=text) for text in _TEXTS]
-    runner = _fresh_runner(bucketed_rig)
+    runner = _fresh_runner(bucketed_rig, monkeypatch)
 
     eager = bucketed_rig.adapter.extract(items, **_eager_request(request_kwargs))
     for _ in range(2):
@@ -446,6 +465,7 @@ def test_bucketed_cuda_graphs_stay_close_to_eager(bucketed_rig: _Rig, request_kw
             assert got == pytest.approx(expected, abs=2e-2)
         assert graphed.input_token_counts == eager.input_token_counts
     assert runner.graph_count > 0
+    assert runner.replayed  # the second pass replayed
     assert not runner.disabled
 
 

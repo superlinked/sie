@@ -289,18 +289,20 @@ class CudaGraphRunner:
     def _record(self, key: Key, inputs: dict[str, torch.Tensor]) -> tuple[_Graph, torch.Tensor]:
         """Record the graph for ``key``; return it and this forward's logits.
 
-        The forward runs eagerly once on the recording stream first, as
-        recording requires; its logits answer this call, and a replay of the
-        new graph returns the same values.
+        This call is answered by an eager forward on the current stream, as
+        eager execution answers it; a replay of the new graph returns the same
+        values. Its activations go back to the cache that eager forwards
+        reuse. Recording runs on a stream of the runner's own, whose first use
+        creates per-stream state (the cuBLAS handle and workspace) that cannot
+        be created while recording: the first recording warms that stream up
+        with one row of its inputs, the only memory left cached on it.
         """
         _, padded_length, classes = key
         static = self._static_inputs(key, inputs)
         device = static["input_ids"].device
-        stream = self._stream or torch.cuda.Stream(device=device)
-        self._stream = stream
-        pool = next(iter(self._graphs.values())).graph.pool() if self._graphs else None
-        graph = torch.cuda.CUDAGraph()
         current = torch.cuda.current_stream(device)
+        with torch.inference_mode():
+            logits = self._model(**static, max_num_classes=classes).logits.clone()
         relative_pos = self._relative_pos.get(padded_length)
         if relative_pos is None:
             with torch.inference_mode():
@@ -308,12 +310,18 @@ class CudaGraphRunner:
                 relative_pos = self._build_relative_pos(torch.empty((1, padded_length, 1), device=device))
             if relative_pos is not None:
                 self._relative_pos[padded_length] = relative_pos
+        warm_up = self._stream is None
+        stream = self._stream or torch.cuda.Stream(device=device)
+        self._stream = stream
+        pool = next(iter(self._graphs.values())).graph.pool() if self._graphs else None
+        graph = torch.cuda.CUDAGraph()
         stream.wait_stream(current)
         self._recording_relative_pos = relative_pos
         self._recording = True
         try:
             with torch.inference_mode(), torch.cuda.stream(stream):
-                logits = self._model(**static, max_num_classes=classes).logits.clone()
+                if warm_up:
+                    self._model(**{name: value[:1] for name, value in static.items()}, max_num_classes=classes)
                 graph.capture_begin(pool=pool, capture_error_mode="thread_local")
                 try:
                     output = self._model(**static, max_num_classes=classes).logits
@@ -323,7 +331,6 @@ class CudaGraphRunner:
             self._recording = False
             self._recording_relative_pos = None
             current.wait_stream(stream)
-        logits.record_stream(current)
         return _Graph(graph=graph, inputs=static, output=output), logits
 
     def _replay(self, entry: _Graph, inputs: dict[str, torch.Tensor], length: int) -> torch.Tensor:
