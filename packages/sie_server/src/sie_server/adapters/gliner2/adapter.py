@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 import unicodedata
 from numbers import Real
 from pathlib import Path
@@ -12,6 +13,7 @@ from huggingface_hub import snapshot_download
 from sie_server.adapters._base_adapter import BaseAdapter
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_REQUIRES_TEXT, ComputePrecision
+from sie_server.adapters.gliner2.words import linear_equivalent, word_spans
 from sie_server.core.inference_output import ExtractOutput
 from sie_server.types.inputs import Item
 from sie_server.types.responses import Classification, Entity, Relation
@@ -19,6 +21,14 @@ from sie_server.types.responses import Classification, Entity, Relation
 _ERR_REQUIRES_LABELS = "GLiNER2 requires labels parameter for extraction"
 _STRUCTURE_NAME = "_sie_root"
 _STRUCTURE_DELIMITERS = ("::", "|", "[", "]")
+# Metering tokenizes a prefix of this many characters per token of the window
+# (then 4x more, up to the whole text) and stops once the prefix alone fills
+# the window.
+_METER_CHARS_PER_TOKEN = 16
+_METER_MARGIN_TOKENS = 64
+# A space after a non-space character, matched in reversed text: the tokenizers
+# of these checkpoints split pre-tokens at spaces, after normalizing whitespace.
+_SPACE_AFTER_TEXT = re.compile(r" (?=\S)")
 
 
 class GLiNER2Adapter(BaseAdapter):
@@ -89,6 +99,8 @@ class GLiNER2Adapter(BaseAdapter):
         self._revision = revision
 
         self._model: Any = None
+        # How the loaded gliner2 splits words (see ``_model_text``); None until loaded.
+        self._lower_text_first: bool | None = None
         self._device: str | None = None
 
     def load(self, device: str) -> None:
@@ -109,11 +121,33 @@ class GLiNER2Adapter(BaseAdapter):
             model_path = snapshot_download(repo_id=model_path, revision=self._revision)
 
         use_quantize = device != "cpu" and self._compute_precision == "float16"
-        self._model = GLiNER2.from_pretrained(
+        model = GLiNER2.from_pretrained(
             model_path,
             map_location=device,
             quantize=use_quantize,
         )
+        self._use_linear_word_splitter(model.processor)
+        self._model = model
+
+    def _use_linear_word_splitter(self, processor: Any) -> None:
+        """Split words with a linear-time equivalent of gliner2's splitter.
+
+        gliner2's word-splitting regex takes time quadratic in the length of a
+        run of e-mail address characters (``"...."``, ``"a.a.a."``), on the
+        thread that serves every request.
+
+        Raises:
+            RuntimeError: gliner2's splitter is not the one this adapter has an
+                equivalent for.
+        """
+        splitter = linear_equivalent(processor.word_splitter)
+        if splitter is None:
+            raise RuntimeError(
+                f"GLiNER2 has no linear-time equivalent of {type(processor.word_splitter).__name__}; "
+                "gliner2's word splitter changed"
+            )
+        processor.word_splitter = splitter
+        self._lower_text_first = splitter.lower_text_first
 
     def extract(
         self,
@@ -128,6 +162,8 @@ class GLiNER2Adapter(BaseAdapter):
         """Extract entities, relations, classifications, or flat structured data."""
         self._check_loaded()
         texts = [self._extract_text(item) for item in items]
+        # gliner2 reads only the first max_len words of a text, after splitting all of it.
+        model_texts = [self._model_text(text) for text in texts]
         opts = options or {}
         effective_threshold = self._validate_threshold(opts.get("threshold", self._threshold))
         classification_task = opts.get("classification_task", self._classification_task)
@@ -144,7 +180,7 @@ class GLiNER2Adapter(BaseAdapter):
             structures = self._json_schema_to_structures(output_schema)
             with torch.inference_mode():
                 raw_results = self._model.batch_extract_json(
-                    texts,
+                    model_texts,
                     structures,
                     batch_size=len(texts),
                     threshold=effective_threshold,
@@ -169,7 +205,7 @@ class GLiNER2Adapter(BaseAdapter):
             ]
             with torch.inference_mode():
                 raw_results = self._model.batch_extract_relations(
-                    texts,
+                    model_texts,
                     normalized_labels,
                     batch_size=len(texts),
                     threshold=effective_threshold,
@@ -190,7 +226,7 @@ class GLiNER2Adapter(BaseAdapter):
             if not isinstance(classification_task, str) or not classification_task.strip():
                 raise ValueError("GLiNER2 classification_task must be a non-empty string")
             return self._classify(
-                texts,
+                model_texts,
                 normalized_labels,
                 task=classification_task,
                 multi_label=multi_label,
@@ -202,7 +238,7 @@ class GLiNER2Adapter(BaseAdapter):
             if len(texts) == 1:
                 raw_results = [
                     self._model.extract_entities(
-                        texts[0],
+                        model_texts[0],
                         normalized_labels,
                         threshold=effective_threshold,
                         include_confidence=True,
@@ -212,7 +248,7 @@ class GLiNER2Adapter(BaseAdapter):
                 ]
             else:
                 raw_results = self._model.batch_extract_entities(
-                    texts,
+                    model_texts,
                     normalized_labels,
                     threshold=effective_threshold,
                     include_confidence=True,
@@ -623,19 +659,98 @@ class GLiNER2Adapter(BaseAdapter):
             elif not isinstance(value, list) or any(not isinstance(item, str) for item in value):
                 raise ValueError(f"GLiNER2 structured extraction property {name!r} must be an array of strings")
 
+    def _model_text(self, text: str) -> str:
+        """The prefix of ``text`` holding every word gliner2 reads from it, or ``text``.
+
+        gliner2 splits all of a text into words and keeps the first ``max_len``.
+        The prefix ending where the last kept word ends gives it the same words
+        at the same offsets, since no word crosses that point. gliner2 1.x
+        splits the lowercased text and indexes the original with those offsets,
+        so the prefix ends at the lowercased offset; it is used only when its
+        lowercase starts the lowercased text (a final sigma can lowercase
+        differently at the cut). gliner2 2.x splits the text as given.
+        """
+        limit = self._max_seq_length
+        if limit is None or len(text) <= limit or self._lower_text_first is None:  # a word has a character
+            return text
+        source = text.lower() if self._lower_text_first else text
+        cut = None
+        for count, (_, end) in enumerate(word_spans(source), start=1):
+            if count == limit:
+                cut = end
+                break
+        if cut is None or cut >= len(text):
+            return text
+        prefix = text[:cut]
+        if self._lower_text_first and not source.startswith(prefix.lower()):
+            return text
+        return prefix
+
     def _doc_input_token_counts(self, texts: list[str]) -> list[int] | None:
         processor = getattr(self._model, "processor", None)
         tokenizer = getattr(processor, "tokenizer", None)
         if tokenizer is None:
             return None
+        limit = self._max_seq_length
         try:
-            encoded = tokenizer(
-                texts,
-                add_special_tokens=True,
-                truncation=self._max_seq_length is not None,
-                max_length=self._max_seq_length,
-            )
-            counts = [len(ids) for ids in encoded["input_ids"]]
+            counts: list[int | None] = [None] * len(texts)
+            short = [index for index, text in enumerate(texts) if limit is None or len(text) <= _meter_budget(limit)]
+            if short:
+                encoded = tokenizer(
+                    [texts[index] for index in short],
+                    add_special_tokens=True,
+                    truncation=limit is not None,
+                    max_length=limit,
+                )
+                ids = encoded["input_ids"]
+                if len(ids) != len(short):
+                    return None
+                for index, row in zip(short, ids, strict=True):
+                    counts[index] = len(row)
+            if limit is not None:
+                for index, text in enumerate(texts):
+                    if counts[index] is None:
+                        counts[index] = self._long_doc_input_tokens(tokenizer, text, limit)
         except Exception:  # noqa: BLE001 -- metering must not fail extraction
             return None
-        return counts if len(counts) == len(texts) else None
+        complete = [count for count in counts if count is not None]
+        return complete if len(complete) == len(texts) else None
+
+    @staticmethod
+    def _long_doc_input_tokens(tokenizer: Any, text: str, limit: int) -> int:
+        """Tokens of a long ``text`` with special tokens, truncated to ``limit``.
+
+        Tokenizing a multi-megabyte text takes about a second, so prefixes are
+        tokenized first, from ``_METER_CHARS_PER_TOKEN`` characters per window
+        token up. A prefix ending just before a space tokenizes like the start of
+        the text (these tokenizers split pre-tokens at spaces), so once it fills
+        the window, so does the text. Without a space in the second half of the
+        prefix, the prefix must fill the window with ``_METER_MARGIN_TOKENS`` to
+        spare, for the tokens at its cut.
+        """
+        budget = _meter_budget(limit)
+        while budget < len(text):
+            cut = _last_space(text, budget)
+            if cut is not None:
+                if _token_count(tokenizer, text[:cut]) >= limit:
+                    return limit
+            elif _token_count(tokenizer, text[:budget]) >= limit + _METER_MARGIN_TOKENS:
+                return limit
+            budget *= 4
+        encoded = tokenizer(text, add_special_tokens=True, truncation=True, max_length=limit)
+        return len(encoded["input_ids"])
+
+
+def _meter_budget(limit: int) -> int:
+    return limit * _METER_CHARS_PER_TOKEN
+
+
+def _token_count(tokenizer: Any, text: str) -> int:
+    return len(tokenizer(text, add_special_tokens=True)["input_ids"])
+
+
+def _last_space(text: str, end: int) -> int | None:
+    """Index of the last space after a non-space character in the second half of ``text[:end]``, or None."""
+    begin = end // 2
+    match = _SPACE_AFTER_TEXT.search(text[begin:end][::-1])
+    return None if match is None else end - 1 - match.start()

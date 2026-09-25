@@ -1,4 +1,5 @@
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -8,6 +9,7 @@ import pytest
 import yaml
 from sie_server.adapters.gliner2.adapter import GLiNER2Adapter
 from sie_server.adapters.gliner2.classification import GLiNER2ClassificationAdapter
+from sie_server.adapters.gliner2.words import PACKAGE_PATTERN, LinearWordSplitter
 from sie_server.core.loader import load_adapter, load_model_configs
 from sie_server.types.inputs import Item
 
@@ -240,10 +242,27 @@ def _adapter_with_counting_model(*, max_seq_length: int = 512) -> tuple[GLiNER2A
     return adapter, model
 
 
+class _Gliner2V1WordSplitter:
+    """gliner2 1.x's word splitter: lowercase the text, then match the package pattern."""
+
+    _PATTERN = PACKAGE_PATTERN
+
+    def __call__(self, text: str, lower: bool = True) -> Iterator[tuple[str, int, int]]:
+        if lower:
+            text = text.lower()
+        for match in self._PATTERN.finditer(text):
+            yield match.group(), match.start(), match.end()
+
+
+_Gliner2V1WordSplitter.__name__ = "WhitespaceTokenSplitter"
+
+
 def test_load_resolves_every_file_from_pinned_snapshot() -> None:
     fake_module = ModuleType("gliner2")
     fake_class = MagicMock()
-    fake_class.from_pretrained.return_value = MagicMock()
+    model = MagicMock()
+    model.processor.word_splitter = _Gliner2V1WordSplitter()
+    fake_class.from_pretrained.return_value = model
     fake_module.GLiNER2 = fake_class
     adapter = GLiNER2Adapter("fastino/gliner2-base-v1", revision="a" * 40)
 
@@ -265,6 +284,8 @@ def test_load_resolves_every_file_from_pinned_snapshot() -> None:
         map_location="cpu",
         quantize=False,
     )
+    assert isinstance(model.processor.word_splitter, LinearWordSplitter)
+    assert model.processor.word_splitter.lower_text_first
 
 
 def test_entity_offsets_use_python_unicode_character_indices() -> None:
