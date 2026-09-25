@@ -139,9 +139,10 @@ descriptions above took 555 MB of device memory: 490 MB for the pool and
 the graphs, 60 MB cached on the recording stream (its cuBLAS workspace and one
 warm-up row) and 5 MB of relative-position tables. The pool keeps what evicted
 graphs used, so traffic with many shapes keeps growing it. The runner therefore
-adds up the device memory its recordings take, and past 4% of the device's
-memory (900 MB on an L4) it drops every graph, returns their memory to the
-device and records again. Graphs are also released when the model unloads, and
+adds up the device memory its graphs hold (what each recording took, plus the
+tables and buffers they read), and past 4% of the device's memory (900 MB on
+an L4) it drops every graph, returns their memory to the device and records
+again. Graphs are also released when the model unloads, and
 when one of its forwards runs out of memory.
 
 While a graph records, PyTorch's caching allocator does not free cached blocks

@@ -32,11 +32,12 @@ therefore kept rare and short:
 - a runner records at most 16 graphs at once, then one per 2 seconds.
 
 A runner's graphs hold device memory the server does not attribute to the
-model: their shared pool, which also keeps what evicted graphs used, and the
-driver's copy of each recorded graph (about 6 MB for a DeBERTa-large
-forward). The runner adds up the device memory each recording takes. Past 4%
-of the device's memory it drops every graph, returns the memory to the device
-and starts again.
+model: their shared pool, which also keeps what evicted graphs used, the
+driver's copy of each recorded graph (about 8 MB for a DeBERTa-large
+forward), and the relative-position tables and static buffers they read. The
+runner adds up the device memory each recording takes, plus those tensors.
+Past 4% of the device's memory it drops every graph, returns the memory to the
+device and starts again.
 
 Recording needs a forward that never waits on the host. Two parts of the
 gliclass DeBERTa forward do: the relative-position table copies a CPU scalar
@@ -91,8 +92,9 @@ _SECONDS_PER_RECORDING = 2.0
 _RECORDING_HEADROOM = 0.1
 # One recording at a time in the process, across every model's runner.
 _RECORDING_LOCK = threading.Lock()
-# Device memory a runner's recordings may take, as a share of the device's
-# memory, before it drops its graphs and starts again.
+# Device memory a runner's graphs may hold (their recordings, relative-position
+# tables and static buffers), as a share of the device's memory, before it
+# drops them and starts again.
 _MEMORY_BUDGET_SHARE = 0.04
 # Encoders whose forward records cleanly once the two host reads are replaced.
 _ENCODERS = frozenset({"deberta-v2"})
@@ -270,10 +272,11 @@ class CudaGraphRunner:
                 while len(self._graphs) > self._max_graphs:
                     self._graphs.popitem(last=False)
                 self._drop_unused_tables()
-                if self._device_bytes > self._memory_budget(input_ids.device):
+                held = self._device_bytes + self._tensor_bytes()
+                if held > self._memory_budget(input_ids.device):
                     logger.info(
                         "GLiClass CUDA graphs took %d MB, over their budget; dropping them to record again",
-                        self._device_bytes // 2**20,
+                        held // 2**20,
                     )
                     self.clear()
                     # With every graph gone, their pool can go back to the device.
@@ -314,6 +317,15 @@ class CudaGraphRunner:
     @staticmethod
     def _free_memory(device: torch.device) -> int:
         return torch.cuda.mem_get_info(device)[0]
+
+    def _tensor_bytes(self) -> int:
+        """Device memory of the tensors the graphs keep: tables, static inputs and outputs."""
+        tables = sum(table.nbytes for table in self._relative_pos.values())
+        buffers = sum(
+            sum(tensor.nbytes for tensor in entry.inputs.values()) + entry.output.nbytes
+            for entry in self._graphs.values()
+        )
+        return tables + buffers
 
     def _drop_unused_tables(self) -> None:
         lengths = {length for _, length, _ in self._graphs}

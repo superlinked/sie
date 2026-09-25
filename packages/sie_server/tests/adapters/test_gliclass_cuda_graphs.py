@@ -85,7 +85,8 @@ class _Runner(CudaGraphRunner):
             raise RuntimeError("operation not permitted when stream is capturing")
         self.recorded.append(key)
         self._relative_pos.setdefault(key[1], torch.zeros(1))
-        return SimpleNamespace(key=key, device_bytes=self.bytes_per_graph), torch.zeros(key[0], key[2])
+        entry = SimpleNamespace(key=key, device_bytes=self.bytes_per_graph, inputs={}, output=torch.zeros(0))
+        return entry, torch.zeros(key[0], key[2])
 
     def _replay(self, entry: Any, inputs: dict[str, torch.Tensor], length: int) -> torch.Tensor:
         if self.replay_error is not None:
@@ -270,6 +271,15 @@ class TestRecordingPolicy:
         runner.run(_inputs(1, 32), 4, "bucketed")  # records again from nothing
         assert runner.recorded[-1] == (1, 32, 4)
         assert runner.graph_count == 1
+
+    def test_the_budget_counts_the_tensors_graphs_keep(self) -> None:
+        runner = _Runner()
+        runner.budget = 999
+        runner._relative_pos[32] = torch.zeros(1000, dtype=torch.uint8)  # a 1,000-byte table
+
+        runner.run(_inputs(1, 32), 4, "bucketed")  # nothing recorded counts, but the table does
+
+        assert runner.graph_count == 0
 
     def test_evicting_graphs_does_not_give_their_memory_back(self) -> None:
         # Evicted graphs leave their share of the shared pool behind, so their
