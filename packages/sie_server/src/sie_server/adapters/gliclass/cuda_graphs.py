@@ -8,9 +8,9 @@ with a single call.
 Graphs are an operator setting, fixed when the model loads
 (``adapter_options.loadtime.cuda_graphs``); a request can only opt out. A
 graph is recorded per (batch size, sequence length, class slots) and kept in
-a bounded least-recently-used cache. Forwards over four full windows of
-tokens run eagerly: the GPU, not kernel launches, bounds them. Two modes
-choose the sequence length:
+a bounded least-recently-used cache. Forwards over 2,048 tokens run eagerly:
+the GPU, not kernel launches, bounds them. Two modes choose the sequence
+length:
 
 - ``exact`` records the request's own length. Replay launches the kernels
   eager execution launches, so scores are bit-identical to eager. A shape is
@@ -31,6 +31,13 @@ therefore kept rare and short:
 - no recording while less than a tenth of the device's memory is free;
 - a runner records at most 16 graphs at once, then one per 2 seconds.
 
+A runner's graphs hold device memory the server does not attribute to the
+model: their shared pool, which also keeps what evicted graphs used, and the
+driver's copy of each recorded graph (about 6 MB for a DeBERTa-large
+forward). The runner adds up the device memory each recording takes. Past 4%
+of the device's memory it drops every graph, returns the memory to the device
+and starts again.
+
 Recording needs a forward that never waits on the host. Two parts of the
 gliclass DeBERTa forward do: the relative-position table copies a CPU scalar
 to the GPU, and segment ids (instruct and Opir multitask models) read each
@@ -39,8 +46,8 @@ encoder a table precomputed for the length, shared by the graphs of that
 length, and computes segment ids with tensor operations; both give the same
 integers.
 
-The graphs of one runner share one memory pool. Replays never overlap (a lock
-serializes them) and every result is copied out before the next replay.
+Replays never overlap (a lock serializes them) and every result is copied out
+before the next replay.
 Anything unsupported, larger than the token bound, or failing to record runs
 eagerly; a recording failure turns the runner off.
 """
@@ -71,10 +78,10 @@ _MAX_GRAPHS = 64
 _MAX_SIGHTINGS = 4096
 # ``exact`` mode records a shape the time it is seen this many times.
 _EXACT_RECORD_AT = 2
-# Tokens (batch x padded length) a graph may hold: four full windows. Past
-# about that many tokens the GPU, not kernel launches, bounds a forward, so a
-# graph saves little and would pin a larger memory pool.
-_WINDOWS_PER_GRAPH = 4
+# Tokens (batch x padded length) a graph may hold. Past about that many tokens
+# the GPU, not kernel launches, bounds a forward, so a graph saves little and
+# would pin a larger memory pool.
+_MAX_GRAPH_TOKENS = 2048
 # A runner may record this many graphs at once, then one per this many
 # seconds, however its forwards repeat: recording costs a forward, and while
 # it runs the allocator cannot free cached memory for other models.
@@ -84,6 +91,9 @@ _SECONDS_PER_RECORDING = 2.0
 _RECORDING_HEADROOM = 0.1
 # One recording at a time in the process, across every model's runner.
 _RECORDING_LOCK = threading.Lock()
+# Device memory a runner's recordings may take, as a share of the device's
+# memory, before it drops its graphs and starts again.
+_MEMORY_BUDGET_SHARE = 0.04
 # Encoders whose forward records cleanly once the two host reads are replaced.
 _ENCODERS = frozenset({"deberta-v2"})
 # Poolings whose pooled vector ignores padded positions, so ``bucketed`` mode
@@ -119,6 +129,8 @@ class _Graph:
     graph: Any
     inputs: dict[str, torch.Tensor]
     output: torch.Tensor
+    # Device memory the recording took: pool growth and the recorded graph.
+    device_bytes: int = 0
 
 
 class CudaGraphRunner:
@@ -138,7 +150,7 @@ class CudaGraphRunner:
         self._pad_values = {"input_ids": pad_token_id, "attention_mask": 0, "token_type_ids": pad_token_type_id}
         self._max_length = max_length
         self._bucket = bucket_width(max_length)
-        self._max_tokens = _WINDOWS_PER_GRAPH * max_length
+        self._max_tokens = _MAX_GRAPH_TOKENS
         self._max_graphs = max_graphs
         self._graphs: OrderedDict[Key, _Graph] = OrderedDict()
         self._sightings: OrderedDict[Key, int] = OrderedDict()
@@ -146,6 +158,9 @@ class CudaGraphRunner:
         self._stream: torch.cuda.Stream | None = None
         self._disabled = False
         self._clock = clock
+        # Device memory recordings have taken since the graphs were last
+        # dropped; evicting a graph does not give its share of the pool back.
+        self._device_bytes = 0
         self._recording_credit = float(_RECORDING_BURST)
         self._credited_at = clock()
         # Relative-position tables of the recorded lengths; a graph reads its
@@ -237,24 +252,33 @@ class CudaGraphRunner:
                 return None  # another model is recording
             try:
                 self._recording_credit -= 1
-                entry, logits = self._record(key, inputs)
-            except Exception as exc:  # a graph that cannot be recorded runs eagerly
-                if is_oom_error(exc):
-                    # Not a reason to stop recording: release the graphs and
-                    # let the worker's OOM recovery see the error.
+                try:
+                    entry, logits = self._record(key, inputs)
+                except Exception as exc:  # a graph that cannot be recorded runs eagerly
+                    if is_oom_error(exc):
+                        # Not a reason to stop recording: release the graphs
+                        # and let the worker's OOM recovery see the error.
+                        self.clear()
+                        raise
+                    logger.warning("GLiClass CUDA graph recording failed; running eagerly from now on", exc_info=True)
                     self.clear()
-                    raise
-                logger.warning("GLiClass CUDA graph recording failed; running eagerly from now on", exc_info=True)
-                self.clear()
-                self._disabled = True
-                return None
+                    self._disabled = True
+                    return None
+                self._graphs[key] = entry
+                self._device_bytes += entry.device_bytes
+                while len(self._graphs) > self._max_graphs:
+                    self._graphs.popitem(last=False)
+                self._drop_unused_tables()
+                if self._device_bytes > self._memory_budget(input_ids.device):
+                    logger.info(
+                        "GLiClass CUDA graphs took %d MB, over their budget; dropping them to record again",
+                        self._device_bytes // 2**20,
+                    )
+                    self.clear()
+                    torch.cuda.empty_cache()
+                return logits
             finally:
                 _RECORDING_LOCK.release()
-            self._graphs[key] = entry
-            while len(self._graphs) > self._max_graphs:
-                self._graphs.popitem(last=False)
-            self._drop_unused_tables()
-            return logits
 
     def clear(self) -> None:
         """Drop every graph and its memory."""
@@ -262,6 +286,7 @@ class CudaGraphRunner:
             self._graphs.clear()
             self._sightings.clear()
             self._relative_pos.clear()
+            self._device_bytes = 0
 
     @property
     def graph_count(self) -> int:
@@ -278,6 +303,15 @@ class CudaGraphRunner:
         """Whether enough device memory is free to record without starving other models."""
         free, total = torch.cuda.mem_get_info(device)
         return free >= _RECORDING_HEADROOM * total
+
+    @staticmethod
+    def _memory_budget(device: torch.device) -> int:
+        """Device memory this runner's recordings may take before its graphs are dropped."""
+        return int(_MEMORY_BUDGET_SHARE * torch.cuda.mem_get_info(device)[1])
+
+    @staticmethod
+    def _free_memory(device: torch.device) -> int:
+        return torch.cuda.mem_get_info(device)[0]
 
     def _drop_unused_tables(self) -> None:
         lengths = {length for _, length, _ in self._graphs}
@@ -329,16 +363,18 @@ class CudaGraphRunner:
             with torch.inference_mode(), torch.cuda.stream(stream):
                 if warm_up:
                     self._model(**{name: value[:1] for name, value in static.items()}, max_num_classes=classes)
+                free_before = self._free_memory(device)
                 graph.capture_begin(pool=pool, capture_error_mode="thread_local")
                 try:
                     output = self._model(**static, max_num_classes=classes).logits
                 finally:
                     graph.capture_end()
+                device_bytes = max(0, free_before - self._free_memory(device))
         finally:
             self._recording = False
             self._recording_relative_pos = None
             current.wait_stream(stream)
-        return _Graph(graph=graph, inputs=static, output=output), logits
+        return _Graph(graph=graph, inputs=static, output=output, device_bytes=device_bytes), logits
 
     def _replay(self, entry: _Graph, inputs: dict[str, torch.Tensor], length: int) -> torch.Tensor:
         for name, value in inputs.items():

@@ -58,7 +58,7 @@ class _Runner(CudaGraphRunner):
     """Records and replays with fakes: logits say which path produced them.
 
     Time stands still unless a test moves ``now``; the device always has
-    memory to spare unless a test clears ``headroom``.
+    memory to spare unless a test clears ``headroom`` or sets a ``budget``.
     """
 
     def __init__(self, model: Any = None, *, fail: bool | Exception = False, **kwargs: Any) -> None:
@@ -68,10 +68,15 @@ class _Runner(CudaGraphRunner):
         self.replayed: list[tuple[int, int, int]] = []
         self.fail = fail
         self.headroom = True
+        self.budget = 2**40
+        self.bytes_per_graph = 0
         self.replay_error: Exception | None = None
 
     def _has_headroom(self, device: torch.device) -> bool:
         return self.headroom
+
+    def _memory_budget(self, device: torch.device) -> int:
+        return self.budget
 
     def _record(self, key: Any, inputs: dict[str, torch.Tensor]) -> Any:
         if isinstance(self.fail, Exception):
@@ -80,7 +85,7 @@ class _Runner(CudaGraphRunner):
             raise RuntimeError("operation not permitted when stream is capturing")
         self.recorded.append(key)
         self._relative_pos.setdefault(key[1], torch.zeros(1))
-        return SimpleNamespace(key=key), torch.zeros(key[0], key[2])
+        return SimpleNamespace(key=key, device_bytes=self.bytes_per_graph), torch.zeros(key[0], key[2])
 
     def _replay(self, entry: Any, inputs: dict[str, torch.Tensor], length: int) -> torch.Tensor:
         if self.replay_error is not None:
@@ -127,7 +132,7 @@ class TestShapes:
         assert runner.key(1, length, 8, "bucketed") == (1, bucketed, 8)
         assert runner.key(1, length, 8, "exact") == (1, length, 8)
 
-    def test_shapes_past_four_windows_run_eagerly(self) -> None:
+    def test_shapes_past_2048_tokens_run_eagerly(self) -> None:
         runner = _Runner()
 
         assert runner.key(4, 512, 4, "exact") == (4, 512, 4)
@@ -136,6 +141,13 @@ class TestShapes:
         assert runner.key(65, 32, 4, "bucketed") is None
         assert runner.key(5, 380, 8, "bucketed") == (5, 384, 8)
         assert runner.key(5, 400, 8, "bucketed") is None  # 5 x 416 tokens
+
+    def test_the_token_bound_does_not_grow_with_the_window(self) -> None:
+        runner = CudaGraphRunner(_model(), pad_token_id=0, max_length=1024)
+
+        assert runner.key(2, 1024, 4, "exact") == (2, 1024, 4)
+        assert runner.key(3, 1024, 4, "exact") is None
+        assert runner.key(3, 600, 4, "bucketed") == (3, 640, 4)  # 64-token buckets
 
     @pytest.mark.parametrize("pooling", ["avg", "last", "max"])
     def test_poolings_that_read_padding_keep_exact_lengths(self, pooling: str) -> None:
@@ -242,6 +254,35 @@ class TestRecordingPolicy:
         assert runner.run(_inputs(1, 100), 4, "bucketed") is not None
         assert runner.recorded == [(1, 128, 4)]
         assert not cuda_graphs_module._RECORDING_LOCK.locked()
+
+    def test_graphs_are_dropped_when_their_memory_passes_the_budget(self) -> None:
+        runner = _Runner()
+        runner.budget, runner.bytes_per_graph = 250, 100
+
+        runner.run(_inputs(1, 32), 4, "bucketed")
+        runner.run(_inputs(1, 64), 4, "bucketed")
+        assert runner.graph_count == 2
+        runner.run(_inputs(1, 96), 4, "bucketed")  # 300 bytes: over the budget
+
+        assert runner.graph_count == 0
+        assert runner._relative_pos == {}
+        assert not runner.disabled
+        runner.run(_inputs(1, 32), 4, "bucketed")  # records again from nothing
+        assert runner.recorded[-1] == (1, 32, 4)
+        assert runner.graph_count == 1
+
+    def test_evicting_graphs_does_not_give_their_memory_back(self) -> None:
+        # Evicted graphs leave their share of the shared pool behind, so their
+        # memory still counts until the graphs are dropped.
+        runner = _Runner(max_graphs=1)
+        runner.budget, runner.bytes_per_graph = 250, 100
+
+        runner.run(_inputs(1, 32), 4, "bucketed")
+        runner.run(_inputs(1, 64), 4, "bucketed")
+        assert runner.graph_count == 1
+        runner.run(_inputs(1, 96), 4, "bucketed")
+
+        assert runner.graph_count == 0
 
     def test_no_recording_while_device_memory_is_short(self) -> None:
         runner = _Runner()

@@ -392,17 +392,11 @@ def bucketed_rig(request: pytest.FixtureRequest) -> _Rig:
 
 
 def _fresh_runner(rig: _Rig, monkeypatch: pytest.MonkeyPatch) -> Any:
-    """The rig's graph runner, emptied and with a full recording burst.
-
-    The tiny model's window is 64 tokens, so four windows would leave an
-    8-row sub-batch to eager execution; the bound is raised so that every
-    forward in these tests goes through a graph.
-    """
+    """The rig's graph runner, emptied, with a full recording burst, counting replays."""
     runner = rig.adapter._graphs
     assert runner is not None
     runner.clear()
     runner._recording_credit = 16.0
-    runner._max_tokens = 16 * _MAX_LENGTH
     runner.replayed = []
     replay = runner._replay
 
