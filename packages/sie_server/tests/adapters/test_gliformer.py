@@ -1252,6 +1252,7 @@ def test_load_pins_snapshot_and_places_model(device: str, precision: str | None,
     with (
         patch.dict(sys.modules, {"gliformer": module}),
         patch.object(adapter_module, "_bound_span_decoding") as bound_span_decoding,
+        patch.object(adapter_module, "_assert_bounded_decoding") as assert_bounded,
         patch.object(adapter_module, "snapshot_download", return_value="/staged/gliformer") as download,
     ):
         adapter.load(device)
@@ -1272,6 +1273,12 @@ def test_load_pins_snapshot_and_places_model(device: str, precision: str | None,
     model.model.register_forward_hook.assert_called_once_with(adapter_module._upcast_score_outputs)
     ner_head.register_forward_hook.assert_called_once_with(adapter_module._mask_padded_ner_logits)
     bound_span_decoding.assert_called_once_with()
+    assert_bounded.assert_called_once_with()
+    # One small extraction at load, through every head the hooks check.
+    probe = model.inference.call_args
+    assert probe.args[0] == adapter_module._PROBE_TEXTS
+    assert probe.kwargs["joint_relations"] is not None
+    assert probe.kwargs["structures"] is not None
     assert relation_head.max_relation_entities == 100
     assert tokenizer.model_max_length == 2048
     assert adapter._tokenizer is tokenizer
@@ -1295,6 +1302,7 @@ def test_per_request_eval_walks_the_model_only_when_it_is_training() -> None:
     with (
         patch.dict(sys.modules, {"gliformer": _fake_gliformer_module(model)}),
         patch.object(adapter_module, "_bound_span_decoding"),
+        patch.object(adapter_module, "_assert_bounded_decoding"),
         patch.object(adapter_module.Path, "is_dir", return_value=True),
     ):
         adapter.load("cpu")
@@ -1324,6 +1332,23 @@ def test_per_request_eval_shortcut_does_not_keep_the_model_alive() -> None:
     assert released() is None
 
 
+def test_load_fails_when_the_probe_forward_is_rejected() -> None:
+    model = MagicMock()
+    model.config = SimpleNamespace(max_len=2048, embedding_config=SimpleNamespace(projection_dim=768))
+    model.model.heads = _fake_heads()
+    model.inference.side_effect = RuntimeError("GLiFormer NER logits came without a matching word mask")
+    adapter = GLiFormerAdapter("/local/checkpoint")
+    with (
+        patch.dict(sys.modules, {"gliformer": _fake_gliformer_module(model)}),
+        patch.object(adapter_module, "_bound_span_decoding"),
+        patch.object(adapter_module, "_assert_bounded_decoding"),
+        patch.object(adapter_module.Path, "is_dir", return_value=True),
+        pytest.raises(RuntimeError, match="word mask"),
+    ):
+        adapter.load("cpu")
+    assert adapter._model is None
+
+
 def test_load_rejects_embedding_dimension_mismatch() -> None:
     model = MagicMock()
     model.config = SimpleNamespace(max_len=2048, embedding_config=SimpleNamespace(projection_dim=768))
@@ -1332,6 +1357,7 @@ def test_load_rejects_embedding_dimension_mismatch() -> None:
     with (
         patch.dict(sys.modules, {"gliformer": _fake_gliformer_module(model)}),
         patch.object(adapter_module, "_bound_span_decoding"),
+        patch.object(adapter_module, "_assert_bounded_decoding"),
         patch.object(adapter_module.Path, "is_dir", return_value=True),
         pytest.raises(ValueError, match="dimension mismatch"),
     ):
@@ -1400,6 +1426,12 @@ def test_importing_gliformer_through_the_adapter_keeps_transformers_auto_models(
         "assert MODEL_MAPPING[LayoutDebertaConfig] is LayoutDebertaModel\n"
         "from gliformer.tasks.span_decoder import SpanDecoder\n"
         "assert SpanDecoder._calculate_span_score._sie_bounded is True\n"
+        "import importlib\n"
+        "from sie_server.adapters.gliformer import adapter\n"
+        "for name in adapter._PROPOSAL_MODULES:\n"
+        "    module = importlib.import_module(name)\n"
+        "    assert module.extract_spans_from_tokens._sie_bounded is True, name\n"
+        "adapter._assert_bounded_decoding()\n"
     )
     result = subprocess.run(  # noqa: S603 — fixed interpreter and script
         [sys.executable, "-c", script], capture_output=True, text=True, timeout=600, check=False

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import gc
 import importlib
 import random
+import sys
 from dataclasses import astuple
 from types import ModuleType, SimpleNamespace
 from typing import Any
@@ -471,6 +473,50 @@ def test_the_package_functions_are_bounded_after_import() -> None:
     replaced = upstream.SpanDecoder._calculate_span_score
     adapter_module._import_gliformer()
     assert upstream.SpanDecoder._calculate_span_score is replaced
+
+
+def test_every_gliformer_binding_of_the_proposal_function_is_bounded() -> None:
+    for name in adapter_module._PROPOSAL_MODULES:
+        module = importlib.import_module(name)
+        if hasattr(module, "extract_spans_from_tokens"):
+            assert module.extract_spans_from_tokens._sie_bounded is True
+    adapter_module._assert_bounded_decoding()
+
+
+def test_bounded_decoding_check_rejects_an_override() -> None:
+    class _Overriding(upstream.SpanDecoder):
+        def greedy_search(self, spans, flat_ner=True, multi_label=False):
+            return spans
+
+    try:
+        with pytest.raises(RuntimeError, match="overrides"):
+            adapter_module._assert_bounded_decoding()
+    finally:
+        del _Overriding
+        gc.collect()
+    adapter_module._assert_bounded_decoding()
+
+
+def test_bounded_decoding_check_rejects_a_leftover_binding(monkeypatch: pytest.MonkeyPatch) -> None:
+    leftover = ModuleType("gliformer.tasks.leftover")
+    leftover.extract_spans_from_tokens = extract_spans_from_tokens
+    monkeypatch.setitem(sys.modules, "gliformer.tasks.leftover", leftover)
+    with pytest.raises(RuntimeError, match="still binds"):
+        adapter_module._assert_bounded_decoding()
+
+
+def test_gliner_proposal_function_is_checked_against_its_source() -> None:
+    def changed(scores, labels=None, threshold=0.5):
+        return None
+
+    owner = SimpleNamespace(extract_spans_from_tokens=changed)
+    with pytest.raises(RuntimeError, match="must be verified again"):
+        adapter_module._replace_package_function(
+            owner,
+            "extract_spans_from_tokens",
+            lambda scores, labels=None, threshold=0.5: None,
+            source_sha256="0249c8ba3ce43091c120eaef4c06b8e8c518c3038392de2b10764df08bba713e",
+        )
 
 
 # -- Padding --------------------------------------------------------------------

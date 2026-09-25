@@ -8,6 +8,7 @@ import importlib
 import inspect
 import logging
 import math
+import sys
 import threading
 import warnings
 import weakref
@@ -256,6 +257,8 @@ def _bound_span_decoding() -> None:
         source_sha256="079bfd5f322bc10981c4150b708da41fbba6cb3742ae5e0daa4e9a4e3f31859c",
     )
     original_proposals = getattr(structuring_model, "extract_spans_from_tokens", None)
+    if getattr(original_proposals, "_sie_bounded", False):
+        original_proposals = original_proposals._sie_original  # ty:ignore[unresolved-attribute]
     if not callable(original_proposals):
         raise RuntimeError("GLiFormer's structuring head has no span proposal function to bound")
 
@@ -264,8 +267,74 @@ def _bound_span_decoding() -> None:
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return propose_spans(scores, labels, threshold, original=original_proposals)
 
-    # GLiNER's version is not pinned exactly, so only its parameters are checked.
-    _replace_package_function(structuring_model, "extract_spans_from_tokens", extract_spans_from_tokens)
+    # Every gliformer module that imported GLiNER's proposal function gets the
+    # bounded one; only the structuring head calls it in gliformer 0.1.2.
+    for module_name in _PROPOSAL_MODULES:
+        module = importlib.import_module(module_name)
+        if getattr(module, "extract_spans_from_tokens", None) is not None:
+            _replace_package_function(
+                module,
+                "extract_spans_from_tokens",
+                extract_spans_from_tokens,
+                source_sha256="0249c8ba3ce43091c120eaef4c06b8e8c518c3038392de2b10764df08bba713e",
+            )
+    _assert_bounded_decoding()
+
+
+# gliformer modules that bind GLiNER's span proposal function at import.
+_PROPOSAL_MODULES = (
+    "gliformer.tasks.structuring.model",
+    "gliformer.tasks.joint_relex.model",
+    "gliformer.tasks.anchored_extraction",
+    "gliformer.tasks.open_relex.model",
+)
+# gliformer's task decoders, imported so that their classes can be checked.
+_DECODER_MODULES = (
+    "gliformer.tasks.ner.decoder",
+    "gliformer.tasks.joint_relex.decoder",
+    "gliformer.tasks.open_relex.decoder",
+    "gliformer.tasks.structuring.decoder",
+)
+
+
+def _assert_bounded_decoding() -> None:
+    """Fail unless nothing in gliformer can still reach the unbounded functions.
+
+    Raises:
+        RuntimeError: A span decoder subclass overrides a replaced method, a
+            structuring decoder subclass overrides ``decode``, or a gliformer
+            module still binds GLiNER's own proposal function.
+    """
+    span_decoder = importlib.import_module("gliformer.tasks.span_decoder")
+    structuring_decoder = importlib.import_module("gliformer.tasks.structuring.decoder")
+    for module_name in _DECODER_MODULES:
+        importlib.import_module(module_name)
+    for base, names in (
+        (span_decoder.SpanDecoder, ("_calculate_span_score", "greedy_search")),
+        (structuring_decoder.StructuringDecoder, ("decode",)),
+    ):
+        for subclass in _subclasses(base):
+            overridden = [name for name in names if name in vars(subclass)]
+            if overridden:
+                raise RuntimeError(
+                    f"GLiFormer's {subclass.__module__}.{subclass.__qualname__} overrides {overridden}, "
+                    "which the adapter bounds"
+                )
+    proposals: Any = importlib.import_module("gliformer.tasks.structuring.model").extract_spans_from_tokens
+    original = getattr(proposals, "_sie_original", None)
+    for module_name, module in list(sys.modules.items()):
+        if module is None or not (module_name == "gliformer" or module_name.startswith("gliformer.")):
+            continue
+        if any(value is original for value in vars(module).values()):
+            raise RuntimeError(f"GLiFormer's {module_name} still binds GLiNER's unbounded span proposal function")
+
+
+def _subclasses(cls: type) -> list[type]:
+    found = []
+    for subclass in cls.__subclasses__():
+        found.append(subclass)
+        found.extend(_subclasses(subclass))
+    return found
 
 
 def _replace_package_function(
@@ -525,6 +594,10 @@ class GLiFormerAdapter(BaseAdapter):
         # ``embed_text`` truncates at the tokenizer limit, which the saved
         # tokenizer leaves unbounded; share the extraction budget instead.
         tokenizer.model_max_length = int(model.config.max_len)
+
+        # Loading the checkpoint imports the task decoders; check them too.
+        _assert_bounded_decoding()
+        _probe_forward(model)
 
         self._model = model
         self._tokenizer = tokenizer
@@ -903,6 +976,29 @@ def _skip_redundant_eval(model: Any) -> None:
 # Heads that run an NER pass for their own entity candidates, and the method
 # that returns it.
 _NER_CONSUMERS = {"joint_relex": "_forward_ner", "structuring": "_forward_entity_ner"}
+
+
+# A short batch that runs every head whose output the hooks check: entities
+# and relations through the relation head's NER pass, and a structuring field
+# through the structuring head's. Two lengths, so the padding mask runs too.
+_PROBE_TEXTS = ["Ada Lovelace worked with Charles Babbage in London.", "Ada lived in London."]
+_PROBE_TASKS = {
+    "entities": None,
+    "classes": None,
+    "joint_relations": {None: {"entities": ["person", "city"], "relations": ["lives in"]}},
+    "structures": {"$root": {"name": "str"}},
+}
+
+
+def _probe_forward(model: Any) -> None:
+    """Run one small extraction so a checkpoint the hooks cannot handle fails at load.
+
+    Raises:
+        RuntimeError: A hook rejected the checkpoint's outputs, for example
+            NER logits of an unexpected shape.
+    """
+    with torch.inference_mode():
+        model.inference(list(_PROBE_TEXTS), **_PROBE_TASKS, threshold=0.5, batch_size=len(_PROBE_TEXTS))
 
 
 def _mask_padded_words(model: Any) -> None:
