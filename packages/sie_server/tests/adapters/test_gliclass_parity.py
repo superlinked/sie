@@ -482,6 +482,34 @@ def test_graphs_over_their_memory_budget_are_dropped(exact_rig: _Rig, monkeypatc
     assert torch.cuda.memory_reserved() <= reserved
 
 
+class _OutOfMemoryGraph:
+    """A CUDA graph whose recording runs out of memory."""
+
+    def capture_begin(self, **_: Any) -> None:
+        raise torch.cuda.OutOfMemoryError("CUDA out of memory while recording")
+
+    def capture_end(self) -> None:
+        pass
+
+
+@pytest.mark.gpu_hw
+def test_running_out_of_memory_while_recording_answers_eagerly(
+    exact_rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    items = [Item(text=text) for text in _TEXTS]
+    runner = _fresh_runner(exact_rig, monkeypatch)
+    eager = _outputs(exact_rig.adapter.extract(items, labels=_LABELS, options=_EAGER))
+    monkeypatch.setattr(torch.cuda, "CUDAGraph", _OutOfMemoryGraph)
+
+    # The second sighting records; the recording fails, and the call still gets its answer.
+    for _ in range(2):
+        assert _outputs(exact_rig.adapter.extract(items, labels=_LABELS)) == eager
+
+    assert runner.graph_count == 0
+    assert not runner.disabled
+    assert runner._recording_credit < 1  # paused
+
+
 @pytest.mark.gpu_hw
 def test_a_forward_that_cannot_be_recorded_falls_back_to_eager(monkeypatch: pytest.MonkeyPatch) -> None:
     if not torch.cuda.is_available():

@@ -150,9 +150,17 @@ to satisfy other allocations, so another model on the same GPU that needs
 memory in that window (about one forward) can run out of memory where it
 otherwise would not. Recording is kept rare to limit this: one recording at a
 time in the process, none while less than a tenth of the device's memory is
-free, and per model at most 16 recordings at once, then one per 2 seconds. On a
-GPU shared with other models, leave memory headroom, or enable graphs only
-where the model has the GPU to itself. Usage and billing do not change.
+free, and per model at most 16 recordings at once, then one per 2 seconds. If a
+recording itself runs out of memory, the request still gets its eager answer;
+the model drops its graphs and records nothing for a minute.
+
+Both limits are approximate. The free-memory check reads the device once,
+before recording, so a model loading at the same moment can still meet one
+recording. The memory budget is checked after each recording, so a model's
+graphs can exceed it by one recording: up to about 330 MB, one graph of the
+largest shape on `gliclass-large-v1.0`. On a GPU shared with other models,
+leave memory headroom, or enable graphs only where the model has the GPU to
+itself. Usage and billing do not change.
 
 ## Configuration
 

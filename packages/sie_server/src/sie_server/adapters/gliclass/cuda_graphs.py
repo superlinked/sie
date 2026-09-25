@@ -55,6 +55,7 @@ eagerly; a recording failure turns the runner off.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import math
 import threading
@@ -90,6 +91,8 @@ _RECORDING_BURST = 16
 _SECONDS_PER_RECORDING = 2.0
 # Recording waits until at least this share of the device's memory is free.
 _RECORDING_HEADROOM = 0.1
+# After a recording runs out of memory, the runner records nothing for this long.
+_OOM_COOL_DOWN_SECONDS = 60.0
 # One recording at a time in the process, across every model's runner.
 _RECORDING_LOCK = threading.Lock()
 # Device memory a runner's graphs may hold (their recordings, relative-position
@@ -124,6 +127,15 @@ def unsupported_reason(model: Any, device: str | torch.device) -> str | None:
 def bucket_width(max_length: int) -> int:
     """Sequence-length bucket for ``bucketed`` mode: 32 tokens at a 512 window, 64 at 1,024."""
     return max(16, max_length // 16)
+
+
+class _RecordingError(Exception):
+    """Recording a graph failed after the eager forward had answered the call."""
+
+    def __init__(self, cause: BaseException, logits: torch.Tensor) -> None:
+        super().__init__(str(cause))
+        self.cause = cause
+        self.logits = logits
 
 
 @dataclass
@@ -256,10 +268,26 @@ class CudaGraphRunner:
                 self._recording_credit -= 1
                 try:
                     entry, logits = self._record(key, inputs)
-                except Exception as exc:  # a graph that cannot be recorded runs eagerly
+                except _RecordingError as failure:
+                    # The eager forward has answered this call; only the graph
+                    # failed, so the answer stands and no OOM recovery is needed.
+                    self.clear()
+                    if is_oom_error(failure.cause):
+                        logger.info(
+                            "GLiClass CUDA graph recording ran out of memory; recording paused for %d s",
+                            _OOM_COOL_DOWN_SECONDS,
+                        )
+                        self._recording_credit = 1 - _OOM_COOL_DOWN_SECONDS / _SECONDS_PER_RECORDING
+                    else:
+                        logger.warning(
+                            "GLiClass CUDA graph recording failed; running eagerly from now on", exc_info=failure.cause
+                        )
+                        self._disabled = True
+                    return failure.logits
+                except Exception as exc:  # the eager forward that answers this call failed
                     if is_oom_error(exc):
-                        # Not a reason to stop recording: release the graphs
-                        # and let the worker's OOM recovery see the error.
+                        # Release the graphs and let the worker's OOM recovery
+                        # see the error.
                         self.clear()
                         raise
                     logger.warning("GLiClass CUDA graph recording failed; running eagerly from now on", exc_info=True)
@@ -351,13 +379,25 @@ class CudaGraphRunner:
         creates per-stream state (the cuBLAS handle and workspace) that cannot
         be created while recording: the first recording warms that stream up
         with one row of its inputs, the only memory left cached on it.
+
+        Raises:
+            _RecordingError: With the eager logits, when anything after the
+                eager forward fails: the table, the warm-up or the recording.
         """
-        _, padded_length, classes = key
+        classes = key[2]
         static = self._static_inputs(key, inputs)
         device = static["input_ids"].device
         current = torch.cuda.current_stream(device)
         with torch.inference_mode():
             logits = self._model(**static, max_num_classes=classes).logits.clone()
+        try:
+            return self._capture(key, static, current), logits
+        except Exception as exc:
+            raise _RecordingError(exc, logits) from exc
+
+    def _capture(self, key: Key, static: dict[str, torch.Tensor], current: torch.cuda.Stream) -> _Graph:
+        _, padded_length, classes = key
+        device = static["input_ids"].device
         relative_pos = self._relative_pos.get(padded_length)
         if relative_pos is None:
             with torch.inference_mode():
@@ -381,14 +421,18 @@ class CudaGraphRunner:
                 graph.capture_begin(pool=pool, capture_error_mode="thread_local")
                 try:
                     output = self._model(**static, max_num_classes=classes).logits
-                finally:
-                    graph.capture_end()
+                except BaseException:
+                    # End the recording without hiding why it failed.
+                    with contextlib.suppress(Exception):
+                        graph.capture_end()
+                    raise
+                graph.capture_end()
                 device_bytes = max(0, free_before - self._free_memory(device))
         finally:
             self._recording = False
             self._recording_relative_pos = None
             current.wait_stream(stream)
-        return _Graph(graph=graph, inputs=static, output=output, device_bytes=device_bytes), logits
+        return _Graph(graph=graph, inputs=static, output=output, device_bytes=device_bytes)
 
     def _replay(self, entry: _Graph, inputs: dict[str, torch.Tensor], length: int) -> torch.Tensor:
         for name, value in inputs.items():

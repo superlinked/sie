@@ -57,6 +57,10 @@ def _model(
 class _Runner(CudaGraphRunner):
     """Records and replays with fakes: logits say which path produced them.
 
+    Recording answers with zeros, a replay with ones, and a recording whose
+    capture fails (``capture_error``) with the eager answer, twos. ``fail``
+    makes the eager forward of a recording fail instead.
+
     Time stands still unless a test moves ``now``; the device always has
     memory to spare unless a test clears ``headroom`` or sets a ``budget``.
     """
@@ -67,6 +71,7 @@ class _Runner(CudaGraphRunner):
         self.recorded: list[tuple[int, int, int]] = []
         self.replayed: list[tuple[int, int, int]] = []
         self.fail = fail
+        self.capture_error: Exception | None = None
         self.headroom = True
         self.budget = 2**40
         self.bytes_per_graph = 0
@@ -82,7 +87,9 @@ class _Runner(CudaGraphRunner):
         if isinstance(self.fail, Exception):
             raise self.fail
         if self.fail:
-            raise RuntimeError("operation not permitted when stream is capturing")
+            raise RuntimeError("the eager forward failed")
+        if self.capture_error is not None:
+            raise cuda_graphs_module._RecordingError(self.capture_error, torch.full((key[0], key[2]), 2.0))
         self.recorded.append(key)
         self._relative_pos.setdefault(key[1], torch.zeros(1))
         entry = SimpleNamespace(key=key, device_bytes=self.bytes_per_graph, inputs={}, output=torch.zeros(0))
@@ -304,15 +311,46 @@ class TestRecordingPolicy:
         assert runner.recorded == [(1, 128, 4)]
         assert runner.replayed == [(1, 128, 4)]
 
-    def test_a_recording_failure_turns_graphs_off(self) -> None:
-        runner = _Runner(fail=True)
+    def test_a_recording_failure_turns_graphs_off_and_keeps_the_eager_answer(self) -> None:
+        runner = _Runner()
+        runner.capture_error = RuntimeError("operation not permitted when stream is capturing")
 
-        assert runner.run(_inputs(1, 100), 4, "bucketed") is None
+        answer = runner.run(_inputs(1, 100), 4, "bucketed")
+
+        assert answer is not None
+        assert torch.equal(answer, torch.full((1, 4), 2.0))  # the eager answer
         assert runner.disabled
         assert not cuda_graphs_module._RECORDING_LOCK.locked()
-        runner.fail = False
+        runner.capture_error = None
         assert runner.run(_inputs(1, 100), 4, "bucketed") is None
         assert runner.recorded == []
+
+    def test_an_eager_forward_that_fails_while_recording_turns_graphs_off(self) -> None:
+        runner = _Runner(fail=True)
+
+        assert runner.run(_inputs(1, 100), 4, "bucketed") is None  # the adapter runs it eagerly
+        assert runner.disabled
+        assert not cuda_graphs_module._RECORDING_LOCK.locked()
+
+    def test_running_out_of_memory_while_capturing_keeps_the_eager_answer_and_pauses(self) -> None:
+        runner = _Runner()
+        runner.run(_inputs(1, 100), 4, "bucketed")
+        runner.capture_error = torch.cuda.OutOfMemoryError("CUDA out of memory")
+
+        answer = runner.run(_inputs(1, 200), 4, "bucketed")
+
+        assert answer is not None
+        assert torch.equal(answer, torch.full((1, 4), 2.0))  # the eager answer, not an error
+        assert runner.graph_count == 0
+        assert not runner.disabled
+        assert not cuda_graphs_module._RECORDING_LOCK.locked()
+        # Recording pauses for a minute, then resumes.
+        runner.capture_error = None
+        runner.now += 59.0
+        assert runner.run(_inputs(1, 300), 4, "bucketed") is None
+        runner.now += 2.0
+        assert runner.run(_inputs(1, 300), 4, "bucketed") is not None
+        assert runner.recorded[-1] == (1, 320, 4)
 
     @pytest.mark.parametrize(
         "error",
@@ -322,7 +360,7 @@ class TestRecordingPolicy:
             RuntimeError("CUBLAS_STATUS_ALLOC_FAILED: failed to allocate workspace"),
         ],
     )
-    def test_running_out_of_memory_while_recording_drops_the_graphs_and_raises(self, error: Exception) -> None:
+    def test_an_eager_forward_out_of_memory_while_recording_drops_the_graphs_and_raises(self, error: Exception) -> None:
         runner = _Runner()
         runner.run(_inputs(1, 100), 4, "bucketed")
         runner.fail = error
@@ -435,6 +473,18 @@ def test_other_eager_errors_keep_the_graphs() -> None:
         _adapter_with(runner)._forward(pipe, _inputs(1, 100), ["a", "b"], same_labels=True, graphs="off")
 
     assert runner.graph_count == 1
+
+
+def test_a_capture_out_of_memory_answers_eagerly_without_oom_recovery() -> None:
+    runner = _Runner()
+    runner.capture_error = torch.cuda.OutOfMemoryError("CUDA out of memory")
+
+    # The fake pipe's own forward would raise: the answer must come from the recording.
+    logits = _adapter_with(runner)._forward(_Pipe(), _inputs(1, 100), ["a", "b"], same_labels=True, graphs="bucketed")
+
+    assert torch.equal(logits, torch.full((1, 2), 2.0))
+    assert runner.graph_count == 0
+    assert not runner.disabled
 
 
 def test_an_out_of_memory_error_in_a_replay_drops_the_graphs() -> None:
