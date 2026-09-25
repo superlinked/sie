@@ -280,11 +280,16 @@ BACKENDS="laya laya-typed-decisions gliformer-large gliclass-instruct-large-grou
           gliclass gliclass-large-v1 gliclass-base-v1 gliclass-small-v1 gliner2-base gliner2-large nli-modernbert-base
           gliner2.5-decide gliner2.5-multi-decide gliner2.5-decide-1b"
 URL=http://localhost:8080
+SIE_COMMIT=d41ba7fb828cedb6a08f4c4028c6ce621385168f   # the SIE commit your server runs
 
 # 1. Dev, every phrasing the plan gives each backend, then choose the phrasing per question
 for b in $BACKENDS; do
-  uv run python run.py --record --set vulnerability-triage --split dev --variant short described concrete \
-    --backend $b --url $URL --out run-output/dev--$b.json   # short concrete for the two noted above
+  case $b in
+    gliclass-instruct-large-grouped|gliner2.5-decide) PHRASINGS="short concrete" ;;   # described does not fit
+    *) PHRASINGS="short described concrete" ;;
+  esac
+  uv run python run.py --record --set vulnerability-triage --split dev --variant $PHRASINGS \
+    --backend $b --url $URL --out run-output/dev--$b.json
 done
 for b in qwen3-4b-instruct qwen3.5-4b; do
   uv run python run.py --record --set vulnerability-triage --split dev --backend $b \
@@ -302,14 +307,15 @@ python3 tune.py lanes --calls run-output/dev-tuned--*.json run-output/dev--qwen3
 
 # 3. Test, once, in the tuned configuration; and the workflow set (the plan leaves out gliner2.5-decide)
 for b in $BACKENDS gliclass-large-v1-one-call qwen3-4b-instruct; do
-  uv run python run.py --record --set vulnerability-triage --split test --backend $b --url $URL --server-commit <sie commit>
+  uv run python run.py --record --set vulnerability-triage --split test --backend $b --url $URL --server-commit "$SIE_COMMIT"
 done
 for b in $BACKENDS gliclass-large-v1-one-call; do
-  uv run python run.py --record --set workflows --backend $b --url $URL --server-commit <sie commit>
+  [ "$b" = gliner2.5-decide ] && continue   # not in the workflow plan
+  uv run python run.py --record --set workflows --backend $b --url $URL --server-commit "$SIE_COMMIT"
 done
 uv run python multitask.py --record --split test --url $URL --out run-output/multitask/test.json
 
-python3 run.py --merge run-output/*--*.json --server-commit <sie commit>   # calls.json and manifest.json
+python3 run.py --merge run-output/*--*.json --server-commit "$SIE_COMMIT"   # calls.json and manifest.json
 ```
 
 Rebuilt inputs can differ from the published ones, because NVD records keep
