@@ -215,51 +215,73 @@ def test_pairing_without_starts_or_ends_returns_nothing() -> None:
     assert _bounded(logits, {0: "a", 1: "b"}, 0.5) == []
 
 
-# -- Request budget ---------------------------------------------------------------
+# -- Per-document allowances --------------------------------------------------------
 
 
-def test_budget_is_charged_before_work_and_stays_exhausted() -> None:
-    span_decoding.charge(10**9)  # no budget: free
-    with span_decoding.decode_budget(10):
-        span_decoding.charge(4)
-        span_decoding.charge(6)
-        assert not span_decoding.budget_exhausted()
-        with pytest.raises(span_decoding.DecodeBudgetExceededError):
-            span_decoding.charge(1)
-        assert span_decoding.budget_exhausted()
-        with pytest.raises(span_decoding.DecodeBudgetExceededError):
-            span_decoding.charge(0)
-    assert not span_decoding.budget_exhausted()
+def _row_inputs(logits: torch.Tensor, threshold: float) -> tuple[Any, ...]:
+    return _inputs(logits, threshold)
 
 
-def test_pairing_charges_its_candidates_and_its_cut() -> None:
+def test_allowances_belong_to_rows() -> None:
+    assert span_decoding.row_allowance() is None  # outside a forward pass
+    with span_decoding.document_allowances([5, 7]) as allowances:
+        with span_decoding.decoding_row(1):
+            assert span_decoding.row_allowance() is allowances[1]
+        assert span_decoding.row_allowance(0) is allowances[0]
+        with pytest.raises(RuntimeError, match="not one of the pass's documents"):
+            span_decoding.row_allowance()
+        with span_decoding.decoding_row(2), pytest.raises(RuntimeError, match="not one of the pass's documents"):
+            span_decoding.row_allowance()
+    allowance = span_decoding.Allowance(10)
+    assert allowance.affordable(3) == 3
+    assert allowance.affordable(3, reserve=5) == 1
+    allowance.spend(25)
+    assert allowance.remaining == 0
+
+
+def test_pairing_within_an_allowance_keeps_the_best_first_prefix() -> None:
     logits = _bio_scores(2, length=80, labels=3, dtype=torch.float32)
     names = {0: "a", 1: "b", 2: "c"}
-    full = len(_upstream(logits, names, 0.1))
-    with span_decoding.decode_budget(10**9):
-        _bounded(logits, names, 0.1)
-        assert 10**9 - span_decoding._REQUEST_BUDGET.get().remaining == full
-    with span_decoding.decode_budget(10**9):
-        _bounded(logits, names, 0.1, max_candidates=10)
-        # The kept candidates and one unit per score cell for the cut.
-        assert 10**9 - span_decoding._REQUEST_BUDGET.get().remaining == 10 + 80 * 3
-    with span_decoding.decode_budget(full - 1), pytest.raises(span_decoding.DecodeBudgetExceededError):
-        _bounded(logits, names, 0.1)
+    full = _upstream(logits, names, 0.1)
+    count_cost = -(-80 * 3 // 32)
+    with span_decoding.document_allowances([10**9, count_cost + len(full), count_cost + 80 * 3 + 10, 50]) as rows:
+        results = []
+        for row in range(4):
+            with span_decoding.decoding_row(row):
+                results.append(_bounded(logits, names, 0.1))
+    # Plenty, or exactly enough: everything, at one unit per span plus the count.
+    assert _as_tuples(results[0]) == _as_tuples(full)
+    assert 10**9 - rows[0].remaining == count_cost + len(full)
+    assert _as_tuples(results[1]) == _as_tuples(full)
+    assert rows[1].remaining == 0
+    # Enough for the cut and 10 spans: the head of the full result.
+    assert _as_tuples(results[2]) == _as_tuples(_head(full, 10))
+    assert rows[2].remaining == 0
+    # Not enough to find a cut: nothing, and only the count is spent.
+    assert results[3] == []
+    assert rows[3].remaining == 50 - count_cost
 
 
-def test_proposals_cost_more_than_spans() -> None:
-    scores = _bio_scores(8, length=90, labels=3, dtype=torch.float32).unsqueeze(0)
-    proposals = len(_ranked_proposals(scores[0], 0.1))
-    with span_decoding.decode_budget(10**9):
-        _propose(scores, 0.1)
-        spent = 10**9 - span_decoding._REQUEST_BUDGET.get().remaining
-    assert proposals > span_decoding.MAX_STRUCTURING_PROPOSALS
-    # Capped: the kept proposals, and one unit per score cell for the cut.
-    assert spent == span_decoding.PROPOSAL_UNITS * span_decoding.MAX_STRUCTURING_PROPOSALS + 90 * 3
-    with span_decoding.decode_budget(10**9):
-        _propose(scores[:, :30], 0.1)
-        spent = 10**9 - span_decoding._REQUEST_BUDGET.get().remaining
-    assert spent == span_decoding.PROPOSAL_UNITS * len(_ranked_proposals(scores[0, :30], 0.1))
+def test_candidate_units_raise_the_cost_of_each_span() -> None:
+    logits = _bio_scores(4, length=40, labels=2, dtype=torch.float32)
+    names = {0: "a", 1: "b"}
+    full = _upstream(logits, names, 0.2)
+    with span_decoding.document_allowances([10**9]) as rows, span_decoding.decoding_row(0):
+        with span_decoding.candidate_units(64):
+            _bounded(logits, names, 0.2)
+    assert 10**9 - rows[0].remaining == -(-40 * 2 // 32) + 64 * len(full)
+
+
+def test_proposals_within_an_allowance_keep_the_best_first_prefix() -> None:
+    scores = _bio_scores(8, length=30, labels=3, dtype=torch.float32).unsqueeze(0)
+    ranked = _ranked_proposals(scores[0], 0.1)
+    count_cost = -(-30 * 3 // 32)
+    units = count_cost + 30 * 3 + span_decoding.PROPOSAL_UNITS * 5
+    with span_decoding.document_allowances([units]) as rows:
+        kept = _proposals(*_propose(scores, 0.1))[0]
+    assert len(ranked) > 5
+    assert kept == [(item.start, item.end) for item in _head(ranked, 5)]
+    assert rows[0].remaining == 0
 
 
 # -- Structuring span proposals ---------------------------------------------------
@@ -455,6 +477,20 @@ def test_fully_nested_records_stay_within_the_text_bound() -> None:
     fields = [field for group in records[0] for record in group for field in record]
     words = sum(field["end"] - field["start"] + 1 for field in fields)
     assert 0 < words <= structuring_decoding.MAX_RECORD_WORDS
+
+
+def test_record_spans_within_an_allowance_keep_each_slots_best_spans() -> None:
+    args = _slot_args(3)
+    full = structuring_decoding._slot_spans(*args, make_span=upstream.Span, max_spans=10**9)
+    flat = [span for _, spans in full for span in spans]
+    proposals = len(args[3])
+    cut_cost = (4 * proposals + proposals * 5) // 4  # open slots x proposals + proposals x fields, over 4
+    allowance = span_decoding.Allowance(cut_cost + 30)
+    capped = structuring_decoding._slot_spans(*args, make_span=upstream.Span, max_spans=10**9, allowance=allowance)
+    head = {id(span) for span in _head(flat, 30)}
+    for (_, everything), (_, kept) in zip(full, capped, strict=True):
+        assert _as_tuples(kept) == _as_tuples([span for span in everything if id(span) in head])
+    assert allowance.remaining == 0
 
 
 # -- Replacing the package's functions ---------------------------------------------

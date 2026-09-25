@@ -20,16 +20,19 @@ take first: best score first, and among equal scores in the package's own
 order. Overlap removal keeps spans best first, so a cut changes the entities
 only by leaving out spans that rank below every kept one.
 
-Work is also counted per request (:func:`decode_budget`): each kept
-candidate, each proposal, and each bounded search costs units, roughly 2.5
-microseconds of host time apiece, and a request that runs out raises
-:class:`DecodeBudgetExceededError` before the work that would overdraw it.
+Work is also bounded per document (:func:`document_allowances`): each
+document gets an allowance of work units, roughly 2.5 microseconds of host
+time apiece, from its own billed tokens. Every kept candidate, proposal,
+and bounded search draws on the allowance of the document it belongs to, and
+a stage that cannot afford everything keeps the best-first prefix it can
+afford, exactly as it does at the fixed bounds. One document's allowance
+never depends on the other documents decoded with it.
 """
 
 from __future__ import annotations
 
 import bisect
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any
@@ -48,57 +51,82 @@ MAX_SPAN_CANDIDATES = 4096
 # threshold 0.5 and 1184 at 0.1 (a list of names, 64 fields).
 MAX_STRUCTURING_PROPOSALS = 2048
 
-# Request budget units (about 2.5 microseconds of host work each, measured
-# on an L4 host). A proposal costs the structuring head far more than a span.
+# Allowance units (about 2.5 microseconds of host work each, measured on an
+# L4 host). A structuring proposal or a relation entity candidate costs its
+# head far more than a span: it is pooled, scored, and walked in Python.
 PROPOSAL_UNITS = 64
+# One unit per this many score cells for the pass that counts candidates.
+_COUNT_CELLS_PER_UNIT = 32
 
 _FLOAT32_BITS_ONE = int(np.float32(1.0).view(np.int32))
 
 
-class DecodeBudgetExceededError(RuntimeError):
-    """The request needs more span decoding than its budget allows."""
+class Allowance:
+    """Work units one document may still spend on span decoding."""
 
-
-class _Budget:
     __slots__ = ("remaining",)
 
     def __init__(self, units: int) -> None:
         self.remaining = units
 
+    def affordable(self, unit_cost: int, reserve: int = 0) -> int:
+        """How many items at ``unit_cost`` fit after setting ``reserve`` units aside."""
+        return max(0, (self.remaining - reserve) // unit_cost)
 
-_REQUEST_BUDGET: ContextVar[_Budget | None] = ContextVar("gliformer_decode_budget", default=None)
+    def spend(self, units: int) -> None:
+        self.remaining = max(0, self.remaining - units)
+
+
+_ALLOWANCES: ContextVar[list[Allowance] | None] = ContextVar("gliformer_document_allowances", default=None)
+_ROW: ContextVar[int | None] = ContextVar("gliformer_decoding_row", default=None)
+_CANDIDATE_UNITS: ContextVar[int] = ContextVar("gliformer_candidate_units", default=1)
 
 
 @contextmanager
-def decode_budget(units: int) -> Iterator[None]:
-    """Give span decoding in this context ``units`` of work, shared by every document row."""
-    token = _REQUEST_BUDGET.set(_Budget(units))
+def document_allowances(units: Sequence[int]) -> Iterator[list[Allowance]]:
+    """Give each document of a forward pass, in order, its own allowance."""
+    allowances = [Allowance(value) for value in units]
+    token = _ALLOWANCES.set(allowances)
+    try:
+        yield allowances
+    finally:
+        _ALLOWANCES.reset(token)
+
+
+@contextmanager
+def decoding_row(row: int) -> Iterator[None]:
+    """Mark span pairing in this context as decoding document row ``row``."""
+    token = _ROW.set(row)
     try:
         yield
     finally:
-        _REQUEST_BUDGET.reset(token)
+        _ROW.reset(token)
 
 
-def budget_exhausted() -> bool:
-    """Whether the current budget has run out (never, outside a budget)."""
-    budget = _REQUEST_BUDGET.get()
-    return budget is not None and budget.remaining < 0
+@contextmanager
+def candidate_units(units: int) -> Iterator[None]:
+    """Charge each paired candidate span ``units`` in this context."""
+    token = _CANDIDATE_UNITS.set(units)
+    try:
+        yield
+    finally:
+        _CANDIDATE_UNITS.reset(token)
 
 
-def charge(units: int) -> None:
-    """Take ``units`` from the current budget, if any, before doing that work.
+def row_allowance(row: int | None = None) -> Allowance | None:
+    """The allowance of document ``row`` (default: the row being decoded), if allowances apply.
 
     Raises:
-        DecodeBudgetExceededError: Not enough units remain; the budget stays
-            exhausted for the rest of the context.
+        RuntimeError: Allowances apply but the row is unknown or is not one of
+            the pass's documents.
     """
-    budget = _REQUEST_BUDGET.get()
-    if budget is None:
-        return
-    if units > budget.remaining:
-        budget.remaining = -1
-        raise DecodeBudgetExceededError("GLiFormer span decoding budget for this request is exhausted")
-    budget.remaining -= units
+    allowances = _ALLOWANCES.get()
+    if allowances is None:
+        return None
+    index = _ROW.get() if row is None else row
+    if index is None or not 0 <= index < len(allowances):
+        raise RuntimeError("GLiFormer decoded a row that is not one of the pass's documents")
+    return allowances[index]
 
 
 def pair_spans(
@@ -161,6 +189,8 @@ def pair_spans(
         outside=_as_float32(1.0 - scores_inside),
         max_width=max_width,
         max_candidates=max_candidates,
+        allowance=row_allowance(),
+        unit_cost=_CANDIDATE_UNITS.get(),
     )
     names: dict[int, Any] = {}
     spans = []
@@ -229,6 +259,7 @@ def propose_spans(
             outside=None,
             max_width=None,
             max_candidates=max_candidates,
+            allowance=row_allowance(row),
             unit_cost=PROPOSAL_UNITS,
         )
         rows.append((span_start, span_end))
@@ -256,6 +287,7 @@ def _bounded_pairs(
     outside: np.ndarray | None,
     max_width: int | None,
     max_candidates: int,
+    allowance: Allowance | None = None,
     unit_cost: int = 1,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Same-label (start, end) pairs whose range has no ``bad`` position, at most ``max_candidates``.
@@ -267,8 +299,10 @@ def _bounded_pairs(
     their original order: every pair above a score cut, then pairs scoring
     just below it in their original order.
 
-    Each kept pair costs ``unit_cost`` budget units, and finding a cut costs
-    one unit per score cell.
+    With an ``allowance``, counting the pairs costs one unit per 32 score
+    cells, each kept pair ``unit_cost`` units, and finding a cut one unit per
+    score cell; the row keeps as many pairs as its allowance affords, the
+    same best-first prefix, and none if it cannot afford the cut.
 
     Returns:
         ``(span_start, span_end, label, score)`` arrays.
@@ -348,15 +382,23 @@ def _bounded_pairs(
         return score
 
     total = int(per_start(None).sum())
-    charge(unit_cost * min(total, max_candidates))
-    if total <= max_candidates:
+    cells = length * labels
+    limit = max_candidates
+    if allowance is not None:
+        allowance.spend(-(-cells // _COUNT_CELLS_PER_UNIT))
+        limit = min(limit, allowance.affordable(unit_cost))
+    if total <= limit:
         owner, span_end = pairs(None)
     else:
-        charge(length * labels)
-        cut = _score_cut(lambda value: int(per_start(value).sum()), max_candidates)
+        if allowance is not None:
+            limit = min(max_candidates, allowance.affordable(unit_cost, reserve=cells))
+            if limit == 0:
+                return empty, empty, empty, np.empty(0, dtype=np.float32)
+            allowance.spend(cells)
+        cut = _score_cut(lambda value: int(per_start(value).sum()), limit)
         above = per_start(cut)
         owner, span_end = pairs(cut)
-        missing = max_candidates - int(above.sum())
+        missing = limit - int(above.sum())
         cut_bits = int(np.float32(cut).view(np.int32))
         if missing > 0 and cut_bits > 0:
             # Pairs scoring exactly the next float32 below the cut, in order.
@@ -370,6 +412,8 @@ def _bounded_pairs(
             span_end = np.concatenate([span_end, tie_end])
             order = np.lexsort((span_end, owner))
             owner, span_end = owner[order], span_end[order]
+    if allowance is not None:
+        allowance.spend(unit_cost * owner.size)
     if owner.size == 0:
         return empty, empty, empty, np.empty(0, dtype=np.float32)
     return s_pos[owner], span_end, s_lab[owner], scores(owner, span_end)

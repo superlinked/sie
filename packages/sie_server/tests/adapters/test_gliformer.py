@@ -817,45 +817,45 @@ def test_inference_is_split_into_padded_token_chunks() -> None:
     assert output.input_token_counts == [5, 5, 5]
 
 
-def test_a_request_that_exhausts_its_decode_budget_fails_its_remaining_items(monkeypatch: pytest.MonkeyPatch) -> None:
-    texts = ["Alice works here", "Bob works there", "Carol stays home", "Dan goes out"]
-    adapter, model = _adapter({}, inference_batch_tokens=8)
-    # Budget: 10 units + 1 per billed token = 30 for four 5-token items.
-    monkeypatch.setattr(adapter_module, "_DECODE_BUDGET_FLOOR", 10)
-    monkeypatch.setattr(adapter_module, "_DECODE_UNITS_PER_TOKEN", 1)
+def test_each_document_decodes_within_its_own_allowance() -> None:
+    texts = ["Alice works here", "a much longer text about Bob who works there", "Carol stays home"]
+    adapter, model = _adapter({})
+    seen = []
 
     def inference(batch: list[str], **_: Any) -> dict[str, Any]:
-        # Decoding each document costs 12 units, as the span decoders charge.
-        for _text in batch:
-            span_decoding.charge(12)
+        allowances = span_decoding._ALLOWANCES.get()
+        seen.append([allowance.remaining for allowance in allowances])
+        # A hostile first document spends its whole allowance; the others
+        # are unaffected.
+        span_decoding.row_allowance(0).spend(10**9)
         return {"ner": [[_ner(text, text.split()[0], "person")] for text in batch]}
 
     model.inference.side_effect = inference
     output = adapter.extract([Item(text=text) for text in texts], labels=["person"])
 
-    # Two documents fit (24 units); the third overdraws, so it and the
-    # fourth are never run.
-    assert [call.args[0] for call in model.inference.call_args_list] == [texts[:1], texts[1:2], texts[2:3]]
-    assert [[entity["text"] for entity in entities] for entities in output.entities] == [["Alice"], ["Bob"], [], []]
-    assert output.errors is not None
-    assert [error.code if error else None for error in output.errors] == [None, None, "INVALID_INPUT", "INVALID_INPUT"]
-    assert "more span decoding than one request allows" in output.errors[2].message
-    assert output.input_token_counts == [5, 5, 0, 0]
+    counts = output.input_token_counts
+    floor, rate = adapter_module._DECODE_FLOOR, adapter_module._DECODE_UNITS_PER_TOKEN
+    assert seen == [[floor + rate * count for count in counts]]
+    assert output.errors is None
+    assert [[entity["text"] for entity in entities] for entities in output.entities] == [["Alice"], ["a"], ["Carol"]]
+    assert span_decoding._ALLOWANCES.get() is None
 
 
-def test_decode_budget_scales_with_billed_tokens() -> None:
-    adapter, model = _adapter({"ner": [[], []]})
-    budgets = []
+def test_a_documents_allowance_does_not_depend_on_its_batch() -> None:
+    adapter, model = _adapter({}, inference_batch_tokens=16)
+    seen: dict[str, int] = {}
 
     def inference(batch: list[str], **_: Any) -> dict[str, Any]:
-        budgets.append(span_decoding._REQUEST_BUDGET.get().remaining)
+        for text, allowance in zip(batch, span_decoding._ALLOWANCES.get(), strict=True):
+            seen.setdefault(text, allowance.remaining)
+            assert seen[text] == allowance.remaining
         return {"ner": [[] for _ in batch]}
 
     model.inference.side_effect = inference
-    output = adapter.extract([Item(text="one two"), Item(text="three four five")], labels=["person"])
-    billed = sum(output.input_token_counts)
-    assert budgets == [adapter_module._DECODE_BUDGET_FLOOR + adapter_module._DECODE_UNITS_PER_TOKEN * billed]
-    assert span_decoding._REQUEST_BUDGET.get() is None
+    adapter.extract([Item(text="Alice works here")], labels=["person"])
+    adapter.extract([Item(text="Bob works there"), Item(text="Alice works here")], labels=["person"])
+    adapter.extract([Item(text=t) for t in ["one two three", "Alice works here", "x y z"]], labels=["person"])
+    assert len(seen) == 4
 
 
 def test_documents_are_billed_up_to_the_window_left_by_the_prompt() -> None:
@@ -927,17 +927,19 @@ def test_relation_candidates_are_limited_at_load(current: int | None, expected: 
     assert head.max_relation_entities == expected
 
 
-def test_relation_candidates_are_charged_to_the_decode_budget() -> None:
+def test_relation_candidates_cost_proposal_units() -> None:
     head = _relation_head(max_relation_entities=None)
+    units = []
+
+    def decode(ner_scores: Any, *_: Any, **__: Any) -> Any:
+        units.append(span_decoding._CANDIDATE_UNITS.get())
+        return None
+
+    head._decode_relation_entity_spans = decode
     adapter_module._limit_relation_entities(SimpleNamespace(heads={"joint_relex": head, "ner": object()}))
-    with span_decoding.decode_budget(1000):
-        head._decode_relation_entity_spans(torch.zeros(1))
-        assert 1000 - span_decoding._REQUEST_BUDGET.get().remaining == 2 * span_decoding.PROPOSAL_UNITS
-    with (
-        span_decoding.decode_budget(span_decoding.PROPOSAL_UNITS),
-        pytest.raises(span_decoding.DecodeBudgetExceededError),
-    ):
-        head._decode_relation_entity_spans(torch.zeros(1))
+    head._decode_relation_entity_spans(torch.zeros(1))
+    assert units == [span_decoding.PROPOSAL_UNITS]
+    assert span_decoding._CANDIDATE_UNITS.get() == 1
 
 
 def test_relation_limit_fails_closed_without_a_relation_head() -> None:

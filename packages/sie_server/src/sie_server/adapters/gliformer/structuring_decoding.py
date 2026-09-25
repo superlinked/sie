@@ -27,7 +27,7 @@ from typing import Any
 import numpy as np
 import torch
 
-from sie_server.adapters.gliformer.span_decoding import _FLOAT32_BITS_ONE, _score_cut, charge
+from sie_server.adapters.gliformer.span_decoding import _FLOAT32_BITS_ONE, Allowance, _score_cut, row_allowance
 
 # Record-slot field spans one document keeps across all slots. Each open slot
 # pairs every member proposal with every field, so real documents produce far
@@ -140,6 +140,7 @@ def make_structuring_decode(
                 field_id_to_class,
                 make_span=make_span,
                 max_spans=max_spans,
+                allowance=row_allowance(batch_idx),
             )
             kept = _within_word_limit(
                 [(anchor_idx, self.greedy_search(spans, flat_ner, multi_label)) for anchor_idx, spans in slot_spans],
@@ -184,6 +185,7 @@ def _slot_spans(
     *,
     make_span: Callable[..., Any],
     max_spans: int,
+    allowance: Allowance | None = None,
 ) -> list[tuple[int, list[Any]]]:
     """Each open slot's candidate field spans, in the package's order.
 
@@ -196,9 +198,10 @@ def _slot_spans(
 
     When more than ``max_spans`` spans qualify, the document keeps the first
     ``max_spans`` of a stable best-score-first ordering: every span above a
-    score cut, then spans scoring just below it in their order. Each kept span
-    costs a budget unit, and finding a cut costs one unit per four
-    membership and field cells.
+    score cut, then spans scoring just below it in their order. With an
+    ``allowance``, each kept span costs a unit and finding a cut one unit
+    per four membership and field cells, and the document keeps only as many
+    spans as its allowance affords, the same best-first prefix.
     """
     anchor_count = membership_probs.shape[0]
     class_count = field_probs.shape[1]
@@ -233,14 +236,19 @@ def _slot_spans(
 
     counts = per_slot(None)
     total = int(counts.sum())
-    charge(min(total, max_spans))
+    limit = max_spans if allowance is None else min(max_spans, allowance.affordable(1))
     cut: np.float32 | None = None
     quota = np.full(slots.size, -1, dtype=np.int64)  # spans tied just below the cut each slot keeps
-    if total > max_spans:
-        charge((member.size + fields.size) // 4)
-        cut = _score_cut(lambda value: int(per_slot(value).sum()), max_spans)
+    if total > limit:
+        cut_cost = (member.size + fields.size) // 4
+        if allowance is not None:
+            limit = min(max_spans, allowance.affordable(1, reserve=cut_cost))
+            if limit == 0:
+                return [(anchor_idx, []) for anchor_idx in slots.tolist()]
+            allowance.spend(cut_cost)
+        cut = _score_cut(lambda value: int(per_slot(value).sum()), limit)
         above = per_slot(cut)
-        missing = max_spans - int(above.sum())
+        missing = limit - int(above.sum())
         cut_bits = int(np.float32(cut).view(np.int32))
         quota[:] = 0
         if missing > 0 and 0 < cut_bits <= _FLOAT32_BITS_ONE + 1:
@@ -270,6 +278,8 @@ def _slot_spans(
             )
         ]
         result.append((anchor_idx, spans))
+    if allowance is not None:
+        allowance.spend(sum(len(spans) for _, spans in result))
     return result
 
 

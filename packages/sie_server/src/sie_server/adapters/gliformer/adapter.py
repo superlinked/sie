@@ -40,10 +40,9 @@ from sie_server.adapters.gliformer.output_schema import (
 )
 from sie_server.adapters.gliformer.span_decoding import (
     PROPOSAL_UNITS,
-    DecodeBudgetExceededError,
-    budget_exhausted,
-    charge,
-    decode_budget,
+    candidate_units,
+    decoding_row,
+    document_allowances,
     pair_spans,
     propose_spans,
     select_spans,
@@ -111,22 +110,12 @@ _MAX_TYPE_GROUPS = 64
 
 # Marks an item whose model output could not be used.
 _ITEM_ERROR = "__gliformer_item_error__"
-# Marks an item left undecoded because its request ran out of decode budget.
-_BUDGET_ERROR = "__gliformer_budget_error__"
-_ERR_DECODE_BUDGET = (
-    "GLiFormer request needs more span decoding than one request allows; send fewer items per request "
-    "or use a higher threshold"
-)
-
-# Span decoding work one request may do, in span_decoding's budget units
-# (about 2.5 microseconds of host work each): a floor for small requests plus
-# an allowance per billed token. Measured needs: at most 60 units per billed
-# token for one document (entity-dense, 64-field schema, threshold 0.1) and
-# 47 for 4096 short entity-dense documents with a records schema at 0.1. At
-# 96 units, decode work stays within about 240 microseconds per billed
-# token, about what large's forward pass costs per token.
-_DECODE_BUDGET_FLOOR = 262144
-_DECODE_UNITS_PER_TOKEN = 96
+# Span decoding work each document may do, in span_decoding's allowance units
+# (about 2.5 microseconds of host work each): a floor plus an allowance per
+# billed token of that document. A document that needs more keeps the
+# best-first prefix of each stage it can afford (see span_decoding).
+_DECODE_FLOOR = 16384
+_DECODE_UNITS_PER_TOKEN = 64
 
 # Distinct task prompts whose token counts are kept. A prompt depends only on
 # the request's task arguments, so a repeated task skips rebuilding and
@@ -195,7 +184,8 @@ def _bound_span_decoding() -> None:
 
     Every BIO span decoder in the package (entities, the relation head's
     entity candidates, structuring fields) pairs starts with ends in
-    ``SpanDecoder._calculate_span_score`` and removes overlaps in
+    ``SpanDecoder._calculate_span_score``, one document row at a time from
+    ``SpanDecoder.decode_bio_spans_batch``, and removes overlaps in
     ``SpanDecoder.greedy_search``; the structuring head proposes spans with
     GLiNER's ``extract_spans_from_tokens`` and turns them into records in
     ``StructuringDecoder.decode``. All four work pair by pair in Python. The
@@ -243,6 +233,25 @@ def _bound_span_decoding() -> None:
         _ = self
         return select_spans(spans, flat_ner, multi_label)
 
+    def decode_bio_spans_batch(
+        self: Any,
+        logits: torch.Tensor,
+        id_to_classes: Any,
+        batch_size: int,
+        threshold: float,
+        flat_ner: bool = True,
+        multi_label: bool = False,
+    ) -> list[list[Any]]:
+        # The package's loop, with each row marked so that its pairing draws
+        # on that document's allowance.
+        all_spans = []
+        for i in range(batch_size):
+            id_to_class_i = self._get_id_to_class(id_to_classes, i)
+            with decoding_row(i):
+                spans = self.decode_bio_spans(logits[i], id_to_class_i, threshold, flat_ner, multi_label)
+            all_spans.append(spans)
+        return all_spans
+
     _replace_package_function(
         span_decoder.SpanDecoder,
         "_calculate_span_score",
@@ -254,6 +263,12 @@ def _bound_span_decoding() -> None:
         "greedy_search",
         greedy_search,
         source_sha256="8a08975bc767870ef5e3ed9bc9ec1d2284c19c0604a9eed48480b922dbc099ad",
+    )
+    _replace_package_function(
+        span_decoder.SpanDecoder,
+        "decode_bio_spans_batch",
+        decode_bio_spans_batch,
+        source_sha256="fc2eab7aa5798d5ce07763ac451528b64fd9f4b670f684b9fd7a4813969ceba6",
     )
     _replace_package_function(
         structuring_decoder.StructuringDecoder,
@@ -313,7 +328,7 @@ def _assert_bounded_decoding() -> None:
     for module_name in _DECODER_MODULES:
         importlib.import_module(module_name)
     for base, names in (
-        (span_decoder.SpanDecoder, ("_calculate_span_score", "greedy_search")),
+        (span_decoder.SpanDecoder, ("_calculate_span_score", "greedy_search", "decode_bio_spans_batch")),
         (structuring_decoder.StructuringDecoder, ("decode",)),
     ):
         for subclass in _subclasses(base):
@@ -383,6 +398,13 @@ def _verify_bounded_decoding(model: Any) -> None:
                     greedy._sie_original(decoder, list(spans), flat_ner, multi_label),
                     greedy(decoder, list(spans), flat_ner, multi_label),
                 )
+        batch = vars(span_decoder.SpanDecoder)["decode_bio_spans_batch"]
+        for flat_ner in (True, False):
+            check(
+                "batch span decoding",
+                batch._sie_original(decoder, logits, names, 2, threshold, flat_ner, False),
+                batch(decoder, logits, names, 2, threshold, flat_ner, False),
+            )
         proposals = vars(structuring_model)["extract_spans_from_tokens"]
         check(
             "span proposal",
@@ -522,12 +544,14 @@ class GLiFormerAdapter(BaseAdapter):
     are unchanged. Each document of a batch decodes as it would alone: the
     padding of shorter documents never forms spans or lowers scores.
 
-    A request's span decoding is also budgeted: 262,144 work units plus 96
-    per billed token. A unit is about 2.5 microseconds of host work: one
-    candidate span or record field span, 64 units per structuring proposal,
-    and one per score cell when a document hits a bound. Items not yet
-    decoded when the budget runs out fail with ``INVALID_INPUT`` and bill
-    nothing; items already decoded keep their results.
+    Each document's span decoding also draws on its own allowance: 16,384
+    work units plus 64 per billed token of that document. A unit is about
+    2.5 microseconds of host work: one candidate span, record field span, or
+    relation, 64 per structuring proposal or relation entity candidate, and
+    one per score cell when a stage reaches a bound. A stage that cannot
+    afford everything keeps the best-first prefix it can afford, as at the
+    fixed bounds; the document still succeeds and bills normally, and other
+    documents are unaffected.
 
     ``options["relation_threshold"]`` raises the minimum score for relations
     only. GLiFormer decodes entities and relations with one threshold, so it
@@ -779,20 +803,20 @@ class GLiFormerAdapter(BaseAdapter):
 
         raw_results: list[dict[str, Any]] = [{} for _ in items]
         structures = request.plan.structures if request.plan is not None else None
-        with decode_budget(_DECODE_BUDGET_FLOOR + _DECODE_UNITS_PER_TOKEN * sum(counts)):
-            for types, indices in batches.items():
-                rows = self._run(
-                    [texts[index] for index in indices],
-                    task_kwargs[types],
-                    [lengths[index] for index in indices],
-                    structures=structures,
-                    threshold=threshold,
-                    flat_ner=flat_ner,
-                    multi_label=multi_label,
-                    max_items=max_items,
-                )
-                for index, row in zip(indices, rows, strict=True):
-                    raw_results[index] = row
+        for types, indices in batches.items():
+            rows = self._run(
+                [texts[index] for index in indices],
+                task_kwargs[types],
+                [lengths[index] for index in indices],
+                [_DECODE_FLOOR + _DECODE_UNITS_PER_TOKEN * counts[index] for index in indices],
+                structures=structures,
+                threshold=threshold,
+                flat_ner=flat_ner,
+                multi_label=multi_label,
+                max_items=max_items,
+            )
+            for index, row in zip(indices, rows, strict=True):
+                raw_results[index] = row
 
         return _assemble_output(texts, raw_results, request, input_token_counts=counts)
 
@@ -838,6 +862,7 @@ class GLiFormerAdapter(BaseAdapter):
         texts: list[str],
         task_kwargs: dict[str, Any],
         lengths: list[int],
+        allowances: list[int],
         *,
         structures: dict[str, Any] | None,
         threshold: float,
@@ -847,29 +872,21 @@ class GLiFormerAdapter(BaseAdapter):
     ) -> list[dict[str, Any]]:
         """Run ``GLiFormer.inference`` in bounded chunks; one raw result per text.
 
-        Once the request's decode budget runs out, the chunk in progress and
-        every later one are left undecoded and their items marked with
-        ``_BUDGET_ERROR``; chunks already decoded keep their results.
+        ``allowances`` holds each text's span decoding allowance, in units.
         """
         formatter = self._build_formatter(structures) if structures and self._build_formatter else None
         rows: list[dict[str, Any]] = [{} for _ in texts]
         with self._tokenizer_guard():
             for chunk in _token_budget_chunks(lengths, self._inference_batch_tokens, max_items=max_items):
-                chunk_rows: list[dict[str, Any]] | None = None
-                if not budget_exhausted():
-                    try:
-                        chunk_rows = self._infer(
-                            texts,
-                            chunk,
-                            task_kwargs,
-                            threshold=threshold,
-                            flat_ner=flat_ner,
-                            multi_label=multi_label,
-                        )
-                    except DecodeBudgetExceededError:
-                        chunk_rows = None
-                if chunk_rows is None:
-                    chunk_rows = [{_BUDGET_ERROR: True} for _ in chunk]
+                chunk_rows = self._infer(
+                    texts,
+                    chunk,
+                    task_kwargs,
+                    allowances,
+                    threshold=threshold,
+                    flat_ner=flat_ner,
+                    multi_label=multi_label,
+                )
                 for index, row in zip(chunk, chunk_rows, strict=True):
                     rows[index] = _format_row(row, formatter)
         return rows
@@ -879,6 +896,7 @@ class GLiFormerAdapter(BaseAdapter):
         texts: list[str],
         chunk: list[int],
         task_kwargs: dict[str, Any],
+        allowances: list[int],
         **inference_kwargs: Any,
     ) -> list[dict[str, Any]]:
         """Run ``chunk``, isolating documents whose scores are non-finite.
@@ -891,7 +909,7 @@ class GLiFormerAdapter(BaseAdapter):
         """
 
         def attempt(part: list[int]) -> list[dict[str, Any]] | None:
-            return self._forward(texts, part, task_kwargs, **inference_kwargs)
+            return self._forward(texts, part, task_kwargs, allowances, **inference_kwargs)
 
         def isolate(part: list[int]) -> list[dict[str, Any]]:
             if len(part) == 1:
@@ -911,11 +929,16 @@ class GLiFormerAdapter(BaseAdapter):
         texts: list[str],
         chunk: list[int],
         task_kwargs: dict[str, Any],
+        allowances: list[int],
         **inference_kwargs: Any,
     ) -> list[dict[str, Any]] | None:
-        """One forward pass; ``None`` when it produced non-finite scores."""
+        """One forward pass; ``None`` when it produced non-finite scores.
+
+        Each document starts the pass with its full allowance, so what it
+        keeps depends only on the document itself.
+        """
         try:
-            with torch.inference_mode():
+            with torch.inference_mode(), document_allowances([allowances[index] for index in chunk]):
                 results = self._model.inference(
                     [texts[index] for index in chunk],
                     **task_kwargs,
@@ -1158,8 +1181,8 @@ def _limit_relation_entities(model: Any) -> None:
       tensors before it builds entity pairs, so the pair tensors never grow
       past this many entities per document.
     - The head ranks each decoded entity with a few small tensor operations
-      in Python before it applies these bounds, so each one costs
-      ``PROPOSAL_UNITS`` of the request's decode budget.
+      in Python before it applies these bounds, so each candidate span it
+      pairs costs ``PROPOSAL_UNITS`` of its document's allowance.
 
     Raises:
         RuntimeError: The checkpoint has no joint relation head, or it no
@@ -1176,9 +1199,8 @@ def _limit_relation_entities(model: Any) -> None:
         raise RuntimeError("GLiFormer's relation head no longer decodes entity candidates where the adapter expects")
 
     def charged(*args: Any, **kwargs: Any) -> Any:
-        span_idx, span_mask, span_class_idx = decode(*args, **kwargs)
-        charge(PROPOSAL_UNITS * int(span_mask.sum()))
-        return span_idx, span_mask, span_class_idx
+        with candidate_units(PROPOSAL_UNITS):
+            return decode(*args, **kwargs)
 
     vars(head)["_decode_relation_entity_spans"] = charged
 
@@ -1190,7 +1212,7 @@ def _format_row(row: dict[str, Any], formatter: Any) -> dict[str, Any]:
     several spans were found holds all of them, best first. The formatter
     keeps the best value for scalar fields and normalizes list fields.
     """
-    if formatter is None or "structuring" not in row or _ITEM_ERROR in row or _BUDGET_ERROR in row:
+    if formatter is None or "structuring" not in row or _ITEM_ERROR in row:
         return row
     try:
         return {**row, "structuring": formatter.format_batch([row["structuring"]])[0]}
@@ -1369,11 +1391,7 @@ def _assemble_output(
         try:
             if _ITEM_ERROR in raw:
                 raise RuntimeError(_ERR_ITEM_OUTPUT)
-            if _BUDGET_ERROR in raw:
-                entities, relations, classifications, data = [], [], [], {}
-                error = ExtractItemError(code=ErrorCode.INVALID_INPUT.value, message=_ERR_DECODE_BUDGET)
-            else:
-                entities, relations, classifications, data, error = _assemble_item(text, raw, request, index)
+            entities, relations, classifications, data, error = _assemble_item(text, raw, request, index)
         except RuntimeError as exc:
             logger.warning("GLiFormer output for one item could not be used: %s", exc)
             entities, relations, classifications, data = [], [], [], {}
