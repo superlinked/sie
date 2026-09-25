@@ -927,13 +927,6 @@ def test_relation_candidates_are_limited_at_load(current: int | None, expected: 
     assert head.max_relation_entities == expected
 
 
-@pytest.mark.parametrize(("current", "expected"), [(None, 32), (8, 8), (500, 32)])
-def test_relation_candidate_width_is_limited_at_load(current: int | None, expected: int) -> None:
-    head = _relation_head(max_relation_entities=None, max_relation_span_width=current)
-    adapter_module._limit_relation_entities(SimpleNamespace(heads={"joint_relex": head, "ner": object()}))
-    assert head.max_relation_span_width == expected
-
-
 def test_relation_candidates_are_charged_to_the_decode_budget() -> None:
     head = _relation_head(max_relation_entities=None)
     adapter_module._limit_relation_entities(SimpleNamespace(heads={"joint_relex": head, "ner": object()}))
@@ -1312,7 +1305,6 @@ def test_load_pins_snapshot_and_places_model(device: str, precision: str | None,
     assert probe.kwargs["joint_relations"] is not None
     assert probe.kwargs["structures"] is not None
     assert relation_head.max_relation_entities == 100
-    assert relation_head.max_relation_span_width == 32
     assert tokenizer.model_max_length == 2048
     assert adapter._tokenizer is tokenizer
     assert adapter._normalize_structures == "normalizer"

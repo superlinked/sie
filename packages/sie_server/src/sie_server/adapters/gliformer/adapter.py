@@ -101,8 +101,6 @@ _MAX_RELATION_ENTITIES = 100
 _RELATION_PAIR_BUDGET = 131072
 # The package decodes relations cell by cell over pairs x relation types.
 _MAX_RELATION_TYPES = 20
-# Longest relation head or tail, in words (see _limit_relation_entities).
-_MAX_RELATION_SPAN_WIDTH = 32
 
 # Entity spans a caller may supply per item for relation extraction.
 _MAX_SUPPLIED_ENTITIES = MAX_EXTRACT_LABELS
@@ -459,10 +457,9 @@ class GLiFormerAdapter(BaseAdapter):
     cannot be lower than ``threshold``.
 
     Relations are scored among the 100 most confident entities of each
-    document, and only between entities of at most 32 words; pairs involving
-    other entities are not reported. A request may ask for at most 20
-    relation types. Supplied ``metadata.entities`` may use at most 64
-    distinct sets of entity labels per request.
+    document; pairs involving other entities are not reported. A request may
+    ask for at most 20 relation types. Supplied ``metadata.entities`` may use
+    at most 64 distinct sets of entity labels per request.
 
     Structured output follows GLiFormer's own formatting: a string property
     keeps the best of several extracted values, and array-of-string values
@@ -1082,11 +1079,6 @@ def _limit_relation_entities(model: Any) -> None:
       ranks the decoded entities and slices the kept ones into compact
       tensors before it builds entity pairs, so the pair tensors never grow
       past this many entities per document.
-    - Candidates are at most ``_MAX_RELATION_SPAN_WIDTH`` words long. Every
-      relation copies its head and tail text, and a document can hold
-      ``_MAX_RELATION_ENTITIES`` squared times ``_MAX_RELATION_TYPES``
-      relations, so the width bounds the text a document's relations carry.
-      Longer entities are still reported as entities.
     - The head ranks each decoded entity with a few small tensor operations
       in Python before it applies these bounds, so each one costs
       ``PROPOSAL_UNITS`` of the request's decode budget.
@@ -1101,8 +1093,6 @@ def _limit_relation_entities(model: Any) -> None:
     head = heads["joint_relex"]
     current = getattr(head, "max_relation_entities", None)
     head.max_relation_entities = _MAX_RELATION_ENTITIES if current is None else min(current, _MAX_RELATION_ENTITIES)
-    width = getattr(head, "max_relation_span_width", None)
-    head.max_relation_span_width = _MAX_RELATION_SPAN_WIDTH if width is None else min(width, _MAX_RELATION_SPAN_WIDTH)
     decode = getattr(head, "_decode_relation_entity_spans", None)
     if not callable(decode):
         raise RuntimeError("GLiFormer's relation head no longer decodes entity candidates where the adapter expects")
