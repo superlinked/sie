@@ -67,6 +67,31 @@ Label names are refused when their total length exceeds 16 characters per
 token of the window (8,192 characters for a 512-token model), more than any
 label prompt can fit.
 
+### GLiNER2.5-Decide usage and limits
+
+The GLiNER2.5-Decide models (`fastino/GLiNER2.5-Decide`, `GLiNER2.5-multi-Decide`,
+`GLiNER2.5-Decide-1B`) run on `gliner2` 2.x, which the transformers5 bundle
+pins. Each item is one encoder row: every question's (or label group's) name,
+instruction, and labels, then the document. `usage.input_tokens` counts the
+document tokens the model reads plus the tokens of the instructions and label
+descriptions (criteria) sent with the item, as Laya and GLiClass count
+instructions and criteria. Question ids, group names, and label names are not
+counted, and an item that returns an error counts nothing.
+
+A request takes at most 64 questions or label groups, 64 options per question,
+and 1,024 options in total. Question ids and group names may have 128
+characters, labels 256, and each instruction or description 2,048, with 65,536
+characters in all. Strings that contain one of the model's prompt markers
+(`[L]`, `[P]`, `[DESCRIPTION]`, ...) are refused. The questions may take at most
+512 tokens of the model's window (1,024 tokens for `GLiNER2.5-Decide`, 2,048
+for the others), which bounds the uncounted question and label tokens read with
+each item; a request needing more fails with `INPUT_TOO_LONG`. The
+document is read up to the whole words that fit in the rest of the window; a
+word longer than 4,096 characters, or text past 64 characters per token of the
+window, also ends what is read. An item none of whose words fits, or that does
+not fit whole with `options={"overflow_policy": "error"}`, returns a per-item
+`INPUT_TOO_LONG` error while the other items succeed.
+
 ## Configuration
 
 `sie-server` reads its config from `SIE_*` environment variables (Pydantic

@@ -7,6 +7,7 @@ adapters:
 - sie_server.adapters.lighton_ocr.adapter
 - sie_server.adapters.glm_ocr
 - sie_server.adapters.gliner2.classification
+- sie_server.adapters.gliner2.decide
 - sie_server.adapters.st_sparse_vision.adapter
 deps:
   # Transformers 5.x for models requiring newer architecture support
@@ -30,5 +31,10 @@ deps:
   # unsatisfiable against that pin and broke `uv run` resolution.
   # Let transformers drive the version.
   pillow: ''
-  # gliguard-LLMGuardrails-300M uses GLiNER2 classification APIs.
-  gliner2: '>=1.3.1,<2'
+  # gliguard-LLMGuardrails-300M uses GLiNER2 classification APIs, and the
+  # GLiNER2.5-Decide models need gliner2 2.x (AutoExtractor, boundary
+  # architecture). Exact: the Decide adapter builds the task prompt with the
+  # package's processor. GLiGuard's outputs are unchanged from 1.3.2. gliner2
+  # 2.0 declares transformers<5 only for its `local` extra, which is not used;
+  # the multilingual and 1B Decide checkpoints were saved with transformers 5.
+  gliner2: '==2.0.0'

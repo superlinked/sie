@@ -199,7 +199,8 @@ def test_transformers5_bundle_carries_gliner2_classification_runtime() -> None:
     assert "sie_server.adapters.gliner2.classification" not in default["adapters"]
     assert "sie_server.adapters.gliner2.classification" in transformers5["adapters"]
     assert "sie_server.adapters.gliner2.adapter" not in transformers5["adapters"]
-    assert transformers5["deps"]["gliner2"] == ">=1.3.1,<2"
+    # The GLiNER2.5-Decide models share this bundle and need gliner2 2.x.
+    assert transformers5["deps"]["gliner2"] == "==2.0.0"
     profile = model["profiles"]["default"]
     assert profile["adapter_path"].endswith("gliner2.classification:GLiNER2ClassificationAdapter")
     assert profile["adapter_options"] == {

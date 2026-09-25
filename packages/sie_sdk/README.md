@@ -149,6 +149,45 @@ An item whose document pushes the labels out of the window, in any of its rows,
 comes back with an `INPUT_TOO_LONG` error in its `error` field and is not
 billed. The other items still succeed.
 
+## Typed decisions
+
+Typed-decision models answer typed questions about each item and return a
+probability for every option. The Laya models and the GLiNER2.5-Decide models
+take the same question mapping as `output_schema`: `choice` (pick one of the
+criteria), `noul` (yes or no), and `score` (an ordinal scale, index 0 first).
+Answers come back in `data`, keyed by question id.
+
+```python
+result = client.extract(
+    "fastino/GLiNER2.5-Decide",
+    Item(text="This is the third time I have explained the same missing refund. Get me a person."),
+    output_schema={
+        "intent": {
+            "type": "choice",
+            "instructions": "What does the customer want?",
+            "criteria": {"refund_request": "money back", "cancel": None, "complaint": "unhappy with service"},
+        },
+        "handoff": {"type": "noul", "instructions": "Should a person take over?"},
+        "frustration": {"type": "score", "instructions": "How frustrated is the customer?",
+                        "criteria": ["calm", "annoyed", "angry"]},
+    },
+)
+answers = result["data"]
+print(answers["intent"]["choice"], answers["intent"]["probabilities"])
+# e.g. refund_request {'refund_request': 0.59, 'cancel': 0.07, 'complaint': 0.34}
+print(answers["handoff"]["answer"], answers["handoff"]["noul"])  # True 0.99 (the probability of yes)
+print(answers["frustration"]["score"])  # e.g. 1.13, the expected level from 0 to 2
+```
+
+`choice` and `score` answers carry `probabilities` and `confidence`
+(`1 - entropy / log(number of options)`); a `noul` answer carries `noul`, the
+probability of yes, `answer`, and `confidence` (`max(p, 1 - p)`). The
+GLiNER2.5-Decide models also accept `options={"label_groups": {...}}` with
+`"classification_type": "multi-label"` for independent per-label scores, and
+plain `labels`, which return every label in `classifications`. They read all
+of a call's questions in one row per item, so each question's probabilities
+depend on the other questions sent with it.
+
 ## Generation prompts and guard verdicts
 
 `generate` and `stream_generate` treat text-only prompts as raw continuation

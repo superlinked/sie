@@ -1,0 +1,978 @@
+{
+ "model": "fastino/GLiNER2.5-multi-Decide",
+ "revision": "6bc1d43d201b0691e733626389af8c57eea3ea68",
+ "generated_with": {
+  "gliner2": "2.0.0",
+  "transformers": "5.17.0",
+  "torch": "2.9.1+cu128",
+  "device": "cpu",
+  "dtype": "float32",
+  "window": 2048
+ },
+ "texts": [
+  "My subscription renewed on April 15 for 5,400 yen after the service was already down. Can I get that charge refunded?",
+  "Guest in room 1408 says the AC has been out since yesterday and they want to move tonight or leave. They also asked for the incidentals hold to be released.",
+  "Das Paket kam beschädigt an, bitte schicken Sie Ersatz. Ich brauche es bis Freitag, sonst storniere ich die Bestellung!",
+  "请帮我取消订单，我不想要了。退款什么时候到账？",
+  "The treaty was signed in Paris in 1992. It entered into force the following year, after the last signatory ratified it."
+ ],
+ "long_text": "Quarterly operations report for the northern warehouse, week 0. The team shipped 12000 orders and handled 300 returns; late deliveries fell to 9 percent. Carrier contract 0 renewed without changes, and the forklift inspection passed on schedule. Payroll ran on time for 40 staff members and no overtime disputes were filed. Quarterly operations report for the northern warehouse, week 1. The team shipped 12037 orders and handled 301 returns; late deliveries fell to 8 percent. Carrier contract 1 renewed without changes, and the forklift inspection passed on schedule. Payroll ran on time for 41 staff members and no overtime disputes were filed. Quarterly operations report for the northern warehouse, week 2. The team shipped 12074 orders and handled 302 returns; late deliveries fell to 7 percent. Carrier contract 2 renewed without changes, and the forklift inspection passed on schedule. Payroll ran on time for 42 staff members and no overtime disputes were filed. Quarterly operations report for the northern warehouse, week 3. The team shipped 12111 orders and handled 303 returns; late deliveries fell to 6 percent. Carrier contract 3 renewed without changes, and the forklift inspection passed on schedule. Payroll ran on time for 43 staff members and no overtime disputes were filed. Quarterly operations report for the northern warehouse, week 4. The team shipped 12148 orders and handled 304 returns; late deliveries fell to 5 percent. Carrier contract 4 renewed without changes, and the forklift inspection passed on schedule. Payroll ran on time for 44 staff members and no overtime disputes were filed. Quarterly operations report for the northern warehouse, week 5. The team shipped 12185 orders and handled 305 returns; late deliveries fell to 4 percent. Carrier contract 5 renewed without changes, and the forklift inspection passed on schedule. Payroll ran on time for 40 staff members and no overtime disputes were filed. Quarterly operations report for the northern warehouse, week 6. The team shipped 12222 orders and handled 306 returns; late deliveries fell to 3 percent. Carrier contract 6 renewed without changes, and the forklift inspection passed on schedule. Payroll ran on time for 41 staff members and no overtime disputes were filed. Quarterly operations report for the northern warehouse, week 7. The team shipped 12259 orders and handled 307 returns; late deliveries fell to 2 percent. Carrier contract 7 renewed without changes, and the forklift inspection passed on schedule. Payroll ran on time for 42 staff members and no overtime disputes were filed. Quarterly operations report for the northern warehouse, week 8. The team shipped 12296 orders and handled 308 returns; late deliveries fell to 9 percent. Carrier contract 8 renewed without changes, and the forklift inspection passed on schedule. Payroll ran on time for 43 staff members and no overtime disputes were filed. Quarterly operations report for the northern warehouse, week 9. The team shipped 12333 orders and handled 309 returns; late deliveries fell to 8 percent. Carrier contract 9 renewed without changes, and the forklift inspection passed on schedule. Payroll ran on time for 44 staff members and no overtime disputes were filed. Quarterly operations report for the northern warehouse, week 10. The team shipped 12370 orders and handled 310 returns; late deliveries fell to 7 percent. Carrier contract 10 renewed without changes, and the forklift inspection passed on schedule. Payroll ran on time for 40 staff members and no overtime disputes were filed. Quarterly operations report for the northern warehouse, week 11. The team shipped 12407 orders and handled 311 returns; late deliveries fell to 6 percent. Carrier contract 11 renewed without changes, and the forklift inspection passed on schedule. Payroll ran on time for 41 staff members and no overtime disputes were filed. Quarterly operations report for the northern warehouse, week 12. The team shipped 12444 orders and handled 312 returns; late deliveries fell to 5 percent. Carrier contract 12 renewed without changes, and the forklift inspection passed on schedule. Payroll ran on time for 42 staff members and no overtime disputes were filed. Quarterly operations report for the northern warehouse, week 13. The team shipped 12481 orders and handled 313 returns; late deliveries fell to 4 percent. Carrier contract 13 renewed without changes, and the forklift inspection passed on schedule. Payroll ran on time for 43 staff members and no overtime disputes were filed. Quarterly operations report for the northern warehouse, week 14. The team shipped 12518 orders and handled 314 returns; late deliveries fell to 3 percent. Carrier contract 14 renewed without changes, and the forklift inspection passed on schedule. Payroll ran on time for 44 staff members and no overtime disputes were filed. Quarterly operations report for the northern warehouse, week 15. The team shipped 12555 orders and handled 315 returns; late deliveries fell to 2 percent. Carrier contract 15 renewed without changes, and the forklift inspection passed on schedule. Payroll ran on time for 40 staff members and no overtime disputes were filed. Quarterly operations report for the northern warehouse, week 16. The team shipped 12592 orders and handled 316 returns; late deliveries fell to 9 percent. Carrier contract 16 renewed without changes, and the forklift inspection passed on schedule. Payroll ran on time for 41 staff members and no overtime disputes were filed. Quarterly operations report for the northern warehouse, week 17. The team shipped 12629 orders and handled 317 returns; late deliveries fell to 8 percent. Carrier contract 17 renewed without changes, and the forklift inspection passed on schedule. Payroll ran on time for 42 staff members and no overtime disputes were filed. Quarterly operations report for the northern warehouse, week 18. The team shipped 12666 orders and handled 318 returns; late deliveries fell to 7 percent. Carrier contract 18 renewed without changes, and the forklift inspection passed on schedule. Payroll ran on time for 43 staff members and no overtime disputes were filed. Quarterly operations report for the northern warehouse, week 19. The team shipped 12703 orders and handled 319 returns; late deliveries fell to 6 percent. Carrier contract 19 renewed without changes, and the forklift inspection passed on schedule. Payroll ran on time for 44 staff members and no overtime disputes were filed. Quarterly operations report for the northern warehouse, week 20. The team shipped 12740 orders and handled 320 returns; late deliveries fell to 5 percent. Carrier contract 20 renewed without changes, and the forklift inspection passed on schedule. Payroll ran on time for 40 staff members and no overtime disputes were filed. Quarterly operations report for the northern warehouse, week 21. The team shipped 12777 orders and handled 321 returns; late deliveries fell to 4 percent. Carrier contract 21 renewed without changes, and the forklift inspection passed on schedule. Payroll ran on time for 41 staff members and no overtime disputes were filed. Quarterly operations report for the northern warehouse, week 22. The team shipped 12814 orders and handled 322 returns; late deliveries fell to 3 percent. Carrier contract 22 renewed without changes, and the forklift inspection passed on schedule. Payroll ran on time for 42 staff members and no overtime disputes were filed. Quarterly operations report for the northern warehouse, week 23. The team shipped 12851 orders and handled 323 returns; late deliveries fell to 2 percent. Carrier contract 23 renewed without changes, and the forklift inspection passed on schedule. Payroll ran on time for 43 staff members and no overtime disputes were filed. Quarterly operations report for the northern warehouse, week 24. The team shipped 12888 orders and handled 324 returns; late deliveries fell to 9 percent. Carrier contract 24 renewed without changes, and the forklift inspection passed on schedule. Payroll ran on time for 44 staff members and no overtime disputes were filed. Quarterly operations report for the northern warehouse, week 25. The team shipped 12925 orders and handled 325 returns; late deliveries fell to 8 percent. Carrier contract 25 renewed without changes, and the forklift inspection passed on schedule. Payroll ran on time for 40 staff members and no overtime disputes were filed. Quarterly operations report for the northern warehouse, week 26. The team shipped 12962 orders and handled 326 returns; late deliveries fell to 7 percent. Carrier contract 26 renewed without changes, and the forklift inspection passed on schedule. Payroll ran on time for 41 staff members and no overtime disputes were filed. Quarterly operations report for the northern warehouse, week 27. The team shipped 12999 orders and handled 327 returns; late deliveries fell to 6 percent. Carrier contract 27 renewed without changes, and the forklift inspection passed on schedule. Payroll ran on time for 42 staff members and no overtime disputes were filed. Quarterly operations report for the northern warehouse, week 28. The team shipped 13036 orders and handled 328 returns; late deliveries fell to 5 percent. Carrier contract 28 renewed without changes, and the forklift inspection passed on schedule. Payroll ran on time for 43 staff members and no overtime disputes were filed. Quarterly operations report for the northern warehouse, week 29. The team shipped 13073 orders and handled 329 returns; late deliveries fell to 4 percent. Carrier contract 29 renewed without changes, and the forklift inspection passed on schedule. Payroll ran on time for 44 staff members and no overtime disputes were filed. Quarterly operations report for the northern warehouse, week 30. The team shipped 13110 orders and handled 330 returns; late deliveries fell to 3 percent. Carrier contract 30 renewed without changes, and the forklift inspection passed on schedule. Payroll ran on time for 40 staff members and no overtime disputes were filed. Quarterly operations report for the northern warehouse, week 31. The team shipped 13147 orders and handled 331 returns; late deliveries fell to 2 percent. Carrier contract 31 renewed without changes, and the forklift inspection passed on schedule. Payroll ran on time for 41 staff members and no overtime disputes were filed. Quarterly operations report for the northern warehouse, week 32. The team shipped 13184 orders and handled 332 returns; late deliveries fell to 9 percent. Carrier contract 32 renewed without changes, and the forklift inspection passed on schedule. Payroll ran on time for 42 staff members and no overtime disputes were filed. Quarterly operations report for the northern warehouse, week 33. The team shipped 13221 orders and handled 333 returns; late deliveries fell to 8 percent. Carrier contract 33 renewed without changes, and the forklift inspection passed on schedule. Payroll ran on time for 43 staff members and no overtime disputes were filed. Quarterly operations report for the northern warehouse, week 34. The team shipped 13258 orders and handled 334 returns; late deliveries fell to 7 percent. Carrier contract 34 renewed without changes, and the forklift inspection passed on schedule. Payroll ran on time for 44 staff members and no overtime disputes were filed. Quarterly operations report for the northern warehouse, week 35. The team shipped 13295 orders and handled 335 returns; late deliveries fell to 6 percent. Carrier contract 35 renewed without changes, and the forklift inspection passed on schedule. Payroll ran on time for 40 staff members and no overtime disputes were filed. Quarterly operations report for the northern warehouse, week 36. The team shipped 13332 orders and handled 336 returns; late deliveries fell to 5 percent. Carrier contract 36 renewed without changes, and the forklift inspection passed on schedule. Payroll ran on time for 41 staff members and no overtime disputes were filed. Quarterly operations report for the northern warehouse, week 37. The team shipped 13369 orders and handled 337 returns; late deliveries fell to 4 percent. Carrier contract 37 renewed without changes, and the forklift inspection passed on schedule. Payroll ran on time for 42 staff members and no overtime disputes were filed. Quarterly operations report for the northern warehouse, week 38. The team shipped 13406 orders and handled 338 returns; late deliveries fell to 3 percent. Carrier contract 38 renewed without changes, and the forklift inspection passed on schedule. Payroll ran on time for 43 staff members and no overtime disputes were filed. Quarterly operations report for the northern warehouse, week 39. The team shipped 13443 orders and handled 339 returns; late deliveries fell to 2 percent. Carrier contract 39 renewed without changes, and the forklift inspection passed on schedule. Payroll ran on time for 44 staff members and no overtime disputes were filed. Quarterly operations report for the northern warehouse, week 40. The team shipped 13480 orders and handled 340 returns; late deliveries fell to 9 percent. Carrier contract 40 renewed without changes, and the forklift inspection passed on schedule. Payroll ran on time for 40 staff members and no overtime disputes were filed. Quarterly operations report for the northern warehouse, week 41. The team shipped 13517 orders and handled 341 returns; late deliveries fell to 8 percent. Carrier contract 41 renewed without changes, and the forklift inspection passed on schedule. Payroll ran on time for 41 staff members and no overtime disputes were filed. Quarterly operations report for the northern warehouse, week 42. The team shipped 13554 orders and handled 342 returns; late deliveries fell to 7 percent. Carrier contract 42 renewed without changes, and the forklift inspection passed on schedule. Payroll ran on time for 42 staff members and no overtime disputes were filed. Quarterly operations report for the northern warehouse, week 43. The team shipped 13591 orders and handled 343 returns; late deliveries fell to 6 percent. Carrier contract 43 renewed without changes, and the forklift inspection passed on schedule. Payroll ran on time for 43 staff members and no overtime disputes were filed. Quarterly operations report for the northern warehouse, week 44. The team shipped 13628 orders and handled 344 returns; late deliveries fell to 5 percent. Carrier contract 44 renewed without changes, and the forklift inspection passed on schedule. Payroll ran on time for 44 staff members and no overtime disputes were filed. Quarterly operations report for the northern warehouse, week 45. The team shipped 13665 orders and handled 345 returns; late deliveries fell to 4 percent. Carrier contract 45 renewed without changes, and the forklift inspection passed on schedule. Payroll ran on time for 40 staff members and no overtime disputes were filed. Quarterly operations report for the northern warehouse, week 46. The team shipped 13702 orders and handled 346 returns; late deliveries fell to 3 percent. Carrier contract 46 renewed without changes, and the forklift inspection passed on schedule. Payroll ran on time for 41 staff members and no overtime disputes were filed. Quarterly operations report for the northern warehouse, week 47. The team shipped 13739 orders and handled 347 returns; late deliveries fell to 2 percent. Carrier contract 47 renewed without changes, and the forklift inspection passed on schedule. Payroll ran on time for 42 staff members and no overtime disputes were filed. Quarterly operations report for the northern warehouse, week 48. The team shipped 13776 orders and handled 348 returns; late deliveries fell to 9 percent. Carrier contract 48 renewed without changes, and the forklift inspection passed on schedule. Payroll ran on time for 43 staff members and no overtime disputes were filed. Quarterly operations report for the northern warehouse, week 49. The team shipped 13813 orders and handled 349 returns; late deliveries fell to 8 percent. Carrier contract 49 renewed without changes, and the forklift inspection passed on schedule. Payroll ran on time for 44 staff members and no overtime disputes were filed. Quarterly operations report for the northern warehouse, week 50. The team shipped 13850 orders and handled 350 returns; late deliveries fell to 7 percent. Carrier contract 50 renewed without changes, and the forklift inspection passed on schedule. Payroll ran on time for 40 staff members and no overtime disputes were filed. Quarterly operations report for the northern warehouse, week 51. The team shipped 13887 orders and handled 351 returns; late deliveries fell to 6 percent. Carrier contract 51 renewed without changes, and the forklift inspection passed on schedule. Payroll ran on time for 41 staff members and no overtime disputes were filed. Quarterly operations report for the northern warehouse, week 52. The team shipped 13924 orders and handled 352 returns; late deliveries fell to 5 percent. Carrier contract 52 renewed without changes, and the forklift inspection passed on schedule. Payroll ran on time for 42 staff members and no overtime disputes were filed. Quarterly operations report for the northern warehouse, week 53. The team shipped 13961 orders and handled 353 returns; late deliveries fell to 4 percent. Carrier contract 53 renewed without changes, and the forklift inspection passed on schedule. Payroll ran on time for 43 staff members and no overtime disputes were filed. Quarterly operations report for the northern warehouse, week 54. The team shipped 13998 orders and handled 354 returns; late deliveries fell to 3 percent. Carrier contract 54 renewed without changes, and the forklift inspection passed on schedule. Payroll ran on time for 44 staff members and no overtime disputes were filed. Quarterly operations report for the northern warehouse, week 55. The team shipped 14035 orders and handled 355 returns; late deliveries fell to 2 percent. Carrier contract 55 renewed without changes, and the forklift inspection passed on schedule. Payroll ran on time for 40 staff members and no overtime disputes were filed. Quarterly operations report for the northern warehouse, week 56. The team shipped 14072 orders and handled 356 returns; late deliveries fell to 9 percent. Carrier contract 56 renewed without changes, and the forklift inspection passed on schedule. Payroll ran on time for 41 staff members and no overtime disputes were filed. Quarterly operations report for the northern warehouse, week 57. The team shipped 14109 orders and handled 357 returns; late deliveries fell to 8 percent. Carrier contract 57 renewed without changes, and the forklift inspection passed on schedule. Payroll ran on time for 42 staff members and no overtime disputes were filed. Quarterly operations report for the northern warehouse, week 58. The team shipped 14146 orders and handled 358 returns; late deliveries fell to 7 percent. Carrier contract 58 renewed without changes, and the forklift inspection passed on schedule. Payroll ran on time for 43 staff members and no overtime disputes were filed. Quarterly operations report for the northern warehouse, week 59. The team shipped 14183 orders and handled 359 returns; late deliveries fell to 6 percent. Carrier contract 59 renewed without changes, and the forklift inspection passed on schedule. Payroll ran on time for 44 staff members and no overtime disputes were filed. In the last week the payroll system failed during the month-end close and salaries for 40 staff are delayed; finance needs a fix before the Friday 5pm cutoff",
+ "cases": [
+  {
+   "name": "questions",
+   "request": {
+    "output_schema": {
+     "intent": {
+      "type": "choice",
+      "instructions": "What does the customer want?",
+      "criteria": {
+       "refund_request": "the customer wants money back",
+       "cancel_order": "the customer wants to cancel an order or subscription",
+       "room_change": "a guest wants another room",
+       "maintenance": null,
+       "other": ""
+      }
+     },
+     "urgency": {
+      "type": "score",
+      "instructions": "How urgent is this request?",
+      "criteria": [
+       "not urgent",
+       "within a week",
+       "today",
+       "blocking or past a deadline"
+      ]
+     },
+     "needs_human": {
+      "type": "noul",
+      "instructions": "Must a person act on this?",
+      "criteria": {
+       "true": "automation cannot resolve it"
+      }
+     },
+     "rating": {
+      "type": "score",
+      "instructions": "Rate the severity from 0 to 10.",
+      "criteria": [
+       "0",
+       "1",
+       "2",
+       "3",
+       "4",
+       "5",
+       "6",
+       "7",
+       "8",
+       "9",
+       "10"
+      ]
+     }
+    }
+   },
+   "documents": "texts",
+   "reference_call": {
+    "tasks": [
+     {
+      "name": "intent",
+      "kind": "single",
+      "labels": {
+       "refund_request": "the customer wants money back",
+       "cancel_order": "the customer wants to cancel an order or subscription",
+       "room_change": "a guest wants another room",
+       "maintenance": null,
+       "other": null
+      },
+      "instruction": "What does the customer want?"
+     },
+     {
+      "name": "urgency",
+      "kind": "single",
+      "labels": {
+       "0": "not urgent",
+       "1": "within a week",
+       "2": "today",
+       "3": "blocking or past a deadline"
+      },
+      "instruction": "How urgent is this request?"
+     },
+     {
+      "name": "needs_human",
+      "kind": "single",
+      "labels": {
+       "yes": "automation cannot resolve it",
+       "no": null
+      },
+      "instruction": "Must a person act on this?"
+     },
+     {
+      "name": "rating",
+      "kind": "single",
+      "labels": [
+       "0",
+       "1",
+       "2",
+       "3",
+       "4",
+       "5",
+       "6",
+       "7",
+       "8",
+       "9",
+       "10"
+      ],
+      "instruction": "Rate the severity from 0 to 10."
+     }
+    ]
+   },
+   "results": [
+    {
+     "max_len": null,
+     "row_length": 234,
+     "row_sha256": "c300f4f1eedb7a932f9a995375e43c1140c4120432ee5f3f1ebea57a5306b397",
+     "probabilities": {
+      "intent": {
+       "refund_request": 0.8653422372199283,
+       "cancel_order": 0.03450084898476019,
+       "room_change": 0.012078067428275139,
+       "maintenance": 0.029505144996428447,
+       "other": 0.05857370137060786
+      },
+      "urgency": {
+       "0": 0.20284874594982216,
+       "1": 0.24311020085065396,
+       "2": 0.2659260870293298,
+       "3": 0.2881149661701941
+      },
+      "needs_human": {
+       "yes": 0.500748931801502,
+       "no": 0.49925106819849796
+      },
+      "rating": {
+       "0": 0.08046718993580655,
+       "1": 0.08906680895442307,
+       "2": 0.0934985956331202,
+       "3": 0.09595803061044571,
+       "4": 0.0957161247774777,
+       "5": 0.0976250881698765,
+       "6": 0.09257131565461933,
+       "7": 0.09211546742826163,
+       "8": 0.09119083759620662,
+       "9": 0.08866964362517778,
+       "10": 0.083120897614585
+      }
+     }
+    },
+    {
+     "max_len": null,
+     "row_length": 243,
+     "row_sha256": "39ec24fee33e88ea4f9e2be4a383bc7723dd6fce3f43bde73b7ade6fe56b218e",
+     "probabilities": {
+      "intent": {
+       "refund_request": 0.06817533353987852,
+       "cancel_order": 0.05605657413946528,
+       "room_change": 0.5351599176271147,
+       "maintenance": 0.19887152477280506,
+       "other": 0.14173664992073645
+      },
+      "urgency": {
+       "0": 0.17551762855334838,
+       "1": 0.21198615910952678,
+       "2": 0.2739309404720854,
+       "3": 0.33856527186503954
+      },
+      "needs_human": {
+       "yes": 0.5406472818180786,
+       "no": 0.45935271818192136
+      },
+      "rating": {
+       "0": 0.0770764216234726,
+       "1": 0.08235757125042457,
+       "2": 0.09340344438522002,
+       "3": 0.09967735617468781,
+       "4": 0.09744752606449507,
+       "5": 0.0978724809345962,
+       "6": 0.0926880414527889,
+       "7": 0.09324157698242443,
+       "8": 0.09109992451052977,
+       "9": 0.09078488015884718,
+       "10": 0.08435077646251349
+      }
+     }
+    },
+    {
+     "max_len": null,
+     "row_length": 237,
+     "row_sha256": "121a23ba29a87c358181480531e031042e80d8acfa5a7b3c605fb8c1bd45206f",
+     "probabilities": {
+      "intent": {
+       "refund_request": 0.054698441080062894,
+       "cancel_order": 0.7882612180903259,
+       "room_change": 0.019162545386786023,
+       "maintenance": 0.05998062902608238,
+       "other": 0.07789716641674277
+      },
+      "urgency": {
+       "0": 0.12770230550857256,
+       "1": 0.20154298257347203,
+       "2": 0.2764879624104309,
+       "3": 0.39426674950752444
+      },
+      "needs_human": {
+       "yes": 0.5644253730127116,
+       "no": 0.4355746269872884
+      },
+      "rating": {
+       "0": 0.07846375877537351,
+       "1": 0.08677583333018656,
+       "2": 0.09442011105084717,
+       "3": 0.09676355595498756,
+       "4": 0.09465799668051146,
+       "5": 0.09653925072154865,
+       "6": 0.09162503377236929,
+       "7": 0.09173296845120982,
+       "8": 0.09197188995942916,
+       "9": 0.09351012946865679,
+       "10": 0.08353947183488011
+      }
+     }
+    },
+    {
+     "max_len": null,
+     "row_length": 224,
+     "row_sha256": "0a8cc71303a6335a1674fd7fbfc90555dee59c3dd5b5ba33872d53839ec5610c",
+     "probabilities": {
+      "intent": {
+       "refund_request": 0.02263417836653408,
+       "cancel_order": 0.9552144548941393,
+       "room_change": 0.002488009099897836,
+       "maintenance": 0.003006055144091452,
+       "other": 0.016657302495337405
+      },
+      "urgency": {
+       "0": 0.23647786467295173,
+       "1": 0.24199428143202062,
+       "2": 0.25164947670141785,
+       "3": 0.26987837719360985
+      },
+      "needs_human": {
+       "yes": 0.5171507442346706,
+       "no": 0.4828492557653295
+      },
+      "rating": {
+       "0": 0.10010890234534435,
+       "1": 0.0932930938019073,
+       "2": 0.09464095392118523,
+       "3": 0.09350876429119166,
+       "4": 0.09227005902154302,
+       "5": 0.0938133078064512,
+       "6": 0.09067714763074344,
+       "7": 0.08938593115721644,
+       "8": 0.08804881981659674,
+       "9": 0.08525644177910455,
+       "10": 0.07899657842871609
+      }
+     }
+    },
+    {
+     "max_len": null,
+     "row_length": 233,
+     "row_sha256": "285cd7b230c2b36c2d0ef306302385c1412320d7f85216f12378614927423f11",
+     "probabilities": {
+      "intent": {
+       "refund_request": 0.13159847656083726,
+       "cancel_order": 0.15907767845788198,
+       "room_change": 0.09347238339833705,
+       "maintenance": 0.07421214863069613,
+       "other": 0.5416393129522475
+      },
+      "urgency": {
+       "0": 0.2489354429613785,
+       "1": 0.2423315371594498,
+       "2": 0.2519829155606013,
+       "3": 0.25675010431857037
+      },
+      "needs_human": {
+       "yes": 0.42528726425413543,
+       "no": 0.5747127357458645
+      },
+      "rating": {
+       "0": 0.07942884194267318,
+       "1": 0.08228779855000765,
+       "2": 0.0893583237073672,
+       "3": 0.0958273822239652,
+       "4": 0.09632633065105693,
+       "5": 0.09711759475509496,
+       "6": 0.09276840697923255,
+       "7": 0.09207804067792887,
+       "8": 0.09271766071540209,
+       "9": 0.0927527047329241,
+       "10": 0.08933691506434724
+      }
+     }
+    }
+   ]
+  },
+  {
+   "name": "question_over_passage",
+   "request": {
+    "output_schema": {
+     "answer": {
+      "type": "noul",
+      "instructions": "Did the treaty enter into force in 1992?"
+     }
+    }
+   },
+   "documents": "texts",
+   "reference_call": {
+    "tasks": [
+     {
+      "name": "answer",
+      "kind": "single",
+      "labels": [
+       "yes",
+       "no"
+      ],
+      "instruction": "Did the treaty enter into force in 1992?"
+     }
+    ]
+   },
+   "results": [
+    {
+     "max_len": null,
+     "row_length": 58,
+     "row_sha256": "32deb0d1390ba395f566ad2a640a7d236eca61bd81ec8c6ebf2d329d341e8b6e",
+     "probabilities": {
+      "answer": {
+       "yes": 0.24841801885062556,
+       "no": 0.7515819811493744
+      }
+     }
+    },
+    {
+     "max_len": null,
+     "row_length": 67,
+     "row_sha256": "328bc4cd434a55d2ed2fe5b24054e4c414a2bf48f6bad833e7a438f85aaabc37",
+     "probabilities": {
+      "answer": {
+       "yes": 0.31462890543725375,
+       "no": 0.6853710945627463
+      }
+     }
+    },
+    {
+     "max_len": null,
+     "row_length": 61,
+     "row_sha256": "31649e942cad9062fbd50f2b14e281a7fce9b8b62f530d7a7a9dd36d55763fae",
+     "probabilities": {
+      "answer": {
+       "yes": 0.2669829496234064,
+       "no": 0.7330170503765936
+      }
+     }
+    },
+    {
+     "max_len": null,
+     "row_length": 48,
+     "row_sha256": "3e95581460471d68706aa973a93e636b66610219ddf79683eb1aacc425c3bcce",
+     "probabilities": {
+      "answer": {
+       "yes": 0.3410693353132902,
+       "no": 0.6589306646867097
+      }
+     }
+    },
+    {
+     "max_len": null,
+     "row_length": 57,
+     "row_sha256": "773a90ebab74562f25be0486fd665611a623f7762c52e0e797751271384bcb7b",
+     "probabilities": {
+      "answer": {
+       "yes": 0.9933019022020662,
+       "no": 0.00669809779793398
+      }
+     }
+    }
+   ]
+  },
+  {
+   "name": "label_groups",
+   "request": {
+    "instruction": "Triage the message.",
+    "options": {
+     "label_groups": {
+      "intent": [
+       "refund_request",
+       "cancel_order",
+       "room_change",
+       "maintenance",
+       "other"
+      ],
+      "priority": [
+       "low",
+       "normal",
+       "high",
+       "urgent"
+      ],
+      "needs_human": [
+       "yes",
+       "no"
+      ]
+     }
+    }
+   },
+   "documents": "texts",
+   "reference_call": {
+    "tasks": [
+     {
+      "name": "intent",
+      "kind": "single",
+      "labels": [
+       "refund_request",
+       "cancel_order",
+       "room_change",
+       "maintenance",
+       "other"
+      ],
+      "instruction": "Triage the message."
+     },
+     {
+      "name": "priority",
+      "kind": "single",
+      "labels": [
+       "low",
+       "normal",
+       "high",
+       "urgent"
+      ],
+      "instruction": "Triage the message."
+     },
+     {
+      "name": "needs_human",
+      "kind": "single",
+      "labels": [
+       "yes",
+       "no"
+      ],
+      "instruction": "Triage the message."
+     }
+    ]
+   },
+   "results": [
+    {
+     "max_len": null,
+     "row_length": 112,
+     "row_sha256": "5a2a8d3f334af6ac555598bfd44ed60cb74e5032319d30d965b680f070548adc",
+     "probabilities": {
+      "intent": {
+       "refund_request": 0.992542480604977,
+       "cancel_order": 0.0015130109425440358,
+       "room_change": 0.0004970936067399901,
+       "maintenance": 0.0012871165936307303,
+       "other": 0.004160298252108347
+      },
+      "priority": {
+       "low": 0.23502648533841594,
+       "normal": 0.3075152367534908,
+       "high": 0.2532555011019328,
+       "urgent": 0.20420277680616045
+      },
+      "needs_human": {
+       "yes": 0.5703937415542173,
+       "no": 0.4296062584457827
+      }
+     }
+    },
+    {
+     "max_len": null,
+     "row_length": 121,
+     "row_sha256": "71beb2ce681925aa29e38a95a75a680d3cef9ad783046b72cd4b2dfbe3a7d4ac",
+     "probabilities": {
+      "intent": {
+       "refund_request": 0.07405230650129703,
+       "cancel_order": 0.05687348320725224,
+       "room_change": 0.5682816286210692,
+       "maintenance": 0.15886877456777443,
+       "other": 0.14192380710260705
+      },
+      "priority": {
+       "low": 0.19033413382300554,
+       "normal": 0.2255110625686171,
+       "high": 0.29515538575499806,
+       "urgent": 0.2889994178533793
+      },
+      "needs_human": {
+       "yes": 0.563724071157929,
+       "no": 0.436275928842071
+      }
+     }
+    },
+    {
+     "max_len": null,
+     "row_length": 115,
+     "row_sha256": "cbc1dfa364f50f8f00ff04a455e91e149fa1fbca6fd5e49de9c5cc370a517223",
+     "probabilities": {
+      "intent": {
+       "refund_request": 0.007306926753793017,
+       "cancel_order": 0.97607903480116,
+       "room_change": 0.0010640839719275488,
+       "maintenance": 0.005471416745275971,
+       "other": 0.01007853772784352
+      },
+      "priority": {
+       "low": 0.14616614050872026,
+       "normal": 0.17338279070055723,
+       "high": 0.3309454389654734,
+       "urgent": 0.34950562982524913
+      },
+      "needs_human": {
+       "yes": 0.7350032631246142,
+       "no": 0.2649967368753859
+      }
+     }
+    },
+    {
+     "max_len": null,
+     "row_length": 102,
+     "row_sha256": "92872f4675af6101236de0cc43f82b18aa26deca7ebb6acd8f223cde93193fd3",
+     "probabilities": {
+      "intent": {
+       "refund_request": 0.004258707140121063,
+       "cancel_order": 0.9921012540057011,
+       "room_change": 0.00017867828707934327,
+       "maintenance": 0.0003654525245295128,
+       "other": 0.0030959080425688795
+      },
+      "priority": {
+       "low": 0.2552381896105709,
+       "normal": 0.2844838899978587,
+       "high": 0.23983462222405222,
+       "urgent": 0.22044329816751823
+      },
+      "needs_human": {
+       "yes": 0.5460669637573503,
+       "no": 0.45393303624264975
+      }
+     }
+    },
+    {
+     "max_len": null,
+     "row_length": 111,
+     "row_sha256": "b097ed6172b8be1913758b32312bf2ca229a90d73dbf996c2be215cbcb2bf7db",
+     "probabilities": {
+      "intent": {
+       "refund_request": 0.06827418052943238,
+       "cancel_order": 0.06822474637756669,
+       "room_change": 0.07629117247267378,
+       "maintenance": 0.09473030082254938,
+       "other": 0.6924795997977778
+      },
+      "priority": {
+       "low": 0.264424202772207,
+       "normal": 0.3183966632491285,
+       "high": 0.2334700147435491,
+       "urgent": 0.18370911923511532
+      },
+      "needs_human": {
+       "yes": 0.3931246565934047,
+       "no": 0.6068753434065953
+      }
+     }
+    }
+   ]
+  },
+  {
+   "name": "label_groups_multi_label",
+   "request": {
+    "options": {
+     "label_groups": {
+      "topics": [
+       "billing",
+       "hvac",
+       "shipping",
+       "payroll",
+       "account"
+      ],
+      "channel": [
+       "email",
+       "chat",
+       "phone"
+      ]
+     },
+     "classification_type": "multi-label"
+    }
+   },
+   "documents": "texts",
+   "reference_call": {
+    "tasks": [
+     {
+      "name": "topics",
+      "kind": "multi",
+      "labels": [
+       "billing",
+       "hvac",
+       "shipping",
+       "payroll",
+       "account"
+      ],
+      "instruction": null
+     },
+     {
+      "name": "channel",
+      "kind": "multi",
+      "labels": [
+       "email",
+       "chat",
+       "phone"
+      ],
+      "instruction": null
+     }
+    ]
+   },
+   "results": [
+    {
+     "max_len": null,
+     "row_length": 72,
+     "row_sha256": "92d54c4c5ac9ae763e2ffc5570c840e34465ca981233a13073f92d84ebceaf6d",
+     "probabilities": {
+      "topics": {
+       "billing": 0.5509768171557046,
+       "hvac": 0.07499519564837895,
+       "shipping": 0.08699790332555553,
+       "payroll": 0.11328731372337252,
+       "account": 0.3470624839410997
+      },
+      "channel": {
+       "email": 0.3987747473918513,
+       "chat": 0.3347985877362211,
+       "phone": 0.275626540050097
+      }
+     }
+    },
+    {
+     "max_len": null,
+     "row_length": 81,
+     "row_sha256": "1511e4f3a3793f110ba274dc310069c470f6abc4258e2966af848bac64d2acd4",
+     "probabilities": {
+      "topics": {
+       "billing": 0.07819253958706025,
+       "hvac": 0.9805449305318654,
+       "shipping": 0.03347003740569826,
+       "payroll": 0.0408345366688793,
+       "account": 0.11962147215203459
+      },
+      "channel": {
+       "email": 0.3606983606307541,
+       "chat": 0.4068665501006504,
+       "phone": 0.3268092842455029
+      }
+     }
+    },
+    {
+     "max_len": null,
+     "row_length": 75,
+     "row_sha256": "f989cedda054fd6185e2c5d136f49ee1a9a680df9d57cad8c5dab543fc0eb284",
+     "probabilities": {
+      "topics": {
+       "billing": 0.15392406419471802,
+       "hvac": 0.03414020747831923,
+       "shipping": 0.8269061050822606,
+       "payroll": 0.05657939544203529,
+       "account": 0.1321888298186983
+      },
+      "channel": {
+       "email": 0.4712439390275077,
+       "chat": 0.31231505739645,
+       "phone": 0.27883299564587416
+      }
+     }
+    },
+    {
+     "max_len": null,
+     "row_length": 62,
+     "row_sha256": "bf03e67374a61279d69ed8790d8e04201bec15bc5a27e8a6011b7892bec84918",
+     "probabilities": {
+      "topics": {
+       "billing": 0.3442248473191424,
+       "hvac": 0.06183041387514028,
+       "shipping": 0.11847002656640461,
+       "payroll": 0.11350796002646542,
+       "account": 0.37715684724456217
+      },
+      "channel": {
+       "email": 0.39040485924501206,
+       "chat": 0.3058516407099851,
+       "phone": 0.27263776543028034
+      }
+     }
+    },
+    {
+     "max_len": null,
+     "row_length": 71,
+     "row_sha256": "9e0f7393d1b49c38f5b17b2fef4273dba68f0013fbf970189c2947e976480cb7",
+     "probabilities": {
+      "topics": {
+       "billing": 0.2174290483561565,
+       "hvac": 0.1341628062406503,
+       "shipping": 0.1953933412460402,
+       "payroll": 0.17123657217548122,
+       "account": 0.3065704799775977
+      },
+      "channel": {
+       "email": 0.39398790070918305,
+       "chat": 0.3866055564111748,
+       "phone": 0.253894336638229
+      }
+     }
+    }
+   ]
+  },
+  {
+   "name": "labels",
+   "request": {
+    "labels": [
+     "billing",
+     "technical",
+     "hospitality",
+     "logistics",
+     "other"
+    ],
+    "instruction": "Which team should handle this?"
+   },
+   "documents": "texts",
+   "reference_call": {
+    "tasks": [
+     {
+      "name": "label",
+      "kind": "single",
+      "labels": [
+       "billing",
+       "technical",
+       "hospitality",
+       "logistics",
+       "other"
+      ],
+      "instruction": "Which team should handle this?"
+     }
+    ]
+   },
+   "results": [
+    {
+     "max_len": null,
+     "row_length": 65,
+     "row_sha256": "fbc9c1cb8f4aabdcc007f3dfc0b2909853393e4ab83e6d0149de6c7e7325fafc",
+     "probabilities": {
+      "label": {
+       "billing": 0.7527314858653925,
+       "technical": 0.05528599264429413,
+       "hospitality": 0.02421007214910886,
+       "logistics": 0.049428431209613224,
+       "other": 0.11834401813159132
+      }
+     }
+    },
+    {
+     "max_len": null,
+     "row_length": 74,
+     "row_sha256": "dead6a01dfc53a5df07c0942fba8eb9eee02e9e030b36e026f64db85885a48b7",
+     "probabilities": {
+      "label": {
+       "billing": 0.032633745329729194,
+       "technical": 0.273623599144904,
+       "hospitality": 0.23137119907614176,
+       "logistics": 0.2570411402470624,
+       "other": 0.20533031620216266
+      }
+     }
+    },
+    {
+     "max_len": null,
+     "row_length": 68,
+     "row_sha256": "e892b2e197c71e238856ab1e55dd35e4e4591ea35ce837bb3b3afad3d0cb9c18",
+     "probabilities": {
+      "label": {
+       "billing": 0.14592706724966928,
+       "technical": 0.04231747595556333,
+       "hospitality": 0.06710331778655262,
+       "logistics": 0.506304832285875,
+       "other": 0.23834730672233984
+      }
+     }
+    },
+    {
+     "max_len": null,
+     "row_length": 55,
+     "row_sha256": "7609c07dd66570f5d0caecce204d9ba33948a38045e3b4ea902294a04d5c31f5",
+     "probabilities": {
+      "label": {
+       "billing": 0.36843164901097974,
+       "technical": 0.0768108273785425,
+       "hospitality": 0.0523916241851089,
+       "logistics": 0.15808914013863787,
+       "other": 0.34427675928673107
+      }
+     }
+    },
+    {
+     "max_len": null,
+     "row_length": 64,
+     "row_sha256": "32d4854b8380ce1dbff93dfd6da5d665d6ff4a3c84d38c92e84f343e2ff4ee22",
+     "probabilities": {
+      "label": {
+       "billing": 0.05232635251077149,
+       "technical": 0.07854168291958191,
+       "hospitality": 0.06159038105904645,
+       "logistics": 0.0684019802532734,
+       "other": 0.7391396032573269
+      }
+     }
+    }
+   ]
+  },
+  {
+   "name": "long_document",
+   "request": {
+    "output_schema": {
+     "intent": {
+      "type": "choice",
+      "instructions": "What does the customer want?",
+      "criteria": {
+       "refund_request": "the customer wants money back",
+       "cancel_order": "the customer wants to cancel an order or subscription",
+       "room_change": "a guest wants another room",
+       "maintenance": null,
+       "other": ""
+      }
+     },
+     "urgency": {
+      "type": "score",
+      "instructions": "How urgent is this request?",
+      "criteria": [
+       "not urgent",
+       "within a week",
+       "today",
+       "blocking or past a deadline"
+      ]
+     },
+     "needs_human": {
+      "type": "noul",
+      "instructions": "Must a person act on this?",
+      "criteria": {
+       "true": "automation cannot resolve it"
+      }
+     },
+     "rating": {
+      "type": "score",
+      "instructions": "Rate the severity from 0 to 10.",
+      "criteria": [
+       "0",
+       "1",
+       "2",
+       "3",
+       "4",
+       "5",
+       "6",
+       "7",
+       "8",
+       "9",
+       "10"
+      ]
+     }
+    }
+   },
+   "documents": "long",
+   "reference_call": {
+    "tasks": [
+     {
+      "name": "intent",
+      "kind": "single",
+      "labels": {
+       "refund_request": "the customer wants money back",
+       "cancel_order": "the customer wants to cancel an order or subscription",
+       "room_change": "a guest wants another room",
+       "maintenance": null,
+       "other": null
+      },
+      "instruction": "What does the customer want?"
+     },
+     {
+      "name": "urgency",
+      "kind": "single",
+      "labels": {
+       "0": "not urgent",
+       "1": "within a week",
+       "2": "today",
+       "3": "blocking or past a deadline"
+      },
+      "instruction": "How urgent is this request?"
+     },
+     {
+      "name": "needs_human",
+      "kind": "single",
+      "labels": {
+       "yes": "automation cannot resolve it",
+       "no": null
+      },
+      "instruction": "Must a person act on this?"
+     },
+     {
+      "name": "rating",
+      "kind": "single",
+      "labels": [
+       "0",
+       "1",
+       "2",
+       "3",
+       "4",
+       "5",
+       "6",
+       "7",
+       "8",
+       "9",
+       "10"
+      ],
+      "instruction": "Rate the severity from 0 to 10."
+     }
+    ]
+   },
+   "results": [
+    {
+     "max_len": 1218,
+     "row_length": 2047,
+     "row_sha256": "c8f870c279becee339680e16b3092fb008c94047609bfb1c836b95f8e3972a27",
+     "probabilities": {
+      "intent": {
+       "refund_request": 0.22137453640299068,
+       "cancel_order": 0.13554206829667656,
+       "room_change": 0.06737549277112384,
+       "maintenance": 0.1203290706636644,
+       "other": 0.4553788318655445
+      },
+      "urgency": {
+       "0": 0.2876334328606865,
+       "1": 0.23819383547916143,
+       "2": 0.25049020716699416,
+       "3": 0.22368252449315795
+      },
+      "needs_human": {
+       "yes": 0.3122318917744955,
+       "no": 0.6877681082255046
+      },
+      "rating": {
+       "0": 0.07948976483071504,
+       "1": 0.0747515657317049,
+       "2": 0.07955062351211512,
+       "3": 0.0850301649087393,
+       "4": 0.08933833893246318,
+       "5": 0.09274387834160848,
+       "6": 0.09014150542966329,
+       "7": 0.08957841282184897,
+       "8": 0.0841316921623689,
+       "9": 0.08915373182557224,
+       "10": 0.14609032150320053
+      }
+     }
+    }
+   ]
+  }
+ ]
+}

@@ -1320,6 +1320,55 @@ def test_convaiinnovations_laya_typed_decisions_extract() -> None:
 
 
 # =============================================================================
+# Extract models (text input - GLiNER2.5-Decide typed decisions)
+# The same typed questions as Laya. These models need gliner2 2.x, which the
+# transformers5 bundle carries: run them with that bundle's requirements, e.g.
+#   python -m sie_server.cli resolve-deps --bundle transformers5 > /tmp/t5.txt
+#   uv run --no-sync --with-requirements /tmp/t5.txt pytest -c pyproject.toml -m model \
+#       packages/sie_server/tests/test_all_models.py -k decide
+# =============================================================================
+
+
+def _check_gliner2_decide(adapter: Any, model_name: str, expected: tuple[str, bool, str] | None) -> None:
+    """Typed answers for one state: (intent choice, refund noul answer, top department label)."""
+    output = adapter.extract([Item(text=_LAYA_STATE)], output_schema=_LAYA_QUESTIONS)
+    assert output.data is not None
+    answers = output.data[0]
+    assert list(answers) == list(_LAYA_QUESTIONS)
+    assert sum(answers["intent"]["probabilities"].values()) == pytest.approx(1.0, abs=1e-5)
+    assert sum(answers["frustration"]["probabilities"].values()) == pytest.approx(1.0, abs=1e-5)
+    assert 0.0 <= answers["frustration"]["score"] <= 3.0
+    labels = adapter.extract([Item(text=_LAYA_STATE)], labels=["billing", "technical", "sales"])
+    assert labels.classifications is not None
+    actual = (answers["intent"]["choice"], answers["refund_requested"]["answer"], labels.classifications[0][0]["label"])
+    if expected is None:
+        msg = f"FILL: {model_name} decide = {actual}"
+        raise AssertionError(msg)
+    assert actual == expected
+
+
+def test_fastino_gliner2_5_decide_extract() -> None:
+    pytest.importorskip("gliner2.classification", reason="needs gliner2 2.x (the transformers5 bundle)")
+    _check_gliner2_decide(
+        _get_adapter("fastino/GLiNER2.5-Decide"), "fastino/GLiNER2.5-Decide", ("refund", True, "billing")
+    )
+
+
+def test_fastino_gliner2_5_multi_decide_extract() -> None:
+    pytest.importorskip("gliner2.classification", reason="needs gliner2 2.x (the transformers5 bundle)")
+    _check_gliner2_decide(
+        _get_adapter("fastino/GLiNER2.5-multi-Decide"), "fastino/GLiNER2.5-multi-Decide", ("refund", True, "billing")
+    )
+
+
+def test_fastino_gliner2_5_decide_1b_extract() -> None:
+    pytest.importorskip("gliner2.classification", reason="needs gliner2 2.x (the transformers5 bundle)")
+    _check_gliner2_decide(
+        _get_adapter("fastino/GLiNER2.5-Decide-1B"), "fastino/GLiNER2.5-Decide-1B", ("refund", True, "billing")
+    )
+
+
+# =============================================================================
 # Extract models (image input - Florence-2, Donut)
 # These require image input, skipping for now as they need special handling
 # =============================================================================

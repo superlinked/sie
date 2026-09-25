@@ -46,6 +46,8 @@ dependencies = [
     # never shipped, killing three extract cells at model load (#2873).
     # 0.2.26 is the first release that loads the joint entity-relation checkpoints.
     "gliner>=0.2.26,<1",
+    # gliner2 stays on 1.x with the default bundle (2.0 changes gliner2-base/large
+    # outputs); the transformers5 bundle overlays the 2.x pin its GLiNER2.5 models need.
     "gliner2>=1.3.1,<2",
     "glirel>=1.0,<2",
     # 0.1.17 adds the cross-attention scorer and pass-through pooling used by

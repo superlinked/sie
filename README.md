@@ -46,7 +46,7 @@ One SIE cluster runs the inference behind a whole agent. Each task is a handful 
 | **Search** | Embed, match, and rerank to retrieve the right context. | [`bge-m3`](packages/sie_server/models/BAAI__bge-m3.yaml), [`splade-v3`](packages/sie_server/models/naver__splade-v3.yaml), [`colbertv2`](packages/sie_server/models/colbert-ir__colbertv2.0.yaml), [`qwen3-reranker`](packages/sie_server/models/Qwen__Qwen3-Reranker-4B.yaml) |
 | **Document to markdown** | PDFs, Office files, and scans become clean markdown. | [`lightonocr`](packages/sie_server/models/lightonai__LightOnOCR-2-1B.yaml), [`glm-ocr`](packages/sie_server/models/zai-org__GLM-OCR.yaml), [`mineru`](packages/sie_server/models/opendatalab__MinerU2.5-Pro-2604-1.2B.yaml), [`paddleocr-vl`](packages/sie_server/models/PaddlePaddle__PaddleOCR-VL-1.5.yaml), [`docling`](packages/sie_server/models/docling.yaml) |
 | **Structured output** | Schema-valid JSON, extracted or generated. | [`gliner2`](packages/sie_server/models/fastino__gliner2-large-v1.yaml), [`gliner-relex`](packages/sie_server/models/knowledgator__gliner-relex-large-v1.0.yaml), [`gliformer`](packages/sie_server/models/knowledgator__gliformer-large-v1.yaml), [`nuner-zero`](packages/sie_server/models/numind__NuNER_Zero.yaml), [`qwen3.8-27b`](packages/sie_server/models/Qwen__Qwen3.8-27B-FP8.yaml), [`qwen3.6-27b`](packages/sie_server/models/Qwen__Qwen3.6-27B.yaml) |
-| **Decide** | Choice, yes/no, and score answers with probabilities to typed questions about a text or JSON state. | [`laya`](packages/sie_server/models/convaiinnovations__laya.yaml), [`laya-multilingual`](packages/sie_server/models/convaiinnovations__laya-multilingual.yaml), [`laya-typed-decisions`](packages/sie_server/models/convaiinnovations__laya-typed-decisions.yaml) |
+| **Decide** | Choice, yes/no, and score answers with probabilities to typed questions about a text or JSON state. | [`laya`](packages/sie_server/models/convaiinnovations__laya.yaml), [`laya-multilingual`](packages/sie_server/models/convaiinnovations__laya-multilingual.yaml), [`laya-typed-decisions`](packages/sie_server/models/convaiinnovations__laya-typed-decisions.yaml), [`gliner2.5-decide`](packages/sie_server/models/fastino__GLiNER2.5-Decide.yaml), [`gliner2.5-multi-decide`](packages/sie_server/models/fastino__GLiNER2.5-multi-Decide.yaml), [`gliner2.5-decide-1b`](packages/sie_server/models/fastino__GLiNER2.5-Decide-1B.yaml) |
 | **Classify** | Zero-shot labels, with several label groups answered in one call. The instruct models also follow a task instruction and few-shot examples. | [`gliclass-large-v3`](packages/sie_server/models/knowledgator__gliclass-large-v3.0.yaml), [`gliclass-instruct-large`](packages/sie_server/models/knowledgator__gliclass-instruct-large-v1.0.yaml), [`gliclass-multilang-mini`](packages/sie_server/models/knowledgator__gliclass-multilang-mini.yaml) |
 | **Guard content** | A safety verdict: Yes/No with the threshold set in the model config, or safe/unsafe and policy-label scores with the threshold chosen per request. | [`granite-guardian-2b`](packages/sie_server/models/ibm-granite__granite-guardian-3.0-2b.yaml), [`opir-multitask-large`](packages/sie_server/models/knowledgator__opir-multitask-large-v1.0.yaml), [`opir-edge`](packages/sie_server/models/knowledgator__opir-edge-v1.0.yaml) |
 | **Run the agent loop** | Plan steps and call tools with an open LLM, streaming included. | [`qwen3.8-27b`](packages/sie_server/models/Qwen__Qwen3.8-27B-FP8.yaml), [`qwen3.6-27b`](packages/sie_server/models/Qwen__Qwen3.6-27B.yaml) |
@@ -180,6 +180,30 @@ result = client.extract(
 )
 print(result["data"]["department"])  # values are illustrative and rounded
 # {'type': 'choice', 'choice': 'billing', 'probabilities': {'billing': 0.987, 'technical': 0.013}, 'confidence': 0.9}
+```
+
+The GLiNER2.5-Decide models (`fastino/GLiNER2.5-Decide` for English, `GLiNER2.5-multi-Decide`, and
+`GLiNER2.5-Decide-1B`) take the same questions, GLiClass-style `options={"label_groups": {...}}`, or plain `labels`,
+and return every option's probability. They read all of a call's questions next to the document in one row per item:
+one forward pass answers them all, and each question's probabilities depend on the other questions sent with it. A
+`score` question is read as the ordinal labels `"0"` to `"k-1"`, each described by its criterion; a `noul` question as
+`"yes"`/`"no"`. `usage.input_tokens` counts the document tokens the model reads plus the questions' instructions and
+criteria text; question ids and label names are not counted.
+
+```python
+result = client.extract(
+    "fastino/GLiNER2.5-Decide",
+    Item(text="Guest in room 1408 says the AC has been out since yesterday and wants to move rooms tonight."),
+    output_schema={
+        "intent": {"type": "choice", "instructions": "What does the guest want?",
+                   "criteria": {"room_change": "move to another room", "maintenance": "fix something", "checkout": None}},
+        "needs_human": {"type": "noul", "instructions": "Must a person act on this?"},
+        "urgency": {"type": "score", "instructions": "How urgent is this?", "criteria": ["low", "normal", "high", "urgent"]},
+    },
+)
+print(result["data"]["intent"])  # values are illustrative and rounded
+# {'type': 'choice', 'choice': 'room_change',
+#  'probabilities': {'room_change': 0.871, 'maintenance': 0.085, 'checkout': 0.045}, 'confidence': 0.57}
 ```
 
 Text generation runs on the GPU generation image; stop the first server, then start this one on the same port:
