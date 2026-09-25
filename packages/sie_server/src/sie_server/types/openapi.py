@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 from sie_server.core.extract_cost import MAX_EXTRACT_LABELS
 from sie_server.core.score_cost import MAX_SCORE_ITEMS
+from sie_server.types.inputs import DEFAULT_MAX_ITEM_TEXT_BYTES
 
 
 def _base64_media_bytes(schema: dict[str, Any]) -> None:
@@ -80,14 +81,24 @@ class ItemModel(BaseModel):
     """A single item to encode."""
 
     id: str | None = Field(default=None, description="Optional identifier for this item. Returned in response.")
-    text: str | None = Field(default=None, description="Text content to encode", examples=["Hello, world!"])
+    text: str | None = Field(
+        default=None,
+        description=(
+            "Text content to encode. An item's text and metadata may hold at most "
+            f"{DEFAULT_MAX_ITEM_TEXT_BYTES} bytes of UTF-8 together by default (SIE_MAX_ITEM_TEXT_BYTES)."
+        ),
+        examples=["Hello, world!"],
+    )
     images: list[ImageInputModel] | None = Field(default=None, description="Images for multimodal models")
     audio: AudioInputModel | None = Field(default=None, description="Audio for audio models")
     video: VideoInputModel | None = Field(default=None, description="Video for video models")
     document: DocumentInputModel | None = Field(
         default=None, description="Document for composite-document extractors (PDF, DOCX, HTML, ...)"
     )
-    metadata: dict[str, Any] | None = Field(default=None, description="Arbitrary metadata. Returned in response.")
+    metadata: dict[str, Any] | None = Field(
+        default=None,
+        description="Arbitrary metadata. Returned in response. Counts toward the item's text size limit.",
+    )
 
     model_config = {"extra": "allow"}
 

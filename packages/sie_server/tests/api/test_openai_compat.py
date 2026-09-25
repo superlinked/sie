@@ -13,6 +13,7 @@ from sie_server.config.model import EmbeddingDim, EncodeTask, ModelConfig, Profi
 from sie_server.core.load_errors import LoadErrorClass, LoadFailure
 from sie_server.core.oom import ResourceExhausted, ResourceExhaustedError
 from sie_server.core.registry import ModelRegistry
+from sie_server.types.inputs import MAX_ITEM_TEXT_BYTES
 
 
 def _mock_encode_impl(items: list[Any], output_types: list[str], **kwargs: Any) -> Any:
@@ -228,6 +229,22 @@ class TestOpenAIEmbeddings:
         assert error["type"] == "invalid_request_error"
         assert error["param"] == "input"
         assert error["message"] == "Input cannot be empty"
+
+    def test_input_over_the_item_text_cap_rejected(self, client: TestClient, mock_adapter: MagicMock) -> None:
+        """Each input is an encode item, bounded like one before anything encodes it."""
+        response = client.post(
+            "/v1/embeddings",
+            json={"model": "text-embedding-3-small", "input": ["ok", "x" * (MAX_ITEM_TEXT_BYTES + 1)]},
+        )
+
+        assert response.status_code == 400
+        assert response.json()["error"] == {
+            "code": "invalid_request",
+            "message": f"Field 'input[1]' must hold at most {MAX_ITEM_TEXT_BYTES} bytes of UTF-8 text",
+            "type": "invalid_request_error",
+            "param": "input",
+        }
+        mock_adapter.encode.assert_not_called()
 
     def test_unhonourable_dimensions_rejected(self, client: TestClient) -> None:
         """A width SIE cannot produce must fail, not be silently ignored.

@@ -917,6 +917,18 @@ class TestGenerateEndpoint:
         assert body["detail"]["param"] == "prompt"
         assert body["detail"]["code"] == "INPUT_TOO_LONG"
 
+    def test_prompt_is_not_bound_by_the_item_text_cap(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Generation prompts are not encode/score/extract items: long-context
+        # models keep their own prompt bound, not the per-item text cap.
+        monkeypatch.setattr("sie_server.types.inputs.MAX_ITEM_TEXT_BYTES", 16)
+        response = client.post(
+            "/v1/generate/Qwen__Qwen3-4B-Instruct",
+            json={"prompt": "x" * 64, "max_new_tokens": 8},
+        )
+        assert response.status_code == 200, response.text
+
     # ── Penalty forwarding and unsupported direct-worker grammar ──────
 
     @pytest.mark.parametrize("field", ["frequency_penalty", "presence_penalty"])

@@ -28,7 +28,7 @@ from sie_server.ipc_types import (
     ScoreBatchItem,
 )
 from sie_server.queue_executor import QueueExecutor, _validate_prepared_audio
-from sie_server.types.inputs import InvalidInputError, Item
+from sie_server.types.inputs import MAX_ITEM_TEXT_BYTES, InvalidInputError, Item
 
 _MODELS_DIR = Path(__file__).resolve().parents[1] / "models"
 
@@ -559,6 +559,66 @@ class TestProcessEncodeBatch:
         # The malformed item never reached inference; only the valid one did.
         mock_encode.assert_awaited_once()
         assert len(mock_encode.await_args.kwargs["items"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_item_over_the_text_cap_is_isolated_as_invalid_input(self) -> None:
+        """An item over the per-item text bound fails alone with INVALID_INPUT,
+        naming its place in the request, before anything tokenizes it. A sibling
+        at the bound still runs, and the rejected item reports no units.
+        """
+        reg = _make_registry()
+
+        async def fake_run_encode(**kwargs):
+            return [{"dense": [0.0]} for _ in kwargs["items"]], RequestTiming()
+
+        with patch(
+            "sie_server.core.encode_pipeline.EncodePipeline.run_encode",
+            new=AsyncMock(side_effect=fake_run_encode),
+        ) as mock_encode:
+            outcome = await QueueExecutor(reg).process_encode_batch(
+                ProcessEncodeBatchRequest(
+                    model_id="test/model",
+                    items=[
+                        _encode_item(wiid="req-1.0", item={"text": "x" * MAX_ITEM_TEXT_BYTES}, item_index=0),
+                        # Two bytes per character: over the bound in bytes, not in characters.
+                        _encode_item(wiid="req-1.1", item={"text": "é" * (MAX_ITEM_TEXT_BYTES // 2 + 1)}, item_index=1),
+                    ],
+                )
+            )
+
+        by_id = {o.work_item_id: o for o in outcome.outcomes}
+        assert by_id["req-1.0"].disposition == "publish_and_ack"
+        rejected = by_id["req-1.1"]
+        assert rejected.disposition == "publish_error_and_ack"
+        assert rejected.error_code == "INVALID_INPUT"
+        assert rejected.error == f"Field 'items[1]' must hold at most {MAX_ITEM_TEXT_BYTES} bytes of UTF-8 text"
+        assert rejected.units is None
+        mock_encode.assert_awaited_once()
+        (encoded,) = mock_encode.await_args.kwargs["items"]
+        assert len(encoded.text) == MAX_ITEM_TEXT_BYTES
+
+    @pytest.mark.asyncio
+    async def test_metadata_msgspec_cannot_encode_is_still_measured(self) -> None:
+        """IPC frames are decoded with ``msgpack.unpackb``, which leaves a timestamp
+        extension as ``msgpack.Timestamp``. Measuring it must not raise and fail
+        the whole batch; the item is encoded as before.
+        """
+        reg = _make_registry()
+        frame = msgpack.packb({"text": "hi", "metadata": {"at": msgpack.Timestamp(1, 0)}}, datetime=False)
+        item = msgpack.unpackb(frame, raw=False)
+
+        async def fake_run_encode(**kwargs):
+            return [{"dense": [0.0]} for _ in kwargs["items"]], RequestTiming()
+
+        with patch(
+            "sie_server.core.encode_pipeline.EncodePipeline.run_encode",
+            new=AsyncMock(side_effect=fake_run_encode),
+        ):
+            outcome = await QueueExecutor(reg).process_encode_batch(
+                ProcessEncodeBatchRequest(model_id="test/model", items=[_encode_item(item=item)])
+            )
+
+        assert outcome.outcomes[0].disposition == "publish_and_ack"
 
     @pytest.mark.asyncio
     async def test_merges_profile_runtime_options_into_adapter_call(self) -> None:
@@ -1216,6 +1276,36 @@ class TestProcessScoreBatch:
         assert len(requests) == 1
 
     @pytest.mark.asyncio
+    async def test_query_or_item_over_the_text_cap_is_invalid_input(self) -> None:
+        reg = _make_registry()
+        worker = AsyncMock()
+        fut: asyncio.Future[WorkerResult] = asyncio.Future()
+        fut.set_result(
+            WorkerResult(output=ScoreOutput(scores=np.array([0.9], dtype=np.float32)), timing=RequestTiming())
+        )
+        worker.submit_score_preformed_batch = AsyncMock(return_value=[fut])
+        reg.start_worker = AsyncMock(return_value=worker)
+        good = _score_item(wiid="good.0")
+        long_query = _score_item(wiid="query.0")
+        long_query.query_item = {"text": "q" * (MAX_ITEM_TEXT_BYTES + 1)}
+        long_doc = _score_item(wiid="doc.0")
+        long_doc.score_items = [{"text": "a"}, {"text": "中" * (MAX_ITEM_TEXT_BYTES // 3 + 1)}]
+
+        outcome = await QueueExecutor(reg).process_score_batch(
+            ProcessScoreBatchRequest(model_id="test/model", items=[good, long_query, long_doc])
+        )
+
+        by_id = {o.work_item_id: o for o in outcome.outcomes}
+        assert by_id["good.0"].disposition == "publish_and_ack"
+        for wiid, field in (("query.0", "query"), ("doc.0", "items[1]")):
+            assert by_id[wiid].disposition == "publish_error_and_ack"
+            assert by_id[wiid].error_code == "INVALID_INPUT"
+            assert by_id[wiid].error == f"Field '{field}' must hold at most {MAX_ITEM_TEXT_BYTES} bytes of UTF-8 text"
+            assert by_id[wiid].units is None
+        (request,) = worker.submit_score_preformed_batch.await_args.args[0]
+        assert request.query.text == "q"
+
+    @pytest.mark.asyncio
     async def test_multimodal_score_items_contribute_media_batch_cost(self) -> None:
         reg = _make_registry()
         worker = AsyncMock()
@@ -1651,6 +1741,46 @@ class TestProcessExtractBatch:
 
         (request,) = worker.submit_extract_preformed_batch.await_args.args[0]
         assert [p.cost for p in request.prepared_items] == [len("Alice works at Acme.")]
+
+    @pytest.mark.asyncio
+    async def test_item_over_the_text_cap_is_invalid_input_before_any_cost_estimate(self) -> None:
+        """Text and ``metadata.state`` count toward one per-item bound. An item over
+        it fails alone with INVALID_INPUT and no units, before the adapter's cost
+        hook or the worker sees it; an item at the bound still runs.
+        """
+        reg = _make_registry()
+        adapter = _RowCostAdapter()
+        reg.get.return_value = adapter
+        worker = _extract_worker(ExtractOutput(entities=[[]]))
+        reg.start_worker = AsyncMock(return_value=worker)
+        at_cap = _extract_item(wiid="req-1.0", item_index=0)
+        at_cap.item = {"text": "x" * MAX_ITEM_TEXT_BYTES}
+        long_text = _extract_item(wiid="req-1.1", item_index=1)
+        long_text.item = {"text": "x" * (MAX_ITEM_TEXT_BYTES + 1)}
+        long_state = _extract_item(wiid="req-1.2", item_index=2)
+        long_state.item = {"metadata": {"state": {"turns": ["x" * (MAX_ITEM_TEXT_BYTES // 2)] * 2}}}
+
+        outcome = await QueueExecutor(reg).process_extract_batch(
+            ProcessExtractBatchRequest(model_id="test/model", items=[at_cap, long_text, long_state])
+        )
+
+        by_id = {o.work_item_id: o for o in outcome.outcomes}
+        assert by_id["req-1.0"].disposition == "publish_and_ack"
+        for wiid, message in (
+            ("req-1.1", f"Field 'items[1]' must hold at most {MAX_ITEM_TEXT_BYTES} bytes of UTF-8 text"),
+            (
+                "req-1.2",
+                f"Field 'items[2]' must hold at most {MAX_ITEM_TEXT_BYTES} bytes of UTF-8 text and metadata",
+            ),
+        ):
+            assert by_id[wiid].disposition == "publish_error_and_ack"
+            assert by_id[wiid].error_code == "INVALID_INPUT"
+            assert by_id[wiid].error == message
+            assert by_id[wiid].units is None
+            assert by_id[wiid].result_msgpack is None
+        assert len(adapter.hook_calls) == 1
+        (request,) = worker.submit_extract_preformed_batch.await_args.args[0]
+        assert len(request.items[0].text) == MAX_ITEM_TEXT_BYTES
 
     @pytest.mark.asyncio
     async def test_laya_request_error_publishes_invalid_input(self) -> None:

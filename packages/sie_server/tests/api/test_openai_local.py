@@ -30,6 +30,7 @@ from sie_server.core import video_frames
 from sie_server.core.inference_output import ScoreOutput
 from sie_server.core.timing import RequestTiming
 from sie_server.core.worker import WorkerResult
+from sie_server.types.inputs import MAX_ITEM_TEXT_BYTES
 
 _GEMMA_OPEN = "<" + "|channel" + ">" + "thought\n"
 _GEMMA_CLOSE = "<" + "channel|" + ">"
@@ -1224,6 +1225,20 @@ def test_rerank_rejects_too_many_documents() -> None:
     r = _client().post("/v1/rerank", json={"model": "m", "query": "q", "documents": docs})
     assert r.status_code == 400
     assert r.json()["error"]["param"] == "documents"
+
+
+def test_rerank_rejects_texts_over_the_item_text_cap() -> None:
+    long_text = "x" * (MAX_ITEM_TEXT_BYTES + 1)
+    for body, param, field in [
+        ({"model": "m", "query": long_text, "documents": ["a"]}, "query", "query"),
+        ({"model": "m", "query": "q", "documents": ["a", long_text]}, "documents", "documents[1]"),
+    ]:
+        r = _client().post("/v1/rerank", json=body)
+        assert r.status_code == 400, field
+        error = r.json()["error"]
+        assert error["param"] == param
+        assert error["code"] == "INVALID_INPUT"
+        assert error["message"] == f"Field '{field}' must hold at most {MAX_ITEM_TEXT_BYTES} bytes of UTF-8 text"
 
 
 def test_rerank_rejects_non_bool_return_documents() -> None:

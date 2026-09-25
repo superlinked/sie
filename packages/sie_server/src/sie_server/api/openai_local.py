@@ -61,7 +61,7 @@ from sie_server.core.video_frames import (
 )
 from sie_server.observability.tracing import tracer
 from sie_server.processors.streaming import _decode_data_uri_image
-from sie_server.types.inputs import Item
+from sie_server.types.inputs import Item, item_size_error
 from sie_server.types.responses import ErrorCode
 
 logger = logging.getLogger(__name__)
@@ -1150,6 +1150,13 @@ async def _rerank(
     return_documents = body.get("return_documents", False)
     if not isinstance(return_documents, bool):
         raise _bad_request("'return_documents' must be a boolean", param="return_documents")
+    query_item = Item(text=query)
+    doc_items = [Item(id=str(i), text=str(doc)) for i, doc in enumerate(documents)]
+    if error := item_size_error(query_item, "query"):
+        raise _bad_request(error, param="query")
+    for index, doc_item in enumerate(doc_items):
+        if error := item_size_error(doc_item, f"documents[{index}]"):
+            raise _bad_request(error, param="documents")
 
     registry = http_request.app.state.registry
     device = registry.device
@@ -1172,8 +1179,6 @@ async def _rerank(
         checker.check_not_loading()
         await checker.ensure_loaded(device)
 
-        query_item = Item(text=query)
-        doc_items = [Item(id=str(i), text=str(doc)) for i, doc in enumerate(documents)]
         options_raw = body.get("options")
         if options_raw is not None and not isinstance(options_raw, dict):
             raise _bad_request("'options' must be an object", param="options")

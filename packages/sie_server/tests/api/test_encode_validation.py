@@ -16,6 +16,7 @@ from sie_server.config.model import (
     Tasks,
 )
 from sie_server.core.registry import ModelRegistry
+from sie_server.types.inputs import MAX_ITEM_TEXT_BYTES
 
 # Patch msgpack for numpy support
 m.patch()
@@ -269,3 +270,34 @@ class TestUndecodableImageValidation:
         assert "image data is not a decodable image" in detail["message"]
         assert "$.items[0].images[0].data" in detail["message"]
         assert "BytesIO" not in detail["message"]
+
+
+class TestItemTextSize:
+    """Each encode item's text and metadata are bounded at ingress, before any tokenization."""
+
+    def test_text_at_the_cap_is_encoded(self, client: TestClient, mock_adapter: MagicMock) -> None:
+        response = client.post(
+            "/v1/encode/test-model",
+            json={"items": [{"text": "x" * MAX_ITEM_TEXT_BYTES}]},
+            headers=JSON_HEADERS,
+        )
+
+        assert response.status_code == 200
+        mock_adapter.encode.assert_called_once()
+
+    def test_text_over_the_cap_is_rejected_before_encoding(
+        self, client: TestClient, mock_adapter: MagicMock, mock_registry: MagicMock
+    ) -> None:
+        response = client.post(
+            "/v1/encode/test-model",
+            json={"items": [{"text": "Hello world"}, {"text": "中" * (MAX_ITEM_TEXT_BYTES // 3 + 1)}]},
+            headers=JSON_HEADERS,
+        )
+
+        assert response.status_code == 400
+        assert response.json()["detail"] == {
+            "code": "INVALID_INPUT",
+            "message": f"Field 'items[1]' must hold at most {MAX_ITEM_TEXT_BYTES} bytes of UTF-8 text",
+        }
+        mock_adapter.encode.assert_not_called()
+        mock_registry.preprocessor_registry.prepare.assert_not_called()

@@ -2724,7 +2724,7 @@
               }
             ],
             "default": null,
-            "description": "Text content to encode",
+            "description": "Text content to encode. An item's text and metadata may hold at most 2097152 bytes of UTF-8 together by default (SIE_MAX_ITEM_TEXT_BYTES).",
             "examples": [
               "Hello, world!"
             ],
@@ -2793,7 +2793,7 @@
               }
             ],
             "default": null,
-            "description": "Arbitrary metadata. Returned in response.",
+            "description": "Arbitrary metadata. Returned in response. Counts toward the item's text size limit.",
             "title": "Metadata"
           }
         },

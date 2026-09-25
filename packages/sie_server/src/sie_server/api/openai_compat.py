@@ -38,7 +38,7 @@ from sie_server.core.worker import QueueFullError
 from sie_server.core.worker.types import WorkerDrainedError
 from sie_server.observability.tracing import tracer
 from sie_server.observability.worker_telemetry import worker_telemetry, worker_telemetry_enabled
-from sie_server.types.inputs import Item
+from sie_server.types.inputs import Item, item_size_error
 from sie_server.types.openapi import (
     OpenAIEmbeddingsErrorResponse,
     OpenAIEmbeddingsModelLoadFailedErrorResponse,
@@ -491,6 +491,21 @@ async def _create_embeddings(
                 },
             )
 
+        items = [Item(text=text) for text in texts]
+        for index, item in enumerate(items):
+            if error := item_size_error(item, f"input[{index}]"):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "error": {
+                            "code": "invalid_request",
+                            "message": error,
+                            "type": "invalid_request_error",
+                            "param": "input",
+                        }
+                    },
+                )
+
         span.set_attribute("batch_size", len(texts))
 
         # Model load states: mirror the native routes' ModelStateChecker
@@ -509,9 +524,7 @@ async def _create_embeddings(
         except HTTPException as error:
             raise _openai_state_error(error) from error
 
-        # Get config and convert texts to SIE Items
         config = registry.get_config(model)
-        items = [Item(text=text) for text in texts]
 
         # Run encoding
         telemetry_enabled = worker_telemetry_enabled()

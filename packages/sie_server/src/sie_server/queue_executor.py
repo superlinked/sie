@@ -1005,7 +1005,7 @@ class QueueExecutor:
         server_items: list[Item] = []
         for bi in group:
             try:
-                server_items.append(decode_item(bi.item))
+                server_items.append(decode_item(bi.item, f"items[{bi.item_index}]"))
             except (msgspec.ValidationError, InvalidMediaError) as decode_exc:
                 outcomes[bi.work_item_id] = _inference_exception_outcome(bi, decode_exc)
                 continue
@@ -1331,8 +1331,8 @@ class QueueExecutor:
         for bi in req.items:
             try:
                 options = merge_runtime_options(config, bi.options)
-                query_item = decode_item(bi.query_item)
-                score_items = [decode_item(it) for it in bi.score_items]
+                query_item = decode_item(bi.query_item, "query")
+                score_items = [decode_item(it, f"items[{index}]") for index, it in enumerate(bi.score_items)]
 
                 prepared_items, timing = build_score_prepared_items_timed(query_item, score_items)
 
@@ -1438,7 +1438,9 @@ class QueueExecutor:
                 instruction = bi.instruction if bi.instruction is not None else options.get("instruction")
                 if instruction is not None and not isinstance(instruction, str):
                     raise InvalidInputError("instruction must be a string")
-                server_item = decode_item(bi.item)
+                # Also rejects an item over the text size bound (as the HTTP
+                # ExtractRequest does) before any cost estimate or adapter sees it.
+                server_item = decode_item(bi.item, f"items[{bi.item_index}]")
                 timing = RequestTiming()
                 timing.start_tokenization()
                 if bi.prepared_audio is not None:

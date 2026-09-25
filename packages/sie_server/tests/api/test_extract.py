@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import msgpack
 import msgpack_numpy as m
+import msgspec
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -35,7 +36,7 @@ from sie_server.core.registry import ModelRegistry
 from sie_server.core.timing import RequestTiming
 from sie_server.core.worker import WorkerResult
 from sie_server.core.worker.handlers.extract import ExtractHandler
-from sie_server.types.inputs import Item
+from sie_server.types.inputs import MAX_ITEM_TEXT_BYTES, Item
 from sie_server.types.responses import Classification, Entity
 
 # Patch msgpack for numpy support
@@ -540,6 +541,117 @@ class TestExtractEndpoint:
         assert data["detail"]["code"] == "INVALID_INPUT"
         assert "requires image input" in data["detail"]["message"]
         mock_registry.start_worker.assert_not_called()
+
+
+# msgpack framing of ``{"state": <str of 65,536 bytes or more>}``.
+_STATE_FRAMING = len(msgspec.msgpack.encode({"state": "x" * 70_000})) - 70_000
+
+
+class TestExtractItemTextSize:
+    """Each item's text and metadata are bounded at ingress, before any work."""
+
+    def test_text_at_the_cap_is_extracted(self, client: TestClient, mock_adapter: MagicMock) -> None:
+        response = client.post(
+            "/v1/extract/test-extractor",
+            json={"items": [{"text": "x" * MAX_ITEM_TEXT_BYTES}], "params": {"labels": ["person"]}},
+            headers=JSON_HEADERS,
+        )
+
+        assert response.status_code == 200
+        (items,) = mock_adapter.extract.call_args.args
+        assert len(items[0].text) == MAX_ITEM_TEXT_BYTES
+
+    def test_text_over_the_cap_rejects_the_request_before_any_work(
+        self, client: TestClient, mock_adapter: MagicMock, mock_registry: MagicMock
+    ) -> None:
+        response = client.post(
+            "/v1/extract/test-extractor",
+            json={
+                "items": [{"text": "Apple Inc."}, {"text": "x" * (MAX_ITEM_TEXT_BYTES + 1)}],
+                "params": {"labels": ["organization"]},
+            },
+            headers=JSON_HEADERS,
+        )
+
+        assert response.status_code == 400
+        assert response.json()["detail"] == {
+            "code": "INVALID_INPUT",
+            "message": f"Field 'items[1]' must hold at most {MAX_ITEM_TEXT_BYTES} bytes of UTF-8 text",
+        }
+        mock_registry.start_worker.assert_not_called()
+        mock_adapter.extract_item_costs.assert_not_called()
+        mock_adapter.extract.assert_not_called()
+
+    def test_multibyte_text_is_measured_in_utf8_bytes(self, client: TestClient, mock_adapter: MagicMock) -> None:
+        # Two bytes per character: over the cap in bytes, about half of it in characters.
+        text = "é" * (MAX_ITEM_TEXT_BYTES // 2 + 1)
+        response = client.post(
+            "/v1/extract/test-extractor",
+            json={"items": [{"text": text}], "params": {"labels": ["person"]}},
+            headers=JSON_HEADERS,
+        )
+
+        assert response.status_code == 400
+        assert str(MAX_ITEM_TEXT_BYTES) in response.json()["detail"]["message"]
+        mock_adapter.extract.assert_not_called()
+
+    def test_msgpack_body_over_the_cap_is_rejected(self, client: TestClient, mock_adapter: MagicMock) -> None:
+        body = msgpack.packb(
+            {"items": [{"text": "x" * (MAX_ITEM_TEXT_BYTES + 1)}], "params": {"labels": ["person"]}},
+            use_bin_type=True,
+        )
+        response = client.post(
+            "/v1/extract/test-extractor",
+            content=body,
+            headers={"Content-Type": "application/msgpack", **JSON_HEADERS},
+        )
+
+        assert response.status_code == 400
+        assert response.json()["detail"]["code"] == "INVALID_INPUT"
+        mock_adapter.extract.assert_not_called()
+
+    def test_metadata_state_at_the_cap_is_extracted(self, client: TestClient, mock_adapter: MagicMock) -> None:
+        state = "x" * (MAX_ITEM_TEXT_BYTES - _STATE_FRAMING)
+        response = client.post(
+            "/v1/extract/test-extractor",
+            json={"items": [{"metadata": {"state": state}}], "params": {"labels": ["approve", "deny"]}},
+            headers=JSON_HEADERS,
+        )
+
+        assert response.status_code == 200
+        (items,) = mock_adapter.extract.call_args.args
+        assert items[0].metadata == {"state": state}
+
+    def test_metadata_state_over_the_cap_is_rejected(self, client: TestClient, mock_adapter: MagicMock) -> None:
+        state = {"ticket": "x" * (MAX_ITEM_TEXT_BYTES - _STATE_FRAMING)}
+        response = client.post(
+            "/v1/extract/test-extractor",
+            json={"items": [{"metadata": {"state": state}}], "params": {"labels": ["approve", "deny"]}},
+            headers=JSON_HEADERS,
+        )
+
+        assert response.status_code == 400
+        assert response.json()["detail"]["message"] == (
+            f"Field 'items[0]' must hold at most {MAX_ITEM_TEXT_BYTES} bytes of UTF-8 text and metadata"
+        )
+        mock_adapter.extract.assert_not_called()
+
+    def test_ordinary_items_with_metadata_are_unaffected(self, client: TestClient, mock_adapter: MagicMock) -> None:
+        response = client.post(
+            "/v1/extract/test-extractor",
+            json={
+                "items": [
+                    {"text": "Steve Jobs founded Apple.", "metadata": {"entities": [{"text": "Apple"}]}},
+                    {"metadata": {"state": {"turns": ["refund please", "approved"]}}},
+                ],
+                "params": {"labels": ["person"]},
+            },
+            headers=JSON_HEADERS,
+        )
+
+        assert response.status_code == 200
+        assert len(response.json()["items"]) == 2
+        mock_adapter.extract.assert_called_once()
 
 
 class TestExtractEntityResults:

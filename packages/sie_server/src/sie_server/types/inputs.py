@@ -9,7 +9,8 @@ audio uses a strict msgspec struct because it crosses a bounded binary boundary.
 """
 
 import io
-from typing import TYPE_CHECKING, Any, Literal, TypedDict, TypeGuard, cast, overload
+import os
+from typing import TYPE_CHECKING, Any, Final, Literal, TypedDict, TypeGuard, cast, overload
 
 import msgspec
 
@@ -316,11 +317,97 @@ def decode_image(
 
 
 # =============================================================================
+# Item text size
+# =============================================================================
+
+# Upper bound on the text one encode, score, or extract item carries: its
+# ``text`` plus its ``metadata``, which adapters read states and entity spans
+# from, in UTF-8 bytes. The request body bounds (16 MiB for encode and score,
+# 34 MiB for extract) would otherwise admit a single text of tens of megabytes,
+# and an adapter that tokenizes or serializes a whole text before truncating it
+# spends seconds of the inference thread and gigabytes of memory on it.
+#
+# 2 MiB is far above what any of these models reads. The longest window among
+# them is 40,960 tokens; natural text spends 1-8 UTF-8 bytes per token in any
+# script, and 2 MiB fills that window only at 51 bytes per token. It also
+# holds the longest document an adapter reads whole, GLiClass's 524,288
+# characters, even at 4 bytes per character. Generation prompts are not items
+# and keep their own bound (``SIE_GENERATE_MAX_PROMPT_BYTES``).
+DEFAULT_MAX_ITEM_TEXT_BYTES: Final[int] = 2 * 1024 * 1024
+
+
+def _item_text_limit_from_env() -> int:
+    raw = os.environ.get("SIE_MAX_ITEM_TEXT_BYTES")
+    if raw is None:
+        return DEFAULT_MAX_ITEM_TEXT_BYTES
+    msg = f"SIE_MAX_ITEM_TEXT_BYTES must be a positive integer, got {raw!r}"
+    try:
+        limit = int(raw)
+    except ValueError as exc:
+        raise ValueError(msg) from exc
+    if limit <= 0:
+        raise ValueError(msg)
+    return limit
+
+
+MAX_ITEM_TEXT_BYTES = _item_text_limit_from_env()
+
+
+def item_size_error(item: Item, field: str) -> str | None:
+    """Return why ``item`` carries too much text, or ``None``.
+
+    Counts the UTF-8 bytes of ``item.text`` plus the msgpack-encoded size of
+    ``item.metadata`` (a string's UTF-8 bytes and a few bytes of framing)
+    against :data:`MAX_ITEM_TEXT_BYTES`. Both ingress paths call it before
+    anything tokenizes the item, estimates its cost, or batches it: the HTTP
+    request types reject the request with ``INVALID_INPUT`` (400), and
+    :func:`decode_item` fails the queue work item with ``INVALID_INPUT``.
+
+    Args:
+        item: The decoded item.
+        field: The item's place in the request, named in the message
+            (``"items[3]"``, ``"query"``).
+    """
+    limit = MAX_ITEM_TEXT_BYTES
+    size = 0
+    text = item.text
+    if text is not None:
+        # An ASCII text is one byte per character, and one longer than the
+        # limit in characters is longer in bytes too: only the rest is encoded.
+        size = len(text) if text.isascii() or len(text) > limit else len(text.encode("utf-8", "surrogatepass"))
+    if size <= limit and item.metadata:
+        size += _encoded_size(item.metadata)
+    if size <= limit:
+        return None
+    what = "text and metadata" if item.metadata else "text"
+    return f"Field '{field}' must hold at most {limit} bytes of UTF-8 {what}"
+
+
+def _size_hook(value: object) -> object:
+    # The queue path decodes frames with ``msgpack.unpackb``, which leaves a
+    # timestamp extension as ``msgpack.Timestamp``; msgspec cannot encode it.
+    # Measuring must never raise, so any such value counts at its repr's size.
+    return repr(value)
+
+
+_SIZE_ENCODER: Final = msgspec.msgpack.Encoder(enc_hook=_size_hook)
+_JSON_SIZE_ENCODER: Final = msgspec.json.Encoder(enc_hook=_size_hook)
+
+
+def _encoded_size(value: object) -> int:
+    try:
+        return len(_SIZE_ENCODER.encode(value))
+    except OverflowError:
+        # An integer wider than 64 bits, which only a JSON body can carry.
+        return len(_JSON_SIZE_ENCODER.encode(value))
+
+
+# =============================================================================
 # Validated item decode
 # =============================================================================
 
 
-def decode_item(raw: dict[str, Any]) -> Item:
+def decode_item(raw: dict[str, Any], field: str = "item") -> Item:
     """Validate a wire-format item mapping into a typed :class:`Item`.
 
     The HTTP ingress path decodes request bodies straight into typed msgspec
@@ -337,19 +424,25 @@ def decode_item(raw: dict[str, Any]) -> Item:
     ``str`` media ``data`` to ``bytes`` the same way the JSON path does. The
     Permissive ``*Input`` TypedDicts are ``total=False``, so missing/empty
     media ``data`` is still enforced at point of use by :func:`media_bytes`;
-    the strict audio struct rejects unknown fields during conversion.
+    the strict audio struct rejects unknown fields during conversion. It also
+    applies the HTTP request types' text size bound (:func:`item_size_error`).
 
     Args:
         raw: The wire-format item mapping. The SDK ships ``content`` as an
             alias for ``text``; it is remapped when ``text`` is absent.
+        field: The item's place in its request, named in a size error.
 
     Returns:
         A validated :class:`Item`.
 
     Raises:
-        msgspec.ValidationError: If a field is present with the wrong type.
-            Both ingress paths surface this as ``INVALID_INPUT`` (HTTP 400).
+        msgspec.ValidationError: If a field is present with the wrong type, or
+            the item carries more text than :data:`MAX_ITEM_TEXT_BYTES`. Both
+            ingress paths surface this as ``INVALID_INPUT`` (HTTP 400).
     """
     if "content" in raw and "text" not in raw:
         raw = {**raw, "text": raw["content"]}
-    return msgspec.convert(raw, type=Item)
+    item = msgspec.convert(raw, type=Item)
+    if error := item_size_error(item, field):
+        raise msgspec.ValidationError(error)
+    return item

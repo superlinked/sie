@@ -25,6 +25,7 @@ from sie_server.core.inference_output import ScoreOutput
 from sie_server.core.registry import ModelRegistry
 from sie_server.core.timing import RequestTiming
 from sie_server.core.worker import WorkerResult
+from sie_server.types.inputs import MAX_ITEM_TEXT_BYTES
 
 # Patch msgpack for numpy support
 m.patch()
@@ -514,6 +515,43 @@ class TestScoreEndpoint:
         data = response.json()
         assert data["detail"]["code"] == "INVALID_INPUT"
         assert data["detail"]["message"] == "Expected `str | null`, got `int` - at `$.query.text`"
+
+    def test_score_query_over_the_text_cap_rejected(self, client: TestClient, mock_adapter: MagicMock) -> None:
+        """A query over the per-item text bound is a 400 before anything scores it."""
+        response = client.post(
+            "/v1/score/test-reranker",
+            json={"query": {"text": "q" * (MAX_ITEM_TEXT_BYTES + 1)}, "items": [{"text": "Doc"}]},
+            headers=JSON_HEADERS,
+        )
+        assert response.status_code == 400
+        assert response.json()["detail"] == {
+            "code": "INVALID_INPUT",
+            "message": f"Field 'query' must hold at most {MAX_ITEM_TEXT_BYTES} bytes of UTF-8 text",
+        }
+        mock_adapter.score_pairs.assert_not_called()
+
+    def test_score_item_over_the_text_cap_rejected(self, client: TestClient, mock_adapter: MagicMock) -> None:
+        response = client.post(
+            "/v1/score/test-reranker",
+            json={
+                "query": {"text": "Query"},
+                "items": [{"text": "Doc"}, {"text": "é" * (MAX_ITEM_TEXT_BYTES // 2 + 1)}],
+            },
+            headers=JSON_HEADERS,
+        )
+        assert response.status_code == 400
+        assert response.json()["detail"]["message"] == (
+            f"Field 'items[1]' must hold at most {MAX_ITEM_TEXT_BYTES} bytes of UTF-8 text"
+        )
+        mock_adapter.score_pairs.assert_not_called()
+
+    def test_score_items_at_the_text_cap_accepted(self, client: TestClient) -> None:
+        response = client.post(
+            "/v1/score/test-reranker",
+            json={"query": {"text": "Query"}, "items": [{"text": "x" * MAX_ITEM_TEXT_BYTES}]},
+            headers=JSON_HEADERS,
+        )
+        assert response.status_code == 200
 
     def test_score_missing_query_rejected(self, client: TestClient) -> None:
         """Missing query is rejected."""
