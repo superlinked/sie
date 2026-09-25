@@ -7,6 +7,7 @@ from real graphs are checked against eager scores in test_gliclass_parity.py
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -22,8 +23,17 @@ from sie_server.adapters.gliclass.cuda_graphs import (
     segment_ids,
     unsupported_reason,
 )
-from sie_server.core.loader import reject_unknown_loadtime_options
+from sie_server.core.loader import _build_adapter_kwargs, load_model_configs, reject_unknown_loadtime_options
 from sie_server.types.inputs import InvalidInputError
+
+_MODELS_DIR = Path(__file__).resolve().parents[2] / "models"
+# The shipped profiles that load with graphs: DeBERTa-v3 models whose bucketed
+# scores changed no top label against eager execution (see the server README).
+_BUCKETED_BY_DEFAULT = {
+    "knowledgator/gliclass-base-v1.0",
+    "knowledgator/gliclass-large-v1.0",
+    "knowledgator/opir-multitask-large-v1.0",
+}
 
 
 class _Encoder:
@@ -542,3 +552,20 @@ class TestOperatorSetting:
             _adapter_with(runner)._forward(_Pipe(), _inputs(1, 100), ["a", "b"], same_labels=True, graphs="off")
 
         assert runner.replayed == []
+
+
+def test_shipped_profiles_enable_bucketed_graphs_only_where_measured() -> None:
+    configs = load_model_configs(_MODELS_DIR)
+    # Named profiles (``model:profile``) inherit the default profile's load-time options.
+    modes = {
+        name.split(":")[0]: config.resolve_profile("default").loadtime.get("cuda_graphs", "off")
+        for name, config in configs.items()
+        if config.resolve_profile("default").adapter_path.endswith(":GLiClassAdapter")
+    }
+
+    assert {name for name, mode in modes.items() if mode != "off"} == _BUCKETED_BY_DEFAULT
+    assert {modes[name] for name in _BUCKETED_BY_DEFAULT} == {"bucketed"}
+    for name in _BUCKETED_BY_DEFAULT:
+        adapter = GLiClassAdapter(**_build_adapter_kwargs(configs[name], "float16"))
+        assert adapter._cuda_graphs == "bucketed"
+        assert adapter._request_cuda_graphs({"cuda_graphs": "off"}) == "off"

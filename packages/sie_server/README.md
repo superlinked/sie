@@ -101,19 +101,26 @@ documents twice), so that graphs were recorded and then replayed: 11,538
 answers per model. A small change can still flip a near tie between the top
 two labels:
 
-| Model | Largest probability change | Top label changed |
-|--|--|--|
-| `gliclass-small-v1.0` | 0.004 | 3 answers |
-| `gliclass-base-v1.0` | 0.005 | none |
-| `gliclass-large-v1.0` | 0.006 | none |
-| `gliclass-base-v3.0` | 0.005 | 3 |
-| `gliclass-large-v3.0` | 0.009 | 3 |
-| `gliclass-instruct-base-v1.0` | 0.008 | 12 |
-| `gliclass-instruct-large-v1.0` | 0.010 | 18 |
-| `opir-multitask-large-v1.0` | 0.014 | none |
-| `gliclass-multilang-mini` (100 descriptions, no joint groups: 2,016 answers) | 0.023 | 3 |
+| Model | Largest probability change | Top label changed | Shipped profile |
+|--|--|--|--|
+| `gliclass-small-v1.0` | 0.004 | 3 answers | `off` |
+| `gliclass-base-v1.0` | 0.005 | none | `bucketed` |
+| `gliclass-large-v1.0` | 0.006 | none | `bucketed` |
+| `gliclass-base-v3.0` | 0.005 | 3 | `off` |
+| `gliclass-large-v3.0` | 0.009 | 3 | `off` |
+| `gliclass-instruct-base-v1.0` | 0.008 | 12 | `off` |
+| `gliclass-instruct-large-v1.0` | 0.010 | 18 | `off` |
+| `opir-multitask-large-v1.0` | 0.014 | none | `bucketed` |
+| `gliclass-multilang-mini` (100 descriptions, no joint groups: 2,016 answers) | 0.023 | 3 | `off` |
 
 `exact` changed nothing.
+
+The shipped profiles load with `bucketed` graphs only where no top label
+changed: `gliclass-base-v1.0`, `gliclass-large-v1.0` and
+`opir-multitask-large-v1.0`. Their probabilities can differ from eager
+execution by up to the amounts above. To run one of them eagerly, set
+`cuda_graphs: off` in its profile, or send `options={"cuda_graphs": "off"}` with
+a request. The other models load with `off`.
 
 Graphs apply on CUDA to the DeBERTa-based GLiClass models: the v1.0 models,
 `gliclass-base-v3.0` and `gliclass-large-v3.0`, the base and large instruct
