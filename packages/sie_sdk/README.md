@@ -153,9 +153,10 @@ On a CUDA server, the DeBERTa-based GLiClass models can replay their forward
 passes as CUDA graphs, which cuts the CPU time spent launching kernels. Send
 `options={"cuda_graphs": "exact"}` to keep scores bit-identical to the default,
 or `"bucketed"` to pad sequence lengths to buckets so that fewer graphs cover
-every length. Padding can move a probability by a few thousandths, as batching
-requests together does. The default is `"off"`. See the server README for the
-supported models and memory use.
+every length. Padding moves probabilities slightly, as batching requests
+together does: by up to 0.006 on `gliclass-large-v1.0` and 0.023 on
+`gliclass-multilang-mini` in our tests. The default is `"off"`. See the server
+README for the supported models, measurements and memory use.
 
 ## Generation prompts and guard verdicts
 

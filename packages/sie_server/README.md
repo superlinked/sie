@@ -80,15 +80,28 @@ profile (`adapter_options.runtime.cuda_graphs`).
 |--|--|--|
 | `off` (default) | none | eager |
 | `exact` | each (batch, sequence length, label slots) seen twice | bit-identical to eager |
-| `bucketed` | sequence lengths padded up to a multiple of 32 tokens (64 on 1,024-token models) | padding can move fp16 probabilities by a few thousandths, as batching requests together does |
+| `bucketed` | sequence lengths padded up to a multiple of 32 tokens (64 on 1,024-token models) | padding moves fp16 probabilities (see below) |
 
-Graphs apply on CUDA to the DeBERTa-based GLiClass models (gliclass v1.0 and
-v3.0, the instruct models, `gliclass-multilang-mini` and the Opir multitask
-models). ModernBERT-based models, CPU and MPS run eagerly with any value.
+Padding is masked, but a longer sequence rounds fp16 sums differently, the same
+kind of change batching requests together makes. Against eager execution on
+CVE descriptions from `examples/typed-decisions` (384 for
+`gliclass-large-v1.0`, 100 for the other models, three questions each, asked
+one at a time and as separate groups), `bucketed` moved probabilities by at
+most 0.004 on `gliclass-small-v1.0`, 0.006 on `gliclass-large-v1.0`, 0.010 on
+`gliclass-instruct-large-v1.0`, 0.013 on `opir-multitask-large-v1.0` and 0.023
+on `gliclass-multilang-mini`, where 3 of 900 separate-group answers changed
+their top label. `exact` changed nothing.
+
+Graphs apply on CUDA to the DeBERTa-based GLiClass models: the v1.0 models,
+`gliclass-base-v3.0` and `gliclass-large-v3.0`, the base and large instruct
+models, the Opir multitask models and `gliclass-multilang-mini`. The
+ModernBERT-based models (the edge models, `gliclass-multilang-edge` and the
+Opir edge models), CPU and MPS run eagerly with any value.
 Recording happens on first use: the request that records a shape takes about
 one extra forward pass. Recording is rationed to 16 graphs at once, then one
-per 8 forward passes, so traffic with more shapes than the cache holds runs
-mostly eagerly instead of re-recording. A model keeps at most 64 graphs, least
+per 8 forward passes, and one per 64 while most graphs leave the cache without
+being replayed, so traffic with more shapes than the cache holds runs mostly
+eagerly instead of re-recording. A model keeps at most 64 graphs, least
 recently used first out. A graph holds at most four full windows of tokens
 (2,048 on a 512-token model); larger forwards are bound by the GPU rather than
 by kernel launches and run eagerly. All of a model's graphs share one memory

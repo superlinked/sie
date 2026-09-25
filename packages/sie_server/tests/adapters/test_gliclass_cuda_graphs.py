@@ -63,7 +63,7 @@ class _Runner(CudaGraphRunner):
         if self.fail:
             raise RuntimeError("operation not permitted when stream is capturing")
         self.recorded.append(key)
-        return SimpleNamespace(key=key), torch.zeros(key[0], key[2])
+        return SimpleNamespace(key=key, replays=0), torch.zeros(key[0], key[2])
 
     def _replay(self, entry: Any, inputs: dict[str, torch.Tensor], length: int) -> torch.Tensor:
         self.replayed.append(entry.key)
@@ -179,14 +179,32 @@ class TestRecordingPolicy:
         assert runner.recorded == [(1, 32, 4), (1, 64, 4), (1, 96, 4), (1, 64, 4)]
 
     def test_recording_is_rationed_so_many_shapes_cannot_thrash(self) -> None:
-        runner = _Runner(max_graphs=4)
+        runner = _Runner(max_graphs=1000)
 
         # Every call is a new shape: sixteen record at once, then one per eight calls.
         answers = [runner.run(_inputs(1, 100), classes, "bucketed") for classes in range(2, 82)]
 
         assert 16 + 80 // 8 - 1 <= len(runner.recorded) <= 16 + 80 // 8
         assert answers.count(None) == 80 - len(runner.recorded)  # the rest ran eagerly
-        assert runner.graph_count == 4
+
+    def test_recording_slows_while_graphs_leave_the_cache_unused(self) -> None:
+        runner = _Runner(max_graphs=4)
+
+        # Shapes that never repeat: evicted graphs were never replayed.
+        for classes in range(2, 402):
+            runner.run(_inputs(1, 100), classes, "bucketed")
+        wasteful = len(runner.recorded)
+        # Fewer than one recording per 8 forwards past the first burst.
+        assert wasteful < 16 + 400 // 8
+        assert runner._wasted > 0.5
+
+        # Shapes that repeat are still recorded, one per 64 forwards, then replayed.
+        runner.recorded.clear()
+        for _ in range(100):
+            for classes in (500, 501):
+                runner.run(_inputs(1, 100), classes, "bucketed")
+        assert set(runner.recorded) == {(1, 128, 500), (1, 128, 501)}
+        assert runner.replayed[-2:] == [(1, 128, 500), (1, 128, 501)]
 
     def test_a_recording_failure_turns_graphs_off(self) -> None:
         runner = _Runner(fail=True)

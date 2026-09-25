@@ -28,8 +28,8 @@ like the pipeline call used before these fields existed):
 - ``options.cuda_graphs``: ``"off"`` (the default), ``"exact"`` or
   ``"bucketed"``. On CUDA, DeBERTa-based models replay forwards as CUDA graphs
   (see ``cuda_graphs.py``): ``exact`` keeps scores bit-identical to eager
-  execution, ``bucketed`` pads sequence lengths to buckets and can move fp16
-  scores by a few thousandths. Other models and devices run eagerly.
+  execution, ``bucketed`` pads sequence lengths to buckets and moves fp16
+  scores slightly. Other models and devices run eagerly.
 - ``options.group_encoding``: how label groups are encoded. ``"separate"`` (the
   default) encodes the document once per group, with only that group's labels.
   Each group scores like a request whose ``labels`` are that group's labels.

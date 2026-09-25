@@ -7,9 +7,9 @@ with a single call.
 
 A graph is recorded per (batch size, sequence length, class slots) and kept
 in a bounded least-recently-used cache. Recording costs about one extra
-forward, so it is rationed: 16 graphs at once, then one per 8 forwards. Traffic
-with more shapes than the cache holds then runs mostly eagerly instead of
-re-recording. Forwards over four full windows of tokens run eagerly: the GPU,
+forward, so it is rationed: 16 graphs at once, then one per 8 forwards, and one
+per 64 while most graphs leave the cache without a replay. Traffic with more
+shapes than the cache holds then runs mostly eagerly instead of re-recording. Forwards over four full windows of tokens run eagerly: the GPU,
 not kernel launches, bounds them. Two modes choose the sequence length:
 
 - ``exact`` records the request's own length. Replay launches the kernels
@@ -17,8 +17,9 @@ not kernel launches, bounds them. Two modes choose the sequence length:
   recorded the second time it is seen, so lengths seen once cost nothing.
 - ``bucketed`` pads the length up to a bucket (a multiple of 32 tokens at a
   512-token window, 64 at 1,024), so a few graphs cover every length. Padding
-  is masked, but a longer sequence rounds fp16 sums differently, so scores can
-  move by a few thousandths, as when requests are batched together.
+  is masked, but a longer sequence rounds fp16 sums differently, as when
+  requests are batched together: up to 0.006 in probability on
+  gliclass-large-v1.0 and 0.023 on gliclass-multilang-mini in our tests.
 
 Recording needs a forward that never waits on the host. Two parts of the
 gliclass DeBERTa forward do: the relative-position table copies a CPU scalar
@@ -65,6 +66,9 @@ _WINDOWS_PER_GRAPH = 4
 # than the cache holds cannot keep re-recording.
 _RECORDING_BURST = 16
 _FORWARDS_PER_RECORDING = 8
+# While more than half of the graphs recently evicted were never replayed (the
+# traffic has more shapes than the cache holds), recording slows this much.
+_WASTED_SLOWDOWN = 8
 # Encoders whose forward records cleanly once the two host reads are replaced.
 _ENCODERS = frozenset({"deberta-v2"})
 # Poolings whose pooled vector ignores padded positions, so ``bucketed`` mode
@@ -101,6 +105,7 @@ class _Graph:
     inputs: dict[str, torch.Tensor]
     output: torch.Tensor
     relative_pos: torch.Tensor | None
+    replays: int = 0
 
 
 class CudaGraphRunner:
@@ -127,6 +132,8 @@ class CudaGraphRunner:
         self._stream: torch.cuda.Stream | None = None
         self._disabled = False
         self._recording_credit = float(_RECORDING_BURST)
+        # Moving share of evicted graphs that were never replayed.
+        self._wasted = 0.0
         # Set only while recording: the relative-position table the encoder uses.
         self._recording_relative_pos: torch.Tensor | None = None
         self._recording = False
@@ -196,10 +203,14 @@ class CudaGraphRunner:
         if key is None:
             return None
         with self._lock:
-            self._recording_credit = min(float(_RECORDING_BURST), self._recording_credit + 1 / _FORWARDS_PER_RECORDING)
+            refill = 1 / _FORWARDS_PER_RECORDING
+            if self._wasted > 0.5:
+                refill /= _WASTED_SLOWDOWN
+            self._recording_credit = min(float(_RECORDING_BURST), self._recording_credit + refill)
             entry = self._graphs.get(key)
             if entry is not None:
                 self._graphs.move_to_end(key)
+                entry.replays += 1
                 return self._replay(entry, inputs, length)
             if not self._should_record(key, mode) or self._recording_credit < 1:
                 return None
@@ -213,7 +224,8 @@ class CudaGraphRunner:
                 return None
             self._graphs[key] = entry
             while len(self._graphs) > self._max_graphs:
-                self._graphs.popitem(last=False)
+                _, evicted = self._graphs.popitem(last=False)
+                self._wasted = 0.9 * self._wasted + 0.1 * (getattr(evicted, "replays", 0) == 0)
             return logits
 
     def clear(self) -> None:
