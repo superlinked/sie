@@ -71,16 +71,26 @@ label prompt can fit.
 
 A GLiClass forward on a DeBERTa encoder launches about a thousand small GPU
 kernels, so at small batch sizes the CPU that launches them is the bottleneck.
-`options={"cuda_graphs": ...}` replays forwards as CUDA graphs instead. A graph
-records the kernel launches of one input shape once; a replay launches them
-all in one call. Set it per request, or as a runtime default in a model
-profile (`adapter_options.runtime.cuda_graphs`).
+A CUDA graph records the kernel launches of one input shape once; a replay
+launches them all in one call. Graphs are an operator setting, fixed when the
+model loads, in the model profile:
+
+```yaml
+profiles:
+  default:
+    adapter_options:
+      loadtime:
+        cuda_graphs: bucketed
+```
 
 | Value | Shapes recorded | Scores |
 |--|--|--|
 | `off` (default) | none | eager |
 | `exact` | each (batch, sequence length, label slots) seen twice | bit-identical to eager |
 | `bucketed` | sequence lengths padded up to a multiple of 32 tokens (64 on 1,024-token models) | padding moves fp16 probabilities (see below) |
+
+A request can send `options={"cuda_graphs": "off"}` to run eagerly on a model
+loaded with graphs. It cannot turn graphs on: any other value is refused.
 
 Padding is masked, but a longer sequence rounds fp16 sums differently, the same
 kind of change batching requests together makes. Against eager execution on
@@ -96,16 +106,37 @@ Graphs apply on CUDA to the DeBERTa-based GLiClass models: the v1.0 models,
 `gliclass-base-v3.0` and `gliclass-large-v3.0`, the base and large instruct
 models, the Opir multitask models and `gliclass-multilang-mini`. The
 ModernBERT-based models (the edge models, `gliclass-multilang-edge` and the
-Opir edge models), CPU and MPS run eagerly with any value.
-Recording happens on first use: the request that records a shape takes about
-one extra forward pass. Recording is rationed to 16 graphs at once, then one
-per 8 forward passes, and one per 64 while most graphs leave the cache without
-being replayed, so traffic with more shapes than the cache holds runs mostly
-eagerly instead of re-recording. A model keeps at most 64 graphs, least
-recently used first out. A graph holds at most four full windows of tokens
-(2,048 on a 512-token model); larger forwards are bound by the GPU rather than
-by kernel launches and run eagerly. All of a model's graphs share one memory
-pool sized by the largest shape recorded. Usage and billing do not change.
+Opir edge models), CPU and MPS run eagerly with any value, and the load logs a
+warning.
+
+Nothing is recorded at load. A shape is recorded the first time a request
+needs it (the second time in `exact` mode), and that request takes about two
+eager forwards. A model keeps at most 64 graphs, least recently used first
+out. A graph holds at most four full windows of tokens (2,048 on a 512-token
+model); larger forwards are bound by the GPU rather than by kernel launches
+and run eagerly.
+
+**Memory, and other models on the same GPU.** Graph memory counts as device
+memory in use, but it is not attributed to the model: under memory pressure
+the server evicts whole models, least recently used first, which may be
+another model. On `gliclass-large-v1.0` in `bucketed` mode, the 31 graphs
+recorded for the CVE descriptions above added 298 MB: a 232 MB graph pool,
+60 MB cached on the recording stream (its cuBLAS workspace and one warm-up
+row) and 5 MB of relative-position tables. In `exact` mode, 64 graphs of the
+same traffic added 184 MB. A model's graphs share one pool, which grows with
+the shapes recorded and with fragmentation between them: one graph of the
+largest shape allowed (4 × 512 tokens) needs 332 MB on its own. Graphs are
+released when the model unloads, and when one of its forwards runs out of
+memory.
+
+While a graph records, PyTorch's caching allocator does not free cached blocks
+to satisfy other allocations, so another model on the same GPU that needs
+memory in that window (about one forward) can run out of memory where it
+otherwise would not. Recording is kept rare to limit this: one recording at a
+time in the process, none while less than a tenth of the device's memory is
+free, and per model at most 16 recordings at once, then one per 2 seconds. On a
+GPU shared with other models, leave memory headroom, or enable graphs only
+where the model has the GPU to itself. Usage and billing do not change.
 
 ## Configuration
 
