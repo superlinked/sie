@@ -17,6 +17,7 @@ import torch
 import yaml
 from pydantic import BaseModel
 from sie_server.adapters.gliformer import adapter as adapter_module
+from sie_server.adapters.gliformer import span_decoding
 from sie_server.adapters.gliformer.adapter import GLiFormerAdapter
 from sie_server.adapters.gliformer.output_schema import compile_output_schema, shape_structured_output
 from sie_server.core.inference_output import ExtractItemError
@@ -814,6 +815,47 @@ def test_inference_is_split_into_padded_token_chunks() -> None:
     assert [call.kwargs["batch_size"] for call in model.inference.call_args_list] == [2, 1]
     assert [[entity["text"] for entity in entities] for entities in output.entities] == [["Alice"], ["Bob"], ["Carol"]]
     assert output.input_token_counts == [5, 5, 5]
+
+
+def test_a_request_that_exhausts_its_decode_budget_fails_its_remaining_items(monkeypatch: pytest.MonkeyPatch) -> None:
+    texts = ["Alice works here", "Bob works there", "Carol stays home", "Dan goes out"]
+    adapter, model = _adapter({}, inference_batch_tokens=8)
+    # Budget: 10 units + 1 per billed token = 30 for four 5-token items.
+    monkeypatch.setattr(adapter_module, "_DECODE_BUDGET_FLOOR", 10)
+    monkeypatch.setattr(adapter_module, "_DECODE_UNITS_PER_TOKEN", 1)
+
+    def inference(batch: list[str], **_: Any) -> dict[str, Any]:
+        # Decoding each document costs 12 units, as the span decoders charge.
+        for _text in batch:
+            span_decoding.charge(12)
+        return {"ner": [[_ner(text, text.split()[0], "person")] for text in batch]}
+
+    model.inference.side_effect = inference
+    output = adapter.extract([Item(text=text) for text in texts], labels=["person"])
+
+    # Two documents fit (24 units); the third overdraws, so it and the
+    # fourth are never run.
+    assert [call.args[0] for call in model.inference.call_args_list] == [texts[:1], texts[1:2], texts[2:3]]
+    assert [[entity["text"] for entity in entities] for entities in output.entities] == [["Alice"], ["Bob"], [], []]
+    assert output.errors is not None
+    assert [error.code if error else None for error in output.errors] == [None, None, "INVALID_INPUT", "INVALID_INPUT"]
+    assert "more span decoding than one request allows" in output.errors[2].message
+    assert output.input_token_counts == [5, 5, 0, 0]
+
+
+def test_decode_budget_scales_with_billed_tokens() -> None:
+    adapter, model = _adapter({"ner": [[], []]})
+    budgets = []
+
+    def inference(batch: list[str], **_: Any) -> dict[str, Any]:
+        budgets.append(span_decoding._REQUEST_BUDGET.get().remaining)
+        return {"ner": [[] for _ in batch]}
+
+    model.inference.side_effect = inference
+    output = adapter.extract([Item(text="one two"), Item(text="three four five")], labels=["person"])
+    billed = sum(output.input_token_counts)
+    assert budgets == [adapter_module._DECODE_BUDGET_FLOOR + adapter_module._DECODE_UNITS_PER_TOKEN * billed]
+    assert span_decoding._REQUEST_BUDGET.get() is None
 
 
 def test_documents_are_billed_up_to_the_window_left_by_the_prompt() -> None:

@@ -36,7 +36,14 @@ from sie_server.adapters.gliformer.output_schema import (
     compile_output_schema,
     shape_structured_output,
 )
-from sie_server.adapters.gliformer.span_decoding import pair_spans, propose_spans, select_spans
+from sie_server.adapters.gliformer.span_decoding import (
+    DecodeBudgetExceededError,
+    budget_exhausted,
+    decode_budget,
+    pair_spans,
+    propose_spans,
+    select_spans,
+)
 from sie_server.adapters.gliformer.structuring_decoding import make_structuring_decode
 from sie_server.core.extract_cost import MAX_EXTRACT_LABELS
 from sie_server.core.inference_output import EncodeOutput, ExtractItemError, ExtractOutput
@@ -100,6 +107,20 @@ _MAX_TYPE_GROUPS = 64
 
 # Marks an item whose model output could not be used.
 _ITEM_ERROR = "__gliformer_item_error__"
+# Marks an item left undecoded because its request ran out of decode budget.
+_BUDGET_ERROR = "__gliformer_budget_error__"
+_ERR_DECODE_BUDGET = (
+    "GLiFormer request needs more span decoding than one request allows; send fewer items per request "
+    "or use a higher threshold"
+)
+
+# Span decoding work one request may do, in span_decoding's budget units
+# (about 2.5 microseconds of host work each): a floor for small requests plus
+# an allowance per billed token. The measured documents need at most about
+# 60 units per billed token (an entity-dense document with a 64-field schema
+# at threshold 0.1), so the allowance scales decode work with what is billed.
+_DECODE_BUDGET_FLOOR = 262144
+_DECODE_UNITS_PER_TOKEN = 64
 
 # Distinct task prompts whose token counts are kept. A prompt depends only on
 # the request's task arguments, so a repeated task skips rebuilding and
@@ -351,6 +372,13 @@ class GLiFormerAdapter(BaseAdapter):
     are unchanged. Each document of a batch decodes as it would alone: the
     padding of shorter documents never forms spans or lowers scores.
 
+    A request's span decoding is also budgeted: 262,144 work units plus 64
+    per billed token. A unit is about 2.5 microseconds of host work: one
+    candidate span or record field span, 64 units per structuring proposal,
+    and one per score cell when a document hits a bound. Items not yet
+    decoded when the budget runs out fail with ``INVALID_INPUT`` and bill
+    nothing; items already decoded keep their results.
+
     ``options["relation_threshold"]`` raises the minimum score for relations
     only. GLiFormer decodes entities and relations with one threshold, so it
     cannot be lower than ``threshold``.
@@ -596,19 +624,20 @@ class GLiFormerAdapter(BaseAdapter):
 
         raw_results: list[dict[str, Any]] = [{} for _ in items]
         structures = request.plan.structures if request.plan is not None else None
-        for types, indices in batches.items():
-            rows = self._run(
-                [texts[index] for index in indices],
-                task_kwargs[types],
-                [lengths[index] for index in indices],
-                structures=structures,
-                threshold=threshold,
-                flat_ner=flat_ner,
-                multi_label=multi_label,
-                max_items=max_items,
-            )
-            for index, row in zip(indices, rows, strict=True):
-                raw_results[index] = row
+        with decode_budget(_DECODE_BUDGET_FLOOR + _DECODE_UNITS_PER_TOKEN * sum(counts)):
+            for types, indices in batches.items():
+                rows = self._run(
+                    [texts[index] for index in indices],
+                    task_kwargs[types],
+                    [lengths[index] for index in indices],
+                    structures=structures,
+                    threshold=threshold,
+                    flat_ner=flat_ner,
+                    multi_label=multi_label,
+                    max_items=max_items,
+                )
+                for index, row in zip(indices, rows, strict=True):
+                    raw_results[index] = row
 
         return _assemble_output(texts, raw_results, request, input_token_counts=counts)
 
@@ -661,19 +690,31 @@ class GLiFormerAdapter(BaseAdapter):
         multi_label: bool,
         max_items: int | None,
     ) -> list[dict[str, Any]]:
-        """Run ``GLiFormer.inference`` in bounded chunks; one raw result per text."""
+        """Run ``GLiFormer.inference`` in bounded chunks; one raw result per text.
+
+        Once the request's decode budget runs out, the chunk in progress and
+        every later one are left undecoded and their items marked with
+        ``_BUDGET_ERROR``; chunks already decoded keep their results.
+        """
         formatter = self._build_formatter(structures) if structures and self._build_formatter else None
         rows: list[dict[str, Any]] = [{} for _ in texts]
         with self._tokenizer_guard():
             for chunk in _token_budget_chunks(lengths, self._inference_batch_tokens, max_items=max_items):
-                chunk_rows = self._infer(
-                    texts,
-                    chunk,
-                    task_kwargs,
-                    threshold=threshold,
-                    flat_ner=flat_ner,
-                    multi_label=multi_label,
-                )
+                chunk_rows: list[dict[str, Any]] | None = None
+                if not budget_exhausted():
+                    try:
+                        chunk_rows = self._infer(
+                            texts,
+                            chunk,
+                            task_kwargs,
+                            threshold=threshold,
+                            flat_ner=flat_ner,
+                            multi_label=multi_label,
+                        )
+                    except DecodeBudgetExceededError:
+                        chunk_rows = None
+                if chunk_rows is None:
+                    chunk_rows = [{_BUDGET_ERROR: True} for _ in chunk]
                 for index, row in zip(chunk, chunk_rows, strict=True):
                     rows[index] = _format_row(row, formatter)
         return rows
@@ -953,7 +994,7 @@ def _format_row(row: dict[str, Any], formatter: Any) -> dict[str, Any]:
     several spans were found holds all of them, best first. The formatter
     keeps the best value for scalar fields and normalizes list fields.
     """
-    if formatter is None or "structuring" not in row or _ITEM_ERROR in row:
+    if formatter is None or "structuring" not in row or _ITEM_ERROR in row or _BUDGET_ERROR in row:
         return row
     try:
         return {**row, "structuring": formatter.format_batch([row["structuring"]])[0]}
@@ -1132,7 +1173,11 @@ def _assemble_output(
         try:
             if _ITEM_ERROR in raw:
                 raise RuntimeError(_ERR_ITEM_OUTPUT)
-            entities, relations, classifications, data, error = _assemble_item(text, raw, request, index)
+            if _BUDGET_ERROR in raw:
+                entities, relations, classifications, data = [], [], [], {}
+                error = ExtractItemError(code=ErrorCode.INVALID_INPUT.value, message=_ERR_DECODE_BUDGET)
+            else:
+                entities, relations, classifications, data, error = _assemble_item(text, raw, request, index)
         except RuntimeError as exc:
             logger.warning("GLiFormer output for one item could not be used: %s", exc)
             entities, relations, classifications, data = [], [], [], {}

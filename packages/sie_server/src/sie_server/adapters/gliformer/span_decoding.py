@@ -79,6 +79,12 @@ def decode_budget(units: int) -> Iterator[None]:
         _REQUEST_BUDGET.reset(token)
 
 
+def budget_exhausted() -> bool:
+    """Whether the current budget has run out (never, outside a budget)."""
+    budget = _REQUEST_BUDGET.get()
+    return budget is not None and budget.remaining < 0
+
+
 def charge(units: int) -> None:
     """Take ``units`` from the current budget, if any, before doing that work.
 

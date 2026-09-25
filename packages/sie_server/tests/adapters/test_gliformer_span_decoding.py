@@ -13,7 +13,7 @@ import pytest
 import torch
 from gliner.modeling.utils import extract_spans_from_tokens
 from sie_server.adapters.gliformer import adapter as adapter_module
-from sie_server.adapters.gliformer import structuring_decoding
+from sie_server.adapters.gliformer import span_decoding, structuring_decoding
 from sie_server.adapters.gliformer.span_decoding import MAX_SPAN_CANDIDATES, pair_spans, propose_spans, select_spans
 
 # Import the package the way the adapter does (without its AutoModel
@@ -211,6 +211,53 @@ def test_worst_case_document_is_bounded() -> None:
 def test_pairing_without_starts_or_ends_returns_nothing() -> None:
     logits = torch.full((4, 2, 3), -8.0)
     assert _bounded(logits, {0: "a", 1: "b"}, 0.5) == []
+
+
+# -- Request budget ---------------------------------------------------------------
+
+
+def test_budget_is_charged_before_work_and_stays_exhausted() -> None:
+    span_decoding.charge(10**9)  # no budget: free
+    with span_decoding.decode_budget(10):
+        span_decoding.charge(4)
+        span_decoding.charge(6)
+        assert not span_decoding.budget_exhausted()
+        with pytest.raises(span_decoding.DecodeBudgetExceededError):
+            span_decoding.charge(1)
+        assert span_decoding.budget_exhausted()
+        with pytest.raises(span_decoding.DecodeBudgetExceededError):
+            span_decoding.charge(0)
+    assert not span_decoding.budget_exhausted()
+
+
+def test_pairing_charges_its_candidates_and_its_cut() -> None:
+    logits = _bio_scores(2, length=80, labels=3, dtype=torch.float32)
+    names = {0: "a", 1: "b", 2: "c"}
+    full = len(_upstream(logits, names, 0.1))
+    with span_decoding.decode_budget(10**9):
+        _bounded(logits, names, 0.1)
+        assert 10**9 - span_decoding._REQUEST_BUDGET.get().remaining == full
+    with span_decoding.decode_budget(10**9):
+        _bounded(logits, names, 0.1, max_candidates=10)
+        # The kept candidates and one unit per score cell for the cut.
+        assert 10**9 - span_decoding._REQUEST_BUDGET.get().remaining == 10 + 80 * 3
+    with span_decoding.decode_budget(full - 1), pytest.raises(span_decoding.DecodeBudgetExceededError):
+        _bounded(logits, names, 0.1)
+
+
+def test_proposals_cost_more_than_spans() -> None:
+    scores = _bio_scores(8, length=90, labels=3, dtype=torch.float32).unsqueeze(0)
+    proposals = len(_ranked_proposals(scores[0], 0.1))
+    with span_decoding.decode_budget(10**9):
+        _propose(scores, 0.1)
+        spent = 10**9 - span_decoding._REQUEST_BUDGET.get().remaining
+    assert proposals > span_decoding.MAX_STRUCTURING_PROPOSALS
+    # Capped: the kept proposals, and one unit per score cell for the cut.
+    assert spent == span_decoding.PROPOSAL_UNITS * span_decoding.MAX_STRUCTURING_PROPOSALS + 90 * 3
+    with span_decoding.decode_budget(10**9):
+        _propose(scores[:, :30], 0.1)
+        spent = 10**9 - span_decoding._REQUEST_BUDGET.get().remaining
+    assert spent == span_decoding.PROPOSAL_UNITS * len(_ranked_proposals(scores[0, :30], 0.1))
 
 
 # -- Structuring span proposals ---------------------------------------------------
