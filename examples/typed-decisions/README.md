@@ -8,8 +8,14 @@ It covers zero-shot label classifiers, typed decision models and a small LLM.
 
 Everything that decides what is reported was fixed on 224 earlier records and
 committed before the 160 test records were sent, in
-[PREREGISTRATION.md](PREREGISTRATION.md). The test slice was then recorded
-once, against SIE server commit `28a07f5`.
+[PREREGISTRATION.md](PREREGISTRATION.md). The test slice was first recorded
+against SIE server commit `28a07f5`.
+
+On 2026-09-25 it was recorded again against `d41ba7f`, under the
+pre-registration's two amendments. That server runs the Smart model's three
+questions in one call, with CUDA graphs, and serves Fastino's GLiNER2.5-Decide
+models. The figures below are that run. The first run is under
+[The first run](#the-first-run-server-28a07f5).
 
 ## What this shows
 
@@ -30,22 +36,24 @@ brackets.
 
 | Lane | Model | Vendor | `weakness` | `attack_vector` | `remote_unauthenticated` | Median per record |
 |---|---|---|---|---|---|---|
-| Fast | `knowledgator/gliformer-large-v1` | Knowledgator | not shown (failed on dev) | 144 (0.873) | not asked | 69 ms, 1 call |
-| Smart | `knowledgator/gliclass-large-v1.0` | Knowledgator | 142 (0.887) | 147 (0.796) | 115 (0.725) | 205 ms, 3 calls |
-| LLM | `Qwen/Qwen3-4B-Instruct-2507` | Qwen | not shown (failed on dev) | 150 (0.867) | 129 (0.815) | 2,671 ms, 1 call |
+| Fast | `knowledgator/gliformer-large-v1` | Knowledgator | not shown (failed on dev) | 144 (0.873) | not asked | 65 ms, 1 call |
+| Smart | `knowledgator/gliclass-large-v1.0`, the three questions as separate label groups in one call | Knowledgator | 142 (0.887) | 147 (0.796) | 115 (0.725) | 28 ms, 1 call |
+| LLM | `Qwen/Qwen3-4B-Instruct-2507` | Qwen | not shown (failed on dev) | 150 (0.867) | 129 (0.815) | 2,676 ms, 1 call |
 
 - **By question type:** Smart answered 289 of 320 pick-one questions and 115
   of 160 yes-or-no questions.
 - **Medians are round trips, not a service level.** Each server ran on one
-  NVIDIA L4 GPU, with the client on the same machine, one record at a time.
-- **One speed claim clears its pre-registered 1.5x margin.** Smart answers the
-  same three questions 13.0 times faster than the LLM. Fast's one call and
-  Smart's attack-vector request take about the same time (1.02x), so no speed
-  claim is made between them.
+  NVIDIA L4 GPU with 10 CPU cores and 40 GiB of memory reserved, with the
+  client on the same machine, one record at a time.
+- **Two speed claims clear the pre-registered 1.5x margin.**
+  - Smart's one call is 2.35 times faster than Fast's, on the attack-vector
+    answer both show; Smart's call carries two more questions.
+  - Smart answers the same three questions 96 times faster than the LLM.
+  - On this server, Smart is the faster lane.
 - **The LLM gives no probabilities.** It returns values, so its answers carry
   none.
 - **No credit figures.** `page.py --prices` prices only models the published
-  SIE Cloud price list names. On 2026-09-24 it named none of these three.
+  SIE Cloud price list names. On 2026-09-25 it named none of these three.
 
 GLiFormer is not asked the yes-or-no question. Asked all three in one call, it
 confused "exploitable remotely without a login" with "remotely over the
@@ -58,10 +66,29 @@ network".
 | `gliclass-instruct-large` | `knowledgator/gliclass-instruct-large-v1.0` | Knowledgator | weakness 142; attack vector 149 |
 | `laya` | `convaiinnovations/laya` | Convai Innovations | weakness 134 |
 | `laya-typed-decisions` | `convaiinnovations/laya-typed-decisions` | Convai Innovations | weakness 145 |
+| `gliner2.5-decide` | `fastino/GLiNER2.5-Decide` | Fastino | weakness 146 |
+| `gliner2.5-multi-decide` | `fastino/GLiNER2.5-multi-Decide` | Fastino | weakness 137 |
+| `gliner2.5-decide-1b` | `fastino/GLiNER2.5-Decide-1B` | Fastino | weakness 139; attack vector 150 (0.852 balanced) |
 
 `laya-typed-decisions` also passed the yes-or-no question on dev. On test its
 balanced accuracy there fell to 0.673, below 0.70, so the pre-registered
-withdrawal rule took it off every surface.
+withdrawal rule took it off every surface, in both runs.
+
+**Where GLiNER2.5-Decide stands.** The three Decide models were tuned on dev
+only, like every other backend, and each answers all three questions in one
+call.
+- **Weakness.** `fastino/GLiNER2.5-Decide` is right on 146 of 160, the most of
+  any backend, against Smart's 142.
+- **Weakness and attack vector.** `fastino/GLiNER2.5-Decide-1B` passes both.
+  Its attack-vector answer matches the LLM's 150 of 160 and beats Smart's 147.
+- **The yes-or-no question.** None of the three passes it on dev. Their
+  balanced accuracy was 0.54 to 0.59, and on test 0.51 to 0.54, so none can
+  stand in for Smart. None takes a lane; each shows in the catalog.
+- **Time.** Their medians on test are 39 ms (Decide), 30 ms (multi) and 34 ms
+  (1B) per record.
+- **Window.** `fastino/GLiNER2.5-Decide` reads questions in at most 256 of its
+  512 tokens. So it was not given the described phrasing, nor the workflow
+  set's questions, which need 305 to 425.
 
 **Three records illustrate the answers.** They were chosen by the stated rule
 in `page.py`, which picks one record for each argument:
@@ -93,8 +120,9 @@ On test:
 | remote without a login | 100% (Fast is not asked) | 0.719, 0.725 balanced | 0.719, 0.725 |
 
 It matches Smart with zero regressions and beats it on weakness. But it makes
-3.68 calls per record against Smart's 3.00, so it fails its control, as it did
-on dev.
+2.00 calls per record against Smart's one, so it fails its control, as it did
+on dev. Fast is not asked the yes-or-no question, so Smart is called for every
+record anyway.
 
 **Severity, computed and never asked.** `cvss.compose_severity` scores every
 combination of a backend's three answers with the CVSS v3.1 base-score formula,
@@ -105,7 +133,7 @@ reproduces NVD's base score for all 384 records. Scored on the exact level:
 | Severity from | Accuracy | Balanced accuracy |
 |---|---|---|
 | the NVD analyst's own three answers (the ceiling) | 0.719 | 0.743 |
-| Smart | 0.600 | 0.601 |
+| Smart | 0.606 | 0.612 |
 | the LLM, from its whole CVSS vector | 0.675 | 0.613 |
 | always the most common level | 0.463 | |
 
@@ -134,7 +162,36 @@ own distribution. Every other backend is zero-shot.
 | `laya-typed-decisions` (fine-tuned on the benchmark's training split) | 0.769 | 0.663 |
 | always the most common answer | 0.522 | 0.230 |
 | `gliner2-large` (Fastino), the best zero-shot backend | 0.516 | 0.345 |
+| `gliner2.5-multi-decide` (Fastino) | 0.456 | 0.301 |
+| `gliner2.5-decide-1b` (Fastino) | 0.442 | 0.297 |
 | `laya` (Convai Innovations), the base checkpoint | 0.360 | 0.239 |
+
+`fastino/GLiNER2.5-Decide` is not scored here: its 256-token question budget
+holds none of the four workflows' question sets.
+
+### The first run (server `28a07f5`)
+
+The first test run, on 2026-09-24, is kept at dataset revision
+[`30b05245`](https://huggingface.co/datasets/superlinked/sie-task-evidence/tree/30b05245e375f15cc87aa37a1705c4aad0d26f45/typed-decisions).
+Across all 160 test records, no decided answer of any backend changed between
+the two runs:
+- Smart's one call moved probabilities by at most 0.0058 against its three
+  per-question calls.
+- GLiFormer, the LLM, GLiClass instruct and Laya returned the same
+  probabilities.
+- Smart's computed severity moved from 96 to 97 of 160 right: it is composed
+  from whole distributions.
+
+Only time changed:
+
+| Lane | Median per record, first run | Median per record, this run |
+|---|---|---|
+| Fast | 69 ms, 1 call | 65 ms, 1 call |
+| Smart | 205 ms, 3 calls (one per question) | 28 ms, 1 call |
+| LLM | 2,671 ms | 2,676 ms |
+
+In the first run Smart was 13.0 times faster than the LLM, and Fast and Smart
+were within 1.02 times of each other on the attack-vector answer.
 
 ### Every backend recorded
 
@@ -143,10 +200,12 @@ own distribution. Every other backend is zero-shot.
 | `laya` | `convaiinnovations/laya` | Convai Innovations | the question dict as `output_schema` | 1 |
 | `laya-typed-decisions` | `convaiinnovations/laya-typed-decisions`, fine-tuned on the workflow benchmark's training split | Convai Innovations | the question dict as `output_schema` | 1 |
 | `gliformer-large` | `knowledgator/gliformer-large-v1` | Knowledgator | every question a label group, named by the question; on vulnerability triage it is asked `weakness` and `attack_vector` only | 1 |
-| `gliclass-instruct-large-grouped` | `knowledgator/gliclass-instruct-large-v1.0` | Knowledgator | every question a label group, the questions in the instruction | 1 |
+| `gliclass-instruct-large-grouped` | `knowledgator/gliclass-instruct-large-v1.0` | Knowledgator | every question a label group, encoded jointly, the questions in the instruction | 1 |
 | `gliclass-instruct-large` | `knowledgator/gliclass-instruct-large-v1.0` | Knowledgator | one question per call, the question as the instruction | one per question |
 | `gliclass` | `knowledgator/gliclass-large-v3.0` | Knowledgator | one question per call, labels only | one per question |
 | `gliclass-large-v1`, `gliclass-base-v1`, `gliclass-small-v1` | `knowledgator/gliclass-{large,base,small}-v1.0` | Knowledgator | one question per call, labels only | one per question |
+| `gliclass-large-v1-one-call` | `knowledgator/gliclass-large-v1.0` | Knowledgator | every question a label group, each group encoded as its own row; the per-question backend's tuned settings | 1 |
+| `gliner2.5-decide`, `gliner2.5-multi-decide`, `gliner2.5-decide-1b` | `fastino/GLiNER2.5-Decide`, `-multi-Decide`, `-Decide-1B` | Fastino | the question dict as `output_schema`, as for Laya | 1 |
 | `gliner2-base`, `gliner2-large` | `fastino/gliner2-{base,large}-v1` | Fastino | one question per call, the question id as the task name | one per question |
 | `nli-modernbert-base` | `MoritzLaurer/ModernBERT-base-zeroshot-v2.0` | MoritzLaurer | one question per call, each label as an NLI hypothesis | one per question |
 | `qwen3-4b-instruct` | `Qwen/Qwen3-4B-Instruct-2507` | Qwen | one chat completion with a JSON schema, returning the CVSS v3.1 base metrics and the weakness class (vulnerability triage only) | 1 |
@@ -179,7 +238,7 @@ score:
 
 ```sh
 python3 fetch.py                   # downloads the pinned revision into data/
-python3 run.py --check             # rebuilds all 17,856 recorded requests from the inputs
+python3 run.py --check             # rebuilds all 22,384 recorded requests from the inputs
 python3 score.py                   # every backend and question on the test slice; asserts the published figures
 python3 page.py                    # the page's lanes, cards, catalog and cascade; asserts what the page shows
 python3 multitask.py --score --calls data/multitask/test.json
@@ -200,23 +259,32 @@ without sending them.
 
 ### Record it yourself
 
-This needs an SIE server that serves these models. The LLMs need a server
-built with SGLang (the `sie-server:latest-cuda12-sglang` image). The steps are
-the ones PREREGISTRATION.md fixes: every phrasing on dev, then the tuned
-configuration on dev, then the test slice once.
+This needs an SIE server that serves these models. The server image depends on
+the backend:
+- The encoders run in the default image.
+- GLiNER2.5-Decide needs the transformers5 bundle.
+- The LLMs need a server built with SGLang (the
+  `sie-server:latest-cuda12-sglang` image).
+
+The steps are the ones PREREGISTRATION.md fixes: every phrasing on dev, then
+the tuned configuration on dev, then the test slice once.
+`gliclass-large-v1-one-call` takes `gliclass-large-v1`'s settings and is
+recorded on dev only in its tuned mix. `gliner2.5-decide` is recorded on dev in
+`short` and `concrete` only.
 
 ```sh
 uv sync --group build
 uv run python build_inputs.py                  # rebuilds data/inputs/<set>/cases.json from the NVD and Hugging Face
 
 BACKENDS="laya laya-typed-decisions gliformer-large gliclass-instruct-large-grouped gliclass-instruct-large
-          gliclass gliclass-large-v1 gliclass-base-v1 gliclass-small-v1 gliner2-base gliner2-large nli-modernbert-base"
+          gliclass gliclass-large-v1 gliclass-base-v1 gliclass-small-v1 gliner2-base gliner2-large nli-modernbert-base
+          gliner2.5-decide gliner2.5-multi-decide gliner2.5-decide-1b"
 URL=http://localhost:8080
 
-# 1. Dev, every phrasing, then choose the phrasing per question
+# 1. Dev, every phrasing the plan gives each backend, then choose the phrasing per question
 for b in $BACKENDS; do
   uv run python run.py --record --set vulnerability-triage --split dev --variant short described concrete \
-    --backend $b --url $URL --out run-output/dev--$b.json
+    --backend $b --url $URL --out run-output/dev--$b.json   # short concrete for the two noted above
 done
 for b in qwen3-4b-instruct qwen3.5-4b; do
   uv run python run.py --record --set vulnerability-triage --split dev --backend $b \
@@ -225,19 +293,19 @@ done
 python3 tune.py phrasing --calls run-output/dev--*.json
 
 # 2. Dev in the chosen phrasing, then fit the decision rules, the lanes and the cascade
-for b in $BACKENDS; do
+for b in $BACKENDS gliclass-large-v1-one-call; do
   uv run python run.py --record --set vulnerability-triage --split dev --variant tuned \
     --backend $b --url $URL --out run-output/dev-tuned--$b.json
 done
 python3 tune.py rules --calls run-output/dev-tuned--*.json
 python3 tune.py lanes --calls run-output/dev-tuned--*.json run-output/dev--qwen3-4b-instruct.json
 
-# 3. Test, once, in the tuned configuration; and the workflow set
-for b in $BACKENDS qwen3-4b-instruct; do
-  uv run python run.py --record --set vulnerability-triage --split test --backend $b --url $URL
+# 3. Test, once, in the tuned configuration; and the workflow set (the plan leaves out gliner2.5-decide)
+for b in $BACKENDS gliclass-large-v1-one-call qwen3-4b-instruct; do
+  uv run python run.py --record --set vulnerability-triage --split test --backend $b --url $URL --server-commit <sie commit>
 done
-for b in $BACKENDS; do
-  uv run python run.py --record --set workflows --backend $b --url $URL
+for b in $BACKENDS gliclass-large-v1-one-call; do
+  uv run python run.py --record --set workflows --backend $b --url $URL --server-commit <sie commit>
 done
 uv run python multitask.py --record --split test --url $URL --out run-output/multitask/test.json
 
@@ -258,7 +326,7 @@ than on every one, and their probabilities differ in the third decimal place.
 
 ## What to expect
 
-`run.py --check` prints `17856 of 17856 recorded calls rebuilt from the inputs
+`run.py --check` prints `22384 of 22384 recorded calls rebuilt from the inputs
 and matched`. It fails if a call is missing, recorded twice, implied by no
 case, or sent something other than what the inputs and `tuning.json` produce.
 
@@ -269,7 +337,7 @@ per backend and question type:
 - latency per record;
 - a per-question table.
 
-It ends with `All 24 published figures reproduced.` and exits nonzero if any
+It ends with `All 29 published figures reproduced.` and exits nonzero if any
 figure in `PUBLISHED` stops reproducing.
 
 `page.py` prints the lanes, the figures row, the cards, the catalog, the speed
@@ -286,6 +354,9 @@ claims and the cascade:
   card network-needs-login: CVE-2023-6826 (file_upload)
   card local-access: CVE-2023-44278 (path_traversal)
   ...
+  speed    attack vector: Fast's one call against Smart's one call: 65 vs 28 ms, smart 2.35x faster, claimed
+  speed    a record's three answers: Smart's one call against the LLM's one: 28 vs 2676 ms, smart 96.29x faster, claimed
+  ...
   WITHDRAWN {'catalog': 'laya-typed-decisions', 'question': 'remote_unauthenticated', 'reasons': ['balanced accuracy 0.673']}
 
 The page's cards, time medians, speed claims and withdrawals reproduced.
@@ -297,7 +368,7 @@ The page's cards, time medians, speed claims and withdrawals reproduced.
 typed-decisions/
   inputs/vulnerability-triage/cases.json  384 NVD records: description, gold, CVSS vector, CPE, source digest
   inputs/workflows/cases.json             400 typed-decisions benchmark cases with their questions and gold
-  calls.json                              17,856 calls: request digest, response, status, timing
+  calls.json                              22,384 calls: request digest, response, status, timing, server commit per recording
   summary.json                            score.py's figures for every backend, set and split
   page.json                               page.py's surfaces on the test slice
   multitask/test.json                     the GLiFormer multi-task run and its 160 embeddings
@@ -308,7 +379,12 @@ typed-decisions/
 stored as its SHA-256 (`body_sha256`), because the body is fully determined by
 the inputs and `tuning.json`. `run.py --check` rebuilds every body and compares
 digests, and `run.py --show` prints any of them. Dev calls are included, in
-every phrasing, so the tuning can be re-derived.
+every phrasing, so the tuning can be re-derived. Each recording names the
+server commit it ran against:
+- dev recordings on `28a07f5` for the backends tuned in the first run;
+- dev recordings for the one-call Smart, the re-encoded grouped instruct
+  GLiClass and GLiNER2.5-Decide on `d41ba7f`;
+- the whole test slice, the workflow set and the multi-task run on `d41ba7f`.
 
 ## The two sets
 

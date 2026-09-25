@@ -95,8 +95,8 @@ SPEED_MARGIN = 1.5
 # exits nonzero when the recording stops reproducing any of it.
 PUBLISHED = {
     "cards": ["CVE-2023-49378", "CVE-2023-6826", "CVE-2023-44278"],
-    "median_ms_per_record": {"fast": 69, "smart": 205, "llm": 2671},
-    "speed_claims": [["attack vector", False], ["a record's three answers", True]],
+    "median_ms_per_record": {"fast": 65, "smart": 28, "llm": 2676},
+    "speed_claims": [["attack vector", "smart", True], ["a record's three answers", "smart", True]],
     "withdrawn": [["laya-typed-decisions", "remote_unauthenticated"]],
 }
 
@@ -105,7 +105,9 @@ def published_failures(page: dict[str, Any]) -> list[str]:
     actual = {
         "cards": [card["case"] for card in page["cards"]],
         "median_ms_per_record": {name: round(lane["median_ms_per_record"]) for name, lane in page["board"].items()},
-        "speed_claims": [[claim["compares"].split(":")[0], claim["claimed"]] for claim in page["speed"]],
+        "speed_claims": [
+            [claim["compares"].split(":")[0], claim["faster"], claim["claimed"]] for claim in page["speed"]
+        ],
         "withdrawn": [[item.get("lane") or item.get("catalog"), item["question"]] for item in page["withdrawn"]],
     }
     return [
@@ -402,26 +404,27 @@ def speed_claims(board: dict[str, Any], latency: dict, gold: dict[str, dict[str,
         claims.append(
             (
                 "attack vector: Fast's one call against Smart's one call",
-                fast["median_ms_per_record"],
-                smart["median_ms_per_record"],
+                ("fast", fast["median_ms_per_record"]),
+                ("smart", smart["median_ms_per_record"]),
             )
         )
     if "llm" in board:
         claims.append(
             (
                 "a record's three answers: Smart's one call against the LLM's one",
-                smart["median_ms_per_record"],
-                board["llm"]["median_ms_per_record"],
+                ("smart", smart["median_ms_per_record"]),
+                ("llm", board["llm"]["median_ms_per_record"]),
             )
         )
     out = []
-    for what, first, second in claims:
+    for what, (first_lane, first), (second_lane, second) in claims:
         ratio = max(first, second) / min(first, second)
         out.append(
             {
                 "compares": what,
                 "median_ms": [first, second],
                 "ratio": ratio,
+                "faster": first_lane if first <= second else second_lane,
                 "claimed": ratio >= SPEED_MARGIN,
             }
         )
@@ -457,7 +460,7 @@ def report(page: dict[str, Any]) -> None:
         mark = "claimed" if claim["claimed"] else "not claimed"
         print(
             f"  speed    {claim['compares']}: {claim['median_ms'][0]:.0f} vs {claim['median_ms'][1]:.0f} ms, "
-            f"{claim['ratio']:.2f}x, {mark}"
+            f"{claim['faster']} {claim['ratio']:.2f}x faster, {mark}"
         )
     cascade = page["cascade"]
     print(

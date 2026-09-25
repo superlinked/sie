@@ -85,16 +85,16 @@ SUM_TOLERANCE = 0.02
 # All test slice, in each backend's tuned configuration (the LLM's described).
 VT, WF = VULNERABILITY_TRIAGE, WORKFLOWS
 PUBLISHED: dict[str, float] = {
-    # The board: Smart (knowledgator/gliclass-large-v1.0)
-    f"{VT}/gliclass-large-v1/weakness/correct": 142,
-    f"{VT}/gliclass-large-v1/weakness/balanced_accuracy": 0.887,
-    f"{VT}/gliclass-large-v1/attack_vector/correct": 147,
-    f"{VT}/gliclass-large-v1/attack_vector/balanced_accuracy": 0.796,
-    f"{VT}/gliclass-large-v1/remote_unauthenticated/correct": 115,
-    f"{VT}/gliclass-large-v1/remote_unauthenticated/balanced_accuracy": 0.725,
+    # The board: Smart (knowledgator/gliclass-large-v1.0, one call per record)
+    f"{VT}/gliclass-large-v1-one-call/weakness/correct": 142,
+    f"{VT}/gliclass-large-v1-one-call/weakness/balanced_accuracy": 0.887,
+    f"{VT}/gliclass-large-v1-one-call/attack_vector/correct": 147,
+    f"{VT}/gliclass-large-v1-one-call/attack_vector/balanced_accuracy": 0.796,
+    f"{VT}/gliclass-large-v1-one-call/remote_unauthenticated/correct": 115,
+    f"{VT}/gliclass-large-v1-one-call/remote_unauthenticated/balanced_accuracy": 0.725,
     # The figures row: Smart's pick-one and yes-or-no answers
-    f"{VT}/gliclass-large-v1/choice/accuracy": 0.903,
-    f"{VT}/gliclass-large-v1/noul/accuracy": 0.719,
+    f"{VT}/gliclass-large-v1-one-call/choice/accuracy": 0.903,
+    f"{VT}/gliclass-large-v1-one-call/noul/accuracy": 0.719,
     # The board: Fast (knowledgator/gliformer-large-v1)
     f"{VT}/gliformer-large/attack_vector/correct": 144,
     f"{VT}/gliformer-large/attack_vector/balanced_accuracy": 0.873,
@@ -108,9 +108,14 @@ PUBLISHED: dict[str, float] = {
     f"{VT}/gliclass-instruct-large/attack_vector/correct": 149,
     f"{VT}/laya/weakness/correct": 134,
     f"{VT}/laya-typed-decisions/weakness/correct": 145,
+    f"{VT}/gliner2.5-decide/weakness/correct": 146,
+    f"{VT}/gliner2.5-multi-decide/weakness/correct": 137,
+    f"{VT}/gliner2.5-decide-1b/weakness/correct": 139,
+    f"{VT}/gliner2.5-decide-1b/attack_vector/correct": 150,
+    f"{VT}/gliner2.5-decide-1b/attack_vector/balanced_accuracy": 0.852,
     # The README: computed severity, reported and not shown
-    f"{VT}/gliclass-large-v1/severity/accuracy": 0.600,
-    f"{VT}/gliclass-large-v1/severity/balanced_accuracy": 0.601,
+    f"{VT}/gliclass-large-v1-one-call/severity/accuracy": 0.606,
+    f"{VT}/gliclass-large-v1-one-call/severity/balanced_accuracy": 0.612,
     f"{VT}/qwen3-4b-instruct/severity/accuracy": 0.675,
     f"{VT}/qwen3-4b-instruct/severity/balanced_accuracy": 0.613,
     # The README: the fine-tuned Laya checkpoint on the workflow benchmark's teacher labels

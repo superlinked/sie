@@ -41,8 +41,8 @@ from pathlib import Path
 
 DATASET = "superlinked/sie-task-evidence"
 TASK = "typed-decisions"
-REVISION = "30b05245e375f15cc87aa37a1705c4aad0d26f45"
-MANIFEST_SHA256 = "24131629767bfb1d3db5c2596f153d994fb56c781c322c80dba93f18c338acfc"
+REVISION = "bcf30acf1f1b18ae550715c42eefcb0c50783578"
+MANIFEST_SHA256 = "b06b4b65afaf6dc281ffee18e147db75f36775cf66a136d3b18b575ace51cde5"
 
 BASE = f"https://huggingface.co/datasets/{DATASET}/resolve/{REVISION}/{TASK}"
 HTTP_OK = 200
