@@ -121,11 +121,13 @@ _ERR_DECODE_BUDGET = (
 
 # Span decoding work one request may do, in span_decoding's budget units
 # (about 2.5 microseconds of host work each): a floor for small requests plus
-# an allowance per billed token. The measured documents need at most about
-# 60 units per billed token (an entity-dense document with a 64-field schema
-# at threshold 0.1), so the allowance scales decode work with what is billed.
+# an allowance per billed token. Measured needs: at most 60 units per billed
+# token for one document (entity-dense, 64-field schema, threshold 0.1) and
+# 47 for 4096 short entity-dense documents with a records schema at 0.1. At
+# 96 units, decode work stays within about 240 microseconds per billed
+# token, about what large's forward pass costs per token.
 _DECODE_BUDGET_FLOOR = 262144
-_DECODE_UNITS_PER_TOKEN = 64
+_DECODE_UNITS_PER_TOKEN = 96
 
 # Distinct task prompts whose token counts are kept. A prompt depends only on
 # the request's task arguments, so a repeated task skips rebuilding and
@@ -445,7 +447,7 @@ class GLiFormerAdapter(BaseAdapter):
     are unchanged. Each document of a batch decodes as it would alone: the
     padding of shorter documents never forms spans or lowers scores.
 
-    A request's span decoding is also budgeted: 262,144 work units plus 64
+    A request's span decoding is also budgeted: 262,144 work units plus 96
     per billed token. A unit is about 2.5 microseconds of host work: one
     candidate span or record field span, 64 units per structuring proposal,
     and one per score cell when a document hits a bound. Items not yet
