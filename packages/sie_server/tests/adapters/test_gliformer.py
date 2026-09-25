@@ -1163,6 +1163,12 @@ def test_encode_rejects_non_dense_outputs() -> None:
 # -- Loading ---------------------------------------------------------------------------
 
 
+def _fake_heads() -> dict[str, Any]:
+    ner_head = MagicMock()
+    relation_head = SimpleNamespace(max_relation_entities=None, _owns_ner_head=False, _reused_ner_head=ner_head)
+    return {"ner": ner_head, "joint_relex": relation_head}
+
+
 def _fake_gliformer_module(model: MagicMock) -> ModuleType:
     module = ModuleType("gliformer")
     module.GLiFormer = MagicMock()  # type: ignore[attr-defined]
@@ -1186,8 +1192,8 @@ def _fake_gliformer_module(model: MagicMock) -> ModuleType:
 def test_load_pins_snapshot_and_places_model(device: str, precision: str | None, dtype: torch.dtype) -> None:
     model = MagicMock()
     model.config = SimpleNamespace(max_len=2048, embedding_config=SimpleNamespace(projection_dim=768))
-    relation_head = SimpleNamespace(max_relation_entities=None)
     ner_head = MagicMock()
+    relation_head = SimpleNamespace(max_relation_entities=None, _owns_ner_head=False, _reused_ner_head=ner_head)
     model.model.heads = {"joint_relex": relation_head, "ner": ner_head}
     set_eval_mode = model.eval
     tokenizer = model.data_processor.transformer_tokenizer
@@ -1238,7 +1244,7 @@ def test_load_pins_snapshot_and_places_model(device: str, precision: str | None,
 def test_per_request_eval_walks_the_model_only_when_it_is_training() -> None:
     model = MagicMock()
     model.config = SimpleNamespace(max_len=2048, embedding_config=SimpleNamespace(projection_dim=768))
-    model.model.heads = {"joint_relex": SimpleNamespace(max_relation_entities=None), "ner": MagicMock()}
+    model.model.heads = _fake_heads()
     set_eval_mode = model.eval
     set_eval_mode.side_effect = lambda: setattr(model, "training", False) or model
     model.train.side_effect = lambda mode: setattr(model, "training", mode) or model
@@ -1279,7 +1285,7 @@ def test_per_request_eval_shortcut_does_not_keep_the_model_alive() -> None:
 def test_load_rejects_embedding_dimension_mismatch() -> None:
     model = MagicMock()
     model.config = SimpleNamespace(max_len=2048, embedding_config=SimpleNamespace(projection_dim=768))
-    model.model.heads = {"joint_relex": SimpleNamespace(max_relation_entities=None), "ner": MagicMock()}
+    model.model.heads = _fake_heads()
     adapter = GLiFormerAdapter("/local/checkpoint", dense_dim=1024)
     with (
         patch.dict(sys.modules, {"gliformer": _fake_gliformer_module(model)}),

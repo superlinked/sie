@@ -439,8 +439,43 @@ def test_padding_mask_fails_closed_without_a_matching_word_mask(mask: torch.Tens
 
 def test_padding_mask_is_installed_on_the_ner_head() -> None:
     ner_head = torch.nn.Identity()
-    model = SimpleNamespace(heads={"ner": ner_head})
+    reusing = SimpleNamespace(_owns_ner_head=False, _reused_ner_head=ner_head)
+    model = SimpleNamespace(heads={"ner": ner_head, "joint_relex": reusing, "structuring": reusing})
     adapter_module._mask_padded_words(model)
     assert list(ner_head._forward_hooks.values()) == [adapter_module._mask_padded_ner_logits]
+    assert "_forward_entity_ner" not in vars(reusing)
     with pytest.raises(RuntimeError, match="no NER head"):
         adapter_module._mask_padded_words(SimpleNamespace(heads={}))
+
+
+def test_padding_mask_covers_a_head_with_its_own_ner_pass() -> None:
+    padded = torch.zeros(1, 6, 2, 3)
+    mask = torch.tensor([[1, 1, 1, 0, 0, 0]])
+    calls = []
+
+    class _StructuringHead:
+        _owns_ner_head = True
+
+        def _forward_entity_ner(self, shared: Any, flat_inputs: Any, **kwargs: Any) -> Any:
+            calls.append((shared, flat_inputs, kwargs))
+            return _head_output(padded.clone(), mask)
+
+    head = _StructuringHead()
+    adapter_module._mask_padded_words(SimpleNamespace(heads={"ner": torch.nn.Identity(), "structuring": head}))
+    output = head._forward_entity_ner("shared", "inputs", threshold=0.3)
+    assert calls == [("shared", "inputs", {"threshold": 0.3})]
+    assert bool(torch.isneginf(output.logits[0, 3:]).all())
+    assert torch.equal(output.logits[0, :3], padded[0, :3])
+
+
+@pytest.mark.parametrize(
+    "head",
+    [
+        SimpleNamespace(_owns_ner_head=False, _reused_ner_head=torch.nn.Identity()),
+        SimpleNamespace(_owns_ner_head=True),
+        SimpleNamespace(),
+    ],
+)
+def test_padding_mask_fails_closed_on_an_ner_pass_it_cannot_reach(head: Any) -> None:
+    with pytest.raises(RuntimeError, match="cannot mask"):
+        adapter_module._mask_padded_words(SimpleNamespace(heads={"ner": torch.nn.Identity(), "joint_relex": head}))

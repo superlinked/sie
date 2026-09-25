@@ -858,6 +858,11 @@ def _skip_redundant_eval(model: Any) -> None:
     model.eval = eval_if_training
 
 
+# Heads that run an NER pass for their own entity candidates, and the method
+# that returns it.
+_NER_CONSUMERS = {"joint_relex": "_forward_ner", "structuring": "_forward_entity_ner"}
+
+
 def _mask_padded_words(model: Any) -> None:
     """Keep the padding of shorter documents out of span decoding.
 
@@ -868,21 +873,44 @@ def _mask_padded_words(model: Any) -> None:
     (about 100 s for 40 short records at threshold 0.3), only for the mapping
     step to drop those spans. At any threshold, a span that ends a shorter
     document took the padding's 0.5 as its right neighbour and was reported
-    with score 0.5. The relation and structuring heads run this head for
-    their own entity candidates, so masking its output once covers every
-    decoder: padded positions get logit -inf and each document decodes as it
-    would alone.
+    with score 0.5. Padded positions get logit -inf instead, so each document
+    decodes as it would alone.
+
+    The relation and structuring heads run an NER pass for their own entity
+    candidates. When they reuse the standalone NER head, its hook covers
+    them; a head with an NER head of its own gets its NER pass masked too.
 
     Raises:
-        RuntimeError: The checkpoint has no NER head.
+        RuntimeError: The checkpoint has no NER head, or a relation or
+            structuring head runs an NER pass this cannot mask.
     """
     heads = getattr(model, "heads", None)
     if heads is None or "ner" not in heads:
         raise RuntimeError("GLiFormer checkpoint has no NER head to mask")
-    heads["ner"].register_forward_hook(_mask_padded_ner_logits)
+    ner_head = heads["ner"]
+    ner_head.register_forward_hook(_mask_padded_ner_logits)
+    for name, method in _NER_CONSUMERS.items():
+        if name not in heads:
+            continue
+        head = heads[name]
+        if getattr(head, "_owns_ner_head", None) is False and vars(head).get("_reused_ner_head") is ner_head:
+            continue
+        ner_pass = getattr(head, method, None)
+        if getattr(head, "_owns_ner_head", None) is not True or not callable(ner_pass):
+            raise RuntimeError(f"GLiFormer {name} head runs an NER pass the adapter cannot mask")
+        vars(head)[method] = _masked_ner_pass(ner_pass)
 
 
-def _mask_padded_ner_logits(_module: torch.nn.Module, _args: Any, output: Any) -> Any:
+def _masked_ner_pass(ner_pass: Callable[..., Any]) -> Callable[..., Any]:
+    """``ner_pass`` with its output's padded positions masked."""
+
+    def masked(*args: Any, **kwargs: Any) -> Any:
+        return _mask_padded_ner_logits(None, args, ner_pass(*args, **kwargs))
+
+    return masked
+
+
+def _mask_padded_ner_logits(_module: Any, _args: Any, output: Any) -> Any:
     """Forward hook: set the NER logits of padded word positions to -inf.
 
     Raises:
