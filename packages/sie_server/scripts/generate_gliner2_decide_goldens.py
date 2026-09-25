@@ -21,7 +21,7 @@ output records that stack under ``generated_with``:
 
     uv run --no-project --python 3.12 --with gliner2==2.0.0 --with transformers==5.17.0 \\
         --with torch==2.9.1 python packages/sie_server/scripts/generate_gliner2_decide_goldens.py \\
-        --model fastino/GLiNER2.5-Decide --revision 7ee5da4c2415e32259bcdc0b1a7367c32ce8d6f6 --window 1024 \\
+        --model fastino/GLiNER2.5-Decide --revision 7ee5da4c2415e32259bcdc0b1a7367c32ce8d6f6 --window 512 \\
         --out packages/sie_server/tests/adapters/goldens/gliner2_decide/fastino__GLiNER2.5-Decide.json
 """
 

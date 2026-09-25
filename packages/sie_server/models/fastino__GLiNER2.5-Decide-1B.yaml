@@ -24,7 +24,9 @@ tasks:
   encode: null
   score: null
   extract: {}
-# Tokens per item: every question's prompt and labels, then the document.
+# Tokens per item: every question's prompt and labels, then the document. The
+# Ettin encoder config sets max_position_embeddings 7999 and the tokenizer
+# model_max_length 8192; 2048 tokens stays within both.
 max_sequence_length: 2048
 profiles:
   default:

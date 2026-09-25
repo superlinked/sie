@@ -89,9 +89,10 @@ and 1,024 options in total. Question ids and group names may have 128
 characters, labels 256, and each instruction or description 2,048, with 65,536
 characters in all. Strings that contain one of the model's prompt markers
 (`[L]`, `[P]`, `[DESCRIPTION]`, ...) are refused. The questions may take at most
-512 tokens of the model's window (1,024 tokens for `GLiNER2.5-Decide`, 2,048
-for the others), which bounds the uncounted question and label tokens read with
-each item; a request needing more fails with `INPUT_TOO_LONG`. The
+512 tokens, or half the model's window when that is less: 256 of
+`GLiNER2.5-Decide`'s 512 tokens, 512 of the others' 2,048. This bounds the
+uncounted question and label tokens read with each item; a request needing more
+fails with `INPUT_TOO_LONG`. The
 document is read up to the whole words that fit in the rest of the window; a
 word longer than 4,096 characters, or text past 64 characters per token of the
 window, also ends what is read. An item none of whose words fits, or that does

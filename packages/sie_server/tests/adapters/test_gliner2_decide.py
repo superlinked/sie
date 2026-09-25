@@ -779,7 +779,7 @@ def test_loadable_checkpoint_overlays_only_the_patched_configs(monkeypatch: pyte
 # ---------------------------------------------------------------------------
 
 DECIDE_MODELS = {
-    "fastino/GLiNER2.5-Decide": ("7ee5da4c2415e32259bcdc0b1a7367c32ce8d6f6", 1024),
+    "fastino/GLiNER2.5-Decide": ("7ee5da4c2415e32259bcdc0b1a7367c32ce8d6f6", 512),
     "fastino/GLiNER2.5-multi-Decide": ("6bc1d43d201b0691e733626389af8c57eea3ea68", 2048),
     "fastino/GLiNER2.5-Decide-1B": ("52c94d3b698bf6d2619df9d898bdc1523ea3f1ca", 2048),
 }

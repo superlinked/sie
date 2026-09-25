@@ -13,7 +13,9 @@ tasks:
   encode: null
   score: null
   extract: {}
-# Tokens per item: every question's prompt and labels, then the document.
+# Tokens per item: every question's prompt and labels, then the document. The
+# checkpoint config sets max_len 4096 (gliner2 counts it in words), and the
+# tokenizer sets no length limit; 2048 tokens stays within both.
 max_sequence_length: 2048
 profiles:
   default:

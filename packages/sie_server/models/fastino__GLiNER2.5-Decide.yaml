@@ -13,8 +13,11 @@ tasks:
   encode: null
   score: null
   extract: {}
-# Tokens per item: every question's prompt and labels, then the document.
-max_sequence_length: 1024
+# Tokens per item: every question's prompt and labels, then the document. 512,
+# as for fastino/gliner2-large-v1, this model's base: its DeBERTa-v3-large encoder
+# was pretrained on 512 positions (max_position_embeddings), and neither the model
+# card nor the checkpoint config (max_len null) gives a longer length.
+max_sequence_length: 512
 profiles:
   default:
     max_batch_tokens: 16384
