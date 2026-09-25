@@ -407,7 +407,6 @@ class CudaGraphRunner:
                 self._relative_pos[padded_length] = relative_pos
         warm_up = self._stream is None
         stream = self._stream or torch.cuda.Stream(device=device)
-        self._stream = stream
         pool = next(iter(self._graphs.values())).graph.pool() if self._graphs else None
         graph = torch.cuda.CUDAGraph()
         stream.wait_stream(current)
@@ -417,6 +416,8 @@ class CudaGraphRunner:
             with torch.inference_mode(), torch.cuda.stream(stream):
                 if warm_up:
                     self._model(**{name: value[:1] for name, value in static.items()}, max_num_classes=classes)
+                    # Kept only once warmed up, so a failed warm-up is tried again.
+                    self._stream = stream
                 free_before = self._free_memory(device)
                 graph.capture_begin(pool=pool, capture_error_mode="thread_local")
                 try:

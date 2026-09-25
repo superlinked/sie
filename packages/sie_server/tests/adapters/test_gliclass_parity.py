@@ -511,6 +511,38 @@ def test_running_out_of_memory_while_recording_answers_eagerly(
 
 
 @pytest.mark.gpu_hw
+def test_a_warm_up_that_runs_out_of_memory_is_tried_again(exact_rig: _Rig, monkeypatch: pytest.MonkeyPatch) -> None:
+    items = [Item(text=text) for text in _TEXTS[:3]]
+    runner = _fresh_runner(exact_rig, monkeypatch)
+    runner._stream = None  # the next recording creates and warms up its stream
+    model = runner._model
+    failures = []
+
+    def warm_up_fails_once(**inputs: Any) -> Any:
+        # The warm-up is the only one-row forward of a three-item request.
+        if inputs["input_ids"].shape[0] == 1 and not failures:
+            failures.append(True)
+            raise torch.cuda.OutOfMemoryError("CUDA out of memory during warm-up")
+        return model(**inputs)
+
+    monkeypatch.setattr(runner, "_model", warm_up_fails_once)
+    eager = _outputs(exact_rig.adapter.extract(items, labels=_LABELS, options=_EAGER))
+    for _ in range(2):  # the second sighting records; its warm-up fails
+        assert _outputs(exact_rig.adapter.extract(items, labels=_LABELS)) == eager
+    assert failures
+    assert runner._stream is None
+    assert not runner.disabled
+
+    runner._recording_credit = 16.0  # skip the pause
+    for _ in range(2):  # warms up again, records, then replays
+        assert _outputs(exact_rig.adapter.extract(items, labels=_LABELS)) == eager
+    assert runner._stream is not None
+    assert runner.graph_count > 0
+    assert runner.replayed
+    assert not runner.disabled
+
+
+@pytest.mark.gpu_hw
 def test_a_forward_that_cannot_be_recorded_falls_back_to_eager(monkeypatch: pytest.MonkeyPatch) -> None:
     if not torch.cuda.is_available():
         pytest.skip("requires CUDA")
