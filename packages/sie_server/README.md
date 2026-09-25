@@ -103,15 +103,15 @@ two labels:
 
 | Model | Largest probability change | Top label changed | Shipped profile |
 |--|--|--|--|
-| `gliclass-small-v1.0` | 0.004 | 3 answers | `off` |
-| `gliclass-base-v1.0` | 0.005 | none | `bucketed` |
-| `gliclass-large-v1.0` | 0.006 | none | `bucketed` |
-| `gliclass-base-v3.0` | 0.005 | 3 | `off` |
-| `gliclass-large-v3.0` | 0.009 | 3 | `off` |
-| `gliclass-instruct-base-v1.0` | 0.008 | 12 | `off` |
-| `gliclass-instruct-large-v1.0` | 0.010 | 18 | `off` |
-| `opir-multitask-large-v1.0` | 0.014 | none | `bucketed` |
-| `gliclass-multilang-mini` (100 descriptions, no joint groups: 2,016 answers) | 0.023 | 3 | `off` |
+| `gliclass-small-v1.0` | 0.0039 | 3 answers | `off` |
+| `gliclass-base-v1.0` | 0.0049 | none | `bucketed` |
+| `gliclass-large-v1.0` | 0.0056 | none | `bucketed` |
+| `gliclass-base-v3.0` | 0.0054 | 3 | `off` |
+| `gliclass-large-v3.0` | 0.0093 | 3 | `off` |
+| `gliclass-instruct-base-v1.0` | 0.0076 | 12 | `off` |
+| `gliclass-instruct-large-v1.0` | 0.0098 | 18 | `off` |
+| `opir-multitask-large-v1.0` | 0.0144 | none | `bucketed` |
+| `gliclass-multilang-mini` (100 descriptions, no joint groups: 2,016 answers) | 0.0227 | 3 | `off` |
 
 `exact` changed nothing.
 
