@@ -263,12 +263,20 @@ class TestRecordingPolicy:
         assert runner.run(_inputs(1, 100), 4, "bucketed") is None
         assert runner.recorded == []
 
-    def test_running_out_of_memory_while_recording_drops_the_graphs_and_raises(self) -> None:
+    @pytest.mark.parametrize(
+        "error",
+        [
+            torch.cuda.OutOfMemoryError("CUDA out of memory"),
+            RuntimeError("CUDA error: out of memory"),
+            RuntimeError("CUBLAS_STATUS_ALLOC_FAILED: failed to allocate workspace"),
+        ],
+    )
+    def test_running_out_of_memory_while_recording_drops_the_graphs_and_raises(self, error: Exception) -> None:
         runner = _Runner()
         runner.run(_inputs(1, 100), 4, "bucketed")
-        runner.fail = torch.cuda.OutOfMemoryError("CUDA out of memory")
+        runner.fail = error
 
-        with pytest.raises(torch.cuda.OutOfMemoryError):
+        with pytest.raises(type(error)):
             runner.run(_inputs(1, 200), 4, "bucketed")
 
         assert runner.graph_count == 0
@@ -326,11 +334,14 @@ def test_segment_ids_are_the_libraries_own(rows: list[list[int]]) -> None:
 
 
 class _Pipe:
+    def __init__(self, error: Exception | None = None) -> None:
+        self.error = error or torch.cuda.OutOfMemoryError("CUDA out of memory")
+
     def _resolve_max_num_classes(self, labels: list[str], same_labels: bool) -> int:
         return len(labels)
 
     def model(self, **_: Any) -> Any:
-        raise torch.cuda.OutOfMemoryError("CUDA out of memory")
+        raise self.error
 
 
 def _adapter_with(runner: _Runner) -> GLiClassAdapter:
@@ -351,6 +362,28 @@ def test_an_eager_out_of_memory_drops_the_graphs() -> None:
     assert runner.graph_count == 0
     assert runner.recorded == [(1, 128, 2)]
     assert not runner.disabled
+
+
+def test_an_eager_error_worded_as_out_of_memory_drops_the_graphs() -> None:
+    runner = _Runner()
+    runner.run(_inputs(1, 100), 2, "bucketed")
+    pipe = _Pipe(RuntimeError("CUDA error: out of memory"))
+
+    with pytest.raises(RuntimeError):
+        _adapter_with(runner)._forward(pipe, _inputs(1, 100), ["a", "b"], same_labels=True, graphs="off")
+
+    assert runner.graph_count == 0
+
+
+def test_other_eager_errors_keep_the_graphs() -> None:
+    runner = _Runner()
+    runner.run(_inputs(1, 100), 2, "bucketed")
+    pipe = _Pipe(ValueError("bad input"))
+
+    with pytest.raises(ValueError, match="bad input"):
+        _adapter_with(runner)._forward(pipe, _inputs(1, 100), ["a", "b"], same_labels=True, graphs="off")
+
+    assert runner.graph_count == 1
 
 
 def test_an_out_of_memory_error_in_a_replay_drops_the_graphs() -> None:

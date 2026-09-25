@@ -77,6 +77,7 @@ from sie_server.adapters.errors import InputTooLongError
 from sie_server.adapters.gliclass.cuda_graphs import GRAPH_MODES, CudaGraphRunner, GraphMode, unsupported_reason
 from sie_server.core.extract_cost import MAX_EXTRACT_LABELS
 from sie_server.core.inference_output import ExtractItemError, ExtractOutput
+from sie_server.core.oom import is_oom_error
 from sie_server.types.inputs import InvalidInputError
 from sie_server.types.overflow_policy import DEFAULT_OVERFLOW_POLICY, OverflowPolicy
 from sie_server.types.responses import Classification, ErrorCode
@@ -988,10 +989,10 @@ class GLiClassAdapter(BaseAdapter):
                 if logits is not None:
                     return logits
             return pipe.model(**inputs, **forward_kwargs).logits
-        except torch.cuda.OutOfMemoryError:
+        except Exception as exc:
             # Graph memory is held until its graphs go; drop them so the
             # worker's OOM recovery can reuse it.
-            if self._graphs is not None:
+            if self._graphs is not None and is_oom_error(exc):
                 self._graphs.clear()
             raise
 
