@@ -236,6 +236,11 @@ class CudaGraphRunner:
             try:
                 self._recording_credit -= 1
                 entry, logits = self._record(key, inputs)
+            except torch.cuda.OutOfMemoryError:
+                # Not a reason to stop recording: release the graphs and let
+                # the worker's OOM recovery see the error.
+                self.clear()
+                raise
             except Exception:  # noqa: BLE001 -- a graph that cannot be recorded runs eagerly
                 logger.warning("GLiClass CUDA graph recording failed; running eagerly from now on", exc_info=True)
                 self.clear()

@@ -61,7 +61,7 @@ class _Runner(CudaGraphRunner):
     memory to spare unless a test clears ``headroom``.
     """
 
-    def __init__(self, model: Any = None, *, fail: bool = False, **kwargs: Any) -> None:
+    def __init__(self, model: Any = None, *, fail: bool | Exception = False, **kwargs: Any) -> None:
         self.now = 0.0
         super().__init__(model or _model(), pad_token_id=0, max_length=512, clock=lambda: self.now, **kwargs)
         self.recorded: list[tuple[int, int, int]] = []
@@ -74,6 +74,8 @@ class _Runner(CudaGraphRunner):
         return self.headroom
 
     def _record(self, key: Any, inputs: dict[str, torch.Tensor]) -> Any:
+        if isinstance(self.fail, Exception):
+            raise self.fail
         if self.fail:
             raise RuntimeError("operation not permitted when stream is capturing")
         self.recorded.append(key)
@@ -260,6 +262,18 @@ class TestRecordingPolicy:
         runner.fail = False
         assert runner.run(_inputs(1, 100), 4, "bucketed") is None
         assert runner.recorded == []
+
+    def test_running_out_of_memory_while_recording_drops_the_graphs_and_raises(self) -> None:
+        runner = _Runner()
+        runner.run(_inputs(1, 100), 4, "bucketed")
+        runner.fail = torch.cuda.OutOfMemoryError("CUDA out of memory")
+
+        with pytest.raises(torch.cuda.OutOfMemoryError):
+            runner.run(_inputs(1, 200), 4, "bucketed")
+
+        assert runner.graph_count == 0
+        assert not runner.disabled  # memory pressure is not a reason to stop recording
+        assert not cuda_graphs_module._RECORDING_LOCK.locked()
 
     def test_unexpected_inputs_run_eagerly(self) -> None:
         runner = _Runner()
