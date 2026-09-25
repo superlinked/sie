@@ -623,6 +623,19 @@ def test_reading_from_the_end_keeps_the_tail_of_an_overlong_run(monkeypatch: pyt
     assert "old" not in document
 
 
+def test_a_conversation_cut_inside_an_overlong_run_is_not_whole() -> None:
+    adapter, _ = make_adapter(window=2048)
+    item = Item(metadata={"state": ["older turn", "x" * 5000]})  # the newest run's tail fits in the room
+
+    read = adapter.extract([item], labels=["yes", "no"])
+    strict = adapter.extract([item], labels=["yes", "no"], options={"overflow_policy": "error"})
+
+    assert read.errors is None
+    assert strict.errors is not None
+    assert strict.errors[0] is not None
+    assert strict.errors[0].code == "INPUT_TOO_LONG"
+
+
 def test_label_groups_answer_like_gliclass(monkeypatch: pytest.MonkeyPatch) -> None:
     adapter, _ = make_adapter()
     output = adapter.extract(

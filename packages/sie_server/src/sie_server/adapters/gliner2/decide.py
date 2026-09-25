@@ -640,6 +640,9 @@ class GLiNER2DecideAdapter(BaseAdapter):
         used = 0
         complete = whole
         for word, start, end in words:
+            if not word:  # _words_from_end cut an overlong run here: older text is not read
+                complete = False
+                break
             reach = len(normalized) - start if from_end else end
             if end - start > _MAX_WORD_CHARS or reach > char_limit or len(kept) >= max_words:
                 complete = False
@@ -660,7 +663,11 @@ class GLiNER2DecideAdapter(BaseAdapter):
         )
 
     def _words_from_end(self, text: str) -> Iterator[tuple[str, int, int]]:
-        """The words of ``text``, last first; a run longer than ``_MAX_WORD_CHARS`` yields only its tail's words."""
+        """The words of ``text``, last first.
+
+        A run longer than ``_MAX_WORD_CHARS`` yields only its tail's words, then
+        an empty word marking the cut (the splitter never yields an empty word).
+        """
         for run in reversed([match.span() for match in _RUN.finditer(text)]):
             begin, end = run
             cut = max(begin, end - _MAX_WORD_CHARS)
@@ -668,6 +675,7 @@ class GLiNER2DecideAdapter(BaseAdapter):
             for word, start, stop in reversed(words):
                 yield word, cut + start, cut + stop
             if cut > begin:
+                yield "", cut, cut
                 return
 
     def _score(self, rows: list[list[int]], label_positions: list[int]) -> np.ndarray:
