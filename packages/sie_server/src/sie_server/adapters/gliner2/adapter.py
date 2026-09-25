@@ -663,8 +663,9 @@ class GLiNER2Adapter(BaseAdapter):
         """The prefix of ``text`` holding every word gliner2 reads from it, or ``text``.
 
         gliner2 splits all of a text into words and keeps the first ``max_len``.
-        The prefix ending where the last kept word ends gives it the same words
-        at the same offsets, since no word crosses that point. gliner2 1.x
+        The prefix ending where the last kept word ends (with the whitespace
+        after it) gives it the same words at the same offsets, since no word
+        crosses that point. gliner2 1.x
         splits the lowercased text and indexes the original with those offsets,
         so the prefix ends at the lowercased offset; it is used only when its
         lowercase starts the lowercased text (a final sigma can lowercase
@@ -679,6 +680,10 @@ class GLiNER2Adapter(BaseAdapter):
             if count == limit:
                 cut = end
                 break
+        if cut is not None and cut < len(source) and source[cut].isspace():
+            # Keep the separator: gliner2 ends a text without a sentence end with
+            # ".", which a URL word (running to whitespace) would absorb.
+            cut += 1
         if cut is None or cut >= len(text):
             return text
         prefix = text[:cut]

@@ -130,6 +130,8 @@ LONG_TEXTS = [
     ". " * 400 + "end",
     "." * 5000,
     "a." * 3000,
+    "see http://example.com/a?b=c " * 60,
+    "www.example.org\tthen text\n" * 60,
 ]
 LONG_TEXT_IDS = [
     "prose",
@@ -142,6 +144,8 @@ LONG_TEXT_IDS = [
     "spaced-dots",
     "dots",
     "a-dots",
+    "url-at-cut",
+    "www-at-cut",
 ]
 
 
@@ -175,6 +179,17 @@ def test_the_prefix_gives_gliner2_the_same_input_as_the_whole_text(text: str, ma
     assert text.startswith(prefix)
     assert collated(processor, prefix, max_len) == reference
     assert collated(processor, text, max_len) == reference  # and the linear splitter on the whole text
+
+
+@pytest.mark.parametrize("max_len", [1, 2])
+def test_a_url_at_the_cut_keeps_its_separator(max_len: int) -> None:
+    # gliner2 ends a text without a sentence end with ".", which a URL word would absorb.
+    text = "http://example.com rest of the text"
+    adapter = GLiNER2Adapter("fake/gliner2", max_seq_length=max_len)
+    processor = make_processor()
+    reference = collated(processor, text, max_len)
+    adapter._use_linear_word_splitter(processor)
+    assert collated(processor, adapter._model_text(text), max_len) == reference
 
 
 def test_prefixes_are_short_for_long_documents() -> None:
