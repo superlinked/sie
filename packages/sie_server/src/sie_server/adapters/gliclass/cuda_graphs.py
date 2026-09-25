@@ -266,6 +266,7 @@ class CudaGraphRunner:
                     return None
                 self._graphs[key] = entry
                 self._device_bytes += entry.device_bytes
+                del entry  # the cache holds the only reference, so dropping it frees the graph
                 while len(self._graphs) > self._max_graphs:
                     self._graphs.popitem(last=False)
                 self._drop_unused_tables()
@@ -275,6 +276,7 @@ class CudaGraphRunner:
                         self._device_bytes // 2**20,
                     )
                     self.clear()
+                    # With every graph gone, their pool can go back to the device.
                     torch.cuda.empty_cache()
                 return logits
             finally:

@@ -464,6 +464,25 @@ def test_bucketed_cuda_graphs_stay_close_to_eager(
 
 
 @pytest.mark.gpu_hw
+def test_graphs_over_their_memory_budget_are_dropped(exact_rig: _Rig, monkeypatch: pytest.MonkeyPatch) -> None:
+    items = [Item(text=text) for text in _TEXTS]
+    runner = _fresh_runner(exact_rig, monkeypatch)
+    monkeypatch.setattr(runner, "_memory_budget", lambda device: 0)  # every recording goes over
+
+    eager = _outputs(exact_rig.adapter.extract(items, labels=_LABELS, options=_EAGER))
+    torch.cuda.synchronize()
+    reserved = torch.cuda.memory_reserved()
+    for _ in range(3):
+        assert _outputs(exact_rig.adapter.extract(items, labels=_LABELS)) == eager
+
+    assert runner.graph_count == 0
+    assert not runner.disabled
+    assert runner._device_bytes == 0
+    # The dropped graphs' pool went back to the device.
+    assert torch.cuda.memory_reserved() <= reserved
+
+
+@pytest.mark.gpu_hw
 def test_a_forward_that_cannot_be_recorded_falls_back_to_eager(monkeypatch: pytest.MonkeyPatch) -> None:
     if not torch.cuda.is_available():
         pytest.skip("requires CUDA")
