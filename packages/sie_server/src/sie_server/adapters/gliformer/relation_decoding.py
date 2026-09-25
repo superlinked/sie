@@ -166,7 +166,10 @@ def _row_relations(
     """
     pair_count, type_count = probs.shape
     if allowance is not None:
-        allowance.spend(-(-(pair_count * type_count) // _CELLS_PER_UNIT))
+        # Only this document's own pairs are charged: the pair axis is padded
+        # to the document with the most pairs in the batch.
+        pairs_here = pair_count if pair_mask is None else int(pair_mask.sum())
+        allowance.spend(-(-(pairs_here * type_count) // _CELLS_PER_UNIT))
     passing = ~(probs.detach().to(device="cpu", dtype=torch.float64) <= threshold)
     if pair_mask is not None:
         passing &= pair_mask.detach().cpu().bool()[:, None]

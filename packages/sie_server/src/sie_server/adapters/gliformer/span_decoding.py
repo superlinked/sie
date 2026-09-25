@@ -300,9 +300,10 @@ def _bounded_pairs(
     just below it in their original order.
 
     With an ``allowance``, counting the pairs costs one unit per 32 score
-    cells, each kept pair ``unit_cost`` units, and finding a cut one unit per
-    score cell; the row keeps as many pairs as its allowance affords, the
-    same best-first prefix, and none if it cannot afford the cut.
+    cells up to one past the last candidate, each kept pair ``unit_cost``
+    units, and finding a cut one unit per such cell; the row keeps as many
+    pairs as its allowance affords, the same best-first prefix, and none if
+    it cannot afford the cut.
 
     Returns:
         ``(span_start, span_end, label, score)`` arrays.
@@ -310,6 +311,17 @@ def _bounded_pairs(
     empty = np.empty(0, dtype=np.int64)
     if s_pos.size == 0 or e_pos.size == 0:
         return empty, empty, empty, np.empty(0, dtype=np.float32)
+    # Candidates lie within the document: the padding after a shorter
+    # document scores zero and never passes. Reading only the positions up to
+    # one past the last candidate gives the same pairs and scores, and makes
+    # the work, and its cost, depend on the document alone rather than on the
+    # longest document it is batched with.
+    document_reach = int(max(s_pos.max(), e_pos.max())) + 2
+    extent = min(inside.shape[0], document_reach)
+    bad, inside = bad[:extent], inside[:extent]
+    start_scores, end_scores = start_scores[:extent], end_scores[:extent]
+    if outside is not None:
+        outside = outside[:extent]
     length, labels = inside.shape
     positions = np.arange(length, dtype=np.int64)[:, None]
     infinite = np.float32(np.inf)
@@ -382,7 +394,7 @@ def _bounded_pairs(
         return score
 
     total = int(per_start(None).sum())
-    cells = length * labels
+    cells = document_reach * labels  # the same whether or not the row ends with the document
     limit = max_candidates
     if allowance is not None:
         allowance.spend(-(-cells // _COUNT_CELLS_PER_UNIT))

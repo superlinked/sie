@@ -240,12 +240,20 @@ def test_allowances_belong_to_rows() -> None:
     assert allowance.remaining == 0
 
 
+def _cells(logits: torch.Tensor, threshold: float) -> int:
+    """Score cells a row is charged for: its labels, up to one past its last start or end."""
+    probs = torch.sigmoid(logits.float())
+    passing = ((probs[..., 0] > threshold) | (probs[..., 1] > threshold)).any(dim=1)
+    return (int(passing.nonzero().max()) + 2) * logits.shape[1]
+
+
 def test_pairing_within_an_allowance_keeps_the_best_first_prefix() -> None:
     logits = _bio_scores(2, length=80, labels=3, dtype=torch.float32)
     names = {0: "a", 1: "b", 2: "c"}
     full = _upstream(logits, names, 0.1)
-    count_cost = -(-80 * 3 // 32)
-    with span_decoding.document_allowances([10**9, count_cost + len(full), count_cost + 80 * 3 + 10, 50]) as rows:
+    cells = _cells(logits, 0.1)
+    count_cost = -(-cells // 32)
+    with span_decoding.document_allowances([10**9, count_cost + len(full), count_cost + cells + 10, 50]) as rows:
         results = []
         for row in range(4):
             with span_decoding.decoding_row(row):
@@ -270,19 +278,52 @@ def test_candidate_units_raise_the_cost_of_each_span() -> None:
     with span_decoding.document_allowances([10**9]) as rows, span_decoding.decoding_row(0):
         with span_decoding.candidate_units(64):
             _bounded(logits, names, 0.2)
-    assert 10**9 - rows[0].remaining == -(-40 * 2 // 32) + 64 * len(full)
+    assert 10**9 - rows[0].remaining == -(-_cells(logits, 0.2) // 32) + 64 * len(full)
 
 
 def test_proposals_within_an_allowance_keep_the_best_first_prefix() -> None:
     scores = _bio_scores(8, length=30, labels=3, dtype=torch.float32).unsqueeze(0)
     ranked = _ranked_proposals(scores[0], 0.1)
-    count_cost = -(-30 * 3 // 32)
-    units = count_cost + 30 * 3 + span_decoding.PROPOSAL_UNITS * 5
+    cells = _cells(scores[0], 0.1)
+    units = -(-cells // 32) + cells + span_decoding.PROPOSAL_UNITS * 5
     with span_decoding.document_allowances([units]) as rows:
         kept = _proposals(*_propose(scores, 0.1))[0]
     assert len(ranked) > 5
     assert kept == [(item.start, item.end) for item in _head(ranked, 5)]
     assert rows[0].remaining == 0
+
+
+def _padded(logits: torch.Tensor, positions: int) -> torch.Tensor:
+    """``logits`` followed by padded positions, as the padding mask leaves them."""
+    padding = torch.full((positions, *logits.shape[1:]), float("-inf"), dtype=logits.dtype)
+    return torch.cat([logits, padding])
+
+
+@pytest.mark.parametrize("units", [10**9, 300])
+def test_pairing_costs_the_same_however_far_the_batch_pads_the_document(units: int) -> None:
+    logits = _bio_scores(5, length=40, labels=3, dtype=torch.float32)
+    names = {0: "a", 1: "b", 2: "c"}
+    kept, spent = [], []
+    for row_logits in (logits, _padded(logits, 400)):
+        with span_decoding.document_allowances([units]) as rows, span_decoding.decoding_row(0):
+            kept.append(_as_tuples(_bounded(row_logits, names, 0.1)))
+        spent.append(units - rows[0].remaining)
+    assert kept[0]
+    assert kept[0] == kept[1]
+    assert spent[0] == spent[1]
+    assert units > 10**6 or len(kept[0]) < len(_upstream(logits, names, 0.1))
+
+
+def test_proposals_cost_the_same_however_far_the_batch_pads_the_document() -> None:
+    logits = _bio_scores(6, length=30, labels=3, dtype=torch.float32)
+    kept, spent = [], []
+    for row_logits in (logits, _padded(logits, 300)):
+        with span_decoding.document_allowances([10**9]) as rows:
+            kept.append(_proposals(*_propose(row_logits.unsqueeze(0), 0.1))[0])
+        spent.append(10**9 - rows[0].remaining)
+    assert kept[0]
+    assert kept[0] == kept[1]
+    assert spent[0] == spent[1]
 
 
 # -- Structuring span proposals ---------------------------------------------------
@@ -815,6 +856,23 @@ def test_relations_within_an_allowance_keep_the_best_first_prefix() -> None:
     head = {id(item.triple) for item in _head(_scored(full), 4)}
     assert capped == [triple for triple in full if id(triple) in head]
     assert rows[0].remaining == 0
+
+
+def test_relations_cost_the_same_however_far_the_batch_pads_the_pairs() -> None:
+    output = _relation_output(7, rows=1, pairs=60, types=6)
+    padded = _relation_output(7, rows=1, pairs=60, types=6)
+    padded.joint_rel_logits = torch.cat([output.joint_rel_logits, torch.full((1, 500, 6), 3.0)], 1)
+    padded.joint_rel_idx = torch.cat([output.joint_rel_idx, torch.zeros(1, 500, 2, dtype=torch.long)], 1)
+    padded.joint_rel_mask = torch.cat([output.joint_rel_mask, torch.zeros(1, 500, dtype=torch.bool)], 1)
+    kwargs = {"threshold": 0.1, "texts": [[f"w{i}" for i in range(30)]]}
+    kept, spent = [], []
+    for relation_output in (output, padded):
+        with span_decoding.document_allowances([10**9]) as rows:
+            kept.append(_RELATIONS.decode(relation_output, **kwargs))
+        spent.append(10**9 - rows[0].remaining)
+    assert _flat(kept[0])
+    assert kept[0] == kept[1]
+    assert spent[0] == spent[1]
 
 
 def test_relation_cells_that_all_fail_decode_quickly() -> None:
