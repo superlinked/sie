@@ -123,24 +123,26 @@ Opir edge models), CPU and MPS run eagerly with any value, and the load logs a
 warning.
 
 Nothing is recorded at load. A shape is recorded the first time a request
-needs it (the second time in `exact` mode), and that request takes about two
-eager forwards. A model keeps at most 64 graphs, least recently used first
-out. A graph holds at most four full windows of tokens (2,048 on a 512-token
-model); larger forwards are bound by the GPU rather than by kernel launches
-and run eagerly.
+needs it (the second time in `exact` mode), and that request takes a little
+over two eager forwards (76 ms against 33 ms on `gliclass-large-v1.0` on an
+L4). A model keeps at most 64 graphs, least recently used first
+out. A graph holds at most 2,048 tokens (batch times padded length); larger
+forwards are bound by the GPU rather than by kernel launches and run eagerly.
 
 **Memory, and other models on the same GPU.** Graph memory counts as device
 memory in use, but it is not attributed to the model: under memory pressure
 the server evicts whole models, least recently used first, which may be
-another model. On `gliclass-large-v1.0` in `bucketed` mode, the 31 graphs
-recorded for the CVE descriptions above added 298 MB: a 232 MB graph pool,
-60 MB cached on the recording stream (its cuBLAS workspace and one warm-up
-row) and 5 MB of relative-position tables. In `exact` mode, 64 graphs of the
-same traffic added 184 MB. A model's graphs share one pool, which grows with
-the shapes recorded and with fragmentation between them: one graph of the
-largest shape allowed (4 × 512 tokens) needs 332 MB on its own. Graphs are
-released when the model unloads, and when one of its forwards runs out of
-memory.
+another model. A model's graphs share one memory pool, and the driver keeps a
+copy of each graph: about 8 MB for a `gliclass-large-v1.0` forward. On
+`gliclass-large-v1.0` in `bucketed` mode, the 31 graphs recorded for the CVE
+descriptions above took 555 MB of device memory: 490 MB for the pool and
+the graphs, 60 MB cached on the recording stream (its cuBLAS workspace and one
+warm-up row) and 5 MB of relative-position tables. The pool keeps what evicted
+graphs used, so traffic with many shapes keeps growing it. The runner therefore
+adds up the device memory its recordings take, and past 4% of the device's
+memory (900 MB on an L4) it drops every graph, returns their memory to the
+device and records again. Graphs are also released when the model unloads, and
+when one of its forwards runs out of memory.
 
 While a graph records, PyTorch's caching allocator does not free cached blocks
 to satisfy other allocations, so another model on the same GPU that needs
