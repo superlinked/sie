@@ -341,14 +341,15 @@ class GLiFormerAdapter(BaseAdapter):
     root enums only) accept any threshold from 0, where every question gets
     its best answer.
 
-    Span decoding is bounded: a document keeps at most 4096 candidate spans
-    for entities and relation endpoints, and at most 4096 structuring
-    proposals, each record slot at most 4096 candidate fields. Beyond that
-    only the highest-scoring candidates are kept, and candidates tied at the
-    cut are dropped together; ordinary documents stay far below the bound, so
-    their results are unchanged. Each document of a batch decodes as it would
-    alone: the padding of shorter documents never forms spans or lowers
-    scores.
+    Span decoding is bounded per document: at most 4096 candidate spans for
+    entities and relation endpoints, 2048 structuring proposals, and 65,536
+    record field spans across all record slots. Beyond that a document keeps
+    the candidates overlap removal would take first (best score first, and
+    among equal scores in GLiFormer's own order), so it loses only results
+    that rank below every kept one; nothing in the output marks such a
+    document. The measured documents stay below every bound, so their results
+    are unchanged. Each document of a batch decodes as it would alone: the
+    padding of shorter documents never forms spans or lowers scores.
 
     ``options["relation_threshold"]`` raises the minimum score for relations
     only. GLiFormer decodes entities and relations with one threshold, so it

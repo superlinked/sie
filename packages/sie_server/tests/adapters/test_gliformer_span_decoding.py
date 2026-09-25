@@ -107,13 +107,10 @@ def test_scores_at_the_threshold_compare_as_the_package_does() -> None:
     assert _as_tuples(_bounded(logits, {0: "x"}, threshold)) == _as_tuples(expected)
 
 
-def _cut(spans: list[Any], limit: int) -> float | None:
-    """Score of the lowest kept candidate: at most ``limit`` kept, ties kept together."""
-    scores = sorted((span.score for span in spans), reverse=True)
-    kept = min(limit, len(scores))
-    while kept and kept < len(scores) and scores[kept - 1] == scores[kept]:
-        kept -= 1
-    return scores[kept - 1] if kept else None
+def _head(items: list[Any], limit: int) -> list[Any]:
+    """The first ``limit`` items overlap removal would take (stable, best score first), in their order."""
+    taken = set(sorted(range(len(items)), key=lambda index: -items[index].score)[:limit])
+    return [item for index, item in enumerate(items) if index in taken]
 
 
 @pytest.mark.parametrize("limit", [1, 7, 50, 200])
@@ -124,28 +121,38 @@ def test_capped_pairing_keeps_the_best_candidates_in_order(seed: int, limit: int
     full = _upstream(logits, names, 0.1)
     assert len(full) > limit
     capped = _bounded(logits, names, 0.1, max_candidates=limit)
-    cut = _cut(full, limit)
-    expected = [span for span in full if cut is not None and span.score >= cut]
-    assert _as_tuples(capped) == _as_tuples(expected)
-    assert len(capped) <= limit
-    # Overlap removal takes spans best first, so the cut only drops spans
-    # that rank below it.
+    assert _as_tuples(capped) == _as_tuples(_head(full, limit))
+    # Overlap removal takes spans best first, so the capped result is the
+    # head of the full one: the spans it would have kept first.
     for flat_ner in (True, False):
         for multi_label in (True, False):
             kept = select_spans(capped, flat_ner, multi_label)
             everything = _UPSTREAM_GREEDY(_DECODER, full, flat_ner, multi_label)
-            assert _as_tuples(kept) == _as_tuples([s for s in everything if cut is not None and s.score >= cut])
+            head = {id(span) for span in _head(full, limit)}
+            assert _as_tuples(kept) == _as_tuples([span for span in everything if id(span) in head])
 
 
-def test_capped_pairing_drops_candidates_tied_at_the_cut_together() -> None:
-    # Three identical one-word entities: all tie, so a cap of 2 keeps none.
+def test_capped_pairing_keeps_tied_candidates_in_the_package_order() -> None:
+    # Three identical one-word entities tie: a cap of 2 keeps the first two.
     logits = torch.full((5, 1, 3), -8.0)
     for position in (0, 2, 4):
         logits[position, 0] = 6.0
     names = {0: "x"}
-    assert len(_bounded(logits, names, 0.5)) == 3
-    assert _bounded(logits, names, 0.5, max_candidates=2) == []
-    assert len(_bounded(logits, names, 0.5, max_candidates=3)) == 3
+    assert [span.start for span in _bounded(logits, names, 0.5)] == [0, 2, 4]
+    assert [span.start for span in _bounded(logits, names, 0.5, max_candidates=2)] == [0, 2]
+    assert [span.start for span in _bounded(logits, names, 0.5, max_candidates=1)] == [0]
+
+
+def test_capped_pairing_fills_the_cap_from_a_large_tie() -> None:
+    # Saturated scores: every start, end, and inside probability is 1, so all
+    # spans away from the edges tie at 0 (their outside neighbour is 1).
+    logits = torch.full((300, 2, 3), 30.0)
+    names = {0: "a", 1: "b"}
+    full = _upstream(logits[:60], names, 0.5)
+    assert len({span.score for span in full}) == 2
+    for limit in (1, 2, 3, 100, 1000):
+        assert _as_tuples(_bounded(logits[:60], names, 0.5, max_candidates=limit)) == _as_tuples(_head(full, limit))
+    assert len(_bounded(logits, names, 0.5)) == MAX_SPAN_CANDIDATES
 
 
 def _random_spans(seed: int, count: int, length: int) -> list[Any]:
@@ -168,6 +175,24 @@ def test_overlap_removal_matches_the_package(seed: int, flat_ner: bool, multi_la
     expected = _UPSTREAM_GREEDY(_DECODER, list(spans), flat_ner, multi_label)
     assert select_spans(list(spans), flat_ner, multi_label) == expected
     assert select_spans([], flat_ner, multi_label) == []
+
+
+@pytest.mark.parametrize("multi_label", [False, True])
+def test_nested_overlap_removal_matches_the_package_on_chains_and_crossings(multi_label: bool) -> None:
+    rng = random.Random(7)  # noqa: S311 -- reproducible test data
+    # Fully nested chains, their crossings, and long spans, with ties.
+    spans = [upstream.Span(start=i, end=400 - i, entity_type="a", score=rng.choice((0.5, 0.9))) for i in range(200)]
+    spans += [upstream.Span(start=i + 1, end=401 - i, entity_type="b", score=rng.random()) for i in range(200)]
+    spans += [upstream.Span(start=i, end=i, entity_type="c", score=rng.random()) for i in range(0, 400, 7)]
+    spans += [upstream.Span(start=s, end=s, entity_type="d", score=0.5) for s in (3, 3, 5)]
+    rng.shuffle(spans)
+    assert select_spans(list(spans), False, multi_label) == _UPSTREAM_GREEDY(_DECODER, list(spans), False, multi_label)
+
+
+def test_fully_nested_spans_are_removed_quickly() -> None:
+    spans = [upstream.Span(start=i, end=8190 - i, entity_type="a", score=1.0 - i / 8192) for i in range(4095)]
+    kept = select_spans(spans, False, False)
+    assert len(kept) == 4095
 
 
 def test_overlap_removal_through_the_decoder_class_uses_the_bounded_code() -> None:
@@ -255,10 +280,8 @@ def test_capped_proposals_keep_the_best_in_order(limit: int) -> None:
     ranked = _ranked_proposals(scores[0], 0.1)
     assert [(item.start, item.end) for item in ranked] == _proposals(*extract_spans_from_tokens(scores, None, 0.1))[0]
     assert len(ranked) > limit
-    cut = _cut(ranked, limit)
     kept = _proposals(*_propose(scores, 0.1, max_candidates=limit))[0]
-    assert len(kept) <= limit
-    assert kept == [(item.start, item.end) for item in ranked if cut is not None and item.score >= cut]
+    assert kept == [(item.start, item.end) for item in _head(ranked, limit)]
 
 
 def test_worst_case_proposals_are_bounded() -> None:
@@ -307,41 +330,49 @@ def test_structuring_decode_without_outputs_matches_the_package() -> None:
     assert _STRUCTURING.decode(empty) == _UPSTREAM_STRUCTURING_DECODE(_STRUCTURING, empty) == []
 
 
-@pytest.mark.parametrize("limit", [1, 5, 30])
-def test_capped_slots_keep_their_best_spans(limit: int) -> None:
-    output = _structuring_output(3, groups=1, slots=4, entities=40, fields=5)
-    args = (
-        torch.sigmoid(output.structuring_logits[0]),
-        torch.sigmoid(output.structuring_field_logits[0]),
+def _slot_args(seed: int, *, slots: int = 4, entities: int = 40, fields: int = 5, saturate: bool = False) -> tuple:
+    output = _structuring_output(seed, groups=1, slots=slots, entities=entities, fields=fields)
+    membership = torch.sigmoid(output.structuring_logits[0])
+    field_probs = torch.sigmoid(output.structuring_field_logits[0])
+    if saturate:
+        membership = torch.ones_like(membership)
+        field_probs = torch.ones_like(field_probs)
+    return (
+        membership,
+        field_probs,
         output.structuring_span_idx[0],
         torch.where(output.structuring_span_mask[0])[0],
         None,
         0.1,
-        {i: f"f{i}" for i in range(5)},
+        {i: f"f{i}" for i in range(fields)},
     )
-    full = structuring_decoding._slot_spans(*args, make_span=upstream.Span, max_candidates=10**9)
-    capped = structuring_decoding._slot_spans(*args, make_span=upstream.Span, max_candidates=limit)
-    for (slot, everything), (capped_slot, kept) in zip(full, capped, strict=True):
-        assert slot == capped_slot
-        assert len(everything) > limit
-        cut = _cut(everything, limit)
-        assert _as_tuples(kept) == _as_tuples([s for s in everything if cut is not None and s.score >= cut])
 
 
-@pytest.mark.parametrize(
-    ("scores", "limit", "kept"),
-    [
-        ([0.9, 0.8, 0.8, 0.8, 0.5], 1, 1),
-        ([0.9, 0.8, 0.8, 0.8, 0.5], 2, 1),
-        ([0.9, 0.8, 0.8, 0.8, 0.5], 4, 4),
-        ([0.9, 0.8, 0.8, 0.8, 0.5], 5, 5),
-        ([0.5, 0.5, 0.5], 2, 0),
-    ],
-)
-def test_slot_cut_keeps_ties_together(scores: list[float], limit: int, kept: int) -> None:
-    values = np.asarray(scores, dtype=np.float32)
-    cut = structuring_decoding._tie_safe_cut(values, limit) if values.size > limit else values.min()
-    assert int((values >= cut).sum()) == kept
+@pytest.mark.parametrize("saturate", [False, True])
+@pytest.mark.parametrize("limit", [1, 5, 30, 100])
+def test_capped_documents_keep_each_slots_best_spans(limit: int, saturate: bool) -> None:
+    args = _slot_args(3, saturate=saturate)
+    full = structuring_decoding._slot_spans(*args, make_span=upstream.Span, max_spans=10**9)
+    capped = structuring_decoding._slot_spans(*args, make_span=upstream.Span, max_spans=limit)
+    flat = [(slot, span) for slot, spans in full for span in spans]
+    assert len(flat) > limit
+    head = {id(span) for span in _head([span for _, span in flat], limit)}
+    assert [slot for slot, _ in capped] == [slot for slot, _ in full]
+    for (_, everything), (_, kept) in zip(full, capped, strict=True):
+        # Each slot keeps the head of its own best-first order...
+        assert _as_tuples(kept) == _as_tuples([span for span in everything if id(span) in head])
+        # ...so its overlap removal keeps the head of the full result.
+        assert _as_tuples(select_spans(kept, False, False)) == _as_tuples(
+            [span for span in _UPSTREAM_GREEDY(_DECODER, everything, False, False) if id(span) in head]
+        )
+    assert sum(len(spans) for _, spans in capped) == limit
+
+
+def test_record_spans_are_bounded_per_document_not_per_slot() -> None:
+    args = _slot_args(5, slots=100, entities=64, fields=8, saturate=True)
+    capped = structuring_decoding._slot_spans(*args, make_span=upstream.Span, max_spans=1000)
+    assert sum(len(spans) for _, spans in capped) == 1000
+    assert len(capped) == 100
 
 
 # -- Replacing the package's functions ---------------------------------------------

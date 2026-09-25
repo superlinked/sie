@@ -11,11 +11,12 @@ takes seconds.
 
 :func:`make_structuring_decode` builds a drop-in ``decode`` that selects the
 same spans with array operations, in the same order and with the same
-scores, and keeps at most ``max_candidates`` of them per slot: the
-highest-scoring, cut at a score so that tied spans are kept or dropped
-together. Overlap removal takes spans best score first, so a cut changes a
-slot's fields only by leaving out spans that rank below it. Everything else
-is the package's own code, unchanged.
+scores, and keeps at most ``max_spans`` of them per document across all
+slots: the ones each slot's overlap removal would take first (best score
+first, and among equal scores in the package's order). Overlap removal
+keeps spans best first, so a cut changes a slot's fields only by leaving out
+spans that rank below every kept one. Everything else is the package's own
+code, unchanged.
 """
 
 from __future__ import annotations
@@ -26,21 +27,27 @@ from typing import Any
 import numpy as np
 import torch
 
-from sie_server.adapters.gliformer.span_decoding import MAX_SPAN_CANDIDATES
+from sie_server.adapters.gliformer.span_decoding import _FLOAT32_BITS_ONE, _score_cut, charge
+
+# Record-slot field spans one document keeps across all slots. Each open slot
+# pairs every member proposal with every field, so real documents produce far
+# more of these than entity spans: measured with both checkpoints up to 15,291
+# per entity-dense 2048-word document at threshold 0.5 and 55,015 at 0.1.
+MAX_RECORD_SPANS = 65536
 
 
 def make_structuring_decode(
     make_span: Callable[..., Any],
     unflatten_by_batch_origin: Callable[..., Any],
     *,
-    max_candidates: int = MAX_SPAN_CANDIDATES,
+    max_spans: int = MAX_RECORD_SPANS,
 ) -> Callable[..., Any]:
     """A replacement for ``gliformer.tasks.structuring.decoder.StructuringDecoder.decode``.
 
     Args:
         make_span: The package's ``Span`` class.
         unflatten_by_batch_origin: The package's helper of that name.
-        max_candidates: Most spans per record slot passed to overlap removal.
+        max_spans: Most field spans per document, across its record slots.
 
     Returns:
         The ``decode`` method.
@@ -123,7 +130,7 @@ def make_structuring_decode(
                 context.threshold,
                 field_id_to_class,
                 make_span=make_span,
-                max_candidates=max_candidates,
+                max_spans=max_spans,
             )
             for anchor_idx, spans in slot_spans:
                 spans = self.greedy_search(spans, flat_ner, multi_label)
@@ -164,7 +171,7 @@ def _slot_spans(
     field_id_to_class: dict[int, str],
     *,
     make_span: Callable[..., Any],
-    max_candidates: int,
+    max_spans: int,
 ) -> list[tuple[int, list[Any]]]:
     """Each open slot's candidate field spans, in the package's order.
 
@@ -172,8 +179,14 @@ def _slot_spans(
     ``(E, C)`` and ``span_idx`` ``(E, 2)``. A slot takes a proposal whose
     membership is not at or below the threshold, and a field of it whose
     probability is above the threshold and that has a name; the span's score
-    is the smaller of the two probabilities. Spans come by proposal, then by
-    field id, as the package builds them.
+    is the smaller of the two probabilities. Spans come by slot, then by
+    proposal, then by field id, as the package builds them.
+
+    When more than ``max_spans`` spans qualify, the document keeps the first
+    ``max_spans`` of a stable best-score-first ordering: every span above a
+    score cut, then spans scoring just below it in their order. Each kept span
+    costs a budget unit, and finding a cut costs one unit per four
+    membership and field cells.
     """
     anchor_count = membership_probs.shape[0]
     class_count = field_probs.shape[1]
@@ -185,30 +198,64 @@ def _slot_spans(
     probability = field_probs[valid_entities].detach().to(device="cpu", dtype=torch.float32).numpy()
     bounds = span_idx[valid_entities].cpu().numpy()
     open_slots = np.ones(anchor_count, dtype=bool) if anchor_mask is None else anchor_mask.bool().cpu().numpy()
+    slots = np.flatnonzero(open_slots)
+    member, membership = member[slots], membership[slots]
     names = [field_id_to_class.get(idx) for idx in range(class_count)]
-    slots = []
-    for anchor_idx in np.flatnonzero(open_slots).tolist():
-        members = np.flatnonzero(member[anchor_idx])
-        entity, field = np.nonzero(fields[members])
+
+    def masks(cut: np.float32 | None) -> tuple[np.ndarray, np.ndarray]:
+        if cut is None:
+            return member, fields
+        return member & (membership >= cut), fields & (probability >= cut)
+
+    def per_slot(cut: np.float32 | None) -> np.ndarray:
+        """Spans per open slot at score ``cut``: members times their passing fields."""
+        slot_members, entity_fields = masks(cut)
+        return slot_members.astype(np.int64) @ entity_fields.sum(axis=1, dtype=np.int64)
+
+    def slot_spans(position: int, cut: np.float32 | None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        slot_members, entity_fields = masks(cut)
+        members = np.flatnonzero(slot_members[position])
+        entity, field = np.nonzero(entity_fields[members])
         entity = members[entity]
-        score = np.minimum(membership[anchor_idx, entity], probability[entity, field])
-        if score.size > max_candidates:
-            keep = score >= _tie_safe_cut(score, max_candidates)
-            entity, field, score = entity[keep], field[keep], score[keep]
+        return entity, field, np.minimum(membership[position, entity], probability[entity, field])
+
+    counts = per_slot(None)
+    total = int(counts.sum())
+    charge(min(total, max_spans))
+    cut: np.float32 | None = None
+    quota = np.full(slots.size, -1, dtype=np.int64)  # spans tied just below the cut each slot keeps
+    if total > max_spans:
+        charge((member.size + fields.size) // 4)
+        cut = _score_cut(lambda value: int(per_slot(value).sum()), max_spans)
+        above = per_slot(cut)
+        missing = max_spans - int(above.sum())
+        cut_bits = int(np.float32(cut).view(np.int32))
+        quota[:] = 0
+        if missing > 0 and 0 < cut_bits <= _FLOAT32_BITS_ONE + 1:
+            ties = per_slot(np.int32(cut_bits - 1).view(np.float32)) - above
+            before = np.cumsum(ties) - ties
+            quota = np.clip(missing - before, 0, ties)
+
+    result = []
+    for position, anchor_idx in enumerate(slots.tolist()):
+        if cut is None:
+            entity, field, score = slot_spans(position, None)
+        else:
+            entity, field, score = slot_spans(position, cut)
+            if quota[position] > 0:
+                below = np.int32(int(np.float32(cut).view(np.int32)) - 1).view(np.float32)
+                tie_entity, tie_field, tie_score = slot_spans(position, below)
+                tied = np.flatnonzero(tie_score < cut)[: quota[position]]
+                entity = np.concatenate([entity, tie_entity[tied]])
+                field = np.concatenate([field, tie_field[tied]])
+                score = np.concatenate([score, tie_score[tied]])
+                order = np.lexsort((field, entity))
+                entity, field, score = entity[order], field[order], score[order]
         spans = [
             make_span(start=start, end=end, entity_type=names[label], score=value)
             for start, end, label, value in zip(
                 bounds[entity, 0].tolist(), bounds[entity, 1].tolist(), field.tolist(), score.tolist(), strict=True
             )
         ]
-        slots.append((anchor_idx, spans))
-    return slots
-
-
-def _tie_safe_cut(scores: np.ndarray, limit: int) -> np.float32:
-    """Lowest score to keep so that at most ``limit`` scores reach it, ties kept together."""
-    edge = np.partition(scores, scores.size - limit)[scores.size - limit]  # the limit-th highest
-    if int((scores >= edge).sum()) <= limit:
-        return edge
-    above = scores[scores > edge]
-    return above.min() if above.size else np.float32(np.inf)
+        result.append((anchor_idx, spans))
+    return result
