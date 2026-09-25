@@ -69,7 +69,7 @@ docker run --gpus all -p 8080:8080 \
   -v sie-hf-cache:/app/.cache/huggingface \
   ghcr.io/superlinked/sie-server:latest-cuda12-default
 
-# Linux, NVIDIA GPU: Transformers 5 OCR models (LightOnOCR and GLM-OCR)
+# Linux, NVIDIA GPU: Transformers 5 models (LightOnOCR, GLM-OCR, and the GLiNER2.5-Decide models)
 docker run --gpus all -p 8080:8080 \
   -v sie-hf-cache:/app/.cache/huggingface \
   ghcr.io/superlinked/sie-server:latest-cuda12-transformers5
@@ -87,7 +87,8 @@ docker run -p 8080:8080 \
 
 Docker images are bundle-specific so dependency-incompatible model families stay isolated. Use the
 `sglang-vision-extract` image for LightOnOCR, GLM-OCR, and PaddleOCR-VL, or the `transformers5` image for the
-`:transformers` profiles of LightOnOCR and GLM-OCR; the `default` image intentionally does not advertise them.
+`:transformers` profiles of LightOnOCR and GLM-OCR and for the GLiNER2.5-Decide models; the `default` image
+intentionally does not advertise them.
 
 ```bash
 # in a second terminal
@@ -183,7 +184,7 @@ print(result["data"]["department"])  # values are illustrative and rounded
 ```
 
 The GLiNER2.5-Decide models (`fastino/GLiNER2.5-Decide` for English, `GLiNER2.5-multi-Decide`, and
-`GLiNER2.5-Decide-1B`) take the same questions, GLiClass-style `options={"label_groups": {...}}`, or plain `labels`,
+`GLiNER2.5-Decide-1B`), served by the `transformers5` image from step 1, take the same questions, GLiClass-style `options={"label_groups": {...}}`, or plain `labels`,
 and return every option's probability. They read all of a call's questions next to the document in one row per item:
 one forward pass answers them all, and each question's probabilities depend on the other questions sent with it. A
 `score` question is read as the ordinal labels `"0"` to `"k-1"`, each described by its criterion; a `noul` question as

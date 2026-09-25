@@ -26,10 +26,15 @@ pip install sie-server
   pip install sie-server "transformers<5"
   ```
 
-- **OCR-VLM bundle** (LightOnOCR, GLM-OCR) — requires `transformers` 5.x, and is served with `-b transformers5`:
+- **Transformers 5 bundle** (LightOnOCR, GLM-OCR, GLiGuard, and the GLiNER2.5-Decide models) — requires
+  `transformers` 5.x, and is served with `-b transformers5`. The GLiNER2.5-Decide models also need `gliner2`
+  2.x. `sie-server` itself asks for `gliner2<2`, which the default bundle's GLiNER2 models need, so pip
+  reports that conflict when the second command below installs 2.x; the transformers5 bundle's GLiNER2
+  models are verified on 2.0.0:
 
   ```bash
   pip install sie-server "transformers>=5,<6"
+  pip install "gliner2==2.0.0"  # only for the GLiNER2.5-Decide models
   sie-server serve -b transformers5
   ```
 
@@ -71,7 +76,8 @@ label prompt can fit.
 
 The GLiNER2.5-Decide models (`fastino/GLiNER2.5-Decide`, `GLiNER2.5-multi-Decide`,
 `GLiNER2.5-Decide-1B`) run on `gliner2` 2.x, which the transformers5 bundle
-pins. Each item is one encoder row: every question's (or label group's) name,
+pins (the `transformers5` image, or a native install as described above). Each
+item is one encoder row: every question's (or label group's) name,
 instruction, and labels, then the document. `usage.input_tokens` counts the
 document tokens the model reads plus the tokens of the instructions and label
 descriptions (criteria) sent with the item, as Laya and GLiClass count

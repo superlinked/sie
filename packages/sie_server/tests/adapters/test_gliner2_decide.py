@@ -11,6 +11,7 @@ import json
 import math
 import re
 from collections.abc import Iterator
+from functools import lru_cache
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -94,6 +95,7 @@ class FakeProcessor:
     def __init__(self) -> None:
         self.tokenizer = FakeTokenizer()
         self.word_splitter = fake_word_splitter
+        self._tokenize_cached = lru_cache(maxsize=100)(self.tokenizer.tokenize)
 
     def change_mode(self, is_training: bool) -> None:
         assert not is_training
@@ -141,7 +143,7 @@ class FakeProcessor:
         schema_index, in_text = 0, False
         for index, element in enumerate(combined):
             position = len(subwords)
-            subwords.extend(self.tokenizer.tokenize(element))
+            subwords.extend(self._tokenize_cached(element))
             if element == "[SEP_TEXT]":
                 in_text = True
             elif in_text:
@@ -467,6 +469,19 @@ def test_long_documents_are_cut_to_whole_words_in_the_window(monkeypatch: pytest
     assert output.input_token_counts == [3 * kept]
     # Work stops at the window: only the kept words and the one that did not fit were tokenized.
     assert processor.tokenizer.tokenized_chars < 20 * 96
+
+
+def test_caches_keep_neither_long_words_nor_task_prompts() -> None:
+    adapter, processor = make_adapter(window=256)
+    long_words = [f"{i:04d}" + "x" * 60 for i in range(20)]
+
+    output = adapter.extract([Item(text=" ".join(["short", "words", *long_words]))], labels=["yes", "no"])
+
+    assert output.input_token_counts is not None
+    assert output.input_token_counts[0] > 100  # long words were read...
+    assert adapter._word_cache is not None
+    assert adapter._word_cache.cache_info().currsize == 2  # ...but only "short" and "words" were kept
+    assert processor._tokenize_cached.cache_info().currsize == 0
 
 
 def test_overflow_policy_error_and_unreadable_items_fail_alone() -> None:

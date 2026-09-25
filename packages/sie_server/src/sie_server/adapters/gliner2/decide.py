@@ -92,7 +92,11 @@ _MAX_WORD_CHARS = 4096
 _MAX_CHARS_PER_TOKEN = 64
 # Batching-cost estimate: characters per window token.
 _COST_CHARS_PER_TOKEN = 4
-_WORD_CACHE_SIZE = 65536
+# Token ids of recent words, kept across requests. Only words of at most
+# _CACHED_WORD_CHARS characters are kept, so the cache holds a few tens of MB at
+# most; a longer word (a hash, an id, a base64 run) is tokenized each time.
+_WORD_CACHE_SIZE = 16384
+_CACHED_WORD_CHARS = 32
 _SENTENCE_END = (".", "!", "?")
 
 _ERR_ITEM = (
@@ -327,7 +331,7 @@ class GLiNER2DecideAdapter(BaseAdapter):
     spec: ClassVar[AdapterSpec] = AdapterSpec(
         inputs=("text",),
         outputs=("json",),
-        unload_fields=("_model", "_processor", "_tokenizer", "_word_splitter", "_word_ids"),
+        unload_fields=("_model", "_processor", "_tokenizer", "_word_splitter", "_word_ids", "_word_cache"),
     )
 
     def __init__(
@@ -374,6 +378,7 @@ class GLiNER2DecideAdapter(BaseAdapter):
         self._tokenizer: Any = None
         self._word_splitter: Any = None
         self._word_ids: Any = None
+        self._word_cache: Any = None
         self._device: str | None = None
 
     # ------------------------------------------------------------------ loading
@@ -430,15 +435,20 @@ class GLiNER2DecideAdapter(BaseAdapter):
         """Use ``model`` (encoder and classification head) and ``processor`` (the task prompt builder)."""
         tokenizer = processor.tokenizer
 
-        @lru_cache(maxsize=_WORD_CACHE_SIZE)
-        def word_ids(word: str) -> tuple[int, ...]:
+        def tokenize(word: str) -> tuple[int, ...]:
             return tuple(tokenizer.convert_tokens_to_ids(tokenizer.tokenize(word)))
+
+        cached = lru_cache(maxsize=_WORD_CACHE_SIZE)(tokenize)
+
+        def word_ids(word: str) -> tuple[int, ...]:
+            return cached(word) if len(word) <= _CACHED_WORD_CHARS else tokenize(word)
 
         self._model = model
         self._processor = processor
         self._tokenizer = tokenizer
         self._word_splitter = processor.word_splitter
         self._word_ids = word_ids
+        self._word_cache = cached
         self._device = device
 
     def warmup(self) -> None:
@@ -518,6 +528,12 @@ class GLiNER2DecideAdapter(BaseAdapter):
             InputTooLongError: The task prompt takes more than ``max_prompt_tokens``.
         """
         record = self._processor.transform_and_format(".", request.model_schema())
+        # The processor keeps every string it tokenizes in an LRU of 50,000
+        # entries; task prompts with descriptions run to tens of KB, so drop
+        # them rather than keep each request's prompt for the adapter's lifetime.
+        cache_clear = getattr(getattr(self._processor, "_tokenize_cached", None), "cache_clear", None)
+        if cache_clear is not None:
+            cache_clear()
         text_start = record.text_word_first_positions[0]
         ids = list(record.input_ids[:text_start])
         if len(ids) > self._max_prompt_tokens:
