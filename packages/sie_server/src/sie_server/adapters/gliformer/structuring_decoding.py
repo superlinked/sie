@@ -31,8 +31,9 @@ from sie_server.adapters.gliformer.span_decoding import _FLOAT32_BITS_ONE, _scor
 
 # Record-slot field spans one document keeps across all slots. Each open slot
 # pairs every member proposal with every field, so real documents produce far
-# more of these than entity spans: measured with both checkpoints up to 15,291
-# per entity-dense 2048-word document at threshold 0.5 and 55,015 at 0.1.
+# more of these than entity spans: measured with both checkpoints on
+# 2048-word documents, up to 15,291 at threshold 0.5 and 58,890 at 0.1 (a
+# list of names with a records schema).
 MAX_RECORD_SPANS = 65536
 # Words of field text one document's records may hold after overlap removal.
 # Each field copies its span's words, and nested overlap removal

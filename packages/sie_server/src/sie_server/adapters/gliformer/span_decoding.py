@@ -44,8 +44,8 @@ import torch
 MAX_SPAN_CANDIDATES = 4096
 # Structuring span proposals one document row keeps. Each one is pooled,
 # scored against every record slot, and walked in Python by the structuring
-# head. Measured at most 920 on the same documents (entity-dense, 64 fields,
-# threshold 0.1).
+# head. Measured with both checkpoints on the same documents: at most 612 at
+# threshold 0.5 and 1184 at 0.1 (a list of names, 64 fields).
 MAX_STRUCTURING_PROPOSALS = 2048
 
 # Request budget units (about 2.5 microseconds of host work each, measured
