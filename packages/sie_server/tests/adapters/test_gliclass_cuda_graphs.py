@@ -278,8 +278,7 @@ def test_an_eager_out_of_memory_drops_the_graphs() -> None:
     runner = _Runner()
     runner.run(_inputs(1, 100), 2, "bucketed")
     assert runner.graph_count == 1
-    runner.fail = True  # the next shape cannot be recorded and runs eagerly
-    runner._disabled = False
+    runner._recording_credit = 0.0  # the next shape is not recorded and runs eagerly
     adapter = GLiClassAdapter("tiny", max_seq_length=512)
     adapter._graphs = runner
 
@@ -287,3 +286,5 @@ def test_an_eager_out_of_memory_drops_the_graphs() -> None:
         adapter._forward(_Pipe(), _inputs(1, 300), ["a", "b"], same_labels=True, graphs="bucketed")
 
     assert runner.graph_count == 0
+    assert runner.recorded == [(1, 128, 2)]
+    assert not runner.disabled
