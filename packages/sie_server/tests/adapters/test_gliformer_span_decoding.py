@@ -538,18 +538,36 @@ def test_bounded_decoding_check_rejects_a_leftover_binding(monkeypatch: pytest.M
         adapter_module._assert_bounded_decoding()
 
 
-def test_gliner_proposal_function_is_checked_against_its_source() -> None:
-    def changed(scores, labels=None, threshold=0.5):
-        return None
+def test_replacements_are_verified_against_the_package_at_load() -> None:
+    adapter_module._verify_bounded_decoding(None)
 
-    owner = SimpleNamespace(extract_spans_from_tokens=changed)
-    with pytest.raises(RuntimeError, match="must be verified again"):
-        adapter_module._replace_package_function(
-            owner,
-            "extract_spans_from_tokens",
-            lambda scores, labels=None, threshold=0.5: None,
-            source_sha256="0249c8ba3ce43091c120eaef4c06b8e8c518c3038392de2b10764df08bba713e",
-        )
+
+@pytest.mark.parametrize("target", ["propose_spans", "pair_spans", "select_spans", "make_structuring_decode"])
+def test_verification_fails_closed_when_a_replacement_differs(monkeypatch: pytest.MonkeyPatch, target: str) -> None:
+    # Swap the real implementation behind one installed replacement for one
+    # that drops its last result, as a changed package would look.
+    if target == "make_structuring_decode":
+        decode = structuring_decoder.StructuringDecoder.decode
+
+        def changed(self: Any, *args: Any, **kwargs: Any) -> Any:
+            return [[group[:-1] for group in item] for item in decode(self, *args, **kwargs)]
+
+        changed._sie_original = decode._sie_original
+        changed._sie_bounded = True
+        monkeypatch.setattr(structuring_decoder.StructuringDecoder, "decode", changed)
+    elif target == "propose_spans":
+        real = adapter_module.propose_spans
+
+        def changed(*args: Any, **kwargs: Any) -> Any:
+            span_idx, span_mask = real(*args, **kwargs)
+            return span_idx, span_mask & False
+
+        monkeypatch.setattr(adapter_module, target, changed)
+    else:
+        real = getattr(adapter_module, target)
+        monkeypatch.setattr(adapter_module, target, lambda *args, **kwargs: real(*args, **kwargs)[:-1])
+    with pytest.raises(RuntimeError, match="no longer matches its bounded replacement"):
+        adapter_module._verify_bounded_decoding(None)
 
 
 # -- Padding --------------------------------------------------------------------

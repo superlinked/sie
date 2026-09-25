@@ -1278,6 +1278,7 @@ def test_load_pins_snapshot_and_places_model(device: str, precision: str | None,
         patch.dict(sys.modules, {"gliformer": module}),
         patch.object(adapter_module, "_bound_span_decoding") as bound_span_decoding,
         patch.object(adapter_module, "_assert_bounded_decoding") as assert_bounded,
+        patch.object(adapter_module, "_verify_bounded_decoding") as verify_bounded,
         patch.object(adapter_module, "snapshot_download", return_value="/staged/gliformer") as download,
     ):
         adapter.load(device)
@@ -1299,6 +1300,7 @@ def test_load_pins_snapshot_and_places_model(device: str, precision: str | None,
     ner_head.register_forward_hook.assert_called_once_with(adapter_module._mask_padded_ner_logits)
     bound_span_decoding.assert_called_once_with()
     assert_bounded.assert_called_once_with()
+    verify_bounded.assert_called_once_with(model)
     # One small extraction at load, through every head the hooks check.
     probe = model.inference.call_args
     assert probe.args[0] == adapter_module._PROBE_TEXTS
@@ -1328,6 +1330,7 @@ def test_per_request_eval_walks_the_model_only_when_it_is_training() -> None:
         patch.dict(sys.modules, {"gliformer": _fake_gliformer_module(model)}),
         patch.object(adapter_module, "_bound_span_decoding"),
         patch.object(adapter_module, "_assert_bounded_decoding"),
+        patch.object(adapter_module, "_verify_bounded_decoding"),
         patch.object(adapter_module.Path, "is_dir", return_value=True),
     ):
         adapter.load("cpu")
@@ -1367,6 +1370,7 @@ def test_load_fails_when_the_probe_forward_is_rejected() -> None:
         patch.dict(sys.modules, {"gliformer": _fake_gliformer_module(model)}),
         patch.object(adapter_module, "_bound_span_decoding"),
         patch.object(adapter_module, "_assert_bounded_decoding"),
+        patch.object(adapter_module, "_verify_bounded_decoding"),
         patch.object(adapter_module.Path, "is_dir", return_value=True),
         pytest.raises(RuntimeError, match="word mask"),
     ):
@@ -1383,6 +1387,7 @@ def test_load_rejects_embedding_dimension_mismatch() -> None:
         patch.dict(sys.modules, {"gliformer": _fake_gliformer_module(model)}),
         patch.object(adapter_module, "_bound_span_decoding"),
         patch.object(adapter_module, "_assert_bounded_decoding"),
+        patch.object(adapter_module, "_verify_bounded_decoding"),
         patch.object(adapter_module.Path, "is_dir", return_value=True),
         pytest.raises(ValueError, match="dimension mismatch"),
     ):

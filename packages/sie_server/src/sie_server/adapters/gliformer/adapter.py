@@ -8,6 +8,7 @@ import importlib
 import inspect
 import logging
 import math
+import operator
 import sys
 import threading
 import warnings
@@ -17,7 +18,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from numbers import Real
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from typing import Any, ClassVar
 
 import torch
@@ -273,15 +274,13 @@ def _bound_span_decoding() -> None:
 
     # Every gliformer module that imported GLiNER's proposal function gets the
     # bounded one; only the structuring head calls it in gliformer 0.1.2.
+    # gliner is pinned by range, and images resolve it from the index, so its
+    # source is not hashed: loading checks the replacement's behaviour
+    # against it instead (see _verify_bounded_decoding).
     for module_name in _PROPOSAL_MODULES:
         module = importlib.import_module(module_name)
         if getattr(module, "extract_spans_from_tokens", None) is not None:
-            _replace_package_function(
-                module,
-                "extract_spans_from_tokens",
-                extract_spans_from_tokens,
-                source_sha256="0249c8ba3ce43091c120eaef4c06b8e8c518c3038392de2b10764df08bba713e",
-            )
+            _replace_package_function(module, "extract_spans_from_tokens", extract_spans_from_tokens)
     _assert_bounded_decoding()
 
 
@@ -331,6 +330,84 @@ def _assert_bounded_decoding() -> None:
             continue
         if any(value is original for value in vars(module).values()):
             raise RuntimeError(f"GLiFormer's {module_name} still binds GLiNER's unbounded span proposal function")
+
+
+def _verify_bounded_decoding(model: Any) -> None:
+    """Fail unless each replacement matches the function it replaces on a fixed input.
+
+    The input is small, so no bound applies, and it has ties, padding, nested
+    and overlapping spans, and scores exactly at the threshold. This is what
+    keeps a gliner release that changes proposal semantics from loading, since
+    gliner is pinned by range and not hashed.
+
+    Raises:
+        RuntimeError: A replacement's output differs from the original's.
+    """
+    span_decoder = importlib.import_module("gliformer.tasks.span_decoder")
+    structuring_model = importlib.import_module("gliformer.tasks.structuring.model")
+    structuring_decoder = importlib.import_module("gliformer.tasks.structuring.decoder")
+    _ = model
+    # The replaced code reads no configuration, so a blank one keeps the check
+    # independent of the checkpoint.
+    decoder = span_decoder.SpanDecoder(SimpleNamespace())
+    generator = torch.Generator().manual_seed(0)
+    logits = torch.randn(2, 24, 3, 3, generator=generator) * 3
+    logits[:, 2:6, 0, :] = 4.0  # a run of saturated, tied scores
+    logits[:, 4, 1, 2] = torch.tensor(0.3).logit()  # inside exactly at the threshold
+    logits[1, 18:] = float("-inf")  # padding
+
+    def check(name: str, original: Any, replacement: Any, same: Callable[[Any, Any], bool] = operator.eq) -> None:
+        if not same(original, replacement):
+            raise RuntimeError(f"GLiFormer's {name} no longer matches its bounded replacement")
+
+    names = {0: "a", 1: "b", 2: "c"}
+    for threshold in (0.3, 0.5):
+        start, end, inside = logits[0].permute(2, 0, 1)
+        args = (
+            decoder._get_indices_above_threshold(start, threshold),
+            decoder._get_indices_above_threshold(end, threshold),
+            torch.sigmoid(inside),
+            torch.sigmoid(start),
+            torch.sigmoid(end),
+            names,
+            threshold,
+        )
+        pairing = vars(span_decoder.SpanDecoder)["_calculate_span_score"]
+        spans = pairing(decoder, *args)
+        check("span pairing", pairing._sie_original(decoder, *args), spans)
+        greedy = vars(span_decoder.SpanDecoder)["greedy_search"]
+        for flat_ner in (True, False):
+            for multi_label in (True, False):
+                check(
+                    "overlap removal",
+                    greedy._sie_original(decoder, list(spans), flat_ner, multi_label),
+                    greedy(decoder, list(spans), flat_ner, multi_label),
+                )
+        proposals = vars(structuring_model)["extract_spans_from_tokens"]
+        check(
+            "span proposal",
+            proposals._sie_original(logits, None, threshold),
+            proposals(logits, None, threshold),
+            lambda a, b: all(torch.equal(x, y) for x, y in zip(a, b, strict=True)),
+        )
+    records = SimpleNamespace(
+        structuring_logits=torch.randn(1, 4, 6, generator=generator) * 2,
+        structuring_field_logits=torch.randn(1, 6, 3, generator=generator) * 2,
+        structuring_span_idx=torch.tensor([[[0, 1], [0, 3], [2, 2], [2, 5], [4, 4], [0, 1]]]),
+        structuring_span_mask=torch.tensor([[True, True, True, True, True, False]]),
+        structuring_anchor_mask=torch.tensor([[True, True, False, True]]),
+        structuring_batch_origin=torch.arange(1),
+        batch_size=1,
+    )
+    record_decoder = structuring_decoder.StructuringDecoder(SimpleNamespace())
+    decode = vars(structuring_decoder.StructuringDecoder)["decode"]
+    for flat_ner in (True, False):
+        kwargs = {"threshold": 0.3, "flat_ner": flat_ner, "texts": [[f"w{i}" for i in range(8)]]}
+        check(
+            "record decoding",
+            decode._sie_original(record_decoder, records, **kwargs),
+            decode(record_decoder, records, **kwargs),
+        )
 
 
 def _subclasses(cls: type) -> list[type]:
@@ -601,6 +678,7 @@ class GLiFormerAdapter(BaseAdapter):
 
         # Loading the checkpoint imports the task decoders; check them too.
         _assert_bounded_decoding()
+        _verify_bounded_decoding(model)
         _probe_forward(model)
 
         self._model = model
