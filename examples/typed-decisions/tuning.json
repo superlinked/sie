@@ -1283,6 +1283,9 @@
      }
     }
    },
+   "gliclass-large-v1-one-call": {
+    "same_as": "gliclass-large-v1"
+   },
    "gliclass-small-v1": {
     "phrasing": {
      "attack_vector": {

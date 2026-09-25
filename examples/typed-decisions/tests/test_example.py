@@ -336,6 +336,49 @@ class GroupedBackendTests(unittest.TestCase):
             gold = self.case["gold"][qid]
             self.assertEqual(answers[qid]["top"], gold)
 
+    def test_grouped_gliclass_asks_for_joint_encoding(self) -> None:
+        options = self._request("gliclass-instruct-large-grouped")["body"]["params"]["options"]
+        self.assertEqual(options["group_encoding"], "joint")
+
+    def test_one_call_gliclass_sends_each_question_as_a_separate_group(self) -> None:
+        request = self._request("gliclass-large-v1-one-call")
+        options = request["body"]["params"]["options"]
+        self.assertEqual(options["group_encoding"], "separate")
+        self.assertEqual(request["groups"], {qid: qid for qid in questions.VULNERABILITY_QUESTIONS})
+        (per_question,) = run.requests_for(
+            "gliclass-large-v1",
+            "short",
+            self.case["state"],
+            {"weakness": questions.VULNERABILITY_QUESTIONS["weakness"]},
+        )
+        self.assertEqual(options["label_groups"]["weakness"], per_question["body"]["params"]["labels"])
+        self.assertNotIn("instruction", request["body"]["params"])
+
+    def test_one_call_gliclass_answers_map_to_option_keys(self) -> None:
+        request = self._request("gliclass-large-v1-one-call")
+        data = {}
+        for qid, labels in request["body"]["params"]["options"]["label_groups"].items():
+            scores = gold_scores(self.case, qid, labels, "short")
+            total = sum(scores.values())
+            data[qid] = {"type": "choice", "probabilities": {label: v / total for label, v in scores.items()}}
+        call = {
+            "id": "o",
+            "set": questions.VULNERABILITY_TRIAGE,
+            "backend": "gliclass-large-v1-one-call",
+            "variant": "short",
+            "requests": [request],
+            "responses": [{"data": data}],
+        }
+        answers = score.NORMALISERS[run.TRANSPORTS["gliclass-separate"]](call, questions.VULNERABILITY_QUESTIONS)
+        for qid in questions.VULNERABILITY_QUESTIONS:
+            self.assertEqual(answers[qid]["top"], self.case["gold"][qid])
+
+    def test_decide_is_asked_the_typed_questions_the_way_laya_is(self) -> None:
+        decide = self._request("gliner2.5-decide")
+        laya = self._request("laya")
+        self.assertEqual(decide["body"], laya["body"])
+        self.assertEqual(run.TRANSPORTS["decide"], run.TRANSPORTS["laya"])
+
     def test_grouped_gliclass_missing_group_fails_closed(self) -> None:
         call = self._gliclass_grouped_call()
         call["responses"][0]["data"].pop("attack vector")
@@ -514,6 +557,31 @@ class TuneTests(unittest.TestCase):
         predicted = ["a"] * 10 + ["b"] * 5 + ["a"] * 5 + ["a"]
         self.assertAlmostEqual(score.balanced_accuracy(gold, predicted), 0.75)
         self.assertEqual(tune.worst_recall(tune.metrics(gold, predicted)), 0.5)
+
+
+class InheritanceTests(unittest.TestCase):
+    def test_same_as_takes_the_other_backends_settings(self) -> None:
+        settings = {
+            "backends": {
+                "s": {
+                    "parent": {
+                        "phrasing": {"q": {"phrasing": "short"}},
+                        "questions": {"q": {"rule": {"kind": "argmax"}}},
+                    },
+                    "child": {"same_as": "parent"},
+                }
+            }
+        }
+        self.assertEqual(tuning.phrasing("s", "child", tuning.TUNED, settings), {"q": "short"})
+        self.assertEqual(tuning.rules("s", "child", tuning.TUNED, settings), {"q": {"kind": "argmax"}})
+
+    def test_a_one_call_second_stage_counts_one_call_when_anything_escalates(self) -> None:
+        latency = {("f", "c"): {"total": 10.0, "requests": 1}, ("s", "c"): {"total": 8.0, "requests": 1}}
+        lane = {"backend": "f", "escalate_to": "s"}
+        self.assertEqual(tune.record_calls(lane, "c", {"a": True, "b": True}, latency), 2)
+        self.assertEqual(tune.record_latency(lane, "c", {"a": True, "b": True}, latency), 18.0)
+        self.assertEqual(tune.record_calls(lane, "c", {"a": False, "b": False}, latency), 1)
+        self.assertEqual(tune.record_latency(lane, "c", {"a": False, "b": False}, latency), 10.0)
 
 
 class CardTests(unittest.TestCase):

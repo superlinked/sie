@@ -122,6 +122,14 @@ SIE_MODELS: dict[str, dict[str, str]] = {
     },
     "gliclass": {"model": "knowledgator/gliclass-large-v3.0", "family": "gliclass", "vendor": "Knowledgator"},
     "gliclass-large-v1": {"model": "knowledgator/gliclass-large-v1.0", "family": "gliclass", "vendor": "Knowledgator"},
+    # The same model, asked every question in one call: each question a label
+    # group, each group encoded as its own row. It answers as the per-question
+    # calls do and inherits their tuned settings (tune.INHERITS).
+    "gliclass-large-v1-one-call": {
+        "model": "knowledgator/gliclass-large-v1.0",
+        "family": "gliclass-separate",
+        "vendor": "Knowledgator",
+    },
     "gliclass-base-v1": {"model": "knowledgator/gliclass-base-v1.0", "family": "gliclass", "vendor": "Knowledgator"},
     "gliclass-small-v1": {"model": "knowledgator/gliclass-small-v1.0", "family": "gliclass", "vendor": "Knowledgator"},
     "gliclass-instruct-large": {
@@ -137,6 +145,11 @@ SIE_MODELS: dict[str, dict[str, str]] = {
     "gliformer-large": {"model": "knowledgator/gliformer-large-v1", "family": "gliformer", "vendor": "Knowledgator"},
     "gliner2-base": {"model": "fastino/gliner2-base-v1", "family": "gliner2", "vendor": "Fastino"},
     "gliner2-large": {"model": "fastino/gliner2-large-v1", "family": "gliner2", "vendor": "Fastino"},
+    # Fastino's typed decision models take Laya's question mapping as output_schema
+    # and answer in Laya's shape, one call per record.
+    "gliner2.5-decide": {"model": "fastino/GLiNER2.5-Decide", "family": "decide", "vendor": "Fastino"},
+    "gliner2.5-multi-decide": {"model": "fastino/GLiNER2.5-multi-Decide", "family": "decide", "vendor": "Fastino"},
+    "gliner2.5-decide-1b": {"model": "fastino/GLiNER2.5-Decide-1B", "family": "decide", "vendor": "Fastino"},
     "nli-modernbert-base": {
         "model": "MoritzLaurer/ModernBERT-base-zeroshot-v2.0",
         "family": "nli",
@@ -179,7 +192,9 @@ NLI_STATEMENT_TEMPLATE = "{}"
 # How each family's answers come back, which is how score.py reads them.
 TRANSPORTS = {
     "laya": "sie-extract-typed",
+    "decide": "sie-extract-typed",
     "gliclass-grouped": "sie-extract-groups",
+    "gliclass-separate": "sie-extract-groups",
     "gliformer": "sie-extract-group-labels",
     "gliclass": "sie-extract",
     "gliclass-instruct": "sie-extract",
@@ -195,7 +210,12 @@ TRANSPORTS = {
 # is not tuned.
 # Grouped GLiClass cannot take the described phrasing: its six labelled groups
 # need 573 tokens before any record text, over the model's 512-token window.
-DEV_PHRASINGS = {"gliclass-instruct-large-grouped": (SHORT, CONCRETE)}
+DEV_PHRASINGS = {
+    "gliclass-instruct-large-grouped": (SHORT, CONCRETE),
+    # One-call GLiClass takes the per-question backend's settings (tune.INHERITS),
+    # so on dev it is recorded only in that tuned mix, to judge it by the page rule.
+    "gliclass-large-v1-one-call": (),
+}
 # The LLM backend sends one fixed prompt, so it has one phrasing and nothing to
 # tune; its prompt is about CVSS, so it answers only the vulnerability set.
 LLM_BACKENDS = tuple(backend for backend, spec in SIE_MODELS.items() if spec["family"] == "llm")
@@ -264,7 +284,7 @@ def requests_for(
         rendered, _ = typed_questions(questions, variant)
         return [{"state": state, "questions": rendered}]
     family = family_of(backend)
-    if family == "laya":
+    if family in ("laya", "decide"):
         # SIE's Laya adapter takes a text state as `text` and a structured one as
         # `metadata.state`, and the question dict as `output_schema`.
         rendered, _ = typed_questions(questions, variant)
@@ -299,6 +319,15 @@ def requests_for(
                 }
             }
         ]
+    if family == "gliclass-separate":
+        # Each question a label group named by its id, in its own phrasing. Each
+        # group is encoded as its own row, so it scores as a labels request with
+        # that group's labels would.
+        groups = {
+            qid: [label for _, label in label_options(q, phrasing_of(variant, qid))] for qid, q in questions.items()
+        }
+        params = {"options": {"label_groups": groups, "group_encoding": "separate", "overflow_policy": "truncate_text"}}
+        return [{"groups": {qid: qid for qid in questions}, "body": {"items": [{"text": text}], "params": params}}]
     if family in ("gliclass-grouped", "gliformer"):
         # GLiClass joins a group's name to each of its labels, so the name stays
         # short and the questions travel in the instruction. GLiFormer reads a
@@ -313,9 +342,11 @@ def requests_for(
             for qid, q in questions.items()
         }
         if family == "gliclass-grouped":
+            # Joint: one row per record with every group's labels, as the
+            # server encoded label groups before separate rows became the default.
             params: dict[str, Any] = {
                 "instruction": grouped_instruction(questions),
-                "options": {"label_groups": groups, "overflow_policy": "truncate_text"},
+                "options": {"label_groups": groups, "group_encoding": "joint", "overflow_policy": "truncate_text"},
             }
         else:
             # Every label's score, not only the winner's: threshold 0 and multi-label.
@@ -442,12 +473,12 @@ class SIEExtractRunner:
         )
         if result.get("error"):
             raise CallFailedError(f"item error {result['error']}")
-        if self.family == "laya":
+        if self.family in ("laya", "decide"):
             data = result.get("data") or {}
             if set(data) != set(params["output_schema"]):
                 raise CallFailedError(f"answered {sorted(data)}, asked {sorted(params['output_schema'])}")
             return {"data": data, "model": result.get("model", self.model)}
-        if self.family == "gliclass-grouped":
+        if self.family in ("gliclass-grouped", "gliclass-separate"):
             data = result.get("data") or {}
             if set(data) != set(request["groups"]):
                 raise CallFailedError(f"answered groups {sorted(data)}, asked {sorted(request['groups'])}")
@@ -620,6 +651,8 @@ def record(args: argparse.Namespace) -> int:
             "environment": environment(),
             "concurrency": 1,
             "warm_up": "one unrecorded case before the first recorded call",
+            # As given with --server-commit: the SIE commit the server ran.
+            "server_commit": args.server_commit[0] if args.server_commit else None,
         },
         "call_count": len(calls),
         "failed_calls": len(failed),
@@ -771,6 +804,7 @@ def merge(
     files already in `out_dir` (a scorer's summary, say) to pin as well.
     """
     recordings = [load(path) for path in paths]
+    default_commit = (server_commits or [None])[0]
     calls = [
         {**call, "requests": digested(call["requests"])} for recording in recordings for call in recording["calls"]
     ]
@@ -788,7 +822,12 @@ def merge(
                 "failed_calls": sum(recording["failed_calls"] for recording in recordings),
                 "complete": not incomplete,
                 "recordings": [
-                    {"set": recording["set"], "backend": recording["backend"], **recording["recorded"]}
+                    {
+                        "set": recording["set"],
+                        "backend": recording["backend"],
+                        **recording["recorded"],
+                        "server_commit": recording["recorded"].get("server_commit") or default_commit,
+                    }
                     for recording in recordings
                 ],
                 "calls": calls,
@@ -819,8 +858,11 @@ def merge(
         "files_sha256": files,
         "endpoint": sorted({recording["recorded"]["runner"].get("endpoint") for recording in recordings} - {None}),
         "endpoint_note": "A self-hosted SIE server, with the client on the same machine, one record at a time.",
-        # The SIE server commit(s) the recordings were made against, as given.
-        "server_commits": server_commits or [],
+        # The SIE server commits the recordings were made against; calls.json
+        # names each recording's own.
+        "server_commits": sorted(
+            {recording["recorded"].get("server_commit") or default_commit for recording in recordings} - {None}
+        ),
         "hardware": hardware,
         "models": sorted({call["model"] for call in calls}),
         "run_dates": sorted({recording["recorded"]["at"][:10] for recording in recordings}),
@@ -849,7 +891,12 @@ def main() -> int:
     parser.add_argument("--record", action="store_true", help="make live calls")
     parser.add_argument("--merge", nargs="+", metavar="RECORDING", help="combine recordings into calls.json")
     parser.add_argument("--merge-out", default="run-output", help="where --merge writes (default: run-output)")
-    parser.add_argument("--server-commit", nargs="+", help="with --merge: the SIE server commit(s) recorded against")
+    parser.add_argument(
+        "--server-commit",
+        nargs="+",
+        help="with --record: the SIE commit the server runs, stamped on the recording; "
+        "with --merge: the commit for recordings that carry no stamp",
+    )
     parser.add_argument("--hardware", help="with --merge: what the server ran on, for the manifest")
     parser.add_argument("--attach", nargs="+", help="with --merge: files in --merge-out to pin in the manifest")
     parser.add_argument("--set", choices=sorted(PLAN), default=VULNERABILITY_TRIAGE)

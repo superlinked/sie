@@ -81,7 +81,14 @@ CARDS = (
         lambda gold: gold["attack_vector"] in ("local", "physical"),
     ),
 )
-CATALOG = ("gliclass-instruct-large", "laya", "laya-typed-decisions")
+CATALOG = (
+    "gliclass-instruct-large",
+    "laya",
+    "laya-typed-decisions",
+    "gliner2.5-decide",
+    "gliner2.5-multi-decide",
+    "gliner2.5-decide-1b",
+)
 SPEED_MARGIN = 1.5
 
 # What the page publishes from the test slice beyond score.py's figures. page.py
@@ -390,14 +397,19 @@ def speed_claims(board: dict[str, Any], latency: dict, gold: dict[str, dict[str,
     claims = []
     fast, smart = board["fast"], board["smart"]
     if "attack_vector" in fast["cells"] and "attack_vector" in smart["cells"]:
-        records = sorted(gold)
-        fast_ms = statistics.median(latency[("gliformer-large", c)]["total"] for c in records)
-        smart_ms = statistics.median(latency[("gliclass-large-v1", c)]["attack_vector"] for c in records)
-        claims.append(("attack vector: Fast's one call against Smart's attack-vector request", fast_ms, smart_ms))
+        # The one answer both lanes show. Each lane makes one call per record, and
+        # Smart's call carries two more questions.
+        claims.append(
+            (
+                "attack vector: Fast's one call against Smart's one call",
+                fast["median_ms_per_record"],
+                smart["median_ms_per_record"],
+            )
+        )
     if "llm" in board:
         claims.append(
             (
-                "a record's three answers: Smart's three requests against the LLM's one",
+                "a record's three answers: Smart's one call against the LLM's one",
                 smart["median_ms_per_record"],
                 board["llm"]["median_ms_per_record"],
             )

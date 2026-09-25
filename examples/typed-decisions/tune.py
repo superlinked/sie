@@ -81,11 +81,15 @@ LANE_CUTOFFS = (None, *(round(step / 100, 2) for step in range(50, 100, 5)), 1.0
 # The lanes the page's board compares, each one model on its own.
 LANES = {
     "fast": {"backend": "gliformer-large"},
-    "smart": {"backend": "gliclass-large-v1"},
+    "smart": {"backend": "gliclass-large-v1-one-call"},
     "llm": {"backend": PAGE_LLM},
 }
 # Fast first, and Smart for what Fast is unsure of. Judged against Smart alone.
-CASCADE = {"backend": "gliformer-large", "escalate_to": "gliclass-large-v1"}
+CASCADE = {"backend": "gliformer-large", "escalate_to": "gliclass-large-v1-one-call"}
+# Backends that take another backend's tuned settings unchanged, rather than
+# being tuned themselves: the one-call GLiClass answers as its per-question
+# calls do (PREREGISTRATION.md, amendment 1).
+INHERITS = {"gliclass-large-v1-one-call": "gliclass-large-v1"}
 
 
 def metrics(gold: list[str], predicted: list[str]) -> dict[str, Any]:
@@ -258,6 +262,9 @@ def choose_phrasing(paths: list[str], data_dir: Path, tuned: dict[str, Any]) -> 
             phrasings[qid] = {"phrasing": best_phrasing(tried), "dev": tried}
         target[backend] = {"phrasing": phrasings}
         print(f"{backend}: " + ", ".join(f"{qid}={p['phrasing']}" for qid, p in phrasings.items()))
+    for child, parent in INHERITS.items():
+        target[child] = {"same_as": parent}
+        print(f"{child}: the settings of {parent}")
 
 
 def fit_rules(paths: list[str], data_dir: Path, tuned: dict[str, Any]) -> None:
@@ -265,8 +272,17 @@ def fit_rules(paths: list[str], data_dir: Path, tuned: dict[str, Any]) -> None:
     by = answers_by(calls, data_dir, decided=False)
     gold = gold_of(data_dir)
     target = tuned["backends"][VULNERABILITY_TRIAGE]
-    for (backend, variant), per_case in sorted(by.items()):
+    for (backend, variant), per_case in sorted(by.items(), key=lambda item: (item[0][0] in INHERITS, item[0])):
         if variant != tuning.TUNED:
+            continue
+        if backend in INHERITS:
+            # Its rules are its parent's, fitted above; only its dev verdicts are its own.
+            rules = {qid: entry["rule"] for qid, entry in target[INHERITS[backend]]["questions"].items()}
+            target[backend]["dev"] = {}
+            for qid, rule in rules.items():
+                sample = rows_for(per_case, gold, qid)
+                target[backend]["dev"][qid] = verdict([g for _, g in sample], decide(sample, rule))
+                report(backend, qid, rule, target[backend]["dev"][qid])
             continue
         settings: dict[str, Any] = {}
         for qid in asked(VULNERABILITY_TRIAGE, backend, VULNERABILITY_QUESTIONS):
@@ -400,14 +416,19 @@ def record_latency(lane: dict[str, Any], case: str, escalated: dict[str, bool], 
     total = latency[(lane["backend"], case)]["total"]
     if "escalate_to" in lane:
         second = latency[(lane["escalate_to"], case)]
-        total += sum(second[qid] for qid, up in escalated.items() if up)
+        if second["requests"] == 1:
+            # One call answers every question: it is made once if anything escalates.
+            total += second["total"] if any(escalated.values()) else 0.0
+        else:
+            total += sum(second[qid] for qid, up in escalated.items() if up)
     return total
 
 
 def record_calls(lane: dict[str, Any], case: str, escalated: dict[str, bool], latency: dict) -> int:
     calls = latency[(lane["backend"], case)]["requests"]
     if "escalate_to" in lane:
-        calls += sum(escalated.values())
+        second = latency[(lane["escalate_to"], case)]["requests"]
+        calls += int(any(escalated.values())) if second == 1 else sum(escalated.values())
     return calls
 
 

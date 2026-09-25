@@ -17,6 +17,9 @@ Per backend and question, tuning.json holds:
                                                                 and renormalising
     dev        the dev figures the choice was made on
     page       whether the question passes the page rule on dev, and why not
+
+A backend entry of the form {"same_as": other} takes the other backend's
+phrasing and rules as they are (tune.INHERITS says which).
 """
 
 from __future__ import annotations
@@ -40,8 +43,13 @@ def load(path: Path | None = None) -> dict[str, Any]:
 
 
 def entry(set_name: str, backend: str, tuning: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    """A backend's settings. An entry {"same_as": other} uses the other backend's, unchanged."""
     tuning = load() if tuning is None else tuning
-    return tuning.get("backends", {}).get(set_name, {}).get(backend)
+    backends = tuning.get("backends", {}).get(set_name, {})
+    found = backends.get(backend)
+    if found is not None and "same_as" in found:
+        return backends.get(found["same_as"])
+    return found
 
 
 def phrasing(set_name: str, backend: str, variant: str, tuning: dict[str, Any] | None = None) -> Phrasing:

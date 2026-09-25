@@ -313,3 +313,81 @@ record:
 - **LLM row.** `Qwen/Qwen3.5-4B` was checked on dev and kept out, because it
   fails the remote-without-login question that `Qwen/Qwen3-4B-Instruct-2507`
   passes.
+
+## Amendment 1, 2026-09-25: a faster server, one-call Smart, GLiNER2.5-Decide
+
+This amendment was written and committed before any test record was sent to the
+new server. Everything above still applies unless this section says otherwise.
+
+**Server.**
+- SIE `d41ba7f`. Its GLiClass changes mean the Smart model can answer all three
+  questions in one call, and it runs with CUDA graphs by default.
+- Bundles: the default bundle for the encoders, the transformers5 bundle for
+  GLiNER2.5-Decide, and the SGLang bundle for the LLM.
+- Each session reserves one NVIDIA L4, 10 CPU cores and 40 GiB of memory.
+- Each recording names the server commit it ran against, and the manifest lists
+  every commit.
+
+**Smart, one call per record.**
+- `gliclass-large-v1-one-call` sends `knowledgator/gliclass-large-v1.0` all three
+  questions in one call, each question a label group encoded as its own row, on
+  the model's default profile.
+- Its phrasing, cut-off and prior correction are `gliclass-large-v1`'s from
+  `tuning.json`, unchanged (`tune.INHERITS`). It is not tuned itself.
+- Before the test slice it is recorded on dev in that tuned mix and judged by the
+  page rule with those settings. As for every lane, a question it fails is left
+  out.
+- The per-question backend `gliclass-large-v1` stays in the plan and is recorded
+  on test too, for comparison.
+
+**Fast and the LLM.**
+- Fast is `gliformer-large`, as tuned.
+- The LLM row is `Qwen/Qwen3-4B-Instruct-2507` with the same call. Neither is
+  re-tuned. Both are recorded again on the new server.
+
+**Grouped instruct GLiClass.** The server now encodes label groups separately
+unless told otherwise. So `gliclass-instruct-large-grouped` asks for joint
+encoding explicitly, as it was recorded before, and is recorded again on dev
+(`short`, `concrete`, then the tuned mix). Its settings are refitted by the
+same procedure.
+
+**The test slice.**
+- Every backend in the plan is recorded once on the 160 test records at the new
+  commit. So are the workflow set and the GLiFormer multi-task run.
+- Accuracy is reported as it comes out, and the withdrawal rule applies to the
+  point figures as before.
+- The previous run's figures stay in the README, and its evidence stays at
+  dataset revision `30b05245e375f15cc87aa37a1705c4aad0d26f45`.
+
+**Time.**
+- Same protocol: one record at a time, the client beside the server, the median
+  per record, and "a round trip, not a service level".
+- A speed claim still needs 1.5 times.
+- Smart now makes one call, so the first comparison becomes Fast's one call
+  against Smart's one call, on the attack-vector answer both show.
+- The second is Smart's one call against the LLM's one call, on the same three
+  answers.
+
+**The cascade.** The cascade now makes one Smart call per record, whenever any
+question escalates. Its control is unchanged.
+
+**The cards.** Same rule. The records it picks can change, because the answers
+can.
+
+**GLiNER2.5-Decide.** Fastino's three typed decision models are new backends:
+
+| Backend | Model |
+|---|---|
+| `gliner2.5-decide` | `fastino/GLiNER2.5-Decide` |
+| `gliner2.5-multi-decide` | `fastino/GLiNER2.5-multi-Decide` |
+| `gliner2.5-decide-1b` | `fastino/GLiNER2.5-Decide-1B` |
+
+- They are asked Laya's typed questions as `output_schema`, one call per record,
+  and return every option's probability.
+- They are tuned on dev only, by the same procedure as every other backend:
+  phrasing, then decision rules, then the page rule.
+- Their settings and dev verdicts are added below, in amendment 2, and committed
+  before any of them sees a test record.
+- Each joins the catalog with the questions it passes on dev (`page.CATALOG`).
+  This amendment reassigns no lane. Where Decide stands against Fast and Smart
+  is reported, not decided here.
