@@ -112,11 +112,17 @@ _MAX_TYPE_GROUPS = 64
 # Marks an item whose model output could not be used.
 _ITEM_ERROR = "__gliformer_item_error__"
 # Span decoding work each document may do, in span_decoding's allowance units
-# (about 2.5 microseconds of host work each): a floor plus an allowance per
-# billed token of that document. A document that needs more keeps the
-# best-first prefix of each stage it can afford (see span_decoding).
-_DECODE_FLOOR = 16384
-_DECODE_UNITS_PER_TOKEN = 64
+# (1 to 5 microseconds of host work each on an L4 host): a floor plus an
+# allowance per billed token of that document. A document that needs more
+# keeps the best-first prefix of each stage it can afford (see span_decoding).
+# Measured with both checkpoints on 4,416 documents (short records, 2048-word
+# entity-dense text, prose, a list of names, repeated text, and 64-word
+# windows of them) and 12 tasks up to 64 labels, 20 relation types, and
+# records schemas with 16 fields or two record types: at threshold 0.5 every
+# document used at most 21% of its allowance; at 0.1 the heaviest, 64 words
+# of names with two record types, used 29,738 of 29,952 units.
+_DECODE_FLOOR = 4096
+_DECODE_UNITS_PER_TOKEN = 256
 
 # Distinct task prompts whose token counts are kept. A prompt depends only on
 # the request's task arguments, so a repeated task skips rebuilding and
@@ -581,11 +587,11 @@ class GLiFormerAdapter(BaseAdapter):
     are unchanged. Each document of a batch decodes as it would alone: the
     padding of shorter documents never forms spans or lowers scores.
 
-    Each document's span decoding also draws on its own allowance: 16,384
-    work units plus 64 per billed token of that document. A unit is about
-    2.5 microseconds of host work: one candidate span, record field span, or
-    relation, 64 per structuring proposal or relation entity candidate, and
-    one per score cell when a stage reaches a bound. A stage that cannot
+    Each document's span decoding also draws on its own allowance: 4,096
+    work units plus 256 per billed token of that document. A unit is 1 to 5
+    microseconds of host work: one candidate span or record field span, two
+    per relation, 64 per structuring proposal or relation entity candidate,
+    and one per score cell when a stage reaches a bound. A stage that cannot
     afford everything keeps the best-first prefix it can afford, as at the
     fixed bounds; the document still succeeds and bills normally, and other
     documents are unaffected.
