@@ -21,7 +21,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from sie_server.adapters._word_window import ATTENTION_BUDGET, MAX_WORD_CHARS, WindowedSplitter, subword_budget
-from sie_server.adapters.gliner2.adapter import _SUBWORDS_PER_WORD, GLiNER2Adapter
+from sie_server.adapters.gliner2.adapter import _PROMPT_TOKENS_PER_RELATION, _SUBWORDS_PER_WORD, GLiNER2Adapter
 from sie_server.adapters.gliner2.classification import GLiNER2ClassificationAdapter
 from sie_server.adapters.gliner2.words import PACKAGE_PATTERN, LinearWordSplitter
 from sie_server.types.inputs import Item
@@ -103,6 +103,24 @@ class PackageModel:
         ((name, config),) = tasks.items()
         self._collate(texts, gliner2_engine.Schema().classification(name, config["labels"]), max_len)
         return [{name: {"label": config["labels"][0], "confidence": 0.9}} for _ in texts]
+
+    def batch_extract_relations(
+        self, texts: list[str], labels: list[str], *, max_len: int | None, **_: Any
+    ) -> list[Any]:
+        self._collate(texts, gliner2_engine.Schema().relations(labels), max_len)
+        return [{"relation_extraction": {}} for _ in texts]
+
+    def batch_extract_json(
+        self, texts: list[str], structures: dict[str, list[str]], *, max_len: int | None, **_: Any
+    ) -> list[Any]:
+        schema = gliner2_engine.Schema()
+        for parent, fields in structures.items():
+            builder = schema.structure(parent)
+            for spec in fields:
+                name, dtype, choices, description = gliner2_engine.GLiNER2._parse_field_spec(None, spec)
+                builder.field(name, dtype=dtype, choices=choices, description=description)
+        self._collate(texts, schema, max_len)
+        return [{} for _ in texts]
 
 
 def make_adapter(
@@ -328,6 +346,66 @@ def test_an_ordinary_batch_runs_in_one_pass() -> None:
 
     assert len(model.inputs) == 1
     assert model.inputs[0].input_ids.shape[0] == 8
+
+
+@pytest.mark.parametrize("splitting", ["gliner2-1.x", "gliner2-2.x"])
+@pytest.mark.parametrize(
+    ("text", "max_len"),
+    [
+        (" ".join(["w"] * 510) + " http://", 512),
+        ("\u0130 " + " ".join(["w"] * 507) + " see https:// more words here", 512),
+        ("\u0130com https:// tail words", 6),
+    ],
+    ids=["url-without-sentence-end", "dotted-capital-i-then-url", "dotted-capital-i-short"],
+)
+def test_the_prefix_reads_what_gliner2_reads_with_its_sentence_end(text: str, max_len: int, splitting: str) -> None:
+    # gliner2 appends "." to a text without a sentence end, and a URL word absorbs it.
+    adapter = GLiNER2Adapter("fake/gliner2", max_seq_length=max_len)
+    processor = make_processor()
+    if splitting == "gliner2-2.x":
+        processor.word_splitter = Gliner2V2Splitter()
+    adapter._use_linear_word_splitter(processor)
+
+    prefix = adapter._model_text(text)
+
+    assert collated(processor, prefix, max_len) == collated(processor, text, max_len)
+
+
+def test_relation_rows_run_in_passes_within_the_attention_budget() -> None:
+    # gliner2 builds a structure of about ten tokens around each relation type.
+    adapter, model = make_adapter(encoder_config={"model_type": "deberta-v2"})
+    labels = [f"rel{index}" for index in range(150)]
+    text = " ".join(["abcdefghi"] * 400)
+    entities = [{"text": "abcdefghi", "label": "x", "start": 0, "end": 9}]
+
+    adapter.extract([Item(text=text, metadata={"entities": entities}) for _ in range(8)], labels=labels)
+
+    estimated = adapter._row_tokens([adapter._window(text)] * 1, labels, per_entry=_PROMPT_TOKENS_PER_RELATION)
+    assert estimated is not None
+    for batch in model.inputs:
+        rows, width = batch.input_ids.shape
+        assert width <= estimated[0]
+        assert rows == 1 or rows * width**2 <= ATTENTION_BUDGET
+
+
+def test_structured_rows_are_not_underestimated() -> None:
+    adapter, model = make_adapter(encoder_config={"model_type": "deberta-v2"})
+    schema = {
+        "type": "object",
+        "properties": {
+            f"field{index}": {"type": "string", "enum": [f"choice{index}{option}" for option in "abcdef"]}
+            for index in range(40)
+        },
+    }
+    text = " ".join(["abcdefghi"] * 400)
+
+    adapter.extract([Item(text=text)], output_schema=schema)
+
+    structures = adapter._json_schema_to_structures(schema)
+    specs = [spec for fields in structures.values() for spec in fields]
+    estimated = adapter._row_tokens([adapter._window(text)], specs + specs)
+    assert estimated is not None
+    assert model.inputs[-1].input_ids.shape[1] <= estimated[0]
 
 
 @pytest.mark.parametrize("max_len", [1, 2])

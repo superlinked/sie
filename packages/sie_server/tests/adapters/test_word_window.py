@@ -145,6 +145,14 @@ class SplitWordTokenizer:
         return type("Encoding", (), {"word_ids": lambda self: ids})()
 
 
+def test_the_counter_keeps_no_word_longer_than_a_piece() -> None:
+    counter = SubwordCounter(per_char)
+    long_word = "q" * (MAX_WORD_CHARS + 1)
+
+    assert counter([long_word, "ab", long_word]) == [MAX_WORD_CHARS + 1, 2, MAX_WORD_CHARS + 1]
+    assert counter._cache == {"ab": 2}
+
+
 def test_split_words_are_counted_as_the_tokenizer_encodes_them() -> None:
     assert split_word_counter(SplitWordTokenizer())(["a", "", "bc"]) == [2, 0, 2]
 
@@ -170,6 +178,13 @@ def test_the_budget_allows_subwords_per_word_up_to_the_encoder_cap() -> None:
     assert subword_budget(386, bert) == 508
     relative = {"model_type": "deberta-v2", "max_position_embeddings": 512}
     assert subword_budget(384, relative) == SUBWORDS_PER_WORD * 384
+    # transformers 5 writes no position_embedding_type for BERT-style encoders.
+    assert subword_budget(386, {"model_type": "bert", "max_position_embeddings": 512}) == 508
+    assert subword_budget(386, {"model_type": "xlm-roberta", "max_position_embeddings": 514}) == 510
+    bert_relative = {"model_type": "bert", "position_embedding_type": "relative_key", "max_position_embeddings": 512}
+    assert subword_budget(386, bert_relative) == SUBWORDS_PER_WORD * 386
+    rotary = {"model_type": "modernbert", "max_position_embeddings": 8192}
+    assert subword_budget(2048, rotary) == MAX_DOCUMENT_SUBWORDS
 
 
 def test_a_batch_that_fits_runs_as_it_is() -> None:

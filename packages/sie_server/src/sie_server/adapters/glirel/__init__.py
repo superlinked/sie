@@ -193,6 +193,8 @@ class GLiRELAdapter(BaseAdapter):
             if not entities:
                 raise ValueError(_ERR_REQUIRES_ENTITIES)
 
+            for entity in entities:
+                self._validate_entity_span(entity, text)
             tokens, token_offsets, read_end = self._tokenize(text)
             # Entities past the words GLiREL reads take no part, as when it truncates them itself.
             read_entities = [entity for entity in entities if self._is_read(entity, text, read_end)]
@@ -276,11 +278,28 @@ class GLiRELAdapter(BaseAdapter):
         return [word for word, _, _ in words], [(start, end) for _, start, end in words], read_end
 
     @staticmethod
-    def _is_read(entity: dict[str, Any], text: str, read_end: int) -> bool:
-        """Whether an entity lies in the text GLiREL reads (anything past it but spaces counts against it)."""
+    def _validate_entity_span(entity: dict[str, Any], text: str) -> None:
+        """Check an entity's character offsets wherever it lies in the text.
+
+        Raises:
+            ValueError: The offsets are not integers with start < end, or cover no text token.
+        """
         start = entity.get("start")
         end = entity.get("end")
-        if not isinstance(start, int) or not isinstance(end, int) or end <= read_end:
+        if not isinstance(start, int) or not isinstance(end, int) or start >= end:
+            msg = "GLiREL entity metadata requires integer character offsets with start < end"
+            raise ValueError(msg)
+        # Every non-space character is part of a GLiREL token.
+        if not text[max(start, 0) : end].strip():
+            msg = f"GLiREL entity span [{start}, {end}) does not cover any text token"
+            raise ValueError(msg)
+
+    @staticmethod
+    def _is_read(entity: dict[str, Any], text: str, read_end: int) -> bool:
+        """Whether an entity lies in the text GLiREL reads (anything past it but spaces counts against it)."""
+        start = entity["start"]
+        end = entity["end"]
+        if end <= read_end:
             return True
         return start < read_end and not text[read_end:end].strip()
 

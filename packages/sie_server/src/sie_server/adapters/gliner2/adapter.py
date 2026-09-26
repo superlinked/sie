@@ -52,8 +52,12 @@ _WORD_CACHE_SIZE = 16384
 _CACHED_WORD_CHARS = 32
 # Rows gliner2 puts in one forward pass when not told otherwise.
 _PACKAGE_BATCH_SIZE = 8
-# Task prompt tokens per label, schema field or task name beyond its own tokens.
+# Task prompt tokens per label or task name beyond its own tokens: gliner2
+# marks each entity type or class with one token, and builds one structure of
+# about ten tokens around each relation type.
 _PROMPT_TOKENS_PER_ENTRY = 2
+_PROMPT_TOKENS_PER_RELATION = 12
+_SENTENCE_END = (".", "!", "?")
 # The prompt's own markers, [SEP_TEXT], and the tokenizer's specials.
 _ROW_OVERHEAD_TOKENS = 8
 _DEBERTA_CONFIG = {"model_type": "deberta-v2"}
@@ -249,7 +253,9 @@ class GLiNER2Adapter(BaseAdapter):
             if classification_task is not None:
                 raise ValueError("GLiNER2 structured extraction does not accept classification_task")
             structures = self._json_schema_to_structures(output_schema)
-            rows = self._row_tokens(windows, [spec for specs in structures.values() for spec in specs])
+            specs = [spec for fields in structures.values() for spec in fields]
+            # A field's choices are read twice: in its structure and in a prefix before the document.
+            rows = self._row_tokens(windows, specs + specs)
             with torch.inference_mode():
                 raw_results = self._run_planned(
                     model_texts,
@@ -280,7 +286,7 @@ class GLiNER2Adapter(BaseAdapter):
             normalized_entities = [
                 self._normalize_input_entities(item, entities or []) for item, entities in zip(items, relation_entities)
             ]
-            rows = self._row_tokens(windows, normalized_labels)
+            rows = self._row_tokens(windows, normalized_labels, per_entry=_PROMPT_TOKENS_PER_RELATION)
             with torch.inference_mode():
                 raw_results = self._run_planned(
                     model_texts,
@@ -406,7 +412,13 @@ class GLiNER2Adapter(BaseAdapter):
             input_token_counts=input_token_counts,
         )
 
-    def _row_tokens(self, windows: list[tuple[str, int | None]], prompt_entries: Iterable[str]) -> list[int] | None:
+    def _row_tokens(
+        self,
+        windows: list[tuple[str, int | None]],
+        prompt_entries: Iterable[str],
+        *,
+        per_entry: int = _PROMPT_TOKENS_PER_ENTRY,
+    ) -> list[int] | None:
         """Estimated tokens of each item's encoder row: the task prompt, then the words it reads.
 
         None when the words were not counted (no bounded splitter is installed).
@@ -415,7 +427,7 @@ class GLiNER2Adapter(BaseAdapter):
         if count is None or any(subwords is None for _, subwords in windows):
             return None
         entries = [entry for entry in prompt_entries if isinstance(entry, str)]
-        prompt = sum(count(entries)) + _PROMPT_TOKENS_PER_ENTRY * len(entries) + _ROW_OVERHEAD_TOKENS
+        prompt = sum(count(entries)) + per_entry * len(entries) + _ROW_OVERHEAD_TOKENS
         return [prompt + (subwords or 0) for _, subwords in windows]
 
     def _run_planned(
@@ -811,19 +823,25 @@ class GLiNER2Adapter(BaseAdapter):
         not read. No word crosses that point, so the prefix splits into the
         same words at the same offsets. gliner2 1.x splits the lowercased text
         and indexes the original with those offsets, so the prefix ends at the
-        lowercased offset; it is used only when its lowercase starts the
-        lowercased text (a final sigma can lowercase differently at the cut).
-        gliner2 2.x splits the text as given. The subwords are None when no
-        bounded splitter is installed.
+        lowercased offset; it is used only when lowercasing keeps the text's
+        length and the prefix's lowercase starts the lowercased text (a final
+        sigma can lowercase differently at the cut). gliner2 2.x splits the
+        text as given. The window is read from the text as gliner2 reads it,
+        with the "." it appends to a text without a sentence end. The
+        subwords are None when no bounded splitter is installed.
         """
         splitter = self._word_splitter
         if splitter is None:
             return text, None
-        window = splitter.window(text, lower=True)
+        # gliner2 ends a text without a sentence end with ".", and reads that too.
+        window = splitter.window(text if text.endswith(_SENTENCE_END) else text + ".", lower=True)
         cut = window.cut
         if cut is None:
             return text, window.subwords
         source = text.lower() if self._lower_text_first else text
+        if len(source) != len(text):
+            # Offsets into the lowercased text do not index this one.
+            return text, window.subwords
         if cut < len(source) and source[cut].isspace():
             # Keep the separator: gliner2 ends a text without a sentence end with
             # ".", which a URL word (running to whitespace) would absorb.

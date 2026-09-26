@@ -308,3 +308,36 @@ def test_glirel_skips_the_model_when_no_entity_is_read() -> None:
 
     predict.assert_not_called()
     assert output.relations == [[]]
+
+
+def test_glirel_still_rejects_invalid_entity_offsets_past_the_words_it_reads() -> None:
+    adapter, predict = glirel_adapter(max_words=2)
+    text = "Tim Cook leads Apple"
+
+    with pytest.raises(ValueError, match="does not cover any text token"):
+        adapter.extract(
+            [Item(text=text, metadata={"entities": [{"text": "x", "label": "ORG", "start": 500, "end": 505}]})],
+            labels=["ceo_of"],
+        )
+    predict.assert_not_called()
+
+
+def test_glirel_load_reads_through_the_bounded_window() -> None:
+    model = MagicMock()
+    model.to.return_value = model
+    model.base_config.max_len = 512
+    model.token_rep_layer.bert_layer.tokenizer = char_tokenizer()
+    model.token_rep_layer.bert_layer.model.config = DEBERTA
+    module = ModuleType("glirel")
+    module.GLiREL = MagicMock()  # ty:ignore[unresolved-attribute]
+    module.GLiREL.from_pretrained.return_value = model  # ty:ignore[unresolved-attribute]
+    adapter = GLiRELAdapter("fake/glirel")
+
+    with patch.dict(sys.modules, {"glirel": module}):
+        adapter.load("cpu")
+
+    assert adapter._words is not None
+    assert adapter._words.max_words == 512
+    assert adapter._words.max_subwords == subword_budget(512, DEBERTA, per_word=GLIREL_SUBWORDS_PER_WORD)
+    tokens, _, _ = adapter._tokenize("Tim Cook " + "z" * MiB)
+    assert sum(len(token) for token in tokens) <= adapter._words.max_subwords

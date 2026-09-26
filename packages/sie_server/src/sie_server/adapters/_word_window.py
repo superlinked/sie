@@ -22,7 +22,7 @@ reads:
 window: ``SUBWORDS_PER_WORD`` by default, which holds ordinary text in the
 languages these tokenizers read. Prose, code, CSV and JSON logs run at 1 to 2.4
 subwords per word, other European languages and Korean at up to 3.2, and
-Chinese or Japanese at up to 5.6 for the multilingual checkpoints. The budget
+Chinese or Japanese at about 4 to 6 for the multilingual checkpoints. The budget
 is capped at ``MAX_DOCUMENT_SUBWORDS`` (``DEBERTA_MAX_DOCUMENT_SUBWORDS`` for
 DeBERTa encoders, whose attention materializes score matrices of the square of
 the row length), and within the position table of encoders with absolute
@@ -44,7 +44,7 @@ from typing import Any
 # A longer word is read in pieces of this many characters.
 MAX_WORD_CHARS = 256
 # Subword tokens a document may take per word of the model's word window.
-SUBWORDS_PER_WORD = 6
+SUBWORDS_PER_WORD = 8
 # Most document subwords a model reads...
 MAX_DOCUMENT_SUBWORDS = 8192
 # ...and for DeBERTa encoders: one such row takes about 2 GiB of attention scores at float16.
@@ -57,6 +57,11 @@ _SPECIAL_POSITIONS = 4
 _READ_BLOCK = 64
 _COUNT_CACHE_SIZE = 16384
 _QUADRATIC_ATTENTION_TYPES = frozenset({"deberta", "deberta-v2"})
+# Encoders with a learned table of absolute positions. transformers 5 no longer
+# writes ``position_embedding_type`` for them, so the model type decides.
+_ABSOLUTE_POSITION_TYPES = frozenset(
+    {"albert", "bert", "camembert", "distilbert", "electra", "mpnet", "roberta", "xlm-roberta"}
+)
 
 Word = tuple[str, int, int]
 CountSubwords = Callable[[Sequence[str]], Sequence[int]]
@@ -76,9 +81,12 @@ def quadratic_attention(encoder_config: Any) -> bool:
 def absolute_positions(encoder_config: Any) -> int | None:
     """The size of the encoder's absolute position table, or None when positions are relative or rotary."""
     positions = _config_value(encoder_config, "max_position_embeddings")
-    if _config_value(encoder_config, "position_embedding_type") != "absolute" or not isinstance(positions, int):
+    if not isinstance(positions, int) or isinstance(positions, bool):
         return None
-    return positions
+    kind = _config_value(encoder_config, "position_embedding_type")
+    if kind == "absolute" or (kind is None and _config_value(encoder_config, "model_type") in _ABSOLUTE_POSITION_TYPES):
+        return positions
+    return None
 
 
 def subword_budget(max_words: int, encoder_config: Any = None, *, per_word: int = SUBWORDS_PER_WORD) -> int:
@@ -187,7 +195,11 @@ class WindowedSplitter:
 
 
 class SubwordCounter:
-    """Subword counts of words, from ``count`` (a list of words at a time), with the recent ones kept."""
+    """Subword counts of words, from ``count`` (a list of words at a time), with the recent ones kept.
+
+    Only words of at most ``MAX_WORD_CHARS`` characters (every piece a window
+    reads) are kept, so the cache holds at most ``size`` such words.
+    """
 
     __slots__ = ("_cache", "_count", "_size")
 
@@ -198,16 +210,22 @@ class SubwordCounter:
 
     def __call__(self, words: Sequence[str]) -> list[int]:
         missing = list(dict.fromkeys(word for word in words if word not in self._cache))
+        counted: dict[str, int] = {}
         if missing:
             counts = self._count(missing)
             if len(counts) != len(missing):
                 raise RuntimeError("subword counts do not match the words counted")
-            for word, count in zip(missing, counts, strict=True):
-                self._cache[word] = int(count)
+            counted = {word: int(count) for word, count in zip(missing, counts, strict=True)}
         result = []
         for word in words:
-            self._cache.move_to_end(word)
-            result.append(self._cache[word])
+            if word in counted:
+                count = counted[word]
+                if len(word) <= MAX_WORD_CHARS:
+                    self._cache[word] = count
+            else:
+                count = self._cache[word]
+                self._cache.move_to_end(word)
+            result.append(count)
         while len(self._cache) > self._size:
             self._cache.popitem(last=False)
         return result
