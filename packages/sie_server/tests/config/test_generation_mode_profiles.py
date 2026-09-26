@@ -13,6 +13,7 @@ _THINKING_MODELS = (
     ("Qwen__Qwen3.5-4B.yaml", "Qwen/Qwen3.5-4B"),
     ("Qwen__Qwen3.6-27B.yaml", "Qwen/Qwen3.6-27B"),
     ("Qwen__Qwen3.6-35B-A3B.yaml", "Qwen/Qwen3.6-35B-A3B"),
+    ("Qwen__Qwen3.8-27B-FP8.yaml", "Qwen/Qwen3.8-27B-FP8"),
     ("google__gemma-4-E2B-it.yaml", "google/gemma-4-E2B-it"),
     ("google__gemma-4-E4B-it.yaml", "google/gemma-4-E4B-it"),
     ("google__gemma-4-26B-A4B-it.yaml", "google/gemma-4-26B-A4B-it"),
@@ -42,6 +43,7 @@ _LONG_CONTEXT_THINKING_IDS = {model_id for _, model_id in _LONG_CONTEXT_THINKING
 _HARDWARE_THINKING_PROFILES = {
     "Qwen/Qwen3.6-27B": ("h100-256k-thinking", "long-context-thinking-no-spec"),
     "Qwen/Qwen3.6-35B-A3B": ("h100-256k-thinking",),
+    "Qwen/Qwen3.8-27B-FP8": ("h100-256k-thinking", "h100-256k-thinking-no-spec"),
     "google/gemma-4-31B-it": (
         "h100-96k-thinking",
         "h200-256k-thinking",

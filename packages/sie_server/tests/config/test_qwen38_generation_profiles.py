@@ -8,6 +8,8 @@ _MODEL_ID = "Qwen/Qwen3.8-27B-FP8"
 _MODEL_PATH = Path(__file__).resolve().parents[2] / "models" / "Qwen__Qwen3.8-27B-FP8.yaml"
 _REVISION = "017b9c7af6b5689d5dd426a76e0bc077eb5ca20a"
 _ADAPTER = "sie_server.adapters.sglang.cuda13:SGLangCuda13Adapter"
+_THINKING_ADAPTER = "sie_server.adapters.sglang.cuda13:SGLangStrictThinkingAdapter"
+_THINKING_PROFILES = ("h100-256k-thinking", "h100-256k-thinking-no-spec", "thinking")
 _NATIVE_CONTEXT = 262144
 _NATIVE_OUTPUT_CAP = 32768
 _SPECULATIVE = {
@@ -49,6 +51,9 @@ def test_qwen38_uses_the_pinned_official_fp8_checkpoint() -> None:
         "h200-256k-no-spec",
         "rtx-pro-6000-256k",
         "rtx-pro-6000-256k-no-spec",
+        "h100-256k-thinking",
+        "h100-256k-thinking-no-spec",
+        "thinking",
     }
 
 
@@ -168,3 +173,31 @@ def test_qwen38_hardware_launches_keep_fp8_weights_with_tuned_state_precision() 
         assert rtx_profile.loadtime["attention_backend"] == "flashinfer"
         assert rtx_args[rtx_args.index("--chunked-prefill-size") + 1] == "2048"
         assert "--max-prefill-tokens" not in rtx_args
+
+
+def test_qwen38_thinking_profiles_are_the_h100_native_shape_without_speculation() -> None:
+    config = load_model_config(_MODEL_PATH)
+    configs = expand_profile_variants([config])
+    answer_only = config.resolve_profile("h100-256k-no-spec")
+    thinking = config.resolve_profile("h100-256k-thinking")
+
+    assert thinking.grammar_profile == "h100-256k-thinking-no-spec"
+    for name in _THINKING_PROFILES:
+        profile = config.resolve_profile(name)
+        variant = configs[f"{_MODEL_ID}:{name}"]
+        assert variant.tasks.generate is not None
+        assert variant.tasks.generate.chat_template_kwargs == {"enable_thinking": True}
+        assert variant.tasks.generate.context_length == _NATIVE_CONTEXT
+        assert variant.tasks.generate.max_output_tokens == _NATIVE_OUTPUT_CAP
+        assert profile.adapter_path == _THINKING_ADAPTER
+        assert profile.loadtime["speculative"] == {"enabled": False}
+        assert profile.loadtime["reasoning_parser"] == "qwen3"
+        assert profile.loadtime | {"reasoning_parser": None} == answer_only.loadtime | {"reasoning_parser": None}
+        assert profile.runtime["default_sampling"] == {
+            "temperature": 1.0,
+            "top_p": 0.95,
+            "top_k": 20,
+            "presence_penalty": 0.0,
+        }
+        assert profile.runtime | {"default_sampling": None} == answer_only.runtime | {"default_sampling": None}
+        assert profile.kv_budget_tokens == profile.max_batch_tokens == _NATIVE_CONTEXT
