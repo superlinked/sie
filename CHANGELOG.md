@@ -1,5 +1,45 @@
 # Changelog
 
+## [0.8.3](https://github.com/superlinked/sie/compare/v0.8.2...v0.8.3) (2026-09-26)
+
+
+### Features
+
+* **examples:** add a typed-decisions verification example ([#362](https://github.com/superlinked/sie/issues/362)) ([d4e00b3](https://github.com/superlinked/sie/commit/d4e00b3b33701e150d28fe191df4a50d2bc96416))
+* **examples:** add watermark robustness eval (translation vs paraphrase) ([#296](https://github.com/superlinked/sie/issues/296)) ([a7c37ac](https://github.com/superlinked/sie/commit/a7c37ace008d4576a96e2085780441fa48249796))
+* **examples:** refresh typed-decisions evidence on a faster server and add GLiNER2.5-Decide ([#376](https://github.com/superlinked/sie/issues/376)) ([8b4dc45](https://github.com/superlinked/sie/commit/8b4dc459dea70ca9bf9ff2320a459663b88ba2a3))
+* **server:** add GLiFormer multi-task extraction models ([#358](https://github.com/superlinked/sie/issues/358)) ([28a07f5](https://github.com/superlinked/sie/commit/28a07f500490c8bd2653b68f83baf3718cb70b95))
+* **server:** encode GLiClass label groups separately by default ([#364](https://github.com/superlinked/sie/issues/364)) ([71b395f](https://github.com/superlinked/sie/commit/71b395fee4564df7a33fdc47561427c2a5044c4e))
+* **server:** GLiClass task prompts, few-shot examples and label groups, plus instruct, Opir and multilingual models ([#355](https://github.com/superlinked/sie/issues/355)) ([bc1d66e](https://github.com/superlinked/sie/commit/bc1d66ef3df2beb93763a0bf874cd41e0b221d89))
+* **server:** relations from GLiNER relex models, plus GLiNER bi-encoder v2 and PII models ([#356](https://github.com/superlinked/sie/issues/356)) ([5914e91](https://github.com/superlinked/sie/commit/5914e9111443ba84999d559419a3be6fed23d236))
+* **server:** replay GLiClass forwards as CUDA graphs ([#367](https://github.com/superlinked/sie/issues/367)) ([7afc169](https://github.com/superlinked/sie/commit/7afc1691422c386ba276a2277c81675efff34943))
+* **server:** serve GLiNER2.5-Decide typed-decision models ([#368](https://github.com/superlinked/sie/issues/368)) ([2bbbc54](https://github.com/superlinked/sie/commit/2bbbc5400cc3926501fa1a706b12bf578e31c373))
+* **server:** serve Laya typed-decision models through extract ([#353](https://github.com/superlinked/sie/issues/353)) ([5162aa7](https://github.com/superlinked/sie/commit/5162aa7d006e3c5fb0d8f26f967c049bb63ccd79))
+
+
+### Bug Fixes
+
+* **examples:** follow the screenshot-mining and multi-vector page selections ([#349](https://github.com/superlinked/sie/issues/349)) ([72c74bb](https://github.com/superlinked/sie/commit/72c74bb2135b9960cbc2bf20c46c361589484d36))
+* **examples:** score /structured-output's amended run, and drop the last display claim ([#352](https://github.com/superlinked/sie/issues/352)) ([26c81c2](https://github.com/superlinked/sie/commit/26c81c2483dd59a6d91575fb759423a25d7d81f7))
+* **examples:** score the detect and image-classify pages as they now publish ([#350](https://github.com/superlinked/sie/issues/350)) ([e48c1a6](https://github.com/superlinked/sie/commit/e48c1a64b000754d674a9f0d02090f5fece81ff4))
+* **examples:** score the redact composition, and stop both examples describing their pages ([#357](https://github.com/superlinked/sie/issues/357)) ([e9815c3](https://github.com/superlinked/sie/commit/e9815c332f967cbc4b1ef2635ed9bd04024023b3))
+* **examples:** stop chat and caption-vqa describing what their pages display ([#351](https://github.com/superlinked/sie/issues/351)) ([2e3c45e](https://github.com/superlinked/sie/commit/2e3c45ec8cdb7e6e7ea14ca6edc8e6b876ebd381))
+* **examples:** stop guardrails and speech-to-text describing what their pages display ([#354](https://github.com/superlinked/sie/issues/354)) ([79ae97e](https://github.com/superlinked/sie/commit/79ae97ea007ef3bd07c1efdb700edfb5c80ac540))
+* **gliformer:** bound span decoding and keep padding out of it ([#375](https://github.com/superlinked/sie/issues/375)) ([0ee26b0](https://github.com/superlinked/sie/commit/0ee26b0337c82c11a2792607e90c4cf702ca3a39))
+* **knowledge-graph:** narrow two relation schemas and re-pin the evidence ([#348](https://github.com/superlinked/sie/issues/348)) ([72a9924](https://github.com/superlinked/sie/commit/72a9924fb48894b44711ae9a92c9b919d3039273))
+* **mcp:** window GLiNER extract and redact by words so the whole text is read ([#359](https://github.com/superlinked/sie/issues/359)) ([35e711b](https://github.com/superlinked/sie/commit/35e711bf6bde4ff0694b56e58d87b698b93d15ff))
+* **server:** bound subword length of long words in GLiNER adapters ([#380](https://github.com/superlinked/sie/issues/380)) ([894a017](https://github.com/superlinked/sie/commit/894a0175749e4da71c6239dc4ea1c6bbaf8ebfae))
+* **server:** limit the label prompt of GLiNER-family extract requests ([#381](https://github.com/superlinked/sie/issues/381)) ([5aa0287](https://github.com/superlinked/sie/commit/5aa0287c66e4916f0919660eef6348d0bfbc98b6))
+* **server:** reject oversized item text at encode, score, and extract ingress ([#366](https://github.com/superlinked/sie/issues/366)) ([7bd6192](https://github.com/superlinked/sie/commit/7bd61929a0438be8bd785ef161885f54f7169a75))
+* **server:** split GLiNER2 documents in linear time ([#371](https://github.com/superlinked/sie/issues/371)) ([359c4f0](https://github.com/superlinked/sie/commit/359c4f08a9005a7e24dd9b43ee32db7d0c43665c))
+* **sparse:** score the three cards the page shows and the run behind them ([#346](https://github.com/superlinked/sie/issues/346)) ([c93f18a](https://github.com/superlinked/sie/commit/c93f18a089a4f5cac8b0f1ae80d0c559ac3b7622))
+
+
+### Performance Improvements
+
+* **gliformer:** measure each task prompt once and skip the per-request eval() ([#365](https://github.com/superlinked/sie/issues/365)) ([d41ba7f](https://github.com/superlinked/sie/commit/d41ba7fb828cedb6a08f4c4028c6ce621385168f))
+* **models:** load three GLiClass models with bucketed CUDA graphs ([#372](https://github.com/superlinked/sie/issues/372)) ([a3a6429](https://github.com/superlinked/sie/commit/a3a642981dddd3d6e6c1e2a57ca625e58a62538f))
+
 ## [0.8.2](https://github.com/superlinked/sie/compare/v0.8.1...v0.8.2) (2026-09-23)
 
 
