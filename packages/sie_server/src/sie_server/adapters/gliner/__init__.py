@@ -17,6 +17,11 @@ Reference models:
 Joint entity-relation ("relex") models also extract relations between the
 entities they find when a request names relation types in
 ``options["relation_labels"]``. Without it they return entities only.
+
+A request's labels and relation types, which GLiNER encodes with every
+document and does not bill, may have at most 128 characters each and take at
+most ``max_prompt_tokens`` tokens together (default 1024); a longer prompt is
+rejected with ``INVALID_INPUT``.
 """
 
 import math
@@ -27,6 +32,12 @@ from typing import Any, ClassVar
 import torch
 
 from sie_server.adapters._base_adapter import BaseAdapter
+from sie_server.adapters._prompt_limit import (
+    DEFAULT_MAX_PROMPT_TOKENS,
+    PromptLimit,
+    check_label_chars,
+    gliner_prompt_counter,
+)
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_REQUIRES_TEXT, ComputePrecision
 from sie_server.adapters._word_window import bound_gliner_words, plan_forwards
@@ -96,6 +107,7 @@ class GLiNERAdapter(BaseAdapter):
         multi_label: bool = False,
         merge_adjacent_entities: bool = False,
         relation_threshold: float | None = None,
+        max_prompt_tokens: int = DEFAULT_MAX_PROMPT_TOKENS,
         compute_precision: ComputePrecision = "float16",
         revision: str | None = None,
         **kwargs: Any,  # Accept extra args from loader (e.g., pooling)
@@ -112,6 +124,9 @@ class GLiNERAdapter(BaseAdapter):
             relation_threshold: Minimum relation score (0-1) for joint
                 entity-relation models. None uses the entity threshold, as the
                 gliner library does.
+            max_prompt_tokens: Most tokens a request's labels and relation
+                types may take in the prompt encoded with each document (see
+                ``_prompt_limit``).
             compute_precision: Compute precision for inference.
             revision: Optional HuggingFace revision/branch/commit SHA to pin when
                 loading model artifacts.
@@ -133,6 +148,9 @@ class GLiNERAdapter(BaseAdapter):
         self._extracts_relations = False
         # True when the encoder's attention memory grows with the square of a row (see ``_inference``).
         self._quadratic_attention = False
+        self._prompt_limit = PromptLimit("GLiNER", max_prompt_tokens)
+        # Tokens of the label prompt, as the loaded model builds it; None until loaded.
+        self._count_prompt: Any = None
 
     def load(self, device: str) -> None:
         """Load the model onto the specified device.
@@ -173,6 +191,7 @@ class GLiNERAdapter(BaseAdapter):
         # gliner's max_len counts words, whatever their subwords: read at most a
         # bounded number of subwords too, with a long word in pieces.
         self._quadratic_attention = bound_gliner_words(self._model)
+        self._count_prompt = gliner_prompt_counter(self._model)
 
     def extract(
         self,
@@ -226,6 +245,8 @@ class GLiNERAdapter(BaseAdapter):
         relation_labels = self._validate_relation_labels(opts.get("relation_labels"), labels)
         if relation_labels and not self._extracts_relations:
             raise InvalidInputError(_ERR_NO_RELATIONS)
+
+        self._check_prompt(labels, relation_labels)
 
         # Extract texts from all items
         texts = [self._extract_text(item) for item in items]
@@ -302,6 +323,27 @@ class GLiNERAdapter(BaseAdapter):
             all_relations = [self._format_relations(relations) for relations in batch_relations]
 
         return ExtractOutput(entities=all_entities, relations=all_relations, input_token_counts=input_token_counts)
+
+    def _check_prompt(self, labels: list[str], relation_labels: list[str]) -> None:
+        """Reject a request whose labels and relation types take more than ``max_prompt_tokens``.
+
+        gliner encodes the label prompt with every document, and only the
+        document is billed.
+
+        Raises:
+            InvalidInputError: The prompt is too long, or a label is not a string.
+        """
+        check_label_chars("GLiNER", "labels", labels)
+        check_label_chars("GLiNER", "relation_labels", relation_labels)
+        entity_types = list(dict.fromkeys(labels))  # gliner drops repeated labels
+        count = self._count_prompt
+
+        def tokens() -> int:
+            return count(entity_types, relation_labels) if count is not None else 0
+
+        self._prompt_limit.check(
+            [*entity_types, *relation_labels], tokens, (tuple(entity_types), tuple(relation_labels))
+        )
 
     @staticmethod
     def _validate_relation_labels(value: Any, labels: list[str]) -> list[str]:

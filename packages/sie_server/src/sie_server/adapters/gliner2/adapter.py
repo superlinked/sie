@@ -13,6 +13,7 @@ import torch
 from huggingface_hub import snapshot_download
 
 from sie_server.adapters._base_adapter import BaseAdapter
+from sie_server.adapters._prompt_limit import DEFAULT_MAX_SCHEMA_PROMPT_TOKENS, PromptLimit, check_label_chars
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_REQUIRES_TEXT, ComputePrecision
 from sie_server.adapters._word_window import (
@@ -76,6 +77,12 @@ class GLiNER2Adapter(BaseAdapter):
     - Batch methods cover entities, relations, structured data, and classification
     - Classification uses ``classify_text()`` / ``batch_classify_text()``
 
+    A request's labels, class labels, relation types or schema fields (field
+    names, descriptions and choices), which gliner2 encodes with every document
+    and does not bill, may take at most ``max_prompt_tokens`` tokens (default
+    2048), and each label, task name, field name or choice at most 128
+    characters; a longer prompt is rejected with ``INVALID_INPUT``.
+
     Reference models:
     - fastino/gliner2-base-v1
     - fastino/gliner2-large-v1
@@ -98,6 +105,7 @@ class GLiNER2Adapter(BaseAdapter):
         default_labels: list[str] | None = None,
         multi_label: bool = False,
         max_seq_length: int | None = None,
+        max_prompt_tokens: int = DEFAULT_MAX_SCHEMA_PROMPT_TOKENS,
         compute_precision: ComputePrecision = "float16",
         revision: str | None = None,
         **kwargs: Any,
@@ -115,6 +123,9 @@ class GLiNER2Adapter(BaseAdapter):
             multi_label: Whether the configured classification task may return
                 multiple labels.
             max_seq_length: Maximum document and schema input length.
+            max_prompt_tokens: Most tokens a request's labels, class labels,
+                relation types or schema fields may take in the task prompt
+                encoded with each document (see ``_prompt_limit``).
             compute_precision: Compute precision for inference.
             revision: Optional HuggingFace revision/branch/commit SHA to pin when
                 loading model artifacts.
@@ -127,6 +138,7 @@ class GLiNER2Adapter(BaseAdapter):
         self._default_labels = self._validate_labels(default_labels) if default_labels is not None else None
         self._multi_label = multi_label
         self._max_seq_length = max_seq_length
+        self._prompt_limit = PromptLimit("GLiNER2", max_prompt_tokens)
         self._compute_precision = compute_precision
         self._revision = revision
 
@@ -254,8 +266,14 @@ class GLiNER2Adapter(BaseAdapter):
                 raise ValueError("GLiNER2 structured extraction does not accept classification_task")
             structures = self._json_schema_to_structures(output_schema)
             specs = [spec for fields in structures.values() for spec in fields]
-            # A field's choices are read twice: in its structure and in a prefix before the document.
-            rows = self._row_tokens(windows, specs + specs)
+            # A field's choices are listed in its structure, and each again in a prefix before the document.
+            choices = [
+                choice for definition in output_schema["properties"].values() for choice in definition.get("enum") or []
+            ]
+            check_label_chars("GLiNER2", "output_schema property names", output_schema["properties"])
+            check_label_chars("GLiNER2", "output_schema enum values", choices)
+            prompt = self._prompt_tokens(specs, key=("json", tuple(specs)), extra=len(choices))
+            rows = self._row_tokens(windows, prompt)
             with torch.inference_mode():
                 raw_results = self._run_planned(
                     model_texts,
@@ -286,7 +304,11 @@ class GLiNER2Adapter(BaseAdapter):
             normalized_entities = [
                 self._normalize_input_entities(item, entities or []) for item, entities in zip(items, relation_entities)
             ]
-            rows = self._row_tokens(windows, normalized_labels, per_entry=_PROMPT_TOKENS_PER_RELATION)
+            check_label_chars("GLiNER2", "labels", normalized_labels)
+            prompt = self._prompt_tokens(
+                normalized_labels, per_entry=_PROMPT_TOKENS_PER_RELATION, key=("relations", tuple(normalized_labels))
+            )
+            rows = self._row_tokens(windows, prompt)
             with torch.inference_mode():
                 raw_results = self._run_planned(
                     model_texts,
@@ -314,6 +336,12 @@ class GLiNER2Adapter(BaseAdapter):
         if classification_task is not None:
             if not isinstance(classification_task, str) or not classification_task.strip():
                 raise ValueError("GLiNER2 classification_task must be a non-empty string")
+            check_label_chars("GLiNER2", "classification_task", [classification_task])
+            check_label_chars("GLiNER2", "labels", normalized_labels)
+            prompt = self._prompt_tokens(
+                [classification_task, *normalized_labels],
+                key=("classification", classification_task, tuple(normalized_labels)),
+            )
             return self._classify(
                 model_texts,
                 normalized_labels,
@@ -321,7 +349,7 @@ class GLiNER2Adapter(BaseAdapter):
                 multi_label=multi_label,
                 threshold=effective_threshold,
                 input_token_counts=input_token_counts,
-                rows=self._row_tokens(windows, [classification_task, *normalized_labels]),
+                rows=self._row_tokens(windows, prompt),
             )
 
         def extract_entities(batch: list[str]) -> list[Any]:
@@ -345,10 +373,12 @@ class GLiNER2Adapter(BaseAdapter):
                 max_len=self._max_seq_length,
             )
 
+        check_label_chars("GLiNER2", "labels", normalized_labels)
+        prompt = self._prompt_tokens(normalized_labels, key=("entities", tuple(normalized_labels)))
         with torch.inference_mode():
             raw_results = self._run_planned(
                 model_texts,
-                self._row_tokens(windows, normalized_labels),
+                self._row_tokens(windows, prompt),
                 extract_entities,
                 rows_per_pass=1 if len(texts) == 1 else _PACKAGE_BATCH_SIZE,
             )
@@ -412,22 +442,43 @@ class GLiNER2Adapter(BaseAdapter):
             input_token_counts=input_token_counts,
         )
 
-    def _row_tokens(
+    def _prompt_tokens(
         self,
-        windows: list[tuple[str, int | None]],
-        prompt_entries: Iterable[str],
+        entries: list[str],
         *,
+        key: tuple[Any, ...],
         per_entry: int = _PROMPT_TOKENS_PER_ENTRY,
-    ) -> list[int] | None:
+        extra: int = 0,
+    ) -> int | None:
+        """Estimated tokens of the task prompt gliner2 builds from ``entries``, checked against the limit.
+
+        Each label, class label, relation type and schema field is counted
+        with the tokens gliner2 adds around it, plus ``extra`` (a token per
+        field choice, which gliner2 lists again before the document). None when words are
+        not counted (no bounded splitter is installed); the prompt's
+        characters are still checked.
+
+        Raises:
+            InvalidInputError: The prompt takes more than ``max_prompt_tokens``.
+        """
+        count = self._count_subwords
+        strings = [entry for entry in entries if isinstance(entry, str)]
+
+        def tokens() -> int:
+            if count is None:
+                return 0
+            return sum(count(strings)) + per_entry * len(strings) + extra + _ROW_OVERHEAD_TOKENS
+
+        prompt = self._prompt_limit.check(strings, tokens, (per_entry, extra, *key))
+        return prompt if count is not None else None
+
+    def _row_tokens(self, windows: list[tuple[str, int | None]], prompt: int | None) -> list[int] | None:
         """Estimated tokens of each item's encoder row: the task prompt, then the words it reads.
 
         None when the words were not counted (no bounded splitter is installed).
         """
-        count = self._count_subwords
-        if count is None or any(subwords is None for _, subwords in windows):
+        if prompt is None or any(subwords is None for _, subwords in windows):
             return None
-        entries = [entry for entry in prompt_entries if isinstance(entry, str)]
-        prompt = sum(count(entries)) + per_entry * len(entries) + _ROW_OVERHEAD_TOKENS
         return [prompt + (subwords or 0) for _, subwords in windows]
 
     def _run_planned(

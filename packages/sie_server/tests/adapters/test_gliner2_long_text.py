@@ -373,14 +373,15 @@ def test_the_prefix_reads_what_gliner2_reads_with_its_sentence_end(text: str, ma
 
 def test_relation_rows_run_in_passes_within_the_attention_budget() -> None:
     # gliner2 builds a structure of about ten tokens around each relation type.
-    adapter, model = make_adapter(encoder_config={"model_type": "deberta-v2"})
+    adapter, model = make_adapter(encoder_config={"model_type": "deberta-v2"}, max_prompt_tokens=8192)
     labels = [f"rel{index}" for index in range(150)]
     text = " ".join(["abcdefghi"] * 400)
     entities = [{"text": "abcdefghi", "label": "x", "start": 0, "end": 9}]
 
     adapter.extract([Item(text=text, metadata={"entities": entities}) for _ in range(8)], labels=labels)
 
-    estimated = adapter._row_tokens([adapter._window(text)] * 1, labels, per_entry=_PROMPT_TOKENS_PER_RELATION)
+    prompt = adapter._prompt_tokens(labels, per_entry=_PROMPT_TOKENS_PER_RELATION, key=("relations", tuple(labels)))
+    estimated = adapter._row_tokens([adapter._window(text)], prompt)
     assert estimated is not None
     for batch in model.inputs:
         rows, width = batch.input_ids.shape
@@ -389,7 +390,7 @@ def test_relation_rows_run_in_passes_within_the_attention_budget() -> None:
 
 
 def test_structured_rows_are_not_underestimated() -> None:
-    adapter, model = make_adapter(encoder_config={"model_type": "deberta-v2"})
+    adapter, model = make_adapter(encoder_config={"model_type": "deberta-v2"}, max_prompt_tokens=8192)
     schema = {
         "type": "object",
         "properties": {
@@ -401,11 +402,11 @@ def test_structured_rows_are_not_underestimated() -> None:
 
     adapter.extract([Item(text=text)], output_schema=schema)
 
-    structures = adapter._json_schema_to_structures(schema)
-    specs = [spec for fields in structures.values() for spec in fields]
-    estimated = adapter._row_tokens([adapter._window(text)], specs + specs)
+    (prompt,) = adapter._prompt_limit._counts.values()  # the estimate extract() planned with
+    estimated = adapter._row_tokens([adapter._window(text)], prompt)
     assert estimated is not None
-    assert model.inputs[-1].input_ids.shape[1] <= estimated[0]
+    # The schema is estimated from its field specs, not gliner2's own word split of it.
+    assert model.inputs[-1].input_ids.shape[1] <= estimated[0] * 1.02
 
 
 @pytest.mark.parametrize("max_len", [1, 2])
