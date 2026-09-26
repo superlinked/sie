@@ -1,6 +1,6 @@
 [project]
 name = "sie-config"
-version = "0.8.2"
+version = "0.8.3"
 description = "SIE Config Service - Config control plane for SIE clusters"
 requires-python = ">=3.12,<3.13"
 license = { text = "Apache-2.0" }
