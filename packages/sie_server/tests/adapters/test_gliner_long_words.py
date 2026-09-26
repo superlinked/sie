@@ -26,7 +26,7 @@ from sie_server.adapters.gliner import GLiNERAdapter
 from sie_server.adapters.gliner_bi import GLiNERBiAdapter
 from sie_server.adapters.glirel import _SUBWORDS_PER_WORD as GLIREL_SUBWORDS_PER_WORD
 from sie_server.adapters.glirel import GLiRELAdapter
-from sie_server.types.inputs import Item
+from sie_server.types.inputs import InvalidInputError, Item
 
 gliner_config = pytest.importorskip("gliner.config")
 gliner_processor = pytest.importorskip("gliner.data_processing.processor")
@@ -314,9 +314,14 @@ def test_glirel_still_rejects_invalid_entity_offsets_past_the_words_it_reads() -
     adapter, predict = glirel_adapter(max_words=2)
     text = "Tim Cook leads Apple"
 
-    with pytest.raises(ValueError, match="does not cover any text token"):
+    with pytest.raises(InvalidInputError, match="0 <= start < end"):
         adapter.extract(
             [Item(text=text, metadata={"entities": [{"text": "x", "label": "ORG", "start": 500, "end": 505}]})],
+            labels=["ceo_of"],
+        )
+    with pytest.raises(InvalidInputError, match="does not cover any text token"):
+        adapter.extract(
+            [Item(text=text + "   ", metadata={"entities": [{"text": " ", "label": "ORG", "start": 21, "end": 23}]})],
             labels=["ceo_of"],
         )
     predict.assert_not_called()
@@ -341,3 +346,26 @@ def test_glirel_load_reads_through_the_bounded_window() -> None:
     assert adapter._words.max_subwords == subword_budget(512, DEBERTA, per_word=GLIREL_SUBWORDS_PER_WORD)
     tokens, _, _ = adapter._tokenize("Tim Cook " + "z" * MiB)
     assert sum(len(token) for token in tokens) <= adapter._words.max_subwords
+
+
+@pytest.mark.parametrize(
+    ("start", "end"),
+    [(0, 500), (-3, 4), (5, 2), (4, 4), (False, True), (0, True), ("0", 3), (0, 3.0)],
+    ids=["past-the-end", "negative", "reversed", "empty", "booleans", "boolean-end", "string", "float"],
+)
+def test_glirel_rejects_invalid_entity_offsets_as_invalid_input(start: Any, end: Any) -> None:
+    adapter, predict = glirel_adapter()
+    good = Item(text="Tim Cook", metadata={"entities": [{"text": "Tim", "label": "PERSON", "start": 0, "end": 3}]})
+    bad = Item(text="Tim Cook", metadata={"entities": [{"text": "Tim", "label": "PERSON", "start": start, "end": end}]})
+
+    with pytest.raises(InvalidInputError, match="0 <= start < end <= 8"):
+        adapter.extract([good, bad], labels=["ceo_of"])
+    predict.assert_not_called()
+
+
+def test_glirel_rejects_an_entity_that_is_not_an_object() -> None:
+    adapter, predict = glirel_adapter()
+
+    with pytest.raises(InvalidInputError, match="must be objects"):
+        adapter.extract([Item(text="Tim Cook", metadata={"entities": ["Tim"]})], labels=["ceo_of"])
+    predict.assert_not_called()

@@ -21,7 +21,7 @@ from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_REQUIRES_TEXT, ComputePrecision
 from sie_server.adapters._word_window import SubwordCounter, WindowedSplitter, split_word_counter, subword_budget
 from sie_server.core.inference_output import ExtractOutput
-from sie_server.types.inputs import Item
+from sie_server.types.inputs import InvalidInputError, Item
 from sie_server.types.responses import Entity, Relation
 
 # Error messages
@@ -178,14 +178,15 @@ class GLiRELAdapter(BaseAdapter):
         Raises:
             RuntimeError: If model not loaded.
             ValueError: If labels not provided or items lack entities.
+            InvalidInputError: If an entity is not an object or has invalid offsets.
         """
         self._check_loaded()
 
         if not labels:
             raise ValueError(_ERR_REQUIRES_LABELS)
 
-        all_entities = []
-        all_relations = []
+        # Check every item's entities before running any item.
+        inputs: list[tuple[str, list[dict[str, Any]]]] = []
         for item in items:
             text = self._extract_text(item)
             entities = self._extract_entities(item)
@@ -195,6 +196,11 @@ class GLiRELAdapter(BaseAdapter):
 
             for entity in entities:
                 self._validate_entity_span(entity, text)
+            inputs.append((text, entities))
+
+        all_entities = []
+        all_relations = []
+        for text, entities in inputs:
             tokens, token_offsets, read_end = self._tokenize(text)
             # Entities past the words GLiREL reads take no part, as when it truncates them itself.
             read_entities = [entity for entity in entities if self._is_read(entity, text, read_end)]
@@ -278,21 +284,34 @@ class GLiRELAdapter(BaseAdapter):
         return [word for word, _, _ in words], [(start, end) for _, start, end in words], read_end
 
     @staticmethod
-    def _validate_entity_span(entity: dict[str, Any], text: str) -> None:
+    def _validate_entity_span(entity: Any, text: str) -> None:
         """Check an entity's character offsets wherever it lies in the text.
 
         Raises:
-            ValueError: The offsets are not integers with start < end, or cover no text token.
+            InvalidInputError: The entity is not an object, its offsets are not
+                integers with ``0 <= start < end <= len(text)``, or they cover no
+                text token.
         """
+        if not isinstance(entity, dict):
+            raise InvalidInputError("GLiREL entities must be objects")
         start = entity.get("start")
         end = entity.get("end")
-        if not isinstance(start, int) or not isinstance(end, int) or start >= end:
-            msg = "GLiREL entity metadata requires integer character offsets with start < end"
-            raise ValueError(msg)
+        if (
+            not isinstance(start, int)
+            or isinstance(start, bool)
+            or not isinstance(end, int)
+            or isinstance(end, bool)
+            or not 0 <= start < end <= len(text)
+        ):
+            msg = (
+                "GLiREL entity metadata requires integer character offsets with "
+                f"0 <= start < end <= {len(text)} (the text's length)"
+            )
+            raise InvalidInputError(msg)
         # Every non-space character is part of a GLiREL token.
-        if not text[max(start, 0) : end].strip():
+        if not text[start:end].strip():
             msg = f"GLiREL entity span [{start}, {end}) does not cover any text token"
-            raise ValueError(msg)
+            raise InvalidInputError(msg)
 
     @staticmethod
     def _is_read(entity: dict[str, Any], text: str, read_end: int) -> bool:
@@ -315,7 +334,7 @@ class GLiRELAdapter(BaseAdapter):
             end_char = entity.get("end")
             if not isinstance(start_char, int) or not isinstance(end_char, int) or start_char >= end_char:
                 msg = "GLiREL entity metadata requires integer character offsets with start < end"
-                raise ValueError(msg)
+                raise InvalidInputError(msg)
 
             covered_tokens = [
                 index
@@ -324,7 +343,7 @@ class GLiRELAdapter(BaseAdapter):
             ]
             if not covered_tokens:
                 msg = f"GLiREL entity span [{start_char}, {end_char}) does not cover any text token"
-                raise ValueError(msg)
+                raise InvalidInputError(msg)
 
             ner_input.append(
                 [
