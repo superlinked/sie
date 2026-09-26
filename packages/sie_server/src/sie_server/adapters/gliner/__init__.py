@@ -29,6 +29,7 @@ import torch
 from sie_server.adapters._base_adapter import BaseAdapter
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_REQUIRES_TEXT, ComputePrecision
+from sie_server.adapters._word_window import bound_gliner_words, plan_forwards
 from sie_server.core.extract_cost import MAX_EXTRACT_LABELS
 from sie_server.core.inference_output import ExtractOutput
 from sie_server.types.inputs import InvalidInputError, Item
@@ -52,6 +53,8 @@ _MIN_ADJACENCY_THRESHOLD = 0.5
 # candidate inside the forward pass. Near zero that is nearly every span of the
 # document, so relex requests need at least this entity threshold.
 _MIN_RELEX_THRESHOLD = 0.1
+# Rows gliner's inference (and the meter, which mirrors it) puts in one forward pass.
+_GLINER_BATCH_SIZE = 8
 _ERR_NO_RELATIONS = (
     "This GLiNER model does not extract relations; options.relation_labels needs a joint "
     "entity-relation model such as knowledgator/gliner-relex-large-v1.0"
@@ -128,6 +131,8 @@ class GLiNERAdapter(BaseAdapter):
         self._device: str | None = None
         # True for joint entity-relation models, whose config names a relations layer.
         self._extracts_relations = False
+        # True when the encoder's attention memory grows with the square of a row (see ``_inference``).
+        self._quadratic_attention = False
 
     def load(self, device: str) -> None:
         """Load the model onto the specified device.
@@ -165,6 +170,9 @@ class GLiNERAdapter(BaseAdapter):
         self._extracts_relations = getattr(self._model.config, "relations_layer", None) is not None
         if self._extracts_relations:
             _cap_relation_candidates(self._model.model, _MAX_RELATION_CANDIDATES)
+        # gliner's max_len counts words, whatever their subwords: read at most a
+        # bounded number of subwords too, with a long word in pieces.
+        self._quadratic_attention = bound_gliner_words(self._model)
 
     def extract(
         self,
@@ -227,7 +235,7 @@ class GLiNERAdapter(BaseAdapter):
         # Meter the exact post-word-truncation document window before GPU work.
         # Besides producing the authoritative terminal counts, this rejects a
         # finite-tokenizer prompt that leaves no represented document subword.
-        input_token_counts = self._doc_input_token_counts(texts, labels, relation_labels)
+        input_token_counts, row_tokens = self._meter(texts, labels, relation_labels)
 
         # Get options with fallback to model defaults
         effective_threshold = self._validate_threshold(opts.get("threshold", self._threshold), "threshold")
@@ -255,18 +263,16 @@ class GLiNERAdapter(BaseAdapter):
 
         # Use batch prediction for efficiency (24x speedup vs single item loop)
         with torch.inference_mode():
-            prediction = self._model.inference(
+            batch_entities, batch_relations = self._inference(
                 texts,
                 labels,
+                row_tokens,
+                returns_relations=bool(relation_labels),
                 threshold=effective_threshold,
                 flat_ner=effective_flat_ner,
                 multi_label=effective_multi_label,
                 **relation_kwargs,
             )
-        if relation_labels:
-            batch_entities, batch_relations = prediction
-        else:
-            batch_entities, batch_relations = prediction, None
 
         # Convert to our format
         all_entities = []
@@ -349,13 +355,60 @@ class GLiNERAdapter(BaseAdapter):
         formatted.sort(key=lambda r: (-r["score"], r["relation"], r["head"], r["tail"]))
         return formatted
 
+    def _inference(
+        self,
+        texts: list[str],
+        labels: list[str],
+        row_tokens: list[int] | None,
+        *,
+        returns_relations: bool,
+        **kwargs: Any,
+    ) -> tuple[list[Any], list[Any] | None]:
+        """Run gliner inference, in several calls when one forward pass would hold too long a batch.
+
+        gliner pads each pass of up to ``_GLINER_BATCH_SIZE`` rows to its
+        longest row, and a DeBERTa encoder's attention memory grows with rows
+        times the square of that length, so rows are grouped by length within
+        ``_word_window.ATTENTION_BUDGET`` (see ``plan_forwards``). A batch that
+        fits runs in one call, exactly as before. Returns entities and, when
+        requested, relations per item.
+        """
+        groups = None
+        if row_tokens is not None and self._quadratic_attention:
+            groups = plan_forwards(row_tokens, rows_per_pass=_GLINER_BATCH_SIZE)
+        if groups is None:
+            groups = [list(range(len(texts)))]
+        entities: list[Any] = [None] * len(texts)
+        relations: list[Any] | None = [None] * len(texts) if returns_relations else None
+        for group in groups:
+            prediction = self._model.inference([texts[index] for index in group], labels, **kwargs)
+            group_entities, group_relations = prediction if returns_relations else (prediction, None)
+            if len(group_entities) != len(group) or (
+                group_relations is not None and len(group_relations) != len(group)
+            ):
+                raise ValueError("GLiNER returned predictions for a different number of items")
+            for position, index in enumerate(group):
+                entities[index] = group_entities[position]
+                if relations is not None and group_relations is not None:
+                    relations[index] = group_relations[position]
+        return entities, relations
+
     def _doc_input_token_counts(
         self,
         texts: list[str],
         labels: list[str],
         relation_labels: list[str] | None = None,
     ) -> list[int] | None:
-        """Count the document subwords represented by GLiNER's real processor.
+        """Count the document subwords represented by GLiNER's real processor (see ``_meter``)."""
+        return self._meter(texts, labels, relation_labels)[0]
+
+    def _meter(
+        self,
+        texts: list[str],
+        labels: list[str],
+        relation_labels: list[str] | None = None,
+    ) -> tuple[list[int] | None, list[int] | None]:
+        """Count the document subwords represented by GLiNER's real processor, and each row's tokens.
 
         Classic GLiNER first splits and truncates each document in WORDS, then
         prepends the label prompt and transformer-tokenizes that retained word
@@ -370,17 +423,23 @@ class GLiNERAdapter(BaseAdapter):
         GLiNER inference's default batch size so a finite tokenizer cap is
         observed identically. Joint entity-relation models also put the
         relation types in the prompt, so they are passed through as well.
+
+        The word splitter is the bounded one installed at load, so the counts
+        are of the window gliner reads. The second list holds every row's
+        attended tokens (prompt included), for planning forward passes.
+        Both are None when the processor cannot be metered.
         """
         processor = getattr(self._model, "data_processor", None)
         prepare_inputs = getattr(self._model, "prepare_inputs", None)
         prepare_base_input = getattr(self._model, "prepare_base_input", None)
         if processor is None or prepare_inputs is None or prepare_base_input is None:
-            return None
+            return None, None
 
         try:
             split_texts, _, _ = prepare_inputs(texts)
             raw_items = prepare_base_input(split_texts)
             counts: list[int] = []
+            rows: list[int] = []
             has_document_subwords: list[bool] = []
             for start in range(0, len(raw_items), 8):
                 if self._extracts_relations:
@@ -407,7 +466,8 @@ class GLiNERAdapter(BaseAdapter):
                     attention_mask = encoded["attention_mask"][batch_index].tolist()
                     words_mask = encoded["words_mask"][batch_index].tolist()
                     if len(word_ids) != len(attention_mask) or len(word_ids) != len(words_mask):
-                        return None
+                        return None, None
+                    rows.append(sum(1 for attended in attention_mask if attended))
                     first_document_index = next(
                         (index for index, word_mask in enumerate(words_mask) if word_mask > 0),
                         None,
@@ -436,12 +496,12 @@ class GLiNERAdapter(BaseAdapter):
                         )
                     )
         except Exception:  # noqa: BLE001 — metering must never fail an extraction
-            return None
-        if len(counts) != len(texts) or len(has_document_subwords) != len(texts):
-            return None
+            return None, None
+        if len(counts) != len(texts) or len(has_document_subwords) != len(texts) or len(rows) != len(texts):
+            return None, None
         if not all(has_document_subwords):
             raise InvalidInputError(_ERR_PROMPT_EXHAUSTS_DOCUMENT)
-        return counts
+        return counts, rows
 
     def _merge_entities(self, entities: list[Entity], text: str) -> list[Entity]:
         """Merge adjacent entities with the same label.
