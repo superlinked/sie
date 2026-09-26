@@ -7,6 +7,11 @@ they output (head, relation, tail) triples with confidence scores.
 Reference models:
 - jackboyla/glirel-large-v0 (zero-shot relation extraction)
 - jackboyla/glirel_re_large-v0 (relation-focused variant)
+
+A request's relation types, which GLiREL encodes with every text, may have at
+most 128 characters each and take at most ``max_prompt_tokens`` tokens together
+(default 1024), and an item may carry at most ``MAX_ENTITIES`` (256) entities;
+other requests are rejected with ``INVALID_INPUT``.
 """
 
 import re
@@ -17,6 +22,7 @@ from typing import Any, ClassVar
 import torch
 
 from sie_server.adapters._base_adapter import BaseAdapter
+from sie_server.adapters._prompt_limit import DEFAULT_MAX_PROMPT_TOKENS, PromptLimit, check_label_chars
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_REQUIRES_TEXT, ComputePrecision
 from sie_server.adapters._word_window import SubwordCounter, WindowedSplitter, split_word_counter, subword_budget
@@ -27,6 +33,9 @@ from sie_server.types.responses import Entity, Relation
 # Error messages
 _ERR_REQUIRES_LABELS = "GLiREL requires labels parameter for relation extraction"
 _ERR_REQUIRES_ENTITIES = "GLiREL requires entities in item metadata for relation extraction"
+# GLiREL scores every pair of an item's entities (in Python while preparing
+# the batch, and on the GPU), so an item may carry at most this many.
+MAX_ENTITIES = 256
 _TOKEN_PATTERN = re.compile(r"\w+(?:[-_]\w+)*|\S")
 # Subword tokens a text may take per word GLiREL reads: its checkpoints read
 # English, whose prose, code and logs run at up to 2.4 subwords per word.
@@ -72,6 +81,7 @@ class GLiRELAdapter(BaseAdapter):
         model_name_or_path: str | Path,
         *,
         threshold: float = 0.3,
+        max_prompt_tokens: int = DEFAULT_MAX_PROMPT_TOKENS,
         compute_precision: ComputePrecision = "float16",
         revision: str | None = None,
         **kwargs: Any,  # Accept extra args from loader
@@ -81,6 +91,8 @@ class GLiRELAdapter(BaseAdapter):
         Args:
             model_name_or_path: HuggingFace model ID or local path to GLiREL model.
             threshold: Minimum confidence score for relation extraction (0-1).
+            max_prompt_tokens: Most tokens a request's relation types may take
+                in the prompt encoded with each text (see ``_prompt_limit``).
             compute_precision: Compute precision for inference.
             revision: Optional HuggingFace revision/branch/commit SHA to pin when
                 loading model artifacts.
@@ -96,6 +108,9 @@ class GLiRELAdapter(BaseAdapter):
         self._device: str | None = None
         # The words of a text GLiREL reads (see ``_tokenize``); None until loaded.
         self._words: WindowedSplitter | None = None
+        self._prompt_limit = PromptLimit("GLiREL", max_prompt_tokens)
+        # Tokens of the relation-type prompt, as the loaded model builds it; None until loaded.
+        self._count_prompt: Any = None
 
     def load(self, device: str) -> None:
         """Load the model onto the specified device.
@@ -125,6 +140,9 @@ class GLiRELAdapter(BaseAdapter):
             embeddings.tokenizer,
             int(self._model.base_config.max_len),
             getattr(embeddings.model, "config", None),
+        )
+        self._count_prompt = _prompt_counter(
+            embeddings.tokenizer, str(self._model.rel_token), str(self._model.sep_token)
         )
 
     def _bound_words(self, tokenizer: Any, max_words: int, encoder_config: Any = None) -> None:
@@ -177,23 +195,25 @@ class GLiRELAdapter(BaseAdapter):
 
         Raises:
             RuntimeError: If model not loaded.
-            ValueError: If labels not provided or items lack entities.
-            InvalidInputError: If an entity is not an object or has invalid offsets.
+            InvalidInputError: If labels are missing or too long, or an item lacks
+                text or entities, carries more than ``MAX_ENTITIES`` entities, or
+                has invalid entity offsets.
         """
         self._check_loaded()
 
         if not labels:
-            raise ValueError(_ERR_REQUIRES_LABELS)
+            raise InvalidInputError(_ERR_REQUIRES_LABELS)
+        self._check_prompt(labels)
 
-        # Check every item's entities before running any item.
+        # Check every item before running any, so bad input fails as a 400 before model work.
         inputs: list[tuple[str, list[dict[str, Any]]]] = []
         for item in items:
             text = self._extract_text(item)
             entities = self._extract_entities(item)
-
             if not entities:
-                raise ValueError(_ERR_REQUIRES_ENTITIES)
-
+                raise InvalidInputError(_ERR_REQUIRES_ENTITIES)
+            if len(entities) > MAX_ENTITIES:
+                raise InvalidInputError(f"GLiREL items may carry at most {MAX_ENTITIES} entities in metadata")
             for entity in entities:
                 self._validate_entity_span(entity, text)
             inputs.append((text, entities))
@@ -256,10 +276,27 @@ class GLiRELAdapter(BaseAdapter):
 
         return ExtractOutput(entities=all_entities, relations=all_relations)
 
+    def _check_prompt(self, labels: list[str]) -> None:
+        """Reject a request whose relation types take more than ``max_prompt_tokens``.
+
+        GLiREL encodes the relation types with every text, and GLiREL output
+        carries no input token count.
+
+        Raises:
+            InvalidInputError: The prompt is too long, or a relation type is not a string.
+        """
+        check_label_chars("GLiREL", "labels", labels)
+        count = self._count_prompt
+
+        def tokens() -> int:
+            return count(labels) if count is not None else 0
+
+        self._prompt_limit.check(labels, tokens, tuple(labels))
+
     def _extract_text(self, item: Item) -> str:
         """Extract text from an item."""
         if item.text is None:
-            raise ValueError(ERR_REQUIRES_TEXT.format(adapter_name="GLiREL adapter"))
+            raise InvalidInputError(ERR_REQUIRES_TEXT.format(adapter_name="GLiREL adapter"))
         return item.text
 
     def _extract_entities(self, item: Item) -> list[dict[str, Any]]:
@@ -267,7 +304,10 @@ class GLiRELAdapter(BaseAdapter):
         metadata = item.metadata
         if metadata is None:
             return []
-        return metadata.get("entities", [])
+        entities = metadata.get("entities", [])
+        if not isinstance(entities, list):
+            raise InvalidInputError("GLiREL item metadata.entities must be a list")
+        return entities
 
     def _tokenize(self, text: str) -> tuple[list[str], list[tuple[int, int]], int]:
         """Tokenize text like GLiREL, keeping the words it reads: ``(words, offsets, end of the text read)``.
@@ -374,6 +414,17 @@ class GLiRELAdapter(BaseAdapter):
             relation_text = " ".join(str(token) for token in relation_text)
             relation_text = re.sub(r"\s+([,.;:!?%])", r"\1", relation_text)
         return str(relation_text)
+
+
+def _prompt_counter(tokenizer: Any, rel_token: str, sep_token: str) -> Any:
+    """Tokens of GLiREL's prompt for a list of relation types: ``[REL] type ... [REL] type [SEP]``."""
+
+    def count(labels: list[str]) -> int:
+        words = [word for label in labels for word in (rel_token, label)] + [sep_token]
+        encoding = tokenizer(words, is_split_into_words=True, add_special_tokens=False)
+        return len(encoding["input_ids"])
+
+    return count
 
 
 def _words(text: str) -> Iterator[tuple[str, int, int]]:
