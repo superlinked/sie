@@ -25,9 +25,9 @@ tasks:
       grammar: ["json_schema", "regex"]
       streaming: true
       tools: true
-    # Qwen3.8 defaults to thinking. The initial SIE contract is answer-only;
-    # reasoning profiles can be added after their parser/output behavior is
-    # tested independently.
+    # Qwen3.8 defaults to thinking. The bare model and every non-thinking
+    # profile are answer-only; reasoning is exposed only through the explicit
+    # thinking profiles below.
     chat_template_kwargs:
       enable_thinking: false
     prewarm_grammars:
@@ -180,6 +180,74 @@ profiles:
           - "1"
           - "--cuda-graph-max-bs-decode"
           - "1"
+
+  # H100-80GB thinking: the h100-256k launch shape without speculation, plus
+  # the qwen3 reasoning parser and the strict-thinking lane so a premature EOS
+  # cannot leave the answer inside the private reasoning channel. The chat
+  # template's own default effort (xhigh) applies because the gateway does not
+  # forward request-level reasoning_effort. Sampling is the model card's
+  # thinking recipe. Standalone so its children inherit only this shape.
+  h100-256k-thinking:
+    grammar_profile: h100-256k-thinking-no-spec
+    max_output_tokens: 32768
+    max_batch_tokens: 262144
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.sglang.cuda13:SGLangStrictThinkingAdapter
+    kv_budget_tokens: 262144
+    chat_template_kwargs:
+      enable_thinking: true
+    adapter_options:
+      loadtime:
+        max_seq_length: 262144
+        mem_fraction_static: 0.85
+        served_model_name: Qwen/Qwen3.8-27B-FP8
+        attention_backend: fa3
+        grammar_backend: xgrammar
+        reasoning_parser: qwen3
+        tool_call_parser: qwen3_coder
+        extra_env:
+          SGLANG_JIT_DEEPGEMM_FAST_WARMUP: "1"
+        speculative:
+          enabled: false
+        extra_launch_args:
+          - "--mm-process-config"
+          - '{"image":{"min_pixels":65536,"max_pixels":1003520}}'
+          - "--kv-cache-dtype"
+          - "bfloat16"
+          - "--mamba-ssm-dtype"
+          - "bfloat16"
+          - "--mamba-radix-cache-strategy"
+          - "extra_buffer"
+          - "--disable-overlap-schedule"
+          - "--page-size"
+          - "64"
+          - "--chunked-prefill-size"
+          - "32768"
+          - "--max-prefill-tokens"
+          - "32768"
+          - "--max-running-requests"
+          - "1"
+          - "--cuda-graph-max-bs-decode"
+          - "1"
+      runtime:
+        first_chunk_timeout_s: 900
+        inter_chunk_timeout_s: 30
+        overall_timeout_s: 1800
+        default_sampling:
+          temperature: 1.0
+          top_p: 0.95
+          top_k: 20
+          presence_penalty: 0.0
+        stop_tokens:
+          - "<|im_end|>"
+  # Constrained-decoding identity for the thinking launch; identical because
+  # the parent is already non-speculative and grammar-safe.
+  h100-256k-thinking-no-spec:
+    extends: h100-256k-thinking
+  # Hardware-neutral alias. Thinking needs the native window, so it resolves
+  # to the H100 256K lane rather than the 8K bare route.
+  thinking:
+    extends: h100-256k-thinking
 
   # H200-141GB: deliberately retain the measured H100 SM90 recipe and
   # one-admission launch shape; the larger card provides more memory headroom
