@@ -10,6 +10,7 @@ Reference models:
 """
 
 import re
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -18,6 +19,7 @@ import torch
 from sie_server.adapters._base_adapter import BaseAdapter
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_REQUIRES_TEXT, ComputePrecision
+from sie_server.adapters._word_window import SubwordCounter, WindowedSplitter, split_word_counter, subword_budget
 from sie_server.core.inference_output import ExtractOutput
 from sie_server.types.inputs import Item
 from sie_server.types.responses import Entity, Relation
@@ -26,6 +28,9 @@ from sie_server.types.responses import Entity, Relation
 _ERR_REQUIRES_LABELS = "GLiREL requires labels parameter for relation extraction"
 _ERR_REQUIRES_ENTITIES = "GLiREL requires entities in item metadata for relation extraction"
 _TOKEN_PATTERN = re.compile(r"\w+(?:[-_]\w+)*|\S")
+# Subword tokens a text may take per word GLiREL reads: its checkpoints read
+# English, whose prose, code and logs run at up to 2.4 subwords per word.
+_SUBWORDS_PER_WORD = 4
 
 
 class GLiRELAdapter(BaseAdapter):
@@ -89,6 +94,8 @@ class GLiRELAdapter(BaseAdapter):
 
         self._model: Any = None  # GLiREL model type
         self._device: str | None = None
+        # The words of a text GLiREL reads (see ``_tokenize``); None until loaded.
+        self._words: WindowedSplitter | None = None
 
     def load(self, device: str) -> None:
         """Load the model onto the specified device.
@@ -112,6 +119,28 @@ class GLiRELAdapter(BaseAdapter):
 
         # Set eval mode
         self._model.eval()
+
+        embeddings = self._model.token_rep_layer.bert_layer
+        self._bound_words(
+            embeddings.tokenizer,
+            int(self._model.base_config.max_len),
+            getattr(embeddings.model, "config", None),
+        )
+
+    def _bound_words(self, tokenizer: Any, max_words: int, encoder_config: Any = None) -> None:
+        """Read at most ``max_words`` words of a text, and a bounded number of their subwords.
+
+        GLiREL keeps its first ``max_len`` words and encodes every subword of
+        each, without truncating; ``_word_window.read_window`` also reads a
+        word longer than 256 characters in pieces and stops at the subword
+        budget.
+        """
+        self._words = WindowedSplitter(
+            _words,
+            max_words=max_words,
+            max_subwords=subword_budget(max_words, encoder_config, per_word=_SUBWORDS_PER_WORD),
+            count_subwords=SubwordCounter(split_word_counter(tokenizer)),
+        )
 
     def extract(
         self,
@@ -164,8 +193,10 @@ class GLiRELAdapter(BaseAdapter):
             if not entities:
                 raise ValueError(_ERR_REQUIRES_ENTITIES)
 
-            tokens, token_offsets = self._tokenize(text)
-            ner_input = self._to_glirel_ner(entities, token_offsets)
+            tokens, token_offsets, read_end = self._tokenize(text)
+            # Entities past the words GLiREL reads take no part, as when it truncates them itself.
+            read_entities = [entity for entity in entities if self._is_read(entity, text, read_end)]
+            ner_input = self._to_glirel_ner(read_entities, token_offsets)
 
             # Get options with fallback to model defaults
             opts = options or {}
@@ -173,20 +204,22 @@ class GLiRELAdapter(BaseAdapter):
             effective_top_k = opts.get("top_k", 10)
 
             # GLiREL expects pre-tokenized text and inclusive token offsets.
-            with torch.inference_mode():
-                raw_relations = self._model.predict_relations(
-                    text=tokens,
-                    labels=labels,
-                    threshold=effective_threshold,
-                    ner=ner_input,
-                    top_k=effective_top_k,
-                )
+            raw_relations = []
+            if ner_input:
+                with torch.inference_mode():
+                    raw_relations = self._model.predict_relations(
+                        text=tokens,
+                        labels=labels,
+                        threshold=effective_threshold,
+                        ner=ner_input,
+                        top_k=effective_top_k,
+                    )
 
             # Convert to proper Relation objects
             item_relations = []
             for rel in raw_relations:
-                head_text = self._relation_entity_text(rel, "head", entities, ner_input)
-                tail_text = self._relation_entity_text(rel, "tail", entities, ner_input)
+                head_text = self._relation_entity_text(rel, "head", read_entities, ner_input)
+                tail_text = self._relation_entity_text(rel, "tail", read_entities, ner_input)
 
                 item_relations.append(
                     Relation(
@@ -228,11 +261,28 @@ class GLiRELAdapter(BaseAdapter):
             return []
         return metadata.get("entities", [])
 
+    def _tokenize(self, text: str) -> tuple[list[str], list[tuple[int, int]], int]:
+        """Tokenize text like GLiREL, keeping the words it reads: ``(words, offsets, end of the text read)``.
+
+        Once loaded, the words are the bounded window of ``_bound_words``;
+        before that, every word of the text.
+        """
+        if self._words is None:
+            words, read_end = list(_words(text)), len(text)
+        else:
+            window = self._words.window(text)
+            words = window.words
+            read_end = len(text) if window.cut is None else words[-1][2]
+        return [word for word, _, _ in words], [(start, end) for _, start, end in words], read_end
+
     @staticmethod
-    def _tokenize(text: str) -> tuple[list[str], list[tuple[int, int]]]:
-        """Tokenize text exactly like GLiREL and retain character offsets."""
-        matches = list(_TOKEN_PATTERN.finditer(text))
-        return [match.group() for match in matches], [(match.start(), match.end()) for match in matches]
+    def _is_read(entity: dict[str, Any], text: str, read_end: int) -> bool:
+        """Whether an entity lies in the text GLiREL reads (anything past it but spaces counts against it)."""
+        start = entity.get("start")
+        end = entity.get("end")
+        if not isinstance(start, int) or not isinstance(end, int) or end <= read_end:
+            return True
+        return start < read_end and not text[read_end:end].strip()
 
     @staticmethod
     def _to_glirel_ner(
@@ -286,3 +336,9 @@ class GLiRELAdapter(BaseAdapter):
             relation_text = " ".join(str(token) for token in relation_text)
             relation_text = re.sub(r"\s+([,.;:!?%])", r"\1", relation_text)
         return str(relation_text)
+
+
+def _words(text: str) -> Iterator[tuple[str, int, int]]:
+    """GLiREL's words of ``text`` with their character offsets."""
+    for match in _TOKEN_PATTERN.finditer(text):
+        yield match.group(), match.start(), match.end()

@@ -11,6 +11,7 @@ import torch
 from sie_server.adapters._base_adapter import BaseAdapter
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_REQUIRES_TEXT, ComputePrecision
+from sie_server.adapters._word_window import bound_gliner_words, plan_forwards
 from sie_server.core.inference_output import ExtractOutput
 from sie_server.types.inputs import InvalidInputError, Item
 from sie_server.types.responses import Entity
@@ -22,6 +23,8 @@ _ERR_NO_RELATIONS = "GLiNER bi-encoder models do not extract relations; options.
 
 # Maximum number of distinct label-set embeddings to cache.
 _LABEL_CACHE_MAX_SIZE = 64
+# Rows gliner's inference (and the meter, which mirrors it) puts in one forward pass.
+_GLINER_BATCH_SIZE = 8
 
 
 def _validate_threshold(value: Any) -> None:
@@ -102,6 +105,8 @@ class GLiNERBiAdapter(BaseAdapter):
 
         self._model: Any = None
         self._device: str | None = None
+        # True when the text encoder's attention memory grows with the square of a row.
+        self._quadratic_attention = False
         # LRU cache: labels in request order -> pre-computed label embeddings.
         # The embeddings are positional, so the key must keep the order.
         # Protected by _cache_lock for thread safety (defensive — the
@@ -156,6 +161,9 @@ class GLiNERBiAdapter(BaseAdapter):
             self._model = self._model.to(device)
         else:
             self._model = self._model.to(device, dtype=dtype)
+        # gliner's max_len counts words, whatever their subwords: read at most a
+        # bounded number of subwords too, with a long word in pieces.
+        self._quadratic_attention = bound_gliner_words(self._model)
 
         # Clear any stale label cache from a prior load
         self._label_cache.clear()
@@ -215,25 +223,41 @@ class GLiNERBiAdapter(BaseAdapter):
         effective_flat_ner = opts.get("flat_ner", self._flat_ner)
         effective_multi_label = opts.get("multi_label", self._multi_label)
         use_precompute = opts.get("precompute_labels", self._precompute_labels)
+        # A bi-encoder's row is the document alone, so its metered tokens are its row tokens.
+        input_token_counts = self._doc_input_token_counts(texts, labels)
 
-        with torch.inference_mode():
+        def predict(batch: list[str]) -> list[Any]:
             if use_precompute:
-                batch_entities = self._predict_with_cached_embeds(
-                    texts,
+                return self._predict_with_cached_embeds(
+                    batch,
                     labels,
                     threshold=effective_threshold,
                     flat_ner=effective_flat_ner,
                     multi_label=effective_multi_label,
                 )
+            # Fall back to standard GLiNER inference path
+            return self._model.inference(
+                batch,
+                labels,
+                threshold=effective_threshold,
+                flat_ner=effective_flat_ner,
+                multi_label=effective_multi_label,
+            )
+
+        groups = None
+        if input_token_counts is not None and self._quadratic_attention:
+            groups = plan_forwards(input_token_counts, rows_per_pass=_GLINER_BATCH_SIZE)
+        with torch.inference_mode():
+            if groups is None:
+                batch_entities = predict(texts)
             else:
-                # Fall back to standard GLiNER inference path
-                batch_entities = self._model.inference(
-                    texts,
-                    labels,
-                    threshold=effective_threshold,
-                    flat_ner=effective_flat_ner,
-                    multi_label=effective_multi_label,
-                )
+                batch_entities: list[Any] = [[] for _ in texts]
+                for group in groups:
+                    group_entities = predict([texts[index] for index in group])
+                    if len(group_entities) != len(group):
+                        raise ValueError("GLiNER-bi returned predictions for a different number of items")
+                    for index, entities in zip(group, group_entities, strict=True):
+                        batch_entities[index] = entities
 
         # Convert to SIE Entity format (same as GLiNERAdapter)
         all_entities: list[list[Entity]] = []
@@ -251,13 +275,14 @@ class GLiNERBiAdapter(BaseAdapter):
                 )
             all_entities.append(entity_results)
 
-        return ExtractOutput(entities=all_entities, input_token_counts=self._doc_input_token_counts(texts, labels))
+        return ExtractOutput(entities=all_entities, input_token_counts=input_token_counts)
 
     def _doc_input_token_counts(self, texts: list[str], labels: list[str]) -> list[int] | None:
         """Count the document tokens the bi-encoder actually encodes, per item.
 
         A bi-encoder encodes labels separately, so its text input is the
-        document alone. Delegate word splitting and max-length word truncation
+        document alone. Delegate word splitting (the bounded splitter installed
+        at load) and max-length word truncation
         to the pinned GLiNER processor, then count the attended tokens of the
         retained window, special tokens included, as the GLiNER adapter does.
         Batches match GLiNER inference's default batch size. GLiNER skips

@@ -3,6 +3,8 @@ from __future__ import annotations
 import math
 import re
 import unicodedata
+from collections.abc import Callable, Iterable
+from functools import lru_cache
 from numbers import Real
 from pathlib import Path
 from typing import Any, ClassVar
@@ -13,7 +15,14 @@ from huggingface_hub import snapshot_download
 from sie_server.adapters._base_adapter import BaseAdapter
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_REQUIRES_TEXT, ComputePrecision
-from sie_server.adapters.gliner2.words import linear_equivalent, word_spans
+from sie_server.adapters._word_window import (
+    SubwordCounter,
+    WindowedSplitter,
+    plan_forwards,
+    quadratic_attention,
+    subword_budget,
+)
+from sie_server.adapters.gliner2.words import linear_equivalent
 from sie_server.core.inference_output import ExtractOutput
 from sie_server.types.inputs import Item
 from sie_server.types.responses import Classification, Entity, Relation
@@ -29,6 +38,25 @@ _METER_MARGIN_TOKENS = 64
 # A space after a non-space character, matched in reversed text: the tokenizers
 # of these checkpoints split pre-tokens at spaces, after normalizing whitespace.
 _SPACE_AFTER_TEXT = re.compile(r" (?=\S)")
+# Words a document is read up to when the model config sets no max_seq_length.
+_DEFAULT_MAX_WORDS = 512
+# Subword tokens a document may take per word it reads. The GLiNER2 checkpoints
+# read English: prose, code, CSV and JSON logs run at up to 2.4 subwords per word,
+# other European languages at up to 3.2. GLiNER2 reads a URL as one word, so a
+# document made mostly of long links is read only up to the budget.
+_SUBWORDS_PER_WORD = 4
+# gliner2 keeps the tokens of every word it tokenizes in an LRU of 50,000
+# entries. Only words of at most _CACHED_WORD_CHARS characters are kept here, so
+# the cache stays within a few tens of MB; a longer word is tokenized each time.
+_WORD_CACHE_SIZE = 16384
+_CACHED_WORD_CHARS = 32
+# Rows gliner2 puts in one forward pass when not told otherwise.
+_PACKAGE_BATCH_SIZE = 8
+# Task prompt tokens per label, schema field or task name beyond its own tokens.
+_PROMPT_TOKENS_PER_ENTRY = 2
+# The prompt's own markers, [SEP_TEXT], and the tokenizer's specials.
+_ROW_OVERHEAD_TOKENS = 8
+_DEBERTA_CONFIG = {"model_type": "deberta-v2"}
 
 
 class GLiNER2Adapter(BaseAdapter):
@@ -101,6 +129,11 @@ class GLiNER2Adapter(BaseAdapter):
         self._model: Any = None
         # How the loaded gliner2 splits words (see ``_model_text``); None until loaded.
         self._lower_text_first: bool | None = None
+        # The splitter gliner2 reads words with, bounded to the window it reads (see ``_window``).
+        self._word_splitter: WindowedSplitter | None = None
+        self._count_subwords: Callable[[list[str]], list[int]] | None = None
+        # Whether the encoder's attention memory grows with the square of a row (see ``_run_planned``).
+        self._quadratic_attention = True
         self._device: str | None = None
 
     def load(self, device: str) -> None:
@@ -126,15 +159,20 @@ class GLiNER2Adapter(BaseAdapter):
             map_location=device,
             quantize=use_quantize,
         )
-        self._use_linear_word_splitter(model.processor)
+        encoder = getattr(model, "encoder", None)
+        self._use_linear_word_splitter(model.processor, getattr(encoder, "config", None))
         self._model = model
 
-    def _use_linear_word_splitter(self, processor: Any) -> None:
-        """Split words with a linear-time equivalent of gliner2's splitter.
+    def _use_linear_word_splitter(self, processor: Any, encoder_config: Any = None) -> None:
+        """Split words with a linear-time equivalent of gliner2's splitter, bounded to the window gliner2 reads.
 
         gliner2's word-splitting regex takes time quadratic in the length of a
         run of e-mail address characters (``"...."``, ``"a.a.a."``), on the
-        thread that serves every request.
+        thread that serves every request. gliner2 also reads ``max_len`` words
+        whatever their length, so the splitter yields only the window of
+        ``_word_window.read_window``: a word longer than 256 characters in
+        pieces, and at most ``_SUBWORDS_PER_WORD`` subword tokens per word of
+        the window.
 
         Raises:
             RuntimeError: gliner2's splitter is not the one this adapter has an
@@ -146,8 +184,40 @@ class GLiNER2Adapter(BaseAdapter):
                 f"GLiNER2 has no linear-time equivalent of {type(processor.word_splitter).__name__}; "
                 "gliner2's word splitter changed"
             )
-        processor.word_splitter = splitter
+        # An unknown encoder is taken to be DeBERTa, the encoder of every GLiNER2 checkpoint.
+        config = encoder_config if encoder_config is not None else _DEBERTA_CONFIG
+        tokenize = self._bounded_tokenization(processor)
+        count_subwords = SubwordCounter(lambda words: [len(tokenize(word)) for word in words])
+        max_words = self._max_seq_length or _DEFAULT_MAX_WORDS
+        windowed = WindowedSplitter(
+            splitter,
+            max_words=max_words,
+            max_subwords=subword_budget(max_words, config, per_word=_SUBWORDS_PER_WORD),
+            count_subwords=count_subwords,
+        )
+        processor.word_splitter = windowed
         self._lower_text_first = splitter.lower_text_first
+        self._word_splitter = windowed
+        self._count_subwords = count_subwords
+        self._quadratic_attention = quadratic_attention(config)
+
+    @staticmethod
+    def _bounded_tokenization(processor: Any) -> Callable[[str], list[str]]:
+        """Tokenize words as gliner2 does, keeping only short words' tokens.
+
+        gliner2 caches the tokens of every word it tokenizes, however long, for
+        the adapter's lifetime; its cache is replaced by one that keeps words
+        of at most ``_CACHED_WORD_CHARS`` characters.
+        """
+        tokenize = processor.tokenizer.tokenize
+        cached = lru_cache(maxsize=_WORD_CACHE_SIZE)(tokenize)
+
+        def tokenize_word(word: str) -> list[str]:
+            return cached(word) if len(word) <= _CACHED_WORD_CHARS else tokenize(word)
+
+        if hasattr(processor, "_tokenize_cached"):
+            processor._tokenize_cached = tokenize_word
+        return tokenize_word
 
     def extract(
         self,
@@ -162,8 +232,9 @@ class GLiNER2Adapter(BaseAdapter):
         """Extract entities, relations, classifications, or flat structured data."""
         self._check_loaded()
         texts = [self._extract_text(item) for item in items]
-        # gliner2 reads only the first max_len words of a text, after splitting all of it.
-        model_texts = [self._model_text(text) for text in texts]
+        # gliner2 reads a bounded window of words: pass it only the prefix holding them.
+        windows = [self._window(text) for text in texts]
+        model_texts = [model_text for model_text, _ in windows]
         opts = options or {}
         effective_threshold = self._validate_threshold(opts.get("threshold", self._threshold))
         classification_task = opts.get("classification_task", self._classification_task)
@@ -178,15 +249,21 @@ class GLiNER2Adapter(BaseAdapter):
             if classification_task is not None:
                 raise ValueError("GLiNER2 structured extraction does not accept classification_task")
             structures = self._json_schema_to_structures(output_schema)
+            rows = self._row_tokens(windows, [spec for specs in structures.values() for spec in specs])
             with torch.inference_mode():
-                raw_results = self._model.batch_extract_json(
+                raw_results = self._run_planned(
                     model_texts,
-                    structures,
-                    batch_size=len(texts),
-                    threshold=effective_threshold,
-                    include_confidence=False,
-                    include_spans=False,
-                    max_len=self._max_seq_length,
+                    rows,
+                    lambda batch: self._model.batch_extract_json(
+                        batch,
+                        structures,
+                        batch_size=len(batch),
+                        threshold=effective_threshold,
+                        include_confidence=False,
+                        include_spans=False,
+                        max_len=self._max_seq_length,
+                    ),
+                    rows_per_pass=len(texts),
                 )
             return ExtractOutput(
                 entities=[[] for _ in texts],
@@ -203,15 +280,21 @@ class GLiNER2Adapter(BaseAdapter):
             normalized_entities = [
                 self._normalize_input_entities(item, entities or []) for item, entities in zip(items, relation_entities)
             ]
+            rows = self._row_tokens(windows, normalized_labels)
             with torch.inference_mode():
-                raw_results = self._model.batch_extract_relations(
+                raw_results = self._run_planned(
                     model_texts,
-                    normalized_labels,
-                    batch_size=len(texts),
-                    threshold=effective_threshold,
-                    include_confidence=True,
-                    include_spans=True,
-                    max_len=self._max_seq_length,
+                    rows,
+                    lambda batch: self._model.batch_extract_relations(
+                        batch,
+                        normalized_labels,
+                        batch_size=len(batch),
+                        threshold=effective_threshold,
+                        include_confidence=True,
+                        include_spans=True,
+                        max_len=self._max_seq_length,
+                    ),
+                    rows_per_pass=len(texts),
                 )
             return ExtractOutput(
                 entities=normalized_entities,
@@ -232,13 +315,14 @@ class GLiNER2Adapter(BaseAdapter):
                 multi_label=multi_label,
                 threshold=effective_threshold,
                 input_token_counts=input_token_counts,
+                rows=self._row_tokens(windows, [classification_task, *normalized_labels]),
             )
 
-        with torch.inference_mode():
-            if len(texts) == 1:
-                raw_results = [
+        def extract_entities(batch: list[str]) -> list[Any]:
+            if len(batch) == 1:
+                return [
                     self._model.extract_entities(
-                        model_texts[0],
+                        batch[0],
                         normalized_labels,
                         threshold=effective_threshold,
                         include_confidence=True,
@@ -246,15 +330,22 @@ class GLiNER2Adapter(BaseAdapter):
                         max_len=self._max_seq_length,
                     )
                 ]
-            else:
-                raw_results = self._model.batch_extract_entities(
-                    model_texts,
-                    normalized_labels,
-                    threshold=effective_threshold,
-                    include_confidence=True,
-                    include_spans=True,
-                    max_len=self._max_seq_length,
-                )
+            return self._model.batch_extract_entities(
+                batch,
+                normalized_labels,
+                threshold=effective_threshold,
+                include_confidence=True,
+                include_spans=True,
+                max_len=self._max_seq_length,
+            )
+
+        with torch.inference_mode():
+            raw_results = self._run_planned(
+                model_texts,
+                self._row_tokens(windows, normalized_labels),
+                extract_entities,
+                rows_per_pass=1 if len(texts) == 1 else _PACKAGE_BATCH_SIZE,
+            )
 
         all_entities = [self._flatten_entities(result, text=text) for text, result in zip(texts, raw_results)]
         return ExtractOutput(entities=all_entities, input_token_counts=input_token_counts)
@@ -268,6 +359,7 @@ class GLiNER2Adapter(BaseAdapter):
         multi_label: bool,
         threshold: float,
         input_token_counts: list[int] | None,
+        rows: list[int] | None = None,
     ) -> ExtractOutput:
         """Run one GLiNER2 classification schema and normalize its results."""
         tasks = {
@@ -278,25 +370,32 @@ class GLiNER2Adapter(BaseAdapter):
             }
         }
 
-        with torch.inference_mode():
-            if len(texts) == 1:
-                raw_results = [
+        def classify(batch: list[str]) -> list[Any]:
+            if len(batch) == 1:
+                return [
                     self._model.classify_text(
-                        texts[0],
+                        batch[0],
                         tasks,
                         threshold=threshold,
                         include_confidence=True,
                         max_len=self._max_seq_length,
                     )
                 ]
-            else:
-                raw_results = self._model.batch_classify_text(
-                    texts,
-                    tasks,
-                    threshold=threshold,
-                    include_confidence=True,
-                    max_len=self._max_seq_length,
-                )
+            return self._model.batch_classify_text(
+                batch,
+                tasks,
+                threshold=threshold,
+                include_confidence=True,
+                max_len=self._max_seq_length,
+            )
+
+        with torch.inference_mode():
+            raw_results = self._run_planned(
+                texts,
+                rows,
+                classify,
+                rows_per_pass=1 if len(texts) == 1 else _PACKAGE_BATCH_SIZE,
+            )
 
         all_classifications = [
             self._flatten_classifications(result, task=task, threshold=threshold) for result in raw_results
@@ -306,6 +405,45 @@ class GLiNER2Adapter(BaseAdapter):
             classifications=all_classifications,
             input_token_counts=input_token_counts,
         )
+
+    def _row_tokens(self, windows: list[tuple[str, int | None]], prompt_entries: Iterable[str]) -> list[int] | None:
+        """Estimated tokens of each item's encoder row: the task prompt, then the words it reads.
+
+        None when the words were not counted (no bounded splitter is installed).
+        """
+        count = self._count_subwords
+        if count is None or any(subwords is None for _, subwords in windows):
+            return None
+        entries = [entry for entry in prompt_entries if isinstance(entry, str)]
+        prompt = sum(count(entries)) + _PROMPT_TOKENS_PER_ENTRY * len(entries) + _ROW_OVERHEAD_TOKENS
+        return [prompt + (subwords or 0) for _, subwords in windows]
+
+    def _run_planned(
+        self,
+        texts: list[str],
+        rows: list[int] | None,
+        run: Callable[[list[str]], list[Any]],
+        *,
+        rows_per_pass: int,
+    ) -> list[Any]:
+        """``run(texts)``, split into several calls when one forward pass would hold too long a batch.
+
+        gliner2 pads a pass to its longest row, and a DeBERTa encoder's
+        attention memory grows with rows times the square of that length, so
+        rows are grouped by length within ``_word_window.ATTENTION_BUDGET``
+        (see ``plan_forwards``). A batch that fits runs exactly as before.
+        """
+        groups = plan_forwards(rows, rows_per_pass=rows_per_pass) if rows and self._quadratic_attention else None
+        if groups is None:
+            return list(run(texts))
+        results: list[Any] = [None] * len(texts)
+        for group in groups:
+            group_results = list(run([texts[index] for index in group]))
+            if len(group_results) != len(group):
+                raise ValueError("GLiNER2 returned results for a different number of items")
+            for index, result in zip(group, group_results, strict=True):
+                results[index] = result
+        return results
 
     @classmethod
     def _flatten_classifications(
@@ -660,36 +798,42 @@ class GLiNER2Adapter(BaseAdapter):
                 raise ValueError(f"GLiNER2 structured extraction property {name!r} must be an array of strings")
 
     def _model_text(self, text: str) -> str:
-        """The prefix of ``text`` holding every word gliner2 reads from it, or ``text``.
+        """The prefix of ``text`` holding every word gliner2 reads from it, or ``text``."""
+        return self._window(text)[0]
 
-        gliner2 splits all of a text into words and keeps the first ``max_len``.
-        The prefix ending where the last kept word ends (with the whitespace
-        after it) gives it the same words at the same offsets, since no word
-        crosses that point. gliner2 1.x
-        splits the lowercased text and indexes the original with those offsets,
-        so the prefix ends at the lowercased offset; it is used only when its
-        lowercase starts the lowercased text (a final sigma can lowercase
-        differently at the cut). gliner2 2.x splits the text as given.
+    def _window(self, text: str) -> tuple[str, int | None]:
+        """``(model text, subwords)``: the prefix of ``text`` gliner2 reads the same words from, and their subwords.
+
+        gliner2 splits a text into words (with the bounded splitter installed
+        at load, which yields only the window it reads) and keeps the first
+        ``max_len``. ``Window.cut`` is where a prefix gives the same window:
+        the end of the word holding the last piece read, or the first piece
+        not read. No word crosses that point, so the prefix splits into the
+        same words at the same offsets. gliner2 1.x splits the lowercased text
+        and indexes the original with those offsets, so the prefix ends at the
+        lowercased offset; it is used only when its lowercase starts the
+        lowercased text (a final sigma can lowercase differently at the cut).
+        gliner2 2.x splits the text as given. The subwords are None when no
+        bounded splitter is installed.
         """
-        limit = self._max_seq_length
-        if limit is None or len(text) <= limit or self._lower_text_first is None:  # a word has a character
-            return text
+        splitter = self._word_splitter
+        if splitter is None:
+            return text, None
+        window = splitter.window(text, lower=True)
+        cut = window.cut
+        if cut is None:
+            return text, window.subwords
         source = text.lower() if self._lower_text_first else text
-        cut = None
-        for count, (_, end) in enumerate(word_spans(source), start=1):
-            if count == limit:
-                cut = end
-                break
-        if cut is not None and cut < len(source) and source[cut].isspace():
+        if cut < len(source) and source[cut].isspace():
             # Keep the separator: gliner2 ends a text without a sentence end with
             # ".", which a URL word (running to whitespace) would absorb.
             cut += 1
-        if cut is None or cut >= len(text):
-            return text
+        if cut >= len(text):
+            return text, window.subwords
         prefix = text[:cut]
         if self._lower_text_first and not source.startswith(prefix.lower()):
-            return text
-        return prefix
+            return text, window.subwords
+        return prefix, window.subwords
 
     def _doc_input_token_counts(self, texts: list[str]) -> list[int] | None:
         processor = getattr(self._model, "processor", None)

@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import yaml
+from sie_server.adapters._word_window import WindowedSplitter
 from sie_server.adapters.gliner2.adapter import GLiNER2Adapter
 from sie_server.adapters.gliner2.classification import GLiNER2ClassificationAdapter
 from sie_server.adapters.gliner2.words import PACKAGE_PATTERN, LinearWordSplitter
@@ -285,8 +286,10 @@ def test_load_resolves_every_file_from_pinned_snapshot() -> None:
         map_location="cpu",
         quantize=False,
     )
-    assert isinstance(model.processor.word_splitter, LinearWordSplitter)
-    assert model.processor.word_splitter.lower_text_first
+    splitter = model.processor.word_splitter
+    assert isinstance(splitter, WindowedSplitter)
+    assert isinstance(splitter.splitter, LinearWordSplitter)
+    assert splitter.splitter.lower_text_first
 
 
 def test_entity_offsets_use_python_unicode_character_indices() -> None:

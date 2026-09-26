@@ -1,10 +1,13 @@
 """Long and pathological documents in the GLiNER2 adapter (gliner2 1.x).
 
 gliner2 lowercases a document, splits all of it into words with a regex that
-takes quadratic time on runs like ``"...."``, and keeps the first ``max_len``
-words. The adapter splits in linear time and hands gliner2 only the prefix
-holding those words. These tests use gliner2's real processor with a stand-in
-tokenizer: the prefix must give gliner2 exactly the input the whole text gives.
+takes quadratic time on runs like ``"...."``, keeps the first ``max_len``
+words, and encodes every subword of each. The adapter splits in linear time,
+reads a word longer than 256 characters in pieces, stops at the subword budget,
+and hands gliner2 only the prefix holding the words it reads. These tests use
+gliner2's real processor with a stand-in tokenizer: the prefix must give
+gliner2 exactly the input the whole text gives, ordinary text the input
+gliner2's own splitter gives, and no text more subwords than the budget.
 """
 
 from __future__ import annotations
@@ -17,7 +20,8 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
-from sie_server.adapters.gliner2.adapter import GLiNER2Adapter
+from sie_server.adapters._word_window import ATTENTION_BUDGET, MAX_WORD_CHARS, WindowedSplitter, subword_budget
+from sie_server.adapters.gliner2.adapter import _SUBWORDS_PER_WORD, GLiNER2Adapter
 from sie_server.adapters.gliner2.classification import GLiNER2ClassificationAdapter
 from sie_server.adapters.gliner2.words import PACKAGE_PATTERN, LinearWordSplitter
 from sie_server.types.inputs import Item
@@ -101,10 +105,12 @@ class PackageModel:
         return [{name: {"label": config["labels"][0], "confidence": 0.9}} for _ in texts]
 
 
-def make_adapter(cls: type[GLiNER2Adapter] = GLiNER2Adapter, **kwargs: Any) -> tuple[GLiNER2Adapter, PackageModel]:
+def make_adapter(
+    cls: type[GLiNER2Adapter] = GLiNER2Adapter, *, encoder_config: Any = None, **kwargs: Any
+) -> tuple[GLiNER2Adapter, PackageModel]:
     adapter = cls("fake/gliner2", max_seq_length=512, **kwargs)
     model = PackageModel(make_processor())
-    adapter._use_linear_word_splitter(model.processor)
+    adapter._use_linear_word_splitter(model.processor, encoder_config)
     adapter._model = model
     return adapter, model
 
@@ -126,11 +132,10 @@ LONG_TEXTS = [
     "\u039f\u0394\u039f\u03a3'\u0391 " * 40,
     "\u0391\u03a3'\u0391\u03a3'\u0391\u03a3'" * 40,
     "mail a.b@example.com, see https://example.com/x?y=z and @team; " * 20,
-    "x" * 5000 + " tail words here",
     ". " * 400 + "end",
     "." * 5000,
     "a." * 3000,
-    "see http://example.com/a?b=c " * 60,
+    "a b c d e f see http://example.com/a?b=c " * 30,
     "www.example.org\tthen text\n" * 60,
 ]
 LONG_TEXT_IDS = [
@@ -140,7 +145,6 @@ LONG_TEXT_IDS = [
     "final-sigma",
     "sigma-apostrophes",
     "email-url",
-    "long-word",
     "spaced-dots",
     "dots",
     "a-dots",
@@ -163,6 +167,27 @@ class Gliner2V2Splitter:
 Gliner2V2Splitter.__name__ = "WhitespaceTokenSplitter"
 
 
+# Texts with words longer than the window reads whole, or more subwords than it allows.
+LONG_WORD_TEXTS = [
+    "x" * 5000 + " tail words here",
+    "Priya Raman " + "ab" * 3000 + " works at Novartis.",
+    ("q" * 300 + " ") * 40,
+    "k" * MAX_WORD_CHARS + " " + "k" * (MAX_WORD_CHARS + 1) + " end",
+    "\u0130" * 300 + " stanbul",
+    "see https://example.com/" + "p" * 600 + " and more",
+    "mail " + "a." * 400 + "@example.com today",
+]
+LONG_WORD_IDS = [
+    "long-word",
+    "run-in-prose",
+    "spaced-long-words",
+    "at-the-piece-size",
+    "dotted-capital-i",
+    "url",
+    "email",
+]
+
+
 @pytest.mark.parametrize("splitting", ["gliner2-1.x", "gliner2-2.x"])
 @pytest.mark.parametrize("max_len", [7, 64])
 @pytest.mark.parametrize("text", LONG_TEXTS, ids=LONG_TEXT_IDS)
@@ -179,6 +204,130 @@ def test_the_prefix_gives_gliner2_the_same_input_as_the_whole_text(text: str, ma
     assert text.startswith(prefix)
     assert collated(processor, prefix, max_len) == reference
     assert collated(processor, text, max_len) == reference  # and the linear splitter on the whole text
+
+
+@pytest.mark.parametrize("splitting", ["gliner2-1.x", "gliner2-2.x"])
+@pytest.mark.parametrize("max_len", [7, 64])
+@pytest.mark.parametrize("text", LONG_WORD_TEXTS, ids=LONG_WORD_IDS)
+def test_long_words_are_read_in_pieces_within_the_subword_budget(text: str, max_len: int, splitting: str) -> None:
+    adapter = GLiNER2Adapter("fake/gliner2", max_seq_length=max_len)
+    processor = make_processor()
+    if splitting == "gliner2-2.x":
+        processor.word_splitter = Gliner2V2Splitter()
+    adapter._use_linear_word_splitter(processor)
+
+    prefix = adapter._model_text(text)
+    whole = collated(processor, text, max_len)
+
+    assert text.startswith(prefix)
+    assert collated(processor, prefix, max_len) == whole
+    _, (words,), (starts,), (ends,) = whole
+    subwords = [len(processor.tokenizer.tokenize(word)) for word in words]
+    assert len(words) <= max_len
+    assert (
+        sum(subwords) <= subword_budget(max_len, per_word=_SUBWORDS_PER_WORD) or len(words) == 1
+    )  # the first word is always read
+    source = text.lower() if splitting == "gliner2-1.x" else text  # what gliner2's offsets index
+    for word, start, end in zip(words, starts, ends, strict=True):
+        assert end - start <= MAX_WORD_CHARS
+        if end <= len(source):  # not the "." gliner2 appends
+            assert word == source[start:end].lower()
+
+
+def test_a_long_word_is_read_in_consecutive_pieces() -> None:
+    text = "ID " + "a1b2" * 200 + " belongs to Priya"
+    adapter, model = make_adapter()
+
+    adapter.extract([Item(text=text)], labels=["person"])
+
+    batch = model.inputs[-1]
+    assert batch.start_mappings[0][:6] == [0, 3, 259, 515, 771, 804]
+    assert batch.end_mappings[0][:6] == [2, 259, 515, 771, 803, 811]
+    assert "".join(batch.text_tokens[0][1:5]) == "a1b2" * 200
+
+
+def test_an_entity_in_a_long_word_keeps_its_offsets() -> None:
+    text = "ID " + "a1b2" * 200 + " belongs to Priya"
+    adapter, model = make_adapter()
+    extract_entities = model.extract_entities
+
+    def found_in_second_piece(text: str, labels: list[str], **kwargs: Any) -> dict[str, Any]:
+        extract_entities(text, labels, **kwargs)
+        batch = model.inputs[-1]
+        start, end = batch.start_mappings[0][2], batch.end_mappings[0][2]
+        return {"entities": {"id": [{"text": text[start:end], "start": start, "end": end, "confidence": 0.9}]}}
+
+    model.extract_entities = found_in_second_piece  # type: ignore[method-assign]
+    output = adapter.extract([Item(text=text)], labels=["id"])
+
+    assert output.entities == [[{"text": text[259:515], "label": "id", "score": 0.9, "start": 259, "end": 515}]]
+
+
+PATHOLOGICAL_WORDS = [
+    "x" * (2 * MiB),
+    "\u00e9" * MiB,
+    "Priya Raman works at Novartis. " + "7" * (2 * MiB - 40),
+    ("b" * 200 + " ") * (2 * MiB // 201),
+    "\u8bf7\u5e2e\u6211\u53d6\u6d88\u8ba2\u5355" * (MiB // 7),
+]
+PATHOLOGICAL_WORD_IDS = ["letters", "accents", "digits-after-prose", "spaced-long-words", "cjk-run"]
+
+
+@pytest.mark.parametrize("cls", [GLiNER2Adapter, GLiNER2ClassificationAdapter])
+@pytest.mark.parametrize("text", PATHOLOGICAL_WORDS, ids=PATHOLOGICAL_WORD_IDS)
+def test_long_words_keep_the_encoder_input_within_the_subword_budget(cls: type[GLiNER2Adapter], text: str) -> None:
+    adapter, model = make_adapter(cls, classification_task="prompt_safety", default_labels=["safe", "unsafe"])
+    tokenize = model.processor.tokenizer.tokenize
+    started = time.perf_counter()
+    output = adapter.extract([Item(text=text)])
+    classify_seconds = time.perf_counter() - started
+    started = time.perf_counter()
+    entities = adapter.extract([Item(text=text), Item(text="Priya Raman works at Novartis")], labels=["person"])
+    extract_seconds = time.perf_counter() - started
+
+    budget = subword_budget(512, per_word=_SUBWORDS_PER_WORD)
+    rows = [
+        (words, starts, ends)
+        for batch in model.inputs
+        for words, starts, ends in zip(batch.text_tokens, batch.start_mappings, batch.end_mappings, strict=True)
+    ]
+    assert len(rows) == 3
+    for words, starts, ends in rows:
+        assert sum(len(tokenize(word)) for word in words) <= budget
+        assert all(end - start <= MAX_WORD_CHARS for start, end in zip(starts, ends, strict=True))
+    assert all(batch.input_ids.shape[1] <= budget + 64 for batch in model.inputs)  # the task prompt and specials
+    assert ["priya", "raman", "works", "at", "novartis", "."] in [words for words, _, _ in rows]
+    # Billing is unchanged: the document tokens up to max_seq_length.
+    assert output.input_token_counts == [512]
+    assert entities.input_token_counts is not None
+    assert entities.input_token_counts[0] == 512
+    assert classify_seconds < 1.0
+    assert extract_seconds < 1.0
+
+
+def test_a_batch_of_long_rows_runs_in_passes_within_the_attention_budget() -> None:
+    adapter, model = make_adapter(encoder_config={"model_type": "deberta-v2"})
+    texts = [("w" * 200 + " ") * 400 for _ in range(6)] + ["Priya Raman works at Novartis"] * 6
+
+    output = adapter.extract([Item(text=text) for text in texts], labels=["person"])
+
+    assert len(output.entities) == len(texts)
+    assert len(model.inputs) > 1
+    for batch in model.inputs:
+        rows, width = batch.input_ids.shape
+        assert rows == 1 or rows * width**2 <= ATTENTION_BUDGET
+    # The short rows run together, apart from the long ones.
+    assert any(batch.input_ids.shape[0] == 6 and batch.input_ids.shape[1] < 64 for batch in model.inputs)
+
+
+def test_an_ordinary_batch_runs_in_one_pass() -> None:
+    adapter, model = make_adapter(encoder_config={"model_type": "deberta-v2"})
+    texts = [" ".join(f"Sentence {i} mentions Dr. Priya Raman of Novartis." for i in range(60))] * 8
+
+    adapter.extract([Item(text=text) for text in texts], labels=["person"])
+
+    assert len(model.inputs) == 1
+    assert model.inputs[0].input_ids.shape[0] == 8
 
 
 @pytest.mark.parametrize("max_len", [1, 2])
@@ -246,7 +395,11 @@ def test_load_refuses_a_word_splitter_it_has_no_equivalent_for() -> None:
         GLiNER2Adapter("fake/gliner2")._use_linear_word_splitter(processor)
 
 
-def test_the_processor_gets_the_linear_splitter() -> None:
+def test_the_processor_gets_the_bounded_linear_splitter() -> None:
     _, model = make_adapter()
-    assert isinstance(model.processor.word_splitter, LinearWordSplitter)
-    assert model.processor.word_splitter.lower_text_first
+    splitter = model.processor.word_splitter
+    assert isinstance(splitter, WindowedSplitter)
+    assert isinstance(splitter.splitter, LinearWordSplitter)
+    assert splitter.splitter.lower_text_first
+    assert splitter.max_words == 512
+    assert splitter.max_subwords == subword_budget(512, per_word=_SUBWORDS_PER_WORD)
