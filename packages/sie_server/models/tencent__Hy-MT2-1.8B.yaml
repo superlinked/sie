@@ -1,0 +1,44 @@
+sie_id: "tencent/Hy-MT2-1.8B"
+hf_id: "tencent/Hy-MT2-1.8B"
+hf_revision: 9a341cd1b679d3efd23b46e847b01745a71ed792
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: null
+  extract: null
+  generate:
+    context_length: 4096
+    max_output_tokens: 512
+    capabilities:
+      grammar: []
+      streaming: true
+      tools: false
+    chat_template_kwargs: {}
+max_sequence_length: 4096
+profiles:
+  default:
+    max_batch_tokens: 8192
+    kv_budget_tokens: 8192
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.sglang.generation:SGLangGenerationAdapter
+    adapter_options:
+      loadtime:
+        served_model_name: tencent/Hy-MT2-1.8B
+        mem_fraction_static: 0.85
+        grammar_backend: xgrammar
+        disable_piecewise_cuda_graph: true
+        trust_remote_code: false
+      runtime:
+        default_sampling:
+          temperature: 0.7
+          top_p: 0.8
+          top_k: 20
+        first_chunk_timeout_s: 180
+        inter_chunk_timeout_s: 10
+        overall_timeout_s: 600
+        stop_tokens:
+          - "<｜hy_place▁holder▁no▁2｜>"
