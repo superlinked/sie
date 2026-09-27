@@ -157,6 +157,9 @@ the export stale: it is refused without changing the registry or advancing its
 epoch/fingerprints, and the caller retries. This prevents an older in-flight
 export from erasing a newer model update while leaving the epoch ahead of the
 installed models. The network fetch never holds the registry write lock.
+The poller retains a pending retry after a failed bootstrap, even if a concurrent
+delta makes epochs and fingerprints match. Only a successful bootstrap clears
+that retry; failed epoch reads leave it pending.
 
 - If **any** model entry failed (`outcome.failed > 0`), `bootstrap_once` returns `BootstrapError::PartialApply` and **advances neither `ConfigEpoch`, `BundlesHash`, nor `BundleConfigHashesHash`**. The poller will detect drift on the next tick and retry.
 - If all entries applied, `bootstrap_once` advances `ConfigEpoch` via `set_max(outcome.epoch)`, stores `outcome.bundles_hash` into `BundlesHash`, stores `outcome.bundle_config_hashes_hash` into `BundleConfigHashesHash`, and the retry task exits.

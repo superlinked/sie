@@ -115,6 +115,7 @@ pub fn spawn(
         // No need to hammer /epoch before at least one interval has passed.
         ticker.tick().await;
 
+        let mut retry_bootstrap = false;
         loop {
             ticker.tick().await;
             let local_epoch_val = config_epoch.get();
@@ -207,6 +208,7 @@ pub fn spawn(
                 .await
                 {
                     Ok(_) => {
+                        retry_bootstrap = false;
                         // `bootstrap_once` advanced via `set_max`, which is
                         // a no-op while local > remote. Unconditionally
                         // reset now that the registry is in a known state.
@@ -221,6 +223,7 @@ pub fn spawn(
                         );
                     }
                     Err(e) => {
+                        retry_bootstrap = true;
                         telemetry::record_config_operation(
                             ConfigOperation::Reconcile,
                             telemetry_outcome(&e),
@@ -231,7 +234,8 @@ pub fn spawn(
                         );
                     }
                 }
-            } else if remote_epoch > local_epoch_val
+            } else if retry_bootstrap
+                || remote_epoch > local_epoch_val
                 || bundles_hash_drift
                 || bundle_config_hashes_hash_drift
             {
@@ -240,7 +244,9 @@ pub fn spawn(
                     remote_epoch = remote_epoch,
                     bundles_hash_drift,
                     bundle_config_hashes_hash_drift,
-                    reason = if remote_epoch > local_epoch_val {
+                    reason = if retry_bootstrap {
+                        "previous bootstrap failed"
+                    } else if remote_epoch > local_epoch_val {
                         "epoch ahead"
                     } else if bundles_hash_drift {
                         "bundle hash changed"
@@ -258,11 +264,15 @@ pub fn spawn(
                 )
                 .await
                 {
-                    Ok(_) => telemetry::record_config_operation(
-                        ConfigOperation::Reconcile,
-                        ConfigOutcome::Success,
-                    ),
+                    Ok(_) => {
+                        retry_bootstrap = false;
+                        telemetry::record_config_operation(
+                            ConfigOperation::Reconcile,
+                            ConfigOutcome::Success,
+                        );
+                    }
                     Err(e) => {
+                        retry_bootstrap = true;
                         telemetry::record_config_operation(
                             ConfigOperation::Reconcile,
                             telemetry_outcome(&e),
@@ -356,6 +366,66 @@ mod tests {
     /// Without this, a sie-config redeploy that adds a bundle would not
     /// propagate to the gateway until the next model write bumped the
     /// epoch — exactly the operational gap that motivates this change.
+    #[tokio::test]
+    async fn fenced_bootstrap_retries_after_delta_closes_epoch_gap() {
+        let server = MockServer::start().await;
+        mount_bundle_endpoints(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/v1/configs/epoch"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "epoch": 2,
+                "bundles_hash": "stable",
+            })))
+            .mount(&server)
+            .await;
+        let (registry, _tmp) = make_registry();
+        let epoch = ConfigEpoch::new();
+        let hashes = BundlesHash::new();
+        hashes.store("stable".into());
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = attempts.clone();
+        let delta_registry = registry.clone();
+        let delta_epoch = epoch.clone();
+        Mock::given(method("GET"))
+            .and(path("/v1/configs/export"))
+            .respond_with(move |_: &wiremock::Request| {
+                if observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    delta_registry.reload();
+                    delta_epoch.set_max(2);
+                }
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "snapshot_version": 1,
+                    "epoch": 2,
+                    "generated_at": "2026-04-17T00:00:00Z",
+                    "models": [],
+                }))
+            })
+            .mount(&server)
+            .await;
+        let handle = spawn(
+            Some(&server.uri()),
+            None,
+            None,
+            registry,
+            epoch.clone(),
+            hashes,
+            BundleConfigHashesHash::new(),
+            Duration::from_millis(20),
+        )
+        .unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(3), async {
+            while attempts.load(std::sync::atomic::Ordering::SeqCst) < 2 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        handle.abort();
+        result.expect("fenced export must retry even when epochs and hashes match");
+        assert_eq!(epoch.get(), 2);
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
     #[tokio::test]
     async fn bundles_hash_drift_triggers_bootstrap_without_epoch_advance() {
         let server = MockServer::start().await;
