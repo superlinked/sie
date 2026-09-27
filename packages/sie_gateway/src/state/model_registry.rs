@@ -156,6 +156,12 @@ struct RegistrySnapshot {
     bundle_pool_config_hashes: HashMap<(String, String), String>,
 }
 
+#[derive(Default)]
+pub(crate) struct AuthoritativeHashes {
+    pub bundle: HashMap<String, String>,
+    pub pool: HashMap<String, HashMap<String, String>>,
+}
+
 /// Opaque handle to one immutable [`ModelRegistry`] snapshot generation.
 ///
 /// Derived-state publishers can compute every value from this handle, perform
@@ -2153,7 +2159,7 @@ impl ModelRegistry {
         &self,
         configs: Vec<ModelConfig>,
     ) -> Result<usize, String> {
-        self.apply_authoritative(None, configs)
+        self.apply_authoritative(None, configs, None, AuthoritativeHashes::default())
     }
 
     /// Install a matched bundle set and model export as ONE snapshot.
@@ -2163,24 +2169,42 @@ impl ModelRegistry {
     /// retention on the combined result, means a bundle change that only
     /// makes sense together with its model change can never be half-applied
     /// or refused on the strength of the half already installed.
+    #[allow(dead_code)]
     pub fn replace_authoritative_surface(
         &self,
         bundles: Vec<BundleInfo>,
         configs: Vec<ModelConfig>,
     ) -> Result<usize, String> {
-        self.apply_authoritative(Some(bundles), configs)
+        self.apply_authoritative(Some(bundles), configs, None, AuthoritativeHashes::default())
+    }
+
+    pub(crate) fn replace_authoritative_surface_if_current(
+        &self,
+        generation: &ModelRegistryGeneration,
+        bundles: Vec<BundleInfo>,
+        configs: Vec<ModelConfig>,
+        hashes: AuthoritativeHashes,
+    ) -> Result<usize, String> {
+        self.apply_authoritative(Some(bundles), configs, Some(generation), hashes)
     }
 
     fn apply_authoritative(
         &self,
         bundles: Option<Vec<BundleInfo>>,
         configs: Vec<ModelConfig>,
+        generation: Option<&ModelRegistryGeneration>,
+        hashes: AuthoritativeHashes,
     ) -> Result<usize, String> {
         let _write = self
             .write_lock
             .lock()
             .expect("ModelRegistry write_lock poisoned");
         let old_snap = self.snapshot.load();
+        if generation.is_some_and(|expected| !Arc::ptr_eq(&old_snap, &expected.snapshot)) {
+            return Err(
+                "registry changed while fetching authoritative export; retry required".into(),
+            );
+        }
         let new_bundles: HashMap<String, BundleInfo> = match bundles {
             Some(bundles) => bundles.into_iter().map(|b| (b.name.clone(), b)).collect(),
             None => old_snap.bundles.clone(),
@@ -2189,9 +2213,39 @@ impl ModelRegistry {
         let (new_models, new_model_names_lower) =
             Self::build_authoritative_models(configs, &new_bundles)?;
 
-        let bundle_config_hashes = Self::rebuild_bundle_config_hashes(&new_bundles, &new_models);
-        let bundle_pool_config_hashes =
+        let mut bundle_config_hashes =
+            Self::rebuild_bundle_config_hashes(&new_bundles, &new_models);
+        let mut bundle_pool_config_hashes =
             Self::rebuild_bundle_pool_config_hashes(&new_bundles, &new_models);
+        for (bundle, hash) in hashes.bundle {
+            if !new_bundles.contains_key(&bundle) {
+                continue;
+            }
+            if hash.is_empty() {
+                bundle_config_hashes.remove(&bundle);
+            } else {
+                bundle_config_hashes.insert(bundle, hash);
+            }
+        }
+        for (bundle, pools) in hashes.pool {
+            if !new_bundles.contains_key(&bundle) {
+                continue;
+            }
+            for (pool, hash) in pools {
+                let pool = pool.trim().to_lowercase();
+                let pool = if pool.is_empty() {
+                    DEFAULT_MODEL_POOL.to_string()
+                } else {
+                    pool
+                };
+                let key = (bundle.clone(), pool);
+                if hash.is_empty() {
+                    bundle_pool_config_hashes.remove(&key);
+                } else {
+                    bundle_pool_config_hashes.insert(key, hash);
+                }
+            }
+        }
 
         if self.authoritative_surface.load(Ordering::Acquire) {
             let served = old_snap
@@ -4959,6 +5013,55 @@ adapters:
                 4096,
             )
         }
+    }
+
+    #[test]
+    fn authoritative_generation_can_only_be_installed_once() {
+        let temp = TempDir::new().unwrap();
+        let registry = ModelRegistry::new(temp.path(), temp.path(), false);
+        let generation = registry.capture_generation();
+        let bundles = vec![BundleInfo {
+            name: "default".into(),
+            priority: 10,
+            adapters: vec!["sie_server.adapters.sentence_transformer".into()],
+            engine: DEFAULT_ENGINE.into(),
+        }];
+        registry
+            .replace_authoritative_surface_if_current(
+                &generation,
+                bundles.clone(),
+                vec![named_cfg_for_test("test/model")],
+                AuthoritativeHashes {
+                    bundle: HashMap::from([("default".into(), "authority-hash".into())]),
+                    pool: HashMap::from([(
+                        "default".into(),
+                        HashMap::from([(" CUSTOM ".into(), "pool-hash".into())]),
+                    )]),
+                },
+            )
+            .unwrap();
+        let installed = registry.capture_generation();
+        assert_eq!(
+            installed.snapshot.bundle_config_hashes["default"],
+            "authority-hash"
+        );
+        assert_eq!(
+            installed.snapshot.bundle_pool_config_hashes[&("default".into(), "custom".into())],
+            "pool-hash"
+        );
+        assert!(registry
+            .replace_authoritative_surface_if_current(
+                &generation,
+                bundles,
+                vec![named_cfg_for_test("test/other")],
+                AuthoritativeHashes::default(),
+            )
+            .is_err());
+        assert!(registry
+            .with_current_generation(&installed, || ())
+            .is_some());
+        assert!(registry.get_model_info("test/model").is_some());
+        assert!(registry.get_model_info("test/other").is_none());
     }
 
     #[test]

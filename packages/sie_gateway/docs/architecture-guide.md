@@ -149,6 +149,15 @@ Startup short-circuits:
 
 Returns `BootstrapOutcome { epoch, bundles_hash, bundle_config_hashes_hash, applied, failed, total }`.
 
+The fetch captures the local registry generation before its first request.
+Installation checks that generation under the registry's write lock and publishes
+the model/bundle surface and exported bundle/pool hashes together. A delta,
+reload, or another bootstrap that changes the registry during the fetch makes
+the export stale: it is refused without changing the registry or advancing its
+epoch/fingerprints, and the caller retries. This prevents an older in-flight
+export from erasing a newer model update while leaving the epoch ahead of the
+installed models. The network fetch never holds the registry write lock.
+
 - If **any** model entry failed (`outcome.failed > 0`), `bootstrap_once` returns `BootstrapError::PartialApply` and **advances neither `ConfigEpoch`, `BundlesHash`, nor `BundleConfigHashesHash`**. The poller will detect drift on the next tick and retry.
 - If all entries applied, `bootstrap_once` advances `ConfigEpoch` via `set_max(outcome.epoch)`, stores `outcome.bundles_hash` into `BundlesHash`, stores `outcome.bundle_config_hashes_hash` into `BundleConfigHashesHash`, and the retry task exits.
 

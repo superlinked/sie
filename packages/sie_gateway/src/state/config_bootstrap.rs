@@ -76,7 +76,7 @@ use crate::observability::metrics::{self as telemetry, ConfigOperation, ConfigOu
 use crate::state::bundle_config_hashes_hash::BundleConfigHashesHash;
 use crate::state::bundles_hash::BundlesHash;
 use crate::state::config_epoch::ConfigEpoch;
-use crate::state::model_registry::ModelRegistry;
+use crate::state::model_registry::{AuthoritativeHashes, ModelRegistry};
 use crate::types::bundle::{BundleInfo, DEFAULT_ENGINE, KNOWN_ENGINES};
 use crate::types::model::ModelConfig;
 
@@ -504,6 +504,7 @@ impl BootstrapClient {
         &self,
         registry: &ModelRegistry,
     ) -> Result<BootstrapOutcome, BootstrapError> {
+        let generation = registry.capture_generation();
         // Snapshot the bundles hash BEFORE fetching bundles. See the
         // `BootstrapOutcome::bundles_hash` doc comment for why the pre-fetch
         // ordering matters — storing a hash that's NEWER than the bundle
@@ -585,11 +586,17 @@ impl BootstrapClient {
 
         let mut applied = 0usize;
         if failed == 0 {
-            match registry.replace_authoritative_surface(bundles, configs) {
+            match registry.replace_authoritative_surface_if_current(
+                &generation,
+                bundles,
+                configs,
+                AuthoritativeHashes {
+                    bundle: snapshot.bundle_config_hashes,
+                    pool: snapshot.bundle_pool_config_hashes,
+                },
+            ) {
                 Ok(count) => {
                     applied = count;
-                    registry.install_bundle_config_hashes(snapshot.bundle_config_hashes);
-                    registry.install_bundle_pool_config_hashes(snapshot.bundle_pool_config_hashes);
                 }
                 Err(e) => {
                     warn!(error = %e, "failed to install authoritative config export");
@@ -1253,6 +1260,45 @@ mod tests {
             .await
             .expect("retry task should exit immediately when url is None")
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn bootstrap_preserves_delta_applied_while_export_is_in_flight() {
+        let server = MockServer::start().await;
+        let (registry, _tmp) = make_registry();
+        mount_default_bundles(&server).await;
+        mount_default_epoch(&server, 2, "deadbeef").await;
+        let epoch = ConfigEpoch::new();
+        let delta_registry = registry.clone();
+        let delta_epoch = epoch.clone();
+        Mock::given(method("GET"))
+            .and(path("/v1/configs/export"))
+            .respond_with(move |_: &wiremock::Request| {
+                delta_registry
+                    .add_model_config(model_config("test/new-model"))
+                    .unwrap();
+                delta_epoch.set_max(2);
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "snapshot_version": 1,
+                    "epoch": 1,
+                    "generated_at": "2026-04-17T00:00:00Z",
+                    "models": [],
+                }))
+            })
+            .mount(&server)
+            .await;
+        let client = BootstrapClient::new(server.uri(), None).unwrap();
+        let outcome = bootstrap_once(
+            &client,
+            registry.as_ref(),
+            &epoch,
+            &BundlesHash::new(),
+            &BundleConfigHashesHash::new(),
+        )
+        .await;
+        assert!(outcome.is_err(), "stale in-flight export must be retried");
+        assert_eq!(epoch.get(), 2);
+        assert!(registry.get_model_info("test/new-model").is_some());
     }
 
     #[tokio::test]
