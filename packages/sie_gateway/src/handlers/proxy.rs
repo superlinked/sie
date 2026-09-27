@@ -269,6 +269,22 @@ pub fn is_length_limit_error(error: &axum::Error) -> bool {
     false
 }
 
+fn request_body_error(error: &axum::Error, limit: usize) -> (StatusCode, &'static str, String) {
+    if is_length_limit_error(error) {
+        (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            err_code::PAYLOAD_TOO_LARGE,
+            format!("Request body too large (max {limit} bytes)"),
+        )
+    } else {
+        (
+            StatusCode::BAD_REQUEST,
+            err_code::INVALID_REQUEST,
+            "Failed to read request body".to_string(),
+        )
+    }
+}
+
 /// The largest [`native_request_body_limit`] across every native endpoint —
 /// the bound an envelope that can carry ANY of them must buffer to.
 ///
@@ -2184,15 +2200,15 @@ async fn proxy_request_inner(
         let body_bytes = match axum::body::to_bytes(body, MAX_GENERATE_BODY).await {
             Ok(body) => body,
             Err(error) => {
-                warn!(error = %error, limit = MAX_GENERATE_BODY, "request body too large or read error");
+                let (status, code, message) = request_body_error(&error, MAX_GENERATE_BODY);
                 return endpoint_error_response(
                     endpoint,
-                    StatusCode::PAYLOAD_TOO_LARGE,
-                    err_code::PAYLOAD_TOO_LARGE,
+                    status,
+                    code,
                     oai_type::INVALID_REQUEST,
                     oai_code::INVALID_REQUEST,
                     None,
-                    format!("Request body too large (max {} bytes)", MAX_GENERATE_BODY),
+                    message,
                 );
             }
         };
@@ -2466,15 +2482,15 @@ async fn proxy_request_inner(
         match axum::body::to_bytes(req.into_body(), body_limit).await {
             Ok(b) => b,
             Err(e) => {
-                warn!(error = %e, limit = body_limit, "request body too large or read error");
+                let (status, code, message) = request_body_error(&e, body_limit);
                 return endpoint_error_response(
                     endpoint,
-                    StatusCode::PAYLOAD_TOO_LARGE,
-                    err_code::PAYLOAD_TOO_LARGE,
+                    status,
+                    code,
                     oai_type::INVALID_REQUEST,
                     oai_code::INVALID_REQUEST,
                     None,
-                    format!("Request body too large (max {} bytes)", body_limit),
+                    message,
                 );
             }
         }
@@ -7062,10 +7078,11 @@ async fn proxy_chat_inner(
     let body_bytes = match to_bytes(body, max_chat_body).await {
         Ok(b) => b,
         Err(e) => {
+            let (status, _, message) = request_body_error(&e, max_chat_body);
             return (
-                StatusCode::PAYLOAD_TOO_LARGE,
+                status,
                 Json(json_openai_error(
-                    format!("request body too large: {e}"),
+                    message,
                     oai_type::INVALID_REQUEST,
                     None,
                     oai_code::INVALID_REQUEST,
@@ -7925,10 +7942,11 @@ pub async fn proxy_completions(State(state): State<Arc<AppState>>, req: Request)
     let body_bytes = match to_bytes(body, max_completions_body).await {
         Ok(b) => b,
         Err(e) => {
+            let (status, _, message) = request_body_error(&e, max_completions_body);
             return (
-                StatusCode::PAYLOAD_TOO_LARGE,
+                status,
                 Json(json_openai_error(
-                    format!("request body too large: {e}"),
+                    message,
                     oai_type::INVALID_REQUEST,
                     None,
                     oai_code::INVALID_REQUEST,
@@ -8563,10 +8581,11 @@ pub async fn proxy_responses(State(state): State<Arc<AppState>>, req: Request) -
     let body_bytes = match to_bytes(body, max_responses_body).await {
         Ok(b) => b,
         Err(e) => {
+            let (status, _, message) = request_body_error(&e, max_responses_body);
             return (
-                StatusCode::PAYLOAD_TOO_LARGE,
+                status,
                 Json(json_openai_error(
-                    format!("request body too large: {e}"),
+                    message,
                     oai_type::INVALID_REQUEST,
                     None,
                     oai_code::INVALID_REQUEST,
@@ -12641,15 +12660,8 @@ pub async fn proxy_openai_embeddings(State(state): State<Arc<AppState>>, req: Re
     let body_bytes = match to_bytes(body, max_body).await {
         Ok(b) => b,
         Err(e) => {
-            return (
-                StatusCode::PAYLOAD_TOO_LARGE,
-                Json(embeddings_error(
-                    err_code::PAYLOAD_TOO_LARGE,
-                    None,
-                    format!("request body: {}", e),
-                )),
-            )
-                .into_response();
+            let (status, code, message) = request_body_error(&e, max_body);
+            return (status, Json(embeddings_error(code, None, message))).into_response();
         }
     };
     let parsed: Value = match serde_json::from_slice(&body_bytes) {
@@ -13314,10 +13326,8 @@ async fn proxy_rerank_inner(
     let body = match to_bytes(body, MAX).await {
         Ok(body) => body,
         Err(error) => {
-            return rerank_error(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                format!("request body: {error}"),
-            );
+            let (status, _, message) = request_body_error(&error, MAX);
+            return rerank_error(status, message);
         }
     };
     let parsed: Value = match serde_json::from_slice(&body) {
@@ -15057,6 +15067,172 @@ mod tests {
             .header("content-type", "application/json")
             .body(Body::from(serde_json::to_vec(&body).expect("request JSON")))
             .expect("request")
+    }
+
+    fn broken_request_body() -> Body {
+        Body::from_stream(futures_util::stream::iter([
+            Ok::<_, std::io::Error>(vec![b' '; 8]),
+            Err(std::io::Error::other("sensitive transport detail")),
+        ]))
+    }
+
+    #[tokio::test]
+    async fn request_body_error_distinguishes_limits_from_read_failures() {
+        let limit = 16;
+        for streamed in [false, true] {
+            for size in [limit, limit + 1, limit * 2] {
+                let body = if streamed {
+                    Body::from_stream(futures_util::stream::iter([Ok::<_, std::io::Error>(
+                        vec![b'x'; size],
+                    )]))
+                } else {
+                    Body::from(vec![b'x'; size])
+                };
+                let result = to_bytes(body, limit).await;
+                if size == limit {
+                    assert_eq!(result.unwrap().len(), limit);
+                } else {
+                    let (status, code, message) = request_body_error(&result.unwrap_err(), limit);
+                    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+                    assert_eq!(code, err_code::PAYLOAD_TOO_LARGE);
+                    assert_eq!(message, "Request body too large (max 16 bytes)");
+                }
+            }
+        }
+        let error = to_bytes(broken_request_body(), limit).await.unwrap_err();
+        let (status, code, message) = request_body_error(&error, limit);
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(code, err_code::INVALID_REQUEST);
+        assert_eq!(message, "Failed to read request body");
+        let misleading = axum::Error::new(std::io::Error::other("length limit exceeded"));
+        assert_eq!(
+            request_body_error(&misleading, limit).0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[tokio::test]
+    async fn request_body_error_compat_handlers_preserve_envelopes() {
+        let state = Arc::new(admission_test_state(Arc::new(PoolManager::new(vec![
+            "l4".to_string()
+        ]))));
+        for route in [
+            "/v1/chat/completions",
+            "/v1/completions",
+            "/v1/responses",
+            "/v1/embeddings",
+            "/v1/rerank",
+            "/v2/rerank",
+        ] {
+            for oversized in [false, true] {
+                let body = if oversized {
+                    Body::from(vec![b'x'; MAX_NATIVE_REQUEST_BODY + 1])
+                } else {
+                    broken_request_body()
+                };
+                let req = Request::builder().uri(route).body(body).unwrap();
+                let response = match route {
+                    "/v1/chat/completions" => proxy_chat(State(state.clone()), req).await,
+                    "/v1/completions" => proxy_completions(State(state.clone()), req).await,
+                    "/v1/responses" => proxy_responses(State(state.clone()), req).await,
+                    "/v1/embeddings" => proxy_openai_embeddings(State(state.clone()), req).await,
+                    "/v1/rerank" => proxy_rerank(State(state.clone()), req).await,
+                    _ => proxy_rerank_v2(State(state.clone()), req).await,
+                };
+                assert_eq!(
+                    response.status(),
+                    if oversized {
+                        StatusCode::PAYLOAD_TOO_LARGE
+                    } else {
+                        StatusCode::BAD_REQUEST
+                    },
+                    "{route}"
+                );
+                assert!(response.headers().get("retry-after").is_none());
+                let bytes = to_bytes(response.into_body(), 4096).await.unwrap();
+                let value: Value = serde_json::from_slice(&bytes).unwrap();
+                let message = if route.ends_with("rerank") {
+                    value["message"].as_str().unwrap()
+                } else {
+                    assert!(value["error"]["code"].is_string());
+                    value["error"]["message"].as_str().unwrap()
+                };
+                assert!(!message.contains("sensitive transport detail"));
+                if oversized {
+                    assert!(message.contains("Request body too large"));
+                } else {
+                    assert_eq!(message, "Failed to read request body");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn request_body_error_native_handlers_reject_before_dispatch() {
+        let pool_manager = Arc::new(PoolManager::new(vec!["l4".to_string()]));
+        pool_manager.create_default_pool().await;
+        let mut state = admission_test_state(pool_manager);
+        let probe = Arc::new(GenerationTargetProbe::default());
+        state.work_publisher = Some(probe.clone());
+        let (hash, _, _) =
+            state
+                .model_registry
+                .bundle_execution_evidence("default", "default", "test-model");
+        let mut worker = worker_msg("default", "l4", "default");
+        worker.bundle_config_hash = hash;
+        state
+            .registry
+            .update_worker("http://worker:8080", worker)
+            .await;
+        let state = Arc::new(state);
+        for endpoint in ["encode", "score", "extract", "generate"] {
+            for oversized in [false, true] {
+                let body = if oversized {
+                    Body::from(vec![b'x'; native_request_body_limit(endpoint) + 1])
+                } else {
+                    broken_request_body()
+                };
+                let req = Request::builder()
+                    .uri(format!("/v1/{endpoint}/test-model"))
+                    .header("x-sie-machine-profile", "l4")
+                    .body(body)
+                    .unwrap();
+                let response = proxy_request(State(state.clone()), req, endpoint).await;
+                assert_eq!(
+                    response.status(),
+                    if oversized {
+                        StatusCode::PAYLOAD_TOO_LARGE
+                    } else {
+                        StatusCode::BAD_REQUEST
+                    },
+                    "{endpoint}"
+                );
+                assert!(response.headers().get("retry-after").is_none());
+                let bytes = to_bytes(response.into_body(), 4096).await.unwrap();
+                let value: Value = serde_json::from_slice(&bytes).unwrap();
+                let error = if endpoint == "generate" {
+                    &value["error"]
+                } else {
+                    &value["detail"]
+                };
+                assert_eq!(
+                    error["code"],
+                    if endpoint == "generate" {
+                        oai_code::INVALID_REQUEST
+                    } else if oversized {
+                        err_code::PAYLOAD_TOO_LARGE
+                    } else {
+                        err_code::INVALID_REQUEST
+                    }
+                );
+                let message = error["message"].as_str().unwrap();
+                assert!(!message.contains("sensitive transport detail"));
+                if !oversized {
+                    assert_eq!(message, "Failed to read request body");
+                }
+                assert_eq!(probe.target_count(), 0);
+            }
+        }
     }
 
     #[tokio::test]
