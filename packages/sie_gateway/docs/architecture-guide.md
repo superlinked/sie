@@ -144,8 +144,8 @@ Startup short-circuits:
 `bootstrap_once` runs a three-call sequence, authenticated with `SIE_ADMIN_TOKEN` as a bearer token on `SIE_CONFIG_SERVICE_URL`:
 
 1. `GET /v1/configs/epoch` — reads the compact control-plane fingerprints BEFORE we fetch bundles, so the hashes we store reflect the state we're about to catch up from (the pre-fetch ordering is load-bearing — see below). The `bundle_config_hashes_hash` fingerprint covers both worker-parity bundle config hashes and model-level pool ownership, because top-level `pool` changes affect routing/readiness even when the worker-applied profile hash is otherwise unchanged.
-2. `GET /v1/configs/bundles` and per-id `GET /v1/configs/bundles/{id}` — the two-phase bundle fetch. The YAML bodies are parsed into `BundleInfo` values and handed to `ModelRegistry::install_bundles`, which atomically replaces the registry's bundle set and recomputes every model's bundle associations.
-3. `GET /v1/configs/export` — parses every exported model config, then replaces the gateway `ModelRegistry` model set from that authoritative snapshot. Malformed, unparseable, or unroutable entries are logged and counted as `failed`; a failed export does not mutate the model set. Export rows that carry no config body are skipped and are *not* counted as failed.
+2. `GET /v1/configs/bundles` and per-id `GET /v1/configs/bundles/{id}` — the two-phase bundle fetch. The YAML bodies are parsed into `BundleInfo` values and retained for installation with the model export; this fetch does not install bundles independently.
+3. `GET /v1/configs/export` — parses every exported model config, then installs the bundles and authoritative model set together through `ModelRegistry::replace_authoritative_surface_if_current`, guarded by the captured registry generation. Malformed, unparseable, or unroutable entries are logged and counted as `failed`; a failed export does not mutate the model/bundle surface. Export rows that carry no config body are skipped and are *not* counted as failed.
 
 Returns `BootstrapOutcome { epoch, bundles_hash, bundle_config_hashes_hash, applied, failed, total }`.
 
