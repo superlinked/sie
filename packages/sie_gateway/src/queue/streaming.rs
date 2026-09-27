@@ -193,6 +193,7 @@ fn is_known_finish_reason(reason: &str) -> bool {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(from = "WorkerUsageBlock")]
 pub struct UsageBlock {
     #[serde(default)]
     pub prompt_tokens: u32,
@@ -215,6 +216,40 @@ impl UsageBlock {
         self.prompt_tokens_details
             .as_ref()
             .map(|details| details.cached_tokens.min(self.prompt_tokens))
+    }
+}
+
+/// The usage block exactly as a worker sent it. Decoding goes through this so
+/// the cached count is clamped to `prompt_tokens` once, before any surface
+/// serializes the block back out.
+#[derive(Deserialize)]
+struct WorkerUsageBlock {
+    #[serde(default)]
+    prompt_tokens: u32,
+    #[serde(default)]
+    completion_tokens: u32,
+    #[serde(default)]
+    total_tokens: u32,
+    #[serde(default)]
+    images: Option<u32>,
+    #[serde(default)]
+    prompt_tokens_details: Option<PromptTokensDetails>,
+}
+
+impl From<WorkerUsageBlock> for UsageBlock {
+    fn from(raw: WorkerUsageBlock) -> Self {
+        let prompt_tokens_details = raw
+            .prompt_tokens_details
+            .map(|details| PromptTokensDetails {
+                cached_tokens: details.cached_tokens.min(raw.prompt_tokens),
+            });
+        Self {
+            prompt_tokens: raw.prompt_tokens,
+            completion_tokens: raw.completion_tokens,
+            total_tokens: raw.total_tokens,
+            images: raw.images,
+            prompt_tokens_details,
+        }
     }
 }
 

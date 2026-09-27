@@ -3268,6 +3268,30 @@ mod tests {
         }))
         .expect("decodes");
         assert_eq!(usage.cached_prompt_tokens(), Some(10));
+
+        // Every surface serializes the decoded block, so the clamp must hold
+        // on the wire too, not only through the accessor.
+        let terminal = _terminal_chunk("stop", Some(usage));
+        let chat = build_usage_only_chunk_event(
+            SseEndpoint::Chat {
+                include_usage: true,
+            },
+            "cmpl-1",
+            1700,
+            "m",
+            &terminal,
+            &[],
+        )
+        .expect("usage chunk");
+        assert_eq!(
+            chat["usage"]["prompt_tokens_details"],
+            json!({"cached_tokens": 10})
+        );
+        let native = build_generate_chunk_event(&terminal, &[]);
+        assert_eq!(
+            native["usage"]["prompt_tokens_details"],
+            json!({"cached_tokens": 10})
+        );
     }
 
     /// No usage chunk without the opt-in, and never a synthesised one: a
