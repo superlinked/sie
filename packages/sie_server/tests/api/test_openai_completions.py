@@ -53,6 +53,7 @@ class _FakeCompletionAdapter(GenerationAdapter):
         self.finish_reason: FinishReason = "stop"
         self.error_code: str | None = None
         self.error_message: str | None = None
+        self.cached_tokens: int | None = None
 
     def load(self, device: str) -> None:  # pragma: no cover - registry is mocked loaded
         _ = device
@@ -109,6 +110,7 @@ class _FakeCompletionAdapter(GenerationAdapter):
                 finish_reason=self.finish_reason,
                 prompt_tokens=3,
                 completion_tokens=2,
+                cached_tokens=self.cached_tokens,
                 error_code=self.error_code,
                 error_message=self.error_message,
             )
@@ -274,6 +276,32 @@ def test_streaming_completion_emits_openai_chunks_usage_and_done(client: TestCli
     assert events[-1]["choices"] == []
     assert events[-1]["usage"] == {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5}
     assert len({event["id"] for event in events}) == 1
+
+
+def test_completion_usage_reports_cached_prompt_tokens(
+    client: TestClient,
+    adapter: _FakeCompletionAdapter,
+) -> None:
+    adapter.cached_tokens = 2
+    body = {"model": "Qwen/Qwen3-4B-Instruct", "prompt": "Continue this", "max_tokens": 8}
+    expected = {
+        "prompt_tokens": 3,
+        "completion_tokens": 2,
+        "total_tokens": 5,
+        "prompt_tokens_details": {"cached_tokens": 2},
+    }
+
+    blocking = client.post("/v1/completions", json=body)
+    assert blocking.status_code == 200, blocking.text
+    assert blocking.json()["usage"] == expected
+
+    streamed = client.post(
+        "/v1/completions",
+        json={**body, "stream": True, "stream_options": {"include_usage": True}},
+    )
+    assert streamed.status_code == 200, streamed.text
+    payloads = [line.removeprefix("data: ") for line in streamed.text.splitlines() if line.startswith("data: {")]
+    assert json.loads(payloads[-1])["usage"] == expected
 
 
 def test_streaming_completion_surfaces_cancelled_terminal_as_error(

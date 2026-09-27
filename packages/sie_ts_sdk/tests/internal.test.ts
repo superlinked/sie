@@ -678,6 +678,38 @@ describe("parseGenerateResult usage coercion (BUG 13c)", () => {
   });
 });
 
+describe("generation cached prompt tokens", () => {
+  it("surfaces prompt_tokens_details.cached_tokens", () => {
+    const result = parseGenerateResult({
+      model: "m",
+      text: "ok",
+      usage: {
+        prompt_tokens: 90,
+        completion_tokens: 3,
+        total_tokens: 93,
+        prompt_tokens_details: { cached_tokens: 64 },
+      },
+    });
+    expect(result.usage.cachedPromptTokens).toBe(64);
+  });
+
+  it.each([
+    undefined,
+    {},
+    { cached_tokens: -1 },
+    { cached_tokens: 1.5 },
+    { cached_tokens: "64" },
+    [64],
+  ])("omits an absent or malformed count (%j)", (details) => {
+    const result = parseGenerateResult({
+      model: "m",
+      text: "ok",
+      usage: { prompt_tokens: 90, prompt_tokens_details: details },
+    });
+    expect(result.usage).not.toHaveProperty("cachedPromptTokens");
+  });
+});
+
 describe("authoritative generation image usage", () => {
   it.each([1, 2])("preserves %i observed images", (images) => {
     const result = parseGenerateResult({ model: "m", text: "ok", usage: { images } });

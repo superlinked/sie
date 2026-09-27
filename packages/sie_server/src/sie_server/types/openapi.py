@@ -467,12 +467,26 @@ class GenerateRequestModel(BaseModel):
     }
 
 
+class PromptTokensDetailsModel(BaseModel):
+    """Breakdown of the prompt tokens in one generation request."""
+
+    cached_tokens: int = Field(
+        ...,
+        ge=0,
+        description="Prompt tokens served from the engine's prefix cache instead of being prefilled",
+    )
+
+
 class GenerateUsageModel(BaseModel):
     """Token usage for one generation request."""
 
     prompt_tokens: int = Field(..., ge=0, description="Number of prompt tokens")
     completion_tokens: int = Field(..., ge=0, description="Number of generated tokens")
     total_tokens: int = Field(..., ge=0, description="Total prompt and generated tokens")
+    prompt_tokens_details: PromptTokensDetailsModel | None = Field(
+        default=None,
+        description="Prompt-token breakdown; omitted when the engine does not report prefix-cache hits",
+    )
     images: int | None = Field(
         default=None,
         ge=1,
@@ -620,6 +634,7 @@ class OpenAIResponseUsageModel(BaseModel):
     input_tokens: int = Field(..., ge=0)
     output_tokens: int = Field(..., ge=0)
     total_tokens: int = Field(..., ge=0)
+    input_tokens_details: PromptTokensDetailsModel | None = None
 
 
 class OpenAIResponsesResponseModel(BaseModel):

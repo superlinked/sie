@@ -717,6 +717,8 @@ pub struct GenerationCompletionObservation {
     pub tpot_ms: Option<f64>,
     pub prompt_tokens: Option<u64>,
     pub completion_tokens: Option<u64>,
+    /// Prompt tokens the worker's engine served from its prefix cache.
+    pub cached_prompt_tokens: Option<u64>,
 }
 
 impl QueueEventOutcome {
@@ -1392,6 +1394,15 @@ impl GatewayTelemetry {
                 &[
                     KeyValue::new("operation", "generate"),
                     KeyValue::new("token.kind", "completion"),
+                ],
+            );
+        }
+        if let Some(cached_prompt_tokens) = observation.cached_prompt_tokens {
+            self.generation_tokens.add(
+                cached_prompt_tokens,
+                &[
+                    KeyValue::new("operation", "generate"),
+                    KeyValue::new("token.kind", "cached_prompt"),
                 ],
             );
         }
@@ -2884,6 +2895,7 @@ mod tests {
             tpot_ms: Some(25.0),
             prompt_tokens: Some(11),
             completion_tokens: Some(7),
+            cached_prompt_tokens: Some(8),
         });
 
         provider.force_flush().expect("force_flush");
@@ -2998,7 +3010,11 @@ mod tests {
             .collect();
         assert_eq!(
             token_values,
-            HashMap::from([("prompt".to_string(), 11), ("completion".to_string(), 7)])
+            HashMap::from([
+                ("prompt".to_string(), 11),
+                ("completion".to_string(), 7),
+                ("cached_prompt".to_string(), 8),
+            ])
         );
     }
 

@@ -963,6 +963,8 @@ export interface GenerationUsage {
   completionTokens: number;
   totalTokens: number;
   images?: number;
+  /** Prompt tokens served from the engine's prefix cache instead of being prefilled. */
+  cachedPromptTokens?: number;
   creditsCharged?: number;
   rateBookVersion?: string;
 }
@@ -1282,6 +1284,8 @@ export interface ChatUsage {
   completion_tokens: number;
   total_tokens: number;
   images?: number;
+  /** Omitted when the serving engine does not report prefix-cache hits. */
+  prompt_tokens_details?: { cached_tokens: number };
   credits_charged?: number;
   rate_book_version?: string;
 }

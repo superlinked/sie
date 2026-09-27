@@ -131,6 +131,7 @@ static OPENAPI_JSON: LazyLock<String> = LazyLock::new(|| {
         GenerateChunk,
         GenerateChunkError,
         GenerateUsage,
+        PromptTokensDetails,
         ChatCompletionRequest,
         ChatCompletionMessage,
         ChatTemplateKwargs,
@@ -1288,6 +1289,14 @@ fn patch_responses_path(value: &mut Value) {
                                         "input_tokens": {"type": "integer", "minimum": 0},
                                         "output_tokens": {"type": "integer", "minimum": 0},
                                         "total_tokens": {"type": "integer", "minimum": 0},
+                                        "input_tokens_details": {
+                                            "type": "object",
+                                            "additionalProperties": false,
+                                            "required": ["cached_tokens"],
+                                            "properties": {
+                                                "cached_tokens": {"type": "integer", "minimum": 0},
+                                            },
+                                        },
                                     },
                                 },
                             },
@@ -2000,6 +2009,14 @@ pub struct GenerateRequest {
     pub safety_identifier: Option<String>,
 }
 
+/// Breakdown of the prompt tokens in one generation request.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct PromptTokensDetails {
+    /// Prompt tokens served from the engine's prefix cache instead of being
+    /// prefilled. Never exceeds `prompt_tokens`.
+    pub cached_tokens: u32,
+}
+
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct GenerateUsage {
     pub prompt_tokens: u32,
@@ -2009,6 +2026,9 @@ pub struct GenerateUsage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(minimum = 1)]
     pub images: Option<u32>,
+    /// Omitted when the serving engine does not report prefix-cache hits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_tokens_details: Option<PromptTokensDetails>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -2334,6 +2354,9 @@ pub struct ChatCompletionUsage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(minimum = 1)]
     pub images: Option<u32>,
+    /// Omitted when the serving engine does not report prefix-cache hits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_tokens_details: Option<PromptTokensDetails>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]

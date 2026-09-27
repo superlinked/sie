@@ -8503,6 +8503,20 @@ fn responses_params_from_json(body: &serde_json::Value) -> ResponsesParamsResult
     })
 }
 
+/// Responses-API usage block. `input_tokens_details.cached_tokens` appears
+/// only when the worker reported a prefix-cache count.
+fn responses_usage(usage: &crate::queue::streaming::UsageBlock) -> Value {
+    let mut body = json!({
+        "input_tokens": usage.prompt_tokens,
+        "output_tokens": usage.completion_tokens,
+        "total_tokens": usage.total_tokens,
+    });
+    if let Some(cached) = usage.cached_prompt_tokens() {
+        body["input_tokens_details"] = json!({ "cached_tokens": cached });
+    }
+    body
+}
+
 /// Build the OpenAI Responses `response` body from the aggregated outcome.
 #[allow(clippy::result_large_err)]
 fn build_responses_body(
@@ -8543,11 +8557,7 @@ fn build_responses_body(
                 "annotations": [],
             }],
         }],
-        "usage": {
-            "input_tokens": usage.prompt_tokens,
-            "output_tokens": usage.completion_tokens,
-            "total_tokens": usage.total_tokens,
-        },
+        "usage": responses_usage(usage),
     });
     Ok(serde_json::to_vec(&body).unwrap_or_default())
 }
@@ -14771,6 +14781,7 @@ mod tests {
                 finish_reason: "stop".to_string(),
                 usage: Some(crate::queue::streaming::UsageBlock {
                     images: None,
+                    prompt_tokens_details: None,
                     prompt_tokens: 1,
                     completion_tokens: 1,
                     total_tokens: 2,
@@ -18154,6 +18165,7 @@ mod tests {
             finish_reason: "stop".to_string(),
             usage: Some(crate::queue::streaming::UsageBlock {
                 images: None,
+                prompt_tokens_details: None,
                 prompt_tokens: 5,
                 completion_tokens: 3,
                 total_tokens: 8,
@@ -22637,6 +22649,7 @@ mod tests {
             finish_reason: "stop".to_string(),
             usage: Some(UsageBlock {
                 images: None,
+                prompt_tokens_details: None,
                 prompt_tokens: 5,
                 completion_tokens: 9,
                 total_tokens: 14,
@@ -22693,6 +22706,7 @@ mod tests {
             finish_reason: "tool_calls".to_string(),
             usage: Some(UsageBlock {
                 images: None,
+                prompt_tokens_details: None,
                 prompt_tokens: 6,
                 completion_tokens: 12,
                 total_tokens: 18,
@@ -22761,6 +22775,7 @@ mod tests {
             finish_reason: "stop".to_string(),
             usage: Some(UsageBlock {
                 images: None,
+                prompt_tokens_details: None,
                 prompt_tokens: 3,
                 completion_tokens: 4,
                 total_tokens: 7,
@@ -23144,6 +23159,7 @@ mod tests {
             finish_reason: "length".to_string(),
             usage: Some(crate::queue::streaming::UsageBlock {
                 images: None,
+                prompt_tokens_details: None,
                 prompt_tokens: 4,
                 completion_tokens: 16,
                 total_tokens: 20,
@@ -23768,6 +23784,7 @@ mod tests {
             finish_reason: "stop".to_string(),
             usage: Some(crate::queue::streaming::UsageBlock {
                 images: None,
+                prompt_tokens_details: None,
                 prompt_tokens: 5,
                 completion_tokens: 7,
                 total_tokens: 12,
@@ -23794,6 +23811,29 @@ mod tests {
         assert_eq!(v["output"][0]["content"][0]["text"], "a joke");
         assert_eq!(v["usage"]["input_tokens"], 5);
         assert_eq!(v["usage"]["output_tokens"], 7);
+        assert!(v["usage"].get("input_tokens_details").is_none());
+    }
+
+    #[test]
+    fn test_responses_usage_reports_cached_input_tokens() {
+        let usage = crate::queue::streaming::UsageBlock {
+            images: None,
+            prompt_tokens_details: Some(crate::queue::streaming::PromptTokensDetails {
+                cached_tokens: 4,
+            }),
+            prompt_tokens: 5,
+            completion_tokens: 7,
+            total_tokens: 12,
+        };
+        assert_eq!(
+            responses_usage(&usage),
+            serde_json::json!({
+                "input_tokens": 5,
+                "output_tokens": 7,
+                "total_tokens": 12,
+                "input_tokens_details": {"cached_tokens": 4},
+            })
+        );
     }
 
     /// ``n=0`` rejects as invalid_request (must be positive).
@@ -23826,6 +23866,7 @@ mod tests {
             finish_reason: "stop".to_string(),
             usage: Some(crate::queue::streaming::UsageBlock {
                 images: None,
+                prompt_tokens_details: None,
                 prompt_tokens: 5,
                 completion_tokens: 3,
                 total_tokens: 8,
@@ -23917,6 +23958,7 @@ mod tests {
             finish_reason: "stop".to_string(),
             usage: Some(crate::queue::streaming::UsageBlock {
                 images: None,
+                prompt_tokens_details: None,
                 prompt_tokens: 1,
                 completion_tokens: 1,
                 total_tokens: 2,
@@ -23955,6 +23997,7 @@ mod tests {
             finish_reason: "stop".to_string(),
             usage: Some(crate::queue::streaming::UsageBlock {
                 images: None,
+                prompt_tokens_details: None,
                 prompt_tokens: 1,
                 completion_tokens: 1,
                 total_tokens: 2,
@@ -23988,6 +24031,7 @@ mod tests {
             finish_reason: "tool_calls".to_string(),
             usage: Some(crate::queue::streaming::UsageBlock {
                 images: None,
+                prompt_tokens_details: None,
                 prompt_tokens: 7,
                 completion_tokens: 11,
                 total_tokens: 18,
@@ -24562,6 +24606,7 @@ mod tests {
             finish_reason: "stop".to_string(),
             usage: Some(crate::queue::streaming::UsageBlock {
                 images: None,
+                prompt_tokens_details: None,
                 prompt_tokens: 1,
                 completion_tokens: 1,
                 total_tokens: 2,

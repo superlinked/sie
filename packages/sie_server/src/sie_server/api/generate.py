@@ -780,6 +780,7 @@ async def _stream_generate_events(
     finish_reason = "stop"
     prompt_tokens = 0
     completion_tokens = 0
+    cached_tokens: int | None = None
     saw_terminal = False
     terminal_error: dict[str, Any] | None = None
     terminal_outcome_selected = False
@@ -833,6 +834,7 @@ async def _stream_generate_events(
                     prompt_tokens = chunk.prompt_tokens
                 if chunk.completion_tokens is not None:
                     completion_tokens = chunk.completion_tokens
+                cached_tokens = chunk.cached_tokens
                 # The contract allows a terminal chunk to also carry final text; emit it as a
                 # delta so it isn't dropped (MLX's terminal text is always empty, but SGLang
                 # and future adapters may pack final tokens here).
@@ -937,17 +939,20 @@ async def _stream_generate_events(
             "message": "generation stream ended before a terminal event",
         }
 
+    usage: dict[str, Any] = {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": prompt_tokens + completion_tokens,
+    }
+    if cached_tokens is not None:
+        usage["prompt_tokens_details"] = {"cached_tokens": min(cached_tokens, prompt_tokens)}
     terminal: dict[str, Any] = {
         "request_id": request_id,
         "seq": seq,
         "text_delta": "",
         "done": True,
         "finish_reason": finish_reason,
-        "usage": {
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "total_tokens": prompt_tokens + completion_tokens,
-        },
+        "usage": usage,
     }
     if images and terminal_error is None and finish_reason not in {"error", "cancelled"}:
         terminal["usage"]["images"] = len(images)
@@ -1370,6 +1375,11 @@ async def generate(
                     "prompt_tokens": result.prompt_tokens,
                     "completion_tokens": result.completion_tokens,
                     "total_tokens": result.prompt_tokens + result.completion_tokens,
+                    **(
+                        {"prompt_tokens_details": {"cached_tokens": min(result.cached_tokens, result.prompt_tokens)}}
+                        if result.cached_tokens is not None
+                        else {}
+                    ),
                     **({"images": len(images)} if images else {}),
                 },
             }

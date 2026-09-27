@@ -202,6 +202,26 @@ pub struct UsageBlock {
     pub total_tokens: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub images: Option<u32>,
+    /// OpenAI-compatible prompt-token breakdown. Absent when the worker's
+    /// engine does not report prefix-cache hits (and from older workers).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_tokens_details: Option<PromptTokensDetails>,
+}
+
+impl UsageBlock {
+    /// Prompt tokens served from the engine's prefix cache, clamped to
+    /// `prompt_tokens`. `None` when the worker did not report a count.
+    pub fn cached_prompt_tokens(&self) -> Option<u32> {
+        self.prompt_tokens_details
+            .as_ref()
+            .map(|details| details.cached_tokens.min(self.prompt_tokens))
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PromptTokensDetails {
+    #[serde(default)]
+    pub cached_tokens: u32,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1201,6 +1221,7 @@ mod tests {
             usage: if done {
                 Some(UsageBlock {
                     images: None,
+                    prompt_tokens_details: None,
                     prompt_tokens: 5,
                     completion_tokens: 3,
                     total_tokens: 8,
@@ -1625,6 +1646,7 @@ mod tests {
         collector.output_event_count = 2;
         collector.final_meta.as_mut().expect("terminal").usage = Some(UsageBlock {
             images: None,
+            prompt_tokens_details: None,
             prompt_tokens: 1,
             completion_tokens: 4,
             total_tokens: 5,

@@ -755,6 +755,17 @@
             "minimum": 0,
             "type": "integer"
           },
+          "prompt_tokens_details": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PromptTokensDetails",
+                "description": "Omitted when the serving engine does not report prefix-cache hits."
+              }
+            ]
+          },
           "total_tokens": {
             "format": "int32",
             "minimum": 0,
@@ -1884,6 +1895,17 @@
             "format": "int32",
             "minimum": 0,
             "type": "integer"
+          },
+          "prompt_tokens_details": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PromptTokensDetails",
+                "description": "Omitted when the serving engine does not report prefix-cache hits."
+              }
+            ]
           },
           "total_tokens": {
             "format": "int32",
@@ -3173,6 +3195,21 @@
             "type": "boolean"
           }
         },
+        "type": "object"
+      },
+      "PromptTokensDetails": {
+        "description": "Breakdown of the prompt tokens in one generation request.",
+        "properties": {
+          "cached_tokens": {
+            "description": "Prompt tokens served from the engine's prefix cache instead of being\nprefilled. Never exceeds `prompt_tokens`.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "cached_tokens"
+        ],
         "type": "object"
       },
       "Relation": {
@@ -7265,6 +7302,19 @@
                         "input_tokens": {
                           "minimum": 0,
                           "type": "integer"
+                        },
+                        "input_tokens_details": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "cached_tokens": {
+                              "minimum": 0,
+                              "type": "integer"
+                            }
+                          },
+                          "required": [
+                            "cached_tokens"
+                          ],
+                          "type": "object"
                         },
                         "output_tokens": {
                           "minimum": 0,

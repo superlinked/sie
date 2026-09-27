@@ -2492,6 +2492,7 @@ class StreamingProcessor:
                         finish_reason=chunk.finish_reason or "stop",
                         prompt_tokens=chunk.prompt_tokens,
                         completion_tokens=chunk.completion_tokens,
+                        cached_tokens=chunk.cached_tokens,
                         images=image_count if not terminal_has_error and chunk.finish_reason != "cancelled" else None,
                         ttft_ms=_compute_ttft_ms(publish_at, first_text_at),
                         error_code=(chunk.error_code or "inference_error") if terminal_has_error else None,
@@ -4235,6 +4236,7 @@ def _encode_chunk(
     finish_reason: FinishReason | None = None,
     prompt_tokens: int | None = None,
     completion_tokens: int | None = None,
+    cached_tokens: int | None = None,
     images: int | None = None,
     ttft_ms: float | None = None,
     error_code: str | None = None,
@@ -4269,13 +4271,18 @@ def _encode_chunk(
     if finish_reason is not None:
         payload["finish_reason"] = finish_reason
     if prompt_tokens is not None or completion_tokens is not None:
-        payload["usage"] = {
+        usage: dict[str, Any] = {
             "prompt_tokens": int(prompt_tokens or 0),
             "completion_tokens": int(completion_tokens or 0),
             "total_tokens": int((prompt_tokens or 0) + (completion_tokens or 0)),
         }
+        if cached_tokens is not None:
+            usage["prompt_tokens_details"] = {
+                "cached_tokens": min(int(cached_tokens), int(prompt_tokens or 0)),
+            }
         if images is not None:
-            payload["usage"]["images"] = images
+            usage["images"] = images
+        payload["usage"] = usage
     if ttft_ms is not None:
         payload["ttft_ms"] = ttft_ms
     if error_code is not None or error_message is not None:

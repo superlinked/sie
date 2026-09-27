@@ -844,6 +844,23 @@ def settled_charge_from_usage(usage: Any) -> tuple[int, str] | None:
     return credits, version
 
 
+def cached_prompt_tokens_from_usage(usage: Any) -> int | None:
+    """Prompt tokens served from the engine's prefix cache, or ``None``.
+
+    Reads ``usage.prompt_tokens_details.cached_tokens``. Anything malformed is
+    treated as absent.
+    """
+    if not isinstance(usage, Mapping):
+        return None
+    details = usage.get("prompt_tokens_details")
+    if not isinstance(details, Mapping):
+        return None
+    cached = details.get("cached_tokens")
+    if not isinstance(cached, int) or isinstance(cached, bool) or cached < 0:
+        return None
+    return cached
+
+
 def _settled_charge_from_body(body: Any) -> tuple[int, str] | None:
     """The settled charge from a response envelope's ``usage`` block (#2434)."""
     if not isinstance(body, Mapping):

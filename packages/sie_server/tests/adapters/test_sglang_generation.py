@@ -3696,3 +3696,108 @@ def test_an_invalid_watchdog_bound_is_refused(bad: Any) -> None:
 def test_an_invalid_collective_port_is_refused(bad: Any) -> None:
     with pytest.raises(ValueError, match="nccl_port must be"):
         _tp_adapter(tensor_parallel_size=2, nccl_port=bad)
+
+
+@patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
+def test_generate_terminal_reports_prefix_cache_hits(mock_async_client: MagicMock, adapter) -> None:
+    sse_lines = [
+        'data: {"text": "Hi", "meta_info": {"prompt_tokens": 120, "cached_tokens": 96}}',
+        'data: {"text": "Hi there", "meta_info": {"prompt_tokens": 120, "completion_tokens": 2, "cached_tokens": 96, "finish_reason": {"type": "stop"}}}',
+        "data: [DONE]",
+    ]
+    mock_async_client.return_value = _make_client_with_stream(_FakeStreamingResponse(sse_lines))
+    adapter._server_url = "http://localhost:30005"
+
+    result = asyncio.run(collect_generation(adapter.generate(prompt="Hi", max_new_tokens=8)))
+
+    assert result.prompt_tokens == 120
+    assert result.cached_tokens == 96
+
+
+@pytest.mark.parametrize(
+    ("meta_cached", "expected"),
+    [
+        ("", None),
+        (', "cached_tokens": 0', 0),
+        (', "cached_tokens": 500', 120),
+        (', "cached_tokens": -1', None),
+        (', "cached_tokens": true', None),
+        (', "cached_tokens": "96"', None),
+    ],
+)
+@patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
+def test_generate_cached_tokens_is_validated_and_clamped(
+    mock_async_client: MagicMock, adapter, meta_cached: str, expected: int | None
+) -> None:
+    terminal = (
+        '{"text": "ok", "meta_info": {"prompt_tokens": 120, "completion_tokens": 1'
+        + meta_cached
+        + ', "finish_reason": {"type": "stop"}}}'
+    )
+    mock_async_client.return_value = _make_client_with_stream(_FakeStreamingResponse([f"data: {terminal}"]))
+    adapter._server_url = "http://localhost:30005"
+
+    result = asyncio.run(collect_generation(adapter.generate(prompt="Hi", max_new_tokens=8)))
+
+    assert result.cached_tokens == expected
+
+
+@patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
+def test_generate_streaming_n_gt_one_reports_cached_tokens_once(mock_async_client: MagicMock, adapter) -> None:
+    sse_lines = [
+        'data: {"index": 0, "text": "A", "meta_info": {"prompt_tokens": 30, "cached_tokens": 24}}',
+        'data: {"index": 1, "text": "X", "meta_info": {"prompt_tokens": 30, "cached_tokens": 30}}',
+        'data: {"index": 0, "text": "Al", "meta_info": {"prompt_tokens": 30, "cached_tokens": 24, "completion_tokens": 2, "finish_reason": {"type": "stop"}}}',
+        'data: {"index": 1, "text": "Xr", "meta_info": {"prompt_tokens": 30, "cached_tokens": 30, "completion_tokens": 2, "finish_reason": {"type": "stop"}}}',
+        "data: [DONE]",
+    ]
+    mock_async_client.return_value = _make_client_with_stream(_FakeStreamingResponse(sse_lines))
+    adapter._server_url = "http://localhost:30005"
+
+    async def _collect() -> list[GenerationChunk]:
+        return [c async for c in adapter.generate(prompt="hi", max_new_tokens=8, n=2, stream=True)]
+
+    term = asyncio.run(_collect())[-1]
+    assert term.done is True
+    assert term.prompt_tokens == 30
+    assert term.cached_tokens == 24
+
+
+@patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
+def test_generate_n_gt_one_reports_cached_tokens_with_prompt_tokens(mock_async_client: MagicMock, adapter) -> None:
+    sglang_results = [
+        {
+            "text": " a",
+            "meta_info": {
+                "finish_reason": {"type": "stop"},
+                "completion_tokens": 1,
+                "prompt_tokens": 40,
+                "cached_tokens": 32,
+            },
+        },
+        {
+            "text": " b",
+            "meta_info": {
+                "finish_reason": {"type": "stop"},
+                "completion_tokens": 1,
+                "prompt_tokens": 40,
+                "cached_tokens": 40,
+            },
+        },
+    ]
+    resp = MagicMock()
+    resp.json = MagicMock(return_value=sglang_results)
+    resp.raise_for_status = MagicMock()
+    resp.aread = AsyncMock()
+    resp.__aenter__ = AsyncMock(return_value=resp)
+    client_instance = _make_client_with_stream(_FakeStreamingResponse([]))
+    client_instance.stream.return_value = resp
+    mock_async_client.return_value = client_instance
+    adapter._server_url = "http://localhost:30005"
+
+    async def _collect() -> list[GenerationChunk]:
+        return [c async for c in adapter.generate(prompt="hi", max_new_tokens=4, n=2)]
+
+    (term,) = asyncio.run(_collect())
+    assert term.prompt_tokens == 40
+    assert term.cached_tokens == 32

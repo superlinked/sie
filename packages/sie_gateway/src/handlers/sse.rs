@@ -1774,6 +1774,7 @@ mod tests {
                 finish_reason: "cancelled".to_string(),
                 usage: Some(UsageBlock {
                     images: None,
+                    prompt_tokens_details: None,
                     prompt_tokens: 5,
                     completion_tokens,
                     total_tokens: 5 + completion_tokens,
@@ -2017,6 +2018,7 @@ mod tests {
             terminal.seq = 42;
             terminal.usage = Some(UsageBlock {
                 images: None,
+                prompt_tokens_details: None,
                 prompt_tokens: 3,
                 completion_tokens: 2,
                 total_tokens: 5,
@@ -2039,6 +2041,7 @@ mod tests {
             terminal.seq = 42;
             terminal.usage = Some(UsageBlock {
                 images: None,
+                prompt_tokens_details: None,
                 prompt_tokens: 3,
                 completion_tokens: 2,
                 total_tokens: 5,
@@ -2721,6 +2724,7 @@ mod tests {
             "stop",
             Some(UsageBlock {
                 images: None,
+                prompt_tokens_details: None,
                 prompt_tokens: 10,
                 completion_tokens: 7,
                 total_tokens: 17,
@@ -3139,6 +3143,7 @@ mod tests {
             "stop",
             Some(UsageBlock {
                 images: None,
+                prompt_tokens_details: None,
                 prompt_tokens: 2,
                 completion_tokens: 2,
                 total_tokens: 4,
@@ -3175,6 +3180,7 @@ mod tests {
             "stop",
             Some(UsageBlock {
                 images: None,
+                prompt_tokens_details: None,
                 prompt_tokens: 5,
                 completion_tokens: 7,
                 total_tokens: 12,
@@ -3208,6 +3214,62 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_sse_usage_forwards_worker_cached_prompt_tokens() {
+        let usage: UsageBlock = serde_json::from_value(json!({
+            "prompt_tokens": 120,
+            "completion_tokens": 4,
+            "total_tokens": 124,
+            "prompt_tokens_details": {"cached_tokens": 96},
+        }))
+        .expect("worker usage with prompt_tokens_details decodes");
+        assert_eq!(usage.cached_prompt_tokens(), Some(96));
+        let terminal = _terminal_chunk("stop", Some(usage));
+
+        let chat = build_usage_only_chunk_event(
+            SseEndpoint::Chat {
+                include_usage: true,
+            },
+            "cmpl-1",
+            1700,
+            "m",
+            &terminal,
+            &[],
+        )
+        .expect("usage chunk");
+        assert_eq!(
+            chat["usage"]["prompt_tokens_details"],
+            json!({"cached_tokens": 96})
+        );
+        let native = build_generate_chunk_event(&terminal, &[]);
+        assert_eq!(
+            native["usage"]["prompt_tokens_details"],
+            json!({"cached_tokens": 96})
+        );
+
+        let legacy: UsageBlock = serde_json::from_value(json!({
+            "prompt_tokens": 120,
+            "completion_tokens": 4,
+            "total_tokens": 124,
+        }))
+        .expect("usage from a worker without cache reporting decodes");
+        assert_eq!(legacy.cached_prompt_tokens(), None);
+        let native = build_generate_chunk_event(&_terminal_chunk("stop", Some(legacy)), &[]);
+        assert!(native["usage"].get("prompt_tokens_details").is_none());
+    }
+
+    #[test]
+    fn test_cached_prompt_tokens_never_exceed_prompt_tokens() {
+        let usage: UsageBlock = serde_json::from_value(json!({
+            "prompt_tokens": 10,
+            "completion_tokens": 1,
+            "total_tokens": 11,
+            "prompt_tokens_details": {"cached_tokens": 64},
+        }))
+        .expect("decodes");
+        assert_eq!(usage.cached_prompt_tokens(), Some(10));
+    }
+
     /// No usage chunk without the opt-in, and never a synthesised one: a
     /// terminal that carried no authoritative usage reports nothing.
     #[test]
@@ -3216,6 +3278,7 @@ mod tests {
             "stop",
             Some(UsageBlock {
                 images: None,
+                prompt_tokens_details: None,
                 prompt_tokens: 5,
                 completion_tokens: 7,
                 total_tokens: 12,
@@ -3262,6 +3325,7 @@ mod tests {
             "stop",
             Some(UsageBlock {
                 images: None,
+                prompt_tokens_details: None,
                 prompt_tokens: 5,
                 completion_tokens: 7,
                 total_tokens: 12,
@@ -3328,6 +3392,7 @@ mod tests {
             "stop",
             Some(UsageBlock {
                 images: None,
+                prompt_tokens_details: None,
                 prompt_tokens: 5,
                 completion_tokens: 7,
                 total_tokens: 12,
@@ -3363,6 +3428,7 @@ mod tests {
             "stop",
             Some(UsageBlock {
                 images: None,
+                prompt_tokens_details: None,
                 prompt_tokens: 5,
                 completion_tokens: 7,
                 total_tokens: 12,
@@ -3496,6 +3562,7 @@ mod tests {
             "stop",
             Some(UsageBlock {
                 images: None,
+                prompt_tokens_details: None,
                 prompt_tokens: 1,
                 completion_tokens: 1,
                 total_tokens: 2,

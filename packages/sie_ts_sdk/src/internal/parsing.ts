@@ -724,6 +724,7 @@ export function parseExtractResults(data: unknown[]): ExtractResult[] {
 
 interface WireUsageBlock {
   images?: unknown;
+  prompt_tokens_details?: unknown;
   prompt_tokens?: number;
   completion_tokens?: number;
   total_tokens?: number;
@@ -790,6 +791,16 @@ export function settledChargeFields(usage: unknown): {
   return { creditsCharged: credits, rateBookVersion: version };
 }
 
+/** `usage.prompt_tokens_details.cached_tokens`, or an empty object when absent or malformed. */
+export function cachedPromptTokensField(usage: unknown): { cachedPromptTokens?: number } {
+  if (typeof usage !== "object" || usage === null || Array.isArray(usage)) return {};
+  const details = (usage as Record<string, unknown>).prompt_tokens_details;
+  if (typeof details !== "object" || details === null || Array.isArray(details)) return {};
+  const cached = (details as Record<string, unknown>).cached_tokens;
+  if (typeof cached !== "number" || !Number.isSafeInteger(cached) || cached < 0) return {};
+  return { cachedPromptTokens: cached };
+}
+
 function coerceTokenCount(v: unknown): number {
   return typeof v === "number" && Number.isFinite(v) ? Math.trunc(v) : 0;
 }
@@ -823,6 +834,7 @@ export function parseGenerateResult(data: Record<string, unknown>): GenerateResu
       completionTokens: coerceTokenCount(usage.completion_tokens),
       totalTokens: coerceTokenCount(usage.total_tokens),
       ...(isPositiveSafeInteger(usage.images) ? { images: usage.images } : {}),
+      ...cachedPromptTokensField(usage),
       // #2434: the gateway merges the settled charge into this same block, so
       // rebuilding it field-by-field must carry the charge across. Absence
       // stays absence — a request that committed no debit gets neither key.

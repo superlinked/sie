@@ -444,6 +444,7 @@ async def _parse_tool_call_stream_impl(
                     finish_reason="tool_calls" if any_tool_call else chunk.finish_reason,
                     prompt_tokens=chunk.prompt_tokens,
                     completion_tokens=chunk.completion_tokens,
+                    cached_tokens=chunk.cached_tokens,
                     candidates=tuple(updated_candidates),
                     logprobs=chunk.logprobs,
                     error_code=chunk.error_code,
@@ -492,6 +493,7 @@ async def _parse_tool_call_stream_impl(
                 finish_reason=global_finish,  # type: ignore[arg-type]
                 prompt_tokens=chunk.prompt_tokens,
                 completion_tokens=chunk.completion_tokens,
+                cached_tokens=chunk.cached_tokens,
                 error_code=chunk.error_code,
                 error_message=chunk.error_message,
                 # Preserve ``candidates`` (with any per-candidate

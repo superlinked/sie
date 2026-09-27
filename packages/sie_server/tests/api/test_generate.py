@@ -122,6 +122,7 @@ class _FakeGenAdapter(GenerationAdapter):
     # route's verbatim-code fail-closed mapping (#3104/#3136).
     error_code: str | None = None
     error_message: str | None = None
+    cached_tokens: int | None = None
 
     async def generate(
         self,
@@ -171,6 +172,7 @@ class _FakeGenAdapter(GenerationAdapter):
             finish_reason=self.finish_reason,  # type: ignore[arg-type]
             prompt_tokens=len(prompt.split()),
             completion_tokens=2,
+            cached_tokens=self.cached_tokens,
             error_code=self.error_code,
             error_message=self.error_message,
         )
@@ -1316,6 +1318,33 @@ class TestGenerateEndpoint:
         )
         assert response.status_code == 400, response.text
         assert registry.start_load_async.called is False
+
+    def test_usage_reports_cached_prompt_tokens(self, client: TestClient, fake_adapter: _FakeGenAdapter) -> None:
+        fake_adapter.cached_tokens = 2
+        body = {"prompt": "one two three", "max_new_tokens": 8}
+
+        blocking = client.post("/v1/generate/Qwen__Qwen3-4B-Instruct", json=body)
+        assert blocking.status_code == 200, blocking.text
+        assert blocking.json()["usage"] == {
+            "prompt_tokens": 3,
+            "completion_tokens": 2,
+            "total_tokens": 5,
+            "prompt_tokens_details": {"cached_tokens": 2},
+        }
+
+        streamed = client.post("/v1/generate/Qwen__Qwen3-4B-Instruct", json={**body, "stream": True})
+        assert streamed.status_code == 200, streamed.text
+        events = [
+            json.loads(line.removeprefix("data: ")) for line in streamed.text.splitlines() if line.startswith("data: {")
+        ]
+        assert events[-1]["usage"]["prompt_tokens_details"] == {"cached_tokens": 2}
+
+    def test_usage_omits_prompt_tokens_details_when_engine_is_silent(
+        self, client: TestClient, fake_adapter: _FakeGenAdapter
+    ) -> None:
+        response = client.post("/v1/generate/Qwen__Qwen3-4B-Instruct", json={"prompt": "Hi", "max_new_tokens": 8})
+        assert response.status_code == 200, response.text
+        assert "prompt_tokens_details" not in response.json()["usage"]
 
     def test_streaming_logprobs_are_forwarded(self, client: TestClient, fake_adapter: _FakeGenAdapter) -> None:
         response = client.post(

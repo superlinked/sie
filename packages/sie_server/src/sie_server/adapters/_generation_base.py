@@ -436,6 +436,10 @@ class GenerationChunk:
     finish_reason: FinishReason | None = None
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
+    # Prompt tokens the engine served from its prefix cache instead of
+    # prefilling (terminal chunk only). ``None`` when the engine does not
+    # report it; a reported ``0`` means no prefix was reused.
+    cached_tokens: int | None = None
     tool_call_delta: ToolCallDelta | None = None
     error_code: str | None = None
     error_message: str | None = None
@@ -487,6 +491,7 @@ class GenerationResult:
     completion_tokens: int
     error_code: str | None = None
     error_message: str | None = None
+    cached_tokens: int | None = None
 
 
 class ThinkingBlockStripper:
@@ -812,6 +817,7 @@ async def collect_generation(
     finish_reason: FinishReason = "stop"
     prompt_tokens = 0
     completion_tokens = 0
+    cached_tokens: int | None = None
     error_code: str | None = None
     error_message: str | None = None
     result_selected = False
@@ -825,6 +831,7 @@ async def collect_generation(
                     prompt_tokens = chunk.prompt_tokens
                 if chunk.completion_tokens is not None:
                     completion_tokens = chunk.completion_tokens
+                cached_tokens = chunk.cached_tokens
                 error_code = chunk.error_code
                 error_message = chunk.error_message
                 break
@@ -835,6 +842,7 @@ async def collect_generation(
             completion_tokens=completion_tokens,
             error_code=error_code,
             error_message=error_message,
+            cached_tokens=cached_tokens,
         )
         result_selected = True
         return result

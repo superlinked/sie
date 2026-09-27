@@ -366,6 +366,13 @@ async def responses(
                 )
             prompt_tokens = terminal.prompt_tokens
             completion_tokens = terminal.completion_tokens
+            usage: dict[str, Any] = {
+                "input_tokens": prompt_tokens,
+                "output_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens,
+            }
+            if terminal.cached_tokens is not None:
+                usage["input_tokens_details"] = {"cached_tokens": min(terminal.cached_tokens, prompt_tokens)}
             return JSONResponse(
                 content={
                     "id": response_id,
@@ -382,11 +389,7 @@ async def responses(
                             "content": [{"type": "output_text", "text": text, "annotations": []}],
                         }
                     ],
-                    "usage": {
-                        "input_tokens": prompt_tokens,
-                        "output_tokens": completion_tokens,
-                        "total_tokens": prompt_tokens + completion_tokens,
-                    },
+                    "usage": usage,
                 }
             )
     except _CompletionError as exc:

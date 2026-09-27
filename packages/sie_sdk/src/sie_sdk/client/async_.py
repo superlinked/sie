@@ -126,6 +126,7 @@ from ._shared import (
     build_chat_body,
     build_estimate_envelope,
     build_responses_body,
+    cached_prompt_tokens_from_usage,
     check_version_skew,
     compute_oom_backoff,
     compute_retry_delay,
@@ -258,6 +259,9 @@ def _parse_generate_result_async(
         images = usage.get("images")
         if isinstance(images, int) and not isinstance(images, bool) and 0 < images <= 2**32 - 1:
             parsed_usage["images"] = images
+        cached = cached_prompt_tokens_from_usage(usage)
+        if cached is not None:
+            parsed_usage["prompt_tokens_details"] = {"cached_tokens": cached}
         settled = settled_charge_from_usage(usage)
         if settled is not None:
             parsed_usage["credits_charged"], parsed_usage["rate_book_version"] = settled

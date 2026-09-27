@@ -4944,6 +4944,11 @@ impl WorkPublisher {
                                     .usage
                                     .as_ref()
                                     .map(|usage| u64::from(usage.completion_tokens)),
+                                cached_prompt_tokens: completed
+                                    .usage
+                                    .as_ref()
+                                    .and_then(|usage| usage.cached_prompt_tokens())
+                                    .map(u64::from),
                             },
                         );
                     }

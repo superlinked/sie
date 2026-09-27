@@ -512,11 +512,13 @@ async def _stream_completion(
         and terminal.prompt_tokens is not None
         and terminal.completion_tokens is not None
     ):
-        usage = {
+        usage: dict[str, Any] = {
             "prompt_tokens": terminal.prompt_tokens,
             "completion_tokens": terminal.completion_tokens,
             "total_tokens": terminal.prompt_tokens + terminal.completion_tokens,
         }
+        if terminal.cached_tokens is not None:
+            usage["prompt_tokens_details"] = {"cached_tokens": min(terminal.cached_tokens, terminal.prompt_tokens)}
         yield f"data: {
             json.dumps(
                 {
@@ -736,6 +738,13 @@ async def completions(
                 ) from exc
             prompt_tokens = terminal.prompt_tokens or 0
             completion_tokens = terminal.completion_tokens or 0
+            usage: dict[str, Any] = {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens,
+            }
+            if terminal.cached_tokens is not None:
+                usage["prompt_tokens_details"] = {"cached_tokens": min(terminal.cached_tokens, prompt_tokens)}
             return JSONResponse(
                 content={
                     "id": completion_id,
@@ -750,11 +759,7 @@ async def completions(
                         }
                     ],
                     "system_fingerprint": _system_fingerprint(canonical_model),
-                    "usage": {
-                        "prompt_tokens": prompt_tokens,
-                        "completion_tokens": completion_tokens,
-                        "total_tokens": prompt_tokens + completion_tokens,
-                    },
+                    "usage": usage,
                 }
             )
     except _CompletionError as exc:

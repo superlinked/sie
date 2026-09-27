@@ -578,6 +578,13 @@ GenerateGrammar = JsonSchemaGrammar | RegexGrammar | EbnfGrammar
 """Native structured-output grammar. Exactly one grammar variant is set."""
 
 
+class PromptTokensDetails(TypedDict):
+    """Breakdown of a request's prompt tokens."""
+
+    cached_tokens: int
+    """Prompt tokens served from the engine's prefix cache instead of being prefilled."""
+
+
 class GenerationUsage(TypedDict):
     """Token usage for a single generation call.
 
@@ -602,6 +609,7 @@ class GenerationUsage(TypedDict):
     completion_tokens: int
     total_tokens: int
     images: NotRequired[int]
+    prompt_tokens_details: NotRequired[PromptTokensDetails]
     credits_charged: NotRequired[int]
     rate_book_version: NotRequired[str]
 
@@ -752,6 +760,7 @@ class ChatUsage(TypedDict):
     completion_tokens: int
     total_tokens: int
     images: NotRequired[int]
+    prompt_tokens_details: NotRequired[PromptTokensDetails]
 
 
 class ChatChoice(TypedDict, total=False):
@@ -856,6 +865,7 @@ class ResponseUsage(TypedDict):
     input_tokens: int
     output_tokens: int
     total_tokens: int
+    input_tokens_details: NotRequired[PromptTokensDetails]
 
 
 class ResponseResult(TypedDict, total=False):

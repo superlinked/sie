@@ -229,6 +229,7 @@ async def test_parse_tool_call_stream_terminal_propagates_usage_and_tool_calls_r
                         finish_reason="stop",
                         prompt_tokens=11,
                         completion_tokens=13,
+                        cached_tokens=9,
                     ),
                 ]
             )
@@ -239,6 +240,7 @@ async def test_parse_tool_call_stream_terminal_propagates_usage_and_tool_calls_r
     assert terminal.finish_reason == "tool_calls"
     assert terminal.prompt_tokens == 11
     assert terminal.completion_tokens == 13
+    assert terminal.cached_tokens == 9
 
 
 @pytest.mark.asyncio

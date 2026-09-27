@@ -1412,6 +1412,17 @@
             "title": "Total Tokens",
             "description": "Total prompt and generated tokens"
           },
+          "prompt_tokens_details": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PromptTokensDetailsModel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Prompt-token breakdown; omitted when the engine does not report prefix-cache hits"
+          },
           "images": {
             "anyOf": [
               {
@@ -2131,6 +2142,16 @@
             "type": "integer",
             "minimum": 0.0,
             "title": "Total Tokens"
+          },
+          "input_tokens_details": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PromptTokensDetailsModel"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "type": "object",
@@ -2222,6 +2243,22 @@
         "type": "object",
         "title": "ProfileInfo",
         "description": "Information about a profile."
+      },
+      "PromptTokensDetailsModel": {
+        "properties": {
+          "cached_tokens": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Cached Tokens",
+            "description": "Prompt tokens served from the engine's prefix cache instead of being prefilled"
+          }
+        },
+        "type": "object",
+        "required": [
+          "cached_tokens"
+        ],
+        "title": "PromptTokensDetailsModel",
+        "description": "Breakdown of the prompt tokens in one generation request."
       },
       "RelationModel": {
         "properties": {

@@ -1556,6 +1556,7 @@ class SGLangGenerationAdapter(GenerationAdapter):
             # single-candidate cursor at line ~1013.
             logprobs_surfaced: dict[int, int] = {}
             prompt_tokens: int | None = None
+            cached_tokens: int | None = None
             total_completion = 0
             emitted_first = False
             terminal_yielded = False
@@ -1586,6 +1587,7 @@ class SGLangGenerationAdapter(GenerationAdapter):
                         meta = event.get("meta_info") or {}
                         if prompt_tokens is None and isinstance(meta.get("prompt_tokens"), int):
                             prompt_tokens = meta["prompt_tokens"]
+                            cached_tokens = _cached_prompt_tokens(meta, prompt_tokens)
                         fr = meta.get("finish_reason")
                         fr_type = fr.get("type") if isinstance(fr, dict) else fr
                         candidate_done = fr_type is not None
@@ -1667,6 +1669,7 @@ class SGLangGenerationAdapter(GenerationAdapter):
                     finish_reason="stop",
                     prompt_tokens=prompt_tokens,
                     completion_tokens=total_completion,
+                    cached_tokens=cached_tokens,
                 )
             except (GeneratorExit, asyncio.CancelledError):
                 if not terminal_yielded:
@@ -1720,12 +1723,14 @@ class SGLangGenerationAdapter(GenerationAdapter):
             candidates: list[dict[str, Any]] = []
             total_completion = 0
             prompt_tokens: int | None = None
+            cached_tokens: int | None = None
             for r in results:
                 meta = r.get("meta_info", {}) if isinstance(r, dict) else {}
                 fr = meta.get("finish_reason")
                 fr_type = fr.get("type") if isinstance(fr, dict) else fr
                 if prompt_tokens is None and isinstance(meta.get("prompt_tokens"), int):
                     prompt_tokens = meta["prompt_tokens"]
+                    cached_tokens = _cached_prompt_tokens(meta, prompt_tokens)
                 if isinstance(meta.get("completion_tokens"), int):
                     total_completion += meta["completion_tokens"]
                 # Per-candidate logprobs: only emit when the request
@@ -1784,6 +1789,7 @@ class SGLangGenerationAdapter(GenerationAdapter):
                 finish_reason="stop",
                 prompt_tokens=prompt_tokens,
                 completion_tokens=total_completion,
+                cached_tokens=cached_tokens,
                 candidates=tuple(candidates),
             )
             return
@@ -1965,6 +1971,23 @@ class SGLangGenerationAdapter(GenerationAdapter):
                 prompt_tokens=terminal_prompt_tokens,
                 completion_tokens=terminal_completion_tokens,
             )
+
+
+def _cached_prompt_tokens(meta: Any, prompt_tokens: int | None) -> int | None:
+    """Read SGLang's per-request prefix-cache hit count from ``meta_info``.
+
+    ``meta_info.cached_tokens`` counts the prompt tokens SGLang served from
+    its radix cache instead of prefilling. It is clamped to ``prompt_tokens``
+    so a usage block never reports more cached than total input tokens.
+    """
+    if not isinstance(meta, dict):
+        return None
+    cached = meta.get("cached_tokens")
+    if not isinstance(cached, int) or isinstance(cached, bool) or cached < 0:
+        return None
+    if prompt_tokens is not None:
+        return min(cached, prompt_tokens)
+    return cached
 
 
 def _guard_verdict_logprobs(event: dict[str, Any]) -> tuple[dict[str, Any], ...]:
@@ -2206,13 +2229,15 @@ def _chunk_from_sglang_event(
         finish_reason = cast("Literal['stop', 'length']", raw_finish)
         prompt_tokens = meta.get("prompt_tokens") if isinstance(meta, dict) else None
         completion_tokens = meta.get("completion_tokens") if isinstance(meta, dict) else None
+        terminal_prompt_tokens = int(prompt_tokens) if isinstance(prompt_tokens, int) else None
         return GenerationChunk(
             text_delta=delta,
             done=True,
             is_first=is_first,
             finish_reason=finish_reason,
-            prompt_tokens=int(prompt_tokens) if isinstance(prompt_tokens, int) else None,
+            prompt_tokens=terminal_prompt_tokens,
             completion_tokens=int(completion_tokens) if isinstance(completion_tokens, int) else None,
+            cached_tokens=_cached_prompt_tokens(meta, terminal_prompt_tokens),
             logprobs=chunk_logprobs,
         )
 

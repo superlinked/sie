@@ -2334,6 +2334,28 @@ def test_encode_chunk_includes_logprobs() -> None:
     assert "logprobs" not in omitted
 
 
+def test_encode_chunk_reports_cached_prompt_tokens() -> None:
+    from sie_server.processors.streaming import _encode_chunk
+
+    def usage(**kwargs: Any) -> dict[str, Any]:
+        payload = _encode_chunk(kind="chunk", request_id="r", attempt_id="a", seq=3, text_delta="", done=True, **kwargs)
+        return msgpack.unpackb(payload, raw=False)["usage"]
+
+    assert usage(prompt_tokens=100, completion_tokens=4, cached_tokens=64) == {
+        "prompt_tokens": 100,
+        "completion_tokens": 4,
+        "total_tokens": 104,
+        "prompt_tokens_details": {"cached_tokens": 64},
+    }
+    assert usage(prompt_tokens=100, completion_tokens=4, cached_tokens=0)["prompt_tokens_details"] == {
+        "cached_tokens": 0
+    }
+    assert usage(prompt_tokens=10, completion_tokens=4, cached_tokens=64)["prompt_tokens_details"] == {
+        "cached_tokens": 10
+    }
+    assert "prompt_tokens_details" not in usage(prompt_tokens=100, completion_tokens=4)
+
+
 @pytest.mark.asyncio
 async def test_grammar_malformed_payload_surfaces_invalid_request() -> None:
     """Worker-side guard: ``grammar.kind`` outside the allowed set

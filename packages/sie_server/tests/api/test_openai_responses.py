@@ -49,6 +49,7 @@ class _FakeResponsesAdapter(GenerationAdapter):
         self.include_usage = True
         self.error_code: str | None = None
         self.error_message: str | None = None
+        self.cached_tokens: int | None = None
 
     def load(self, device: str) -> None:  # pragma: no cover - registry is mocked loaded
         _ = device
@@ -105,6 +106,7 @@ class _FakeResponsesAdapter(GenerationAdapter):
                 finish_reason="stop",
                 prompt_tokens=3 if self.include_usage else None,
                 completion_tokens=2 if self.include_usage else None,
+                cached_tokens=self.cached_tokens,
                 error_code=self.error_code,
                 error_message=self.error_message,
             )
@@ -264,6 +266,23 @@ def test_responses_hides_family_reasoning_without_changing_usage(
     body = response.json()
     assert body["output"][0]["content"][0]["text"] == "answer"
     assert body["usage"] == {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5}
+
+
+def test_responses_usage_reports_cached_input_tokens(
+    client: TestClient,
+    adapter: _FakeResponsesAdapter,
+) -> None:
+    adapter.cached_tokens = 2
+
+    response = client.post("/v1/responses", json={"model": "Qwen/Qwen3-4B-Instruct", "input": "x"})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["usage"] == {
+        "input_tokens": 3,
+        "output_tokens": 2,
+        "total_tokens": 5,
+        "input_tokens_details": {"cached_tokens": 2},
+    }
 
 
 def test_shared_responses_request_conformance_vectors() -> None:
