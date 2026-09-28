@@ -10,6 +10,15 @@ from dataclasses import dataclass
 from typing import Any
 
 import dspy
+from sie_sdk import RequestError
+
+
+def _raise_for_item_error(result: Any) -> None:
+    """Raise when SIE reports that extraction failed for this item."""
+    error = result.get("error") if isinstance(result, Mapping) else None
+    if isinstance(error, Mapping):
+        msg = f"Extraction failed: {error.get('message')}"
+        raise RequestError(msg, code=error.get("code"), request=result.get("request"))
 
 
 def _scores_by_index(results: Mapping[str, Any], count: int) -> list[float]:
@@ -280,6 +289,7 @@ class SIEExtractor(dspy.Module):
             Item(text=text),
             labels=effective_labels,
         )
+        _raise_for_item_error(result)
 
         entities = self._parse_entities(result)
         relations = self._parse_relations(result)

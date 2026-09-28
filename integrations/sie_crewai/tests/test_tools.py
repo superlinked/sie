@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from unittest.mock import create_autospec
+from unittest.mock import NonCallableMagicMock, create_autospec
 
+import pytest
 from sie_crewai import SIEExtractorTool, SIERerankerTool, SIESparseEmbedder
-from sie_sdk import SIEClient
+from sie_sdk import RequestError, SIEClient
 
 
 class TestSIERerankerTool:
@@ -300,3 +301,23 @@ class TestSIESparseEmbedder:
         embedder = SIESparseEmbedder(model="test-model")
 
         assert embedder._client is None
+
+
+def test_extractor_tool_raises_on_item_error(
+    mock_sie_client: NonCallableMagicMock, extract_item_error: dict[str, str]
+) -> None:
+    mock_sie_client.extract.side_effect = None
+    mock_sie_client.extract.return_value = {
+        "entities": [],
+        "relations": [],
+        "classifications": [],
+        "objects": [],
+        "error": dict(extract_item_error),
+    }
+    extractor = SIEExtractorTool(model="test-extractor", labels=["person"])
+    extractor._client = mock_sie_client
+
+    with pytest.raises(RequestError, match="Extraction failed") as excinfo:
+        extractor._run(text="text")
+
+    assert excinfo.value.code == extract_item_error["code"]

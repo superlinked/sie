@@ -5,12 +5,22 @@ Provides entity, relation, classification, and object extraction using SIE's ext
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 from llama_index.core.tools import FunctionTool
+from sie_sdk import RequestError
 
 if TYPE_CHECKING:
     from sie_sdk import SIEClient
+
+
+def _raise_for_item_error(result: Any) -> None:
+    """Raise when SIE reports that extraction failed for this item."""
+    error = result.get("error") if isinstance(result, Mapping) else None
+    if isinstance(error, Mapping):
+        msg = f"Extraction failed: {error.get('message')}"
+        raise RequestError(msg, code=error.get("code"), request=result.get("request"))
 
 
 def create_sie_extractor_tool(
@@ -148,6 +158,7 @@ class _SIEExtractor:
 
     def _format_result(self, result: object) -> dict[str, list[dict[str, Any]]]:
         """Format extraction result into multi-type dict."""
+        _raise_for_item_error(result)
 
         def _get(key: str) -> list:
             if isinstance(result, dict):

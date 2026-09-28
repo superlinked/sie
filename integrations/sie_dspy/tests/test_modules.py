@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from collections import Counter
-from unittest.mock import create_autospec
+from unittest.mock import NonCallableMagicMock, create_autospec
 
 import dspy
+import pytest
 from sie_dspy import SIEExtractor, SIEReranker
 from sie_dspy.modules import Entity
-from sie_sdk import SIEClient
+from sie_sdk import RequestError, SIEClient
 
 
 class TestSIEReranker:
@@ -267,3 +268,23 @@ class TestSIEExtractor:
         result = extractor.forward(text=research_text)
 
         assert isinstance(result, dspy.Prediction)
+
+
+def test_extractor_forward_raises_on_item_error(
+    mock_sie_client: NonCallableMagicMock, extract_item_error: dict[str, str]
+) -> None:
+    mock_sie_client.extract.side_effect = None
+    mock_sie_client.extract.return_value = {
+        "entities": [],
+        "relations": [],
+        "classifications": [],
+        "objects": [],
+        "error": dict(extract_item_error),
+    }
+    extractor = SIEExtractor(model="test-extractor")
+    extractor._client = mock_sie_client
+
+    with pytest.raises(RequestError, match="Extraction failed") as excinfo:
+        extractor.forward(text="text")
+
+    assert excinfo.value.code == extract_item_error["code"]
