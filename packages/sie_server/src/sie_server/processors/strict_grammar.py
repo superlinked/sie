@@ -7,10 +7,11 @@ a ``regex`` output must match the pattern in full. No verifier exists for the
 backend's EBNF dialects, so ingress rejects ``strict: true`` on ``ebnf``
 grammars instead of accepting a guarantee it cannot check.
 
-Validation runs on the visible text of a natural ``stop`` terminal. A
-violation replaces that terminal with a typed ``MODEL_OUTPUT_PARSE_ERROR``
-terminal, which every generation ingress already surfaces as an error.
-``length``, ``cancelled``, ``error``, and tool-call terminals are unchanged.
+Validation runs on the visible text of every choice that stopped naturally
+without a tool call. A violation replaces the terminal with a typed
+``MODEL_OUTPUT_PARSE_ERROR`` terminal, which every generation ingress already
+surfaces as an error. Choices that finished with ``length`` or a tool call, and
+``cancelled`` or ``error`` terminals, are not verified.
 """
 
 from __future__ import annotations
@@ -44,6 +45,9 @@ VERIFIABLE_GRAMMAR_KINDS = frozenset({"json_schema", "regex"})
 _PATTERN_BUDGET_S = 2.0
 _MAX_PATH_CHARS = 200
 _UNVERIFIABLE_MESSAGE = "generated output could not be verified against the requested grammar"
+# A shared ``tool_calls`` terminal can still close choices that stopped
+# without a tool call; per-choice eligibility is decided in ``_terminal_outputs``.
+_VERIFIED_TERMINAL_REASONS = frozenset({"stop", "tool_calls"})
 
 _pattern_deadline: ContextVar[float] = ContextVar("strict_grammar_pattern_deadline")
 
@@ -118,7 +122,7 @@ async def _validated_chunks(
             if not chunk.done and chunk.finish_reason is not None:
                 choice_finish_reasons[chunk.choice_index] = chunk.finish_reason
             if chunk.done:
-                if chunk.error_code is None and (chunk.finish_reason or "stop") == "stop":
+                if chunk.error_code is None and (chunk.finish_reason or "stop") in _VERIFIED_TERMINAL_REASONS:
                     outputs = _terminal_outputs(chunk, texts, choice_finish_reasons, tool_call_choices)
                     violation = await asyncio.to_thread(first_output_violation, grammar, outputs)
                     if violation is not None:
@@ -154,7 +158,7 @@ def _terminal_outputs(
         return [
             text if isinstance(text := candidate.get("text"), str) else ""
             for candidate in chunk.candidates
-            if candidate.get("finish_reason") in (None, "stop")
+            if candidate.get("finish_reason") in (None, "stop") and not candidate.get("tool_calls")
         ]
     choices = sorted(set(texts) | set(choice_finish_reasons) | tool_call_choices) or [chunk.choice_index]
     return [

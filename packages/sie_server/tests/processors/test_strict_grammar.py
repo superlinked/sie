@@ -258,6 +258,46 @@ async def test_every_candidate_is_verified() -> None:
 
 
 @pytest.mark.asyncio
+async def test_shared_tool_call_terminal_still_verifies_choices_that_stopped() -> None:
+    terminal = GenerationChunk(
+        text_delta="",
+        done=True,
+        finish_reason="tool_calls",
+        candidates=(
+            {
+                "text": "",
+                "finish_reason": "tool_calls",
+                "logprobs": None,
+                "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "f", "arguments": "{}"}}],
+            },
+            {"text": '{"name": "Ada"}', "finish_reason": "stop", "logprobs": None},
+        ),
+    )
+
+    chunks = await _drain(enforce_strict_grammar(_stream([terminal]), _STRICT_SCHEMA))
+
+    assert chunks[-1].error_code == MODEL_OUTPUT_PARSE_ERROR
+    assert "'required' keyword" in (chunks[-1].error_message or "")
+
+
+@pytest.mark.asyncio
+async def test_streamed_tool_call_terminal_still_verifies_other_choices() -> None:
+    upstream = [
+        GenerationChunk(
+            text_delta="", choice_index=0, tool_call_delta=ToolCallDelta(index=0, id="c", function_name="f")
+        ),
+        GenerationChunk(text_delta="", choice_index=0, finish_reason="tool_calls"),
+        GenerationChunk(text_delta="not a code", choice_index=1),
+        GenerationChunk(text_delta="", choice_index=1, finish_reason="stop"),
+        GenerationChunk(text_delta="", done=True, finish_reason="tool_calls"),
+    ]
+
+    chunks = await _drain(enforce_strict_grammar(_stream(upstream), _STRICT_REGEX))
+
+    assert chunks[-1].error_code == MODEL_OUTPUT_PARSE_ERROR
+
+
+@pytest.mark.asyncio
 async def test_streamed_choices_are_verified_independently() -> None:
     upstream = [
         GenerationChunk(text_delta="ABC-", choice_index=0),
