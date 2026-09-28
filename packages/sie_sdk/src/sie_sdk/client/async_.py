@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import json
 import logging
 import time
@@ -151,7 +152,9 @@ from ._shared import (
     raise_if_estimate_unroutable,
     raise_if_input_too_long,
     raise_if_model_load_failed,
+    read_timeout_message,
     request_matches_base_url_origin,
+    resolve_timeouts,
     retry_after_or_default,
     settled_charge_from_usage,
     sse_chunk_error,
@@ -205,22 +208,40 @@ def _fail_pool_creation(future: asyncio.Future[None], exc: BaseException) -> Non
         future.exception()
 
 
-# Mid-flight transport errors retried under `wait_for_capacity=True`:
-# the request was in flight and the peer severed the connection before a
-# complete response arrived (proxy idle timeout, rolling restart,
-# ECONNRESET). `ClientConnectorError` is retried separately at each call
-# site to preserve its distinct "Failed to connect" message.
-# Call-site `except` order: `_RETRYABLE_TRANSPORT_ERRORS` →
-# `ClientConnectorError` → `(ClientError, OSError)` (first-match
-# routing requires most-specific first).
+# Failures before the request reached the server; retried under
+# `wait_for_capacity=True` on every path. aiohttp raises
+# `ConnectionTimeoutError` (3.10+) for connect-phase timeouts; older releases
+# report them as the ambiguous `ServerTimeoutError`, which stays terminal.
+_CONNECT_PHASE_ERRORS: tuple[type[BaseException], ...] = (
+    aiohttp.ClientConnectorError,
+    *(error for error in (getattr(aiohttp, "ConnectionTimeoutError", None),) if isinstance(error, type)),
+)
+
+# Mid-flight transport errors retried under `wait_for_capacity=True` on the
+# idempotent encode/score/extract paths: the peer severed the connection
+# before a complete response arrived (proxy idle timeout, rolling restart,
+# ECONNRESET).
 _RETRYABLE_TRANSPORT_ERRORS: tuple[type[BaseException], ...] = (
-    TimeoutError,
     aiohttp.ServerDisconnectedError,
-    aiohttp.ServerTimeoutError,
     aiohttp.ClientPayloadError,
 )
 
+# Timeouts after the request may have reached the server: never retried.
+# Call-site `except` order: `_CONNECT_PHASE_ERRORS` →
+# `_RETRYABLE_TRANSPORT_ERRORS` → `_SENT_REQUEST_TIMEOUT_ERRORS` →
+# `(ClientError, OSError)` (first-match routing requires most-specific first).
+_SENT_REQUEST_TIMEOUT_ERRORS: tuple[type[BaseException], ...] = (
+    TimeoutError,
+    aiohttp.ServerTimeoutError,
+)
+
 _LEASE_RENEWAL_MAX_RETRIES = 5
+
+# Per-task retry counts keyed by client id. Each update stores a new dict, so
+# a task spawned from this context never shares counts with its parent.
+_LAST_RETRY_COUNTS: contextvars.ContextVar[dict[int, int] | None] = contextvars.ContextVar(
+    "sie_sdk_async_last_retry_counts", default=None
+)
 
 
 def _parse_generate_result_async(
@@ -401,7 +422,9 @@ class SIEAsyncClient:
 
     Args:
         base_url: Base URL of the SIE server (e.g., "http://localhost:8080").
-        timeout_s: Request timeout in seconds (default: 30.0).
+        timeout_s: One per-attempt limit in seconds for both connecting and
+            waiting for response data. Sets ``connect_timeout_s`` and
+            ``read_timeout_s`` together; either of those overrides it.
         api_key: Optional API key for authentication (sent as Bearer token).
         gpu: GPU type for requests (e.g., "l4", "a100-80gb"). Can be overridden per-call.
         options: Options dict for requests. Merged with per-call options (per-call wins).
@@ -411,6 +434,13 @@ class SIEAsyncClient:
             origin. Values are copied at construction and never forwarded to a
             control-plane URL, external payload-store reference, or redirect
             target. Same-origin capability refs receive only these edge headers.
+        connect_timeout_s: Seconds allowed to establish a connection (default:
+            10). A connection that cannot be established is retried under
+            ``wait_for_capacity``.
+        read_timeout_s: Seconds to wait for response data once a request is
+            sent (default: 150, longer than the gateway's default 120 s
+            request deadline). A read timeout is never retried, because the
+            server may still be processing the request.
 
     Example:
         >>> async with SIEAsyncClient("http://localhost:8080") as client:
@@ -440,7 +470,7 @@ class SIEAsyncClient:
         self,
         base_url: str,
         *,
-        timeout_s: float = 30.0,
+        timeout_s: float | None = None,
         api_key: str | None = None,
         gpu: str | None = None,
         options: dict[str, Any] | None = None,
@@ -450,6 +480,8 @@ class SIEAsyncClient:
         control_plane_url: str | None = None,
         org: str | None = None,
         base_url_headers: Mapping[str, str] | None = None,
+        connect_timeout_s: float | None = None,
+        read_timeout_s: float | None = None,
     ) -> None:
         # Normalize base_url (remove trailing slash)
         validate_base_url(base_url)
@@ -458,7 +490,7 @@ class SIEAsyncClient:
         if self._base_url_headers and not base_url_accepts_origin_credentials(self._base_url):
             msg = "base_url_headers require an absolute https base_url without embedded credentials"
             raise ValueError(msg)
-        self._timeout = timeout_s
+        self._connect_timeout, self._timeout = resolve_timeouts(timeout_s, connect_timeout_s, read_timeout_s)
         self._default_gpu = gpu
         self._default_options = options
         self._api_key = api_key
@@ -520,7 +552,7 @@ class SIEAsyncClient:
             self._session = aiohttp.ClientSession(
                 base_url=self._base_url,
                 connector=connector,
-                timeout=aiohttp.ClientTimeout(total=self._timeout),
+                timeout=aiohttp.ClientTimeout(total=self._timeout, sock_connect=self._connect_timeout),
                 headers=self._headers,
             )
         return self._session
@@ -539,6 +571,41 @@ class SIEAsyncClient:
     def base_url(self) -> str:
         """Return the base URL of the SIE server."""
         return self._base_url
+
+    @property
+    def last_retry_count(self) -> int:
+        """Return SDK retries performed by the latest call awaited in this task.
+
+        Tracked per asyncio context, the async counterpart of the sync
+        client's per-thread value: a call run as a separate task (for example
+        through ``asyncio.gather``) records its count in that task only.
+        """
+        counts = _LAST_RETRY_COUNTS.get()
+        return counts.get(id(self), 0) if counts else 0
+
+    def _set_retry_count(self, value: int) -> None:
+        counts = dict(_LAST_RETRY_COUNTS.get() or {})
+        counts[id(self)] = value
+        _LAST_RETRY_COUNTS.set(counts)
+
+    def _reset_retry_count(self) -> None:
+        self._set_retry_count(0)
+
+    def _record_retry(self) -> None:
+        self._set_retry_count(self.last_retry_count + 1)
+
+    def _attempt_timeout(self, remaining: float, read_timeout_s: float | None = None) -> aiohttp.ClientTimeout:
+        """Timeouts for one attempt, capped by the remaining provision budget.
+
+        An explicit per-call ``read_timeout_s`` is honoured as given.
+        """
+        read = read_timeout_s if read_timeout_s is not None else min(self._timeout, remaining)
+        return aiohttp.ClientTimeout(
+            total=max(remaining, read),
+            connect=read,
+            sock_connect=min(self._connect_timeout, remaining),
+            sock_read=read,
+        )
 
     # ------------------------------------------------------------------
     # Low-level HTTP helpers (thin wrappers around aiohttp)
@@ -562,6 +629,7 @@ class SIEAsyncClient:
         headers: dict[str, str] | None = None,
         timeout_s: float | None = None,
         include_base_url_headers: bool = True,
+        client_timeout: aiohttp.ClientTimeout | None = None,
     ) -> _AioResponse:
         kw: dict[str, Any] = {}
         if data is not None:
@@ -571,7 +639,9 @@ class SIEAsyncClient:
         request_headers = self._headers_for_request(url, headers, include_base_url_headers=include_base_url_headers)
         if request_headers:
             kw["headers"] = request_headers
-        if timeout_s is not None:
+        if client_timeout is not None:
+            kw["timeout"] = client_timeout
+        elif timeout_s is not None:
             kw["timeout"] = aiohttp.ClientTimeout(total=timeout_s)
         kw["allow_redirects"] = False
         async with self._throttle(), self._ensure_session().post(url, **kw) as resp:
@@ -658,7 +728,7 @@ class SIEAsyncClient:
                     self._ensure_session().get(
                         path,
                         headers=self._headers_for_request(path, {"Accept": accept}),
-                        timeout=aiohttp.ClientTimeout(total=min(self._timeout, remaining)),
+                        timeout=self._attempt_timeout(remaining),
                         allow_redirects=False,
                     ) as raw,
                 ):
@@ -1261,6 +1331,7 @@ class SIEAsyncClient:
         max_oom_retries: int = RESOURCE_EXHAUSTED_MAX_RETRIES,
     ) -> EncodeResult | list[EncodeResult]:
         """Async version of encode(). See SIEClient.encode() for details."""
+        self._reset_retry_count()
         # Track if single item was passed
         single_item = not isinstance(items, list)
         items_list = [items] if single_item else items
@@ -1328,14 +1399,14 @@ class SIEAsyncClient:
             if remaining <= 0:
                 msg = f"Provision timeout ({timeout:.1f}s) exceeded before request could be sent"
                 raise ProvisioningError(msg, gpu=resolved_gpu)
-            request_timeout = min(self._timeout, remaining)
+            request_timeout = self._attempt_timeout(remaining)
 
             try:
                 response = await self._post(
                     f"/v1/encode/{model}",
                     data=body,
                     headers=headers,
-                    timeout_s=request_timeout,
+                    client_timeout=request_timeout,
                 )
             except _RETRYABLE_TRANSPORT_ERRORS as e:
                 if wait_for_capacity:
@@ -1346,17 +1417,15 @@ class SIEAsyncClient:
                         error=e,
                     )
                     if delay_s is not None:
+                        self._record_retry()
                         await asyncio.sleep(delay_s)
                         continue
-                if isinstance(e, TimeoutError):
-                    msg = f"Request timed out: {e}"
-                else:
-                    msg = (
-                        f"Connection lost mid-request ({type(e).__name__}); "
-                        f"the peer closed the connection before sending a complete response: {e}"
-                    )
+                msg = (
+                    f"Connection lost mid-request ({type(e).__name__}); "
+                    f"the peer closed the connection before sending a complete response: {e}"
+                )
                 raise SIEConnectionError(msg) from e
-            except aiohttp.ClientConnectorError as e:
+            except _CONNECT_PHASE_ERRORS as e:
                 if wait_for_capacity and is_transient_connect_error(e):
                     delay_s = compute_retry_delay(
                         start_time=start_time,
@@ -1368,10 +1437,13 @@ class SIEAsyncClient:
                     )
                     if delay_s is not None:
                         connect_retries += 1
+                        self._record_retry()
                         await asyncio.sleep(delay_s)
                         continue
                 msg = f"Failed to connect to {self._base_url}: {e}"
                 raise SIEConnectionError(msg) from e
+            except _SENT_REQUEST_TIMEOUT_ERRORS as e:
+                raise SIEConnectionError(read_timeout_message(e)) from e
             except (aiohttp.ClientError, OSError) as e:
                 msg = f"Failed to connect to {self._base_url}: {e}"
                 raise SIEConnectionError(msg) from e
@@ -1402,6 +1474,7 @@ class SIEAsyncClient:
                         actual_delay,
                         timeout,
                     )
+                    self._record_retry()
                     await asyncio.sleep(actual_delay)
                     continue
 
@@ -1423,6 +1496,7 @@ class SIEAsyncClient:
                         lora_retries,
                         LORA_LOADING_MAX_RETRIES,
                     )
+                    self._record_retry()
                     await asyncio.sleep(delay)
                     continue
 
@@ -1444,6 +1518,7 @@ class SIEAsyncClient:
                         elapsed,
                         timeout,
                     )
+                    self._record_retry()
                     await asyncio.sleep(actual_delay)
                     continue
 
@@ -1456,6 +1531,7 @@ class SIEAsyncClient:
                         timeout=timeout,
                         model=model,
                     )
+                    self._record_retry()
                     continue
 
             # Retryable pre-execution admission backpressure (pass-2 audit
@@ -1473,6 +1549,7 @@ class SIEAsyncClient:
                     admission_delay,
                     timeout,
                 )
+                self._record_retry()
                 await asyncio.sleep(admission_delay)
                 continue
 
@@ -1493,6 +1570,7 @@ class SIEAsyncClient:
                         elapsed,
                         timeout,
                     )
+                    self._record_retry()
                     await asyncio.sleep(actual_delay)
                     continue
 
@@ -1513,6 +1591,11 @@ class SIEAsyncClient:
 
         # Parse results and inject timing into each
         results = parse_encode_results(response_data["items"])
+        if timing:
+            for result in results:
+                result["timing"] = timing
+
+        attach_request_metadata(results, response.headers, response_data)
         # Guard the 1:1 input↔output contract before any positional access
         # (``results[0]`` below, or batch reassembly in callers). The gateway's
         # queue path returns mixed-success batches as 200 with only the
@@ -1525,11 +1608,6 @@ class SIEAsyncClient:
             operation="encode",
             request=parse_request_metadata(response.headers),
         )
-        if timing:
-            for result in results:
-                result["timing"] = timing
-
-        attach_request_metadata(results, response.headers, response_data)
 
         # Return single result if single item was passed
         return results[0] if single_item else results
@@ -1563,6 +1641,7 @@ class SIEAsyncClient:
         timeout: float | None = None,  # noqa: ASYNC109
     ) -> Recommendation:
         """Async version of recommend(). See SIEClient.recommend() for details."""
+        self._reset_retry_count()
         try:
             response = await self._post(
                 RECOMMEND_PATH,
@@ -1596,6 +1675,7 @@ class SIEAsyncClient:
         timeout: float | None = None,  # noqa: ASYNC109
     ) -> CostEstimate:
         """Async version of estimate(). See SIEClient.estimate() for details."""
+        self._reset_retry_count()
         body = build_estimate_envelope(endpoint, request)
         try:
             response = await self._post(
@@ -1850,6 +1930,7 @@ class SIEAsyncClient:
         Async version of :meth:`SIEClient.score`. See that method for full
         parameter documentation.
         """
+        self._reset_retry_count()
         # Resolve defaults and pool
         pool_name, resolved_gpu = await self._resolve_pool_and_gpu(gpu)
         resolved_options = self._resolve_options(options)
@@ -1893,14 +1974,14 @@ class SIEAsyncClient:
             if remaining <= 0:
                 msg = f"Provision timeout ({timeout:.1f}s) exceeded before request could be sent"
                 raise ProvisioningError(msg, gpu=resolved_gpu)
-            request_timeout = min(self._timeout, remaining)
+            request_timeout = self._attempt_timeout(remaining)
 
             try:
                 response = await self._post(
                     f"/v1/score/{model}",
                     data=body,
                     headers=headers,
-                    timeout_s=request_timeout,
+                    client_timeout=request_timeout,
                 )
             except _RETRYABLE_TRANSPORT_ERRORS as e:
                 if wait_for_capacity:
@@ -1911,17 +1992,15 @@ class SIEAsyncClient:
                         error=e,
                     )
                     if delay_s is not None:
+                        self._record_retry()
                         await asyncio.sleep(delay_s)
                         continue
-                if isinstance(e, TimeoutError):
-                    msg = f"Request timed out: {e}"
-                else:
-                    msg = (
-                        f"Connection lost mid-request ({type(e).__name__}); "
-                        f"the peer closed the connection before sending a complete response: {e}"
-                    )
+                msg = (
+                    f"Connection lost mid-request ({type(e).__name__}); "
+                    f"the peer closed the connection before sending a complete response: {e}"
+                )
                 raise SIEConnectionError(msg) from e
-            except aiohttp.ClientConnectorError as e:
+            except _CONNECT_PHASE_ERRORS as e:
                 if wait_for_capacity and is_transient_connect_error(e):
                     delay_s = compute_retry_delay(
                         start_time=start_time,
@@ -1933,10 +2012,13 @@ class SIEAsyncClient:
                     )
                     if delay_s is not None:
                         connect_retries += 1
+                        self._record_retry()
                         await asyncio.sleep(delay_s)
                         continue
                 msg = f"Failed to connect to {self._base_url}: {e}"
                 raise SIEConnectionError(msg) from e
+            except _SENT_REQUEST_TIMEOUT_ERRORS as e:
+                raise SIEConnectionError(read_timeout_message(e)) from e
             except (aiohttp.ClientError, OSError) as e:
                 msg = f"Failed to connect to {self._base_url}: {e}"
                 raise SIEConnectionError(msg) from e
@@ -1967,6 +2049,7 @@ class SIEAsyncClient:
                         actual_delay,
                         timeout,
                     )
+                    self._record_retry()
                     await asyncio.sleep(actual_delay)
                     continue
 
@@ -1986,6 +2069,7 @@ class SIEAsyncClient:
                         elapsed,
                         timeout,
                     )
+                    self._record_retry()
                     await asyncio.sleep(actual_delay)
                     continue
 
@@ -1998,6 +2082,7 @@ class SIEAsyncClient:
                         timeout=timeout,
                         model=model,
                     )
+                    self._record_retry()
                     continue
 
             # Retryable pre-execution admission backpressure (pass-2 audit
@@ -2015,6 +2100,7 @@ class SIEAsyncClient:
                     admission_delay,
                     timeout,
                 )
+                self._record_retry()
                 await asyncio.sleep(admission_delay)
                 continue
 
@@ -2032,6 +2118,7 @@ class SIEAsyncClient:
                         elapsed,
                         timeout,
                     )
+                    self._record_retry()
                     await asyncio.sleep(actual_delay)
                     continue
 
@@ -2072,6 +2159,7 @@ class SIEAsyncClient:
         wait_for_capacity: bool = True,
         provision_timeout_s: float | None = None,
         max_oom_retries: int = RESOURCE_EXHAUSTED_MAX_RETRIES,
+        read_timeout_s: float | None = None,
     ) -> GenerateResult:
         """Async sibling of :meth:`SIEClient.generate`.
 
@@ -2079,6 +2167,7 @@ class SIEAsyncClient:
         awaits the aggregated outcome; use :meth:`stream_generate` for
         SIE-native chunk streaming.
         """
+        self._reset_retry_count()
         resolved_grammar = validate_generate_grammar(grammar) if grammar is not None else None
         pool_name, resolved_gpu = await self._resolve_pool_and_gpu(gpu)
 
@@ -2128,7 +2217,7 @@ class SIEAsyncClient:
             if remaining <= 0:
                 msg = f"Provision timeout ({timeout:.1f}s) exceeded before request could be sent"
                 raise ProvisioningError(msg, gpu=resolved_gpu)
-            request_timeout_s = min(self._timeout, remaining)
+            request_timeout = self._attempt_timeout(remaining, read_timeout_s)
 
             try:
                 async with (
@@ -2137,25 +2226,15 @@ class SIEAsyncClient:
                         f"/v1/generate/{safe_model}",
                         data=body,
                         headers=self._headers_for_request(f"/v1/generate/{safe_model}", headers),
-                        timeout=aiohttp.ClientTimeout(total=request_timeout_s),
+                        timeout=request_timeout,
                         allow_redirects=False,
                     ) as raw,
                 ):
                     content = await raw.read()
                     response = _AioResponse(raw.status, content, raw.headers)
-            except _RETRYABLE_TRANSPORT_ERRORS as e:
-                # Generation is NOT idempotent and carries no dedup key.
-                # These errors fire after the request body was sent (read
-                # timeout, peer reset, payload error), so the worker may
-                # already be — or have finished — generating. Retrying would
-                # issue a *second* billable generation with a different
-                # completion, so surface the error instead of re-running.
-                # (The idempotent encode/score/extract paths still retry.)
-                msg = f"Request failed: {e}"
-                raise SIEConnectionError(msg) from e
-            except aiohttp.ClientConnectorError as e:
-                # Connect errors fail before the request is sent, so no
-                # generation could have started — safe to retry.
+            except _CONNECT_PHASE_ERRORS as e:
+                # Connect-phase failures happen before the request is sent,
+                # so no generation could have started — safe to retry.
                 if wait_for_capacity and is_transient_connect_error(e):
                     delay_s = compute_retry_delay(
                         start_time=start_time,
@@ -2167,17 +2246,17 @@ class SIEAsyncClient:
                     )
                     if delay_s is not None:
                         connect_retries += 1
+                        self._record_retry()
                         await asyncio.sleep(delay_s)
                         continue
                 msg = f"Failed to connect to {self._base_url}: {e}"
                 raise SIEConnectionError(msg) from e
             except (aiohttp.ClientError, OSError) as e:
-                # Catch-all transport failure. For the non-idempotent
-                # generate path we do NOT retry: unlike a pure connect
-                # failure (ClientConnectorError above), a generic
-                # ClientError/OSError (e.g. ECONNRESET) can fire after the
-                # request was sent, so the worker may already have generated.
-                # Retrying would double-bill an inference. Surface instead.
+                # Every other transport failure, including read timeouts and
+                # peer resets, can fire after the request body was sent, so the
+                # worker may already be — or have finished — generating.
+                # Generation is NOT idempotent and carries no dedup key, so
+                # surface the error instead of re-running it.
                 msg = f"Request failed: {e}"
                 raise SIEConnectionError(msg) from e
 
@@ -2194,6 +2273,7 @@ class SIEAsyncClient:
                         start_time=start_time,
                         timeout=timeout,
                     )
+                    self._record_retry()
                     await asyncio.sleep(delay)
                     continue
 
@@ -2218,6 +2298,7 @@ class SIEAsyncClient:
                             f"provision timeout ({timeout:.1f}s, {elapsed:.1f}s elapsed) for '{model}'"
                         )
                         raise ModelLoadingError(msg, model=model)
+                    self._record_retry()
                     await asyncio.sleep(delay)
                     continue
                 if error_code == RESOURCE_EXHAUSTED_ERROR_CODE:
@@ -2229,6 +2310,7 @@ class SIEAsyncClient:
                         timeout=timeout,
                         model=model,
                     )
+                    self._record_retry()
                     continue
 
             # Retryable pre-execution admission backpressure (pass-2 audit
@@ -2246,6 +2328,7 @@ class SIEAsyncClient:
                     admission_delay,
                     timeout,
                 )
+                self._record_retry()
                 await asyncio.sleep(admission_delay)
                 continue
 
@@ -2299,15 +2382,18 @@ class SIEAsyncClient:
         wait_for_capacity: bool = True,
         provision_timeout_s: float | None = None,
         max_oom_retries: int = RESOURCE_EXHAUSTED_MAX_RETRIES,
+        read_timeout_s: float | None = None,
     ) -> ResponseResult:
         """Async counterpart of :meth:`SIEClient.responses`.
 
         The gateway's Responses MVP is stateless, text-only, and
         non-streaming. Retry behavior matches the sync method: only explicit
-        pre-execution capacity signals and connect-before-send failures are
-        retried; mid-flight failures and post-publish 504 responses are
-        terminal because generation is non-idempotent.
+        pre-execution capacity signals, pre-dispatch admission rejections and
+        connect-before-send failures are retried; mid-flight failures, read
+        timeouts and post-publish 504 responses are terminal because
+        generation is non-idempotent.
         """
+        self._reset_retry_count()
         pool_name, resolved_gpu = await self._resolve_pool_and_gpu(gpu)
         body = json.dumps(
             build_responses_body(
@@ -2341,13 +2427,13 @@ class SIEAsyncClient:
                         "/v1/responses",
                         data=body,
                         headers=self._headers_for_request("/v1/responses", headers),
-                        timeout=aiohttp.ClientTimeout(total=min(self._timeout, remaining)),
+                        timeout=self._attempt_timeout(remaining, read_timeout_s),
                         allow_redirects=False,
                     ) as raw,
                 ):
                     content = await raw.read()
                     response = _AioResponse(raw.status, content, raw.headers)
-            except aiohttp.ClientConnectorError as e:
+            except _CONNECT_PHASE_ERRORS as e:
                 if wait_for_capacity and is_transient_connect_error(e):
                     delay_s = compute_retry_delay(
                         start_time=start_time,
@@ -2359,6 +2445,7 @@ class SIEAsyncClient:
                     )
                     if delay_s is not None:
                         connect_retries += 1
+                        self._record_retry()
                         await asyncio.sleep(delay_s)
                         continue
                 msg = f"Failed to connect to {self._base_url}: {e}"
@@ -2380,6 +2467,7 @@ class SIEAsyncClient:
                 oom_retries=oom_retries,
                 max_oom_retries=max_oom_retries,
             )
+            self._record_retry()
             await asyncio.sleep(delay)
 
         self._check_server_version(response)
@@ -2419,19 +2507,23 @@ class SIEAsyncClient:
         wait_for_capacity: bool = True,
         provision_timeout_s: float | None = None,
         max_oom_retries: int = RESOURCE_EXHAUSTED_MAX_RETRIES,
+        read_timeout_s: float | None = None,
     ) -> ChatCompletion:
         """Non-streaming OpenAI-compatible chat completion (``/v1/chat/completions``).
 
         Async counterpart of :meth:`SIEClient.chat_completions`. For token
         streaming use :meth:`stream_chat_completions`. Generation is
-        non-idempotent, so only pre-execution 503 PROVISIONING / MODEL_LOADING responses are retried;
-        a 504 surfaces as :class:`ServerError`.
+        non-idempotent, so only pre-execution capacity signals and
+        pre-dispatch admission rejections are retried; a 504 surfaces as
+        :class:`ServerError`. ``read_timeout_s`` sets how long to wait for the
+        complete response once the request is sent.
 
         Typed kwargs cover the full gateway-supported field set (see
         :func:`build_chat_body` for the canonical list); ``extra_body`` is
         still merged last for forward-compat fields the typed surface does
         not name yet.
         """
+        self._reset_retry_count()
         pool_name, resolved_gpu = await self._resolve_pool_and_gpu(gpu)
         body = json.dumps(
             build_chat_body(
@@ -2485,13 +2577,13 @@ class SIEAsyncClient:
                         "/v1/chat/completions",
                         data=body,
                         headers=self._headers_for_request("/v1/chat/completions", headers),
-                        timeout=aiohttp.ClientTimeout(total=min(self._timeout, remaining)),
+                        timeout=self._attempt_timeout(remaining, read_timeout_s),
                         allow_redirects=False,
                     ) as raw,
                 ):
                     content = await raw.read()
                     response = _AioResponse(raw.status, content, raw.headers)
-            except aiohttp.ClientConnectorError as e:
+            except _CONNECT_PHASE_ERRORS as e:
                 if wait_for_capacity and is_transient_connect_error(e):
                     delay_s = compute_retry_delay(
                         start_time=start_time,
@@ -2503,6 +2595,7 @@ class SIEAsyncClient:
                     )
                     if delay_s is not None:
                         connect_retries += 1
+                        self._record_retry()
                         await asyncio.sleep(delay_s)
                         continue
                 msg = f"Failed to connect to {self._base_url}: {e}"
@@ -2526,6 +2619,7 @@ class SIEAsyncClient:
                 oom_retries=oom_retries,
                 max_oom_retries=max_oom_retries,
             )
+            self._record_retry()
             await asyncio.sleep(delay)
 
         self._check_server_version(response)
@@ -2724,6 +2818,7 @@ class SIEAsyncClient:
         failure is terminal (non-idempotent). The ``async with`` keeps the
         connection open while the caller consumes the generator.
         """
+        self._reset_retry_count()
         timeout = provision_timeout_s if provision_timeout_s is not None else DEFAULT_PROVISION_TIMEOUT_S
         start_time = time.monotonic()
         oom_retries = 0
@@ -2755,6 +2850,7 @@ class SIEAsyncClient:
                         timeout=aiohttp.ClientTimeout(
                             total=None,
                             connect=min(self._timeout, remaining),
+                            sock_connect=min(self._connect_timeout, remaining),
                             sock_read=self._timeout,
                         ),
                         allow_redirects=False,
@@ -2836,7 +2932,7 @@ class SIEAsyncClient:
                             yielded_chunk = True
                         else:
                             return
-            except aiohttp.ClientConnectorError as e:
+            except _CONNECT_PHASE_ERRORS as e:
                 if wait_for_capacity and is_transient_connect_error(e):
                     delay_s = compute_retry_delay(
                         start_time=start_time,
@@ -2848,6 +2944,7 @@ class SIEAsyncClient:
                     )
                     if delay_s is not None:
                         connect_retries += 1
+                        self._record_retry()
                         await asyncio.sleep(delay_s)
                         continue
                 msg = f"Failed to connect to {self._base_url}: {e}"
@@ -2858,6 +2955,7 @@ class SIEAsyncClient:
                 raise SIEConnectionError(msg) from e
             # Reached only on the non-200 pre-stream retry path.
             if retry_delay is not None:
+                self._record_retry()
                 await asyncio.sleep(retry_delay)
 
     # Use overload for proper type hints when single item vs list
@@ -2908,6 +3006,7 @@ class SIEAsyncClient:
         max_oom_retries: int = RESOURCE_EXHAUSTED_MAX_RETRIES,
     ) -> ExtractResult | list[ExtractResult]:
         """Async version of extract(). See SIEClient.extract() for details."""
+        self._reset_retry_count()
         # Track if single item was passed
         single_item = not isinstance(items, list)
         items_list = [items] if single_item else items
@@ -2972,14 +3071,14 @@ class SIEAsyncClient:
             if remaining <= 0:
                 msg = f"Provision timeout ({timeout:.1f}s) exceeded before request could be sent"
                 raise ProvisioningError(msg, gpu=resolved_gpu)
-            request_timeout = min(self._timeout, remaining)
+            request_timeout = self._attempt_timeout(remaining)
 
             try:
                 response = await self._post(
                     f"/v1/extract/{model}",
                     data=body,
                     headers=headers,
-                    timeout_s=request_timeout,
+                    client_timeout=request_timeout,
                 )
             except _RETRYABLE_TRANSPORT_ERRORS as e:
                 if wait_for_capacity:
@@ -2990,17 +3089,15 @@ class SIEAsyncClient:
                         error=e,
                     )
                     if delay_s is not None:
+                        self._record_retry()
                         await asyncio.sleep(delay_s)
                         continue
-                if isinstance(e, TimeoutError):
-                    msg = f"Request timed out: {e}"
-                else:
-                    msg = (
-                        f"Connection lost mid-request ({type(e).__name__}); "
-                        f"the peer closed the connection before sending a complete response: {e}"
-                    )
+                msg = (
+                    f"Connection lost mid-request ({type(e).__name__}); "
+                    f"the peer closed the connection before sending a complete response: {e}"
+                )
                 raise SIEConnectionError(msg) from e
-            except aiohttp.ClientConnectorError as e:
+            except _CONNECT_PHASE_ERRORS as e:
                 if wait_for_capacity and is_transient_connect_error(e):
                     delay_s = compute_retry_delay(
                         start_time=start_time,
@@ -3012,10 +3109,13 @@ class SIEAsyncClient:
                     )
                     if delay_s is not None:
                         connect_retries += 1
+                        self._record_retry()
                         await asyncio.sleep(delay_s)
                         continue
                 msg = f"Failed to connect to {self._base_url}: {e}"
                 raise SIEConnectionError(msg) from e
+            except _SENT_REQUEST_TIMEOUT_ERRORS as e:
+                raise SIEConnectionError(read_timeout_message(e)) from e
             except (aiohttp.ClientError, OSError) as e:
                 msg = f"Failed to connect to {self._base_url}: {e}"
                 raise SIEConnectionError(msg) from e
@@ -3049,6 +3149,7 @@ class SIEAsyncClient:
                         actual_delay,
                         timeout,
                     )
+                    self._record_retry()
                     await asyncio.sleep(actual_delay)
                     continue
 
@@ -3068,6 +3169,7 @@ class SIEAsyncClient:
                         elapsed,
                         timeout,
                     )
+                    self._record_retry()
                     await asyncio.sleep(actual_delay)
                     continue
 
@@ -3080,6 +3182,7 @@ class SIEAsyncClient:
                         timeout=timeout,
                         model=model,
                     )
+                    self._record_retry()
                     continue
 
             # Retryable pre-execution admission backpressure (pass-2 audit
@@ -3097,6 +3200,7 @@ class SIEAsyncClient:
                     admission_delay,
                     timeout,
                 )
+                self._record_retry()
                 await asyncio.sleep(admission_delay)
                 continue
 
@@ -3114,6 +3218,7 @@ class SIEAsyncClient:
                         elapsed,
                         timeout,
                     )
+                    self._record_retry()
                     await asyncio.sleep(actual_delay)
                     continue
 
@@ -3127,6 +3232,7 @@ class SIEAsyncClient:
         response_data = parse_terminal_msgpack_object(response, owner="extract")
 
         results = parse_extract_results(response_data["items"])
+        attach_request_metadata(results, response.headers, response_data)
         # Same positional contract as encode: ``results[0]`` below and
         # index-based reassembly in batch callers both assume one result per
         # input, and the queue path drops failed items from a 200 body.
@@ -3137,8 +3243,6 @@ class SIEAsyncClient:
             operation="extract",
             request=parse_request_metadata(response.headers),
         )
-
-        attach_request_metadata(results, response.headers, response_data)
 
         return results[0] if single_item else results
 

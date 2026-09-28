@@ -18,7 +18,7 @@ class TestSIEClientInit:
             mock_client.assert_called_once()
             call_kwargs = mock_client.call_args.kwargs
             assert call_kwargs["base_url"] == "http://localhost:8080"
-            assert call_kwargs["timeout"] == 30.0
+            assert call_kwargs["timeout"] == httpx.Timeout(150.0, connect=10.0)
             assert call_kwargs["headers"]["Content-Type"] == "application/msgpack"
             assert "limits" not in call_kwargs
             client.close()
@@ -37,7 +37,15 @@ class TestSIEClientInit:
         with patch("sie_sdk.client.sync.httpx.Client") as mock_client:
             client = SIEClient("http://localhost:8080", timeout_s=60.0)
             call_kwargs = mock_client.call_args.kwargs
-            assert call_kwargs["timeout"] == 60.0
+            assert call_kwargs["timeout"] == httpx.Timeout(60.0, connect=60.0)
+            client.close()
+
+    def test_connect_and_read_timeouts_override_timeout_s(self) -> None:
+        """Phase-specific timeouts override the combined ``timeout_s``."""
+        with patch("sie_sdk.client.sync.httpx.Client") as mock_client:
+            client = SIEClient("http://localhost:8080", timeout_s=60.0, connect_timeout_s=5.0, read_timeout_s=300.0)
+            call_kwargs = mock_client.call_args.kwargs
+            assert call_kwargs["timeout"] == httpx.Timeout(300.0, connect=5.0)
             client.close()
 
     def test_api_key_sets_auth_header(self) -> None:

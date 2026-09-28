@@ -313,6 +313,34 @@ next section for the `RESOURCE_EXHAUSTED` budget):
   `ResourceExhaustedError` when retries run out. Pass
   `max_oom_retries=0` to disable these retries and fail fast.
 
+Admission rejections happen before any work is dispatched, so every call
+retries them within `provision_timeout_s`, honouring `Retry-After`:
+`429 RATE_LIMIT`, `503 QUEUE_FULL`, and the gateway's queue backpressure,
+a `503 QUEUE_UNAVAILABLE` that carries `Retry-After`. A
+`QUEUE_UNAVAILABLE` without `Retry-After` is terminal.
+[`packages/wire-fixtures/retry_classification.json`](../wire-fixtures/retry_classification.json)
+lists how each response is classified; the Python and TypeScript SDKs
+both test against it.
+
+### Timeouts
+
+Each attempt has a connect timeout (`connect_timeout_s`, default 10 s)
+and a read timeout (`read_timeout_s`, default 150 s, longer than the
+gateway's default 120 s request deadline). `timeout_s` sets both at
+once. A connection that cannot be established is retried under
+`wait_for_capacity`. A read timeout is never retried, because the server
+may still be processing the request. Buffered `generate`,
+`chat_completions` and `responses` accept a per-call `read_timeout_s`;
+set it to at least the model profile's `overall_timeout_s` for long
+generations.
+
+### Partial batches
+
+When a batch response carries fewer items than were sent, `encode` and
+`extract` raise `IncompleteBatchError`. Its `results` attribute holds the
+items that did come back (match them by `id`), and `missing_ids` names
+the dropped items when every submitted item carried an `id`.
+
 One generation-specific error is terminal and never retried:
 
 - `empty_model_output` — the generation finished nominally but produced

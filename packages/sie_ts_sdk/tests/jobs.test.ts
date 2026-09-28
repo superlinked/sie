@@ -568,7 +568,7 @@ describe("client.jobs", () => {
     });
   });
 
-  it("submit floors the abort timeout to 120s (survives the 30s default)", () => {
+  it("submit floors the abort timeout to 120s (survives a 30s client timeout)", () => {
     vi.useFakeTimers();
     try {
       let capturedInit: RequestInit | undefined;
@@ -576,11 +576,11 @@ describe("client.jobs", () => {
         capturedInit = init;
         return new Promise<Response>(() => {}); // never settles; we only inspect the signal
       });
-      const client = new SIEClient("http://gw:8080");
+      const client = new SIEClient("http://gw:8080", { timeoutMs: 30_000 });
       client.jobs.submit({ source: ["a"], model: "m" }).catch(() => {}); // swallow the eventual abort
       expect(capturedInit?.signal?.aborted).toBe(false);
       vi.advanceTimersByTime(30_000);
-      expect(capturedInit?.signal?.aborted).toBe(false); // past the 30s default, still alive
+      expect(capturedInit?.signal?.aborted).toBe(false); // past the 30s client timeout, still alive
       vi.advanceTimersByTime(90_001);
       expect(capturedInit?.signal?.aborted).toBe(true); // aborts at the 120s floor
     } finally {

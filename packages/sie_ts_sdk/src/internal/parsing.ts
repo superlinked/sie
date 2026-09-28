@@ -588,7 +588,7 @@ function missingResultIds(
  * @throws {IncompleteBatchError} If the counts differ.
  */
 export function validateBatchResultCount(
-  results: readonly unknown[],
+  results: readonly (EncodeResult | ExtractResult)[],
   submitted: readonly unknown[],
   model: string,
   operation: "encode" | "extract",
@@ -613,6 +613,7 @@ export function validateBatchResultCount(
     model,
     missingIds,
     requestId,
+    results,
   });
 }
 

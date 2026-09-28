@@ -75,27 +75,36 @@ export function computeOomBackoff(
   return applyRetryJitter(capped);
 }
 
+const RETRY_AFTER_SECONDS = /^\d+(?:\.\d+)?$/;
+const RETRY_AFTER_HTTP_DATE = /^[A-Za-z]{3}, \d{2} [A-Za-z]{3} \d{4} \d{2}:\d{2}:\d{2} GMT$/;
+
 /**
  * Parse Retry-After header value
+ *
+ * Accepts non-negative delay seconds (fractions allowed) and the IMF-fixdate
+ * HTTP-date form. A date in the past means "retry now" (0). Any other value is
+ * unusable. `packages/wire-fixtures/retry_classification.json` pins these
+ * cases for both SDKs.
+ *
  * @param header - The Retry-After header value
- * @returns Delay in milliseconds, or undefined if invalid
+ * @returns Delay in milliseconds, or undefined if absent or invalid
  */
 export function getRetryAfter(header: string | null): number | undefined {
   if (!header) return undefined;
+  const value = header.trim();
 
-  // Try parsing as seconds (integer). `Retry-After: 0` means "retry
-  // immediately" and must be honored (>= 0), not treated as invalid and
-  // replaced by the default delay.
-  const seconds = Number.parseInt(header, 10);
-  if (!Number.isNaN(seconds) && seconds >= 0) {
-    return seconds * 1000;
+  // `Retry-After: 0` means "retry immediately" and must be honored, not
+  // treated as invalid and replaced by the default delay.
+  if (RETRY_AFTER_SECONDS.test(value)) {
+    const seconds = Number(value);
+    return Number.isFinite(seconds) ? seconds * 1000 : undefined;
   }
 
-  // Try parsing as HTTP-date
-  const date = new Date(header);
-  if (!Number.isNaN(date.getTime())) {
-    const delay = date.getTime() - Date.now();
-    return delay > 0 ? delay : undefined;
+  if (RETRY_AFTER_HTTP_DATE.test(value)) {
+    const when = Date.parse(value);
+    if (!Number.isNaN(when)) {
+      return Math.max(when - Date.now(), 0);
+    }
   }
 
   return undefined;
