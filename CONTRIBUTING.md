@@ -165,6 +165,24 @@ mise exec -- uv run --frozen --project . --no-sync python tools/ci/live_sdk.py
 mise exec -- uv run --frozen --project . --no-sync pytest -q packages/sie_server/tests/fake_stack/test_sdk_surface.py -m integration
 ```
 
+For model outputs, adapter parity, and the live-server integration suites, run
+the real-model lane. It serves pinned public checkpoints on CPU and downloads
+several gigabytes of weights from the Hugging Face Hub on first use, cached
+under `HF_HOME`. The Qdrant and Weaviate suites also need the containers below:
+
+```bash
+mise run full-sync
+mise run ts -- build
+docker run -d -p 6333:6333 qdrant/qdrant:v1.17.1
+docker run -d -p 8090:8080 -p 50051:50051 -e AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED=true -e DEFAULT_VECTORIZER_MODULE=none semitechnologies/weaviate:1.28.0
+mise exec -- uv run --frozen --project . --no-sync python -m tools.ci.real_models run
+```
+
+Add `--suite pins`, `parity`, `server`, `integrations`, or `typescript`
+(repeatable) to run part of the lane. Hosted CI runs it as the advisory
+`Real models / CPU` job nightly and for pull requests that change model-serving,
+SDK, or integration paths; it is not part of `CI / Required`.
+
 For CPU images and their queue topology, use `mise run cpu-stack`. This requires a local Linux Docker daemon and uses the checked-in fake model, so it does not download model weights.
 
 For Python or npm distribution consumers, build into a fresh temporary output path:
