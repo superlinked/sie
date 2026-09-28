@@ -83,7 +83,7 @@ jobs:
       - name: Pinned collector trace privacy
         run: |
           mise run helm -- dependencies
-          mise exec -- uv run --frozen --project . --no-sync pytest -q -m docker tools/ci/tests/test_collector_trace_privacy.py
+          mise exec -- uv run --frozen --project . --no-sync pytest -q -m docker tools/ci/tests/test_collector_trace_privacy.py tools/ci/tests/test_collector_metric_privacy.py
 
   typescript:
     name: CI / TypeScript

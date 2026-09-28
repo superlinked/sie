@@ -596,6 +596,14 @@ metric_processing:
   datapoint_attributes:
     policy: exact_metric_attribute_set
     unknown: drop
+  remote_scalar_reconstruction:
+    ordering: after_exact_metric_attribute_set_before_queue_identity
+    resource_types: [string]
+    datapoint_types: [string, int, double, bool]
+    duplicates: first_lookup_value_only
+    non_scalar_or_missing: omit
+    cache: clear_for_each_resource_and_datapoint
+    local_prometheus_processing: unchanged
   exemplars:
     policy: forbidden
     producer_filter: always_off

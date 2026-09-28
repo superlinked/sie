@@ -634,3 +634,14 @@ CI should reject a change unless it proves all of the following:
 10. an end-to-end KEDA signal respects the declared five-second OTLP export and
    Prometheus scrape budgets, and collector, producer-export, scrape, or query
    failure activates the worker lane's declared safe fallback.
+
+Remote metric maps are reconstructed after the existing per-metric attribute
+allowlist. Each retained resource key has at most one string value; each retained
+point key has at most one string, integer, double or boolean value. The first
+lookup value wins, matching the value used by preceding filters. Missing or
+non-scalar values are omitted, and scratch state is cleared for every resource
+and point. This removes duplicate protobuf keys without changing metric values,
+histograms, timestamps, temporality or producer domain policies. Local Prometheus
+processing remains unchanged. The pinned collector regression sends raw duplicate
+keys through both rendered receiver branches, including reversed service claims,
+nested values and missing optional fields on successive points.
