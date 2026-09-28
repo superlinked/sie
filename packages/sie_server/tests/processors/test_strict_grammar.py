@@ -150,6 +150,40 @@ def test_unevaluated_properties_is_never_evaluated_with_unbounded_patterns(monke
     )
 
 
+@pytest.mark.parametrize(
+    "schema",
+    [
+        {
+            "$schema": "https://json-schema.org/draft/2019-09/schema",
+            "type": "array",
+            "items": [],
+            "additionalItems": {"unevaluatedProperties": False, "patternProperties": {"(a|aa)+$": {}}},
+        },
+        {"type": "object", "dependencies": {"a": {"unevaluatedProperties": False}}},
+        {"type": "string", "contentSchema": {"unevaluatedProperties": False}},
+        {"anyOf": [{"items": [{"unevaluatedProperties": False}]}]},
+    ],
+)
+def test_unevaluated_properties_is_found_in_every_subschema_position(schema: dict[str, object]) -> None:
+    assert strict_grammar.unverifiable_schema_keyword(schema) == "unevaluatedProperties"
+    assert output_violation(GrammarSpec(kind="json_schema", value=schema, strict=True), "[{}]") == (
+        "generated output could not be verified against the requested grammar"
+    )
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        {"type": "object", "properties": {"unevaluatedProperties": {"type": "string"}}},
+        {"enum": [{"unevaluatedProperties": False}]},
+        {"const": {"unevaluatedProperties": False}},
+        {"dependentRequired": {"unevaluatedProperties": ["a"]}},
+    ],
+)
+def test_unevaluated_properties_as_data_or_a_name_is_verifiable(schema: dict[str, object]) -> None:
+    assert strict_grammar.unverifiable_schema_keyword(schema) is None
+
+
 def test_unevaluated_properties_as_a_property_name_is_verifiable() -> None:
     schema = {"type": "object", "properties": {"unevaluatedProperties": {"type": "string"}}}
 

@@ -50,22 +50,10 @@ _UNVERIFIABLE_MESSAGE = "generated output could not be verified against the requ
 _VERIFIED_TERMINAL_REASONS = frozenset({"stop", "tool_calls"})
 
 _UNVERIFIABLE_SCHEMA_KEYWORDS = ("unevaluatedProperties",)
-_SCHEMA_MAP_KEYWORDS = frozenset({"properties", "patternProperties", "$defs", "definitions", "dependentSchemas"})
-_SCHEMA_ARRAY_KEYWORDS = frozenset({"allOf", "anyOf", "oneOf", "prefixItems"})
-_SUBSCHEMA_KEYWORDS = frozenset(
-    {
-        "additionalProperties",
-        "contains",
-        "else",
-        "if",
-        "items",
-        "not",
-        "propertyNames",
-        "then",
-        "unevaluatedItems",
-        "unevaluatedProperties",
-    }
+_SCHEMA_MAP_KEYWORDS = frozenset(
+    {"properties", "patternProperties", "$defs", "definitions", "dependencies", "dependentRequired", "dependentSchemas"}
 )
+_DATA_KEYWORDS = frozenset({"const", "default", "enum", "examples"})
 
 _pattern_deadline: ContextVar[float] = ContextVar("strict_grammar_pattern_deadline")
 
@@ -224,7 +212,7 @@ def _find_schema_keyword(value: Any, context: str) -> str | None:
             if found := _find_schema_keyword(child, _schema_child_context(context, key)):
                 return found
     elif isinstance(value, list):
-        child_context = "schema" if context in {"schema", "schema_array"} else "other"
+        child_context = "schema" if context == "schema" else "other"
         for item in value:
             if found := _find_schema_keyword(item, child_context):
                 return found
@@ -232,17 +220,16 @@ def _find_schema_keyword(value: Any, context: str) -> str | None:
 
 
 def _schema_child_context(parent: str, key: str) -> str:
+    """Classify a child position; unknown keywords are scanned as subschemas."""
     if parent == "schema_map":
         return "schema"
     if parent != "schema":
         return "other"
     if key in _SCHEMA_MAP_KEYWORDS:
         return "schema_map"
-    if key in _SCHEMA_ARRAY_KEYWORDS:
-        return "schema_array"
-    if key in _SUBSCHEMA_KEYWORDS:
-        return "schema"
-    return "other"
+    if key in _DATA_KEYWORDS:
+        return "other"
+    return "schema"
 
 
 def _json_schema_violation(schema: dict[str, Any], text: str) -> str | None:
