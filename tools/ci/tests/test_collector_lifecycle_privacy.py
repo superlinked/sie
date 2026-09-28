@@ -14,6 +14,7 @@ import socket
 import subprocess
 import threading
 import time
+import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -177,6 +178,49 @@ def test_lifecycle_allowlist_in_real_collector(tmp_path):
         send("untrusted-claimed-name", "response_body")
         send("sie-worker", "worker_generation", application=True)
         send("sie-dispatcher", "dispatch_attempt", application=True)
+        # Malformed protobuf can repeat a key: filters read the first value,
+        # while keep_keys alone retains both. Rebuild the validated scalars.
+        duplicate = ExportLogsServiceRequest()
+        resource = duplicate.resource_logs.add()
+        for key, value in [
+            ("service.name", "sie-worker"),
+            ("service.version", "fixture"),
+            ("service.version", "payload-secret"),
+        ]:
+            attr = resource.resource.attributes.add(key=key)
+            attr.value.string_value = value
+        scope = resource.scope_logs.add()
+        record = scope.log_records.add(
+            time_unix_nano=time.time_ns(),
+            trace_id=(0x1234567890).to_bytes(16, "big"),
+            span_id=(0x12345678).to_bytes(8, "big"),
+        )
+        record.body.string_value = "inference.lifecycle.completed"
+        for key, value in {
+            "event.name": "inference.lifecycle.completed",
+            "event.schema.version": "1",
+            "operation": "generate",
+            "phase": "response_body",
+            "outcome": "error",
+            "error_class": "worker",
+            "duration_ms": 12.0,
+            "first_token_ms": 2.0,
+        }.items():
+            attr = record.attributes.add(key=key)
+            if isinstance(value, float):
+                attr.value.double_value = value
+            else:
+                attr.value.string_value = value
+            record.attributes.add(key=key).value.string_value = "payload-secret"
+        raw_request = urllib.request.Request(
+            f"http://127.0.0.1:{ports[4318]}/v1/logs",
+            data=duplicate.SerializeToString(),
+            headers={"Content-Type": "application/x-protobuf"},
+            method="POST",
+        )
+        with urllib.request.urlopen(raw_request, timeout=5) as response:  # noqa: S310 - fixed loopback HTTP
+            assert response.status == 200
+
         # Invalid enum/type/body/service/phase fixtures must vanish completely.
         for changes in (
             {"error_class": "payload-secret"},
@@ -215,7 +259,7 @@ def test_lifecycle_allowlist_in_real_collector(tmp_path):
                         assert record.span_id == (0x12345678).to_bytes(8, "big")
                         records.append((resource["service.name"], {a.key: a.value for a in record.attributes}))
         assert {service for service, _attrs in records} == {"sie-gateway", "sie-worker", "sie-dispatcher"}
-        assert len(records) == 3
+        assert len(records) == 4
         allowed = {
             "event.name",
             "event.schema.version",

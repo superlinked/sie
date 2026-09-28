@@ -470,7 +470,17 @@ processors:
     log_statements:
       - context: resource
         statements:
-          - keep_keys(attributes, ["service.name", "service.instance.id", "deployment.environment", "cloud.region", "service.version"])
+          - set(cache["service.name"], attributes["service.name"])
+          - set(cache["service.instance.id"], attributes["service.instance.id"])
+          - set(cache["deployment.environment"], attributes["deployment.environment"])
+          - set(cache["cloud.region"], attributes["cloud.region"])
+          - set(cache["service.version"], attributes["service.version"])
+          - keep_keys(attributes, [])
+          - set(attributes["service.name"], cache["service.name"]) where cache["service.name"] != nil
+          - set(attributes["service.instance.id"], cache["service.instance.id"]) where cache["service.instance.id"] != nil
+          - set(attributes["deployment.environment"], cache["deployment.environment"]) where cache["deployment.environment"] != nil
+          - set(attributes["cloud.region"], cache["cloud.region"]) where cache["cloud.region"] != nil
+          - set(attributes["service.version"], cache["service.version"]) where cache["service.version"] != nil
           - set(schema_url, "")
       - context: scope
         statements:
@@ -480,7 +490,23 @@ processors:
           - set(schema_url, "")
       - context: log
         statements:
-          - keep_keys(attributes, ["event.name", "event.schema.version", "phase", "operation", "outcome", "error_class", "duration_ms", "first_token_ms"])
+          - set(cache["event.name"], attributes["event.name"])
+          - set(cache["event.schema.version"], attributes["event.schema.version"])
+          - set(cache["phase"], attributes["phase"])
+          - set(cache["operation"], attributes["operation"])
+          - set(cache["outcome"], attributes["outcome"])
+          - set(cache["error_class"], attributes["error_class"])
+          - set(cache["duration_ms"], attributes["duration_ms"])
+          - set(cache["first_token_ms"], attributes["first_token_ms"])
+          - keep_keys(attributes, [])
+          - set(attributes["event.name"], cache["event.name"]) where cache["event.name"] != nil
+          - set(attributes["event.schema.version"], cache["event.schema.version"]) where cache["event.schema.version"] != nil
+          - set(attributes["phase"], cache["phase"]) where cache["phase"] != nil
+          - set(attributes["operation"], cache["operation"]) where cache["operation"] != nil
+          - set(attributes["outcome"], cache["outcome"]) where cache["outcome"] != nil
+          - set(attributes["error_class"], cache["error_class"]) where cache["error_class"] != nil
+          - set(attributes["duration_ms"], cache["duration_ms"]) where cache["duration_ms"] != nil
+          - set(attributes["first_token_ms"], cache["first_token_ms"]) where cache["first_token_ms"] != nil
           - set(severity_text, "INFO")
           - set(severity_number, SEVERITY_NUMBER_INFO)
 
