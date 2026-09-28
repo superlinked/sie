@@ -1996,6 +1996,9 @@ mod tests {
         let subscriber = tracing_subscriber::registry()
             .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test")));
         let _guard = tracing::subscriber::set_default(subscriber);
+        // Keep two dispatchers alive so subscriber-less sibling tests cannot
+        // cache shared callsites as disabled through tracing-core's fast path.
+        let _callsite_guard = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
         for delivery in [
             WorkerTerminalDelivery::BackloggedBeforeFirstPoll,
             WorkerTerminalDelivery::AfterFirstDelta,

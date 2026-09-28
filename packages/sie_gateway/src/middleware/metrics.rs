@@ -363,6 +363,7 @@ mod tests {
         opentelemetry_sdk::trace::SdkTracerProvider,
         opentelemetry_sdk::trace::InMemorySpanExporter,
         tracing::subscriber::DefaultGuard,
+        tracing::Dispatch,
     ) {
         use opentelemetry::trace::TracerProvider;
         use tracing_subscriber::prelude::*;
@@ -378,13 +379,16 @@ mod tests {
             provider,
             exporter,
             tracing::subscriber::set_default(subscriber),
+            // Keep two dispatchers alive while subscriber-less sibling tests
+            // register shared callsites; avoid tracing-core's single-dispatcher fast path.
+            tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default()),
         )
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn response_ready_and_body_terminal_are_distinct() {
         use http_body_util::BodyExt;
-        let (_provider, exporter, _guard) = trace_capture();
+        let (_provider, exporter, _guard, _callsite_guard) = trace_capture();
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(2);
         let body = Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx));
         let body = Arc::new(Mutex::new(Some(body)));
@@ -436,7 +440,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn server_errors_survive_as_structural_status_but_rejections_do_not() {
-        let (_provider, exporter, _guard) = trace_capture();
+        let (_provider, exporter, _guard, _callsite_guard) = trace_capture();
         for status in [StatusCode::BAD_REQUEST, StatusCode::SERVICE_UNAVAILABLE] {
             let router = Router::new()
                 .route("/v1/encode/test", post(move || async move { status }))
@@ -463,7 +467,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn body_failure_and_client_drop_end_once_without_exception_text() {
         use http_body_util::BodyExt;
-        let (_provider, exporter, _guard) = trace_capture();
+        let (_provider, exporter, _guard, _callsite_guard) = trace_capture();
         let stream = futures_util::stream::iter([
             Ok(bytes::Bytes::from_static(b"first")),
             Err(std::io::Error::other("private exception payload")),
