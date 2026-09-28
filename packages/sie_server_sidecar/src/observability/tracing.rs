@@ -53,7 +53,7 @@ pub fn metrics_provider_enabled() -> bool {
 // resolvable inside this module.
 use sie_telemetry::env::{cleaned_env, sie_tracing_enabled};
 use sie_telemetry::exporters::build_span_exporter;
-use sie_telemetry::resource::{instance_prefix_env, resource_from_values, service_instance_id};
+use sie_telemetry::resource::{instance_prefix_env, resource_from_env, service_instance_id};
 use sie_telemetry::transport::{
     configured_signal_endpoints, endpoint_origin_for_log, otlp_metrics_protocol,
     trace_export_config, OtlpProtocol, SignalExportConfig,
@@ -243,7 +243,7 @@ fn otlp_resource_from_values(
     otel_cloud_region: Option<&str>,
     cloud_region: Option<&str>,
 ) -> Resource {
-    resource_from_values(
+    resource_from_env(
         service_name,
         service_instance_id,
         deployment_environment.unwrap_or(UNKNOWN_RESOURCE_VALUE),

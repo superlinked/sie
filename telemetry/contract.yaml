@@ -692,6 +692,18 @@ traces:
           - gateway.request
           - gateway.response_body
           - gateway.generation_stream
+          - gateway.dispatch
+          - gateway.dispatch.ipc
+          - gateway.dispatch.i6pn
+          - dispatcher.dispatch
+          - dispatcher.modal.remote
+          - dispatcher.modal.stream
+          - dispatcher.modal.spawn
+          - dispatcher.websocket
+          - dispatcher.i6pn
+          - dispatcher.fallback
+          - sidecar.local_ingest
+          - worker.local_ingest
           - gateway.publish
           - gateway.proxy
           - gateway.proxy_chat
