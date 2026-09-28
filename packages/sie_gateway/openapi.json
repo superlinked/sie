@@ -2591,7 +2591,7 @@
         "description": "OpenAI-compatible ``POST /v1/embeddings`` request (subset supported on gateway).",
         "properties": {
           "dimensions": {
-            "description": "Accepted but ignored; the gateway returns the model's native dimension.",
+            "description": "Requested embedding width. SIE always returns the model's native dense\nwidth, so this is accepted only when it equals that width; any other\nvalue is rejected with 400 `unsupported_field` rather than ignored.",
             "format": "int32",
             "minimum": 0,
             "type": [

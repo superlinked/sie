@@ -12542,6 +12542,70 @@ pub fn openai_embeddings_encode_body(input: &Value) -> Result<(Value, u64), Stri
     ))
 }
 
+/// The single-node server's `dimensions` rule: SIE never truncates, so only
+/// the model's native dense width is accepted. Applied only to a model this
+/// caller can see and the registry describes; the encode dispatch answers
+/// every other case, so a hidden model stays indistinguishable from an absent
+/// one.
+fn openai_embeddings_dimensions_error(
+    state: &AppState,
+    parsed: &Value,
+    model_spec: &str,
+    ext: &axum::http::Extensions,
+) -> Option<Response> {
+    let requested = match parsed.get("dimensions") {
+        None | Some(Value::Null) => return None,
+        Some(value) => value,
+    };
+    let Some(requested) = requested.as_i64() else {
+        return Some(
+            (
+                StatusCode::BAD_REQUEST,
+                Json(embeddings_error(
+                    err_code::INVALID_REQUEST,
+                    Some("dimensions"),
+                    "dimensions must be an integer",
+                )),
+            )
+                .into_response(),
+        );
+    };
+    let (model_name, _) = resolve_model_and_bundle(state, model_spec, ext).ok()?;
+    let native = state
+        .model_registry
+        .get_model_info(&model_name)?
+        .info_extras
+        .dims
+        .get("dense")
+        .copied();
+    if native == Some(requested) {
+        return None;
+    }
+    let message = match native {
+        Some(native) => format!(
+            "'dimensions' is not supported by this endpoint: model '{model_spec}' returns \
+             {native}-dimensional embeddings and SIE does not truncate them. Omit \
+             'dimensions', or set it to {native}."
+        ),
+        None => format!(
+            "'dimensions' is not supported by this endpoint: model '{model_spec}' declares \
+             no dense embedding width."
+        ),
+    };
+    Some(
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json_openai_error(
+                message,
+                oai_type::INVALID_REQUEST,
+                Some("dimensions"),
+                oai_code::UNSUPPORTED_FIELD,
+            )),
+        )
+            .into_response(),
+    )
+}
+
 fn openai_embedding_input_to_texts(input: &Value) -> Result<OpenAiEmbeddingInput, String> {
     match input {
         Value::String(s) => {
@@ -12727,6 +12791,11 @@ pub async fn proxy_openai_embeddings(State(state): State<Arc<AppState>>, req: Re
             )),
         )
             .into_response();
+    }
+    if let Some(response) =
+        openai_embeddings_dimensions_error(&state, &parsed, &model_str, &parts.extensions)
+    {
+        return response;
     }
     let input = parsed.get("input").cloned().unwrap_or(Value::Null);
     let (encode_body, token_count) = match openai_embeddings_encode_body(&input) {
@@ -18862,6 +18931,162 @@ mod tests {
         let err = openai_embedding_input_to_texts(&json!([[10, 20, 30], [40, 50]])).unwrap_err();
 
         assert!(err.contains("token-array embeddings input is not supported"));
+    }
+
+    /// A state whose populated registry routes `known/embedder` (384-wide
+    /// dense) and `known/sparse` (no dense output). The dirs must outlive the
+    /// state.
+    fn embeddings_dimensions_state() -> (AppState, tempfile::TempDir, tempfile::TempDir) {
+        let bundles_dir = tempfile::TempDir::new().unwrap();
+        let models_dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            bundles_dir.path().join("default.yaml"),
+            "name: default\nadapters:\n  - sie_server.adapters.sentence_transformer\ndefault: true\n",
+        )
+        .unwrap();
+        for (file, sie_id, encode) in [
+            ("embedder.yaml", "known/embedder", "dense:\n      dim: 384"),
+            ("sparse.yaml", "known/sparse", "sparse:\n      dim: 30522"),
+        ] {
+            std::fs::write(
+                models_dir.path().join(file),
+                format!(
+                    "sie_id: {sie_id}\ntasks:\n  encode:\n    {encode}\nprofiles:\n  default:\n    adapter_path: sie_server.adapters.sentence_transformer:Adapter\n"
+                ),
+            )
+            .unwrap();
+        }
+        let mut state = admission_test_state(Arc::new(PoolManager::new(vec!["l4".to_string()])));
+        state.model_registry = Arc::new(ModelRegistry::new(
+            bundles_dir.path(),
+            models_dir.path(),
+            true,
+        ));
+        (state, bundles_dir, models_dir)
+    }
+
+    async fn post_embeddings(state: AppState, body: Value) -> (StatusCode, Value) {
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/embeddings")
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let response = proxy_openai_embeddings(State(Arc::new(state)), req).await;
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    #[tokio::test]
+    async fn test_openai_embeddings_rejects_dimensions_the_model_does_not_produce() {
+        let (state, _bundles, _models) = embeddings_dimensions_state();
+
+        let (status, body) = post_embeddings(
+            state,
+            json!({"model": "known/embedder", "input": "hello", "dimensions": 256}),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body["error"],
+            json!({
+                "message": "'dimensions' is not supported by this endpoint: model 'known/embedder' returns 384-dimensional embeddings and SIE does not truncate them. Omit 'dimensions', or set it to 384.",
+                "type": "invalid_request_error",
+                "param": "dimensions",
+                "code": "unsupported_field",
+            })
+        );
+    }
+
+    #[test]
+    fn test_openai_embeddings_dimensions_matching_or_omitted_pass_through() {
+        let (state, _bundles, _models) = embeddings_dimensions_state();
+        let ext = axum::http::Extensions::new();
+        assert!(
+            openai_embeddings_dimensions_error(
+                &state,
+                &json!({"dimensions": 256}),
+                "known/embedder",
+                &ext
+            )
+            .is_some(),
+            "the fixture must resolve the model, or the pass-through below proves nothing"
+        );
+
+        for body in [
+            json!({"dimensions": 384}),
+            json!({"dimensions": null}),
+            json!({}),
+        ] {
+            assert!(
+                openai_embeddings_dimensions_error(&state, &body, "known/embedder", &ext).is_none(),
+                "{body}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_openai_embeddings_dimensions_for_a_model_without_dense_output() {
+        let (state, _bundles, _models) = embeddings_dimensions_state();
+
+        let (status, body) = post_embeddings(
+            state,
+            json!({"model": "known/sparse", "input": "hello", "dimensions": 256}),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "unsupported_field");
+        assert_eq!(
+            body["error"]["message"],
+            "'dimensions' is not supported by this endpoint: model 'known/sparse' declares no dense embedding width."
+        );
+    }
+
+    #[tokio::test]
+    async fn test_openai_embeddings_rejects_non_integer_dimensions() {
+        let (state, _bundles, _models) = embeddings_dimensions_state();
+
+        let (status, body) = post_embeddings(
+            state,
+            json!({"model": "known/embedder", "input": "hello", "dimensions": "384"}),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "invalid_request");
+        assert_eq!(body["error"]["param"], "dimensions");
+    }
+
+    #[tokio::test]
+    async fn test_openai_embeddings_dimensions_leave_unknown_and_hidden_models_to_dispatch() {
+        let (state, _bundles, _models) = embeddings_dimensions_state();
+        let ext = axum::http::Extensions::new();
+        assert!(openai_embeddings_dimensions_error(
+            &state,
+            &json!({"dimensions": 256}),
+            "unknown/model",
+            &ext
+        )
+        .is_none());
+
+        let mut responses = Vec::new();
+        for body in [
+            json!({"model": "known/embedder", "input": "hello", "dimensions": 256}),
+            json!({"model": "known/embedder", "input": "hello"}),
+        ] {
+            let (mut state, _bundles, _models) = embeddings_dimensions_state();
+            state.model_access_policy =
+                Some(hiding_policy() as Arc<dyn crate::server::ModelAccessPolicy>);
+            responses.push(post_embeddings(state, body).await);
+        }
+        assert_eq!(responses[0].0, StatusCode::NOT_FOUND);
+        assert_eq!(
+            responses[0], responses[1],
+            "a hidden model must answer a bad 'dimensions' exactly like an absent model"
+        );
     }
 
     #[test]

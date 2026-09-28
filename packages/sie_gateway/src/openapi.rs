@@ -1782,7 +1782,9 @@ pub struct OpenAIEmbeddingRequest {
     pub input: OpenAIEmbeddingInput,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encoding_format: Option<OpenAIEmbeddingEncodingFormat>,
-    /// Accepted but ignored; the gateway returns the model's native dimension.
+    /// Requested embedding width. SIE always returns the model's native dense
+    /// width, so this is accepted only when it equals that width; any other
+    /// value is rejected with 400 `unsupported_field` rather than ignored.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dimensions: Option<u32>,
     /// Accepted but ignored; kept for OpenAI SDK compatibility.
