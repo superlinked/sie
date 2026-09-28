@@ -294,6 +294,9 @@ def test_batch_fanin_survives_remote_privacy_with_local_links_intact(tmp_path, r
         for point in points:
             assert point["attributes"] == [{"key": "filter", "value": {"stringValue": "filter/remote_linked_spans"}}]
     finally:
-        logs = run("docker", "logs", container, include_stderr=True)
-        run("docker", "rm", "-f", container)
-        assert "Error: " not in logs, logs
+        try:
+            run("docker", "stop", "--time", "10", container)
+            logs = run("docker", "logs", container, include_stderr=True)
+            assert "Error: " not in logs, logs
+        finally:
+            run("docker", "rm", "-f", container)
