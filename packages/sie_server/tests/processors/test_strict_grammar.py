@@ -133,6 +133,33 @@ def test_json_schema_internal_refs_resolve_and_remote_refs_are_never_fetched(
     assert output_violation(remote, "{}") == "generated output could not be verified against the requested grammar"
 
 
+def test_unevaluated_properties_is_never_evaluated_with_unbounded_patterns(monkeypatch: pytest.MonkeyPatch) -> None:
+    def refuse_validation(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("jsonschema must not evaluate unevaluatedProperties")
+
+    monkeypatch.setattr(strict_grammar, "_bounded_validator_class", refuse_validation)
+    schema = {
+        "type": "object",
+        "properties": {"child": {"patternProperties": {"(a|aa)+$": {}}, "unevaluatedProperties": False}},
+    }
+    grammar = GrammarSpec(kind="json_schema", value=schema, strict=True)
+
+    assert strict_grammar.unverifiable_schema_keyword(schema) == "unevaluatedProperties"
+    assert output_violation(grammar, '{"child": {}}') == (
+        "generated output could not be verified against the requested grammar"
+    )
+
+
+def test_unevaluated_properties_as_a_property_name_is_verifiable() -> None:
+    schema = {"type": "object", "properties": {"unevaluatedProperties": {"type": "string"}}}
+
+    assert strict_grammar.unverifiable_schema_keyword(schema) is None
+    assert (
+        output_violation(GrammarSpec(kind="json_schema", value=schema, strict=True), '{"unevaluatedProperties": "x"}')
+        is None
+    )
+
+
 @pytest.mark.parametrize(
     ("text", "expected"),
     [

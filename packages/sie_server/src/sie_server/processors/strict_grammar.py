@@ -49,6 +49,24 @@ _UNVERIFIABLE_MESSAGE = "generated output could not be verified against the requ
 # without a tool call; per-choice eligibility is decided in ``_terminal_outputs``.
 _VERIFIED_TERMINAL_REASONS = frozenset({"stop", "tool_calls"})
 
+_UNVERIFIABLE_SCHEMA_KEYWORDS = ("unevaluatedProperties",)
+_SCHEMA_MAP_KEYWORDS = frozenset({"properties", "patternProperties", "$defs", "definitions", "dependentSchemas"})
+_SCHEMA_ARRAY_KEYWORDS = frozenset({"allOf", "anyOf", "oneOf", "prefixItems"})
+_SUBSCHEMA_KEYWORDS = frozenset(
+    {
+        "additionalProperties",
+        "contains",
+        "else",
+        "if",
+        "items",
+        "not",
+        "propertyNames",
+        "then",
+        "unevaluatedItems",
+        "unevaluatedProperties",
+    }
+)
+
 _pattern_deadline: ContextVar[float] = ContextVar("strict_grammar_pattern_deadline")
 
 
@@ -186,11 +204,54 @@ def _reject_json_constant(value: str) -> Any:
     raise ValueError(f"{value} is not valid JSON")
 
 
+def unverifiable_schema_keyword(schema: Any) -> str | None:
+    """Return a keyword the verifier cannot evaluate within its pattern budget.
+
+    ``unevaluatedProperties`` resolves ``patternProperties`` through the
+    standard-library ``re`` engine inside ``jsonschema``, outside the bounded
+    ``regex`` engine used for every other pattern keyword.
+    """
+    return _find_schema_keyword(schema, "schema")
+
+
+def _find_schema_keyword(value: Any, context: str) -> str | None:
+    if isinstance(value, dict):
+        if context == "schema":
+            for keyword in _UNVERIFIABLE_SCHEMA_KEYWORDS:
+                if keyword in value:
+                    return keyword
+        for key, child in value.items():
+            if found := _find_schema_keyword(child, _schema_child_context(context, key)):
+                return found
+    elif isinstance(value, list):
+        child_context = "schema" if context in {"schema", "schema_array"} else "other"
+        for item in value:
+            if found := _find_schema_keyword(item, child_context):
+                return found
+    return None
+
+
+def _schema_child_context(parent: str, key: str) -> str:
+    if parent == "schema_map":
+        return "schema"
+    if parent != "schema":
+        return "other"
+    if key in _SCHEMA_MAP_KEYWORDS:
+        return "schema_map"
+    if key in _SCHEMA_ARRAY_KEYWORDS:
+        return "schema_array"
+    if key in _SUBSCHEMA_KEYWORDS:
+        return "schema"
+    return "other"
+
+
 def _json_schema_violation(schema: dict[str, Any], text: str) -> str | None:
     try:
         instance = json.loads(text, parse_constant=_reject_json_constant)
     except (ValueError, RecursionError):
         return "generated output is not valid JSON"
+    if unverifiable_schema_keyword(schema) is not None:
+        return _UNVERIFIABLE_MESSAGE
     validator_class = _bounded_validator_class(validators.validator_for(schema, default=Draft202012Validator))
     error = next(validator_class(schema, registry=_LOCAL_REFERENCES).iter_errors(instance), None)
     if error is None:

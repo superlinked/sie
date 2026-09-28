@@ -1608,6 +1608,29 @@ def _serve_grammar_routed_configs(registry: MagicMock, *, without: tuple[str, ..
     registry.get_config.side_effect = configs.__getitem__
 
 
+def test_cuda_chat_strict_schema_with_unevaluated_properties_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _handler(_request: httpx.Request) -> httpx.Response:
+        raise AssertionError("an unverifiable strict schema must not reach the child")
+
+    client, registry = _cuda_chat_client(monkeypatch, _handler)
+    response_format = {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "answer",
+            "strict": True,
+            "schema": {"type": "object", "unevaluatedProperties": False},
+        },
+    }
+
+    response = client.post("/v1/chat/completions", json=_chat_request(response_format))
+
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["code"] == "unsupported_field"
+    assert error["param"] == "response_format"
+    registry.get.assert_not_called()
+
+
 def test_cuda_chat_response_format_runs_on_the_grammar_profile(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: dict[str, Any] = {}
 

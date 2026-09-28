@@ -63,7 +63,11 @@ from sie_server.core.video_frames import (
 )
 from sie_server.observability.tracing import tracer
 from sie_server.processors.streaming import _decode_data_uri_image
-from sie_server.processors.strict_grammar import MODEL_OUTPUT_PARSE_ERROR, first_output_violation
+from sie_server.processors.strict_grammar import (
+    MODEL_OUTPUT_PARSE_ERROR,
+    first_output_violation,
+    unverifiable_schema_keyword,
+)
 from sie_server.types.grammar import GrammarSpec
 from sie_server.types.inputs import Item, item_size_error
 from sie_server.types.responses import ErrorCode
@@ -1018,6 +1022,12 @@ async def _chat_completions(
         except GenerationUnsupportedFieldError as exc:
             raise _bad_request(str(exc), param="response_format", code="unsupported_field") from exc
     strict_grammar = _strict_response_format_grammar(body.get("response_format"))
+    if strict_grammar is not None and (keyword := unverifiable_schema_keyword(strict_grammar.value)) is not None:
+        raise _bad_request(
+            f"'{keyword}' is not supported in a strict response_format schema",
+            param="response_format",
+            code="unsupported_field",
+        )
 
     with tracer.start_as_current_span("chat_completions") as span:
         span.set_attribute("model", model)
