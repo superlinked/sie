@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from collections import Counter
-from unittest.mock import MagicMock
+from unittest.mock import create_autospec
 
 import dspy
 from sie_dspy import SIEExtractor, SIEReranker
 from sie_dspy.modules import Entity
+from sie_sdk import SIEClient
 
 
 class TestSIEReranker:
@@ -71,18 +72,17 @@ class TestSIEReranker:
         passages = [f"doc-{i}" for i in range(5)]
         # Ranked entries reference input positions via item_id (doc-3 = index 3
         # is most relevant), out of input order.
-        mock_sie_client.score = MagicMock(
-            return_value={
-                "model": "test-reranker",
-                "scores": [
-                    {"item_id": "3", "score": 0.9, "rank": 0},
-                    {"item_id": "1", "score": 0.7, "rank": 1},
-                    {"item_id": "4", "score": 0.5, "rank": 2},
-                    {"item_id": "0", "score": 0.3, "rank": 3},
-                    {"item_id": "2", "score": 0.1, "rank": 4},
-                ],
-            }
-        )
+        mock_sie_client.score.side_effect = None
+        mock_sie_client.score.return_value = {
+            "model": "test-reranker",
+            "scores": [
+                {"item_id": "3", "score": 0.9, "rank": 0},
+                {"item_id": "1", "score": 0.7, "rank": 1},
+                {"item_id": "4", "score": 0.5, "rank": 2},
+                {"item_id": "0", "score": 0.3, "rank": 3},
+                {"item_id": "2", "score": 0.1, "rank": 4},
+            ],
+        }
         reranker = SIEReranker(model="test-reranker")
         reranker._client = mock_sie_client
 
@@ -97,20 +97,19 @@ class TestSIEReranker:
         # Only item_id "1" is usable; the rest are malformed. The float 1.5 and
         # bool True come after the valid "1": if int() accepted them
         # (int(1.5) == 1, int(True) == 1) they would overwrite doc-1's score.
-        mock_sie_client.score = MagicMock(
-            return_value={
-                "model": "test-reranker",
-                "scores": [
-                    {"item_id": "1", "score": 0.8, "rank": 0},
-                    {"item_id": "not-an-int", "score": 0.95, "rank": 1},
-                    {"item_id": "-1", "score": 0.9, "rank": 2},
-                    {"item_id": "99", "score": 0.7, "rank": 3},
-                    {"score": 0.5, "rank": 4},
-                    {"item_id": 1.5, "score": 0.99, "rank": 5},
-                    {"item_id": True, "score": 0.98, "rank": 6},
-                ],
-            }
-        )
+        mock_sie_client.score.side_effect = None
+        mock_sie_client.score.return_value = {
+            "model": "test-reranker",
+            "scores": [
+                {"item_id": "1", "score": 0.8, "rank": 0},
+                {"item_id": "not-an-int", "score": 0.95, "rank": 1},
+                {"item_id": "-1", "score": 0.9, "rank": 2},
+                {"item_id": "99", "score": 0.7, "rank": 3},
+                {"score": 0.5, "rank": 4},
+                {"item_id": 1.5, "score": 0.99, "rank": 5},
+                {"item_id": True, "score": 0.98, "rank": 6},
+            ],
+        }
         reranker = SIEReranker(model="test-reranker")
         reranker._client = mock_sie_client
 
@@ -205,14 +204,12 @@ class TestSIEExtractor:
 
     def test_extract_empty_result(self) -> None:
         """Test extraction with no entities found."""
-        from unittest.mock import MagicMock
-
         extractor = SIEExtractor(
             model="test-extractor",
             labels=["very_specific_label"],
         )
         # Create a fresh mock that returns empty
-        empty_mock = MagicMock()
+        empty_mock = create_autospec(SIEClient, instance=True)
         empty_mock.extract.return_value = []
         extractor._client = empty_mock
 

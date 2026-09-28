@@ -138,16 +138,15 @@ class TestSIEDocumentEnricher:
         enricher._client = mock_sie_client
 
         # Manually set up a result with duplicate entities
-        mock_sie_client.extract = MagicMock(
-            return_value=[
-                {
-                    "entities": [
-                        {"text": "John", "label": "person", "score": 0.9, "start": 0, "end": 4},
-                        {"text": "John", "label": "person", "score": 0.8, "start": 20, "end": 24},
-                    ],
-                }
-            ]
-        )
+        mock_sie_client.extract.side_effect = None
+        mock_sie_client.extract.return_value = [
+            {
+                "entities": [
+                    {"text": "John", "label": "person", "score": 0.9, "start": 0, "end": 4},
+                    {"text": "John", "label": "person", "score": 0.8, "start": 20, "end": 24},
+                ],
+            }
+        ]
 
         docs = enricher.enrich(["John met John."])
 

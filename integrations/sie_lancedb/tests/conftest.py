@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import NonCallableMagicMock, create_autospec
 
 import numpy as np
 import pyarrow as pa
 import pytest
+from sie_sdk import SIEClient
 
 EMBEDDING_DIM = 384
 MULTIVECTOR_TOKEN_DIM = 128
@@ -89,9 +90,9 @@ def _create_mock_extract_result(text: str, labels: list[str]) -> dict[str, Any]:
 
 
 @pytest.fixture
-def mock_sie_client() -> MagicMock:
+def mock_sie_client() -> NonCallableMagicMock:
     """Create a mocked SIEClient for unit testing."""
-    client = MagicMock()
+    client = create_autospec(SIEClient, instance=True)
 
     def mock_encode(
         _model: str,
@@ -169,10 +170,10 @@ def mock_sie_client() -> MagicMock:
             raise RequestError(404, f"Model '{model_name}' not found")
         return _model_registry[model_name]
 
-    client.encode = MagicMock(side_effect=mock_encode)
-    client.score = MagicMock(side_effect=mock_score)
-    client.extract = MagicMock(side_effect=mock_extract)
-    client.get_model = MagicMock(side_effect=mock_get_model)
+    client.encode.side_effect = mock_encode
+    client.score.side_effect = mock_score
+    client.extract.side_effect = mock_extract
+    client.get_model.side_effect = mock_get_model
     client.base_url = "http://localhost:8080"
 
     return client

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections import Counter
-from unittest.mock import MagicMock
 
 from haystack import Document
 from sie_haystack import SIERanker
@@ -70,7 +69,8 @@ class TestSIERanker:
     def test_run_maps_scores_by_item_id(self, mock_sie_client: object) -> None:
         """Top-ranked document is the relevant one, scores mapped by item_id."""
         documents = [Document(content=f"doc-{i}") for i in range(5)]
-        mock_sie_client.score = MagicMock(return_value=_RANKED_ENVELOPE)
+        mock_sie_client.score.side_effect = None
+        mock_sie_client.score.return_value = _RANKED_ENVELOPE
         ranker = SIERanker(model="test-reranker")
         ranker._client = mock_sie_client
 
@@ -83,7 +83,8 @@ class TestSIERanker:
     def test_run_skips_malformed_item_id(self, mock_sie_client: object) -> None:
         """Malformed item_ids are skipped (no crash, no misassignment)."""
         documents = [Document(content=f"doc-{i}") for i in range(3)]
-        mock_sie_client.score = MagicMock(return_value=_MALFORMED_ENVELOPE)
+        mock_sie_client.score.side_effect = None
+        mock_sie_client.score.return_value = _MALFORMED_ENVELOPE
         ranker = SIERanker(model="test-reranker")
         ranker._client = mock_sie_client
 
