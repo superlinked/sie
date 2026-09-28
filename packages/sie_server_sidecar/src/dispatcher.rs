@@ -1882,7 +1882,8 @@ impl Dispatcher {
     /// `EnsureModelReady` for `items`. A parked group's call is bounded by its
     /// readiness deadline and progress-ACKs the group while it is pending, so
     /// a slow call neither outlives the deadline nor lets JetStream redeliver
-    /// the group; `None` when the deadline passes first.
+    /// the group. `None` when the group was NAKed instead: the deadline passed
+    /// first, or a progress ACK failed.
     async fn ensure_model_ready_by(
         &self,
         model_id: &str,
@@ -1902,9 +1903,13 @@ impl Dispatcher {
                 result = &mut readiness => return Some(result),
                 () = tokio::time::sleep_until(next_progress) => {
                     if next_progress >= deadline {
+                        self.nak_group_past_ready_deadline(model_id, items).await;
                         return None;
                     }
-                    progress_all(items, &self.runtime_state.telemetry).await;
+                    if !progress_all(items, &self.runtime_state.telemetry).await {
+                        nak_all(items, base_nak_delay_ms(), &self.runtime_state.telemetry).await;
+                        return None;
+                    }
                 }
             }
         }
@@ -1959,7 +1964,6 @@ impl Dispatcher {
                 .ensure_model_ready_by(model_id, &items, ready_deadline)
                 .await
             else {
-                self.nak_group_past_ready_deadline(model_id, &items).await;
                 return Ok(());
             };
             let readiness_resp = match readiness {
@@ -5987,6 +5991,53 @@ mod tests {
 
     /// Far longer than any readiness deadline the tests use.
     const STALLED_PROBE: Duration = Duration::from_secs(1_000_000);
+
+    /// A NATS delivery whose ACK, NAK and progress calls fail: it has no
+    /// reply subject and its client never reaches a server.
+    async fn unacknowledgeable_nats_delivery() -> Delivery {
+        let client = async_nats::ConnectOptions::new()
+            .retry_on_initial_connect()
+            .connect("nats://127.0.0.1:1")
+            .await
+            .expect("an offline client needs no server");
+        let message = Message {
+            message: async_nats::Message {
+                subject: "sie.work.test".into(),
+                reply: None,
+                payload: Default::default(),
+                headers: None,
+                status: None,
+                description: None,
+                length: 0,
+            },
+            context: async_nats::jetstream::new(client),
+        };
+        Delivery::Nats(message, None)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_progress_ack_ends_the_parked_wait() {
+        let slow_probe = Duration::from_secs(crate::nats_consumer::ACK_WAIT_SECS * 3);
+        let backend = LoadingModelBackend::with_later_probe_delay("cold", Some(slow_probe));
+        let dispatcher = dispatcher_with_backend(backend.clone());
+        let group = vec![(
+            wi("cold-req", 0, "cold", "encode"),
+            unacknowledgeable_nats_delivery().await,
+        )];
+
+        dispatcher.dispatch_decoded(group, 1, Instant::now()).await;
+        backend.loaded.store(true, Ordering::SeqCst);
+        let started = tokio::time::Instant::now();
+        dispatcher
+            .join_parked_groups(crate::nats_consumer::redelivery_envelope() * 2)
+            .await;
+
+        assert!(
+            started.elapsed() < slow_probe,
+            "the wait must end at the first failed progress ACK, not when readiness returns"
+        );
+        assert!(backend.encoded_models().is_empty());
+    }
 
     #[tokio::test(start_paused = true)]
     async fn a_parked_readiness_call_slower_than_the_ack_wait_still_dispatches() {
