@@ -42,7 +42,12 @@ from sie_server.adapters._generation_base import (
 from sie_server.api.generate import _generation_http_exception
 from sie_server.api.helpers import ModelStateChecker, check_sdk_version
 from sie_server.api.validation import validate_machine_profile_header, validate_signed_i64
-from sie_server.core.runtime_options import apply_generation_runtime_options
+from sie_server.core.runtime_options import (
+    GenerationTimeoutError,
+    apply_generation_runtime_options,
+    bound_generation,
+    resolve_generation_timeouts,
+)
 from sie_server.observability.tracing import tracer
 from sie_server.types.openapi import OpenAICompletionResponseModel
 
@@ -152,6 +157,10 @@ def _from_http_exception(exc: HTTPException) -> _CompletionError:
 def _from_generation_error(error: GenerationError, registry: Any) -> _CompletionError:
     """Preserve the native generation error contract on compatibility routes."""
     return _from_http_exception(_generation_http_exception(error, registry))
+
+
+def _generation_timeout_error(error: GenerationTimeoutError) -> _CompletionError:
+    return _CompletionError(str(error), status_code=status.HTTP_504_GATEWAY_TIMEOUT, code=error.code)
 
 
 def _validated_retry_after_s(error: _CompletionError) -> int | None:
@@ -590,6 +599,7 @@ async def _collect_completion(chunks: AsyncIterator[GenerationChunk]) -> tuple[s
         413: {"description": "Request body or prompt is too large"},
         500: {"description": "Generation failed"},
         503: {"description": "Model loading or temporarily unavailable"},
+        504: {"description": "Non-streaming generation exceeded its first_chunk_timeout_s or overall_timeout_s"},
     },
     openapi_extra={
         "requestBody": {
@@ -724,9 +734,13 @@ async def completions(
                 )
 
             try:
-                text, terminal = await _collect_completion(chunks)
+                text, terminal = await _collect_completion(
+                    bound_generation(chunks, resolve_generation_timeouts(config, None))
+                )
             except _CompletionError:
                 raise
+            except GenerationTimeoutError as exc:
+                raise _generation_timeout_error(exc) from exc
             except GenerationError as exc:
                 raise _from_generation_error(exc, registry) from exc
             except Exception as exc:

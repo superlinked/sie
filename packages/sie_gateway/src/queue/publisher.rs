@@ -550,6 +550,11 @@ struct WorkItemRef<'a> {
     pub router_id: &'a str,
     pub reply_subject: &'a str,
     pub timestamp: f64,
+    /// Absolute Unix-epoch seconds, on the same gateway clock as `timestamp`,
+    /// after which no caller waits for this item. Omitted when unknown; older
+    /// workers ignore the unknown map field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deadline: Option<f64>,
     /// Rolling-upgrade negotiation for `result_chunk_v1` specifically. Older
     /// workers ignore this unknown map field; workers must keep publishing the
     /// legacy one-shot ``WorkResult`` unless it is true. A future chunk version
@@ -581,6 +586,7 @@ struct WorkItemShared<'a> {
     reply_subject: &'a str,
     params: &'a WorkParams,
     timestamp: f64,
+    deadline: Option<f64>,
     /// W3C trace context captured once at publish-call time. The
     /// shared block is what every per-item [`WorkItemRef`] borrows
     /// from, so the propagator runs once per request rather than
@@ -1734,6 +1740,12 @@ fn monitor_publish_acks(
     DispatchDurability::from_future(
         async move { await_publish_acks(&request_id, context, acks).await },
     )
+}
+
+/// The request's result wait as an absolute instant on the envelope clock.
+fn work_item_deadline(timestamp: f64, result_timeout: Duration) -> Option<f64> {
+    let deadline = timestamp + result_timeout.as_secs_f64();
+    (timestamp > 0.0 && deadline.is_finite()).then_some(deadline)
 }
 
 pub(crate) fn initial_publish_ack_count(endpoint: &str, request_items: usize) -> usize {
@@ -3063,6 +3075,7 @@ impl WorkPublisher {
             reply_subject: &reply_subject,
             params,
             timestamp,
+            deadline: work_item_deadline(timestamp, self.result_timeout),
             traceparent: traceparent.as_deref(),
             tracestate: tracestate.as_deref(),
         });
@@ -3110,9 +3123,11 @@ impl WorkPublisher {
                             )
                             .await
                             {
-                                self.pending_results.remove(&request_id);
-                                self.cleanup_offloaded_payloads(&request_id).await;
-                                self.cleanup_offloaded_generate(&request_id).await;
+                                self.abort_pending_dispatch(
+                                    &request_id,
+                                    PendingDispatchKind::Result,
+                                )
+                                .await;
                                 return Err(format!("{e}; {ack_error}"));
                             }
                             if let Some(mut entry) = self.pending_results.get_mut(&request_id) {
@@ -3373,6 +3388,7 @@ impl WorkPublisher {
             router_id: shared.router_id,
             reply_subject: shared.reply_subject,
             timestamp: shared.timestamp,
+            deadline: shared.deadline,
             accepts_result_chunks: true,
             traceparent: shared.traceparent,
             tracestate: shared.tracestate,
@@ -3571,6 +3587,7 @@ impl WorkPublisher {
             reply_subject: &reply_subject,
             params,
             timestamp,
+            deadline: None,
             traceparent: traceparent.as_deref(),
             tracestate: tracestate.as_deref(),
         };
@@ -3716,6 +3733,7 @@ impl WorkPublisher {
             reply_subject: &reply_subject,
             params,
             timestamp,
+            deadline: None,
             traceparent: traceparent.as_deref(),
             tracestate: tracestate.as_deref(),
         };
@@ -3781,10 +3799,14 @@ impl WorkPublisher {
     /// Removal happens before the awaited object-store deletes, so request
     /// state stops accumulating even if cleanup needs the periodic retry
     /// backstop. Both cleanup helpers are idempotent and exact-key scoped.
+    /// A failed ACK does not prove the broker discarded the message, so
+    /// non-streaming work is also signalled with `work_cancel` before its
+    /// offloaded input is deleted, exactly like other request abandonment.
     pub async fn abort_pending_dispatch(&self, request_id: &str, kind: PendingDispatchKind) {
         match kind {
             PendingDispatchKind::Result => {
                 self.pending_results.remove(request_id);
+                self.publish_work_cancel(request_id).await;
             }
             PendingDispatchKind::Stream => {
                 self.pending_streams.remove(request_id);
@@ -3991,6 +4013,7 @@ impl WorkPublisher {
             router_id: shared.router_id,
             reply_subject: shared.reply_subject,
             timestamp: shared.timestamp,
+            deadline: shared.deadline,
             accepts_result_chunks: true,
             traceparent: shared.traceparent,
             tracestate: shared.tracestate,
@@ -4285,6 +4308,7 @@ impl WorkPublisher {
             router_id: shared.router_id,
             reply_subject: shared.reply_subject,
             timestamp: shared.timestamp,
+            deadline: shared.deadline,
             accepts_result_chunks: true,
             traceparent: shared.traceparent,
             tracestate: shared.tracestate,
@@ -6131,6 +6155,8 @@ mod tests {
         pub reply_subject: String,
         #[serde(default)]
         pub timestamp: f64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub deadline: Option<f64>,
         #[serde(default)]
         pub accepts_result_chunks: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -7471,6 +7497,7 @@ mod tests {
             router_id: "router-1".to_string(),
             reply_subject: "_INBOX.r1.req-1".to_string(),
             timestamp: 1700000000.0,
+            deadline: None,
             accepts_result_chunks: true,
             traceparent: None,
             tracestate: None,
@@ -7478,6 +7505,15 @@ mod tests {
 
         let encoded = rmp_serde::to_vec_named(&item).unwrap();
         let decoded: WorkItem = rmp_serde::from_slice(&encoded).unwrap();
+        let wire: rmpv::Value = rmp_serde::from_slice(&encoded).unwrap();
+        assert!(
+            wire.as_map()
+                .unwrap()
+                .iter()
+                .all(|(key, _)| key.as_str() != Some("deadline")),
+            "an unknown deadline must stay off the wire"
+        );
+        assert_eq!(decoded.deadline, None);
 
         assert_eq!(decoded.work_item_id, "req-1.0");
         assert_eq!(decoded.request_id, "req-1");
@@ -7563,6 +7599,7 @@ mod tests {
             router_id: "router-1".to_string(),
             reply_subject: "_INBOX.router-1.req-ref".to_string(),
             timestamp: 1_700_000_000.5,
+            deadline: Some(1_700_000_120.5),
             accepts_result_chunks: true,
             traceparent: None,
             tracestate: None,
@@ -7604,6 +7641,7 @@ mod tests {
             router_id: &owned.router_id,
             reply_subject: &owned.reply_subject,
             timestamp: owned.timestamp,
+            deadline: owned.deadline,
             accepts_result_chunks: true,
             traceparent: owned.traceparent.as_deref(),
             tracestate: owned.tracestate.as_deref(),
@@ -7621,6 +7659,25 @@ mod tests {
         assert_eq!(decoded.work_item_id, owned.work_item_id);
         assert_eq!(decoded.item, owned.item);
         assert_eq!(decoded.options, owned.options);
+        assert_eq!(decoded.deadline, owned.deadline);
+
+        #[derive(Deserialize)]
+        struct PreDeadlineWorkItem {
+            request_id: String,
+            timestamp: f64,
+        }
+        let legacy: PreDeadlineWorkItem = rmp_serde::from_slice(&ref_bytes).unwrap();
+        assert_eq!(legacy.request_id, owned.request_id);
+        assert_eq!(legacy.timestamp, owned.timestamp);
+    }
+
+    #[test]
+    fn work_item_deadline_is_the_publish_timestamp_plus_the_result_wait() {
+        assert_eq!(
+            work_item_deadline(1_700_000_000.25, Duration::from_millis(120_500)),
+            Some(1_700_000_120.75)
+        );
+        assert_eq!(work_item_deadline(0.0, Duration::from_secs(120)), None);
     }
 
     #[test]
@@ -7763,6 +7820,7 @@ mod tests {
             router_id: String::new(),
             reply_subject: "_INBOX.r1.req-2".to_string(),
             timestamp: 0.0,
+            deadline: None,
             accepts_result_chunks: true,
             traceparent: None,
             tracestate: None,
@@ -8444,6 +8502,7 @@ mod tests {
             router_id: String::new(),
             reply_subject: "_INBOX.r.req-x".to_string(),
             timestamp: 1.0,
+            deadline: None,
             accepts_result_chunks: true,
             traceparent: None,
             tracestate: None,
@@ -8594,6 +8653,7 @@ mod tests {
             router_id: String::new(),
             reply_subject: "_INBOX.r.req-tp".to_string(),
             timestamp: 1.0,
+            deadline: None,
             accepts_result_chunks: true,
             traceparent: Some(tp.to_string()),
             tracestate: Some(ts.to_string()),
@@ -8639,6 +8699,7 @@ mod tests {
             router_id: String::new(),
             reply_subject: "_INBOX.r.req-tp2".to_string(),
             timestamp: 1.0,
+            deadline: None,
             accepts_result_chunks: true,
             traceparent: None,
             tracestate: None,
@@ -9056,6 +9117,156 @@ mod tests {
 
         // Best-effort cleanup so repeated local runs don't accumulate
         // per-run streams on a persistent broker.
+        let _ = async_nats::jetstream::new(client.clone())
+            .delete_stream(stream_name(&pool))
+            .await;
+    }
+
+    /// NATS-gated: every non-streaming item carries the request's absolute
+    /// deadline, and a durability failure on a non-streaming dispatch sends
+    /// the request-wide `work_cancel` that workers honour before execution.
+    #[tokio::test]
+    async fn publish_work_stamps_deadline_and_failed_durability_cancels_work() {
+        use futures_util::StreamExt;
+
+        let Ok(url) = std::env::var("NATS_URL") else {
+            eprintln!("skipping: NATS_URL not set");
+            return;
+        };
+        let client =
+            match tokio::time::timeout(Duration::from_secs(2), async_nats::connect(&url)).await {
+                Ok(Ok(c)) => c,
+                _ => {
+                    eprintln!("skipping: could not connect to NATS at {url}");
+                    return;
+                }
+            };
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let pool = format!("deadlinepool{nanos}");
+        let router_id = format!("deadlinegw{nanos}");
+        let model = "BAAI__bge-m3";
+        let result_timeout = Duration::from_secs(7);
+
+        let publisher = Arc::new(WorkPublisher::new(
+            async_nats::jetstream::new(client.clone()),
+            router_id.clone(),
+            Arc::new(crate::queue::payload_store::DisabledPayloadStore),
+            result_timeout,
+            1024,
+            WorkStreamConfig {
+                max_age: Duration::from_secs(300),
+                storage: jetstream::stream::StorageType::Memory,
+                num_replicas: 1,
+            },
+        ));
+        publisher
+            .start_inbox_subscription(&client)
+            .await
+            .expect("start inbox subscription");
+
+        let target = PublishTarget::Pool {
+            pool: pool.clone(),
+            machine_profile: "l4".to_string(),
+            bundle: "default".to_string(),
+            model: model.to_string(),
+        };
+        let subject = target.subject();
+        let stream = async_nats::jetstream::new(client.clone())
+            .get_or_create_stream(jetstream::stream::Config {
+                name: stream_name(&pool),
+                subjects: vec![format!("sie.work.{pool}.*.*.*")],
+                retention: jetstream::stream::RetentionPolicy::WorkQueue,
+                storage: jetstream::stream::StorageType::Memory,
+                max_age: Duration::from_secs(300),
+                max_messages: 100_000,
+                discard: jetstream::stream::DiscardPolicy::New,
+                ..Default::default()
+            })
+            .await
+            .expect("create work stream");
+        stream
+            .create_consumer(jetstream::consumer::pull::Config {
+                durable_name: Some("deadlineworker".to_string()),
+                filter_subject: subject.clone(),
+                ..Default::default()
+            })
+            .await
+            .expect("create work consumer");
+
+        let mut work_sub = client.subscribe(subject.clone()).await.expect("subscribe");
+        let mut cancel_sub = client
+            .subscribe(format!("work_cancel.{router_id}.>"))
+            .await
+            .expect("subscribe work_cancel");
+        client.flush().await.expect("flush");
+
+        let items = ["first", "second"]
+            .into_iter()
+            .map(|text| {
+                rmpv::Value::Map(vec![(
+                    rmpv::Value::String("text".into()),
+                    rmpv::Value::String(text.into()),
+                )])
+            })
+            .collect();
+        let (request_id, _rx, durability) = publisher
+            .publish_work(
+                target,
+                &pool,
+                "encode",
+                model,
+                "pytorch",
+                "",
+                items,
+                &WorkParams::default(),
+            )
+            .await
+            .expect("publish_work");
+        durability.wait().await.expect("durable publish ACK");
+
+        for _ in 0..2 {
+            let msg = tokio::time::timeout(Duration::from_secs(5), work_sub.next())
+                .await
+                .expect("timed out waiting for a published work item")
+                .expect("subscription closed before a message arrived");
+            let work: WorkItem =
+                rmp_serde::from_slice(&msg.payload).expect("decode work-item envelope");
+            assert_eq!(work.request_id, request_id);
+            let deadline = work
+                .deadline
+                .expect("non-streaming work must carry a deadline");
+            assert!(
+                (deadline - work.timestamp - result_timeout.as_secs_f64()).abs() < 1e-6,
+                "deadline {deadline} must be the publish timestamp {} plus the result wait",
+                work.timestamp
+            );
+        }
+
+        publisher
+            .abort_pending_dispatch(&request_id, PendingDispatchKind::Result)
+            .await;
+        let cancel = tokio::time::timeout(Duration::from_secs(5), cancel_sub.next())
+            .await
+            .expect("a failed non-streaming dispatch must publish work_cancel")
+            .expect("cancel subscription closed");
+        assert_eq!(
+            cancel.subject.as_str(),
+            format!("work_cancel.{router_id}.{request_id}")
+        );
+
+        publisher
+            .abort_pending_dispatch("streaming-request", PendingDispatchKind::Stream)
+            .await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(250), cancel_sub.next())
+                .await
+                .is_err(),
+            "a streaming dispatch failure keeps the generation cancel contract"
+        );
+
         let _ = async_nats::jetstream::new(client.clone())
             .delete_stream(stream_name(&pool))
             .await;

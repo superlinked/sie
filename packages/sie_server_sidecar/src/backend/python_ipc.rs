@@ -6,6 +6,7 @@
 //! module just maps the IPC error types to [`BackendError`].
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use tracing::{debug, warn};
@@ -111,6 +112,17 @@ impl InferenceBackend for PythonIpcBackend {
         // JetStream redelivers into either the scheduler (if the
         // model still routes to the worker-sidecar) or the per-op Python path.
         self.ipc.run_batch(req).await.map_err(map_ipc_error)
+    }
+
+    async fn run_batch_with_budget(
+        &self,
+        req: RunBatchRequest,
+        budget: Option<Duration>,
+    ) -> Result<BatchOutcome, BackendError> {
+        self.ipc
+            .run_batch_with_budget(req, budget)
+            .await
+            .map_err(map_ipc_error)
     }
 
     async fn drain(&self, deadline_ms: u64) {

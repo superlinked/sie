@@ -86,6 +86,10 @@ pub struct WorkItem {
     pub tracestate: Option<String>,
     #[serde(default)]
     pub timestamp: f64,
+    /// Absolute Unix-epoch seconds on the gateway clock after which no caller
+    /// waits for this item. Older gateways omit it and the item is unbounded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline: Option<f64>,
 }
 
 /// Per-item result published back to the gateway's inbox.
@@ -195,6 +199,7 @@ mod tests {
             traceparent: None,
             tracestate: None,
             timestamp: 1_700_000_000.0,
+            deadline: None,
         }
     }
 

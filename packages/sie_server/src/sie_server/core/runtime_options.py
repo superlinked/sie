@@ -21,9 +21,13 @@ queued requests. Routing both paths through this helper keeps them in lockstep.
 
 from __future__ import annotations
 
+import asyncio
 import math
-from typing import TYPE_CHECKING, Any
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Literal
 
+from sie_server.adapters._generation_base import aclose_with_error_precedence
 from sie_server.types.inputs import InvalidInputError
 from sie_server.types.overflow_policy import VALID_OVERFLOW_POLICIES
 
@@ -247,3 +251,88 @@ def apply_generation_runtime_options(
             raise ValueError(f"'options.{key}' must be a positive number")
 
     return result
+
+
+@dataclass(frozen=True, slots=True)
+class GenerationTimeouts:
+    """Governed generation timeouts in seconds; ``None`` leaves that bound off."""
+
+    first_chunk_s: float | None = None
+    overall_s: float | None = None
+
+
+class GenerationTimeoutError(TimeoutError):
+    """A buffered generation exceeded a governed timeout.
+
+    ``code`` matches the gateway's generation timeout codes, so a direct server
+    and a gateway report the same expiry the same way.
+    """
+
+    def __init__(self, kind: Literal["first_chunk", "overall"]) -> None:
+        self.kind = kind
+        self.code = f"{kind}_timeout"
+        super().__init__(f"Generation aborted: {kind} timeout")
+
+
+def _timeout_seconds(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, int | float) or not _is_finite_number(value):
+        return None
+    return float(value) if value > 0 else None
+
+
+def resolve_generation_timeouts(
+    config: ModelConfig,
+    request_options: dict[str, Any] | None,
+) -> GenerationTimeouts:
+    """Resolve the profile and request ``first_chunk_timeout_s`` / ``overall_timeout_s``.
+
+    Call after :func:`apply_generation_runtime_options` has validated the same
+    options.
+    """
+    runtime = merge_runtime_options(config, request_options)
+    return GenerationTimeouts(
+        first_chunk_s=_timeout_seconds(runtime.get("first_chunk_timeout_s")),
+        overall_s=_timeout_seconds(runtime.get("overall_timeout_s")),
+    )
+
+
+async def bound_generation[ChunkT](
+    chunks: AsyncIterator[ChunkT],
+    timeouts: GenerationTimeouts,
+) -> AsyncIterator[ChunkT]:
+    """Yield ``chunks`` under the first-chunk and overall timeouts.
+
+    On expiry the pending read is cancelled and ``chunks`` is closed, which
+    aborts the engine request, and :class:`GenerationTimeoutError` is raised.
+    """
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    first_chunk_at = None if timeouts.first_chunk_s is None else started + timeouts.first_chunk_s
+    overall_at = None if timeouts.overall_s is None else started + timeouts.overall_s
+    received_first = False
+    try:
+        while True:
+            pending: list[tuple[float, Literal["first_chunk", "overall"]]] = []
+            if first_chunk_at is not None and not received_first:
+                pending.append((first_chunk_at, "first_chunk"))
+            if overall_at is not None:
+                pending.append((overall_at, "overall"))
+            deadline, kind = min(pending, key=lambda entry: entry[0]) if pending else (None, "overall")
+            timeout = asyncio.timeout_at(deadline)
+            try:
+                async with timeout:
+                    chunk = await anext(chunks)
+            except StopAsyncIteration:
+                return
+            except TimeoutError as exc:
+                if timeout.expired():
+                    raise GenerationTimeoutError(kind) from exc
+                raise
+            received_first = True
+            yield chunk
+    finally:
+        await aclose_with_error_precedence(
+            chunks,
+            outcome_selected=False,
+            context="bounded generation iterator",
+        )

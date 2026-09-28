@@ -77,6 +77,28 @@ Message settlement:
 - Reply publication failure, including a partial chunk sequence, leaves the
   JetStream message unacked for redelivery.
 
+Work-item deadlines:
+
+- The gateway stamps non-streaming work items with an optional `deadline`, an
+  absolute Unix time in seconds on the clock that stamps `timestamp`. Items
+  without it keep the behaviour below that predates deadlines.
+- A NATS delivery whose deadline, plus `SIE_WORK_DEADLINE_SKEW_TOLERANCE_MS`
+  (default 5000), has passed is ACK-dropped at the same checkpoints as
+  `work_cancel`, before payload fetch and backend IPC, and counted as
+  `sie.worker.nats.operations{operation="ack",reason="deadline_exceeded"}`.
+  `SIE_WORK_DEADLINE_ENFORCE=false` logs the decision before IPC and executes
+  the item instead. Local-ingest callers bound their own calls and are not
+  dropped.
+- Encode, score, and extract deliveries with a live deadline are progress-ACKed
+  every few seconds from intake until they are ACKed, NAKed, or deliberately
+  left unacked for redelivery, so a slow scheduler queue or backend call does
+  not trigger a redelivery of work that is still running. The lease also ends
+  at the deadline, after which JetStream redelivers as before and the
+  redelivery is dropped as expired.
+- A `RunBatch` call waits for the longer of `SIE_IPC_REQUEST_TIMEOUT_S` and
+  the time until the batch's latest deadline, bounded by the work-stream
+  lifetime, so a legitimate slow batch is not cut short and retried.
+
 Source: [`dispatcher.rs`](../src/dispatcher.rs),
 [`publisher.rs`](../src/publisher.rs), and [`work_types.rs`](../src/work_types.rs).
 
@@ -124,7 +146,10 @@ Lookups are constant-time and occur before model readiness, during readiness
 waits, around offloaded-payload fetch, at scheduler admission, and immediately
 before backend IPC. Matching encode, score, and extract deliveries are
 ACK-dropped through one settlement path; generation is excluded because its
-streaming cancellation contract uses `cancel.*`.
+streaming cancellation contract uses `cancel.*`. The gateway's
+`cancel.{router_id}.{request_id}` records the same tombstone, so encode, score,
+and extract work for a request cancelled that way is also dropped before
+IPC.
 
 The greater of the work stream age and retry window is the active worker's
 tombstone expiry horizon. A 100,000-entry process cap evicts the oldest

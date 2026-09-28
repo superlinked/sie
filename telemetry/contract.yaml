@@ -299,7 +299,7 @@ cardinality_budgets:
       nats:
         metrics: [sie.worker.nats.operations]
         formula: nats_operation * binary_outcome * nats_reason
-        limit: 210
+        limit: 231
       nats_delivery:
         metrics: [sie.worker.nats.delivery.attempts]
         formula: delivery_redelivered
@@ -913,6 +913,7 @@ enums:
     - metadata_unavailable
     - transport
     - stream_ended
+    - deadline_exceeded
     - other
   delivery_redelivered: ["true", "false"]
   payload_reason:

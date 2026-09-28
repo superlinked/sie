@@ -25,6 +25,7 @@ use async_nats::jetstream::Message;
 use tokio::sync::mpsc;
 use tokio::sync::OwnedSemaphorePermit;
 
+use crate::work_deadline::nats_progress_leases;
 use crate::work_types::WorkResult;
 
 /// Event emitted by the dispatcher for one local-ingest slot.
@@ -146,21 +147,28 @@ impl Delivery {
     /// their terminal [`LocalDeliveryEvent::Result`], so this is a no-op.
     pub async fn ack(&self) -> Result<(), String> {
         match self {
-            Self::Nats(msg, _) => msg.ack().await.map_err(|e| e.to_string()),
+            Self::Nats(msg, _) => {
+                nats_progress_leases().release(msg);
+                msg.ack().await.map_err(|e| e.to_string())
+            }
             Self::Local(_) => Ok(()),
         }
     }
 
     /// NAK — "not settled, redeliver after `delay_ms`". Local deliveries
-    /// route this to the ingest layer's bounded re-dispatch.
+    /// route this to the ingest layer's bounded re-dispatch. A progress ACK
+    /// sent after a NAK would postpone the redelivery, so the progress lease
+    /// ends first.
     pub async fn nak(&self, delay_ms: u64) -> Result<(), String> {
         match self {
-            Self::Nats(msg, _) => msg
-                .ack_with(async_nats::jetstream::AckKind::Nak(Some(
+            Self::Nats(msg, _) => {
+                nats_progress_leases().release(msg);
+                msg.ack_with(async_nats::jetstream::AckKind::Nak(Some(
                     Duration::from_millis(delay_ms),
                 )))
                 .await
-                .map_err(|e| e.to_string()),
+                .map_err(|e| e.to_string())
+            }
             Self::Local(local) => {
                 if local.send_retry(delay_ms) {
                     Ok(())
@@ -168,6 +176,14 @@ impl Delivery {
                     Err("local ingest caller gone — retry event dropped".to_string())
                 }
             }
+        }
+    }
+
+    /// Stop progress-ACKing a delivery that is deliberately left unsettled so
+    /// JetStream redelivers it after `ack_wait`.
+    pub fn end_progress_lease(&self) {
+        if let Self::Nats(msg, _) = self {
+            nats_progress_leases().release(msg);
         }
     }
 

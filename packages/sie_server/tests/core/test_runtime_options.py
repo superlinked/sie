@@ -10,13 +10,20 @@ pooling / normalize) for every queued request.
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import AsyncIterator
+
 import pytest
 from sie_server.config.model import ModelConfig
 from sie_server.core.encode_pipeline import resolve_encode_output_types
 from sie_server.core.runtime_options import (
+    GenerationTimeoutError,
+    GenerationTimeouts,
     apply_generation_runtime_options,
+    bound_generation,
     merge_runtime_options,
     merge_runtime_options_with_profile,
+    resolve_generation_timeouts,
 )
 from sie_server.types.inputs import InvalidInputError
 
@@ -331,3 +338,81 @@ def test_generation_invalid_sampling_option_fails_closed(sampling: dict[str, obj
 def test_generation_non_finite_timeout_fails_closed(value: float) -> None:
     with pytest.raises(ValueError, match="positive number"):
         apply_generation_runtime_options(_generation_config(), {"overall_timeout_s": value}, {"prompt": "hi"})
+
+
+def test_generation_timeouts_resolve_from_profile_and_request() -> None:
+    config = _generation_config()
+
+    assert resolve_generation_timeouts(config, None) == GenerationTimeouts(first_chunk_s=None, overall_s=60.0)
+    assert resolve_generation_timeouts(
+        config,
+        {"first_chunk_timeout_s": 5, "overall_timeout_s": 12.5},
+    ) == GenerationTimeouts(first_chunk_s=5.0, overall_s=12.5)
+
+    undeclared = _generation_config()
+    del undeclared.profiles["default"].adapter_options.runtime["overall_timeout_s"]
+    assert resolve_generation_timeouts(undeclared, None) == GenerationTimeouts()
+
+
+class _Engine:
+    def __init__(self, delays: list[float]) -> None:
+        self.delays = delays
+        self.closed = False
+
+    async def chunks(self) -> AsyncIterator[int]:
+        try:
+            for index, delay in enumerate(self.delays):
+                await asyncio.sleep(delay)
+                yield index
+        finally:
+            self.closed = True
+
+
+async def _drain(chunks: AsyncIterator[int]) -> list[int]:
+    return [chunk async for chunk in chunks]
+
+
+async def test_bound_generation_passes_chunks_through_within_timeouts() -> None:
+    engine = _Engine([0.0, 0.0, 0.0])
+
+    chunks = await _drain(bound_generation(engine.chunks(), GenerationTimeouts(first_chunk_s=1.0, overall_s=1.0)))
+
+    assert chunks == [0, 1, 2]
+    assert engine.closed
+
+
+async def test_bound_generation_without_timeouts_is_unbounded() -> None:
+    engine = _Engine([0.05, 0.05])
+
+    assert await _drain(bound_generation(engine.chunks(), GenerationTimeouts())) == [0, 1]
+
+
+async def test_bound_generation_first_chunk_timeout_aborts_the_engine() -> None:
+    engine = _Engine([5.0])
+
+    with pytest.raises(GenerationTimeoutError) as raised:
+        await _drain(bound_generation(engine.chunks(), GenerationTimeouts(first_chunk_s=0.05, overall_s=5.0)))
+
+    assert raised.value.code == "first_chunk_timeout"
+    assert engine.closed
+
+
+async def test_bound_generation_overall_timeout_applies_after_the_first_chunk() -> None:
+    engine = _Engine([0.0, 0.0, 5.0])
+
+    with pytest.raises(GenerationTimeoutError) as raised:
+        await _drain(bound_generation(engine.chunks(), GenerationTimeouts(first_chunk_s=0.05, overall_s=0.2)))
+
+    assert raised.value.code == "overall_timeout"
+    assert engine.closed
+
+
+async def test_bound_generation_keeps_engine_timeout_errors() -> None:
+    async def failing() -> AsyncIterator[int]:
+        raise TimeoutError("engine read timed out")
+        yield 0
+
+    with pytest.raises(TimeoutError) as raised:
+        await _drain(bound_generation(failing(), GenerationTimeouts(overall_s=5.0)))
+
+    assert not isinstance(raised.value, GenerationTimeoutError)

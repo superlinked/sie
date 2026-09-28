@@ -81,7 +81,12 @@ from sie_server.adapters._generation_base import (
 from sie_server.api.helpers import ModelStateChecker, oom_retry_after_from_registry, read_bounded_request_body
 from sie_server.api.validation import validate_machine_profile_header, validate_signed_i64
 from sie_server.core.grammar_routing import resolve_grammar_serving_model
-from sie_server.core.runtime_options import apply_generation_runtime_options
+from sie_server.core.runtime_options import (
+    GenerationTimeoutError,
+    apply_generation_runtime_options,
+    bound_generation,
+    resolve_generation_timeouts,
+)
 from sie_server.core.tokenizer import image_first_chat_message, load_tokenizer
 from sie_server.observability.tracing import tracer
 from sie_server.processors.strict_grammar import enforce_strict_grammar
@@ -1005,6 +1010,7 @@ async def _stream_generate_events(
             "model": GenerateModelLoadFailedErrorResponse,
         },
         503: {"description": "Model loading or unavailable"},
+        504: {"description": "Non-streaming generation exceeded its first_chunk_timeout_s or overall_timeout_s"},
     },
     openapi_extra={
         "requestBody": {
@@ -1315,7 +1321,10 @@ async def generate(
             # local-dev route keeps the walking-skeleton's blocking response shape
             # for backwards compatibility — drain the iterator into an
             # aggregate. SDK / gateway consume the iterator directly.
-            chunks = adapter.generate_with_preflight(generation_parameters, preflight_result)
+            chunks = bound_generation(
+                adapter.generate_with_preflight(generation_parameters, preflight_result),
+                resolve_generation_timeouts(config, body.get("options")),
+            )
             if suppress_thinking:
                 chunks = suppress_thinking_blocks(
                     chunks,
@@ -1324,6 +1333,11 @@ async def generate(
                 )
             chunks = enforce_strict_grammar(chunks, grammar)
             result = await collect_generation(chunks)
+        except GenerationTimeoutError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail={"code": exc.code, "message": str(exc)},
+            ) from exc
         except GenerationError as exc:
             raise _generation_http_exception(exc, registry) from exc
         except Exception as e:

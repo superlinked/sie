@@ -718,6 +718,7 @@ mod tests {
             traceparent: None,
             tracestate: None,
             timestamp: 0.0,
+            deadline: None,
         }
     }
 

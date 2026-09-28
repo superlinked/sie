@@ -751,6 +751,7 @@ async fn smoke_encode_request_round_trips_through_rust_worker() {
         traceparent: None,
         tracestate: None,
         timestamp: now_s - 0.25,
+        deadline: None,
     };
     let payload = rmp_serde::to_vec_named(&work_item).expect("encode WorkItem");
 
@@ -1117,6 +1118,7 @@ async fn work_cancel_is_namespaced_acks_before_ipc_and_excludes_generation() {
         traceparent: None,
         tracestate: None,
         timestamp: now_s,
+        deadline: None,
     };
     let payload = rmp_serde::to_vec_named(&generation_work).expect("encode generate WorkItem");
     let _ = publish_jetstream_with_retry(&js, &generation_subject, payload).await;
@@ -1222,6 +1224,7 @@ async fn smoke_generate_direct_dispatch_round_trips_through_rust_worker() {
         traceparent: None,
         tracestate: None,
         timestamp: now_s - 0.25,
+        deadline: None,
     };
     let payload = rmp_serde::to_vec_named(&work_item).expect("encode generate WorkItem");
     let js = async_nats::jetstream::new(client.clone());
@@ -1338,6 +1341,7 @@ async fn smoke_generation_direct_dispatch_is_active_before_capability_reconcile(
         traceparent: None,
         tracestate: None,
         timestamp: now_s,
+        deadline: None,
     };
     let payload = rmp_serde::to_vec_named(&work_item).expect("encode generate WorkItem");
     let js = async_nats::jetstream::new(client.clone());
@@ -1489,6 +1493,7 @@ async fn smoke_payload_ref_request_round_trips_through_rust_worker() {
         traceparent: None,
         tracestate: None,
         timestamp: now_s,
+        deadline: None,
     };
     let payload = rmp_serde::to_vec_named(&work_item).expect("encode WorkItem");
 
@@ -1649,6 +1654,7 @@ async fn smoke_extract_payload_ref_preserves_document_bytes_through_ipc() {
         traceparent: None,
         tracestate: None,
         timestamp: now_s,
+        deadline: None,
     };
     let payload = rmp_serde::to_vec_named(&work_item).expect("encode extract WorkItem");
     let js = async_nats::jetstream::new(client.clone());
@@ -1800,6 +1806,30 @@ async fn publish_work_item_with_admission_pool(
     reply_subject: &str,
 ) -> (String, u64) {
     let _ = normalized; // subject is pre-built by caller
+    publish_encode_work_item(
+        js,
+        subject,
+        request_id,
+        model_id,
+        pool,
+        admission_pool,
+        reply_subject,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn publish_encode_work_item(
+    js: &async_nats::jetstream::Context,
+    subject: &str,
+    request_id: &str,
+    model_id: &str,
+    pool: &str,
+    admission_pool: &str,
+    reply_subject: &str,
+    deadline: Option<f64>,
+) -> (String, u64) {
     let now_s = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -1837,9 +1867,150 @@ async fn publish_work_item_with_admission_pool(
         traceparent: None,
         tracestate: None,
         timestamp: now_s,
+        deadline,
     };
     let payload = rmp_serde::to_vec_named(&work_item).expect("encode WorkItem");
     publish_jetstream_with_retry(js, subject, payload).await
+}
+
+/// WorkQueue retention removes an item only after its consumer ACKs it, so
+/// the sequence disappearing before the harness's slow backend response
+/// proves the worker settled the delivery without running it.
+async fn assert_acked_before_ipc(
+    js: &async_nats::jetstream::Context,
+    stream_name: &str,
+    sequence: u64,
+    what: &str,
+) {
+    let stream = js.get_stream(stream_name).await.expect("get work stream");
+    let ack_deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        if stream.get_raw_message(sequence).await.is_err() {
+            return;
+        }
+        assert!(
+            Instant::now() < ack_deadline,
+            "{what} was not ACK-dropped before the slow backend call"
+        );
+        sleep(Duration::from_millis(25)).await;
+    }
+}
+
+/// Gateway deadlines and the gateway's request cancel both stop encode work
+/// that has not started, while live items and items from a gateway that
+/// predates deadlines still run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn expired_or_cancelled_encode_work_is_acked_before_ipc() {
+    if skip_unless_tools_available() {
+        return;
+    }
+    let _guard = smoke_test_guard().await;
+
+    let nats = NatsHarness::start().await;
+    let sock = ShortSocket::new("ipc.sock");
+    let python = PythonHarness::start_with_delay_ms(sock.path.clone(), 1_500).await;
+    let pool = "smoke-deadline";
+    let bundle = "default";
+    let probe_port = find_free_tcp_port();
+    let _worker = WorkerHarness::spawn(&nats.url, &sock.path, pool, bundle, probe_port, None);
+    wait_for_tcp(probe_port, Duration::from_secs(30))
+        .await
+        .expect("worker probe port");
+    sleep(Duration::from_millis(500)).await;
+
+    let client = async_nats::connect(&nats.url)
+        .await
+        .expect("client connect");
+    let js = async_nats::jetstream::new(client.clone());
+    let reply_subject = format!("_INBOX.smoke-deadline.{}", uuid::Uuid::new_v4());
+    let mut sub = client
+        .subscribe(reply_subject.clone())
+        .await
+        .expect("subscribe reply");
+    let model = "BAAI/bge-m3";
+    let subject = pool_work_subject(pool, pool, bundle, model);
+    let now_s = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs_f64();
+
+    for (request_id, deadline) in [
+        ("smoke-deadline-live", Some(now_s + 120.0)),
+        ("smoke-deadline-predates-deadlines", None),
+    ] {
+        publish_encode_work_item(
+            &js,
+            &subject,
+            request_id,
+            model,
+            pool,
+            "",
+            &reply_subject,
+            deadline,
+        )
+        .await;
+        let reply = timeout(Duration::from_secs(10), sub.next())
+            .await
+            .expect("live work must execute")
+            .expect("reply stream closed");
+        let result: WorkResult = rmp_serde::from_slice(&reply.payload).expect("decode WorkResult");
+        assert!(result.success);
+        assert_eq!(result.request_id, request_id);
+    }
+
+    let (stream_name, expired_sequence) = publish_encode_work_item(
+        &js,
+        &subject,
+        "smoke-deadline-expired",
+        model,
+        pool,
+        "",
+        &reply_subject,
+        Some(now_s - 60.0),
+    )
+    .await;
+    assert_acked_before_ipc(&js, &stream_name, expired_sequence, "expired encode").await;
+    assert!(
+        timeout(Duration::from_millis(250), sub.next())
+            .await
+            .is_err(),
+        "expired encode unexpectedly published a result",
+    );
+
+    let cancelled_request = "smoke-deadline-cancelled";
+    client
+        .publish(
+            format!("cancel.stress-gw.{cancelled_request}"),
+            Vec::new().into(),
+        )
+        .await
+        .expect("publish request cancel");
+    client.flush().await.expect("flush request cancel");
+    sleep(Duration::from_millis(100)).await;
+    let (stream_name, cancelled_sequence) = publish_encode_work_item(
+        &js,
+        &subject,
+        cancelled_request,
+        model,
+        pool,
+        "",
+        &reply_subject,
+        Some(now_s + 120.0),
+    )
+    .await;
+    assert_acked_before_ipc(&js, &stream_name, cancelled_sequence, "cancelled encode").await;
+    assert!(
+        timeout(Duration::from_millis(250), sub.next())
+            .await
+            .is_err(),
+        "cancelled encode unexpectedly published a result",
+    );
+
+    drop(_worker);
+    drop(python);
+    drop(nats);
+    let _ = sock;
+    sleep(Duration::from_millis(200)).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2513,6 +2684,7 @@ async fn smoke_prepared_tokens_round_trip_through_rust_worker() {
         traceparent: None,
         tracestate: None,
         timestamp: now_s - 0.25,
+        deadline: None,
     };
     let payload = rmp_serde::to_vec_named(&work_item).expect("encode WorkItem");
     let js = async_nats::jetstream::new(client.clone());
@@ -2664,6 +2836,7 @@ async fn publish_score_work_item(
         traceparent: None,
         tracestate: None,
         timestamp: now_s,
+        deadline: None,
     };
     let payload = rmp_serde::to_vec_named(&work_item).expect("encode score WorkItem");
     let _ = publish_jetstream_with_retry(js, subject, payload).await;
@@ -2716,6 +2889,7 @@ async fn publish_extract_work_item(
         traceparent: None,
         tracestate: None,
         timestamp: now_s,
+        deadline: None,
     };
     let payload = rmp_serde::to_vec_named(&work_item).expect("encode extract WorkItem");
     let _ = publish_jetstream_with_retry(js, subject, payload).await;

@@ -302,7 +302,7 @@ Per-subject transport:
 | Pool inference work (`encode` / `score` / `extract`) | `sie.work.{pool}.{machine_profile}.{bundle}.{model}` | JetStream | Durability and max-delivery semantics required. Work-item payload is msgpack. One stream per pool (`WORK_POOL_{pool}`) captures ordinary non-generation work for the pool, while worker consumers filter one concrete machine-profile/bundle lane; see §8.2. |
 | Worker direct-dispatch | `sie.work.{pool}.{machine_profile}.{bundle}.{model}.{worker_id}` | JetStream | Worker-specific stream used by generation and by capped logical batch pools that must target an assigned worker instead of allowing unassigned workers on the same backing queue to burn JetStream delivery attempts. |
 | Batch direct cancel | `batch_cancel.{router_id}.{worker_id}.{request_id}` | NATS Core | Best-effort worker-scoped signal emitted only after non-streaming worker-direct fallback publishes are durably acked on the pool subject. Sidecars ACK-drop queued worker-direct encode/score/extract items for the request; pool fallback items are never cancelled by this signal. |
-| Non-generation request abandonment | `work_cancel.{router_id}.{request_id}` | NATS Core | Best-effort request-wide signal emitted when the gateway abandons encode/score/extract work. Active sidecars retain bounded namespaced tombstones and ACK-drop matching work before backend IPC. The signal is not replayed to disconnected or restarted workers, and static inference already past IPC is not preempted. |
+| Non-generation request abandonment | `work_cancel.{router_id}.{request_id}` | NATS Core | Best-effort request-wide signal emitted when the gateway abandons encode/score/extract work, including when a publish ACK fails and the stored item's fate is unknown. Active sidecars retain bounded namespaced tombstones and ACK-drop matching work before backend IPC. The signal is not replayed to disconnected or restarted workers, and static inference already past IPC is not preempted. |
 | Inference results | `_INBOX.{router_id}.{request_id}` | NATS Core | Gateway is waiting synchronously; a brief blip after publish but before delivery means the result is lost and the client may retry (the gateway returns `504` with `X-SIE-Error-Code: GATEWAY_TIMEOUT` and `Retry-After: 5` — see §2). Result payload is msgpack. |
 | Config deltas | `sie.config.models.{bundle}`, `sie.config.models._all` | NATS Core | Lightweight fan-out. Gateway durability comes from the snapshot/export path (section 4), not the bus. JSON payload (control plane, not hot path). The gateway subscribes on `_all`; worker-sidecar containers subscribe on their bundle subject and apply through backend IPC. |
 | Worker health | `sie.health.>` | NATS Core | Ephemeral, last-heartbeat-wins. The gateway subscribes in `health_mode=nats` (see `discovery/nats_health.rs`) and supervises the subscriber task: reconnects normally resume in `async-nats`, but a terminated subscription stream is recreated with bounded backoff because there is no full-state health poller. Worker-sidecar containers publish this heartbeat and include the latest bundle hash after successful config apply. Helm sidecar deployments set `health_mode=nats`; the gateway binary default remains `ws` so standalone/test deployments can use the Python WebSocket path. |
@@ -365,7 +365,15 @@ performs request abandonment: it releases chunk-memory reservations, terminates
 the response path without partial success, publishes `work_cancel`, and deletes
 exact-key offloaded payloads. Late results see no collector and are
 dropped. JetStream stays at-least-once; abandonment does not claim exactly-once
-delivery or execution.
+delivery or execution. A failed durable publish ACK removes the collector the
+same way and also publishes `work_cancel`, because a failed ACK does not prove
+the broker discarded the item.
+
+Every non-streaming work item also carries `deadline`, the publish timestamp
+plus the request timeout, as absolute Unix seconds. Sidecars ACK-drop items
+past it before execution, which covers workers that never saw the
+`work_cancel` signal. Streaming generation items omit it because their
+timeouts are resolved per profile after publication.
 
 The managed Modal dispatcher implements the same ownership contract without a
 NATS cancellation hop. It registers an abort handle for each detached
@@ -790,6 +798,8 @@ WorkItem {
   machine_profile: "default",
   item:          { "text": "..." },       // or omitted + payload_ref if >1MB
   reply_subject: "_INBOX.gw-1.abc-123",
+  timestamp:     1700000000.0,
+  deadline:      1700000120.0,             // timestamp + request timeout; omitted when unknown
   accepts_result_chunks: true,              // supports result_chunk_v1 only; absent/false keeps one-shot
   bundle_config_hash: "a1b2c3…",
   …

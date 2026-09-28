@@ -85,7 +85,7 @@ const CONFIG_OPERATION_SERIES: usize = 6;
 const CONFIG_OUTCOME_SERIES: usize = 18;
 const NATS_OPERATION_SERIES: usize = 7;
 const BINARY_OUTCOME_SERIES: usize = 3;
-const NATS_REASON_SERIES: usize = 10;
+const NATS_REASON_SERIES: usize = 11;
 const DELIVERY_REDELIVERED_SERIES: usize = 2;
 const RESULT_TRANSPORT_MODE_SERIES: usize = 4;
 const RESULT_TRANSPORT_OUTCOME_SERIES: usize = 4;
@@ -2258,6 +2258,7 @@ fn bounded_nats_reason(reason: &str) -> &'static str {
         "metadata_unavailable" => "metadata_unavailable",
         "transport" => "transport",
         "stream_ended" => "stream_ended",
+        "deadline_exceeded" => "deadline_exceeded",
         _ => OTHER,
     }
 }
