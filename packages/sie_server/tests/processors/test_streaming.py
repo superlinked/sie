@@ -4506,6 +4506,21 @@ async def test_strict_grammar_violation_publishes_a_typed_terminal_error(stream:
 
 
 @pytest.mark.asyncio
+async def test_strict_grammar_verifies_output_when_the_adapter_omits_the_terminal() -> None:
+    nc = AsyncMock()
+    adapter = _FakeGenAdapter([GenerationChunk(text_delta='{"x": "one"}', is_first=True)])
+    proc = StreamingProcessor(nc=nc, registry=_make_registry(adapter), worker_id="w1")
+    wi = _make_work_item(generate={"prompt": "Hi", "max_new_tokens": 8, "grammar": _STRICT_SCHEMA_PAYLOAD})
+
+    await proc.process(_make_msg(wi), "test/model")
+
+    terminal = _terminal_chunk(nc)
+    assert terminal["done"] is True
+    assert terminal["finish_reason"] == "error"
+    assert terminal["error"]["code"] == "MODEL_OUTPUT_PARSE_ERROR"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("strict", [None, False])
 async def test_non_strict_grammar_output_settles_normally(strict: bool | None) -> None:
     nc = AsyncMock()

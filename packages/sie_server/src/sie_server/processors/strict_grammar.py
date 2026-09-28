@@ -134,6 +134,20 @@ async def _validated_chunks(
                         )
                 terminal_outcome_selected = True
             yield chunk
+        if not terminal_outcome_selected:
+            # Consumers settle an iterator that ends without a terminal as a
+            # natural stop, so the accumulated output is verified here.
+            implicit_stop = GenerationChunk(text_delta="", done=True)
+            outputs = _terminal_outputs(implicit_stop, texts, choice_finish_reasons, tool_call_choices)
+            violation = await asyncio.to_thread(first_output_violation, grammar, outputs)
+            if violation is not None:
+                terminal_outcome_selected = True
+                yield replace(
+                    implicit_stop,
+                    finish_reason="error",
+                    error_code=MODEL_OUTPUT_PARSE_ERROR,
+                    error_message=violation,
+                )
     finally:
         await aclose_with_error_precedence(
             chunks,

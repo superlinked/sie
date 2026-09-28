@@ -350,6 +350,28 @@ async def test_streamed_choice_that_stops_is_still_verified() -> None:
 
 
 @pytest.mark.asyncio
+async def test_missing_terminal_is_verified_as_an_implicit_stop() -> None:
+    upstream = [GenerationChunk(text_delta='{"name": '), GenerationChunk(text_delta='"Ada"}')]
+
+    chunks = await _drain(enforce_strict_grammar(_stream(upstream), _STRICT_SCHEMA))
+
+    assert [chunk.text_delta for chunk in chunks[:-1]] == ['{"name": ', '"Ada"}']
+    terminal = chunks[-1]
+    assert terminal.done is True
+    assert terminal.finish_reason == "error"
+    assert terminal.error_code == MODEL_OUTPUT_PARSE_ERROR
+
+
+@pytest.mark.asyncio
+async def test_conforming_output_without_a_terminal_is_passed_through() -> None:
+    upstream = [GenerationChunk(text_delta='{"name": "Ada", "count": 1}')]
+
+    chunks = await _drain(enforce_strict_grammar(_stream(upstream), _STRICT_SCHEMA))
+
+    assert chunks == upstream
+
+
+@pytest.mark.asyncio
 async def test_closing_the_wrapper_closes_the_upstream_iterator() -> None:
     closed = False
 
