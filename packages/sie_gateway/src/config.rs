@@ -5,6 +5,7 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use crate::state::demand_tracker::PhysicalLaneCatalog;
+use crate::state::pool_manager::PoolLimits;
 use crate::types::pool::PoolSpec;
 
 /// Modal platform proxy-auth credential.
@@ -478,6 +479,27 @@ fn env_u64(key: &str, fallback: u64) -> u64 {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(fallback)
+}
+
+/// Read the pool API bounds from `SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT`,
+/// `SIE_GATEWAY_POOL_MAX_TTL_S`, and `SIE_GATEWAY_MAX_POOLS`. An unset or
+/// unparsable value keeps that bound's default.
+pub fn pool_limits_from_env() -> PoolLimits {
+    let defaults = PoolLimits::default();
+    PoolLimits {
+        max_minimum_worker_count: env::var("SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT")
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(defaults.max_minimum_worker_count),
+        max_ttl_seconds: env::var("SIE_GATEWAY_POOL_MAX_TTL_S")
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(defaults.max_ttl_seconds),
+        max_pools: env::var("SIE_GATEWAY_MAX_POOLS")
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(defaults.max_pools),
+    }
 }
 
 fn env_csv(key: &str) -> Vec<String> {
@@ -1100,6 +1122,35 @@ mod tests {
         with_env(&[("_TEST_CSV", "a,,b,")], || {
             assert_eq!(env_csv("_TEST_CSV"), vec!["a", "b"]);
         });
+    }
+
+    #[test]
+    fn test_pool_limits_from_env_defaults_and_overrides() {
+        let keys = [
+            "SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT",
+            "SIE_GATEWAY_POOL_MAX_TTL_S",
+            "SIE_GATEWAY_MAX_POOLS",
+        ];
+        without_env(&keys, || {
+            assert_eq!(pool_limits_from_env(), PoolLimits::default());
+        });
+        with_env(
+            &[
+                ("SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT", "0"),
+                ("SIE_GATEWAY_POOL_MAX_TTL_S", " 86400 "),
+                ("SIE_GATEWAY_MAX_POOLS", "not-a-number"),
+            ],
+            || {
+                assert_eq!(
+                    pool_limits_from_env(),
+                    PoolLimits {
+                        max_minimum_worker_count: 0,
+                        max_ttl_seconds: 86_400,
+                        max_pools: PoolLimits::default().max_pools,
+                    }
+                );
+            },
+        );
     }
 
     #[test]

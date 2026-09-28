@@ -1043,7 +1043,7 @@
             "type": "object"
           },
           "minimum_worker_count": {
-            "description": "Per-pool warm floor (minimum machines kept warm via KEDA). Default 0\nkeeps scale-from-zero. See `PoolSpec::minimum_worker_count`.",
+            "description": "Per-pool warm floor (minimum machines kept warm via KEDA). Default 0\nkeeps scale-from-zero. Values above the gateway limit\n(`SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT`, default 4) are rejected.\nSee `PoolSpec::minimum_worker_count`.",
             "format": "int32",
             "minimum": 0,
             "type": "integer"
@@ -1073,6 +1073,7 @@
             ]
           },
           "ttl_seconds": {
+            "description": "Lease TTL in seconds; omit for the gateway default. Values above the\ngateway limit (`SIE_GATEWAY_POOL_MAX_TTL_S`, default 3600) are rejected.",
             "format": "int64",
             "minimum": 0,
             "type": [
@@ -6823,7 +6824,7 @@
                 }
               }
             },
-            "description": "Invalid pool request"
+            "description": "Invalid pool request, including a TTL or warm floor above the gateway limit"
           },
           "401": {
             "content": {
@@ -6843,7 +6844,7 @@
                 }
               }
             },
-            "description": "Valid bearer token but admin token required for this mutation (or admin token not configured)"
+            "description": "Admin token required for this mutation (or admin token not configured), or the gateway's limit on API-created pools is reached"
           },
           "500": {
             "content": {

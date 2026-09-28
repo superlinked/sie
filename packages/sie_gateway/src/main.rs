@@ -209,7 +209,8 @@ async fn run_server(cfg: Config) -> Result<(), Box<dyn std::error::Error>> {
     let pools_enabled = config.enable_pools || config.use_kubernetes;
 
     // Set up pool manager (created early so on_worker_healthy callback can capture it)
-    let mut pm = PoolManager::new(config.configured_gpus.clone());
+    let mut pm = PoolManager::new(config.configured_gpus.clone())
+        .with_limits(config::pool_limits_from_env());
     let mut k8s_pool_backend: Option<Arc<state::k8s_pool_backend::K8sPoolBackend>> = None;
     if config.use_kubernetes && pools_enabled {
         match state::k8s_pool_backend::K8sPoolBackend::new(&config.k8s_namespace, &router_id).await
