@@ -30,8 +30,9 @@ pytestmark = pytest.mark.docker
 SENTINEL = "private-payload-sentinel"
 
 
-def run(*args: str) -> str:
-    return subprocess.check_output(args, cwd=ROOT, text=True, stderr=subprocess.STDOUT, timeout=120).strip()  # noqa: S603 - fixed local test commands
+def run(*args: str, include_stderr: bool = False) -> str:
+    result = subprocess.run(args, cwd=ROOT, text=True, capture_output=True, check=True, timeout=120)  # noqa: S603 - fixed local test commands
+    return (result.stdout + (result.stderr if include_stderr else "")).strip()
 
 
 def rendered_config():
@@ -180,7 +181,6 @@ def test_batch_fanin_survives_remote_privacy_with_local_links_intact(tmp_path, r
     container = run(
         "docker",
         "run",
-        "--rm",
         "-d",
         "--user",
         "0",
@@ -294,6 +294,6 @@ def test_batch_fanin_survives_remote_privacy_with_local_links_intact(tmp_path, r
         for point in points:
             assert point["attributes"] == [{"key": "filter", "value": {"stringValue": "filter/remote_linked_spans"}}]
     finally:
-        logs = run("docker", "logs", container)
-        run("docker", "stop", container)
+        logs = run("docker", "logs", container, include_stderr=True)
+        run("docker", "rm", "-f", container)
         assert "Error: " not in logs, logs
