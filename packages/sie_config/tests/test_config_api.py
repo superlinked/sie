@@ -408,12 +408,12 @@ class TestConfigAPIModels:
             "  default:\n"
             "    adapter_path: sie_server.adapters.bert_flash:Bert\n"
             "    max_batch_tokens: 8192\n"
-            "    max_sequence_length: 256\n"
+            "    compute_precision: float16\n"
         )
         resp1 = client.post("/v1/configs/models", content=yaml_body)
         assert resp1.status_code == 201
 
-        conflict_body = yaml_body.replace("max_sequence_length: 256", "max_sequence_length: 128")
+        conflict_body = yaml_body.replace("compute_precision: float16", "compute_precision: bfloat16")
         resp2 = client.post("/v1/configs/models", content=conflict_body)
         assert resp2.status_code == 409
         data = resp2.json()
@@ -1946,8 +1946,8 @@ class TestIdempotencyEvictionSafety:
 class TestMergePreservesTopLevelFields:
     """Appending a profile via `POST /v1/configs/models` must merge on
     top of the stored document, not replace it. A minimal append body
-    cannot erase previously-written top-level fields (`description`,
-    `default_bundle`, ...); conflicting values raise 409 because the
+    cannot erase previously-written top-level fields (`hf_id`,
+    `max_sequence_length`, ...); conflicting values raise 409 because the
     config API is append-only for model metadata.
     """
 
@@ -1972,8 +1972,8 @@ class TestMergePreservesTopLevelFields:
             "/v1/configs/models",
             content=(
                 "sie_id: acme/bert\n"
-                "description: keep-me-around\n"
-                "default_bundle: premium\n"
+                "hf_id: acme/bert-base\n"
+                "max_sequence_length: 512\n"
                 "profiles:\n"
                 "  default:\n"
                 "    adapter_path: sie_server.adapters.bert_flash:BertFlashAdapter\n"
@@ -1982,8 +1982,8 @@ class TestMergePreservesTopLevelFields:
         )
         assert resp1.status_code == 201
 
-        # Append a second profile with a minimal body (no description /
-        # default_bundle in the incoming payload).
+        # Append a second profile with a minimal body (no hf_id /
+        # max_sequence_length in the incoming payload).
         resp2 = self.client.post(
             "/v1/configs/models",
             content=(
@@ -1998,8 +1998,8 @@ class TestMergePreservesTopLevelFields:
 
         stored_path = self._store / "models" / "acme__bert.yaml"
         stored = yaml.safe_load(stored_path.read_text())
-        assert stored["description"] == "keep-me-around"
-        assert stored["default_bundle"] == "premium"
+        assert stored["hf_id"] == "acme/bert-base"
+        assert stored["max_sequence_length"] == 512
         assert set(stored["profiles"].keys()) == {"default", "fast"}
 
     def test_conflicting_top_level_field_returns_409(self) -> None:
@@ -2007,7 +2007,7 @@ class TestMergePreservesTopLevelFields:
             "/v1/configs/models",
             content=(
                 "sie_id: acme/bert\n"
-                "description: initial\n"
+                "hf_id: acme/bert-initial\n"
                 "profiles:\n"
                 "  default:\n"
                 "    adapter_path: sie_server.adapters.bert_flash:BertFlashAdapter\n"
@@ -2016,13 +2016,13 @@ class TestMergePreservesTopLevelFields:
         )
         assert resp1.status_code == 201
 
-        # Reusing the same sie_id but mutating `description` must fail 409
+        # Reusing the same sie_id but mutating `hf_id` must fail 409
         # — config API is append-only for top-level metadata.
         resp2 = self.client.post(
             "/v1/configs/models",
             content=(
                 "sie_id: acme/bert\n"
-                "description: mutated!\n"
+                "hf_id: acme/bert-mutated\n"
                 "profiles:\n"
                 "  fast:\n"
                 "    adapter_path: sie_server.adapters.bert_flash:BertFlashAdapter\n"
@@ -2032,7 +2032,7 @@ class TestMergePreservesTopLevelFields:
         assert resp2.status_code == 409
         body = resp2.json()
         assert body["detail"]["error"] == "content_conflict"
-        assert "description" in body["detail"]["conflicting_fields"]
+        assert "hf_id" in body["detail"]["conflicting_fields"]
 
     def test_append_can_introduce_new_top_level_field(self) -> None:
         resp1 = self.client.post(
@@ -2051,7 +2051,7 @@ class TestMergePreservesTopLevelFields:
             "/v1/configs/models",
             content=(
                 "sie_id: acme/bert\n"
-                "description: added-later\n"
+                "hf_id: acme/bert-base\n"
                 "profiles:\n"
                 "  fast:\n"
                 "    adapter_path: sie_server.adapters.bert_flash:BertFlashAdapter\n"
@@ -2061,7 +2061,7 @@ class TestMergePreservesTopLevelFields:
         assert resp2.status_code == 201
 
         stored = yaml.safe_load((self._store / "models" / "acme__bert.yaml").read_text())
-        assert stored["description"] == "added-later"
+        assert stored["hf_id"] == "acme/bert-base"
 
 
 class TestRejectUnroutableModels:

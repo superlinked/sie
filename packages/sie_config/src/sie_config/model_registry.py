@@ -539,7 +539,7 @@ class ModelRegistry:
         self._model_profiles: dict[str, set[str]] = {}  # model -> profile names
         self._model_profile_configs: dict[str, dict[str, dict]] = {}  # model -> {profile_name: config_dict}
         # Full merged model config (including top-level metadata like
-        # `description`, `default_bundle`). Populated on reload() from the
+        # `hf_id`, `max_sequence_length`). Populated on reload() from the
         # on-disk YAML and on add_model_config() via append-only merge.
         # This is the authoritative source for `/v1/configs/export` in
         # no-config-store deployments, where we otherwise have no way to

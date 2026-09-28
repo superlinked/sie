@@ -6,6 +6,7 @@ requires-python = ">=3.12,<3.13"
 license = { text = "Apache-2.0" }
 dependencies = [
     "fastapi>=0.115,<1",
+    "jsonschema>=4,<5",
     "uvicorn[standard]>=0.32,<1",
     "uvloop>=0.22",
     "nats-py>=2.9,<3",
