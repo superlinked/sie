@@ -626,27 +626,30 @@ class QueueExecutor:
     async def replace_model_configs(self, req: ReplaceModelConfigsRequest) -> ReplaceModelConfigsResponse:
         """Replace the bundle-scoped registry view from a full export snapshot.
 
-        An entry the model-config schema rejects is logged and left out, so the
-        returned hash covers only the applied models; the sidecar advertises it
-        only when it equals the control-plane hash.
+        An entry the model-config schema rejects is logged, and that model keeps
+        its current registry entries, if any. The returned hash covers what the
+        registry then holds; the sidecar advertises it only when it equals the
+        control-plane hash.
         """
         if not req.bundle_id:
             msg = "bundle_id is required"
             raise ValueError(msg)
 
         configs: list[ModelConfig] = []
+        rejected: set[str] = set()
         for entry in req.models:
             try:
                 configs.append(_parse_exported_model_config(entry))
             except (TypeError, ValueError, yaml.YAMLError) as exc:
                 logger.warning(
-                    "Skipping exported model config %r for bundle %s: %s",
+                    "Rejected exported model config %r for bundle %s; keeping its current config, if any: %s",
                     entry.model_id,
                     req.bundle_id,
                     exc,
                 )
+                rejected.add(entry.model_id)
 
-        invalidated = await self._registry.replace_configs_async(configs)
+        invalidated = await self._registry.replace_configs_async(configs, retained_models=rejected)
         for model_id in invalidated:
             self.invalidate_model_descriptor(model_id)
         bundle_hash = compute_bundle_config_hash_cached(self._registry, req.bundle_id)

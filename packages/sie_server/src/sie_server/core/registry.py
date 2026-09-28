@@ -19,7 +19,7 @@ import json
 import logging
 import threading
 import time
-from collections.abc import Coroutine, Iterable
+from collections.abc import Collection, Coroutine, Iterable
 from pathlib import Path
 from typing import Any
 
@@ -121,6 +121,11 @@ def _model_config_semantic_hash(config: ModelConfig) -> str:
 
 def _model_configs_semantically_equal(left: ModelConfig | None, right: ModelConfig) -> bool:
     return left is not None and _model_config_semantic_hash(left) == _model_config_semantic_hash(right)
+
+
+def _config_base_name(name: str, config: ModelConfig) -> str:
+    source = config.synthetic_profile_variant_source
+    return source[0] if source is not None else name
 
 
 def _is_python_runtime_adapter(adapter_path: str) -> bool:
@@ -2410,6 +2415,8 @@ class ModelRegistry:
         self,
         configs: Iterable[ModelConfig],
         model_dir: Path | None = None,
+        *,
+        retained_models: Collection[str] = (),
     ) -> set[str]:
         """Replace the registry config set from an authoritative snapshot.
 
@@ -2417,6 +2424,10 @@ class ModelRegistry:
         loaded models are unloaded while no load is admitted, before the
         config map is swapped, so a worker cannot keep serving a model that
         disappeared from the authoritative bundle export.
+
+        Current entries of a base model named in ``retained_models`` (the model
+        and its profile variants) are kept unchanged when ``configs`` does not
+        carry that model.
         """
         new_configs: dict[str, ModelConfig] = {}
         for config in expand_profile_variants(configs).values():
@@ -2427,21 +2438,28 @@ class ModelRegistry:
                 raise ValueError(msg)
             new_configs[config.sie_id] = config
 
-        if self._pool_name is not None:
-            accepted: dict[str, ModelConfig] = {}
-            for name, config in new_configs.items():
-                validate_pool_isolation(
-                    candidate_name=name,
-                    candidate_config=config,
-                    existing_configs=accepted,
-                    pool_name=self._pool_name,
-                )
-                accepted[name] = config
-        for name, config in new_configs.items():
-            validate_no_legacy_scalar_lora_id(name=name, config=config)
-
         update_lock = self._get_config_update_lock()
         async with update_lock:
+            if retained_models:
+                snapshot_bases = {_config_base_name(name, config) for name, config in new_configs.items()}
+                for name, config in self._configs.items():
+                    base_name = _config_base_name(name, config)
+                    if base_name in retained_models and base_name not in snapshot_bases and name not in new_configs:
+                        new_configs[name] = config
+
+            if self._pool_name is not None:
+                accepted: dict[str, ModelConfig] = {}
+                for name, config in new_configs.items():
+                    validate_pool_isolation(
+                        candidate_name=name,
+                        candidate_config=config,
+                        existing_configs=accepted,
+                        pool_name=self._pool_name,
+                    )
+                    accepted[name] = config
+            for name, config in new_configs.items():
+                validate_no_legacy_scalar_lora_id(name=name, config=config)
+
             async with self._get_load_admission_lock():
                 removed = set(self._configs) - set(new_configs)
                 changed = {

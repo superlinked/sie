@@ -1474,10 +1474,10 @@ profiles:
         assert registry.has_model("tenant/model")
 
     @pytest.mark.asyncio
-    async def test_replace_model_configs_skips_invalid_entries_and_applies_the_rest(
+    async def test_replace_model_configs_keeps_rejected_models_and_applies_the_rest(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
-        def model_yaml(model_id: str, *, profile_extra: str = "") -> str:
+        def model_yaml(model_id: str, *, max_batch_tokens: int = 4096, profile_extra: str = "") -> str:
             return f"""
 sie_id: {model_id}
 hf_id: sentence-transformers/all-MiniLM-L6-v2
@@ -1488,7 +1488,7 @@ tasks:
 profiles:
   default:
     adapter_path: sie_server.adapters.sentence_transformer:Adapter
-    max_batch_tokens: 4096
+    max_batch_tokens: {max_batch_tokens}
 {profile_extra}"""
 
         def request(epoch: int, entries: list[tuple[str, str]]) -> ReplaceModelConfigsRequest:
@@ -1502,16 +1502,21 @@ profiles:
         registry = ModelRegistry(models_dir=None)
         executor = QueueExecutor(registry)
         await executor.replace_model_configs(
-            request(7, [("kept/model", model_yaml("kept/model")), ("broken/model", model_yaml("broken/model"))])
+            request(
+                7,
+                [(model_id, model_yaml(model_id)) for model_id in ("kept/model", "broken/model", "stale/model")],
+            )
         )
-        assert registry.has_model("broken/model")
+        previous_broken = registry.get_config("broken/model")
+        registry._loaded["broken/model"] = MagicMock()
+        registry._do_unload = AsyncMock()
 
         with caplog.at_level("WARNING", logger="sie_server.queue_executor"):
             resp = await executor.replace_model_configs(
                 request(
                     8,
                     [
-                        ("kept/model", model_yaml("kept/model")),
+                        ("kept/model", model_yaml("kept/model", max_batch_tokens=8192)),
                         ("broken/model", model_yaml("broken/model", profile_extra="    max_output_token: 512")),
                         ("renamed/model", model_yaml("other/model")),
                         ("empty/model", ""),
@@ -1521,21 +1526,53 @@ profiles:
             )
 
         assert resp.applied is True
-        assert resp.applied_models == ["kept/model"]
-        assert registry.has_model("kept/model")
-        assert not registry.has_model("broken/model")
+        assert resp.applied_models == ["broken/model", "kept/model"]
+        assert registry.get_config("kept/model").profiles["default"].max_batch_tokens == 8192
+        assert registry.get_config("broken/model") is previous_broken
+        registry._do_unload.assert_not_awaited()
+        assert not registry.has_model("stale/model")
         assert not registry.has_model("other/model")
 
         reference = QueueExecutor(ModelRegistry(models_dir=None))
-        expected = await reference.replace_model_configs(request(8, [("kept/model", model_yaml("kept/model"))]))
+        expected = await reference.replace_model_configs(
+            request(
+                8,
+                [
+                    ("kept/model", model_yaml("kept/model", max_batch_tokens=8192)),
+                    ("broken/model", model_yaml("broken/model")),
+                ],
+            )
+        )
         assert expected.bundle_config_hash
         assert resp.bundle_config_hash == expected.bundle_config_hash
 
-        skipped = [record.getMessage() for record in caplog.records if "Skipping exported model" in record.getMessage()]
-        assert len(skipped) == 4
-        assert "'broken/model'" in skipped[0]
-        assert "max_output_token" in skipped[0]
-        assert "model_id mismatch" in skipped[1]
+        rejected = [
+            record.getMessage() for record in caplog.records if "Rejected exported model" in record.getMessage()
+        ]
+        assert len(rejected) == 4
+        assert "'broken/model'" in rejected[0]
+        assert "max_output_token" in rejected[0]
+        assert "model_id mismatch" in rejected[1]
+
+    @pytest.mark.asyncio
+    async def test_replace_model_configs_keeps_profile_variants_of_a_rejected_model(self) -> None:
+        def request(epoch: int, model_config: str) -> ReplaceModelConfigsRequest:
+            return ReplaceModelConfigsRequest(
+                bundle_id="sglang",
+                epoch=epoch,
+                bundle_config_hash="",
+                models=[ReplaceModelConfigEntry(model_id="Qwen/Qwen3.6-27B", model_config=model_config)],
+            )
+
+        registry = ModelRegistry(models_dir=None)
+        executor = QueueExecutor(registry)
+        await executor.replace_model_configs(request(7, _qwen_profile_variant_yaml()))
+        previous = {name: registry.get_config(name) for name in ("Qwen/Qwen3.6-27B", "Qwen/Qwen3.6-27B:rtx-pro-6000")}
+
+        resp = await executor.replace_model_configs(request(8, "unknown_field: 1\n" + _qwen_profile_variant_yaml()))
+
+        assert resp.applied_models == sorted(previous)
+        assert all(registry.get_config(name) is config for name, config in previous.items())
 
 
 # -----------------------------------------------------------------------------

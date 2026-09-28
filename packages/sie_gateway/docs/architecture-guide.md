@@ -236,7 +236,7 @@ Concurrency on the gateway's `ModelRegistry`:
 
 ## 6. Worker-Ack Status (`GET /v1/configs/models/{id}/status`)
 
-Admin tooling uses this endpoint after a `sie-config` write to observe whether configured workers are reporting the expected `bundle_config_hash` for each affected bundle. Worker-sidecar containers advance that hash after their bundle-scoped NATS delta is accepted by backend IPC `ApplyModelConfig`, or after the worker export reconciler replaces the bundle-scoped backend registry/catalog view from `sie-config`. During that replacement the Python worker logs and skips any exported entry its `ModelConfig` schema rejects and applies the rest; the sidecar still advances the advertised hash only when the worker's resulting hash equals the control-plane hash.
+Admin tooling uses this endpoint after a `sie-config` write to observe whether configured workers are reporting the expected `bundle_config_hash` for each affected bundle. Worker-sidecar containers advance that hash after their bundle-scoped NATS delta is accepted by backend IPC `ApplyModelConfig`, or after the worker export reconciler replaces the bundle-scoped backend registry/catalog view from `sie-config`. During that replacement the Python worker applies every entry its `ModelConfig` schema accepts; for a rejected entry it logs the model and reason and keeps that model's current registry entries, if any. The sidecar still advances the advertised hash only when the worker's resulting hash equals the control-plane hash.
 
 Response shape:
 
