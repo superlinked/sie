@@ -8,10 +8,11 @@ from __future__ import annotations
 
 import os
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import NonCallableMagicMock, create_autospec
 
 import numpy as np
 import pytest
+from sie_sdk import SIEAsyncClient, SIEClient
 
 # Default test configuration
 DEFAULT_EMBEDDING_DIM = 384
@@ -19,6 +20,8 @@ DEFAULT_EMBEDDING_DIM = 384
 ENTITY_PROBABILITY_THRESHOLD = 0.7
 DEFAULT_SPARSE_DIM = 30522
 DEFAULT_MULTIVECTOR_TOKEN_DIM = 128
+EXTRACT_ERROR_TEXT = "This item fails extraction in the mocked SIE client."
+EXTRACT_ITEM_ERROR = {"code": "INPUT_TOO_LONG", "message": "Item exceeds the model input window."}
 
 
 def _get_text(item: Any) -> str:
@@ -87,15 +90,13 @@ def _create_mock_encode_result(
     return result
 
 
-def _create_mock_score_result(query: str, items: list[dict], top_k: int | None = None) -> list[dict[str, Any]]:
+def _create_mock_score_result(query: str, items: list[dict]) -> list[dict[str, Any]]:
     """Create mock score results."""
     rng = np.random.default_rng(hash(query) % (2**32))
     scores = rng.uniform(0, 1, len(items))
 
     # Sort by score descending
     sorted_indices = np.argsort(scores)[::-1]
-    if top_k:
-        sorted_indices = sorted_indices[:top_k]
 
     results = []
     for rank, idx in enumerate(sorted_indices):
@@ -109,8 +110,21 @@ def _create_mock_score_result(query: str, items: list[dict], top_k: int | None =
     return results
 
 
-def _create_mock_extract_result(text: str, labels: list[str]) -> dict[str, Any]:
-    """Create mock extract results with all extraction types."""
+def _create_mock_extract_result(text: str, labels: list[str] | None) -> dict[str, Any]:
+    """Create mock extract results with all extraction types.
+
+    An item whose text is ``EXTRACT_ERROR_TEXT`` gets the per-item ``error``
+    the real SDK returns when extraction did not complete for that item.
+    """
+    if text == EXTRACT_ERROR_TEXT:
+        return {
+            "entities": [],
+            "relations": [],
+            "classifications": [],
+            "objects": [],
+            "error": dict(EXTRACT_ITEM_ERROR),
+        }
+
     # Generate deterministic mock entities
     rng = np.random.default_rng(hash(text) % (2**32))
     entities = []
@@ -138,11 +152,17 @@ def _create_mock_extract_result(text: str, labels: list[str]) -> dict[str, Any]:
 
 
 @pytest.fixture
-def mock_sie_client() -> MagicMock:
+def mock_sie_client() -> NonCallableMagicMock:
     """Create a mocked SIEClient for unit testing.
 
+    The mock is autospecced from ``sie_sdk.SIEClient``: a call with an argument
+    the SDK does not accept raises ``TypeError``, and an attribute the SDK does
+    not define raises ``AttributeError``. Change a method's behavior through its
+    ``side_effect`` or ``return_value``; assigning a new mock to the attribute
+    discards the signature check.
+
     Returns:
-        MagicMock that behaves like SIEClient with encode/score/extract methods.
+        Autospecced SIEClient with deterministic encode/score/extract behavior.
 
     Example:
         def test_embeddings(mock_sie_client):
@@ -150,7 +170,7 @@ def mock_sie_client() -> MagicMock:
             result = embeddings.embed_query("Hello")
             assert len(result) == 384
     """
-    client = MagicMock()
+    client = create_autospec(SIEClient, instance=True)
 
     def mock_encode(_model: str, items: Any, **kwargs: Any) -> list[dict] | dict:
         """Mock encode that returns embeddings for each item."""
@@ -193,32 +213,35 @@ def mock_sie_client() -> MagicMock:
         ]
         return {
             "model": _model,
-            "scores": _create_mock_score_result(query_text, item_dicts, kwargs.get("top_k")),
+            "scores": _create_mock_score_result(query_text, item_dicts),
         }
 
-    def mock_extract(_model: str, items: Any, labels: list[str], **_kwargs: Any) -> list[dict] | dict:
+    def mock_extract(_model: str, items: Any, *, labels: list[str] | None = None, **_kwargs: Any) -> list[dict] | dict:
         """Mock extract that returns NER entities."""
         if _is_single_item(items):
             return _create_mock_extract_result(_get_text(items), labels)
 
         return [_create_mock_extract_result(_get_text(item), labels) for item in items]
 
-    client.encode = MagicMock(side_effect=mock_encode)
-    client.score = MagicMock(side_effect=mock_score)
-    client.extract = MagicMock(side_effect=mock_extract)
+    client.encode.side_effect = mock_encode
+    client.score.side_effect = mock_score
+    client.extract.side_effect = mock_extract
     client.base_url = "http://localhost:8080"
 
     return client
 
 
 @pytest.fixture
-def mock_sie_async_client() -> MagicMock:
+def mock_sie_async_client() -> NonCallableMagicMock:
     """Create a mocked SIEAsyncClient for async unit testing.
 
+    Autospecced from ``sie_sdk.SIEAsyncClient`` with the same contract as
+    ``mock_sie_client``.
+
     Returns:
-        MagicMock that behaves like SIEAsyncClient with async encode/score/extract.
+        Autospecced SIEAsyncClient with async encode/score/extract behavior.
     """
-    client = MagicMock()
+    client = create_autospec(SIEAsyncClient, instance=True)
 
     async def mock_encode(_model: str, items: Any, **kwargs: Any) -> list[dict] | dict:
         # Determine what to include based on output_types
@@ -252,20 +275,34 @@ def mock_sie_async_client() -> MagicMock:
         ]
         return {
             "model": _model,
-            "scores": _create_mock_score_result(query_text, item_dicts, kwargs.get("top_k")),
+            "scores": _create_mock_score_result(query_text, item_dicts),
         }
 
-    async def mock_extract(_model: str, items: Any, labels: list[str], **_kwargs: Any) -> list[dict] | dict:
+    async def mock_extract(
+        _model: str, items: Any, *, labels: list[str] | None = None, **_kwargs: Any
+    ) -> list[dict] | dict:
         if _is_single_item(items):
             return _create_mock_extract_result(_get_text(items), labels)
         return [_create_mock_extract_result(_get_text(item), labels) for item in items]
 
-    client.encode = AsyncMock(side_effect=mock_encode)
-    client.score = AsyncMock(side_effect=mock_score)
-    client.extract = AsyncMock(side_effect=mock_extract)
+    client.encode.side_effect = mock_encode
+    client.score.side_effect = mock_score
+    client.extract.side_effect = mock_extract
     client.base_url = "http://localhost:8080"
 
     return client
+
+
+@pytest.fixture
+def extract_error_text() -> str:
+    """Item text for which the shared mock clients return a per-item extract ``error``."""
+    return EXTRACT_ERROR_TEXT
+
+
+@pytest.fixture
+def extract_item_error() -> dict[str, str]:
+    """The per-item extract ``error`` returned for ``extract_error_text``."""
+    return dict(EXTRACT_ITEM_ERROR)
 
 
 @pytest.fixture
