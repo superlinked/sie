@@ -642,6 +642,10 @@ pub async fn run(config: WorkerConfig) -> anyhow::Result<()> {
         let _ = h.await;
     }
 
+    dispatcher
+        .join_parked_groups(Duration::from_millis(DRAIN_DEADLINE_MS))
+        .await;
+
     // Wait for scheduler drain loops to finish their own final drain
     // window (bounded by SIE_SCHEDULER_DRAIN_DEADLINE_MS inside each
     // loop; default 10 s). They exit on `shutdown.wait()` which has already fired
@@ -893,6 +897,10 @@ pub async fn run_local(config: WorkerConfig) -> anyhow::Result<()> {
         h.abort();
         let _ = h.await;
     }
+
+    dispatcher
+        .join_parked_groups(Duration::from_millis(DRAIN_DEADLINE_MS))
+        .await;
 
     // Same scheduler final-drain contract as `run()` — residual items
     // surface to the ingest callers as shutdown "cancelled" errors instead

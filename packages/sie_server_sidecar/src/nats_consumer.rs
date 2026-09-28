@@ -43,6 +43,12 @@ fn max_deliver() -> i64 {
         .unwrap_or(DEFAULT_MAX_DELIVER)
 }
 
+/// How long JetStream keeps redelivering an unacknowledged work message
+/// before it dead-letters it: `max_deliver` rounds of the ACK wait.
+pub(crate) fn redelivery_envelope() -> Duration {
+    Duration::from_secs(ACK_WAIT_SECS.saturating_mul(max_deliver() as u64))
+}
+
 /// The larger of the durable work lifetime and configured retry envelope is the
 /// active-worker expiry horizon; the bounded state may evict the oldest entry
 /// sooner. Core NATS cancellation remains best-effort: a worker that starts or
