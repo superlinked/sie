@@ -1473,6 +1473,70 @@ profiles:
         assert not registry.has_model("default/model")
         assert registry.has_model("tenant/model")
 
+    @pytest.mark.asyncio
+    async def test_replace_model_configs_skips_invalid_entries_and_applies_the_rest(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        def model_yaml(model_id: str, *, profile_extra: str = "") -> str:
+            return f"""
+sie_id: {model_id}
+hf_id: sentence-transformers/all-MiniLM-L6-v2
+tasks:
+  encode:
+    dense:
+      dim: 384
+profiles:
+  default:
+    adapter_path: sie_server.adapters.sentence_transformer:Adapter
+    max_batch_tokens: 4096
+{profile_extra}"""
+
+        def request(epoch: int, entries: list[tuple[str, str]]) -> ReplaceModelConfigsRequest:
+            return ReplaceModelConfigsRequest(
+                bundle_id="default",
+                epoch=epoch,
+                bundle_config_hash="",
+                models=[ReplaceModelConfigEntry(model_id=mid, model_config=body) for mid, body in entries],
+            )
+
+        registry = ModelRegistry(models_dir=None)
+        executor = QueueExecutor(registry)
+        await executor.replace_model_configs(
+            request(7, [("kept/model", model_yaml("kept/model")), ("broken/model", model_yaml("broken/model"))])
+        )
+        assert registry.has_model("broken/model")
+
+        with caplog.at_level("WARNING", logger="sie_server.queue_executor"):
+            resp = await executor.replace_model_configs(
+                request(
+                    8,
+                    [
+                        ("kept/model", model_yaml("kept/model")),
+                        ("broken/model", model_yaml("broken/model", profile_extra="    max_output_token: 512")),
+                        ("renamed/model", model_yaml("other/model")),
+                        ("empty/model", ""),
+                        ("list/model", "- not\n- a mapping\n"),
+                    ],
+                )
+            )
+
+        assert resp.applied is True
+        assert resp.applied_models == ["kept/model"]
+        assert registry.has_model("kept/model")
+        assert not registry.has_model("broken/model")
+        assert not registry.has_model("other/model")
+
+        reference = QueueExecutor(ModelRegistry(models_dir=None))
+        expected = await reference.replace_model_configs(request(8, [("kept/model", model_yaml("kept/model"))]))
+        assert expected.bundle_config_hash
+        assert resp.bundle_config_hash == expected.bundle_config_hash
+
+        skipped = [record.getMessage() for record in caplog.records if "Skipping exported model" in record.getMessage()]
+        assert len(skipped) == 4
+        assert "'broken/model'" in skipped[0]
+        assert "max_output_token" in skipped[0]
+        assert "model_id mismatch" in skipped[1]
+
 
 # -----------------------------------------------------------------------------
 # SetPinnedModels

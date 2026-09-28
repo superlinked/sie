@@ -46,6 +46,7 @@ from sie_server.ipc_types import (
     ProcessScoreBatchRequest,
     RawOutput,
     ReadinessState,
+    ReplaceModelConfigEntry,
     ReplaceModelConfigsRequest,
     ReplaceModelConfigsResponse,
     ScoreBatchItem,
@@ -507,6 +508,23 @@ def _wrap_encode_output(output: dict, config: Any) -> dict:
     return wrapped
 
 
+def _parse_exported_model_config(entry: ReplaceModelConfigEntry) -> ModelConfig:
+    if not entry.model_config.strip():
+        msg = "model_config is required"
+        raise ValueError(msg)
+
+    raw = yaml.safe_load(entry.model_config)
+    if not isinstance(raw, dict):
+        msg = "model_config must decode to a YAML mapping"
+        raise ValueError(msg)
+
+    model_config = ModelConfig(**raw)
+    if entry.model_id and model_config.sie_id != entry.model_id:
+        msg = f"model_id mismatch: export={entry.model_id!r} config={model_config.sie_id!r}"
+        raise ValueError(msg)
+    return model_config
+
+
 # ---------------------------------------------------------------------------
 # QueueExecutor
 # ---------------------------------------------------------------------------
@@ -606,27 +624,27 @@ class QueueExecutor:
         return compute_bundle_config_hash_cached(self._registry, bundle_id)
 
     async def replace_model_configs(self, req: ReplaceModelConfigsRequest) -> ReplaceModelConfigsResponse:
-        """Replace the bundle-scoped registry view from a full export snapshot."""
+        """Replace the bundle-scoped registry view from a full export snapshot.
+
+        An entry the model-config schema rejects is logged and left out, so the
+        returned hash covers only the applied models; the sidecar advertises it
+        only when it equals the control-plane hash.
+        """
         if not req.bundle_id:
             msg = "bundle_id is required"
             raise ValueError(msg)
 
         configs: list[ModelConfig] = []
         for entry in req.models:
-            if not entry.model_config.strip():
-                msg = "model_config is required"
-                raise ValueError(msg)
-
-            raw = yaml.safe_load(entry.model_config)
-            if not isinstance(raw, dict):
-                msg = "model_config must decode to a YAML mapping"
-                raise ValueError(msg)
-
-            model_config = ModelConfig(**raw)
-            if entry.model_id and model_config.sie_id != entry.model_id:
-                msg = f"model_id mismatch: export={entry.model_id!r} config={model_config.sie_id!r}"
-                raise ValueError(msg)
-            configs.append(model_config)
+            try:
+                configs.append(_parse_exported_model_config(entry))
+            except (TypeError, ValueError, yaml.YAMLError) as exc:
+                logger.warning(
+                    "Skipping exported model config %r for bundle %s: %s",
+                    entry.model_id,
+                    req.bundle_id,
+                    exc,
+                )
 
         invalidated = await self._registry.replace_configs_async(configs)
         for model_id in invalidated:
