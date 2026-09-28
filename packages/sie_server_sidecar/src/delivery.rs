@@ -129,6 +129,19 @@ impl Delivery {
         }
     }
 
+    /// True when this delivery holds a pull-loop admission permit.
+    pub(crate) fn holds_admission_permit(&self) -> bool {
+        matches!(self, Self::Nats(_, Some(_)))
+    }
+
+    /// Give the pull-loop admission permit back and hold `permit` until
+    /// settlement instead. A no-op when no admission permit is held.
+    pub(crate) fn exchange_admission_permit(&mut self, permit: OwnedSemaphorePermit) {
+        if let Self::Nats(_, held @ Some(_)) = self {
+            *held = Some(permit);
+        }
+    }
+
     /// ACK — "settled, never redeliver". Local deliveries settle via
     /// their terminal [`LocalDeliveryEvent::Result`], so this is a no-op.
     pub async fn ack(&self) -> Result<(), String> {
@@ -263,6 +276,56 @@ mod tests {
             }
             other @ LocalDeliveryEvent::Retry { .. } => panic!("expected Result, got {other:?}"),
         }
+    }
+
+    async fn offline_message() -> Message {
+        let client = async_nats::ConnectOptions::new()
+            .retry_on_initial_connect()
+            .connect("nats://127.0.0.1:1")
+            .await
+            .expect("an offline client needs no server");
+        Message {
+            message: async_nats::Message {
+                subject: "sie.work.test".into(),
+                reply: None,
+                payload: Default::default(),
+                headers: None,
+                status: None,
+                description: None,
+                length: 0,
+            },
+            context: async_nats::jetstream::new(client),
+        }
+    }
+
+    #[tokio::test]
+    async fn exchanging_the_admission_permit_returns_it_to_the_pull_loop() {
+        let admission = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        let parked = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        let admitted = std::sync::Arc::clone(&admission)
+            .try_acquire_owned()
+            .unwrap();
+        let mut delivery = Delivery::Nats(offline_message().await, Some(admitted));
+        assert!(delivery.holds_admission_permit());
+
+        delivery
+            .exchange_admission_permit(std::sync::Arc::clone(&parked).try_acquire_owned().unwrap());
+        assert_eq!(admission.available_permits(), 1);
+        assert_eq!(parked.available_permits(), 0);
+
+        drop(delivery);
+        assert_eq!(parked.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_delivery_without_an_admission_permit_takes_no_parked_permit() {
+        let parked = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        let mut delivery = Delivery::Nats(offline_message().await, None);
+        assert!(!delivery.holds_admission_permit());
+
+        delivery
+            .exchange_admission_permit(std::sync::Arc::clone(&parked).try_acquire_owned().unwrap());
+        assert_eq!(parked.available_permits(), 1);
     }
 
     #[test]

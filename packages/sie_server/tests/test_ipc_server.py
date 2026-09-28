@@ -1049,8 +1049,8 @@ profiles:
         )
         assert registry.has_model(variant_id)
 
-        load_lock = registry._get_load_lock()
-        await load_lock.acquire()
+        admission_lock = registry._get_load_admission_lock()
+        await admission_lock.acquire()
         remove_task = asyncio.create_task(
             executor.apply_model_config(
                 ApplyModelConfigRequest(
@@ -1081,11 +1081,11 @@ profiles:
 
         try:
             await asyncio.sleep(0)
-            load_lock.release()
+            admission_lock.release()
             await asyncio.gather(remove_task, readd_task)
         finally:
-            if load_lock.locked():
-                load_lock.release()
+            if admission_lock.locked():
+                admission_lock.release()
             for task in (remove_task, readd_task):
                 if not task.done():
                     task.cancel()
