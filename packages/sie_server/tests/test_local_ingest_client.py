@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
+from contextlib import aclosing
 from pathlib import Path
 from typing import Any
 
 import msgpack
 import pytest
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from sie_server import local_ingest_client
 
 
@@ -179,3 +184,92 @@ async def test_stream_generate_rejects_transport_sequence_gap(unix_socket_dir: P
                 chunk
                 async for chunk in local_ingest_client.stream_generate(str(socket_path), b"items", b"params", _meta())
             ]
+
+
+def test_trace_carrier_does_not_change_bound_payload() -> None:
+    parent = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+    body = local_ingest_client.build_generation_request_body(b"items", b"params", _meta())
+    traced = local_ingest_client.build_generation_request_body(
+        b"items", b"params", {**_meta(), "traceparent": parent, "tracestate": "vendor=value"}
+    )
+    assert traced["traceparent"] == parent
+    assert traced["tracestate"] == "vendor=value"
+    assert traced["items"] == body["items"]
+    assert traced["payload_digest"] == body["payload_digest"]
+    assert local_ingest_client.compute_payload_digest(traced) == local_ingest_client.compute_payload_digest(body)
+    invalid = local_ingest_client.build_generation_request_body(
+        b"items", b"params", {**_meta(), "traceparent": 3, "tracestate": "x" * 513}
+    )
+    assert "traceparent" not in invalid
+    assert "tracestate" not in invalid
+
+
+async def test_traced_stream_owns_handoff_lifetime_without_leaking_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(local_ingest_client, "_TRACER", provider.get_tracer("test"))
+    monkeypatch.setenv("SIE_TRACING_ENABLED", "true")
+    parent = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+    captured = []
+    closed = []
+
+    async def transport(_socket: str, items: bytes, params: bytes, meta: dict[str, Any]) -> AsyncIterator[bytes]:
+        captured.append((items, params, meta, trace.get_current_span().get_span_context()))
+        try:
+            yield b"chunk"
+            await asyncio.Future()
+        finally:
+            closed.append(trace.get_current_span().get_span_context())
+
+    monkeypatch.setattr(local_ingest_client, "_stream_generate", transport)
+    iterator = local_ingest_client.stream_generate(
+        "private/socket", b"secret items", b"secret params", {**_meta(), "traceparent": parent}
+    )
+    async with aclosing(iterator):
+        assert await anext(iterator) == b"chunk"
+        assert not trace.get_current_span().get_span_context().is_valid
+        assert not exporter.get_finished_spans()
+        await asyncio.create_task(iterator.aclose())
+    (span,) = exporter.get_finished_spans()
+    assert closed == [span.context]
+    assert captured[0][3] == span.context
+    assert span.name == "worker.local_ingest"
+    assert span.parent.span_id == int(parent.split("-")[2], 16)
+    assert captured[0][0:2] == (b"secret items", b"secret params")
+    assert captured[0][2]["traceparent"].split("-")[2] == f"{span.context.span_id:016x}"
+    assert not span.attributes
+    assert not span.events
+    assert not span.status.description
+    provider.shutdown()
+
+
+async def test_optional_carrier_does_not_overflow_valid_frame(
+    unix_socket_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    body = local_ingest_client.build_generation_request_body(b"items", b"params", _meta())
+    limit = len(msgpack.packb({"id": 1, "op": "publish_generate_stream", "body": body}, use_bin_type=True))
+    monkeypatch.setattr(local_ingest_client, "MAX_LOCAL_INGEST_FRAME_BYTES", limit)
+    socket_path = unix_socket_dir / "bounded.sock"
+    observed = []
+
+    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        observed.append(await _request(reader))
+        writer.write(_frame({"id": 1, "ok": True, "body": {"final": True, "outcome": {"chunks": 0}}}))
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    server = await asyncio.start_unix_server(handle, path=socket_path)
+    async with server:
+        chunks = [
+            chunk
+            async for chunk in local_ingest_client.stream_generate(
+                str(socket_path),
+                b"items",
+                b"params",
+                {**_meta(), "traceparent": "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"},
+            )
+        ]
+    assert chunks == []
+    assert observed[0]["body"] == body

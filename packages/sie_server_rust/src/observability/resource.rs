@@ -7,7 +7,7 @@ use opentelemetry_sdk::Resource;
 
 pub(crate) use sie_telemetry::env::cleaned_env;
 use sie_telemetry::resource::{
-    instance_prefix_env, resource_from_values, service_instance_id, UNKNOWN_RESOURCE_VALUE,
+    instance_prefix_env, resource_from_env, service_instance_id, UNKNOWN_RESOURCE_VALUE,
 };
 
 pub const SERVICE_NAME: &str = "sie-worker";
@@ -24,7 +24,7 @@ pub fn telemetry_resource() -> Resource {
         .or_else(|| cleaned_env("AWS_DEFAULT_REGION"))
         .unwrap_or_else(|| UNKNOWN_RESOURCE_VALUE.to_string());
 
-    resource_from_values(
+    resource_from_env(
         SERVICE_NAME,
         &instance_id,
         &deployment_environment,

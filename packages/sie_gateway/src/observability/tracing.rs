@@ -77,7 +77,7 @@ use sie_telemetry::proxy::{
 #[cfg(test)]
 use sie_telemetry::resource::compose_service_instance_id;
 pub(crate) use sie_telemetry::resource::process_start_uuid;
-use sie_telemetry::resource::{resource_from_values, service_instance_id};
+use sie_telemetry::resource::{resource_from_env, service_instance_id};
 use sie_telemetry::transport::{
     configured_signal_endpoints, endpoint_origin_for_log, otlp_metrics_protocol,
     select_signal_protocol, trace_export_config, OtlpProtocol, SignalExportConfig,
@@ -420,7 +420,7 @@ fn otlp_resource_from_values(
     deployment_environment: &str,
     cloud_region: &str,
 ) -> Resource {
-    resource_from_values(
+    resource_from_env(
         service_name,
         instance_id,
         deployment_environment,

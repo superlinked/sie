@@ -634,3 +634,10 @@ def test_invalid_metrics_transport_disables_export_fail_open(
     assert "continuing without export" in caplog.text
     assert "error_type=ValueError" in caplog.text
     assert "http/json" not in caplog.text
+
+
+def test_service_version_uses_explicit_deployment_revision(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OTEL_SERVICE_VERSION", "  " + "a" * 40 + "  ")
+    assert wt.worker_resource_attributes()["service.version"] == "a" * 40
+    monkeypatch.setenv("OTEL_SERVICE_VERSION", "  ")
+    assert "service.version" not in wt.worker_resource_attributes()

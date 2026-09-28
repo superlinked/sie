@@ -68,12 +68,14 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
+use opentelemetry::trace::TraceContextExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{mpsc, oneshot, Mutex, Notify, OwnedSemaphorePermit, Semaphore};
-use tracing::{debug, info, warn};
+use tracing::{debug, info, warn, Instrument};
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::delivery::{Delivery, LocalDelivery, LocalDeliveryEvent};
 use crate::dispatcher::Dispatcher;
@@ -170,6 +172,8 @@ struct RequestBody {
     dispatch_context: serde_bytes::ByteBuf,
     payload_digest: serde_bytes::ByteBuf,
     timeout_ms: i64,
+    traceparent: Option<String>,
+    tracestate: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -1099,6 +1103,34 @@ fn encode_generate_error(id: u64, error: &crate::dispatcher::GenerateDispatchErr
     encode_response(id, false, Some(&rendered), empty_body())
 }
 
+fn local_ingest_span(body: &RequestBody, items: &mut [WorkItem]) -> tracing::Span {
+    let parent = crate::observability::propagation::extract_context_from_w3c(
+        body.traceparent
+            .as_deref()
+            .filter(|value| value.len() <= 256),
+        body.tracestate
+            .as_deref()
+            .filter(|value| value.len() <= 512),
+    );
+    if !parent.span().span_context().is_valid() {
+        return tracing::Span::none();
+    }
+    let span = tracing::info_span!("sidecar.local_ingest", otel.name = "sidecar.local_ingest");
+    let _ = span.set_parent(parent.clone());
+    let context = span.context();
+    let context = if context.span().span_context().is_valid() {
+        context
+    } else {
+        parent
+    };
+    let (traceparent, tracestate) = crate::observability::propagation::inject_context(&context);
+    for item in items {
+        item.traceparent.clone_from(&traceparent);
+        item.tracestate.clone_from(&tracestate);
+    }
+    span
+}
+
 async fn publish_generate_stream(
     body: RequestBody,
     shared: &IngestShared,
@@ -1134,6 +1166,29 @@ async fn publish_generate_stream(
             message: "publish_generate_stream requires endpoint generate".to_string(),
         });
     }
+    let span = local_ingest_span(&body, &mut items);
+    publish_validated_generate(
+        body,
+        items,
+        shared,
+        stream_writer,
+        lifecycle,
+        semantic_deadline,
+        timeout_ms,
+    )
+    .instrument(span)
+    .await
+}
+
+async fn publish_validated_generate(
+    body: RequestBody,
+    mut items: Vec<WorkItem>,
+    shared: &IngestShared,
+    stream_writer: GenerateStreamWriter,
+    lifecycle: Arc<ConnectionLifecycle>,
+    semantic_deadline: Option<tokio::time::Instant>,
+    timeout_ms: Option<u64>,
+) -> Result<(), crate::dispatcher::GenerateDispatchError> {
     let mut work_item = items.pop().expect("validated exactly one generate item");
     let meta_pool = normalize_pool(&body.admission_pool);
     let item_pool = normalize_pool(&work_item.admission_pool);
@@ -1519,9 +1574,20 @@ fn error_result(wi: &WorkItem, worker_id: &str, code: &str, message: &str) -> Wo
 async fn publish_work(body: RequestBody, shared: &IngestShared) -> Result<Vec<u8>, String> {
     validate_publish_work_timeout(body.timeout_ms)?;
     validate_payload_digest(&body)?;
-    let items: Vec<WorkItem> = rmp_serde::from_slice(&body.items)
+    let mut items: Vec<WorkItem> = rmp_serde::from_slice(&body.items)
         .map_err(|e| format!("DecodeError: items is not a msgpack WorkItem array: {e}"))?;
     validate_work_items(&body, &items)?;
+    let span = local_ingest_span(&body, &mut items);
+    publish_validated_work(body, items, shared)
+        .instrument(span)
+        .await
+}
+
+async fn publish_validated_work(
+    body: RequestBody,
+    items: Vec<WorkItem>,
+    shared: &IngestShared,
+) -> Result<Vec<u8>, String> {
     let n = items.len();
     let mut results: Vec<Option<WorkResult>> = Vec::with_capacity(n);
     results.resize_with(n, || None);
@@ -1734,9 +1800,79 @@ mod tests {
             dispatch_context: serde_bytes::ByteBuf::from(b"opaque-caller-context".to_vec()),
             payload_digest: serde_bytes::ByteBuf::new(),
             timeout_ms: 1_000,
+            traceparent: None,
+            tracestate: None,
         };
         body.payload_digest = serde_bytes::ByteBuf::from(compute_payload_digest(&body).to_vec());
         body
+    }
+
+    #[tokio::test]
+    async fn transport_span_parents_decoded_work_and_ends_on_cancel() {
+        use opentelemetry::trace::TracerProvider as _;
+        use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
+        use tracing::instrument::WithSubscriber;
+        use tracing_subscriber::prelude::*;
+
+        opentelemetry::global::set_text_map_propagator(
+            opentelemetry_sdk::propagation::TraceContextPropagator::new(),
+        );
+        let exporter = InMemorySpanExporter::default();
+        let provider = SdkTracerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test")));
+        let dispatch = tracing::Dispatch::new(subscriber);
+        let mut items = vec![sample_work_item()];
+        let mut body = bound_body(&items);
+        let original_items = body.items.clone();
+        let original_digest = body.payload_digest.clone();
+        body.traceparent = Some("00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01".into());
+        body.tracestate = Some("vendor=value".into());
+        let span =
+            tracing::dispatcher::with_default(&dispatch, || local_ingest_span(&body, &mut items));
+        let child = span.context().span().span_context().clone();
+        let extracted = crate::observability::propagation::extract_context_from_w3c(
+            items[0].traceparent.as_deref(),
+            items[0].tracestate.as_deref(),
+        );
+        assert_eq!(extracted.span().span_context().span_id(), child.span_id());
+        assert_eq!(body.items, original_items);
+        assert_eq!(body.payload_digest, original_digest);
+        validate_payload_digest(&body).unwrap();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(
+            async move {
+                let _ = started.send(());
+                std::future::pending::<()>().await;
+            }
+            .instrument(span)
+            .with_subscriber(dispatch),
+        );
+        ready.await.unwrap();
+        assert!(exporter.get_finished_spans().unwrap().is_empty());
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        let spans = exporter.get_finished_spans().unwrap();
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].name, "sidecar.local_ingest");
+        assert_eq!(spans[0].parent_span_id.to_string(), "b7ad6b7169203331");
+        assert!(spans[0].events.is_empty());
+        assert!(spans[0].links.is_empty());
+        provider.shutdown().unwrap();
+    }
+
+    #[test]
+    fn missing_or_invalid_transport_parent_keeps_original_items() {
+        for parent in [None, Some("private-invalid-value".to_string())] {
+            let mut items = vec![sample_work_item()];
+            items[0].traceparent = Some("original-parent".into());
+            let mut body = bound_body(&items);
+            body.traceparent = parent;
+            assert!(local_ingest_span(&body, &mut items).is_disabled());
+            assert_eq!(items[0].traceparent.as_deref(), Some("original-parent"));
+        }
     }
 
     #[test]

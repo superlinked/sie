@@ -45,6 +45,24 @@ pub fn resource_from_values(
         .build()
 }
 
+/// Build an allowlisted resource with an optional deployment version override.
+pub fn resource_from_env(
+    service_name: &str,
+    instance_id: &str,
+    deployment_environment: &str,
+    cloud_region: &str,
+    package_version: Option<&str>,
+) -> Resource {
+    let version = cleaned_env("OTEL_SERVICE_VERSION");
+    resource_from_values(
+        service_name,
+        instance_id,
+        deployment_environment,
+        cloud_region,
+        version.as_deref().or(package_version),
+    )
+}
+
 /// The shared substrate-instance prefix chain: explicit override, then the
 /// Modal task id.
 pub fn instance_prefix_env() -> Option<String> {

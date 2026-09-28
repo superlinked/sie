@@ -1123,6 +1123,7 @@ def worker_resource_attributes() -> dict[str, str]:
         "service.instance.id": service_instance_id(),
         "deployment.environment": deployment_environment,
         "cloud.region": cloud_region,
+        **({"service.version": version} if (version := _clean_env("OTEL_SERVICE_VERSION")) else {}),
     }
 
 

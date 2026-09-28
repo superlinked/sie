@@ -4,10 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
 from collections.abc import AsyncIterator
+from contextlib import nullcontext, suppress
 from typing import Any
 
 import msgpack
+from opentelemetry import trace
+from opentelemetry.context import Context
+from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+
+_TRACER = trace.get_tracer(__name__)
+_PROPAGATOR = TraceContextTextMapPropagator()
 
 MAX_LOCAL_INGEST_FRAME_BYTES = 64 * 1024 * 1024
 PAYLOAD_DIGEST_BYTES = 32
@@ -86,6 +94,10 @@ def build_generation_request_body(items: bytes, params: bytes, meta: dict[str, A
         "payload_digest": payload_digest,
         "timeout_ms": timeout_ms,
     }
+    for key, limit in (("traceparent", 256), ("tracestate", 512)):
+        value = meta.get(key)
+        if isinstance(value, str) and len(value) <= limit:
+            body[key] = value
     if not bound_transport:
         body["payload_digest"] = compute_payload_digest(body)
     return body
@@ -114,7 +126,64 @@ async def _read_frame(reader: asyncio.StreamReader) -> dict[str, Any]:
     return response
 
 
-async def stream_generate(
+def stream_generate(socket_path: str, items: bytes, params: bytes, meta: dict[str, Any]) -> AsyncIterator[bytes]:
+    if os.environ.get("SIE_TRACING_ENABLED", "").strip().lower() not in {"1", "true", "yes", "on"}:
+        return _stream_generate(socket_path, items, params, meta)
+    return _traced_generate(socket_path, items, params, meta)
+
+
+async def _traced_generate(socket_path: str, items: bytes, params: bytes, meta: dict[str, Any]) -> AsyncIterator[bytes]:
+    carrier = {
+        key: value
+        for key, limit in (("traceparent", 256), ("tracestate", 512))
+        if isinstance(value := meta.get(key), str) and len(value) <= limit
+    }
+    span = None
+    with suppress(Exception):
+        parent = _PROPAGATOR.extract(carrier, context=Context())
+        span = _TRACER.start_span(
+            "worker.local_ingest",
+            context=parent,
+            kind=trace.SpanKind.CLIENT,
+            record_exception=False,
+            set_status_on_exception=False,
+        )
+        carrier = {}
+        _PROPAGATOR.inject(carrier, context=trace.set_span_in_context(span, parent))
+        meta = {**meta, **carrier}
+    iterator = _stream_generate(socket_path, items, params, meta)
+    try:
+        while True:
+            try:
+                with (
+                    trace.use_span(span, record_exception=False, set_status_on_exception=False)
+                    if span is not None
+                    else nullcontext()
+                ):
+                    chunk = await anext(iterator)
+            except StopAsyncIteration:
+                break
+            yield chunk
+    except BaseException as error:
+        if span is not None and not isinstance(error, (asyncio.CancelledError, GeneratorExit)):
+            with suppress(Exception):
+                span.set_status(trace.StatusCode.ERROR)
+        raise
+    finally:
+        try:
+            with (
+                trace.use_span(span, record_exception=False, set_status_on_exception=False)
+                if span is not None
+                else nullcontext()
+            ):
+                await iterator.aclose()
+        finally:
+            if span is not None:
+                with suppress(Exception):
+                    span.end()
+
+
+async def _stream_generate(
     socket_path: str,
     items: bytes,
     params: bytes,
@@ -133,6 +202,11 @@ async def stream_generate(
         {"id": operation_id, "op": "publish_generate_stream", "body": body},
         use_bin_type=True,
     )
+    if len(payload) > MAX_LOCAL_INGEST_FRAME_BYTES and ("traceparent" in body or "tracestate" in body):
+        # Optional telemetry must not make a previously valid frame too large.
+        body.pop("traceparent", None)
+        body.pop("tracestate", None)
+        payload = msgpack.packb({"id": operation_id, "op": "publish_generate_stream", "body": body}, use_bin_type=True)
     if len(payload) > MAX_LOCAL_INGEST_FRAME_BYTES:
         raise ValueError(
             f"local-ingest generation frame is {len(payload)} bytes; maximum is {MAX_LOCAL_INGEST_FRAME_BYTES}"
