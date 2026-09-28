@@ -1514,7 +1514,7 @@ class ModelRegistry:
                         if current_config is None:
                             msg = f"Model '{name}' config was removed while its weights were being fetched"
                             raise RuntimeError(msg)
-                        if current_config != config:
+                        if not _model_configs_semantically_equal(current_config, config):
                             msg = f"Model '{name}' config changed while its weights were being fetched; retry"
                             raise RuntimeError(msg)
                         model_dir = self._model_dirs.get(name, Path())
