@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import NonCallableMagicMock, create_autospec
 
 import numpy as np
 import pytest
+from sie_sdk import SIEClient
 
 # Default test configuration
 EMBEDDING_DIM = 384
@@ -59,9 +60,9 @@ def _get_text(item: Any) -> str:
 
 
 @pytest.fixture
-def mock_sie_client() -> MagicMock:
+def mock_sie_client() -> NonCallableMagicMock:
     """Create a mocked SIEClient for unit testing."""
-    client = MagicMock()
+    client = create_autospec(SIEClient, instance=True)
 
     def mock_encode(
         _model: str,
@@ -86,7 +87,7 @@ def mock_sie_client() -> MagicMock:
         item_dicts = [{"text": _get_text(i)} for i in items]
         return _create_mock_encode_result(item_dicts, include_dense=include_dense, include_sparse=include_sparse)
 
-    client.encode = MagicMock(side_effect=mock_encode)
+    client.encode.side_effect = mock_encode
     client.base_url = "http://localhost:8080"
 
     return client

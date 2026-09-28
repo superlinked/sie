@@ -8,10 +8,11 @@ consider extracting shared fixtures into a common test utilities package.
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import NonCallableMagicMock, create_autospec
 
 import numpy as np
 import pytest
+from sie_sdk import SIEAsyncClient, SIEClient
 
 EMBEDDING_DIM = 384
 MULTIVECTOR_TOKENS = 8
@@ -95,9 +96,9 @@ def _get_text(item: Any) -> str:
 
 
 @pytest.fixture
-def mock_sie_client() -> MagicMock:
+def mock_sie_client() -> NonCallableMagicMock:
     """Create a mocked SIEClient for unit testing."""
-    client = MagicMock()
+    client = create_autospec(SIEClient, instance=True)
 
     def mock_encode(
         _model: str,
@@ -146,17 +147,17 @@ def mock_sie_client() -> MagicMock:
         item_dicts = [{"text": _get_text(i)} for i in items]
         return _create_mock_extract_result(item_dicts, labels=labels)
 
-    client.encode = MagicMock(side_effect=mock_encode)
+    client.encode.side_effect = mock_encode
     # Default extract returns entities; tests that need classification
     # swap the side_effect on the second call.
-    client.extract = MagicMock(side_effect=mock_extract)
+    client.extract.side_effect = mock_extract
     client.base_url = "http://localhost:8080"
 
     return client
 
 
 @pytest.fixture
-def mock_classify_client(mock_sie_client: MagicMock) -> MagicMock:
+def mock_classify_client(mock_sie_client: NonCallableMagicMock) -> NonCallableMagicMock:
     """Mock client where extract returns classifications (for GLiClass)."""
     original_extract = mock_sie_client.extract.side_effect
 
@@ -175,14 +176,14 @@ def mock_classify_client(mock_sie_client: MagicMock) -> MagicMock:
             return _create_mock_classify_result(item_dicts, labels=labels)
         return original_extract(_model, items, labels=labels, **kwargs)
 
-    mock_sie_client.extract = MagicMock(side_effect=extract_dispatch)
+    mock_sie_client.extract.side_effect = extract_dispatch
     return mock_sie_client
 
 
 @pytest.fixture
-def mock_sie_async_client() -> AsyncMock:
+def mock_sie_async_client() -> NonCallableMagicMock:
     """Create a mocked SIEAsyncClient for async unit testing."""
-    client = AsyncMock()
+    client = create_autospec(SIEAsyncClient, instance=True)
 
     async def mock_encode(
         _model: str,
@@ -229,16 +230,15 @@ def mock_sie_async_client() -> AsyncMock:
         item_dicts = [{"text": _get_text(i)} for i in items]
         return _create_mock_extract_result(item_dicts, labels=labels)
 
-    client.encode = AsyncMock(side_effect=mock_encode)
-    client.extract = AsyncMock(side_effect=mock_extract)
-    client.close = AsyncMock()
+    client.encode.side_effect = mock_encode
+    client.extract.side_effect = mock_extract
     client.base_url = "http://localhost:8080"
 
     return client
 
 
 @pytest.fixture
-def mock_async_classify_client(mock_sie_async_client: AsyncMock) -> AsyncMock:
+def mock_async_classify_client(mock_sie_async_client: NonCallableMagicMock) -> NonCallableMagicMock:
     """Async mock client where extract alternates NER and classification."""
     original_extract = mock_sie_async_client.extract.side_effect
 
@@ -256,7 +256,7 @@ def mock_async_classify_client(mock_sie_async_client: AsyncMock) -> AsyncMock:
             return _create_mock_classify_result(item_dicts, labels=labels)
         return await original_extract(_model, items, labels=labels, **kwargs)
 
-    mock_sie_async_client.extract = AsyncMock(side_effect=extract_dispatch)
+    mock_sie_async_client.extract.side_effect = extract_dispatch
     return mock_sie_async_client
 
 
