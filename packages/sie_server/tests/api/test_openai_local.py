@@ -26,8 +26,10 @@ from sie_server.adapters.mlx.generation import MLXGenerationAdapter
 from sie_server.adapters.sglang.generation import SGLangGenerationAdapter
 from sie_server.api import openai_local
 from sie_server.api.openai_local import _validate_mlx_seed, router
+from sie_server.config.model import ModelConfig
 from sie_server.core import video_frames
 from sie_server.core.inference_output import ScoreOutput
+from sie_server.core.loader import expand_profile_variants
 from sie_server.core.timing import RequestTiming
 from sie_server.core.worker import WorkerResult
 from sie_server.types.inputs import MAX_ITEM_TEXT_BYTES
@@ -1400,3 +1402,251 @@ def test_rerank_non_finite_scores_return_top_level_openai_500(bad: float) -> Non
     assert error["type"] == "server_error"
     assert "m" in error["message"]
     assert "non-finite" in error["message"]
+
+
+_STRICT_RESPONSE_FORMAT = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "answer",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {"answer": {"type": "string"}},
+            "required": ["answer"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
+def _chat_completion(
+    content: str | None, *, finish_reason: str = "stop", tool_calls: list[Any] | None = None
+) -> dict[str, Any]:
+    message: dict[str, Any] = {"role": "assistant", "content": content}
+    if tool_calls is not None:
+        message["tool_calls"] = tool_calls
+    return {
+        "id": "chatcmpl-strict",
+        "object": "chat.completion",
+        "created": 1,
+        "model": "upstream-served-model",
+        "choices": [{"index": 0, "message": message, "logprobs": None, "finish_reason": finish_reason}],
+        "usage": {"prompt_tokens": 3, "completion_tokens": 4, "total_tokens": 7},
+    }
+
+
+def _chat_stream(*contents: str) -> bytes:
+    events: list[dict[str, Any]] = [
+        {
+            "id": "chatcmpl-strict",
+            "object": "chat.completion.chunk",
+            "created": 1,
+            "model": "upstream-served-model",
+            "choices": [{"index": 0, "delta": {"content": content}, "finish_reason": None}],
+        }
+        for content in contents
+    ]
+    events.append(
+        {
+            "id": "chatcmpl-strict",
+            "object": "chat.completion.chunk",
+            "created": 1,
+            "model": "upstream-served-model",
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+        }
+    )
+    return b"".join(f"data: {json.dumps(event)}\n\n".encode() for event in events) + b"data: [DONE]\n\n"
+
+
+def _chat_request(response_format: dict[str, Any], *, stream: bool = False) -> dict[str, Any]:
+    return {
+        "model": "Qwen/Qwen3-0.6B",
+        "messages": [{"role": "user", "content": "Answer in JSON"}],
+        "max_tokens": 8,
+        "stream": stream,
+        "response_format": response_format,
+    }
+
+
+def test_cuda_chat_strict_schema_violation_returns_a_typed_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _ = _cuda_chat_client(
+        monkeypatch, lambda _request: httpx.Response(200, json=_chat_completion('{"answer": 3}'))
+    )
+
+    response = client.post("/v1/chat/completions", json=_chat_request(_STRICT_RESPONSE_FORMAT))
+
+    assert response.status_code == 500
+    assert response.json() == {
+        "error": {
+            "message": "generated output does not match the requested JSON schema at $.answer ('type' keyword)",
+            "type": "server_error",
+            "param": None,
+            "code": "MODEL_OUTPUT_PARSE_ERROR",
+        }
+    }
+
+
+def test_cuda_chat_strict_schema_violation_errors_the_stream(monkeypatch: pytest.MonkeyPatch) -> None:
+    upstream_stream = _ChunkedAsyncStream([_chat_stream('{"answer"', ": 3}")])
+
+    def _handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=upstream_stream, headers={"content-type": "text/event-stream"})
+
+    client, _ = _cuda_chat_client(monkeypatch, _handler)
+
+    response = client.post("/v1/chat/completions", json=_chat_request(_STRICT_RESPONSE_FORMAT, stream=True))
+
+    assert response.status_code == 200
+    data_lines = [line.removeprefix("data: ") for line in response.text.splitlines() if line.startswith("data: ")]
+    assert data_lines[-1] == "[DONE]"
+    events = [json.loads(line) for line in data_lines[:-1]]
+    assert "".join(event["choices"][0]["delta"].get("content", "") for event in events[:-1]) == '{"answer": 3}'
+    assert events[-1] == {
+        "error": {
+            "message": "generated output does not match the requested JSON schema at $.answer ('type' keyword)",
+            "type": "server_error",
+            "param": None,
+            "code": "MODEL_OUTPUT_PARSE_ERROR",
+        }
+    }
+    assert '"finish_reason": "stop"' not in response.text
+    assert upstream_stream.closed is True
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_cuda_chat_conforming_strict_output_is_returned(monkeypatch: pytest.MonkeyPatch, stream: bool) -> None:
+    def _handler(_request: httpx.Request) -> httpx.Response:
+        if stream:
+            return httpx.Response(
+                200,
+                stream=_ChunkedAsyncStream([_chat_stream('{"answer": ', '"yes"}')]),
+                headers={"content-type": "text/event-stream"},
+            )
+        return httpx.Response(200, json=_chat_completion('{"answer": "yes"}'))
+
+    client, _ = _cuda_chat_client(monkeypatch, _handler)
+
+    response = client.post("/v1/chat/completions", json=_chat_request(_STRICT_RESPONSE_FORMAT, stream=stream))
+
+    assert response.status_code == 200
+    assert "MODEL_OUTPUT_PARSE_ERROR" not in response.text
+    if not stream:
+        assert response.json()["choices"][0]["message"]["content"] == '{"answer": "yes"}'
+
+
+@pytest.mark.parametrize(
+    "response_format",
+    [
+        {**_STRICT_RESPONSE_FORMAT, "json_schema": {**_STRICT_RESPONSE_FORMAT["json_schema"], "strict": False}},
+        {"type": "json_schema", "json_schema": {"name": "answer", "schema": {"type": "object"}}},
+        {"type": "json_object"},
+    ],
+)
+def test_cuda_chat_non_strict_response_format_is_not_verified(
+    monkeypatch: pytest.MonkeyPatch,
+    response_format: dict[str, Any],
+) -> None:
+    client, _ = _cuda_chat_client(monkeypatch, lambda _request: httpx.Response(200, json=_chat_completion("[]")))
+
+    response = client.post("/v1/chat/completions", json=_chat_request(response_format))
+
+    assert response.status_code == 200
+    assert response.json()["choices"][0]["message"]["content"] == "[]"
+
+
+@pytest.mark.parametrize("finish_reason", ["length", "tool_calls"])
+def test_cuda_chat_strict_output_skips_truncated_and_tool_call_turns(
+    monkeypatch: pytest.MonkeyPatch,
+    finish_reason: str,
+) -> None:
+    tool_calls = (
+        [{"id": "call_1", "type": "function", "function": {"name": "lookup", "arguments": "{}"}}]
+        if finish_reason == "tool_calls"
+        else None
+    )
+    body = _chat_completion(
+        '{"answer"' if finish_reason == "length" else None, finish_reason=finish_reason, tool_calls=tool_calls
+    )
+    client, _ = _cuda_chat_client(monkeypatch, lambda _request: httpx.Response(200, json=body))
+
+    response = client.post("/v1/chat/completions", json=_chat_request(_STRICT_RESPONSE_FORMAT))
+
+    assert response.status_code == 200
+    assert response.json()["choices"][0]["finish_reason"] == finish_reason
+
+
+def _serve_grammar_routed_configs(registry: MagicMock, *, without: tuple[str, ...] = ()) -> None:
+    config = ModelConfig.model_validate(
+        {
+            "sie_id": "Qwen/Qwen3.5-4B",
+            "hf_id": "Qwen/Qwen3.5-4B",
+            "inputs": {"text": True},
+            "tasks": {
+                "generate": {
+                    "context_length": 4096,
+                    "max_output_tokens": 64,
+                    "grammar_profile": "no-spec",
+                    "capabilities": {"grammar": ["json_schema"]},
+                }
+            },
+            "profiles": {
+                "default": {
+                    "max_batch_tokens": 4096,
+                    "kv_budget_tokens": 2048,
+                    "adapter_path": "sie_server.adapters.sglang.generation:SGLangGenerationAdapter",
+                    "adapter_options": {"loadtime": {"speculative": {"algorithm": "NEXTN", "num_steps": 3}}},
+                },
+                "no-spec": {
+                    "extends": "default",
+                    "adapter_options": {"loadtime": {"speculative": {"enabled": False}}},
+                },
+            },
+        }
+    )
+    configs = {name: value for name, value in expand_profile_variants([config]).items() if name not in without}
+    registry.has_model.side_effect = configs.__contains__
+    registry.get_config.side_effect = configs.__getitem__
+
+
+def test_cuda_chat_response_format_runs_on_the_grammar_profile(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, Any] = {}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json=_chat_completion('{"answer": "yes"}'))
+
+    client, registry = _cuda_chat_client(monkeypatch, _handler)
+    _serve_grammar_routed_configs(registry)
+    request = {**_chat_request(_STRICT_RESPONSE_FORMAT), "model": "Qwen/Qwen3.5-4B"}
+
+    response = client.post("/v1/chat/completions", json=request)
+
+    assert response.status_code == 200, response.text
+    registry.get.assert_called_once_with("Qwen/Qwen3.5-4B:no-spec")
+    assert response.json()["model"] == "Qwen/Qwen3.5-4B"
+    assert seen["body"]["response_format"] == _STRICT_RESPONSE_FORMAT
+
+    registry.get.reset_mock()
+    plain = {key: value for key, value in request.items() if key != "response_format"}
+    assert client.post("/v1/chat/completions", json=plain).status_code == 200
+    registry.get.assert_called_once_with("Qwen/Qwen3.5-4B")
+
+
+def test_cuda_chat_response_format_without_its_grammar_profile_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _handler(_request: httpx.Request) -> httpx.Response:
+        raise AssertionError("a request without a grammar-safe profile must not reach the child")
+
+    client, registry = _cuda_chat_client(monkeypatch, _handler)
+    _serve_grammar_routed_configs(registry, without=("Qwen/Qwen3.5-4B:no-spec",))
+
+    response = client.post(
+        "/v1/chat/completions",
+        json={**_chat_request(_STRICT_RESPONSE_FORMAT), "model": "Qwen/Qwen3.5-4B"},
+    )
+
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["code"] == "unsupported_field"
+    assert error["param"] == "response_format"
+    assert "'no-spec'" in error["message"]
+    registry.get.assert_not_called()

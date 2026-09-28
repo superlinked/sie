@@ -37,6 +37,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from sie_sdk.queue_types import denormalize_model_id
 
 from sie_server.adapters._generation_base import (
+    GenerationUnsupportedFieldError,
     ReasoningFormat,
     ThinkingBlockStripper,
     aclose_with_error_precedence,
@@ -50,6 +51,7 @@ from sie_server.api.options import resolve_runtime_options
 from sie_server.api.score import score_usage_from_output
 from sie_server.api.validation import validate_machine_profile_header, validate_signed_i64
 from sie_server.config.model import validate_chat_template_kwargs
+from sie_server.core.grammar_routing import resolve_grammar_serving_model
 from sie_server.core.inference_output import ScoreOutput
 from sie_server.core.score_cost import MAX_SCORE_ITEMS, build_score_prepared_items
 from sie_server.core.timing import RequestTiming
@@ -61,6 +63,8 @@ from sie_server.core.video_frames import (
 )
 from sie_server.observability.tracing import tracer
 from sie_server.processors.streaming import _decode_data_uri_image
+from sie_server.processors.strict_grammar import MODEL_OUTPUT_PARSE_ERROR, first_output_violation
+from sie_server.types.grammar import GrammarSpec
 from sie_server.types.inputs import Item, item_size_error
 from sie_server.types.responses import ErrorCode
 
@@ -261,19 +265,73 @@ def _translated_upstream_status(upstream_status: int) -> int:
     return status.HTTP_502_BAD_GATEWAY
 
 
-def _upstream_error_event(message: str = "upstream stream error") -> bytes:
+def _upstream_error_event(
+    message: str = "upstream stream error",
+    *,
+    code: str = "upstream_error",
+    error_type: str = "upstream_error",
+) -> bytes:
     payload = json.dumps(
         {
             "error": {
                 "message": message,
-                "type": "upstream_error",
+                "type": error_type,
                 "param": None,
-                "code": "upstream_error",
+                "code": code,
             }
         },
         separators=(",", ":"),
     )
     return f"data: {payload}\n\ndata: [DONE]\n\n".encode()
+
+
+def _response_format_constrains_decoding(response_format: Any) -> bool:
+    return isinstance(response_format, dict) and response_format.get("type") not in (None, "text")
+
+
+def _strict_response_format_grammar(response_format: Any) -> GrammarSpec | None:
+    """Return the JSON Schema grammar a strict ``response_format`` requires."""
+    if not isinstance(response_format, dict) or response_format.get("type") != "json_schema":
+        return None
+    json_schema = response_format.get("json_schema")
+    if not isinstance(json_schema, dict) or json_schema.get("strict") is not True:
+        return None
+    schema = json_schema.get("schema")
+    if not isinstance(schema, dict):
+        return None
+    return GrammarSpec(kind="json_schema", value=schema, strict=True)
+
+
+async def _strict_output_violation(grammar: GrammarSpec, outputs: list[str]) -> str | None:
+    if not outputs:
+        return None
+    return await asyncio.to_thread(first_output_violation, grammar, outputs)
+
+
+def _completed_choice_contents(payload: dict[str, Any]) -> list[str]:
+    """Return the visible content of each naturally completed, non-tool choice."""
+    outputs: list[str] = []
+    choices = payload.get("choices")
+    if not isinstance(choices, list):
+        return outputs
+    for choice in choices:
+        if not isinstance(choice, dict) or choice.get("finish_reason") != "stop":
+            continue
+        message = choice.get("message")
+        if not isinstance(message, dict) or message.get("tool_calls"):
+            continue
+        content = message.get("content")
+        outputs.append(content if isinstance(content, str) else "")
+    return outputs
+
+
+def _strict_output_error_response(message: str) -> JSONResponse:
+    return openai_error_response(
+        HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"code": MODEL_OUTPUT_PARSE_ERROR, "message": message},
+        )
+    )
 
 
 def _validate_optional_positive_int(body: dict[str, Any], field: str) -> int | None:
@@ -761,8 +819,11 @@ async def _sanitize_sse_stream(
     initial_inside_thinking: bool,
     reasoning_format: ReasoningFormat,
     slot: asyncio.Semaphore | None,
+    strict_grammar: GrammarSpec | None = None,
 ) -> AsyncIterator[bytes]:
     states: dict[int, ThinkingBlockStripper] = {}
+    strict_contents: dict[int, list[str]] = {}
+    strict_tool_choices: set[int] = set()
     buffered = bytearray()
     received = 0
     saw_done = False
@@ -804,6 +865,21 @@ async def _sanitize_sse_stream(
                     states=states,
                     terminal=False,
                 )
+                if strict_grammar is not None:
+                    violation = await _stream_strict_violation(
+                        sanitized,
+                        strict_grammar,
+                        contents=strict_contents,
+                        tool_choices=strict_tool_choices,
+                    )
+                    if violation is not None:
+                        terminal_outcome_selected = True
+                        yield _upstream_error_event(
+                            violation,
+                            code=MODEL_OUTPUT_PARSE_ERROR,
+                            error_type="server_error",
+                        )
+                        return
                 encoded = json.dumps(sanitized, separators=(",", ":"), ensure_ascii=False).encode()
                 yield b"data: " + encoded + b"\n"
 
@@ -841,6 +917,36 @@ async def _sanitize_sse_stream(
             finally:
                 if slot is not None:
                     slot.release()
+
+
+async def _stream_strict_violation(
+    payload: dict[str, Any],
+    grammar: GrammarSpec,
+    *,
+    contents: dict[int, list[str]],
+    tool_choices: set[int],
+) -> str | None:
+    """Accumulate streamed choice content and verify each choice that stops."""
+    choices = payload.get("choices")
+    if not isinstance(choices, list):
+        return None
+    completed: list[str] = []
+    for position, choice in enumerate(choices):
+        if not isinstance(choice, dict):
+            continue
+        choice_obj = cast("dict[str, Any]", choice)
+        raw_index = choice_obj.get("index", position)
+        index = raw_index if isinstance(raw_index, int) and not isinstance(raw_index, bool) else position
+        delta = choice_obj.get("delta")
+        if isinstance(delta, dict):
+            content = delta.get("content")
+            if isinstance(content, str) and content:
+                contents.setdefault(index, []).append(content)
+            if delta.get("tool_calls"):
+                tool_choices.add(index)
+        if choice_obj.get("finish_reason") == "stop" and index not in tool_choices:
+            completed.append("".join(contents.get(index, ())))
+    return await _strict_output_violation(grammar, completed)
 
 
 # -- /v1/chat/completions (proxy to the managed generation child) ------------
@@ -906,6 +1012,12 @@ async def _chat_completions(
     registry = http_request.app.state.registry
     device = registry.device
     registry_key = denormalize_model_id(model)
+    if _response_format_constrains_decoding(body.get("response_format")):
+        try:
+            registry_key = resolve_grammar_serving_model(registry, registry_key)
+        except GenerationUnsupportedFieldError as exc:
+            raise _bad_request(str(exc), param="response_format", code="unsupported_field") from exc
+    strict_grammar = _strict_response_format_grammar(body.get("response_format"))
 
     with tracer.start_as_current_span("chat_completions") as span:
         span.set_attribute("model", model)
@@ -1054,6 +1166,7 @@ async def _chat_completions(
                     initial_inside_thinking=initial_inside_thinking,
                     reasoning_format=reasoning_format,
                     slot=slot,
+                    strict_grammar=strict_grammar,
                 ),
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
@@ -1094,6 +1207,10 @@ async def _chat_completions(
         except (ValueError, TypeError, json.JSONDecodeError):
             logger.warning("generation child returned an invalid chat response", exc_info=True)
             return _upstream_error_response("generation child returned an invalid response")
+        if strict_grammar is not None:
+            violation = await _strict_output_violation(strict_grammar, _completed_choice_contents(payload))
+            if violation is not None:
+                return _strict_output_error_response(violation)
         return JSONResponse(content=payload)
 
 

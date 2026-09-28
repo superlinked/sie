@@ -83,6 +83,12 @@ dependencies = [
     "pillow>=12.2.0",
     "numpy>=2,<3",
     "torchvision>=0.18,<1", # Required by some HF models (e.g., nvidia/llama-nemoretriever)
+    # Strict structured-output verification (processors/strict_grammar.py):
+    # JSON Schema validation with local-only $ref resolution, and a
+    # backtracking regex engine that supports match timeouts.
+    "jsonschema>=4.23,<5",
+    "referencing>=0.36,<1",
+    "regex>=2024.11.6",
     # Config
     "pyyaml>=6,<7",
     "pydantic>=2.9,<3",

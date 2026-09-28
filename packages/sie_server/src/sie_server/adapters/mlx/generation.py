@@ -34,7 +34,7 @@ import os
 import subprocess
 import tempfile
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
 from typing import Any, cast
 
@@ -85,6 +85,14 @@ _FINISH_REASONS: frozenset[str] = frozenset({"stop", "length"})
 _MLX_SAMPLING_KEYS: frozenset[str] = frozenset(
     {"temperature", "top_p", "top_k", "min_p", "repetition_penalty", "max_tokens", "seed", "stop"}
 )
+
+
+def _reject_grammar(grammar: object) -> None:
+    if grammar is not None:
+        raise GenerationUnsupportedFieldError(
+            "grammar",
+            "structured-output grammars are not supported by the MLX generation backend",
+        )
 
 
 def normalize_mlx_seed(seed: int) -> int:
@@ -322,6 +330,11 @@ class MLXGenerationAdapter(GenerationAdapter):
         if self._server_url is None:
             raise RuntimeError(ERR_NOT_LOADED)
 
+    def preflight_generate(self, parameters: Mapping[str, Any], *, stream: bool) -> None:
+        """Reject controls that ``mlx_lm.server`` cannot honour before dispatch."""
+        _ = stream
+        _reject_grammar(parameters.get("grammar"))
+
     def _build_sampling_body(
         self,
         prompt: str,
@@ -385,9 +398,10 @@ class MLXGenerationAdapter(GenerationAdapter):
         top_logprobs: int | None = None,
         images: list[ImageInput] | None = None,
         videos: list[VideoInput] | None = None,
-        **kwargs: Any,  # tolerate SGLang-only kwargs (grammar, n, best_of, stream, …)
+        **kwargs: Any,  # tolerate SGLang-only kwargs (n, best_of, stream, …); grammar is rejected
     ) -> AsyncIterator[GenerationChunk]:
         self._check_loaded()
+        _reject_grammar(kwargs.get("grammar"))
         # Vision is deferred on the Mac MLX path (mlx-vlm would need its own
         # transformers>=5.5 process — see the implementation plan §9). Fail loud
         # rather than silently dropping the images and returning a wrong answer.

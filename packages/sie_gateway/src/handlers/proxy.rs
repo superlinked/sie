@@ -1947,7 +1947,19 @@ async fn resolve_routing(
 
     let mut dispatch_model = model_name.clone();
     if generation_intent == Some(GenerationRequestIntent::Grammar) {
-        route_grammar_to_profile(&state.model_registry, &mut dispatch_model);
+        if let Err(unavailable) =
+            route_grammar_to_profile(&state.model_registry, &mut dispatch_model)
+        {
+            return Err(Box::new(endpoint_error_response(
+                endpoint,
+                StatusCode::BAD_REQUEST,
+                err_code::INVALID_REQUEST,
+                oai_type::INVALID_REQUEST,
+                oai_code::UNSUPPORTED_FIELD,
+                Some("grammar"),
+                unavailable.message(&model),
+            )));
+        }
     }
     // #3441 ordering: a model this data plane does not have is answered by the
     // populated-registry `MODEL_NOT_FOUND` 404 BEFORE the governed lookup runs.
@@ -6965,9 +6977,11 @@ async fn resolve_generation_route(
 /// dispatched profile does not serve. The rewritten (DISPATCH) id governs only
 /// the NATS subject + work item; the caller keeps the requested (DISPLAY) id for
 /// the response body, success metrics, and audit log. Invoke ONLY when a grammar
-/// is present. Degrades to the requested id when no profile is declared or the
-/// variant is absent (the cluster still serves on the requested profile — never
-/// hang/5xx).
+/// is present. Keeps the requested id when no profile is declared. A declared
+/// grammar profile whose variant is absent from the registry returns
+/// [`GrammarProfileUnavailable`]: serving the grammar on the requested profile
+/// would bypass the grammar backend, so callers reject the request with
+/// ``400 unsupported_field`` instead.
 ///
 /// Both grammar-capable surfaces (``/v1/generate`` and ``/v1/chat/completions``)
 /// now route *before* their capability/LoRA gates so those validate against the
@@ -6983,7 +6997,7 @@ async fn resolve_generation_route(
 pub fn route_grammar_to_profile(
     registry: &crate::state::model_registry::ModelRegistry,
     model: &mut String,
-) {
+) -> Result<(), GrammarProfileUnavailable> {
     use crate::state::model_registry::GrammarRoute;
     match registry.grammar_route_variant(model) {
         GrammarRoute::Rewrite(variant) => {
@@ -6993,15 +7007,33 @@ pub fn route_grammar_to_profile(
                 "routing grammar-constrained request to non-speculative profile variant"
             );
             *model = variant;
+            Ok(())
         }
-        GrammarRoute::Keep => {}
+        GrammarRoute::Keep => Ok(()),
         GrammarRoute::MissingVariant(grammar_profile) => {
-            tracing::warn!(
+            tracing::error!(
                 base = %model,
                 grammar_profile = %grammar_profile,
-                "declared grammar_profile variant not in registry; serving grammar on the requested profile"
+                "declared grammar_profile variant not in registry; rejecting grammar-constrained request"
             );
+            Err(GrammarProfileUnavailable { grammar_profile })
         }
+    }
+}
+
+/// A model routes grammar-constrained requests to a profile variant that the
+/// registry does not hold.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrammarProfileUnavailable {
+    pub grammar_profile: String,
+}
+
+impl GrammarProfileUnavailable {
+    fn message(&self, display_model: &str) -> String {
+        format!(
+            "grammar-constrained generation for model '{display_model}' requires profile '{}', which is not served",
+            self.grammar_profile
+        )
     }
 }
 
@@ -7136,7 +7168,20 @@ async fn proxy_chat_inner(
     // grammar is present and a variant exists. See ``route_grammar_to_profile``.
     let mut dispatch_model = model_name.clone();
     if params.grammar.is_some() {
-        route_grammar_to_profile(&state.model_registry, &mut dispatch_model);
+        if let Err(unavailable) =
+            route_grammar_to_profile(&state.model_registry, &mut dispatch_model)
+        {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json_openai_error(
+                    unavailable.message(&model_name),
+                    oai_type::INVALID_REQUEST,
+                    Some("response_format"),
+                    oai_code::UNSUPPORTED_FIELD,
+                )),
+            )
+                .into_response();
+        }
     }
 
     // -- per-request max_output_tokens cap from model config + grammar capability.
@@ -21392,7 +21437,7 @@ mod tests {
     ) -> (String, String) {
         let display = requested.to_string();
         let mut dispatch = display.clone();
-        route_grammar_to_profile(registry, &mut dispatch);
+        route_grammar_to_profile(registry, &mut dispatch).expect("grammar route resolves");
         (display, dispatch)
     }
 
@@ -21551,12 +21596,9 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn test_grammar_variant_absent_degrades_to_base() {
-        // Safety contract: a declared `grammar_profile` whose variant is not in
-        // the registry degrades to the base model (never hang / 5xx). Here
-        // `grammar_profile: ghost` names a profile that is not defined, so no
-        // `org/g3:ghost` variant entry is minted and routing keeps the base.
+    /// A model whose declared `grammar_profile: ghost` names a profile that is
+    /// not defined, so no `org/g3:ghost` variant entry is minted.
+    fn ghost_grammar_registry() -> crate::state::model_registry::ModelRegistry {
         use crate::types::model::{ModelConfig, ProfileConfig};
         use std::collections::HashMap as StdHashMap;
 
@@ -21576,8 +21618,10 @@ mod tests {
                 extends: None,
             },
         );
-        let tasks: serde_yaml::Value =
-            serde_yaml::from_str("generate:\n  grammar_profile: ghost\n").unwrap();
+        let tasks: serde_yaml::Value = serde_yaml::from_str(
+            "generate:\n  grammar_profile: ghost\n  capabilities:\n    grammar: [json_schema]\n",
+        )
+        .unwrap();
         registry
             .add_model_config(ModelConfig {
                 name: "org/g3".to_string(),
@@ -21591,6 +21635,15 @@ mod tests {
                 tasks: Some(tasks),
             })
             .unwrap();
+        registry
+    }
+
+    #[test]
+    fn test_grammar_variant_absent_rejects_instead_of_serving_base() {
+        // Safety contract: a declared `grammar_profile` whose variant is not in
+        // the registry is refused, because the requested profile does not
+        // honour the grammar backend.
+        let registry = ghost_grammar_registry();
 
         // The declared (but undefined) profile is still surfaced...
         assert_eq!(
@@ -21600,10 +21653,73 @@ mod tests {
                 .as_deref(),
             Some("ghost"),
         );
-        // ...yet routing degrades to base because `org/g3:ghost` does not exist.
-        let (display, dispatch) = route_like_handler(&registry, "org/g3");
-        assert_eq!(display, "org/g3");
+        // ...and routing refuses because `org/g3:ghost` does not exist. The
+        // dispatch id is left untouched.
+        let mut dispatch = "org/g3".to_string();
+        let unavailable = route_grammar_to_profile(&registry, &mut dispatch)
+            .expect_err("a missing grammar-safe variant must not serve the grammar");
+        assert_eq!(unavailable.grammar_profile, "ghost");
         assert_eq!(dispatch, "org/g3");
+    }
+
+    #[tokio::test]
+    async fn test_grammar_variant_absent_rejects_native_and_chat_requests() {
+        let pool_manager = Arc::new(PoolManager::new(vec!["l4".to_string()]));
+        pool_manager.create_default_pool().await;
+        let mut state = admission_test_state(pool_manager);
+        state.model_registry = Arc::new(ghost_grammar_registry());
+        let probe = Arc::new(GenerationTargetProbe::default());
+        state.work_publisher = Some(probe.clone());
+        let state = Arc::new(state);
+
+        let native = proxy_request(
+            State(Arc::clone(&state)),
+            json_request(
+                "/v1/generate/org%2Fg3",
+                serde_json::json!({
+                    "prompt": "hello",
+                    "max_new_tokens": 4,
+                    "grammar": {"json_schema": {"type": "object"}}
+                }),
+            ),
+            "generate",
+        )
+        .await;
+        let chat = proxy_chat(
+            State(Arc::clone(&state)),
+            json_request(
+                "/v1/chat/completions",
+                serde_json::json!({
+                    "model": "org/g3",
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "max_tokens": 4,
+                    "response_format": {
+                        "type": "json_schema",
+                        "json_schema": {"name": "answer", "schema": {"type": "object"}}
+                    }
+                }),
+            ),
+        )
+        .await;
+
+        for (response, param) in [(native, "grammar"), (chat, "response_format")] {
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{param}");
+            let body = to_bytes(response.into_body(), 16 * 1024).await.unwrap();
+            let value: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(
+                value["error"]["code"],
+                oai_code::UNSUPPORTED_FIELD,
+                "{param}"
+            );
+            assert_eq!(value["error"]["param"], param);
+            assert!(
+                value["error"]["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("'ghost'")),
+                "{value}"
+            );
+        }
+        assert_eq!(probe.target_count(), 0);
     }
 
     // ── /v1/chat/completions parsing + body composition ────────────

@@ -21,6 +21,7 @@ from sie_server.adapters.sglang.generation import (
     SGLangGenerationAdapter,
     _translate_to_mlx_kwargs,
 )
+from sie_server.types.grammar import GrammarSpec
 
 
 @pytest.fixture
@@ -233,6 +234,25 @@ async def test_generate_rejects_videos_as_unsupported_field(adapter: MLXGenerati
         await gen.__anext__()
     assert error.value.param == "videos"
     assert error.value.code == "unsupported_field"
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_preflight_rejects_grammar_as_unsupported_field(adapter: MLXGenerationAdapter, stream: bool) -> None:
+    grammar = GrammarSpec(kind="json_schema", value={"type": "object"}, strict=True)
+
+    with pytest.raises(GenerationUnsupportedFieldError) as error:
+        adapter.preflight_generate({"prompt": "hi", "max_new_tokens": 8, "grammar": grammar}, stream=stream)
+
+    assert error.value.param == "grammar"
+    assert error.value.code == "unsupported_field"
+    assert adapter.preflight_generate({"prompt": "hi", "max_new_tokens": 8}, stream=stream) is None
+
+
+async def test_generate_rejects_grammar_instead_of_ignoring_it(adapter: MLXGenerationAdapter) -> None:
+    with pytest.raises(GenerationUnsupportedFieldError) as error:
+        gen = adapter.generate(prompt="hi", max_new_tokens=8, grammar=GrammarSpec(kind="regex", value="[a-z]+"))
+        await gen.__anext__()
+    assert error.value.param == "grammar"
 
 
 async def test_generate_rejects_unsupported_min_new_tokens(adapter: MLXGenerationAdapter) -> None:

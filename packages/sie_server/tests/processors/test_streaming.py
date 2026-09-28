@@ -37,6 +37,7 @@ from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters.base import ModelCapabilities, ModelDims
 from sie_server.config.engine import EngineConfig
 from sie_server.config.model import ModelConfig
+from sie_server.core.loader import expand_profile_variants
 from sie_server.observability import worker_telemetry as worker_metrics
 from sie_server.processors import streaming as streaming_mod
 from sie_server.processors.streaming import StreamingProcessor, _ValidationError
@@ -4464,3 +4465,175 @@ def test_validate_rejects_malformed_video_messages(messages: list[dict[str, Any]
     result = proc._validate_generate_params({"generate": {"messages": messages, "max_new_tokens": 8}}, None)
     assert isinstance(result, _ValidationError)
     assert fragment in result.message
+
+
+_STRICT_SCHEMA_PAYLOAD = {
+    "kind": "json_schema",
+    "value": {"type": "object", "properties": {"x": {"type": "integer"}}, "required": ["x"]},
+    "strict": True,
+}
+
+
+def _completion_script(text: str) -> list[GenerationChunk]:
+    return [
+        GenerationChunk(text_delta=text, is_first=True),
+        GenerationChunk(text_delta="", done=True, finish_reason="stop", prompt_tokens=2, completion_tokens=3),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_strict_grammar_violation_publishes_a_typed_terminal_error(stream: bool) -> None:
+    nc = AsyncMock()
+    proc = StreamingProcessor(
+        nc=nc, registry=_make_registry(_FakeGenAdapter(_completion_script('{"x": "one"}'))), worker_id="w1"
+    )
+    wi = _make_work_item(
+        generate={"prompt": "Hi", "max_new_tokens": 8, "grammar": _STRICT_SCHEMA_PAYLOAD, "stream": stream}
+    )
+    msg = _make_msg(wi)
+
+    await proc.process(msg, "test/model")
+
+    terminal = _terminal_chunk(nc)
+    assert terminal["done"] is True
+    assert terminal["finish_reason"] == "error"
+    assert terminal["error"]["code"] == "MODEL_OUTPUT_PARSE_ERROR"
+    assert terminal["error"]["message"] == (
+        "generated output does not match the requested JSON schema at $.x ('type' keyword)"
+    )
+    msg.ack.assert_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("strict", [None, False])
+async def test_non_strict_grammar_output_settles_normally(strict: bool | None) -> None:
+    nc = AsyncMock()
+    proc = StreamingProcessor(
+        nc=nc, registry=_make_registry(_FakeGenAdapter(_completion_script("not json"))), worker_id="w1"
+    )
+    grammar = {key: value for key, value in _STRICT_SCHEMA_PAYLOAD.items() if key != "strict"}
+    if strict is not None:
+        grammar["strict"] = strict
+
+    await proc.process(
+        _make_msg(_make_work_item(generate={"prompt": "Hi", "max_new_tokens": 8, "grammar": grammar})), "test/model"
+    )
+
+    terminal = _terminal_chunk(nc)
+    assert terminal["finish_reason"] == "stop"
+    assert terminal.get("error") is None
+
+
+@pytest.mark.asyncio
+async def test_strict_grammar_conforming_output_settles_normally() -> None:
+    nc = AsyncMock()
+    proc = StreamingProcessor(
+        nc=nc, registry=_make_registry(_FakeGenAdapter(_completion_script('{"x": 1}'))), worker_id="w1"
+    )
+    wi = _make_work_item(generate={"prompt": "Hi", "max_new_tokens": 8, "grammar": _STRICT_SCHEMA_PAYLOAD})
+
+    await proc.process(_make_msg(wi), "test/model")
+
+    terminal = _terminal_chunk(nc)
+    assert terminal["finish_reason"] == "stop"
+    assert terminal.get("error") is None
+
+
+@pytest.mark.asyncio
+async def test_strict_ebnf_work_item_is_rejected_before_dispatch() -> None:
+    nc = AsyncMock()
+    adapter = _FakeGenAdapter(_completion_script("yes"))
+    proc = StreamingProcessor(nc=nc, registry=_make_registry(adapter), worker_id="w1")
+    grammar = {"kind": "ebnf", "value": 'root ::= "yes"', "strict": True}
+
+    await proc.process(
+        _make_msg(_make_work_item(generate={"prompt": "Hi", "max_new_tokens": 8, "grammar": grammar})), "test/model"
+    )
+
+    terminal = _terminal_chunk(nc)
+    assert terminal["error"]["code"] == "unsupported_field"
+    assert adapter.close_calls == 0
+
+
+def _grammar_routed_registry(adapter: GenerationAdapter, *, served: tuple[str, ...] | None = None) -> MagicMock:
+    config = ModelConfig.model_validate(
+        {
+            "sie_id": "test/model",
+            "hf_id": "test/model",
+            "inputs": {"text": True},
+            "tasks": {
+                "generate": {
+                    "context_length": 4096,
+                    "max_output_tokens": 512,
+                    "grammar_profile": "no-spec",
+                    "capabilities": {"grammar": ["json_schema"]},
+                }
+            },
+            "max_sequence_length": 4096,
+            "profiles": {
+                "default": {
+                    "max_batch_tokens": 4096,
+                    "kv_budget_tokens": 2048,
+                    "adapter_path": "sie_server.adapters.fake.adapter:FakeAdapter",
+                    "adapter_options": {"loadtime": {"speculative": {"algorithm": "NEXTN", "num_steps": 3}}},
+                },
+                "no-spec": {
+                    "extends": "default",
+                    "adapter_options": {"loadtime": {"speculative": {"enabled": False}}},
+                },
+            },
+        }
+    )
+    configs = expand_profile_variants([config])
+    if served is not None:
+        configs = {name: value for name, value in configs.items() if name in served}
+    registry = _make_registry(adapter)
+    registry.has_model.side_effect = configs.__contains__
+    registry.get_config.side_effect = configs.__getitem__
+    return registry
+
+
+@pytest.mark.asyncio
+async def test_grammar_work_item_runs_on_the_grammar_profile(monkeypatch: pytest.MonkeyPatch) -> None:
+    nc = AsyncMock()
+    registry = _grammar_routed_registry(_FakeGenAdapter(_completion_script('{"x": 1}')))
+    proc = StreamingProcessor(nc=nc, registry=registry, worker_id="w1")
+    monkeypatch.setattr(proc, "_check_context_length", AsyncMock(return_value=None))
+    wi = _make_work_item(generate={"prompt": "Hi", "max_new_tokens": 8, "grammar": _STRICT_SCHEMA_PAYLOAD})
+
+    await proc.process(_make_msg(wi), "test/model")
+
+    registry.get.assert_called_with("test/model:no-spec")
+    assert _terminal_chunk(nc)["finish_reason"] == "stop"
+
+
+@pytest.mark.asyncio
+async def test_unconstrained_work_item_keeps_the_requested_profile(monkeypatch: pytest.MonkeyPatch) -> None:
+    nc = AsyncMock()
+    registry = _grammar_routed_registry(_FakeGenAdapter(_completion_script("free text")))
+    proc = StreamingProcessor(nc=nc, registry=registry, worker_id="w1")
+    monkeypatch.setattr(proc, "_check_context_length", AsyncMock(return_value=None))
+
+    await proc.process(_make_msg(_make_work_item()), "test/model")
+
+    registry.get.assert_called_with("test/model")
+
+
+@pytest.mark.asyncio
+async def test_grammar_work_item_without_its_grammar_profile_is_rejected() -> None:
+    nc = AsyncMock()
+    adapter = _FakeGenAdapter(_completion_script('{"x": 1}'))
+    registry = _grammar_routed_registry(adapter, served=("test/model",))
+    proc = StreamingProcessor(nc=nc, registry=registry, worker_id="w1")
+    wi = _make_work_item(generate={"prompt": "Hi", "max_new_tokens": 8, "grammar": _STRICT_SCHEMA_PAYLOAD})
+    msg = _make_msg(wi)
+
+    await proc.process(msg, "test/model")
+
+    terminal = _terminal_chunk(nc)
+    assert terminal["error"]["code"] == "unsupported_field"
+    assert terminal["error"]["param"] == "grammar"
+    registry.get.assert_not_called()
+    assert adapter.close_calls == 0
+    msg.ack.assert_awaited()

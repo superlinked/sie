@@ -29,6 +29,7 @@ from sie_server.adapters._generation_base import (
 )
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters.base import ModelCapabilities, ModelDims
+from sie_server.adapters.mlx.generation import MLXGenerationAdapter
 from sie_server.api import generate as generate_api
 from sie_server.api.generate import router as generate_router
 from sie_server.config.engine import EngineConfig
@@ -41,6 +42,7 @@ from sie_server.config.model import (
     ProfileConfig,
     Tasks,
 )
+from sie_server.core.loader import expand_profile_variants
 from sie_server.core.registry import ModelRegistry
 from sie_server.types.grammar import OUTLINES_JSON_SCHEMA_TYPE_MESSAGE, GrammarSpec
 from sie_server.types.inputs import ImageInput
@@ -123,6 +125,8 @@ class _FakeGenAdapter(GenerationAdapter):
     error_code: str | None = None
     error_message: str | None = None
     cached_tokens: int | None = None
+    # Generated text; ``None`` echoes the prompt.
+    output_text: str | None = None
 
     async def generate(
         self,
@@ -165,7 +169,10 @@ class _FakeGenAdapter(GenerationAdapter):
             self.last_call["images"] = images
         # Yield one delta + a terminal chunk so the local-dev route can
         # drain the iterator into the walking-skeleton-shaped aggregate response.
-        yield GenerationChunk(text_delta=f"echo:{prompt}", is_first=True)
+        yield GenerationChunk(
+            text_delta=self.output_text if self.output_text is not None else f"echo:{prompt}",
+            is_first=True,
+        )
         yield GenerationChunk(
             text_delta="",
             done=True,
@@ -1010,6 +1017,7 @@ class TestGenerateEndpoint:
         stream: bool,
     ) -> None:
         registry.get_config.return_value = _make_config(grammar=[expected.kind])
+        fake_adapter.output_text = '{"title": "Quarterly report"}'
 
         response = client.post(
             "/v1/generate/Qwen__Qwen3-4B-Instruct",
@@ -1729,3 +1737,282 @@ class TestGenerateEndpoint:
         assert response.status_code == 503
         assert response.json()["detail"]["code"] == "RESOURCE_EXHAUSTED"
         assert response.headers["retry-after"] == "12"
+
+
+_STRICT_SCHEMA = {
+    "type": "object",
+    "properties": {"title": {"type": "string"}},
+    "required": ["title"],
+    "additionalProperties": False,
+}
+
+
+def _grammar_routed_configs() -> dict[str, ModelConfig]:
+    config = _make_config(model_id="Qwen/Qwen3.5-4B", grammar=["json_schema"])
+    assert config.tasks.generate is not None
+    config.tasks.generate.grammar_profile = "no-spec"
+    config.profiles["default"].adapter_options.loadtime["speculative"] = {"algorithm": "NEXTN", "num_steps": 3}
+    config.profiles["no-spec"] = ProfileConfig(
+        extends="default",
+        adapter_options=AdapterOptions(
+            loadtime={"reasoning_parser": "qwen3", "speculative": {"enabled": False}},
+        ),
+    )
+    return expand_profile_variants([config])
+
+
+def _serve_configs(registry: MagicMock, configs: Mapping[str, ModelConfig]) -> None:
+    registry.has_model.side_effect = configs.__contains__
+    registry.get_config.side_effect = configs.__getitem__
+
+
+def _sse_events(text: str) -> list[dict[str, object]]:
+    return [json.loads(line.removeprefix("data: ")) for line in text.splitlines() if line.startswith("data: {")]
+
+
+class TestStrictStructuredOutput:
+    """``strict`` grammars are verified on the terminal path of the direct route."""
+
+    def test_blocking_strict_schema_violation_is_a_typed_error(
+        self,
+        client: TestClient,
+        registry: MagicMock,
+        fake_adapter: _FakeGenAdapter,
+    ) -> None:
+        registry.get_config.return_value = _make_config(grammar=["json_schema"])
+        fake_adapter.output_text = "[]"
+
+        response = client.post(
+            "/v1/generate/Qwen__Qwen3-4B-Instruct",
+            json={
+                "prompt": "Summarise",
+                "grammar": {"json_schema": _STRICT_SCHEMA, "strict": True},
+                "max_new_tokens": 8,
+            },
+        )
+
+        assert response.status_code == 500
+        assert response.json()["detail"] == {
+            "code": "MODEL_OUTPUT_PARSE_ERROR",
+            "message": "generated output does not match the requested JSON schema at $ ('type' keyword)",
+        }
+
+    def test_streaming_strict_schema_violation_errors_on_the_terminal_event(
+        self,
+        client: TestClient,
+        registry: MagicMock,
+        fake_adapter: _FakeGenAdapter,
+    ) -> None:
+        registry.get_config.return_value = _make_config(grammar=["json_schema"])
+        fake_adapter.output_text = '{"title": 7}'
+
+        response = client.post(
+            "/v1/generate/Qwen__Qwen3-4B-Instruct",
+            json={
+                "prompt": "Summarise",
+                "grammar": {"json_schema": _STRICT_SCHEMA, "strict": True},
+                "max_new_tokens": 8,
+                "stream": True,
+            },
+        )
+
+        assert response.status_code == 200
+        events = _sse_events(response.text)
+        assert events[0]["text_delta"] == '{"title": 7}'
+        terminal = events[-1]
+        assert terminal["done"] is True
+        assert terminal["finish_reason"] == "error"
+        assert terminal["error"] == {
+            "code": "MODEL_OUTPUT_PARSE_ERROR",
+            "message": "generated output does not match the requested JSON schema at $.title ('type' keyword)",
+        }
+        assert response.text.endswith("data: [DONE]\n\n")
+
+    @pytest.mark.parametrize("stream", [False, True])
+    def test_strict_regex_requires_a_full_match(
+        self,
+        client: TestClient,
+        registry: MagicMock,
+        fake_adapter: _FakeGenAdapter,
+        stream: bool,
+    ) -> None:
+        registry.get_config.return_value = _make_config(grammar=["regex"])
+        fake_adapter.output_text = "ABC-1234 trailing"
+
+        response = client.post(
+            "/v1/generate/Qwen__Qwen3-4B-Instruct",
+            json={
+                "prompt": "Code?",
+                "grammar": {"regex": r"[A-Z]{3}-\d{4}", "strict": True},
+                "max_new_tokens": 8,
+                "stream": stream,
+            },
+        )
+
+        expected = {
+            "code": "MODEL_OUTPUT_PARSE_ERROR",
+            "message": "generated output does not match the requested regex",
+        }
+        if stream:
+            assert _sse_events(response.text)[-1]["error"] == expected
+        else:
+            assert response.status_code == 500
+            assert response.json()["detail"] == expected
+
+    @pytest.mark.parametrize("strict", [None, False])
+    @pytest.mark.parametrize("stream", [False, True])
+    def test_non_strict_grammar_output_is_returned_unchanged(
+        self,
+        client: TestClient,
+        registry: MagicMock,
+        fake_adapter: _FakeGenAdapter,
+        strict: bool | None,
+        stream: bool,
+    ) -> None:
+        registry.get_config.return_value = _make_config(grammar=["json_schema"])
+        fake_adapter.output_text = "[]"
+        grammar: dict[str, object] = {"json_schema": _STRICT_SCHEMA}
+        if strict is not None:
+            grammar["strict"] = strict
+
+        response = client.post(
+            "/v1/generate/Qwen__Qwen3-4B-Instruct",
+            json={"prompt": "Summarise", "grammar": grammar, "max_new_tokens": 8, "stream": stream},
+        )
+
+        assert response.status_code == 200
+        if stream:
+            terminal = _sse_events(response.text)[-1]
+            assert terminal["finish_reason"] == "stop"
+            assert "error" not in terminal
+        else:
+            assert response.json()["text"] == "[]"
+            assert response.json()["finish_reason"] == "stop"
+
+    def test_strict_output_that_conforms_is_returned(
+        self,
+        client: TestClient,
+        registry: MagicMock,
+        fake_adapter: _FakeGenAdapter,
+    ) -> None:
+        registry.get_config.return_value = _make_config(grammar=["json_schema"])
+        fake_adapter.output_text = '{"title": "Quarterly report"}'
+
+        response = client.post(
+            "/v1/generate/Qwen__Qwen3-4B-Instruct",
+            json={
+                "prompt": "Summarise",
+                "grammar": {"json_schema": _STRICT_SCHEMA, "strict": True},
+                "max_new_tokens": 8,
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json()["text"] == '{"title": "Quarterly report"}'
+
+    def test_strict_ebnf_is_rejected_before_dispatch(
+        self,
+        client: TestClient,
+        registry: MagicMock,
+        fake_adapter: _FakeGenAdapter,
+    ) -> None:
+        registry.get_config.return_value = _make_config(grammar=["ebnf"])
+
+        response = client.post(
+            "/v1/generate/Qwen__Qwen3-4B-Instruct",
+            json={"prompt": "Yes?", "grammar": {"ebnf": 'root ::= "yes"', "strict": True}, "max_new_tokens": 8},
+        )
+
+        assert response.status_code == 400
+        assert response.json()["detail"]["code"] == "unsupported_field"
+        assert response.json()["detail"]["param"] == "grammar.strict"
+        assert fake_adapter.last_call is None
+
+
+class TestGrammarProfileAdmission:
+    """Grammar requests on the direct route run on the declared grammar profile."""
+
+    @pytest.mark.parametrize("stream", [False, True])
+    def test_grammar_request_runs_on_the_grammar_profile(
+        self,
+        client: TestClient,
+        registry: MagicMock,
+        fake_adapter: _FakeGenAdapter,
+        stream: bool,
+    ) -> None:
+        _serve_configs(registry, _grammar_routed_configs())
+
+        response = client.post(
+            "/v1/generate/Qwen__Qwen3.5-4B",
+            json={
+                "prompt": "Hi",
+                "grammar": {"json_schema": {"type": "object"}},
+                "max_new_tokens": 8,
+                "stream": stream,
+            },
+        )
+
+        assert response.status_code == 200, response.text
+        registry.get.assert_called_with("Qwen/Qwen3.5-4B:no-spec")
+        registry.touch_lru.assert_called_with("Qwen/Qwen3.5-4B:no-spec")
+        assert fake_adapter.last_call is not None
+        assert fake_adapter.last_call["grammar"] == GrammarSpec(kind="json_schema", value={"type": "object"})
+        if not stream:
+            assert response.json()["model"] == "Qwen/Qwen3.5-4B"
+
+    def test_unconstrained_request_keeps_the_requested_profile(
+        self,
+        client: TestClient,
+        registry: MagicMock,
+    ) -> None:
+        _serve_configs(registry, _grammar_routed_configs())
+
+        response = client.post("/v1/generate/Qwen__Qwen3.5-4B", json={"prompt": "Hi", "max_new_tokens": 8})
+
+        assert response.status_code == 200, response.text
+        registry.get.assert_called_with("Qwen/Qwen3.5-4B")
+        assert response.json()["model"] == "Qwen/Qwen3.5-4B"
+
+    def test_missing_grammar_profile_rejects_instead_of_running_speculatively(
+        self,
+        client: TestClient,
+        registry: MagicMock,
+        fake_adapter: _FakeGenAdapter,
+    ) -> None:
+        configs = _grammar_routed_configs()
+        del configs["Qwen/Qwen3.5-4B:no-spec"]
+        _serve_configs(registry, configs)
+
+        response = client.post(
+            "/v1/generate/Qwen__Qwen3.5-4B",
+            json={"prompt": "Hi", "grammar": {"json_schema": {"type": "object"}}, "max_new_tokens": 8},
+        )
+
+        assert response.status_code == 400
+        detail = response.json()["detail"]
+        assert detail["code"] == "unsupported_field"
+        assert detail["param"] == "grammar"
+        assert "'no-spec'" in detail["message"]
+        registry.get.assert_not_called()
+        assert fake_adapter.last_call is None
+
+    def test_mlx_backend_rejects_grammar_in_preflight(
+        self,
+        client: TestClient,
+        registry: MagicMock,
+    ) -> None:
+        registry.get_config.return_value = _make_config(model_id="Qwen/Qwen3.5-4B", grammar=["json_schema"])
+        adapter = MLXGenerationAdapter(model_name_or_path="Qwen/Qwen3.5-4B", mlx_repo="mlx-community/Qwen3.5-4B-4bit")
+        registry.get.return_value = adapter
+
+        response = client.post(
+            "/v1/generate/Qwen__Qwen3.5-4B",
+            json={"prompt": "Hi", "grammar": {"json_schema": {"type": "object"}}, "max_new_tokens": 8},
+        )
+
+        assert response.status_code == 400
+        assert response.json()["detail"] == {
+            "code": "unsupported_field",
+            "message": "structured-output grammars are not supported by the MLX generation backend",
+            "param": "grammar",
+        }

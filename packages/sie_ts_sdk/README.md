@@ -174,8 +174,9 @@ Streaming calls throw `SIEStreamError` for mid-stream error chunks —
 the HTTP connection was healthy but the worker or gateway emitted an
 error envelope partway through. Branch on `error.code` (for example
 `empty_model_output`, a terminal generation that produced no visible
-text) and, when `error.requestId` is present, use it to correlate with
-gateway logs. For a validated `RESOURCE_EXHAUSTED` terminal,
+text, or `MODEL_OUTPUT_PARSE_ERROR`, a strict grammar whose finished
+output did not conform) and, when `error.requestId` is present, use it
+to correlate with gateway logs. For a validated `RESOURCE_EXHAUSTED` terminal,
 `error.retryAfter` carries the operator hint in milliseconds; its presence
 does not make retrying generation safe after output has already arrived.
 

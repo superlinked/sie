@@ -71,6 +71,7 @@ from sie_server.adapters._generation_base import (
 )
 from sie_server.api.helpers import oom_retry_after_from_registry
 from sie_server.config.model import validate_chat_template_kwargs
+from sie_server.core.grammar_routing import resolve_grammar_serving_model
 from sie_server.core.runtime_options import apply_generation_runtime_options
 from sie_server.core.text_tokens import estimate_tokens_from_chars
 from sie_server.core.tokenizer import image_first_chat_message, load_tokenizer
@@ -82,6 +83,7 @@ from sie_server.core.video_frames import (
 from sie_server.observability import worker_telemetry as _metrics
 from sie_server.processors.grammar_cache import GrammarLRU
 from sie_server.processors.grammar_compile import compile_outlines
+from sie_server.processors.strict_grammar import enforce_strict_grammar
 from sie_server.processors.tool_call_grammar import (
     ToolChoiceError,
     build_tool_choice_grammar,
@@ -1664,6 +1666,22 @@ class StreamingProcessor:
             )
             return
 
+        if (self._extract_generate_params(wi) or {}).get("grammar") is not None:
+            try:
+                model_id = resolve_grammar_serving_model(self._registry, model_id)
+            except GenerationError as exc:
+                await self._terminal_error_then_settle(
+                    reply_subject,
+                    request_id=request_id,
+                    attempt_id=attempt_id,
+                    seq=0,
+                    code=exc.code,
+                    message=client_safe_generation_error_message(exc.code, str(exc)),
+                    param=client_safe_generation_error_param(exc),
+                    msg=msg,
+                )
+                return
+
         # Lazy-load the model on first request. NAK for redelivery if
         # load fails or the model isn't registered for this worker.
         try:
@@ -2171,6 +2189,7 @@ class StreamingProcessor:
                 tool_call_format=tool_call_format,
                 parallel_tool_calls=parallel_tool_calls,
             )
+        chunks_iter = enforce_strict_grammar(chunks_iter, grammar)
 
         # Bounded chunk queue + a single publisher task drains it. If the
         # queue fills up, the iterator-driver triggers transport_failure.
@@ -3091,6 +3110,11 @@ class StreamingProcessor:
                 )
             label_raw = grammar_raw.get("label")
             strict_raw = grammar_raw.get("strict")
+            if kind_raw == "ebnf" and strict_raw is True:
+                return _ValidationError(
+                    code="unsupported_field",
+                    message="'grammar.strict' is not supported for EBNF grammars",
+                )
             grammar = GrammarSpec(
                 kind=kind_raw,
                 value=value,

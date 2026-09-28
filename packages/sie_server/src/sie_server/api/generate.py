@@ -80,9 +80,11 @@ from sie_server.adapters._generation_base import (
 )
 from sie_server.api.helpers import ModelStateChecker, oom_retry_after_from_registry, read_bounded_request_body
 from sie_server.api.validation import validate_machine_profile_header, validate_signed_i64
+from sie_server.core.grammar_routing import resolve_grammar_serving_model
 from sie_server.core.runtime_options import apply_generation_runtime_options
 from sie_server.core.tokenizer import image_first_chat_message, load_tokenizer
 from sie_server.observability.tracing import tracer
+from sie_server.processors.strict_grammar import enforce_strict_grammar
 from sie_server.types.grammar import GrammarSpec
 from sie_server.types.inputs import ImageInput
 from sie_server.types.openapi import (
@@ -589,6 +591,12 @@ def _parse_native_grammar(value: Any) -> GrammarSpec | None:
             raise _bad_request(f"'grammar.{kind}' must be a string", param=f"grammar.{kind}")
         if len(payload) > limit:
             raise _bad_request(f"{kind} length {len(payload)} exceeds limit ({limit})", param=f"grammar.{kind}")
+        if kind == "ebnf" and strict is True:
+            raise _bad_request(
+                "'grammar.strict' is not supported for EBNF grammars",
+                param="grammar.strict",
+                code="unsupported_field",
+            )
 
     return GrammarSpec(kind=cast("Any", kind), value=payload, label=label, strict=strict)
 
@@ -820,6 +828,7 @@ async def _stream_generate_events(
                 start_inside=thinking_starts_in_prompt,
                 reasoning_format=reasoning_format,
             )
+        chunks = enforce_strict_grammar(chunks, grammar)
         async for chunk in chunks:
             if chunk.done:
                 saw_terminal = True
@@ -1093,16 +1102,22 @@ async def generate(
 
         registry = http_request.app.state.registry
         device = registry.device
+        serving_key = registry_key
+        if grammar is not None:
+            try:
+                serving_key = resolve_grammar_serving_model(registry, registry_key)
+            except GenerationError as exc:
+                raise _generation_http_exception(exc, registry) from exc
 
         # Standard model-state gates: 404 if unknown, 503 if loading/unloading,
         # 502 if a terminal load failure is in cooldown.
-        checker = ModelStateChecker(registry, registry_key, span)
+        checker = ModelStateChecker(registry, serving_key, span)
         checker.check_exists()
         checker.check_not_failed()
         checker.check_not_unloading()
         checker.check_not_loading()
 
-        config = registry.get_config(registry_key)
+        config = registry.get_config(serving_key)
         # Enforce the gateway-side cap mirror: max_new_tokens ≤
         # tasks.generate.max_output_tokens. Worker-authoritative so the
         # local-dev route reports the same 400 the gateway would.
@@ -1219,8 +1234,8 @@ async def generate(
         # Do not start a potentially expensive model load until the complete
         # request has passed validation.
         await checker.ensure_loaded(device)
-        adapter = registry.get(registry_key)
-        registry.touch_lru(registry_key)
+        adapter = registry.get(serving_key)
+        registry.touch_lru(serving_key)
         if not isinstance(adapter, GenerationAdapter):
             raise _bad_request(
                 f"Model '{model}' adapter does not support generate (not a GenerationAdapter)",
@@ -1307,6 +1322,7 @@ async def generate(
                     start_inside=thinking_starts_in_prompt,
                     reasoning_format=reasoning_format,
                 )
+            chunks = enforce_strict_grammar(chunks, grammar)
             result = await collect_generation(chunks)
         except GenerationError as exc:
             raise _generation_http_exception(exc, registry) from exc
@@ -1364,8 +1380,9 @@ async def generate(
         # ``model`` against it; echoing the path-encoded form broke that
         # round-trip. ``config.name`` == ``registry_key`` (denormalized
         # path param) — prefer the config value as the source of truth and
-        # fall back to ``registry_key`` defensively.
-        canonical_model = getattr(config, "name", None) or registry_key
+        # fall back to ``registry_key`` defensively. A grammar request served
+        # by its grammar-safe profile still reports the requested model.
+        canonical_model = registry_key if serving_key != registry_key else getattr(config, "name", None) or registry_key
         return JSONResponse(
             content={
                 "model": canonical_model,

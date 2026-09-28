@@ -341,7 +341,7 @@ When a batch response carries fewer items than were sent, `encode` and
 items that did come back (match them by `id`), and `missing_ids` names
 the dropped items when every submitted item carried an `id`.
 
-One generation-specific error is terminal and never retried:
+Two generation-specific errors are terminal and never retried:
 
 - `empty_model_output` — the generation finished nominally but produced
   no visible output text (for example, private reasoning consumed the
@@ -349,6 +349,15 @@ One generation-specific error is terminal and never retried:
   is not re-run. Surfaces as `ServerError` with
   `code == "empty_model_output"`; on streaming calls it is raised
   mid-stream with the gateway request id attached for correlation.
+- `MODEL_OUTPUT_PARSE_ERROR` — a strict grammar (`grammar.strict` or
+  `response_format.json_schema.strict` set to `true`) was not satisfied:
+  the finished output of a `json_schema` grammar did not parse or
+  validate, or a `regex` grammar did not match the whole output. The
+  message names the failing JSON path and keyword. Streaming calls have
+  already received the text deltas when the error arrives on the
+  terminal event. Truncated (`length`) completions are returned
+  unverified, and `strict: true` on an `ebnf` grammar is rejected with
+  `400 unsupported_field`.
 
 ## Handling resource exhaustion
 

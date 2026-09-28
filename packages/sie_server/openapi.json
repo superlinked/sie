@@ -3271,6 +3271,7 @@
               }
             ],
             "default": null,
+            "description": "EBNF output cannot be verified, so true is rejected with 400 unsupported_field",
             "title": "Strict"
           }
         },
@@ -3344,6 +3345,7 @@
               }
             ],
             "default": null,
+            "description": "When true, the finished output must parse as JSON and validate against json_schema; otherwise the request fails with MODEL_OUTPUT_PARSE_ERROR",
             "title": "Strict"
           }
         },
@@ -3384,6 +3386,7 @@
               }
             ],
             "default": null,
+            "description": "When true, the finished output must match regex in full; otherwise the request fails with MODEL_OUTPUT_PARSE_ERROR",
             "title": "Strict"
           }
         },

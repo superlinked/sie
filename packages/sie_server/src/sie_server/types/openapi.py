@@ -369,7 +369,13 @@ class NativeJsonSchemaGrammarModel(BaseModel):
 
     json_schema: dict[str, Any]
     label: str | None = None
-    strict: bool | None = None
+    strict: bool | None = Field(
+        default=None,
+        description=(
+            "When true, the finished output must parse as JSON and validate against json_schema; "
+            "otherwise the request fails with MODEL_OUTPUT_PARSE_ERROR"
+        ),
+    )
     model_config = {"extra": "forbid"}
 
 
@@ -378,7 +384,13 @@ class NativeRegexGrammarModel(BaseModel):
 
     regex: str = Field(..., max_length=4 * 1024)
     label: str | None = None
-    strict: bool | None = None
+    strict: bool | None = Field(
+        default=None,
+        description=(
+            "When true, the finished output must match regex in full; "
+            "otherwise the request fails with MODEL_OUTPUT_PARSE_ERROR"
+        ),
+    )
     model_config = {"extra": "forbid"}
 
 
@@ -387,7 +399,10 @@ class NativeEbnfGrammarModel(BaseModel):
 
     ebnf: str = Field(..., max_length=8 * 1024)
     label: str | None = None
-    strict: bool | None = None
+    strict: bool | None = Field(
+        default=None,
+        description="EBNF output cannot be verified, so true is rejected with 400 unsupported_field",
+    )
     model_config = {"extra": "forbid"}
 
 

@@ -65,9 +65,12 @@ class GrammarSpec:
         label: Optional human-readable name surfaced from the OpenAI
             ``response_format.json_schema.name`` field. Used for log
             lines and metric labels; never affects the compile result.
-        strict: Optional pass-through from ``response_format.json_schema.strict``.
-            Forwarded to the backend if it accepts a strict flag;
-            otherwise advisory.
+        strict: Native ``grammar.strict`` or OpenAI
+            ``response_format.json_schema.strict``. ``True`` makes the worker
+            verify the finished output of a ``json_schema`` or ``regex``
+            grammar (see :mod:`sie_server.processors.strict_grammar`) and
+            fail the request with ``MODEL_OUTPUT_PARSE_ERROR`` when it does
+            not conform. Ingress rejects ``True`` on ``ebnf`` grammars.
     """
 
     kind: GrammarKind
