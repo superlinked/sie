@@ -1,6 +1,7 @@
 """Tests for OpenAI-compatible embeddings endpoint."""
 
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -779,11 +780,14 @@ class TestOpenAIEmbeddingsProfileResolution:
                 )
             },
         )
+        with ThreadPoolExecutor(max_workers=1) as cpu_pool:
+            mock_registry.postprocessor_registry = PostprocessorRegistry(cpu_pool)
 
-        response = client.post("/v1/embeddings", json={"model": "text-embedding-3-small", "input": "hello"})
+            response = client.post("/v1/embeddings", json={"model": "text-embedding-3-small", "input": "hello"})
 
         assert response.status_code == 200, response.text
         assert mock_adapter.encode.call_args.kwargs["options"]["output_dtype"] == "float32"
+        assert response.json()["data"][0]["embedding"] == pytest.approx([0.1, 0.2, 0.3])
 
     def test_model_without_dense_output_rejected(
         self, client: TestClient, mock_registry: MagicMock, mock_adapter: MagicMock
