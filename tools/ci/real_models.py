@@ -261,7 +261,12 @@ def run_commands(commands: Sequence[tuple[str, list[str]]], env: Mapping[str, st
     failed: list[str] = []
     for label, command in commands:
         print(f"\n## {label}", flush=True)
-        if subprocess.run(command, env=dict(env), check=False).returncode:
+        try:
+            returncode = subprocess.run(command, env=dict(env), check=False).returncode
+        except OSError as exc:
+            print(f"{label} could not start: {exc}", file=sys.stderr)
+            returncode = 1
+        if returncode:
             failed.append(label)
     return failed
 

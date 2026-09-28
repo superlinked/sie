@@ -208,6 +208,21 @@ def test_run_keeps_going_and_reports_every_failed_suite(monkeypatch):
     assert len(calls) == expected
 
 
+def test_a_command_that_cannot_start_is_reported_and_the_rest_still_run(monkeypatch):
+    calls: list[str] = []
+
+    def run(command, **kwargs):
+        calls.append(command[0])
+        if command[0] == "missing":
+            raise FileNotFoundError(2, "No such file or directory", "missing")
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(real_models.subprocess, "run", run)
+    commands = [("first", ["missing"]), ("second", ["present"])]
+    assert real_models.run_commands(commands, {}) == ["first"]
+    assert calls == ["missing", "present"]
+
+
 def test_shared_server_failure_is_reported(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     run, calls = _fake_run(set())
@@ -266,12 +281,18 @@ def test_workflow_caches_the_hub_directory_under_the_pinned_revision_key():
     commands = [step.get("run", "") for step in steps]
     key_step = next(step for step in steps if step.get("id") == "weights")
     assert "python -m tools.ci.real_models cache-key" in key_step["run"]
-    cache = next(step for step in steps if step.get("uses", "").startswith("actions/cache@"))
-    assert cache["with"] == {"path": ".cache/huggingface/hub", "key": "${{ steps.weights.outputs.key }}"}
+    restore = next(step for step in steps if step.get("uses", "").startswith("actions/cache/restore@"))
+    save = next(step for step in steps if step.get("uses", "").startswith("actions/cache/save@"))
+    for step in (restore, save):
+        assert step["with"] == {"path": ".cache/huggingface/hub", "key": "${{ steps.weights.outputs.key }}"}
     assert lane["env"]["HF_HOME"] == "${{ github.workspace }}/.cache/huggingface"
-    run_index = next(index for index, command in enumerate(commands) if "tools.ci.real_models run" in command)
-    assert steps.index(key_step) < steps.index(cache) < run_index
-    assert commands.index("mise run ts -- build") < run_index
+    suites = next(step for step in steps if step.get("id") == "suites")
+    assert "python -m tools.ci.real_models run" in suites["run"]
+    assert steps.index(key_step) < steps.index(restore) < steps.index(suites) < steps.index(save)
+    assert commands.index("mise run ts -- build") < steps.index(suites)
+    assert "!cancelled()" in save["if"]
+    assert "steps.restore.outputs.cache-hit != 'true'" in save["if"]
+    assert "steps.suites.outcome" in save["if"]
 
 
 def test_pull_request_paths_cover_every_lane_input():
