@@ -106,6 +106,12 @@ def sample_spans() -> list[ReadableSpan]:
         span.set_attribute("customer", SENTINEL)
         span.add_event(SENTINEL, {"exception.message": SENTINEL})
         span.set_status(Status(StatusCode.ERROR, SENTINEL))
+    with tracer.start_as_current_span(
+        "sidecar.dispatch",
+        context=context(11, 12),
+        links=[Link(get_current_span(context(13, 14)).get_span_context())],
+    ):
+        pass
     # An ordinary one-parent batch survives unchanged structurally.
     with tracer.start_as_current_span("sidecar.dispatch", context=context(9, 10)):
         pass
@@ -222,7 +228,7 @@ def test_batch_fanin_survives_remote_privacy_with_local_links_intact(tmp_path, r
         with urllib.request.urlopen(request, timeout=5) as response:  # noqa: S310 - fixed loopback HTTP
             assert response.status == 200
         local = wait_for(lambda: s if len(s := read_spans(tmp_path / "local.json")) == len(source) else None)
-        remote = wait_for(lambda: s if len(s := read_spans(tmp_path / "remote.json")) == len(source) - 1 else None)
+        remote = wait_for(lambda: s if len(s := read_spans(tmp_path / "remote.json")) == len(source) - 2 else None)
         unsafe_spans = wait_for(lambda: read_spans(tmp_path / "unsafe.json"))
         assert len(unsafe_spans) == len(source)
         assert any(s.get("links") for s in unsafe_spans), "0.119 no-op set(links, []) reproduction changed"
@@ -249,6 +255,7 @@ def test_batch_fanin_survives_remote_privacy_with_local_links_intact(tmp_path, r
             for s in remote
         )
         assert len([s for s in remote if s["name"] == "worker.run_batch.request"]) == 3
+        assert len([s for s in remote if s["name"] == "sidecar.dispatch.request"]) == 2
         assert {s["spanId"] for s in remote} == {s["spanId"] for s in local if not s.get("links")}
         local_by_id = {s["spanId"]: s for s in local}
         for span in remote:
@@ -266,7 +273,7 @@ def test_batch_fanin_survives_remote_privacy_with_local_links_intact(tmp_path, r
             and 'filter="filter/remote_linked_spans"' in line
         ]
         assert filtered, metrics
-        assert sum(float(line.rsplit(" ", 1)[1]) for line in filtered) == 1
+        assert sum(float(line.rsplit(" ", 1)[1]) for line in filtered) == 2
 
         def self_points():
             path = tmp_path / "self.json"
@@ -281,7 +288,7 @@ def test_batch_fanin_survives_remote_privacy_with_local_links_intact(tmp_path, r
                 if metric["name"] == "otelcol_processor_filter_spans_filtered"
                 for p in metric["sum"]["dataPoints"]
             ]
-            return points if any(int(p.get("asInt", p.get("asDouble", 0))) == 1 for p in points) else []
+            return points if any(int(p.get("asInt", p.get("asDouble", 0))) == 2 for p in points) else []
 
         points = wait_for(self_points)
         for point in points:
