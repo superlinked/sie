@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections import Counter
-from unittest.mock import MagicMock
 
 from llama_index.core.schema import NodeWithScore, QueryBundle, TextNode
 from sie_llamaindex import SIENodePostprocessor
@@ -66,7 +65,8 @@ class TestSIENodePostprocessor:
     def test_postprocess_nodes_maps_scores_by_item_id(self, mock_sie_client: object) -> None:
         """Top-ranked node is the relevant one, scores mapped by item_id."""
         nodes = [NodeWithScore(node=TextNode(text=f"doc-{i}"), score=0.5) for i in range(5)]
-        mock_sie_client.score = MagicMock(return_value=_RANKED_ENVELOPE)
+        mock_sie_client.score.side_effect = None
+        mock_sie_client.score.return_value = _RANKED_ENVELOPE
         postprocessor = SIENodePostprocessor(model="test-reranker")
         postprocessor._client = mock_sie_client
 
@@ -79,7 +79,8 @@ class TestSIENodePostprocessor:
     def test_postprocess_nodes_skips_malformed_item_id(self, mock_sie_client: object) -> None:
         """Malformed item_ids are skipped (no crash, no misassignment)."""
         nodes = [NodeWithScore(node=TextNode(text=f"doc-{i}"), score=0.5) for i in range(3)]
-        mock_sie_client.score = MagicMock(return_value=_MALFORMED_ENVELOPE)
+        mock_sie_client.score.side_effect = None
+        mock_sie_client.score.return_value = _MALFORMED_ENVELOPE
         postprocessor = SIENodePostprocessor(model="test-reranker")
         postprocessor._client = mock_sie_client
 

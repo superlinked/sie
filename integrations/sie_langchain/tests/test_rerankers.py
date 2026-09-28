@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections import Counter
-from unittest.mock import MagicMock
 
 import pytest
 from langchain_core.documents import Document
@@ -64,7 +63,8 @@ class TestSIEReranker:
     def test_compress_documents_maps_scores_by_item_id(self, mock_sie_client: object) -> None:
         """Top-ranked document is the relevant one, scores mapped by item_id."""
         documents = [Document(page_content=f"doc-{i}") for i in range(5)]
-        mock_sie_client.score = MagicMock(return_value=_RANKED_ENVELOPE)
+        mock_sie_client.score.side_effect = None
+        mock_sie_client.score.return_value = _RANKED_ENVELOPE
         reranker = SIEReranker(client=mock_sie_client, model="test-reranker")
 
         result = reranker.compress_documents(documents, "query")
@@ -76,7 +76,8 @@ class TestSIEReranker:
     def test_compress_documents_skips_malformed_item_id(self, mock_sie_client: object) -> None:
         """Malformed item_ids are skipped (no crash, no misassignment)."""
         documents = [Document(page_content=f"doc-{i}") for i in range(3)]
-        mock_sie_client.score = MagicMock(return_value=_MALFORMED_ENVELOPE)
+        mock_sie_client.score.side_effect = None
+        mock_sie_client.score.return_value = _MALFORMED_ENVELOPE
         reranker = SIEReranker(client=mock_sie_client, model="test-reranker")
 
         result = reranker.compress_documents(documents, "query")
