@@ -29,6 +29,16 @@ _logger = logging.getLogger(__name__)
 _provider: LoggerProvider | None = None
 _current: ContextVar[Lifecycle | None] = ContextVar("sie_lifecycle", default=None)
 _OUTCOMES = frozenset({"success", "rejected", "error", "cancelled"})
+_CLIENT_ERROR_CODES = frozenset(
+    {
+        "invalid_request",
+        "unsupported_field",
+        "INPUT_TOO_LONG",
+        "PAYLOAD_TOO_LARGE",
+        "context_exceeded",
+        "grammar_invalid",
+    }
+)
 _ERROR_CLASSES = frozenset(
     {"none", "client_error", "server_error", "transport", "timeout", "worker", "cancelled", "protocol", "other"}
 )
@@ -91,6 +101,12 @@ class Lifecycle:
     error_class: str = "transport"
     terminal: bool = False
 
+    def published_retry(self) -> None:
+        """A confirmed retry handoff ends this attempt without completing generation."""
+        if not self.terminal:
+            self.terminal = True
+            self.outcome, self.error_class = "rejected", "none"
+
     def published_terminal(self, envelope: dict[str, object]) -> None:
         """Terminal means successful transport publication, not client receipt."""
         if self.terminal:
@@ -99,7 +115,14 @@ class Lifecycle:
         if envelope.get("finish_reason") == "cancelled":
             self.outcome, self.error_class = "cancelled", "cancelled"
         elif envelope.get("error") is not None or envelope.get("finish_reason") == "error":
-            self.outcome, self.error_class = "error", "worker"
+            error = envelope.get("error")
+            code = error.get("code") if isinstance(error, dict) else None
+            if isinstance(code, str) and code in _CLIENT_ERROR_CODES:
+                self.outcome, self.error_class = "rejected", "client_error"
+            elif code == "transport_failure":
+                self.outcome, self.error_class = "error", "transport"
+            else:
+                self.outcome, self.error_class = "error", "worker"
         else:
             self.outcome, self.error_class = "success", "none"
 

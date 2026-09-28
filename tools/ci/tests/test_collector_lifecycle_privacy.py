@@ -278,11 +278,15 @@ def test_lifecycle_allowlist_in_real_collector(tmp_path):
         for provider in providers:
             provider.shutdown()
         providers.clear()
-        time.sleep(0.5)
         records = []
         completions = []
-        while not received.empty():
-            request = ExportLogsServiceRequest.FromString(received.get_nowait())
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            try:
+                data = received.get(timeout=min(0.2, max(0.001, deadline - time.monotonic())))
+            except queue.Empty:
+                continue
+            request = ExportLogsServiceRequest.FromString(data)
             assert b"payload-secret" not in request.SerializeToString()
             for resource_logs in request.resource_logs:
                 resource = {item.key: item.value.string_value for item in resource_logs.resource.attributes}
@@ -301,6 +305,8 @@ def test_lifecycle_allowlist_in_real_collector(tmp_path):
                             completions.append(attrs)
                         else:
                             records.append((resource["service.name"], attrs))
+            if len(records) + len(completions) >= 6:
+                deadline = min(deadline, time.monotonic() + 1)
         assert {service for service, _attrs in records} == {"sie-gateway", "sie-worker", "sie-dispatcher"}
         assert len(records) == 4
         assert len(completions) == 2

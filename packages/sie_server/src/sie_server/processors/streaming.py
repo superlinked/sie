@@ -4041,6 +4041,8 @@ class StreamingProcessor:
                 exc_info=True,
             )
             return False
+        if lifecycle := current_lifecycle():
+            lifecycle.published_retry()
         return True
 
     async def _terminal_error_then_settle(

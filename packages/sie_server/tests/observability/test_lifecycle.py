@@ -15,6 +15,7 @@ from opentelemetry.sdk.trace.sampling import ALWAYS_OFF, ALWAYS_ON
 from sie_server import adapter_call_loop
 from sie_server.ipc_types import BatchOutcome, RunBatchItem, RunBatchRequest
 from sie_server.observability import lifecycle
+from sie_server.processors.streaming import StreamingProcessor
 
 
 @pytest.mark.parametrize(
@@ -119,4 +120,55 @@ async def test_batch_error_values_set_structural_status(monkeypatch):
     assert result.outcomes[0].disposition == "publish_error_and_ack"
     assert spans.get_finished_spans()[0].status.status_code == trace.StatusCode.ERROR
     assert spans.get_finished_spans()[0].status.description is None
+    provider.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("code", "outcome", "error_class"),
+    [
+        ("invalid_request", "rejected", "client_error"),
+        ("grammar_invalid", "rejected", "client_error"),
+        ("transport_failure", "error", "transport"),
+        ("inference_error", "error", "worker"),
+        ("secret-code", "error", "worker"),
+    ],
+)
+def test_terminal_error_codes_are_bounded(code, outcome, error_class):
+    provider = TracerProvider()
+    with provider.get_tracer("test").start_as_current_span("worker.streaming_processor") as span:
+        observed = lifecycle.Lifecycle(span, 0)
+        observed.published_terminal({"error": {"code": code, "message": "secret"}, "finish_reason": "error"})
+        assert (observed.outcome, observed.error_class) == (outcome, error_class)
+    provider.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("publish_fails", [False, True])
+async def test_actual_retry_publish_marks_rejected_only_after_success(monkeypatch, publish_fails):
+    exporter = InMemoryLogRecordExporter()
+    log_provider = LoggerProvider()
+    log_provider.add_log_record_processor(SimpleLogRecordProcessor(exporter))
+    monkeypatch.setattr(lifecycle, "_provider", log_provider)
+    spans = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(spans))
+    publish = AsyncMock(side_effect=RuntimeError("secret") if publish_fails else None)
+    processor = SimpleNamespace(_nc=SimpleNamespace(publish=publish))
+    with (
+        provider.get_tracer("test").start_as_current_span("worker.streaming_processor"),
+        lifecycle.observe_generation(),
+    ):
+        result = await StreamingProcessor._publish_nak_envelope(
+            processor, "reply", request_id="fixture", attempt_id="fixture", reason="kv_budget"
+        )
+        assert result is not publish_fails
+    record = exporter.get_finished_logs()[0].log_record
+    assert record.attributes["outcome"] == ("error" if publish_fails else "rejected")
+    assert record.attributes["error_class"] == ("transport" if publish_fails else "none")
+    assert spans.get_finished_spans()[0].status.status_code == (
+        trace.StatusCode.ERROR if publish_fails else trace.StatusCode.UNSET
+    )
+    assert "secret" not in str(record.attributes)
+    publish.assert_awaited_once()
+    log_provider.shutdown()
     provider.shutdown()
