@@ -301,7 +301,9 @@ processors:
     error_mode: propagate
     metrics:
       metric:
-        - 'not IsMatch(name, "^(up|otelcol_exporter_queue_size|otelcol_exporter_queue_capacity|otelcol_receiver_refused_spans|otelcol_exporter_send_failed_spans|otelcol_receiver_refused_metric_points|otelcol_exporter_send_failed_metric_points|otelcol_receiver_refused_log_records|otelcol_exporter_send_failed_log_records|otelcol_receiver_refused_spans_total|otelcol_exporter_send_failed_spans_total|otelcol_receiver_refused_metric_points_total|otelcol_exporter_send_failed_metric_points_total|otelcol_receiver_refused_log_records_total|otelcol_exporter_send_failed_log_records_total)$")'
+        - 'not IsMatch(name, "^(up|otelcol_exporter_queue_size|otelcol_exporter_queue_capacity|otelcol_receiver_refused_spans|otelcol_exporter_send_failed_spans|otelcol_receiver_refused_metric_points|otelcol_exporter_send_failed_metric_points|otelcol_receiver_refused_log_records|otelcol_exporter_send_failed_log_records|otelcol_receiver_refused_spans_total|otelcol_exporter_send_failed_spans_total|otelcol_receiver_refused_metric_points_total|otelcol_exporter_send_failed_metric_points_total|otelcol_receiver_refused_log_records_total|otelcol_exporter_send_failed_log_records_total|otelcol_processor_filter_spans_filtered|otelcol_processor_filter_spans_filtered_total)$")'
+      datapoint:
+        - 'IsMatch(metric.name, "^otelcol_processor_filter_spans_filtered(_total)?$") and attributes["filter"] != "filter/remote_linked_spans"'
   transform/collector_self_metrics:
     error_mode: propagate
     metric_statements:
@@ -318,6 +320,7 @@ processors:
           - set(schema_url, "")
       - context: metric
         statements:
+          - 'set(name, "otelcol_processor_filter_spans_filtered") where name == "otelcol_processor_filter_spans_filtered_total"'
           - 'set(name, "otelcol_receiver_refused_spans") where name == "otelcol_receiver_refused_spans_total"'
           - 'set(name, "otelcol_exporter_send_failed_spans") where name == "otelcol_exporter_send_failed_spans_total"'
           - 'set(name, "otelcol_receiver_refused_metric_points") where name == "otelcol_receiver_refused_metric_points_total"'
@@ -329,6 +332,7 @@ processors:
       - context: datapoint
         statements:
           - 'keep_keys(attributes, []) where metric.name == "up"'
+          - 'keep_keys(attributes, ["filter"]) where metric.name == "otelcol_processor_filter_spans_filtered"'
           - 'keep_keys(attributes, ["exporter", "data_type"]) where IsMatch(metric.name, "^(otelcol_exporter_queue_size|otelcol_exporter_queue_capacity)$")'
           - 'keep_keys(attributes, ["receiver", "transport"]) where IsMatch(metric.name, "^(otelcol_receiver_refused_spans|otelcol_receiver_refused_metric_points|otelcol_receiver_refused_log_records)$")'
           - 'keep_keys(attributes, ["exporter", "transport"]) where IsMatch(metric.name, "^(otelcol_exporter_send_failed_spans|otelcol_exporter_send_failed_metric_points|otelcol_exporter_send_failed_log_records)$")'
@@ -362,7 +366,8 @@ processors:
         - 'resource.attributes["service.name"] != "sie-config" and resource.attributes["service.name"] != "sie-dispatcher" and resource.attributes["service.name"] != "sie-worker" and resource.attributes["service.name"] != "sie-worker-sidecar"'
   # Collector 0.119 parses but does not execute in-place link-slice clearing.
   # Fail closed by dropping the complete linked span on the remote branch;
-  # the separate local trace branch remains byte-for-byte unchanged.
+  # the separate local trace branch retains the original. Safe per-request
+  # timing leaves (.request) have no links and survive this same guard.
   filter/remote_linked_spans:
     error_mode: propagate
     traces:
@@ -394,7 +399,7 @@ processors:
           - set(status.message, "")
           - set(trace_state, "")
           - set(links, [])
-          - 'set(name, "other") where name != "gateway.request" and name != "gateway.publish" and name != "gateway.proxy" and name != "gateway.proxy_chat" and name != "gateway.proxy_request" and name != "gateway.proxy_generate" and name != "sidecar.dispatch" and name != "worker.run_batch" and name != "worker.streaming_processor" and name != "encode" and name != "score" and name != "extract" and name != "generate" and name != "openai_embeddings" and name != "chat_completions" and name != "rerank" and name != "other"'
+          - 'set(name, "other") where name != "gateway.request" and name != "gateway.publish" and name != "gateway.proxy" and name != "gateway.proxy_chat" and name != "gateway.proxy_request" and name != "gateway.proxy_generate" and name != "sidecar.dispatch" and name != "worker.run_batch" and name != "worker.run_batch.request" and name != "sidecar.dispatch.request" and name != "worker.streaming_processor" and name != "encode" and name != "score" and name != "extract" and name != "generate" and name != "openai_embeddings" and name != "chat_completions" and name != "rerank" and name != "other"'
 {{- end }}
 {{- if $logsEnabled }}
   # Logs are allowlisted just like metrics are declared: only the fixed,

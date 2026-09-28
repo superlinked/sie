@@ -261,7 +261,9 @@ fn init_tracer(config: &SignalExportConfig) -> Result<Tracer, String> {
 
     let provider = SdkTracerProvider::builder()
         .with_resource(otlp_resource(&service_name))
-        .with_batch_exporter(exporter)
+        .with_span_processor(sie_telemetry::batch_fanin::BatchFanInSpanProcessor::new(
+            opentelemetry_sdk::trace::BatchSpanProcessor::builder(exporter).build(),
+        ))
         .build();
     let tracer = provider.tracer("sie-worker-sidecar");
     global::set_tracer_provider(provider.clone());

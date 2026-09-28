@@ -667,6 +667,23 @@ traces:
         reason: pinned_collector_cannot_reliably_clear_link_attributes_or_trace_state
         transform_defense: set_links_empty_for_future_runtime_support
         local_oss_action: retain_unchanged
+        drop_counter: otelcol_processor_filter_spans_filtered
+        drop_counter_filter: filter/remote_linked_spans
+        request_views:
+          producer: shared_sdk_processor_before_bounded_export_queue
+          source_names: [worker.run_batch, sidecar.dispatch]
+          names: [worker.run_batch.request, sidecar.dispatch.request]
+          trigger: recorded_sampled_source_with_links
+          parents: distinct_valid_sampled_trace_id_and_span_id_pairs
+          primary_sampling: inherit_source_span_sampling
+          span_id: fresh_per_view
+          timing_and_kind: exact_source_interval_and_kind
+          status: source_code_without_message
+          attributes_events_links_trace_state: empty
+          semantics: leaf_observation_of_shared_execution_not_additional_work
+          descendants: remain_children_of_original_shared_span
+          limits: source_sampling_and_sdk_link_limits_and_existing_export_queue
+          loss: cannot_recover_unsampled_sources_or_discarded_links
       name:
         unknown: other
         allow:
@@ -678,6 +695,8 @@ traces:
           - gateway.proxy_generate
           - sidecar.dispatch
           - worker.run_batch
+          - worker.run_batch.request
+          - sidecar.dispatch.request
           - worker.streaming_processor
           - encode
           - score
@@ -2546,6 +2565,7 @@ collector_self_metrics:
   # Prometheus counter exposition adds `_total`; normalize only these exact
   # source aliases back to the stable OTLP family names below.
   prometheus_input_aliases:
+    otelcol_processor_filter_spans_filtered_total: otelcol_processor_filter_spans_filtered
     otelcol_receiver_refused_spans_total: otelcol_receiver_refused_spans
     otelcol_exporter_send_failed_spans_total: otelcol_exporter_send_failed_spans
     otelcol_receiver_refused_metric_points_total: otelcol_receiver_refused_metric_points
@@ -2553,6 +2573,10 @@ collector_self_metrics:
     otelcol_receiver_refused_log_records_total: otelcol_receiver_refused_log_records
     otelcol_exporter_send_failed_log_records_total: otelcol_exporter_send_failed_log_records
   metrics:
+    - name: otelcol_processor_filter_spans_filtered
+      attributes: [filter]
+      filter_allow: [filter/remote_linked_spans]
+      meaning: original_linked_spans_removed_by_remote_privacy_not_transport_loss
     - name: up
       attributes: []
     - name: otelcol_exporter_queue_size
