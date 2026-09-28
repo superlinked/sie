@@ -12,8 +12,11 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from typing import Any
 
 import pytest
+from sie_server.adapters._generation_base import GenerationChunk
+from sie_server.adapters.fake.adapter import FakeAdapter
 from sie_server.config.model import ModelConfig
 from sie_server.core import runtime_options
 from sie_server.core.encode_pipeline import resolve_encode_output_types
@@ -436,6 +439,50 @@ async def test_bound_generation_does_not_wait_on_a_hung_engine_abort(monkeypatch
     assert raised.value.code == "first_chunk_timeout"
     assert engine.close_started
     assert loop.time() - started < 2.0
+
+
+class _AdapterWithHangingAbort(FakeAdapter):
+    """A generation engine whose abort on cancellation takes a while."""
+
+    def __init__(self, abort_s: float) -> None:
+        super().__init__()
+        self.abort_s = abort_s
+        self.abort_started = False
+        self.abort_finished = False
+
+    async def generate(self, prompt: str, **kwargs: Any) -> AsyncIterator[GenerationChunk]:
+        _ = (prompt, kwargs)
+        try:
+            await asyncio.sleep(30)
+            yield GenerationChunk(text_delta="late")
+        except asyncio.CancelledError:
+            self.abort_started = True
+            await asyncio.sleep(self.abort_s)
+            self.abort_finished = True
+            raise
+
+
+async def test_bound_generation_answers_before_a_slow_engine_abort_finishes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(runtime_options, "_GENERATION_CLOSE_TIMEOUT_S", 0.1)
+    adapter = _AdapterWithHangingAbort(abort_s=0.5)
+    adapter.load("cpu")
+    chunks = adapter.generate_with_preflight({"prompt": "hi", "max_new_tokens": 4}, None)
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+
+    with pytest.raises(GenerationTimeoutError) as raised:
+        await _drain(bound_generation(chunks, GenerationTimeouts(first_chunk_s=0.05)))
+
+    elapsed = loop.time() - started
+    assert raised.value.code == "first_chunk_timeout"
+    assert elapsed < 0.4, elapsed
+    assert adapter.abort_started
+    assert not adapter.abort_finished
+
+    await asyncio.sleep(0.6)
+    assert adapter.abort_finished, "the engine abort must be allowed to finish in the background"
 
 
 async def test_bound_generation_keeps_engine_timeout_errors() -> None:

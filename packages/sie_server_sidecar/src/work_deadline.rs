@@ -26,7 +26,7 @@ use async_nats::jetstream::{AckKind, Message};
 use async_nats::Subject;
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
-use tracing::debug;
+use tracing::{debug, info, warn};
 
 use crate::nats_consumer::{work_cancel_tombstone_ttl, ACK_WAIT_SECS};
 use crate::observability::metrics::SidecarTelemetry;
@@ -39,6 +39,7 @@ const DEFAULT_SKEW_TOLERANCE: Duration = Duration::from_secs(5);
 const MAX_SKEW_TOLERANCE: Duration = Duration::from_secs(60);
 /// The gateway's default 120 s request timeout plus a margin.
 const DEFAULT_MAX_BUDGET: Duration = Duration::from_secs(180);
+const MAX_MAX_BUDGET: Duration = Duration::from_secs(24 * 60 * 60);
 const WARN_INTERVAL: Duration = Duration::from_secs(30);
 
 /// A held delivery is progress-ACKed at most two ticks apart, which must stay
@@ -87,8 +88,17 @@ pub struct WorkDeadlinePolicy {
 
 impl WorkDeadlinePolicy {
     pub fn from_env() -> Self {
+        let enforce = std::env::var(ENFORCE_ENV).ok();
+        if let Some(raw) = enforce.as_deref() {
+            if parse_enforce(raw).is_none() {
+                warn!(
+                    value = raw,
+                    "{ENFORCE_ENV} is not a recognised boolean; work-item deadlines stay unenforced"
+                );
+            }
+        }
         Self::from_values(
-            std::env::var(ENFORCE_ENV).ok().as_deref(),
+            enforce.as_deref(),
             std::env::var(SKEW_TOLERANCE_ENV).ok().as_deref(),
             std::env::var(MAX_BUDGET_ENV).ok().as_deref(),
             work_cancel_tombstone_ttl(),
@@ -101,12 +111,7 @@ impl WorkDeadlinePolicy {
         max_budget_s: Option<&str>,
         max_horizon: Duration,
     ) -> Self {
-        let enforce = enforce.is_some_and(|raw| {
-            matches!(
-                raw.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        });
+        let enforce = enforce.and_then(parse_enforce).unwrap_or(false);
         let skew_tolerance = skew_tolerance_ms
             .and_then(|raw| raw.trim().parse::<u64>().ok())
             .map(Duration::from_millis)
@@ -117,6 +122,7 @@ impl WorkDeadlinePolicy {
             .filter(|seconds| *seconds > 0)
             .map(Duration::from_secs)
             .unwrap_or(DEFAULT_MAX_BUDGET)
+            .min(MAX_MAX_BUDGET)
             .min(max_horizon);
         Self {
             enforce,
@@ -142,7 +148,7 @@ impl WorkDeadlinePolicy {
             return DeadlineStatus::Unbounded;
         };
         let remaining_s = deadline + self.skew_tolerance.as_secs_f64() - now_unix_s;
-        let ceiling = self.max_budget + self.skew_tolerance;
+        let ceiling = self.max_budget.saturating_add(self.skew_tolerance);
         if remaining_s > 0.0 {
             DeadlineStatus::Live(
                 Duration::try_from_secs_f64(remaining_s)
@@ -172,7 +178,7 @@ impl WorkDeadlinePolicy {
             DeadlineStatus::Unbounded => return None,
             DeadlineStatus::Live(remaining) if self.enforce => remaining,
             DeadlineStatus::Expired(_) if self.enforce => return None,
-            DeadlineStatus::Live(remaining) => remaining + self.max_budget,
+            DeadlineStatus::Live(remaining) => remaining.saturating_add(self.max_budget),
             DeadlineStatus::Expired(overdue) => self.max_budget.checked_sub(overdue)?,
         };
         Some(horizon.min(self.max_horizon)).filter(|horizon| !horizon.is_zero())
@@ -195,6 +201,15 @@ impl WorkDeadlinePolicy {
                 }
             })
             .max()
+    }
+
+    /// `deadline - timestamp` for a numeric deadline that is ignored because
+    /// it is not within the maximum budget of a valid publish timestamp.
+    pub fn rejected_budget_s(&self, deadline: Option<f64>, timestamp: f64) -> Option<f64> {
+        let finite = deadline.filter(|value| value.is_finite() && *value > 0.0)?;
+        self.plausible_deadline(deadline, timestamp)
+            .is_none()
+            .then_some(finite - timestamp)
     }
 
     pub fn clock_skew_signal(
@@ -224,6 +239,14 @@ impl WorkDeadlinePolicy {
             }
             _ => None,
         }
+    }
+}
+
+fn parse_enforce(raw: &str) -> Option<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "" | "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
     }
 }
 
@@ -292,6 +315,8 @@ impl WarnLimiter {
 pub static EXPIRED_DROP_WARNINGS: WarnLimiter = WarnLimiter::new(WARN_INTERVAL);
 pub static EXPIRED_EXECUTE_WARNINGS: WarnLimiter = WarnLimiter::new(WARN_INTERVAL);
 pub static CLOCK_SKEW_WARNINGS: WarnLimiter = WarnLimiter::new(WARN_INTERVAL);
+pub static REJECTED_DEADLINE_WARNINGS: WarnLimiter = WarnLimiter::new(WARN_INTERVAL);
+static PROGRESS_PAUSE_LOGS: WarnLimiter = WarnLimiter::new(WARN_INTERVAL);
 
 /// Serialises a lease's progress ACKs with its settlement, so a progress ACK
 /// is either sent before the settling ACK or NAK or not at all.
@@ -355,6 +380,10 @@ impl<T> ProgressLeases<T> {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(&id);
+    }
+
+    fn len(&self) -> usize {
+        self.leases.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 }
 
@@ -434,10 +463,10 @@ impl NatsProgressLeases {
         let _ = self.backend_readiness.set(readiness);
     }
 
-    fn backend_accepts_progress(&self) -> bool {
-        self.backend_readiness
-            .get()
-            .is_none_or(|readiness| readiness.snapshot().is_ready())
+    /// Why progress ACKs are paused, or `None` while they may be sent.
+    fn progress_blocked_reason(&self) -> Option<String> {
+        let snapshot = self.backend_readiness.get()?.snapshot();
+        (!snapshot.is_ready()).then(|| snapshot.reason())
     }
 
     pub(crate) fn hold(
@@ -472,13 +501,64 @@ impl NatsProgressLeases {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum PauseTransition {
+    Paused(String),
+    Resumed,
+}
+
+#[derive(Default)]
+struct ProgressPause {
+    paused: bool,
+}
+
+impl ProgressPause {
+    fn observe(&mut self, blocked: Option<String>) -> Option<PauseTransition> {
+        match (blocked, self.paused) {
+            (Some(reason), false) => {
+                self.paused = true;
+                Some(PauseTransition::Paused(reason))
+            }
+            (None, true) => {
+                self.paused = false;
+                Some(PauseTransition::Resumed)
+            }
+            _ => None,
+        }
+    }
+}
+
 async fn run_progress_ticker(telemetry: SidecarTelemetry) {
     let leases = nats_progress_leases();
+    let mut pause = ProgressPause::default();
     let mut tick = tokio::time::interval(PROGRESS_TICK);
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
         tick.tick().await;
-        if !leases.backend_accepts_progress() {
+        let blocked = leases.progress_blocked_reason();
+        let paused = blocked.is_some();
+        match pause.observe(blocked) {
+            Some(PauseTransition::Paused(reason)) => {
+                if let Some(suppressed) = PROGRESS_PAUSE_LOGS.allow() {
+                    warn!(
+                        reason,
+                        held = leases.leases.len(),
+                        suppressed,
+                        "pausing progress ACKs for held deliveries so JetStream can redeliver them elsewhere"
+                    );
+                }
+            }
+            Some(PauseTransition::Resumed) => {
+                if let Some(suppressed) = PROGRESS_PAUSE_LOGS.allow() {
+                    info!(
+                        held = leases.leases.len(),
+                        suppressed, "resuming progress ACKs for held deliveries"
+                    );
+                }
+            }
+            None => {}
+        }
+        if paused {
             continue;
         }
         for (target, gate) in leases.leases.due(Instant::now()) {
@@ -507,12 +587,6 @@ async fn run_progress_ticker(telemetry: SidecarTelemetry) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    impl<T> ProgressLeases<T> {
-        fn len(&self) -> usize {
-            self.leases.lock().unwrap_or_else(|e| e.into_inner()).len()
-        }
-    }
 
     const HORIZON: Duration = Duration::from_secs(1_800);
     const NOW: f64 = 1_700_000_000.0;
@@ -552,6 +626,10 @@ mod tests {
         let capped = WorkDeadlinePolicy::from_values(None, None, Some("99999"), HORIZON);
         assert_eq!(capped.max_budget, HORIZON);
         let invalid = WorkDeadlinePolicy::from_values(None, None, Some("0"), HORIZON);
+        assert!(
+            !WorkDeadlinePolicy::from_values(Some("enforce"), None, None, HORIZON).enforce,
+            "an unrecognised value leaves enforcement off"
+        );
         assert_eq!(invalid.max_budget, DEFAULT_MAX_BUDGET);
     }
 
@@ -827,19 +905,79 @@ mod tests {
     #[test]
     fn progress_pauses_while_the_backend_is_not_ready() {
         let leases = NatsProgressLeases::new();
-        assert!(leases.backend_accepts_progress());
+        assert_eq!(leases.progress_blocked_reason(), None);
 
         let readiness = Arc::new(Readiness::new(2_000, 3));
         leases.gate_on_backend_readiness(Arc::clone(&readiness));
-        assert!(
-            !leases.backend_accepts_progress(),
+        assert_eq!(
+            leases.progress_blocked_reason().as_deref(),
+            Some("handshake pending"),
             "no successful backend ping yet"
         );
 
         readiness.record_ping_success();
-        assert!(leases.backend_accepts_progress());
+        assert_eq!(leases.progress_blocked_reason(), None);
 
         readiness.mark_draining();
-        assert!(!leases.backend_accepts_progress());
+        assert_eq!(
+            leases.progress_blocked_reason().as_deref(),
+            Some("draining")
+        );
+    }
+
+    #[test]
+    fn pause_and_resume_are_reported_once_per_transition() {
+        let mut pause = ProgressPause::default();
+        assert_eq!(pause.observe(None), None);
+        assert_eq!(
+            pause.observe(Some("draining".into())),
+            Some(PauseTransition::Paused("draining".into()))
+        );
+        assert_eq!(pause.observe(Some("draining".into())), None);
+        assert_eq!(pause.observe(None), Some(PauseTransition::Resumed));
+        assert_eq!(pause.observe(None), None);
+    }
+
+    #[test]
+    fn deadlines_rejected_for_their_budget_are_reported() {
+        let policy = policy(None, None);
+        assert_eq!(policy.rejected_budget_s(None, NOW), None);
+        assert_eq!(policy.rejected_budget_s(Some(f64::NAN), NOW), None);
+        assert_eq!(policy.rejected_budget_s(Some(NOW + 120.0), NOW), None);
+        assert_eq!(
+            policy.rejected_budget_s(Some(NOW + 600.0), NOW),
+            Some(600.0)
+        );
+        assert_eq!(policy.rejected_budget_s(Some(NOW - 5.0), NOW), Some(-5.0));
+    }
+
+    #[test]
+    fn enforcement_setting_parse_flags_unrecognised_values() {
+        assert_eq!(parse_enforce("TRUE"), Some(true));
+        assert_eq!(parse_enforce(" off "), Some(false));
+        assert_eq!(parse_enforce(""), Some(false));
+        assert_eq!(parse_enforce("enforce"), None);
+    }
+
+    #[test]
+    fn absurd_settings_do_not_overflow() {
+        let policy = WorkDeadlinePolicy::from_values(
+            Some("false"),
+            Some("18446744073709551615"),
+            Some("18446744073709551615"),
+            Duration::MAX,
+        );
+        assert_eq!(policy.max_budget, MAX_MAX_BUDGET);
+        assert_eq!(policy.skew_tolerance, MAX_SKEW_TOLERANCE);
+        let timestamp = NOW - 1.0;
+        let deadline = Some(timestamp + MAX_MAX_BUDGET.as_secs_f64());
+        assert!(matches!(
+            policy.status(deadline, timestamp, NOW),
+            DeadlineStatus::Live(_)
+        ));
+        assert!(policy.lease_horizon(deadline, timestamp, NOW).is_some());
+        assert!(policy
+            .run_batch_budget([(deadline, timestamp)], NOW)
+            .is_some());
     }
 }

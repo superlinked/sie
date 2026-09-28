@@ -824,6 +824,27 @@ meant to protect. Drain the pool and delete the streams during a maintenance
 window to pick up the new storage. `streamReplicas`, by contrast, **is**
 reconciled onto existing streams.
 
+### Work-item deadlines
+
+The gateway stamps every non-streaming work item with an absolute `deadline`
+(publish time plus the gateway request timeout). Worker sidecars use it to keep
+slow deliveries leased, to size backend calls, and to count work that is picked
+up after its caller gave up. Set these on
+`workers.common.workerSidecar.extraEnv`:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `SIE_WORK_DEADLINE_ENFORCE` | `false` | `true` ACK-drops expired work before execution instead of only counting it |
+| `SIE_WORK_DEADLINE_SKEW_TOLERANCE_MS` | `5000` | Allowed clock skew between gateway and worker hosts (at most 60000) |
+| `SIE_WORK_DEADLINE_MAX_BUDGET_S` | `180` | Largest accepted `deadline - timestamp`, and the ceiling on deadline-derived backend call budgets |
+
+`SIE_WORK_DEADLINE_MAX_BUDGET_S` must be at least the gateway's
+`SIE_GATEWAY_REQUEST_TIMEOUT` (120 s by default). If the gateway timeout is
+raised above it, workers ignore every deadline and log a rate-limited warning.
+The comparison spans the gateway and worker clocks, so keep the nodes
+synchronised (for example with NTP). Watch
+`sie_worker_work_item_deadline_exceeded_total` before enabling enforcement.
+
 ### Upgrading from the legacy single-bundle pool schema
 
 Releases up to and including 0.4.x used a flat schema where each pool

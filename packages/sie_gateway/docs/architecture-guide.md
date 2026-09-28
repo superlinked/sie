@@ -375,7 +375,10 @@ held deliveries leased and to size backend calls, count items found past it,
 and, when `SIE_WORK_DEADLINE_ENFORCE=true` is set on the workers, ACK-drop
 them before execution, which covers workers that never saw the `work_cancel`
 signal. The comparison spans the gateway and worker clocks, so both must be
-synchronised. Streaming generation items omit it because their timeouts are
+synchronised. Workers ignore a deadline more than `SIE_WORK_DEADLINE_MAX_BUDGET_S`
+(default 180 s) after its timestamp and log a warning, so raising
+`SIE_GATEWAY_REQUEST_TIMEOUT` above that value requires raising the worker
+setting too. Streaming generation items omit it because their timeouts are
 resolved per profile after publication.
 
 The managed Modal dispatcher implements the same ownership contract without a

@@ -58,6 +58,7 @@ use crate::tokenize::TokenizerRegistry;
 use crate::work_deadline::{
     apparent_age_ms, unix_now_s, ClockSkewSignal, DeadlineStatus, WorkDeadlinePolicy,
     CLOCK_SKEW_WARNINGS, EXPIRED_DROP_WARNINGS, EXPIRED_EXECUTE_WARNINGS,
+    REJECTED_DEADLINE_WARNINGS,
 };
 use crate::work_types::WorkItem;
 use half::f16;
@@ -1013,13 +1014,29 @@ impl Dispatcher {
         true
     }
 
-    /// Warn when a delivery's timestamps show that this worker's clock and
-    /// the gateway's disagree by more than the skew tolerance.
+    /// Warn when a delivery's deadline is ignored for its budget, or when its
+    /// timestamps show that this worker's clock and the gateway's disagree by
+    /// more than the skew tolerance.
     fn observe_deadline_clock(&self, wi: &WorkItem, delivery: &Delivery) {
         let Delivery::Nats(msg, ..) = delivery else {
             return;
         };
         if wi.operation == "generate" {
+            return;
+        }
+        if let Some(budget_s) = self
+            .work_deadline
+            .rejected_budget_s(wi.deadline, wi.timestamp)
+        {
+            if let Some(suppressed) = REJECTED_DEADLINE_WARNINGS.allow() {
+                warn!(
+                    request_id = %wi.request_id,
+                    deadline_budget_s = budget_s,
+                    max_budget_s = self.work_deadline.max_budget.as_secs(),
+                    suppressed,
+                    "ignoring a work item deadline that is not within SIE_WORK_DEADLINE_MAX_BUDGET_S of its timestamp; raise the setting to at least the gateway request timeout"
+                );
+            }
             return;
         }
         let now = unix_now_s();

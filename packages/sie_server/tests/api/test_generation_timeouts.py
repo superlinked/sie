@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
 from collections.abc import AsyncIterator, Callable
 from typing import Any
 from unittest.mock import MagicMock
@@ -115,6 +117,36 @@ def test_overall_timeout_aborts_a_slow_generation_and_returns_504(
     assert response.status_code == 504, response.text
     assert error_code(response.json()) == "overall_timeout"
     assert adapter.closed
+
+
+class _SlowAbortFakeAdapter(FakeAdapter):
+    """The fake engine, with an abort that hangs once a request is cancelled."""
+
+    abort_started = False
+
+    async def generate(self, prompt: str, **kwargs: Any) -> AsyncIterator[GenerationChunk]:
+        _ = (prompt, kwargs)
+        try:
+            await asyncio.sleep(30)
+            yield GenerationChunk(text_delta="late")
+        except asyncio.CancelledError:
+            self.abort_started = True
+            await asyncio.sleep(8)
+            raise
+
+
+def test_native_route_answers_a_timeout_before_a_hung_engine_abort_finishes() -> None:
+    adapter = _SlowAbortFakeAdapter()
+    client = _client(adapter, {"first_chunk_timeout_s": 0.05, "overall_timeout_s": 10})
+    started = time.monotonic()
+
+    response = client.post(_ROUTES[0][0], json=_ROUTES[0][1])
+
+    elapsed = time.monotonic() - started
+    assert response.status_code == 504, response.text
+    assert response.json()["detail"]["code"] == "first_chunk_timeout"
+    assert adapter.abort_started
+    assert 1.5 < elapsed < 5.0, elapsed
 
 
 @pytest.mark.parametrize(("path", "body", "error_code"), _ROUTES)

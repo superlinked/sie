@@ -1911,8 +1911,8 @@ async fn assert_acked_before_ipc(
 
 /// With `SIE_WORK_DEADLINE_ENFORCE=true`, gateway deadlines and the gateway's
 /// request cancel both stop encode work that has not started, while live
-/// items, items from a gateway that predates deadlines, and generation still
-/// run.
+/// items, items from a gateway that predates deadlines, items whose deadline
+/// exceeds the maximum budget, and generation still run.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn expired_or_cancelled_encode_work_is_acked_before_ipc() {
     if skip_unless_tools_available() {
@@ -1964,6 +1964,10 @@ async fn expired_or_cancelled_encode_work_is_acked_before_ipc() {
     for (request_id, timing) in [
         ("smoke-deadline-live", deadline_timing(0.0, 120.0)),
         ("smoke-deadline-predates-deadlines", None),
+        (
+            "smoke-deadline-over-budget",
+            deadline_timing(1_000.0, 990.0),
+        ),
     ] {
         publish_encode_work_item(
             &js,

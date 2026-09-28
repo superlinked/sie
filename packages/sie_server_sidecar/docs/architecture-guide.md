@@ -83,8 +83,11 @@ Work-item deadlines:
   absolute Unix time in seconds on the clock that stamps `timestamp`. An item
   without one, with a non-numeric one, or whose `deadline - timestamp` is
   negative or larger than `SIE_WORK_DEADLINE_MAX_BUDGET_S` (default 180) keeps
-  the behaviour that predates deadlines. Generation items are never judged by
-  this field.
+  the behaviour that predates deadlines, and a numeric deadline ignored this
+  way is reported with a rate-limited warning naming its budget. Keep
+  `SIE_WORK_DEADLINE_MAX_BUDGET_S` at or above the gateway's
+  `SIE_GATEWAY_REQUEST_TIMEOUT`; otherwise every item's deadline is ignored.
+  Generation items are never judged by this field.
 - The comparison is between the gateway and worker wall clocks plus
   `SIE_WORK_DEADLINE_SKEW_TOLERANCE_MS` (default 5000, at most 60000). Keep
   gateway and worker hosts synchronised, for example with NTP. The sidecar
@@ -108,8 +111,9 @@ Work-item deadlines:
   ACKed, NAKed, or dropped, so a slow scheduler queue or backend call does not
   trigger a redelivery of work that is still running. Settlement waits for a
   progress ACK already in flight, so none follows the ACK or NAK. Progress
-  pauses while the backend misses its heartbeat or the sidecar is draining, so
-  JetStream can move the work to another worker. With enforcement on, the lease
+  pauses while the backend heartbeat is not ready or the sidecar is draining,
+  so JetStream can move the work to another worker; the pause and the resume
+  are logged. With enforcement on, the lease
   ends at the deadline and a later redelivery is dropped as expired; with
   enforcement off it lasts one more maximum budget past the deadline.
 - A `RunBatch` call waits for the longer of `SIE_IPC_REQUEST_TIMEOUT_S` and
