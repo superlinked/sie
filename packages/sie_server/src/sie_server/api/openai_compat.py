@@ -475,6 +475,8 @@ async def _create_embeddings(
         # Same profile resolution as native /v1/encode with no request params,
         # which is the body the gateway rewrites this route into.
         options, selected_profile = resolve_runtime_options_with_profile(config, None, span)
+        # The OpenAI response format carries float vectors only.
+        options["output_dtype"] = "float32"
         try:
             adapter_output_types, response_output_types = resolve_encode_output_types(
                 config, ["dense"], selected_profile, options

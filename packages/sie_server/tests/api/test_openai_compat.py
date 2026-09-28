@@ -654,9 +654,11 @@ class TestOpenAIEmbeddingsProfileParity:
         texts = ["hello world", "second text"]
         vectors: dict[str, list[list[float]]] = {}
         with TestClient(app) as client:
+            portal = client.portal
+            assert portal is not None
             try:
                 for model in (_PROFILED_MODEL, f"{_PROFILED_MODEL}:cls"):
-                    client.portal.call(registry.load_async, model, "cpu")
+                    portal.call(registry.load_async, model, "cpu")
                     native = client.post(
                         f"/v1/encode/{model}",
                         json={"items": [{"text": text} for text in texts]},
@@ -670,7 +672,7 @@ class TestOpenAIEmbeddingsProfileParity:
                     vectors[model] = [item["embedding"] for item in openai.json()["data"]]
                     assert vectors[model] == native_vectors, model
             finally:
-                client.portal.call(registry.unload_all_async)
+                portal.call(registry.unload_all_async)
 
         assert vectors[_PROFILED_MODEL] != vectors[f"{_PROFILED_MODEL}:cls"]
 
@@ -731,6 +733,57 @@ class TestOpenAIEmbeddingsProfileResolution:
         assert error["code"] == "LORA_LOADING"
         assert error["type"] == "server_error"
         mock_adapter.encode.assert_not_called()
+
+    def test_profile_lora_unsupported_is_an_openai_client_error(
+        self, client: TestClient, mock_registry: MagicMock, mock_adapter: MagicMock
+    ) -> None:
+        mock_registry.get_config.return_value = ModelConfig(
+            sie_id="text-embedding-3-small",
+            hf_id="org/test",
+            tasks=Tasks(encode=EncodeTask(dense=EmbeddingDim(dim=3))),
+            profiles={
+                "default": ProfileConfig(
+                    adapter_path="test:TestAdapter",
+                    max_batch_tokens=8192,
+                    adapter_options=AdapterOptions(runtime={"lora_id": "org/test-lora"}),
+                )
+            },
+        )
+        mock_registry.ensure_lora_loaded_async = AsyncMock(side_effect=ValueError("Model does not support LoRA"))
+
+        response = client.post("/v1/embeddings", json={"model": "text-embedding-3-small", "input": "hello"})
+
+        assert response.status_code == 400, response.text
+        assert response.json() == {
+            "error": {
+                "message": "Model does not support LoRA",
+                "type": "invalid_request_error",
+                "param": None,
+                "code": "INVALID_INPUT",
+            }
+        }
+        mock_adapter.encode.assert_not_called()
+
+    def test_profile_output_dtype_cannot_quantize_openai_vectors(
+        self, client: TestClient, mock_registry: MagicMock, mock_adapter: MagicMock
+    ) -> None:
+        mock_registry.get_config.return_value = ModelConfig(
+            sie_id="text-embedding-3-small",
+            hf_id="org/test",
+            tasks=Tasks(encode=EncodeTask(dense=EmbeddingDim(dim=3))),
+            profiles={
+                "default": ProfileConfig(
+                    adapter_path="test:TestAdapter",
+                    max_batch_tokens=8192,
+                    adapter_options=AdapterOptions(runtime={"output_dtype": "int8"}),
+                )
+            },
+        )
+
+        response = client.post("/v1/embeddings", json={"model": "text-embedding-3-small", "input": "hello"})
+
+        assert response.status_code == 200, response.text
+        assert mock_adapter.encode.call_args.kwargs["options"]["output_dtype"] == "float32"
 
     def test_model_without_dense_output_rejected(
         self, client: TestClient, mock_registry: MagicMock, mock_adapter: MagicMock
