@@ -306,9 +306,10 @@ release record conservative with maximum-length, high-entropy identities. With
 Helm 3.16.4, the external profile encodes 192 lanes to about 840 KiB and the
 worst bundled profile encodes 96 lanes to about 853 KiB, each leaving at least
 64 KiB below the 917,504-byte release budget at this revision.
-The ordinary post-install/post-upgrade hook applies the target shards and
-prunes removed release-managed ScaledObjects. It refuses to adopt a same-name
-object unless that object already carries this Helm release's exact identity.
+The ordinary post-install/post-upgrade/post-rollback hook applies the target
+shards and prunes removed release-managed ScaledObjects. It refuses to adopt a
+same-name object unless that object already carries this Helm release's exact
+identity.
 Because those manifests are intentionally non-secret ConfigMaps, restrict
 write access in the workload namespace to trusted control-plane principals.
 
@@ -361,6 +362,12 @@ kubectl delete configmap "$LEGACY_KEDA_CONFIGMAP" -n <NAMESPACE> --ignore-not-fo
 ```
 
 Fresh installs and later compatible releases use the normal Helm procedure.
+`helm rollback` runs the target revision's stored hooks: it re-applies that
+revision's ScaledObjects and prunes the others, and a target revision with
+autoscaling disabled first removes the release-owned ScaledObjects. Health
+gates run on install and upgrade only. A revision installed by an earlier chart
+version carries no rollback hooks, so rolling back to it leaves ScaledObjects
+unchanged; roll forward instead.
 
 Disabling autoscaling or uninstalling runs a small hook that deletes only
 ScaledObjects carrying this release's managed identity or the exact canonical

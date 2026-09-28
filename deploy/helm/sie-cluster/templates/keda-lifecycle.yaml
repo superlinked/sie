@@ -5,11 +5,10 @@
 {{- $hooks := "pre-delete" -}}
 {{- if not .Values.autoscaling.enabled -}}
 {{- /*
-  pre-upgrade removes ScaledObjects while a bundled source KEDA controller is
-  still present. A failed upgrade is repaired and retried forward; rollback is
-  intentionally unsupported.
+  pre-upgrade and pre-rollback remove ScaledObjects while a bundled source KEDA
+  controller is still present.
 */ -}}
-{{- $hooks = "pre-upgrade,pre-delete" -}}
+{{- $hooks = "pre-upgrade,pre-rollback,pre-delete" -}}
 {{- end -}}
 apiVersion: v1
 kind: ServiceAccount

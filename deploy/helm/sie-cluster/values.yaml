@@ -1281,8 +1281,9 @@ dashboards:
 
 # -- Health gate hooks. autoscaling.enabled always enables the Prometheus and
 # KEDA ScaledObject/HPA control-path gates. The explicit switch below adds
-# application HTTP smoke Jobs. The KEDA/OTLP transition is forward-only and
-# deliberately has no post-rollback hook path.
+# application HTTP smoke Jobs. Gates run on install and upgrade only; a
+# rollback re-applies the target revision's ScaledObjects without re-running
+# them. The canonical 0.6.20 KEDA/OTLP transition itself is forward-only.
 healthGates:
   # -- Enable gateway and config HTTP health gates.
   # This cannot disable the mandatory autoscaling control-path gates.
