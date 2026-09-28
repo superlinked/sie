@@ -3,6 +3,7 @@ from __future__ import annotations
 import errno
 import logging
 import math
+import os
 import random
 import re
 import socket
@@ -141,6 +142,32 @@ def validate_base_url(base_url: str) -> None:
         _ = parts.port
     except ValueError as exc:
         raise ValueError(msg) from exc
+
+
+SIE_BASE_URL_ENV = "SIE_BASE_URL"
+SIE_API_KEY_ENV = "SIE_API_KEY"
+
+
+def resolve_base_url(base_url: str | None) -> str:
+    """Return ``base_url``, or the ``SIE_BASE_URL`` environment variable when it is omitted."""
+    if base_url is not None:
+        return base_url
+    env_base_url = os.environ.get(SIE_BASE_URL_ENV, "").strip()
+    if not env_base_url:
+        msg = f"base_url is required: pass it explicitly or set {SIE_BASE_URL_ENV}"
+        raise ValueError(msg)
+    return env_base_url
+
+
+def resolve_api_key(api_key: str | None) -> str | None:
+    """Return ``api_key``, or the ``SIE_API_KEY`` environment variable when it is omitted.
+
+    An explicit value, including an empty string, always wins, so a caller can
+    opt out of the environment credential.
+    """
+    if api_key is not None:
+        return api_key
+    return os.environ.get(SIE_API_KEY_ENV, "").strip() or None
 
 
 def url_origin_for_logging(url: str) -> str:

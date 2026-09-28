@@ -763,7 +763,11 @@ export interface SIEClientOptions {
   timeout?: number;
   /** Default GPU type for all requests (e.g., "l4", "a100-80gb") */
   gpu?: string;
-  /** API key for authentication (sent as Bearer token) */
+  /**
+   * API key for authentication (sent as Bearer token). Defaults to the
+   * `SIE_API_KEY` environment variable when omitted; pass `""` to send no
+   * credential.
+   */
   apiKey?: string;
   /**
    * Default for whether the SDK waits out transient "no capacity yet"

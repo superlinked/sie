@@ -254,6 +254,11 @@ client = SIEClient(
 )
 ```
 
+When `base_url` or `api_key` is omitted, the client reads `SIE_BASE_URL` or
+`SIE_API_KEY` from the environment, so code and integrations that construct a
+client without credentials work against a gateway with token auth. An explicit
+argument always wins; `api_key=""` sends no credential.
+
 ## Generation execution evidence
 
 `SIEClient.last_model_revision` retains the `X-SIE-Model-Revision` response
