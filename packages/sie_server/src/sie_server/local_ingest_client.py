@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import nullcontext, suppress
 from typing import Any
 
@@ -126,13 +126,13 @@ async def _read_frame(reader: asyncio.StreamReader) -> dict[str, Any]:
     return response
 
 
-def stream_generate(socket_path: str, items: bytes, params: bytes, meta: dict[str, Any]) -> AsyncIterator[bytes]:
+def stream_generate(socket_path: str, items: bytes, params: bytes, meta: dict[str, Any]) -> AsyncGenerator[bytes, None]:
     if os.environ.get("SIE_TRACING_ENABLED", "").strip().lower() not in {"1", "true", "yes", "on"}:
         return _stream_generate(socket_path, items, params, meta)
     return _traced_generate(socket_path, items, params, meta)
 
 
-async def _traced_generate(socket_path: str, items: bytes, params: bytes, meta: dict[str, Any]) -> AsyncIterator[bytes]:
+async def _traced_generate(socket_path: str, items: bytes, params: bytes, meta: dict[str, Any]) -> AsyncGenerator[bytes, None]:
     carrier = {
         key: value
         for key, limit in (("traceparent", 256), ("tracestate", 512))
@@ -188,7 +188,7 @@ async def _stream_generate(
     items: bytes,
     params: bytes,
     meta: dict[str, Any],
-) -> AsyncIterator[bytes]:
+) -> AsyncGenerator[bytes, None]:
     """Map one caller operation onto sidecar protocol v0.2.
 
     Pulling one response before requesting the next naturally propagates

@@ -929,26 +929,32 @@ async fn handle_connection(stream: UnixStream, shared: Arc<IngestShared>) {
                 let _generate_claim = generate_claim;
                 let operation_id = request.id;
                 let stream_writer = GenerateStreamWriter::new(operation_id, writer_op);
+                let mut span = tracing::Span::none();
                 let result = publish_generate_stream(
                     request.body,
                     &shared_op,
                     stream_writer.clone(),
                     Arc::clone(&lifecycle_op),
+                    &mut span,
                 )
                 .await;
-                active_op.lock().await.remove(&request_id);
-                if !lifecycle_op.is_closed() {
-                    let write_result = match result {
-                        Ok(()) => stream_writer.finish_success().await,
-                        Err(error) => stream_writer.finish_error(&error).await,
-                    };
-                    if let Err(error) = write_result {
-                        debug!(
-                            request_id,
-                            error, "local-ingest: generation terminal write failed"
-                        );
+                async {
+                    active_op.lock().await.remove(&request_id);
+                    if !lifecycle_op.is_closed() {
+                        let write_result = match result {
+                            Ok(()) => stream_writer.finish_success().await,
+                            Err(error) => stream_writer.finish_error(&error).await,
+                        };
+                        if let Err(error) = write_result {
+                            debug!(
+                                request_id,
+                                error, "local-ingest: generation terminal write failed"
+                            );
+                        }
                     }
                 }
+                .instrument(span)
+                .await;
             });
             continue;
         }
@@ -1011,8 +1017,9 @@ async fn handle_connection(stream: UnixStream, shared: Arc<IngestShared>) {
             let _retained_data_permit = retained_data_permit;
             let _inbound_permit = inbound_permit;
             let _operation_id_guard = operation_id_guard;
-            let frame = run_op(request, &shared_op).await;
-            write_response(&writer_op, frame).await;
+            let mut span = tracing::Span::none();
+            let frame = run_op(request, &shared_op, &mut span).await;
+            write_response(&writer_op, frame).instrument(span).await;
         });
     }
 
@@ -1043,10 +1050,14 @@ async fn handle_connection(stream: UnixStream, shared: Arc<IngestShared>) {
     }
 }
 
-async fn run_op(request: RequestEnvelope, shared: &IngestShared) -> Vec<u8> {
+async fn run_op(
+    request: RequestEnvelope,
+    shared: &IngestShared,
+    span: &mut tracing::Span,
+) -> Vec<u8> {
     match request.op.as_str() {
         OP_PING => encode_response(request.id, true, None, empty_body()),
-        OP_PUBLISH_WORK => match publish_work(request.body, shared).await {
+        OP_PUBLISH_WORK => match publish_work(request.body, shared, span).await {
             Ok(results_bytes) => {
                 encode_response(request.id, true, None, results_body(results_bytes))
             }
@@ -1150,6 +1161,7 @@ async fn publish_generate_stream(
     shared: &IngestShared,
     stream_writer: GenerateStreamWriter,
     lifecycle: Arc<ConnectionLifecycle>,
+    span: &mut tracing::Span,
 ) -> Result<(), crate::dispatcher::GenerateDispatchError> {
     let semantic_deadline = generate_timeout_deadline(body.timeout_ms).map_err(|message| {
         crate::dispatcher::GenerateDispatchError {
@@ -1180,7 +1192,7 @@ async fn publish_generate_stream(
             message: "publish_generate_stream requires endpoint generate".to_string(),
         });
     }
-    let span = local_ingest_span(&body, &mut items);
+    *span = local_ingest_span(&body, &mut items);
     publish_validated_generate(
         body,
         items,
@@ -1190,7 +1202,7 @@ async fn publish_generate_stream(
         semantic_deadline,
         timeout_ms,
     )
-    .instrument(span)
+    .instrument(span.clone())
     .await
 }
 
@@ -1585,15 +1597,19 @@ fn error_result(wi: &WorkItem, worker_id: &str, code: &str, message: &str) -> Wo
     }
 }
 
-async fn publish_work(body: RequestBody, shared: &IngestShared) -> Result<Vec<u8>, String> {
+async fn publish_work(
+    body: RequestBody,
+    shared: &IngestShared,
+    span: &mut tracing::Span,
+) -> Result<Vec<u8>, String> {
     validate_publish_work_timeout(body.timeout_ms)?;
     validate_payload_digest(&body)?;
     let mut items: Vec<WorkItem> = rmp_serde::from_slice(&body.items)
         .map_err(|e| format!("DecodeError: items is not a msgpack WorkItem array: {e}"))?;
     validate_work_items(&body, &items)?;
-    let span = local_ingest_span(&body, &mut items);
+    *span = local_ingest_span(&body, &mut items);
     publish_validated_work(body, items, shared)
-        .instrument(span)
+        .instrument(span.clone())
         .await
 }
 
