@@ -204,7 +204,10 @@ def test_trace_carrier_does_not_change_bound_payload() -> None:
     assert "tracestate" not in invalid
 
 
-async def test_traced_stream_owns_handoff_lifetime_without_leaking_context(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("state", [None, "vendor=value", "invalid state"])
+async def test_traced_stream_owns_handoff_lifetime_without_leaking_context(
+    monkeypatch: pytest.MonkeyPatch, state: str | None
+) -> None:
     exporter = InMemorySpanExporter()
     provider = TracerProvider()
     provider.add_span_processor(SimpleSpanProcessor(exporter))
@@ -224,7 +227,7 @@ async def test_traced_stream_owns_handoff_lifetime_without_leaking_context(monke
 
     monkeypatch.setattr(local_ingest_client, "_stream_generate", transport)
     iterator = local_ingest_client.stream_generate(
-        "private/socket", b"secret items", b"secret params", {**_meta(), "traceparent": parent}
+        "private/socket", b"secret items", b"secret params", {**_meta(), "traceparent": parent, "tracestate": state}
     )
     async with aclosing(iterator):
         assert await anext(iterator) == b"chunk"
@@ -238,6 +241,7 @@ async def test_traced_stream_owns_handoff_lifetime_without_leaking_context(monke
     assert span.parent.span_id == int(parent.split("-")[2], 16)
     assert captured[0][0:2] == (b"secret items", b"secret params")
     assert captured[0][2]["traceparent"].split("-")[2] == f"{span.context.span_id:016x}"
+    assert captured[0][2].get("tracestate") == (state if state == "vendor=value" else None)
     assert not span.attributes
     assert not span.events
     assert not span.status.description

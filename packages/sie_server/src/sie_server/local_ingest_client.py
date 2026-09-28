@@ -152,7 +152,9 @@ async def _traced_generate(
         )
         carrier = {}
         _PROPAGATOR.inject(carrier, context=trace.set_span_in_context(span, parent))
-        meta = {**meta, **carrier}
+        if "traceparent" in carrier:
+            meta = {key: value for key, value in meta.items() if key not in ("traceparent", "tracestate")}
+            meta.update(carrier)
     iterator = _stream_generate(socket_path, items, params, meta)
     try:
         while True:
