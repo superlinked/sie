@@ -1989,6 +1989,8 @@ mod tests {
         use tracing_subscriber::prelude::*;
         let exporter = opentelemetry_sdk::trace::InMemorySpanExporter::default();
         let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+            // Other tests change the process sampler environment; capture spans deterministically.
+            .with_sampler(opentelemetry_sdk::trace::Sampler::AlwaysOn)
             .with_simple_exporter(exporter.clone())
             .build();
         let subscriber = tracing_subscriber::registry()
