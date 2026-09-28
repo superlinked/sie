@@ -79,10 +79,15 @@ length, and computes segment ids with tensor operations; both give the same
 integers.
 
 Replays never overlap (a lock serializes them), and each replay's hidden
-states are scored before the next replay. Anything unsupported, larger than
-the token bound, or whose shape failed to record runs eagerly. A shape that
-fails to record for any reason but memory is not recorded again, and after
-three such shapes the runner turns graphs off for the process. The runner
+states are scored before the next replay. Only the recording thread's forward
+is diverted while a graph records; the diversion is per thread, so an eager
+forward of the same model on another thread runs unchanged. Anything
+unsupported, larger than the token bound, or whose shape failed to record runs
+eagerly. A shape whose recording or first replay fails for any reason but
+memory is not recorded again, and after three such shapes the runner turns
+graphs off for the process. The scoring head is not part of that count: it
+reads the forward's own inputs, so its errors fail that forward alone, as they
+would eagerly. The runner
 counts every forward it is offered (``CudaGraphStats``) and logs the counts
 every ten minutes while it serves forwards.
 """
@@ -95,7 +100,7 @@ import math
 import threading
 import time
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -302,9 +307,10 @@ class CudaGraphRunner:
         self._relative_pos: dict[int, torch.Tensor] = {}
         # The hidden states every graph writes, sized for the token bound.
         self._hidden: torch.Tensor | None = None
-        # Set only while recording: the relative-position table the encoder uses.
-        self._recording_relative_pos: torch.Tensor | None = None
-        self._recording = False
+        # Set only on the thread that is recording, while it records: the
+        # hooks divert that thread's forward and leave every other thread's
+        # alone.
+        self._local = threading.local()
         self.stats = CudaGraphStats()
         self._summary_at = clock()
         self._summary_forwards = 0
@@ -322,8 +328,8 @@ class CudaGraphRunner:
         def recording_get_rel_pos(
             hidden_states: torch.Tensor, query_states: Any = None, relative_pos: Any = None
         ) -> Any:
-            if self._recording and relative_pos is None:
-                return self._recording_relative_pos
+            if relative_pos is None and self._recording_here():
+                return self._local.relative_pos
             return get_rel_pos(hidden_states, query_states, relative_pos)
 
         encoder.get_rel_pos = recording_get_rel_pos
@@ -332,7 +338,7 @@ class CudaGraphRunner:
             config = self._model.config
 
             def recording_segment_ids(input_ids: torch.Tensor) -> torch.Tensor:
-                if not self._recording:
+                if not self._recording_here():
                     return create_segment_ids(input_ids)
                 return segment_ids(input_ids, config)
 
@@ -350,11 +356,24 @@ class CudaGraphRunner:
             labels: Any = None,
             max_num_classes: int | None = None,
         ) -> Any:
-            if self._recording:
+            if self._recording_here():
                 return encoder_layer, None, None, None
             return head(input_ids, attention_mask, encoder_layer, labels, max_num_classes)
 
         inner.process_encoder_output = recording_head
+
+    def _recording_here(self) -> bool:
+        """Whether this thread is recording a graph of this runner's model."""
+        return getattr(self._local, "recording", False)
+
+    @contextlib.contextmanager
+    def _recording_on_this_thread(self, relative_pos: torch.Tensor | None) -> Iterator[None]:
+        """Divert this thread's forward to a recordable one while the block runs."""
+        self._local.recording, self._local.relative_pos = True, relative_pos
+        try:
+            yield
+        finally:
+            self._local.recording, self._local.relative_pos = False, None
 
     # -- policy ------------------------------------------------------------
 
@@ -437,12 +456,12 @@ class CudaGraphRunner:
             except Exception as exc:  # noqa: BLE001 -- any failure to record runs the forward eagerly
                 self._recording_failed(key, exc)
                 return None, "recording_failed"
-            # The graph answers the forward that recorded it, before the
-            # budget check below can drop it. Its first replay is part of
+            # The graph answers the forward that recorded it, replayed before
+            # the budget check below can drop it. Its first replay is part of
             # recording it: a failure other than memory runs the forward
             # eagerly and the graph is not kept.
             try:
-                logits = self._replay(key, entry, inputs, max_num_classes)
+                hidden = self._replay_graph(key, entry, inputs)
             except Exception as exc:
                 if is_oom_error(exc):
                     raise
@@ -450,9 +469,12 @@ class CudaGraphRunner:
                 return None, "recording_failed"
             self._keep(key, entry, input_ids.device)
             self.stats.recorded += 1
-            return logits, None
         finally:
             _RECORDING_LOCK.release()
+        # The scoring head reads the forward's own inputs, so its errors are
+        # the forward's, as in an eager forward: they fail this forward and
+        # count nothing against the shape.
+        return self._score(entry, hidden, max_num_classes), None
 
     def _keep(self, key: Key, entry: _Graph, device: torch.device) -> None:
         """Cache a new graph and hold the runner's graphs to their memory budget."""
@@ -662,10 +684,8 @@ class CudaGraphRunner:
         pool = next(iter(self._graphs.values())).graph.pool() if self._graphs else None
         graph = torch.cuda.CUDAGraph()
         stream.wait_stream(current)
-        self._recording_relative_pos = relative_pos
-        self._recording = True
         try:
-            with torch.inference_mode(), torch.cuda.stream(stream):
+            with self._recording_on_this_thread(relative_pos), torch.inference_mode(), torch.cuda.stream(stream):
                 if warm_up:
                     self._model(**{name: value[:1] for name, value in static.items()})
                     # Kept only once warmed up, so a failed warm-up is tried again.
@@ -687,8 +707,6 @@ class CudaGraphRunner:
                 graph.capture_end()
                 device_bytes = max(0, free_before - self._free_memory(device))
         finally:
-            self._recording = False
-            self._recording_relative_pos = None
             current.wait_stream(stream)
         return _Graph(graph=graph, inputs=static, device_bytes=device_bytes)
 
@@ -696,6 +714,10 @@ class CudaGraphRunner:
         self, key: Key, entry: _Graph, inputs: dict[str, torch.Tensor], max_num_classes: int | None
     ) -> torch.Tensor:
         """Replay ``entry`` on ``inputs`` and score the replayed hidden states of the real rows."""
+        return self._score(entry, self._replay_graph(key, entry, inputs), max_num_classes)
+
+    def _replay_graph(self, key: Key, entry: _Graph, inputs: dict[str, torch.Tensor]) -> torch.Tensor:
+        """Replay ``entry`` on ``inputs``; the hidden states of the real rows."""
         shared = self._hidden
         if shared is None:  # dropped only with every graph
             raise RuntimeError("GLiClass CUDA graph replayed without its hidden-state buffer")
@@ -709,7 +731,11 @@ class CudaGraphRunner:
             if batch < buffer.shape[0]:
                 buffer[batch:].fill_(pad)
         entry.graph.replay()
-        hidden = self._hidden_states(key, shared.dtype, shared.device)[:batch]
+        return self._hidden_states(key, shared.dtype, shared.device)[:batch]
+
+    def _score(self, entry: _Graph, hidden: torch.Tensor, max_num_classes: int | None) -> torch.Tensor:
+        """The logits the scoring head gives the replayed hidden states of the real rows."""
+        batch = hidden.shape[0]
         with torch.inference_mode():
             return self._head(
                 entry.inputs["input_ids"][:batch], entry.inputs["attention_mask"][:batch], hidden, None, max_num_classes

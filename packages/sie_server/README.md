@@ -198,7 +198,9 @@ itself. Usage and billing do not change.
 **Failures and counters.** A shape that fails to record for a reason other
 than memory runs eagerly from then on, and the failure is logged as a warning
 with its traceback. After three such shapes, the model runs eagerly for the
-rest of the process, logged as an error. Each model counts the forwards it
+rest of the process, logged as an error. The scoring head is not part of that
+count: it reads the request's own inputs, so an error there fails that request
+as it would in an eager forward. Each model counts the forwards it
 replays, records, and runs eagerly (by reason: past the token bound, recording
 paused, budget full, and so on), and logs the counts every ten minutes while it
 serves requests.

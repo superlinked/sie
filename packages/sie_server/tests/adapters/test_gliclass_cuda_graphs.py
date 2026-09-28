@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import random
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -75,13 +76,15 @@ def _model(
 
 
 class _Runner(CudaGraphRunner):
-    """Records and replays with fakes.
+    """Records and replays graphs with fakes; the runner's own code scores them.
 
-    A replay answers with ones, ``(batch, classes)``: the forward's real rows
-    and label slots. A recording whose capture fails (``capture_error``)
-    raises that error. Time stands still unless a test moves ``now``; the
-    device always has memory to spare unless a test clears ``headroom`` or
-    sets a ``budget``.
+    A graph replay (``_replay_graph``) returns hidden states for the forward's
+    real rows, or raises ``replay_error``. The scoring head answers with ones,
+    ``(batch, classes)``: the forward's real rows and label slots, or raises
+    ``head_error``. A recording whose capture fails (``capture_error``) raises
+    that error. Time stands still unless a test moves ``now``; the device
+    always has memory to spare unless a test clears ``headroom`` or sets a
+    ``budget``.
     """
 
     def __init__(self, model: Any = None, **kwargs: Any) -> None:
@@ -96,7 +99,9 @@ class _Runner(CudaGraphRunner):
         self.budget = 2**40
         self.bytes_per_graph = 0
         self.replay_error: Exception | None = None
+        self.head_error: Exception | None = None
         self.buffers_alive = False
+        self._head = self._fake_head
 
     def _has_headroom(self, device: torch.device) -> bool:
         return self.headroom
@@ -114,19 +119,29 @@ class _Runner(CudaGraphRunner):
         self.recorded.append(key)
         self._relative_pos.setdefault(key[1], torch.zeros(1))
         self.buffers_alive = True  # like the hidden-state buffer a real recording writes
-        return SimpleNamespace(key=key, device_bytes=self.bytes_per_graph, inputs={}, graph=None)
+        # Static inputs with a row per padded row and no memory to count.
+        static = {name: torch.zeros(key[0], 0, dtype=torch.long) for name in ("input_ids", "attention_mask")}
+        return SimpleNamespace(key=key, device_bytes=self.bytes_per_graph, inputs=static, graph=None)
 
     def clear(self) -> None:
         super().clear()
         self.buffers_alive = False
 
-    def _replay(self, key: Any, entry: Any, inputs: dict[str, torch.Tensor], max_num_classes: int | None) -> Any:
+    def _replay_graph(self, key: Any, entry: Any, inputs: dict[str, torch.Tensor]) -> torch.Tensor:
         assert self.buffers_alive, "replayed a graph after its buffers were dropped"
         if self.replay_error is not None:
             raise self.replay_error
         self.replayed.append(entry.key)
+        return torch.zeros(inputs["input_ids"].shape[0], key[1], 1)
+
+    def _fake_head(
+        self, input_ids: Any, attention_mask: Any, hidden: torch.Tensor, labels: Any, max_num_classes: int | None
+    ) -> tuple[torch.Tensor]:
+        assert input_ids.shape[0] == attention_mask.shape[0] == hidden.shape[0]
+        if self.head_error is not None:
+            raise self.head_error
         self.head_classes.append(max_num_classes)
-        return torch.ones(inputs["input_ids"].shape[0], max_num_classes or 1)
+        return (torch.ones(hidden.shape[0], max_num_classes or 1),)
 
 
 def _inputs(batch: int, length: int) -> dict[str, torch.Tensor]:
@@ -479,7 +494,7 @@ class TestRecordingPolicy:
     def test_a_first_replay_that_fails_counts_as_a_failed_recording(self) -> None:
         runner = _Runner()
         runner.run(_inputs(1, 100), 4, "bucketed")
-        runner.replay_error = RuntimeError("the head failed")
+        runner.replay_error = RuntimeError("CUDA error: an illegal memory access was encountered")
 
         assert runner.run(_inputs(1, 200), 4, "bucketed") is None  # the adapter answers eagerly
 
@@ -490,6 +505,33 @@ class TestRecordingPolicy:
         assert runner.run(_inputs(1, 200), 4, "bucketed") is None  # not recorded again
         assert runner.stats.eager["failed_shape"] == 1
         assert not cuda_graphs_module._RECORDING_LOCK.locked()
+
+    @pytest.mark.parametrize("first_use", [True, False], ids=["recording-forward", "later-forward"])
+    def test_a_scoring_head_error_fails_only_its_forward(self, first_use: bool) -> None:
+        # The head reads the caller's inputs, so its errors are the caller's:
+        # the forward fails as it would eagerly, and no shape loses its graph.
+        runner = _Runner()
+        runner.run(_inputs(1, 32), 4, "bucketed")
+        shapes = [(1, 64), (1, 96), (1, 128), (1, 160)]
+        if not first_use:
+            for _, length in shapes:
+                runner.run(_inputs(1, length), 4, "bucketed")
+        runner.head_error = IndexError("index 4 is out of bounds for dimension 1 with size 4")
+
+        for _, length in shapes:  # more than the three strikes that would turn graphs off
+            with pytest.raises(IndexError):
+                runner.run(_inputs(1, length), 4, "bucketed")
+
+        assert runner.stats.recording_failures == 0
+        assert runner._failed == set()
+        assert not runner.disabled
+        assert set(runner._graphs) == {(1, 32), *shapes}  # the graphs are kept
+        assert not cuda_graphs_module._RECORDING_LOCK.locked()
+        runner.head_error = None
+        replayed = runner.stats.replayed
+        for _, length in shapes:
+            assert runner.run(_inputs(1, length), 4, "bucketed") is not None
+        assert runner.stats.replayed == replayed + len(shapes)
 
     def test_a_first_replay_that_runs_out_of_memory_reaches_oom_recovery(self) -> None:
         runner = _Runner()
@@ -580,23 +622,54 @@ class TestRecordingHooks:
         runner = _Runner(model)
         encoder = model.model.encoder_model.encoder
         table = torch.arange(4)
-        runner._recording, runner._recording_relative_pos = True, table
 
-        assert encoder.get_rel_pos(torch.zeros(1, 7, 4)) is table
-        assert encoder.get_rel_pos(torch.zeros(1, 7, 4), None, "given") == ("built", 7)
-        ids = torch.tensor([[0, 8, 5, 5, 2]])
-        assert torch.equal(model.model._create_segment_ids(ids), torch.tensor([[0, 1, 1, 1, 1]]))
+        with runner._recording_on_this_thread(table):
+            assert encoder.get_rel_pos(torch.zeros(1, 7, 4)) is table
+            assert encoder.get_rel_pos(torch.zeros(1, 7, 4), None, "given") == ("built", 7)
+            ids = torch.tensor([[0, 8, 5, 5, 2]])
+            assert torch.equal(model.model._create_segment_ids(ids), torch.tensor([[0, 1, 1, 1, 1]]))
+        assert encoder.get_rel_pos(torch.zeros(1, 7, 4)) == ("built", 7)
 
     def test_while_recording_the_forward_stops_at_the_hidden_states(self) -> None:
         model = _model()
         runner = _Runner(model)
         hidden = torch.zeros(2, 7, 4)
-        runner._recording = True
 
-        logits, *rest = model.model.process_encoder_output("ids", "mask", hidden, None, 3)
+        with runner._recording_on_this_thread(None):
+            logits, *rest = model.model.process_encoder_output("ids", "mask", hidden, None, 3)
 
         assert logits is hidden
         assert rest == [None, None, None]
+
+    def test_recording_diverts_only_the_recording_thread(self) -> None:
+        # Another thread's eager forward of the same model, while a graph
+        # records, must get logits, not the recording's hidden states.
+        model = _model(segment_embeddings=True)
+        runner = _Runner(model)
+        encoder = model.model.encoder_model.encoder
+        hidden = torch.zeros(2, 7, 4)
+        seen: dict[str, Any] = {}
+
+        def eager_forward() -> None:
+            seen["head"] = model.model.process_encoder_output("ids", "mask", hidden, None, 3)
+            seen["table"] = encoder.get_rel_pos(hidden)
+            seen["segments"] = model.model._create_segment_ids(torch.ones(1, 3, dtype=torch.long))
+
+        with runner._recording_on_this_thread(torch.arange(4)):
+            other = threading.Thread(target=eager_forward)
+            other.start()
+            other.join()
+            assert model.model.process_encoder_output("ids", "mask", hidden, None, 3)[0] is hidden
+
+        assert seen == {"head": ("head", hidden), "table": ("built", 7), "segments": "eager"}
+
+    def test_the_recording_state_is_cleared_when_recording_fails(self) -> None:
+        runner = _Runner()
+
+        with pytest.raises(RuntimeError), runner._recording_on_this_thread(torch.arange(4)):
+            raise RuntimeError("capture failed")
+
+        assert not runner._recording_here()
 
 
 @pytest.mark.parametrize(
