@@ -263,6 +263,8 @@ def test_lifecycle_allowlist_in_real_collector(tmp_path):
             {"operation": "payload-secret"},
             {"duration_ms": "payload-secret"},
             {"duration_ms": -1},
+            {"duration_ms": float("nan")},
+            {"first_token_ms": float("nan")},
             {"first_token_ms": "payload-secret"},
             {"first_token_ms": 100},
             {"event.schema.version": "2"},
