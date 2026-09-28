@@ -299,6 +299,48 @@ correct on overlays.
 {{- end }}
 
 {{/*
+Deployment environment passed to sie-config as SIE_DEPLOYMENT_ENV. sie-config
+refuses unauthenticated /v1/configs requests when it is "prod" or "production".
+*/}}
+{{- define "sie-cluster.config.deploymentEnv" -}}
+{{- if and .Values.telemetry .Values.telemetry.deploymentEnv -}}
+{{- .Values.telemetry.deploymentEnv | toString -}}
+{{- else -}}
+production
+{{- end -}}
+{{- end }}
+
+{{- define "sie-cluster.config.generatedAdminTokenSecretName" -}}
+{{- printf "%s-admin-token" (include "sie-cluster.config.serviceName" .) -}}
+{{- end }}
+
+{{/*
+Secret holding the sie-config admin token that sie-config, the gateway, and
+worker sidecars share: config.auth.adminTokenSecretName when set, otherwise the
+chart-generated Secret when config.auth.generateAdminToken is true, otherwise
+empty (no token).
+*/}}
+{{- define "sie-cluster.config.adminTokenSecretName" -}}
+{{- if .Values.config.auth.adminTokenSecretName -}}
+{{- .Values.config.auth.adminTokenSecretName -}}
+{{- else if .Values.config.auth.generateAdminToken -}}
+{{- include "sie-cluster.config.generatedAdminTokenSecretName" . -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Fail the render when sie-config would run in a production environment without
+an admin token: it would refuse every /v1/configs request, so the gateway and
+worker sidecars could never load the model catalog.
+*/}}
+{{- define "sie-cluster.config.validateAuth" -}}
+{{- $env := include "sie-cluster.config.deploymentEnv" . | trim | lower -}}
+{{- if and (has $env (list "prod" "production")) (not (include "sie-cluster.config.adminTokenSecretName" .)) -}}
+{{- fail (printf "sie-config would run with telemetry.deploymentEnv=%q and no admin token, so it would refuse every /v1/configs request and the gateway could not load the model catalog. Set config.auth.adminTokenSecretName to an existing Secret, or leave config.auth.generateAdminToken=true (the default) so the chart generates one." $env) -}}
+{{- end -}}
+{{- end }}
+
+{{/*
 Worker StatefulSet name for a pool
 */}}
 {{- define "sie-cluster.worker.name" -}}

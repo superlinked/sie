@@ -107,7 +107,7 @@ Each `--flag` above has a matching `SIE_*` environment variable (see next sectio
 | `SIE_GATEWAY_ENABLE_POOLS` | `false` | Enable pool management |
 | `SIE_GATEWAY_HOT_RELOAD` | `false` | Enable filesystem watcher for bundle/model directories |
 | `SIE_GATEWAY_WATCH_POLLING` | `false` | Use polling file-watcher instead of inotify/fsevents (alias: `SIE_GATEWAY_POLLING_WATCHER`). Useful on filesystems where native notifications are unreliable |
-| `SIE_CONFIG_SERVICE_URL` | unset | Base URL of `sie-config`. When set, the gateway runs a background `GET /v1/configs/export` bootstrap on startup and a 30 s `GET /v1/configs/epoch` drift poller. When unset, the bootstrap/poller tasks no-op and the gateway runs filesystem-seed-only |
+| `SIE_CONFIG_SERVICE_URL` | unset | Base URL of `sie-config`. When set, the gateway runs a background `GET /v1/configs/export` bootstrap on startup and a 30 s `GET /v1/configs/epoch` drift poller, and `/readyz` returns `503` until the first complete export is applied. When unset, the bootstrap/poller tasks no-op and the gateway runs filesystem-seed-only |
 | `SIE_MULTI_ROUTER` | `false` | Multi-gateway coordination flag (wire-compatible name retained) |
 | `SIE_GATEWAY_CONFIGURED_GPUS` | | CSV of canonical machine profiles used for validation and default pool display |
 | `SIE_GATEWAY_CONFIGURED_PHYSICAL_LANES` | `[]` | JSON array of exact queue/KEDA lanes, for example `[{"pool":"default","machineProfile":"cpu","bundle":"default"}]`. Queue routing fails closed when its resolved tuple is absent. Helm and the managed Modal gateway derive this catalog from their deployment manifests; standalone queue deployments must set it explicitly |
@@ -126,7 +126,7 @@ Each `--flag` above has a matching `SIE_*` environment variable (see next sectio
 |--------|------|-------------|
 | GET | `/` | HTML status page |
 | GET | `/healthz` | Liveness — **`200`**, **`text/plain`** body **`ok`** |
-| GET | `/readyz` | Readiness — **`200`** + **`ok`** once the gateway process is serving (**`text/plain`**); worker availability is exposed by `/health` |
+| GET | `/readyz` | Readiness — **`200`** + **`ok`** once the gateway process is serving and, when `SIE_CONFIG_SERVICE_URL` is set, has applied its first complete `sie-config` snapshot; **`503`** before that (**`text/plain`**). It does not flip back on later `sie-config` outages; worker availability is exposed by `/health` |
 | GET | `/health` | Cluster health JSON |
 | GET | `/openapi.json` | OpenAPI 3 contract for gateway-owned HTTP routes |
 | GET | `/ws/cluster-status` | WebSocket cluster status feed |

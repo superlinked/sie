@@ -99,13 +99,26 @@ config:
   # -- Affinity rules
   affinity: {}
 
-  # -- Auth (admin token gates POST /v1/configs/*). Leave mode=none in test clusters.
+  # -- Auth. The admin token gates every sie-config /v1/configs/* read and
+  # write; sie-config, the gateway, and worker sidecars all read it from the
+  # same Secret (the gateway and sidecars present it to load the catalog).
   auth:
     # -- Mode: none | static
     mode: none
-    # -- Secret with the admin token value (key: SIE_ADMIN_TOKEN by default)
+    # -- Existing Secret with the admin token value (key: adminTokenSecretKey).
+    # When set, it is used unchanged and no Secret is generated.
     adminTokenSecretName: ""
     adminTokenSecretKey: "SIE_ADMIN_TOKEN"
+    # -- When adminTokenSecretName is empty, create `<fullname>-config-admin-token`
+    # with a random 64-character token. An existing Secret of that name keeps
+    # its token across upgrades, and the Secret is kept on uninstall
+    # (helm.sh/resource-policy: keep). Renderers without cluster access
+    # (`helm template`, GitOps controllers) cannot read the existing Secret and
+    # produce a new token on every render; use adminTokenSecretName there.
+    # Setting this to false with no adminTokenSecretName fails the render while
+    # telemetry.deploymentEnv is production, because sie-config would refuse
+    # every /v1/configs request.
+    generateAdminToken: true
 
   # -- Liveness/readiness/startup probe timing. The httpGet path/port are
   # contracts owned by the template (sie-config exposes /healthz and /readyz);
@@ -1319,7 +1332,10 @@ telemetry:
   enabled: true
   # -- Override receiver endpoint (enterprise self-hosted collectors)
   url: ""
-  # -- Deployment environment: production | staging | development | ci
+  # -- Deployment environment: production | staging | development | ci.
+  # Also passed to sie-config as SIE_DEPLOYMENT_ENV. With production (or prod),
+  # sie-config refuses every /v1/configs request unless an admin token is
+  # configured (see config.auth); other values let it serve without one.
   deploymentEnv: production
 
 # -- Logging configuration. Gateway and sie-config receive ``SIE_LOG_LEVEL`` from
@@ -1533,9 +1549,10 @@ queueRouting:
 # payloads/*. The legacy GCP BYO path grants objectViewer bucket-wide;
 # operators own IAM scoping for other explicitly configured BYO storage.
 #
-# If enabled and clusterRouting=queue but no URL resolves, the chart FAILS the
-# install with guidance (see deploy/helm/sie-cluster/README.md). Set
-# payloadStore.enabled=false to opt out and accept that >1MB requests will fail.
+# If enabled but no URL resolves (the chart defaults), the chart installs
+# without a payload store and the release notes warn that >1MB requests will
+# fail until a URL is configured (see deploy/helm/sie-cluster/README.md). Set
+# payloadStore.enabled=false to opt out without the warning.
 payloadStore:
   # -- Enable the payload store. Default true: required for >1MB work items.
   enabled: true

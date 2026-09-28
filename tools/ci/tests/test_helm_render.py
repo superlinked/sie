@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import re
 import subprocess
@@ -20,6 +21,13 @@ AUTOSCALING_VALUES = {
         "otel": {"collector": {"prometheus": {"networkPolicy": {"scrapeNamespaceNames": ["monitoring"]}}}}
     },
 }
+GENERATED_ADMIN_TOKEN_SECRET = "sie-sie-cluster-config-admin-token"
+CONFIG_CLIENTS = (
+    "sie-sie-cluster-config/config",
+    "sie-sie-cluster-gateway/gateway",
+    "sie-sie-cluster-worker-l4-default/worker-sidecar",
+)
+L4_POOL = {"workers": {"pools": {"l4": {"enabled": True}}}}
 
 
 def render_workers(tmp_path: Path, values: dict) -> subprocess.CompletedProcess[str]:
@@ -199,3 +207,100 @@ def test_dashboards_cover_public_prometheus_metrics(tmp_path: Path) -> None:
         selector in expression
         for selector in ('namespace="$namespace"', 'service="$collector"', 'endpoint="prometheus"')
     )
+
+
+def render_chart(tmp_path: Path, values: dict) -> subprocess.CompletedProcess[str]:
+    values_file = tmp_path / "chart-values.yaml"
+    values_file.write_text(yaml.safe_dump(values), encoding="utf-8")
+    return subprocess.run(
+        [
+            "mise",
+            "exec",
+            "--",
+            "helm",
+            "template",
+            "sie",
+            str(helm.CHART_DIR),
+            "--namespace",
+            "sie",
+            "-f",
+            str(values_file),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def rendered_documents(tmp_path: Path, values: dict) -> list[dict]:
+    result = render_chart(tmp_path, values)
+    assert result.returncode == 0, result.stderr
+    return [doc for doc in yaml.safe_load_all(result.stdout) if doc]
+
+
+def container_env(docs: list[dict], workload: str, container: str) -> dict[str, dict]:
+    (doc,) = [
+        doc for doc in docs if doc["kind"] in {"Deployment", "StatefulSet"} and doc["metadata"]["name"] == workload
+    ]
+    (spec,) = [spec for spec in doc["spec"]["template"]["spec"]["containers"] if spec["name"] == container]
+    return {env["name"]: env for env in spec.get("env", [])}
+
+
+def admin_token_refs(docs: list[dict]) -> dict[str, dict]:
+    refs = {}
+    for doc in docs:
+        if doc["kind"] not in {"Deployment", "StatefulSet"}:
+            continue
+        for container in doc["spec"]["template"]["spec"]["containers"]:
+            for env in container.get("env", []):
+                if env["name"] == "SIE_ADMIN_TOKEN":
+                    refs[f"{doc['metadata']['name']}/{container['name']}"] = env["valueFrom"]["secretKeyRef"]
+    return refs
+
+
+def admin_token_secrets(docs: list[dict]) -> list[dict]:
+    return [doc for doc in docs if doc["kind"] == "Secret" and doc["metadata"]["name"].endswith("-admin-token")]
+
+
+def test_chart_defaults_render_without_overrides(tmp_path: Path) -> None:
+    docs = rendered_documents(tmp_path, {})
+    gateway = container_env(docs, "sie-sie-cluster-gateway", "gateway")
+    assert "SIE_PAYLOAD_STORE_URL" not in gateway
+    assert gateway["SIE_ADMIN_TOKEN"]["valueFrom"]["secretKeyRef"]["name"] == GENERATED_ADMIN_TOKEN_SECRET
+    assert container_env(docs, "sie-sie-cluster-config", "config")["SIE_DEPLOYMENT_ENV"]["value"] == "production"
+
+
+def test_generated_admin_token_is_wired_to_every_config_client(tmp_path: Path) -> None:
+    docs = rendered_documents(tmp_path, L4_POOL)
+    (secret,) = admin_token_secrets(docs)
+    assert secret["metadata"]["name"] == GENERATED_ADMIN_TOKEN_SECRET
+    assert secret["metadata"]["annotations"] == {"helm.sh/resource-policy": "keep"}
+    assert re.fullmatch(r"[A-Za-z0-9]{64}", base64.b64decode(secret["data"]["SIE_ADMIN_TOKEN"]).decode())
+    expected = {"name": GENERATED_ADMIN_TOKEN_SECRET, "key": "SIE_ADMIN_TOKEN"}
+    assert admin_token_refs(docs) == dict.fromkeys(CONFIG_CLIENTS, expected)
+
+
+def test_operator_admin_token_secret_is_used_unchanged(tmp_path: Path) -> None:
+    auth = {"adminTokenSecretName": "operator-admin", "adminTokenSecretKey": "token"}
+    docs = rendered_documents(tmp_path, {**L4_POOL, "config": {"auth": auth}})
+    assert admin_token_secrets(docs) == []
+    assert admin_token_refs(docs) == dict.fromkeys(CONFIG_CLIENTS, {"name": "operator-admin", "key": "token"})
+
+
+@pytest.mark.parametrize("telemetry", [{}, {"deploymentEnv": "production"}, {"deploymentEnv": " Prod "}])
+def test_production_config_service_without_a_token_fails_the_render(tmp_path: Path, telemetry: dict) -> None:
+    result = render_chart(tmp_path, {"config": {"auth": {"generateAdminToken": False}}, "telemetry": telemetry})
+    assert result.returncode != 0
+    assert "and no admin token, so it would refuse every /v1/configs request" in result.stderr
+
+
+def test_non_production_config_service_may_opt_out_of_the_token(tmp_path: Path) -> None:
+    values = {
+        **L4_POOL,
+        "config": {"auth": {"generateAdminToken": False}},
+        "telemetry": {"deploymentEnv": "development"},
+    }
+    docs = rendered_documents(tmp_path, values)
+    assert admin_token_secrets(docs) == []
+    assert admin_token_refs(docs) == {}
