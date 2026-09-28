@@ -177,4 +177,30 @@ describe("SIEExtractor", () => {
     expect(parsed.entities[0]).toEqual({ text: "Test", label: "thing", score: 0.9 });
     expect(parsed.entities[0].start).toBeUndefined();
   });
+
+  it("throws when SIE reports a per-item extraction failure", async () => {
+    const { RequestError, SIEClient } = await import("@superlinked/sie-sdk");
+    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+      asConstructor({
+        extract: vi.fn().mockResolvedValue({
+          entities: [],
+          relations: [],
+          classifications: [],
+          objects: [],
+          error: {
+            code: "INPUT_TOO_LONG",
+            message: "Input exceeds the model's maximum token capacity",
+          },
+          request: { id: "req-1" },
+        }),
+        close: vi.fn(),
+      }),
+    );
+
+    const extractor = new SIEExtractor();
+    const error = await extractor._call("test").catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(RequestError);
+    expect(error).toMatchObject({ code: "INPUT_TOO_LONG", requestId: "req-1" });
+  });
 });

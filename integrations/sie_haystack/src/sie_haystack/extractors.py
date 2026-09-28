@@ -6,11 +6,21 @@ and detected objects from text.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
 from haystack import component
+from sie_sdk import RequestError
 from sie_sdk.types import Item
+
+
+def _raise_for_item_error(result: Any) -> None:
+    """Raise when SIE reports that extraction failed for this item."""
+    error = result.get("error") if isinstance(result, Mapping) else None
+    if isinstance(error, Mapping):
+        msg = f"Extraction failed: {error.get('message')}"
+        raise RequestError(msg, code=error.get("code"), request=result.get("request"))
 
 
 @dataclass
@@ -162,6 +172,7 @@ class SIEExtractor:
             Item(text=text, metadata=metadata),
             labels=effective_labels,
         )
+        _raise_for_item_error(result)
 
         return {
             "entities": self._build_entities(result),

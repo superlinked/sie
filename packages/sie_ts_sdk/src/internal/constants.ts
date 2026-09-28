@@ -11,8 +11,11 @@ export const HTTP_SERVER_ERROR_MIN = 500;
 export const HTTP_SERVER_ERROR_MAX = 599;
 export const HTTP_GATEWAY_TIMEOUT = 504;
 
-// Default timeouts and delays
-export const DEFAULT_TIMEOUT = 30_000; // 30 seconds
+// Default timeouts and delays. The per-attempt timeout must outlast the
+// gateway's default 120 s request deadline so its typed 504 reaches the caller
+// before the client gives up on a request the server is still running
+// (matches the Python SDK's DEFAULT_READ_TIMEOUT_S).
+export const DEFAULT_TIMEOUT = 150_000; // 150 seconds
 // Floor for long-running POSTs (jobs.submit / files.upload / batches.create) so
 // a large upload / connector preflight / batch creation does not abort while the
 // server keeps working. Matches the Python SDK's 120s floor.
@@ -66,6 +69,17 @@ export const BACKPRESSURE_503_ERROR_CODES: ReadonlySet<string> = new Set([
   QUEUE_FULL_ERROR_CODE,
 ]);
 export const BACKPRESSURE_503_DEFAULT_DELAY = 1_000; // Fallback (ms) when the server omits Retry-After
+// The gateway answers a publish rejected by queue backpressure with 503
+// QUEUE_UNAVAILABLE (`transport_failure` in the OpenAI envelope used by the
+// generation routes) plus Retry-After. The same codes without Retry-After
+// report failures that may follow publication, so only the hinted form is
+// retryable.
+export const QUEUE_UNAVAILABLE_ERROR_CODE = "QUEUE_UNAVAILABLE";
+export const OPENAI_TRANSPORT_FAILURE_ERROR_CODE = "transport_failure";
+export const RETRY_AFTER_GATED_503_ERROR_CODES: ReadonlySet<string> = new Set([
+  QUEUE_UNAVAILABLE_ERROR_CODE,
+  OPENAI_TRANSPORT_FAILURE_ERROR_CODE,
+]);
 
 // Terminal credit / account errors (pass-2 audit B3) — NEVER retried. 402/403
 // credit/account failures are mapped to typed exceptions in `handleError` and,

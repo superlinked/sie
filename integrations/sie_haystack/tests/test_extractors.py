@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+from unittest.mock import NonCallableMagicMock
+
+import pytest
 from sie_haystack import SIEExtractor
 from sie_haystack.extractors import Entity
+from sie_sdk import RequestError
 
 
 class TestSIEExtractor:
@@ -116,3 +120,21 @@ class TestSIEExtractor:
         assert entity.score == 0.95
         assert entity.start == 0
         assert entity.end == 10
+
+
+def test_run_raises_on_item_error(mock_sie_client: NonCallableMagicMock, extract_item_error: dict[str, str]) -> None:
+    mock_sie_client.extract.side_effect = None
+    mock_sie_client.extract.return_value = {
+        "entities": [],
+        "relations": [],
+        "classifications": [],
+        "objects": [],
+        "error": dict(extract_item_error),
+    }
+    extractor = SIEExtractor(model="test-extractor")
+    extractor._client = mock_sie_client
+
+    with pytest.raises(RequestError, match="Extraction failed") as excinfo:
+        extractor.run(text="text")
+
+    assert excinfo.value.code == extract_item_error["code"]

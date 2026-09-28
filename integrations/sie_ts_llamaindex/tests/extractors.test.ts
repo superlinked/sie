@@ -129,6 +129,32 @@ describe("createSIEExtractorTool", () => {
     expect(parsed.relations).toEqual([]);
   });
 
+  it("throws when SIE reports a per-item extraction failure", async () => {
+    const { RequestError, SIEClient } = await import("@superlinked/sie-sdk");
+    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+      asConstructor({
+        extract: vi.fn().mockResolvedValue({
+          entities: [],
+          relations: [],
+          classifications: [],
+          objects: [],
+          error: {
+            code: "INPUT_TOO_LONG",
+            message: "Input exceeds the model's maximum token capacity",
+          },
+          request: { id: "req-1" },
+        }),
+        close: vi.fn(),
+      }),
+    );
+
+    const tool = createSIEExtractorTool();
+    const error = await tool.call({ text: "test" }).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(RequestError);
+    expect(error).toMatchObject({ code: "INPUT_TOO_LONG", requestId: "req-1" });
+  });
+
   it("includes label types in default description", () => {
     const tool = createSIEExtractorTool({
       labels: ["animal", "color"],

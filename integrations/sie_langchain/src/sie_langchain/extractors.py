@@ -5,15 +5,25 @@ Provides entity, relation, classification, and object extraction using SIE's ext
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 from langchain_core.tools import BaseTool
 from pydantic import ConfigDict, Field
+from sie_sdk import RequestError
 from sie_sdk.types import Item
 
 if TYPE_CHECKING:
     from langchain_core.callbacks import CallbackManagerForToolRun
     from sie_sdk import SIEAsyncClient, SIEClient
+
+
+def _raise_for_item_error(result: Any) -> None:
+    """Raise when SIE reports that extraction failed for this item."""
+    error = result.get("error") if isinstance(result, Mapping) else None
+    if isinstance(error, Mapping):
+        msg = f"Extraction failed: {error.get('message')}"
+        raise RequestError(msg, code=error.get("code"), request=result.get("request"))
 
 
 class SIEExtractor(BaseTool):
@@ -166,7 +176,11 @@ class SIEExtractor(BaseTool):
 
         Returns:
             Dict with entities, relations, classifications, and objects.
+
+        Raises:
+            RequestError: If SIE reports that extraction failed for the text.
         """
+        _raise_for_item_error(result)
 
         def _get(key: str) -> list:
             if isinstance(result, dict):

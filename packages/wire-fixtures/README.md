@@ -24,6 +24,11 @@ executable.
   The gateway writes `prefix/plain_key`, the queue retains `plain_key`, and the
   sidecar accepts that key or the exact `full_reference`; Python and both Rust
   binaries load the same fixture to prevent prefix drift.
+- `retry_classification.json` — how the SDKs classify a non-2xx response to a
+  buffered call: `retry` or `terminal` for the idempotent operations (encode,
+  score, extract) and for generation, keyed by status, error code, and whether
+  a usable `Retry-After` is present. It also pins how a `Retry-After` value is
+  parsed (delay seconds or an HTTP date; a past date means retry now).
 
 ### Why `model_info.json` has two buckets
 
@@ -47,11 +52,16 @@ fixture set. Current consumers:
   `typing.get_args(ModelState)` and `ModelInfo.__annotations__` match the
   fixtures, and that
   `RequestUsage`/`TERMINAL_UNIT_FIELDS`/`SETTLED_CHARGE_FIELDS` match
-  `request_usage.json`).
+  `request_usage.json`), and
+  `packages/sie_sdk/tests/client/test_retry_classification.py` (replays every
+  `retry_classification.json` case through both clients against a local HTTP
+  server).
 - TypeScript SDK — `packages/sie_ts_sdk/tests/wireContract.test.ts` (asserts the
   runtime `MODEL_STATES` and `MODEL_INFO_WIRE_FIELDS` arrays — the single
   sources the `ModelState` type and `WireModelInfo` interface are checked
-  against — match the fixtures).
+  against — match the fixtures), and
+  `packages/sie_ts_sdk/tests/retryClassification.test.ts` (replays every
+  `retry_classification.json` case through the client with a stubbed `fetch`).
 - Downstream gateways assert that the members they inject are exactly
   `settled_charge_fields`, so a gateway that starts publishing a third field
   cannot reach production before every consumer has declared it.

@@ -338,6 +338,31 @@ def validate_generate_request_body(request_body: MutableMapping[str, Any]) -> No
 DEFAULT_PROVISION_TIMEOUT_S = 900.0  # 15 minutes
 DEFAULT_RETRY_DELAY_S = 5.0  # Retry every 5 seconds if no Retry-After header
 
+# Per-attempt transport timeouts. The read timeout must outlast the gateway's
+# default 120 s request deadline so its typed 504 reaches the caller before
+# the client gives up on a request the server is still running.
+DEFAULT_CONNECT_TIMEOUT_S = 10.0
+DEFAULT_READ_TIMEOUT_S = 150.0
+
+
+def resolve_timeouts(
+    timeout_s: float | None,
+    connect_timeout_s: float | None,
+    read_timeout_s: float | None,
+) -> tuple[float, float]:
+    """Resolve the client's ``(connect, read)`` timeouts in seconds.
+
+    ``timeout_s`` keeps its original meaning of one limit for every phase of
+    an attempt, so it sets both values. ``connect_timeout_s`` and
+    ``read_timeout_s`` override the matching phase.
+    """
+    fallback_connect = timeout_s if timeout_s is not None else DEFAULT_CONNECT_TIMEOUT_S
+    fallback_read = timeout_s if timeout_s is not None else DEFAULT_READ_TIMEOUT_S
+    connect = connect_timeout_s if connect_timeout_s is not None else fallback_connect
+    read = read_timeout_s if read_timeout_s is not None else fallback_read
+    return connect, read
+
+
 # Pool settings
 DEFAULT_LEASE_RENEWAL_INTERVAL_S = 60.0  # Renew lease every 60s (lease is 1200s)
 
@@ -465,6 +490,14 @@ BILLING_CAPACITY_UNAVAILABLE_ERROR_CODE = "BILLING_CAPACITY_UNAVAILABLE"
 QUEUE_FULL_ERROR_CODE = "QUEUE_FULL"
 BACKPRESSURE_503_ERROR_CODES = frozenset({BILLING_CAPACITY_UNAVAILABLE_ERROR_CODE, QUEUE_FULL_ERROR_CODE})
 BACKPRESSURE_503_DEFAULT_DELAY_S = 1.0  # Fallback when the server omits Retry-After
+# The gateway answers a publish rejected by queue backpressure with 503
+# QUEUE_UNAVAILABLE (``transport_failure`` in the OpenAI envelope used by the
+# generation routes) plus Retry-After. The same codes without Retry-After
+# report failures that may follow publication, so only the hinted form is
+# retryable.
+QUEUE_UNAVAILABLE_ERROR_CODE = "QUEUE_UNAVAILABLE"
+OPENAI_TRANSPORT_FAILURE_ERROR_CODE = "transport_failure"
+RETRY_AFTER_GATED_503_ERROR_CODES = frozenset({QUEUE_UNAVAILABLE_ERROR_CODE, OPENAI_TRANSPORT_FAILURE_ERROR_CODE})
 
 # ── Terminal credit / account errors (pass-2 audit B3) — NEVER retried ──
 # 402/403 credit/account failures are mapped to typed exceptions in
@@ -642,6 +675,14 @@ def is_transient_connect_error(exc: BaseException) -> bool:
             return cur.errno in _TRANSIENT_CONNECT_ERRNOS
         cur = cur.__cause__ or cur.__context__
     return True
+
+
+def read_timeout_message(error: BaseException) -> str:
+    """Message for a timeout after the request was sent, which is never retried."""
+    return (
+        f"Request timed out waiting for the response ({type(error).__name__}). Not retried because the "
+        f"server may already be processing the request; increase the read timeout for slow calls: {error}"
+    )
 
 
 def compute_retry_delay(
@@ -1318,6 +1359,16 @@ def provisioning_retry_delay(
     return apply_jitter(min(DEFAULT_RETRY_DELAY_S, remaining))
 
 
+def is_backpressure_503(response: _HttpResponse) -> bool:
+    """Whether a 503 is a retryable pre-dispatch backpressure rejection."""
+    if response.status_code != HTTP_SERVICE_UNAVAILABLE:
+        return False
+    code = get_error_code(response)
+    if code in BACKPRESSURE_503_ERROR_CODES:
+        return True
+    return code in RETRY_AFTER_GATED_503_ERROR_CODES and get_retry_after(response) is not None
+
+
 def admission_retry_delay(
     response: _HttpResponse,
     *,
@@ -1342,6 +1393,13 @@ def admission_retry_delay(
       self-hosted queue backpressure, #3180). On give-up raises the server's
       terminal 503 verbatim via :func:`handle_error` (a :class:`ServerError`
       preserving the code).
+    * ``503 QUEUE_UNAVAILABLE`` / ``transport_failure`` carrying a usable
+      ``Retry-After``: the gateway rejected the publish under queue
+      backpressure. Without the hint these codes stay terminal. The give-up
+      matches the previous arm.
+
+    ``packages/wire-fixtures/retry_classification.json`` pins these
+    decisions for both SDKs.
 
     Retry timing mirrors :func:`provisioning_retry_delay`: the server-supplied
     ``Retry-After`` is honored verbatim, and only the SDK's own fallback default
@@ -1370,7 +1428,7 @@ def admission_retry_delay(
                 request=parse_request_metadata(response.headers),
             )
         return delay
-    if status == HTTP_SERVICE_UNAVAILABLE and get_error_code(response) in BACKPRESSURE_503_ERROR_CODES:
+    if status == HTTP_SERVICE_UNAVAILABLE and is_backpressure_503(response):
         retry_after = get_retry_after(response)
         elapsed = time.monotonic() - start_time
         remaining = timeout - elapsed
@@ -1407,7 +1465,8 @@ def next_stream_retry_delay(
 
     Returns ``(delay_seconds, new_oom_retries)`` to sleep-then-retry, or
     raises a terminal error. Only explicit pre-execution signals are retried
-    (503 PROVISIONING / MODEL_LOADING / RESOURCE_EXHAUSTED); a 504 and any
+    (503 PROVISIONING / MODEL_LOADING / RESOURCE_EXHAUSTED and the admission
+    rejections handled by :func:`admission_retry_delay`); a 504 and any
     other error are terminal —
     streaming generation is non-idempotent, so a post-publish retry could
     double-bill.
@@ -1451,6 +1510,10 @@ def next_stream_retry_delay(
                 )
             delay = compute_oom_backoff(get_retry_after(response), oom_retries)
             return min(delay, timeout - elapsed), oom_retries + 1
+
+    admission_delay = admission_retry_delay(response, start_time=start_time, timeout=timeout)
+    if admission_delay is not None:
+        return admission_delay, oom_retries
 
     if status == HTTP_GATEWAY_TIMEOUT:
         msg = (
@@ -1772,7 +1835,8 @@ def validate_batch_result_count(
     Raising a typed, actionable :class:`IncompleteBatchError` keeps the
     failure legible: it names the model, the expected vs. returned counts,
     the gateway request id, and — when the submitted items carried ids — the
-    ids the response dropped.
+    ids the response dropped. It also carries the returned ``results`` so a
+    caller can keep the items that succeeded.
 
     Args:
         results: Parsed results from the server response.
@@ -1808,6 +1872,7 @@ def validate_batch_result_count(
         model=model,
         missing_ids=missing_ids,
         request=request,
+        results=results,
     )
 
 

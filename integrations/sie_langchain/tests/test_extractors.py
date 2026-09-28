@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from unittest.mock import NonCallableMagicMock
+
 import pytest
 from sie_langchain import SIEExtractor
+from sie_sdk import RequestError
 
 
 class TestSIEExtractor:
@@ -92,3 +95,26 @@ class TestSIEExtractorAsync:
         result = await extractor.ainvoke(test_ner_text)
 
         assert isinstance(result, dict)
+
+
+def test_extract_raises_on_item_error(
+    mock_sie_client: NonCallableMagicMock, extract_error_text: str, extract_item_error: dict[str, str]
+) -> None:
+    extractor = SIEExtractor(client=mock_sie_client, model="test-ner", labels=["PERSON"])
+
+    with pytest.raises(RequestError, match="Extraction failed") as excinfo:
+        extractor._run(extract_error_text)
+
+    assert excinfo.value.code == extract_item_error["code"]
+
+
+@pytest.mark.asyncio
+async def test_aextract_raises_on_item_error(
+    mock_sie_async_client: NonCallableMagicMock, extract_error_text: str, extract_item_error: dict[str, str]
+) -> None:
+    extractor = SIEExtractor(async_client=mock_sie_async_client, model="test-ner", labels=["PERSON"])
+
+    with pytest.raises(RequestError, match="Extraction failed") as excinfo:
+        await extractor._arun(extract_error_text)
+
+    assert excinfo.value.code == extract_item_error["code"]

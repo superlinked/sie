@@ -19,6 +19,8 @@
  * }
  */
 
+import type { EncodeResult, ExtractResult } from "./types.js";
+
 /**
  * Base error for all SIE SDK errors.
  *
@@ -406,10 +408,10 @@ export class InputTooLongError extends RequestError {
  * Subclass of {@link ServerError} — the server violated the response-shape
  * contract even though the HTTP status was 200 — so existing `ServerError`
  * handlers keep working. `statusCode` is 200 for the same reason: the response
- * was not an HTTP error. Catch this specifically to retry item-wise
- * (single-item batches get per-item error visibility), using {@link missingIds}
- * when the submitted items carried ids. Mirrors the Python SDK's
- * `IncompleteBatchError`.
+ * was not an HTTP error. Catch this specifically, keep the items in
+ * {@link results}, and retry only the failed items (single-item batches get
+ * per-item error visibility), using {@link missingIds} when the submitted items
+ * carried ids. Mirrors the Python SDK's `IncompleteBatchError`.
  */
 export class IncompleteBatchError extends ServerError {
   /** Number of items submitted in this HTTP request. */
@@ -431,6 +433,16 @@ export class IncompleteBatchError extends ServerError {
    */
   readonly missingIds: string[] | undefined;
 
+  /**
+   * The results the response did carry, parsed exactly as a successful call
+   * returns them, in response order.
+   *
+   * Positions do not line up with the submitted items; match them by `id`.
+   * Extract results may still carry a per-item `error`. The response body
+   * names no reason for the items it dropped.
+   */
+  readonly results: readonly (EncodeResult | ExtractResult)[];
+
   constructor(
     message: string,
     options: {
@@ -441,6 +453,7 @@ export class IncompleteBatchError extends ServerError {
       missingIds?: string[];
       requestId?: string;
       param?: string | null;
+      results?: readonly (EncodeResult | ExtractResult)[];
     },
   ) {
     super(message, options.code, 200, options.requestId, options.param);
@@ -449,6 +462,7 @@ export class IncompleteBatchError extends ServerError {
     this.received = options.received;
     this.model = options.model;
     this.missingIds = options.missingIds;
+    this.results = [...(options.results ?? [])];
   }
 }
 
