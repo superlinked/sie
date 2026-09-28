@@ -47,6 +47,20 @@ def _to_f16(arr: np.ndarray) -> list[float]:
     return arr.astype(np.float16).tolist()
 
 
+class _NumericalReferenceMismatchError(AssertionError):
+    """Valid model output differs from the pinned numerical reference."""
+
+
+def _assert_numeric_reference(actual: list[float], expected: list[float]) -> None:
+    try:
+        np.testing.assert_array_equal(
+            np.array(actual, dtype=np.float16),
+            np.array(expected, dtype=np.float16),
+        )
+    except AssertionError as exc:
+        raise _NumericalReferenceMismatchError(str(exc)) from exc
+
+
 def _assert_dense(
     model_name: str,
     expected_dim: int,
@@ -56,15 +70,12 @@ def _assert_dense(
     output = adapter.encode([Item(text="test")], output_types=["dense"])
     assert output.dense is not None, f"{model_name}: no dense output"
     assert output.dense.shape == (1, expected_dim)
-    assert not np.isnan(output.dense[0]).any()
+    assert np.isfinite(output.dense[0]).all()
     actual = _to_f16(output.dense[0, :3])
     if expected_first3 is None:
         msg = f"FILL: {model_name} dense = {actual}"
         raise AssertionError(msg)
-    np.testing.assert_array_equal(
-        np.array(actual, dtype=np.float16),
-        np.array(expected_first3, dtype=np.float16),
-    )
+    _assert_numeric_reference(actual, expected_first3)
 
 
 def _assert_dense_image(
@@ -100,16 +111,16 @@ def _assert_sparse(
     assert output.sparse is not None, f"{model_name}: no sparse output"
     assert len(output.sparse) == 1
     sv = output.sparse[0]
+    assert sv.indices.ndim == sv.values.ndim == 1
+    assert sv.indices.shape == sv.values.shape
+    assert np.isfinite(sv.values).all()
     actual_idx = sv.indices[:3].tolist()
     actual_val = _to_f16(sv.values[:3])
     if expected_indices3 is None or expected_values3 is None:
         msg = f"FILL: {model_name} sparse_indices = {actual_idx}, sparse_values = {actual_val}"
         raise AssertionError(msg)
     assert actual_idx == expected_indices3
-    np.testing.assert_array_equal(
-        np.array(actual_val, dtype=np.float16),
-        np.array(expected_values3, dtype=np.float16),
-    )
+    _assert_numeric_reference(actual_val, expected_values3)
 
 
 def _assert_multivector(
@@ -122,15 +133,15 @@ def _assert_multivector(
     assert output.multivector is not None, f"{model_name}: no multivector output"
     assert len(output.multivector) == 1
     mv = output.multivector[0]
+    assert mv.ndim == 2
+    assert mv.shape[0] > 0
     assert mv.shape[1] == expected_token_dim
+    assert np.isfinite(mv).all()
     actual = _to_f16(mv[0, :3])
     if expected_first3 is None:
         msg = f"FILL: {model_name} multivector = {actual}"
         raise AssertionError(msg)
-    np.testing.assert_array_equal(
-        np.array(actual, dtype=np.float16),
-        np.array(expected_first3, dtype=np.float16),
-    )
+    _assert_numeric_reference(actual, expected_first3)
 
 
 def _assert_multivector_image(
@@ -445,7 +456,7 @@ _BGE_M3_CPU_BFLOAT16 = pytest.mark.xfail(
         "The default profile's compute_precision: bfloat16 also applies on CPU, so BGEM3Adapter runs in "
         "bfloat16 and drifts from the float32 FlagEmbedding output pinned here (bge_m3_flag still matches it)"
     ),
-    raises=AssertionError,
+    raises=_NumericalReferenceMismatchError,
     strict=True,
 )
 

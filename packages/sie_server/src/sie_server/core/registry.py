@@ -62,6 +62,10 @@ _ERR_MODEL_NOT_LOADED = "Model '{name}' is not loaded"
 _ERR_MODEL_ALREADY_LOADED = "Model '{name}' is already loaded"
 
 
+class _ConfigChangedDuringLoadError(RuntimeError):
+    """The downloaded config is no longer current; a later request may retry."""
+
+
 def _base_model_id(raw: str) -> str:
     """Bare ``sie_id`` with any ``:profile`` suffix removed, lowercased.
 
@@ -1513,10 +1517,10 @@ class ModelRegistry:
                         current_config = self._configs.get(name)
                         if current_config is None:
                             msg = f"Model '{name}' config was removed while its weights were being fetched"
-                            raise RuntimeError(msg)
+                            raise _ConfigChangedDuringLoadError(msg)
                         if not _model_configs_semantically_equal(current_config, config):
                             msg = f"Model '{name}' config changed while its weights were being fetched; retry"
-                            raise RuntimeError(msg)
+                            raise _ConfigChangedDuringLoadError(msg)
                         model_dir = self._model_dirs.get(name, Path())
 
                     if width > 1:
@@ -1719,6 +1723,10 @@ class ModelRegistry:
             # restarts. Let these propagate so asyncio's task lifecycle
             # handles them normally.
             raise
+        except _ConfigChangedDuringLoadError:
+            # Config mutation invalidated this attempt, not the model itself.
+            # Keep the current config eligible for a later background load.
+            logger.info("Discarded stale background model load: %s", name)
         except Exception as exc:  # noqa: BLE001 — classify_load_error buckets every exception type
             self._record_load_failure(name, exc)
         finally:

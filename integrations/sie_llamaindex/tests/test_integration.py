@@ -304,6 +304,10 @@ class TestRAGPipelineIntegration:
         )
         response = query_engine.query("How does search work?")
         assert len(response.source_nodes) == 2  # Limited by top_n
+        scores = [node.score for node in response.source_nodes]
+        assert all(isinstance(score, float) for score in scores)
+        _xfail_if_scores_dropped(scores)
+        assert scores == sorted(scores, reverse=True)
 
 
 class TestExtractorIntegration:

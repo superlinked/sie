@@ -1050,6 +1050,37 @@ async def test_config_replaced_during_download_is_not_registered(
         assert not registry.is_loading("slow")
 
 
+@pytest.mark.parametrize("removed", [False, True])
+async def test_stale_background_download_does_not_poison_future_loads(
+    patch_ensure_model_cached: MagicMock, removed: bool
+) -> None:
+    download = _BlockingDownload("org/slow")
+    patch_ensure_model_cached.side_effect = download
+    registry = _two_model_registry()
+    replacement = _make_config(name="slow", hf_id="org/slow", max_sequence_length=4096)
+    with patch("sie_server.core.model_loader.load_adapter", side_effect=_adapter_factory()) as load_adapter:
+        assert await registry.start_load_async("slow", "cpu")
+        try:
+            assert await asyncio.to_thread(download.entered.wait, 5)
+            await registry.replace_configs_async([] if removed else [replacement])
+        finally:
+            download.release.set()
+        await asyncio.wait_for(_drain_background_tasks(registry), timeout=5)
+
+        assert not registry.is_loaded("slow")
+        assert not registry.is_loading("slow")
+        assert registry.get_failure("slow") is None
+        load_adapter.assert_not_called()
+
+        if removed:
+            await registry.add_config_async(replacement)
+        assert await registry.start_load_async("slow", "cpu")
+        await asyncio.wait_for(_drain_background_tasks(registry), timeout=5)
+        assert registry.is_loaded("slow")
+        assert registry.get_failure("slow") is None
+        load_adapter.assert_called_once()
+
+
 async def test_identical_config_reapplied_during_download_still_loads(patch_ensure_model_cached: MagicMock) -> None:
     """Re-applying an unchanged config replaces the object but must not fail the load."""
     download = _BlockingDownload("org/slow")

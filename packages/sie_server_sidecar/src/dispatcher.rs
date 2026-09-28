@@ -1883,7 +1883,7 @@ impl Dispatcher {
     /// readiness deadline and progress-ACKs the group while it is pending, so
     /// a slow call neither outlives the deadline nor lets JetStream redeliver
     /// the group. `None` when the group was NAKed instead: the deadline passed
-    /// first, or a progress ACK failed.
+    /// first, a progress ACK failed, or shutdown requested redelivery.
     async fn ensure_model_ready_by(
         &self,
         model_id: &str,
@@ -1899,8 +1899,18 @@ impl Dispatcher {
             / READINESS_PROGRESS_ACK_WAIT_FRACTION as u32;
         loop {
             let next_progress = (tokio::time::Instant::now() + progress_every).min(deadline);
+            let shutdown_wait = async {
+                match self.shutdown.as_ref() {
+                    Some(shutdown) => shutdown.wait().await,
+                    None => std::future::pending().await,
+                }
+            };
             tokio::select! {
                 result = &mut readiness => return Some(result),
+                () = shutdown_wait => {
+                    nak_all(items, NAK_DELAY_DRAINING_MS, &self.runtime_state.telemetry).await;
+                    return None;
+                }
                 () = tokio::time::sleep_until(next_progress) => {
                     if next_progress >= deadline {
                         self.nak_group_past_ready_deadline(model_id, items).await;
@@ -6079,6 +6089,52 @@ mod tests {
             .await;
 
         assert_eq!(retried_slots(&mut rx), vec![0, 1]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_settles_a_parked_group_during_stalled_readiness() {
+        let backend = LoadingModelBackend::with_later_probe_delay("cold", Some(STALLED_PROBE));
+        let shutdown = Arc::new(Shutdown::new());
+        let mut dispatcher = dispatcher_with_backend(backend.clone());
+        Arc::get_mut(&mut dispatcher).unwrap().shutdown = Some(Arc::clone(&shutdown));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        dispatcher
+            .dispatch_decoded(
+                local_group("cold-req", "cold", 0..2, &tx),
+                2,
+                Instant::now(),
+            )
+            .await;
+        for _ in 0..20 {
+            if backend.probes.load(Ordering::SeqCst) >= 2 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(backend.probes.load(Ordering::SeqCst) >= 2);
+
+        let started = tokio::time::Instant::now();
+        shutdown.fire();
+        dispatcher.join_parked_groups(Duration::from_secs(1)).await;
+
+        assert!(started.elapsed() < Duration::from_secs(1));
+        let mut retries = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                crate::delivery::LocalDeliveryEvent::Retry { slot, delay_ms, .. } => {
+                    retries.push((slot, delay_ms));
+                }
+                other => panic!("unexpected settlement: {other:?}"),
+            }
+        }
+        retries.sort_unstable();
+        assert_eq!(
+            retries,
+            vec![(0, NAK_DELAY_DRAINING_MS), (1, NAK_DELAY_DRAINING_MS)]
+        );
+        assert!(backend.encoded_models().is_empty());
+        assert_eq!(Arc::strong_count(&dispatcher), 1);
     }
 
     #[tokio::test(start_paused = true)]
