@@ -80,10 +80,10 @@ jobs:
           mise exec -- uv run --frozen --project . --no-sync ruff check --select E,F,I,UP,B tools/ci
           mise exec -- uv run --frozen --project . --no-sync ruff check --select E9,F63,F7,F82 tools/mise_tasks
           mise exec -- uv run --frozen --project . --no-sync pytest -q tools/ci/tests --ignore tools/ci/tests/test_required_ci.py --ignore tools/ci/tests/test_public_tree.py --ignore tools/ci/tests/test_helm_render.py
-      - name: Pinned collector trace privacy
+      - name: Pinned collector privacy
         run: |
           mise run helm -- dependencies
-          mise exec -- uv run --frozen --project . --no-sync pytest -q -m docker tools/ci/tests/test_collector_trace_privacy.py
+          mise exec -- uv run --frozen --project . --no-sync pytest -q -m docker tools/ci/tests/test_collector_*privacy.py
 
   typescript:
     name: CI / TypeScript

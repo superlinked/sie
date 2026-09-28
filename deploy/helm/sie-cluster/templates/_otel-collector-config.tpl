@@ -295,6 +295,105 @@ processors:
         - 'resource.attributes["service.name"] == "sie-worker" and not IsMatch(name, "^(sie[.]worker[.]queue[.]duration|sie[.]worker[.]queue[.]depth|sie[.]worker[.]batch[.]size|sie[.]worker[.]batch[.]cost|sie[.]worker[.]batch[.]fill_ratio|sie[.]worker[.]queue[.]pending_at_dispatch|sie[.]worker[.]scheduler[.]adaptive[.]wait|sie[.]worker[.]scheduler[.]adaptive[.]cost|sie[.]worker[.]scheduler[.]adaptive[.]p50|sie[.]worker[.]scheduler[.]starvation[.]resets|sie[.]worker[.]runtime[.]batch[.]size|sie[.]worker[.]runtime[.]batch[.]subgroups|sie[.]worker[.]runtime[.]subgroup[.]size|sie[.]worker[.]requests|sie[.]worker[.]request[.]duration|sie[.]worker[.]inference[.]duration|sie[.]worker[.]units|sie[.]worker[.]model[.]loaded|sie[.]worker[.]model[.]load[.]duration|sie[.]worker[.]model[.]memory|sie[.]worker[.]oom[.]recoveries|sie[.]worker[.]model[.]evictions|sie[.]worker[.]generation[.]worker_wait|sie[.]worker[.]generation[.]ttft|sie[.]worker[.]generation[.]tpot|sie[.]worker[.]generation[.]tokens|sie[.]worker[.]generation[.]inflight|sie[.]worker[.]generation[.]kv[.]reserved|sie[.]worker[.]generation[.]kv[.]budget|sie[.]worker[.]generation[.]admission[.]decisions|sie[.]worker[.]generation[.]duplicate_prevented|sie[.]worker[.]generation[.]grammar[.]compile[.]duration|sie[.]worker[.]generation[.]grammar[.]cache[.]lookups|sie[.]worker[.]generation[.]grammar[.]requests|sie[.]worker[.]runtime[.]forward[.]duration|sie[.]worker[.]runtime[.]forward[.]permit[.]wait|sie[.]worker[.]runtime[.]forward[.]concurrent|sie[.]worker[.]runtime[.]forward[.]limit)$")'
 {{- end }}
 {{- if $betterStack.enabled }}
+  # Scalar lookups select one value; keep_keys alone retains duplicate OTLP
+  # keys. Rebuild only on remote export after per-metric field pruning.
+  transform/remote_metric_scalars:
+    error_mode: propagate
+    metric_statements:
+      - context: resource
+        statements:
+          - keep_keys(cache, [])
+          - 'set(cache["service.name"], attributes["service.name"]) where IsString(attributes["service.name"])'
+          - 'set(cache["service.instance.id"], attributes["service.instance.id"]) where IsString(attributes["service.instance.id"])'
+          - 'set(cache["deployment.environment"], attributes["deployment.environment"]) where IsString(attributes["deployment.environment"])'
+          - 'set(cache["cloud.region"], attributes["cloud.region"]) where IsString(attributes["cloud.region"])'
+          - 'set(cache["service.version"], attributes["service.version"]) where IsString(attributes["service.version"])'
+          - keep_keys(attributes, [])
+          - set(attributes["service.name"], cache["service.name"])
+          - set(attributes["service.instance.id"], cache["service.instance.id"])
+          - set(attributes["deployment.environment"], cache["deployment.environment"])
+          - set(attributes["cloud.region"], cache["cloud.region"])
+          - set(attributes["service.version"], cache["service.version"])
+      - context: datapoint
+        statements:
+          - keep_keys(cache, [])
+          - 'set(cache["backend"], attributes["backend"]) where IsString(attributes["backend"]) or IsInt(attributes["backend"]) or IsDouble(attributes["backend"]) or IsBool(attributes["backend"])'
+          - 'set(cache["bundle"], attributes["bundle"]) where IsString(attributes["bundle"]) or IsInt(attributes["bundle"]) or IsDouble(attributes["bundle"]) or IsBool(attributes["bundle"])'
+          - 'set(cache["dispatch.path"], attributes["dispatch.path"]) where IsString(attributes["dispatch.path"]) or IsInt(attributes["dispatch.path"]) or IsDouble(attributes["dispatch.path"]) or IsBool(attributes["dispatch.path"])'
+          - 'set(cache["event"], attributes["event"]) where IsString(attributes["event"]) or IsInt(attributes["event"]) or IsDouble(attributes["event"]) or IsBool(attributes["event"])'
+          - 'set(cache["fallback.reason"], attributes["fallback.reason"]) where IsString(attributes["fallback.reason"]) or IsInt(attributes["fallback.reason"]) or IsDouble(attributes["fallback.reason"]) or IsBool(attributes["fallback.reason"])'
+          - 'set(cache["flush.reason"], attributes["flush.reason"]) where IsString(attributes["flush.reason"]) or IsInt(attributes["flush.reason"]) or IsDouble(attributes["flush.reason"]) or IsBool(attributes["flush.reason"])'
+          - 'set(cache["gpu_class"], attributes["gpu_class"]) where IsString(attributes["gpu_class"]) or IsInt(attributes["gpu_class"]) or IsDouble(attributes["gpu_class"]) or IsBool(attributes["gpu_class"])'
+          - 'set(cache["grammar"], attributes["grammar"]) where IsString(attributes["grammar"]) or IsInt(attributes["grammar"]) or IsDouble(attributes["grammar"]) or IsBool(attributes["grammar"])'
+          - 'set(cache["grammar.backend"], attributes["grammar.backend"]) where IsString(attributes["grammar.backend"]) or IsInt(attributes["grammar.backend"]) or IsDouble(attributes["grammar.backend"]) or IsBool(attributes["grammar.backend"])'
+          - 'set(cache["http.method"], attributes["http.method"]) where IsString(attributes["http.method"]) or IsInt(attributes["http.method"]) or IsDouble(attributes["http.method"]) or IsBool(attributes["http.method"])'
+          - 'set(cache["http.route"], attributes["http.route"]) where IsString(attributes["http.route"]) or IsInt(attributes["http.route"]) or IsDouble(attributes["http.route"]) or IsBool(attributes["http.route"])'
+          - 'set(cache["http.status_code"], attributes["http.status_code"]) where IsString(attributes["http.status_code"]) or IsInt(attributes["http.status_code"]) or IsDouble(attributes["http.status_code"]) or IsBool(attributes["http.status_code"])'
+          - 'set(cache["input.source"], attributes["input.source"]) where IsString(attributes["input.source"]) or IsInt(attributes["input.source"]) or IsDouble(attributes["input.source"]) or IsBool(attributes["input.source"])'
+          - 'set(cache["kind"], attributes["kind"]) where IsString(attributes["kind"]) or IsInt(attributes["kind"]) or IsDouble(attributes["kind"]) or IsBool(attributes["kind"])'
+          - 'set(cache["lane"], attributes["lane"]) where IsString(attributes["lane"]) or IsInt(attributes["lane"]) or IsDouble(attributes["lane"]) or IsBool(attributes["lane"])'
+          - 'set(cache["machine_profile"], attributes["machine_profile"]) where IsString(attributes["machine_profile"]) or IsInt(attributes["machine_profile"]) or IsDouble(attributes["machine_profile"]) or IsBool(attributes["machine_profile"])'
+          - 'set(cache["method"], attributes["method"]) where IsString(attributes["method"]) or IsInt(attributes["method"]) or IsDouble(attributes["method"]) or IsBool(attributes["method"])'
+          - 'set(cache["mode"], attributes["mode"]) where IsString(attributes["mode"]) or IsInt(attributes["mode"]) or IsDouble(attributes["mode"]) or IsBool(attributes["mode"])'
+          - 'set(cache["model"], attributes["model"]) where IsString(attributes["model"]) or IsInt(attributes["model"]) or IsDouble(attributes["model"]) or IsBool(attributes["model"])'
+          - 'set(cache["operation"], attributes["operation"]) where IsString(attributes["operation"]) or IsInt(attributes["operation"]) or IsDouble(attributes["operation"]) or IsBool(attributes["operation"])'
+          - 'set(cache["outcome"], attributes["outcome"]) where IsString(attributes["outcome"]) or IsInt(attributes["outcome"]) or IsDouble(attributes["outcome"]) or IsBool(attributes["outcome"])'
+          - 'set(cache["output.path"], attributes["output.path"]) where IsString(attributes["output.path"]) or IsInt(attributes["output.path"]) or IsDouble(attributes["output.path"]) or IsBool(attributes["output.path"])'
+          - 'set(cache["phase"], attributes["phase"]) where IsString(attributes["phase"]) or IsInt(attributes["phase"]) or IsDouble(attributes["phase"]) or IsBool(attributes["phase"])'
+          - 'set(cache["pool"], attributes["pool"]) where IsString(attributes["pool"]) or IsInt(attributes["pool"]) or IsDouble(attributes["pool"]) or IsBool(attributes["pool"])'
+          - 'set(cache["profile"], attributes["profile"]) where IsString(attributes["profile"]) or IsInt(attributes["profile"]) or IsDouble(attributes["profile"]) or IsBool(attributes["profile"])'
+          - 'set(cache["reason"], attributes["reason"]) where IsString(attributes["reason"]) or IsInt(attributes["reason"]) or IsDouble(attributes["reason"]) or IsBool(attributes["reason"])'
+          - 'set(cache["redelivered"], attributes["redelivered"]) where IsString(attributes["redelivered"]) or IsInt(attributes["redelivered"]) or IsDouble(attributes["redelivered"]) or IsBool(attributes["redelivered"])'
+          - 'set(cache["result"], attributes["result"]) where IsString(attributes["result"]) or IsInt(attributes["result"]) or IsDouble(attributes["result"]) or IsBool(attributes["result"])'
+          - 'set(cache["scaling_action"], attributes["scaling_action"]) where IsString(attributes["scaling_action"]) or IsInt(attributes["scaling_action"]) or IsDouble(attributes["scaling_action"]) or IsBool(attributes["scaling_action"])'
+          - 'set(cache["source"], attributes["source"]) where IsString(attributes["source"]) or IsInt(attributes["source"]) or IsDouble(attributes["source"]) or IsBool(attributes["source"])'
+          - 'set(cache["stage"], attributes["stage"]) where IsString(attributes["stage"]) or IsInt(attributes["stage"]) or IsDouble(attributes["stage"]) or IsBool(attributes["stage"])'
+          - 'set(cache["state"], attributes["state"]) where IsString(attributes["state"]) or IsInt(attributes["state"]) or IsDouble(attributes["state"]) or IsBool(attributes["state"])'
+          - 'set(cache["strategy"], attributes["strategy"]) where IsString(attributes["strategy"]) or IsInt(attributes["strategy"]) or IsDouble(attributes["strategy"]) or IsBool(attributes["strategy"])'
+          - 'set(cache["surface"], attributes["surface"]) where IsString(attributes["surface"]) or IsInt(attributes["surface"]) or IsDouble(attributes["surface"]) or IsBool(attributes["surface"])'
+          - 'set(cache["token.kind"], attributes["token.kind"]) where IsString(attributes["token.kind"]) or IsInt(attributes["token.kind"]) or IsDouble(attributes["token.kind"]) or IsBool(attributes["token.kind"])'
+          - 'set(cache["token.type"], attributes["token.type"]) where IsString(attributes["token.type"]) or IsInt(attributes["token.type"]) or IsDouble(attributes["token.type"]) or IsBool(attributes["token.type"])'
+          - 'set(cache["transport"], attributes["transport"]) where IsString(attributes["transport"]) or IsInt(attributes["transport"]) or IsDouble(attributes["transport"]) or IsBool(attributes["transport"])'
+          - 'set(cache["unit.type"], attributes["unit.type"]) where IsString(attributes["unit.type"]) or IsInt(attributes["unit.type"]) or IsDouble(attributes["unit.type"]) or IsBool(attributes["unit.type"])'
+          - keep_keys(attributes, [])
+          - set(attributes["backend"], cache["backend"])
+          - set(attributes["bundle"], cache["bundle"])
+          - set(attributes["dispatch.path"], cache["dispatch.path"])
+          - set(attributes["event"], cache["event"])
+          - set(attributes["fallback.reason"], cache["fallback.reason"])
+          - set(attributes["flush.reason"], cache["flush.reason"])
+          - set(attributes["gpu_class"], cache["gpu_class"])
+          - set(attributes["grammar"], cache["grammar"])
+          - set(attributes["grammar.backend"], cache["grammar.backend"])
+          - set(attributes["http.method"], cache["http.method"])
+          - set(attributes["http.route"], cache["http.route"])
+          - set(attributes["http.status_code"], cache["http.status_code"])
+          - set(attributes["input.source"], cache["input.source"])
+          - set(attributes["kind"], cache["kind"])
+          - set(attributes["lane"], cache["lane"])
+          - set(attributes["machine_profile"], cache["machine_profile"])
+          - set(attributes["method"], cache["method"])
+          - set(attributes["mode"], cache["mode"])
+          - set(attributes["model"], cache["model"])
+          - set(attributes["operation"], cache["operation"])
+          - set(attributes["outcome"], cache["outcome"])
+          - set(attributes["output.path"], cache["output.path"])
+          - set(attributes["phase"], cache["phase"])
+          - set(attributes["pool"], cache["pool"])
+          - set(attributes["profile"], cache["profile"])
+          - set(attributes["reason"], cache["reason"])
+          - set(attributes["redelivered"], cache["redelivered"])
+          - set(attributes["result"], cache["result"])
+          - set(attributes["scaling_action"], cache["scaling_action"])
+          - set(attributes["source"], cache["source"])
+          - set(attributes["stage"], cache["stage"])
+          - set(attributes["state"], cache["state"])
+          - set(attributes["strategy"], cache["strategy"])
+          - set(attributes["surface"], cache["surface"])
+          - set(attributes["token.kind"], cache["token.kind"])
+          - set(attributes["token.type"], cache["token.type"])
+          - set(attributes["transport"], cache["transport"])
+          - set(attributes["unit.type"], cache["unit.type"])
   # Collector implementation health is isolated from the application
   # contract and reduced to nine stable families before remote export.
   filter/collector_self_contract:
@@ -659,11 +758,11 @@ service:
     {{- if $betterStack.enabled }}
     metrics/betterstack/gateway:
       receivers: [otlp/gateway]
-      processors: [memory_limiter, filter/remote_gateway_contract, resource/gateway_identity, transform/contract_metrics, transform/remote_queue_identity, batch]
+      processors: [memory_limiter, filter/remote_gateway_contract, resource/gateway_identity, transform/contract_metrics, transform/remote_metric_scalars, transform/remote_queue_identity, batch]
       exporters: [otlphttp/betterstack]
     metrics/betterstack/application:
       receivers: [otlp/application]
-      processors: [memory_limiter, filter/remote_application_contract, resource/application_identity, transform/contract_metrics, batch]
+      processors: [memory_limiter, filter/remote_application_contract, resource/application_identity, transform/contract_metrics, transform/remote_metric_scalars, batch]
       exporters: [otlphttp/betterstack]
     {{- end }}
   {{- end }}
