@@ -34,8 +34,10 @@ from sie_server.core.disk_cache import DiskCacheConfig, ModelDiskCacheManager
 from sie_server.core.hot_reload import HotReloader
 from sie_server.core.load_errors import (
     DevicePlacementError,
+    EngineExitedError,
     LoadErrorClass,
     LoadFailure,
+    ModelConfigurationError,
     ModelLoadTimeoutError,
     classify_load_error,
 )
@@ -121,6 +123,18 @@ def _model_configs_semantically_equal(left: ModelConfig | None, right: ModelConf
 
 def _is_python_runtime_adapter(adapter_path: str) -> bool:
     return not adapter_path.startswith("sie_server_rust.")
+
+
+def _engine_exit_code(adapter: ModelAdapter) -> int | None:
+    """Return the adapter's engine exit code, treating a failing probe as a running engine."""
+    try:
+        exit_code = adapter.engine_exit_code()
+    except Exception:
+        logger.exception("adapter.engine_exit_code() raised; treating the engine as running")
+        return None
+    if isinstance(exit_code, bool) or not isinstance(exit_code, int):
+        return None
+    return exit_code
 
 
 def _adapter_load_required_bytes(adapter: ModelAdapter, memory_manager: MemoryManager) -> int | None:
@@ -313,11 +327,11 @@ class ModelRegistry:
         self._sync_lifecycle_depth = 0
         self._loading: set[str] = set()  # Models currently being loaded
         self._unloading: set[str] = set()  # Models currently being unloaded
-        # Terminal-failed state. Populated by ``_load_model_background`` when a
-        # load raises; surfaces non-retryable ``MODEL_LOAD_FAILED`` errors via
-        # the API and short-circuits hot retry loops (see ``start_load_async``).
-        # Cleared on successful load, explicit ``clear_failure``, or hot-reload
-        # of the model config.
+        # Failed state. Populated by ``_load_model_background`` when a load
+        # raises and by the engine-exit check when a loaded model's engine
+        # dies; surfaces ``MODEL_LOAD_FAILED`` errors via the API and
+        # short-circuits hot retry loops (see ``start_load_async``). Cleared
+        # through ``clear_failure`` on a successful load or a config change.
         self._failed: dict[str, LoadFailure] = {}
 
         # Background memory monitor
@@ -1000,7 +1014,8 @@ class ModelRegistry:
         cannot exist.
 
         Raises:
-            RuntimeError: Naming the declared width and the visible devices.
+            ModelConfigurationError: Naming the declared width and the visible
+                devices.
         """
         if width <= len(self._devices):
             return
@@ -1009,7 +1024,7 @@ class ModelRegistry:
             f"{len(self._devices)} device(s) ({self._devices}). The declared width and the "
             "visible devices must agree."
         )
-        raise RuntimeError(msg)
+        raise ModelConfigurationError(msg)
 
     def _claimed_members(self, name: str) -> list[str]:
         """Devices this model holds exclusively, anchor first, or empty."""
@@ -1079,9 +1094,9 @@ class ModelRegistry:
         the next request can trigger a fresh attempt.
 
         Permanent failure classes (``GATED``, ``NOT_FOUND``,
-        ``DEPENDENCY``, ``UNKNOWN``) have ``cooldown_s=None`` and stay
-        sticky until :meth:`clear_failure` is invoked (e.g. by hot
-        reload).
+        ``DEPENDENCY``, ``CONFIG``), and transient failures that exhausted
+        their attempt budget, have ``cooldown_s=None`` and stay sticky until
+        :meth:`clear_failure` is invoked (e.g. by a config change).
         """
         failure = self._failed.get(name)
         if failure is None:
@@ -1100,9 +1115,11 @@ class ModelRegistry:
     def clear_failure(self, name: str) -> bool:
         """Drop any recorded failure for ``name``.
 
-        Returns True if a record existed and was removed. Used by hot
-        reload (a config change is operator intent that may have fixed
-        the underlying issue) and by successful loads.
+        Returns True if a record existed and was removed. Called on every
+        successful load and on every config change for the model (a config
+        change is operator intent that may have fixed the underlying issue).
+        An expired cooldown keeps the record, because its attempt count
+        drives the next cooldown.
         """
         return self._failed.pop(name, None) is not None
 
@@ -1405,8 +1422,7 @@ class ModelRegistry:
             self._loaded[name] = loaded
             self._register_across_group(name, loaded)
 
-            # Clear any stale failure record from a prior attempt.
-            self._failed.pop(name, None)
+            self.clear_failure(name)
             load_outcome = "success"
             return loaded.adapter
         except ModelLoadTimeoutError as exc:
@@ -1631,6 +1647,8 @@ class ModelRegistry:
                 # would strand every card it reserved.
                 if load_outcome != "success":
                     self._release_device_claims(name)
+                else:
+                    self.clear_failure(name)
                 worker_telemetry().model_load_completed(
                     model=name,
                     duration_s=time.monotonic() - load_start,
@@ -1703,8 +1721,8 @@ class ModelRegistry:
         On success any previously-recorded :class:`LoadFailure` for ``name``
         is cleared. On failure the exception is classified via
         :func:`classify_load_error` and recorded into ``self._failed`` so
-        the API surface can return a non-retryable
-        ``MODEL_LOAD_FAILED`` and the SDK stops hammering the loader.
+        the API surface can return ``MODEL_LOAD_FAILED`` and the SDK stops
+        hammering the loader.
 
         Args:
             name: Model name.
@@ -1713,9 +1731,7 @@ class ModelRegistry:
         try:
             await self.load_async(name, device)
             logger.info("Background model load completed: %s", name)
-            # Successful load clears any prior failure record (e.g. a
-            # transient OOM that has since been resolved by eviction).
-            self._failed.pop(name, None)
+            self.clear_failure(name)
         except (KeyboardInterrupt, SystemExit, asyncio.CancelledError):
             # Operator-initiated shutdown / task cancellation must NOT
             # be recorded as a load failure — that would leave the
@@ -1739,14 +1755,15 @@ class ModelRegistry:
     def _record_load_failure(self, name: str, exc: BaseException) -> None:
         """Classify ``exc`` and record a :class:`LoadFailure` for ``name``.
 
-        Increments ``attempts`` if a failure is already on file. Emits a
-        WARNING-level log with structured fields so operators see the
-        actionable hint immediately rather than waiting for the SDK's
-        retry budget to elapse.
+        Increments ``attempts`` if a failure is already on file, which
+        doubles a transient class's cooldown and, past the attempt budget,
+        makes the failure permanent. Emits a log with structured fields so
+        operators see the actionable hint immediately rather than waiting
+        for the SDK's retry budget to elapse.
         """
-        classification = classify_load_error(exc)
         previous = self._failed.get(name)
         attempts = (previous.attempts + 1) if previous is not None else 1
+        classification = classify_load_error(exc, attempts=attempts)
         message = f"{type(exc).__name__}: {exc}"
         failure = LoadFailure(
             error_class=classification.error_class,
@@ -1771,12 +1788,13 @@ class ModelRegistry:
                 extra={"gated_model": True, "model": name},
             )
         else:
-            logger.exception(
-                "Background model load failed: %s (class=%s, attempts=%d, cooldown=%s)",
+            logger.error(
+                "Model load failure recorded: %s (class=%s, attempts=%d, cooldown=%s)",
                 name,
                 classification.error_class.value,
                 attempts,
                 "permanent" if classification.cooldown_s is None else f"{classification.cooldown_s:.0f}s",
+                exc_info=exc,
             )
 
     def unload(self, name: str, *, reason: str = "manual") -> None:
@@ -1848,9 +1866,9 @@ class ModelRegistry:
         ``OOM`` is no longer relevant) and after device-level recovery
         events. Returns the number of records cleared.
 
-        Permanent classes (``GATED``, ``DEPENDENCY``, ``NOT_FOUND``,
-        ``UNKNOWN``) are never cleared by this helper — those require
-        operator intent (config update or explicit ``clear_failure``).
+        Other classes are never cleared by this helper: transient ones wait
+        out their cooldown, and permanent ones require operator intent (a
+        config update, which calls ``clear_failure``).
         """
         cleared = 0
         for name, failure in list(self._failed.items()):
@@ -2310,7 +2328,7 @@ class ModelRegistry:
         if self._model_filter is not None:
             self._model_filter.discard(model_id)
         self._model_dirs.pop(model_id, None)
-        self._failed.pop(model_id, None)
+        self.clear_failure(model_id)
         self._config_version += 1
 
     def _add_config_entry(self, config: ModelConfig, model_dir: Path | None = None) -> None:
@@ -2367,7 +2385,7 @@ class ModelRegistry:
         # broken adapter option). Clear any sticky failure so the next
         # request retries with the new config.
         for name in expanded_configs:
-            self._failed.pop(name, None)
+            self.clear_failure(name)
         self._config_version += 1
         # The config for an already-pinned model may have just arrived at runtime
         # (default Helm workers receive configs via the sidecar after a pin was
@@ -2438,7 +2456,7 @@ class ModelRegistry:
                     for name in new_configs:
                         self._model_dirs[name] = model_dir
                 for name in invalidated:
-                    self._failed.pop(name, None)
+                    self.clear_failure(name)
                 self._config_version += 1
 
             self._refresh_worker_metric_catalog()
@@ -2856,11 +2874,40 @@ class ModelRegistry:
         await self._hot_reloader.stop()
         self._hot_reloader = None
 
+    async def _reap_exited_engines(self) -> None:
+        """Unload every loaded model whose engine process has exited.
+
+        The exit is recorded as a transient ``ENGINE`` failure, so the model
+        reports ``failed`` with the exit code while the cooldown runs and the
+        first request after it loads the model again. Each model is claimed
+        in the same step as its probe and unloaded through the ordinary
+        drain-then-teardown path, one at a time, without holding
+        ``_load_lock``.
+        """
+        for name in list(self._loaded):
+            loaded = self._loaded.get(name)
+            if loaded is None or name in self._unloading:
+                continue
+            exit_code = _engine_exit_code(loaded.adapter)
+            if exit_code is None:
+                continue
+            claimed = self._begin_unload(name)
+            if claimed is None:
+                continue
+            error = EngineExitedError(f"Model '{name}' engine process exited with code {exit_code} after load")
+            logger.error("%s; unloading it so the next request after the cooldown reloads it", error)
+            self._record_load_failure(name, error)
+            try:
+                await self._finish_unload(name, claimed, reason="other")
+            except Exception:
+                logger.exception("Unloading model '%s' after its engine exited failed", name)
+
     async def _memory_monitor_loop(self) -> None:
-        """Background task that monitors memory pressure and evicts LRU models."""
+        """Background task that reaps exited engines and evicts LRU models under memory pressure."""
         while self._monitor_running:
             try:
                 await asyncio.sleep(self._memory_config.memory_check_interval_s)
+                await self._reap_exited_engines()
 
                 # Quick check without lock
                 pressured_managers = [manager for manager in self._memory_managers.values() if manager.check_pressure()]

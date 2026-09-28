@@ -49,6 +49,7 @@ from sie_server.adapters._generation_base import (
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_NOT_LOADED
 from sie_server.adapters.mlx import _server
+from sie_server.core.load_errors import EngineStartupError, ModelConfigurationError
 from sie_server.types.inputs import ImageInput, VideoInput
 
 logger = logging.getLogger(__name__)
@@ -196,7 +197,7 @@ class MLXGenerationAdapter(GenerationAdapter):
         # module but lack adapter_options.loadtime.mlx_repo — without this, mlx_lm would
         # download the full-precision HF weights (e.g. a 27B model) and OOM on Metal.
         if not self._mlx_repo:
-            raise RuntimeError(
+            raise ModelConfigurationError(
                 f"Generation model '{self._model_name_or_path}' has no mlx_repo set; the Mac MLX "
                 "backend requires an MLX-quantized repo. Add adapter_options.loadtime.mlx_repo "
                 "to the model YAML (e.g. 'mlx-community/<model>-4bit'), or serve a curated Mac model "
@@ -258,7 +259,7 @@ class MLXGenerationAdapter(GenerationAdapter):
                 # never stamps a crash's elapsed time as the configured budget.
                 crash_exit_code = self._process.poll()
                 if crash_exit_code is not None:
-                    raise RuntimeError(f"{_server.ERR_SERVER_CRASH} (exit code {crash_exit_code})")
+                    raise EngineStartupError(f"{_server.ERR_SERVER_CRASH} (exit code {crash_exit_code})")
                 raise RuntimeError(_server.ERR_SERVER_STARTUP)
 
             # mlx_lm.server answers /health as soon as httpd is up, possibly before the model

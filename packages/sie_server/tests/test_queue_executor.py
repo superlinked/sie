@@ -338,9 +338,10 @@ class TestEnsureModelReady:
         reg.start_load_async.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_transient_failure_is_not_terminal(self) -> None:
-        """A TRANSIENT in-cooldown failure (OOM/NETWORK/TIMEOUT) stays
-        retryable — it must not be reported as terminal ``failed``.
+    async def test_transient_failure_in_cooldown_is_retried_later(self) -> None:
+        """A TRANSIENT in-cooldown failure is not terminal: the sidecar NAKs
+        the item with a delay so it is redelivered, possibly to another
+        worker, instead of dead-lettering it or holding it here.
         """
         from sie_server.core.load_errors import LoadErrorClass, LoadFailure
 
@@ -354,7 +355,44 @@ class TestEnsureModelReady:
         )
         reg.start_load_async = AsyncMock(return_value=False)
         ex = QueueExecutor(reg)
-        assert await ex.ensure_model_ready("test/model") == "loading_in_progress"
+        assert await ex.ensure_model_ready("test/model") == "retry_later"
+        reg.start_load_async.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_transient_failure_past_its_cooldown_starts_a_new_load(self) -> None:
+        from sie_server.core.load_errors import LoadErrorClass, LoadFailure
+
+        reg = _make_registry(loaded=False, loading=False)
+        reg.get_failure.return_value = LoadFailure(
+            error_class=LoadErrorClass.NETWORK,
+            message="HfHubHTTPError: 503",
+            attempts=2,
+            last_attempt_ts=time.monotonic() - 1000.0,
+            cooldown_s=60.0,
+        )
+        reg.start_load_async = AsyncMock(return_value=True)
+        ex = QueueExecutor(reg)
+        assert await ex.ensure_model_ready("test/model") == "loading_started"
+        reg.start_load_async.assert_awaited_once_with("test/model", "cpu")
+
+    @pytest.mark.asyncio
+    async def test_transient_failure_recorded_mid_start_is_retried_later(self) -> None:
+        from sie_server.core.load_errors import LoadErrorClass, LoadFailure
+
+        reg = _make_registry(loaded=False, loading=False)
+        reg.get_failure.side_effect = [
+            None,
+            LoadFailure(
+                error_class=LoadErrorClass.NETWORK,
+                message="ConnectionError: reset",
+                attempts=1,
+                last_attempt_ts=time.monotonic(),
+                cooldown_s=30.0,
+            ),
+        ]
+        reg.start_load_async = AsyncMock(return_value=False)
+        ex = QueueExecutor(reg)
+        assert await ex.ensure_model_ready("test/model") == "retry_later"
 
     @pytest.mark.asyncio
     async def test_permanent_failure_recorded_mid_start_returns_failed(self) -> None:

@@ -35,6 +35,8 @@ from pathlib import Path
 
 import requests
 
+from sie_server.core.load_errors import EngineStartupError
+
 logger = logging.getLogger(__name__)
 
 # In-process record of ports already handed out by ``find_free_port`` but not
@@ -122,7 +124,7 @@ def find_free_port(start_port: int = BASE_PORT) -> int:
             _RESERVED_PORTS.add(port)
             return port
     msg = f"Could not find free port in range {start_port}-{start_port + span - 1}"
-    raise RuntimeError(msg)
+    raise EngineStartupError(msg)
 
 
 def release_port(port: int | None) -> None:

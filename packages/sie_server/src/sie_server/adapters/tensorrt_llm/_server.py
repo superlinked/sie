@@ -18,6 +18,8 @@ from typing import Any
 
 import requests
 
+from sie_server.core.load_errors import EngineStartupError
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_STARTUP_TIMEOUT_S = 900.0
@@ -117,7 +119,7 @@ def wait_until_ready(
     health_url = f"{server_url}/health"
     while time.monotonic() < deadline:
         if process.poll() is not None:
-            raise RuntimeError(f"trtllm-serve exited during startup: {log_tail(output_file)}")
+            raise EngineStartupError(f"trtllm-serve exited during startup: {log_tail(output_file)}")
         try:
             response = requests.get(health_url, timeout=5)
             if response.status_code == 200:

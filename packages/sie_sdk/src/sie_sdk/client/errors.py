@@ -178,11 +178,14 @@ class ModelLoadFailedError(ServerError):
     HTTP ``502 MODEL_LOAD_FAILED``. The server uses this code for both:
 
     - **Permanent-class failures** (``GATED``, ``NOT_FOUND``,
-      ``DEPENDENCY``, ``UNKNOWN``) where retrying would waste time and
+      ``DEPENDENCY``, ``CONFIG``) where retrying would waste time and
       operator intervention is required (e.g. set ``HF_TOKEN``, accept
-      the model license, upgrade ``transformers``). These carry
+      the model license, upgrade ``transformers``, fix the model
+      config). A transient failure that keeps recurring past the
+      server's attempt budget also becomes permanent. These carry
       ``permanent=True``.
-    - **Transient classes in active cooldown** (``OOM``, ``NETWORK``)
+    - **Transient classes in active cooldown** (``OOM``, ``NETWORK``,
+      ``STORAGE``, ``ENGINE``, ``TIMEOUT``, ``PLACEMENT``, ``UNKNOWN``)
       where the registry is suppressing retries for a finite window so
       the load loop does not hot-spin. These carry ``permanent=False``;
       the failure auto-expires and a subsequent request will trigger a
@@ -198,7 +201,9 @@ class ModelLoadFailedError(ServerError):
     Attributes:
         model: The model that was requested.
         error_class: Server-side classification (``GATED``, ``OOM``,
-            ``DEPENDENCY``, ``NOT_FOUND``, ``NETWORK``, ``UNKNOWN``).
+            ``DEPENDENCY``, ``NOT_FOUND``, ``CONFIG``, ``NETWORK``,
+            ``STORAGE``, ``ENGINE``, ``TIMEOUT``, ``PLACEMENT``,
+            ``UNKNOWN``).
             Use this to route to remediation paths (surface an
             "HF_TOKEN" hint for ``GATED``, retry later for ``OOM``).
         permanent: Whether the failure is non-retryable per server

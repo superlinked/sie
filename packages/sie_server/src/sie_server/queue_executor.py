@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
@@ -661,7 +662,8 @@ class QueueExecutor:
         - ``ready``: continue processing
         - ``loading_started``: progress-ACK and recheck (this call triggered a new load)
         - ``loading_in_progress``: progress-ACK and recheck with a longer delay
-        - ``retry_later``: NAK with base delay (unknown error path)
+        - ``retry_later``: NAK with base delay (unknown model, or a transient
+          load failure whose cooldown is still running)
         - ``failed``: TERMINAL — dead-letter as ``MODEL_LOAD_FAILED`` (do NOT
           recheck). Emitted when the registry holds a PERMANENT
           ``LoadFailure`` (``cooldown=permanent``).
@@ -676,9 +678,10 @@ class QueueExecutor:
         *permanent* classes only, using the SAME ``get_failure().is_permanent``
         classification as the direct-HTTP ``check_not_failed`` gate and the
         Modal lane's ``worker_runtime._terminal_load_failure``. Transient
-        in-cooldown classes (OOM / NETWORK / TIMEOUT) are intentionally NOT
-        terminal — they stay ``loading_in_progress`` so the caller retries
-        after the short cooldown.
+        failures are not terminal: while their cooldown runs they report
+        ``retry_later``, so the sidecar NAKs the item with a delay and it is
+        redelivered, possibly to a worker that has the model loaded, instead
+        of being held on this worker for the whole cooldown.
         """
         if not self._registry.has_model(model_id):
             return "retry_later"
@@ -692,6 +695,9 @@ class QueueExecutor:
 
         if self._registry.is_loading(model_id):
             return "loading_in_progress"
+
+        if failure is not None and failure.in_cooldown(time.monotonic()):
+            return "retry_later"
 
         try:
             started = await self._registry.start_load_async(model_id, self._registry.device)
@@ -713,6 +719,8 @@ class QueueExecutor:
         failure = self._registry.get_failure(model_id)
         if failure is not None and failure.is_permanent:
             return "failed"
+        if failure is not None and failure.in_cooldown(time.monotonic()):
+            return "retry_later"
         return "loading_in_progress"
 
     # -- Handshake-driven model descriptor --------------------------------

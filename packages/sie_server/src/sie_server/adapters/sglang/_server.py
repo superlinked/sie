@@ -38,6 +38,7 @@ from sie_server.config.device_groups import (
     resolve_device_group,
     validate_tensor_parallel_size,
 )
+from sie_server.core.load_errors import EngineExitedError, EngineStartupError
 from sie_server.core.oom import is_oom_error
 
 __all__ = [
@@ -297,7 +298,7 @@ def find_free_port(start_port: int = BASE_PORT) -> int:
             _RESERVED_PORTS.add(port)
             return port
     msg = f"Could not find free port in range {start_port}-{start_port + span - 1}"
-    raise RuntimeError(msg)
+    raise EngineStartupError(msg)
 
 
 def reserve_port(port: int) -> None:
@@ -306,19 +307,19 @@ def reserve_port(port: int) -> None:
     For a port a profile declares. Release it with :func:`release_port`.
 
     Raises:
-        RuntimeError: If another model in this process has it reserved, or
-            something already has it bound.
+        EngineStartupError: If another model in this process has it reserved,
+            or something already has it bound.
     """
     with _RESERVED_PORTS_LOCK:
         if port in _RESERVED_PORTS:
             msg = f"port {port} is already reserved by another model in this process"
-            raise RuntimeError(msg)
+            raise EngineStartupError(msg)
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             try:
                 s.bind(("localhost", port))
             except OSError as error:
                 msg = f"port {port} is already in use: {error}"
-                raise RuntimeError(msg) from error
+                raise EngineStartupError(msg) from error
         _RESERVED_PORTS.add(port)
 
 
@@ -595,6 +596,28 @@ def read_subprocess_output_tail(output_file: tempfile._TemporaryFileWrapper | No
         return f"<failed to read SGLang log: {exc}>"
 
 
+def engine_exit_code(process: subprocess.Popen[bytes] | None) -> int | None:
+    """Return the exit code of an engine child process that has exited, else ``None``."""
+    return None if process is None else process.poll()
+
+
+def raise_if_engine_exited(process: subprocess.Popen[bytes] | None, served_name: str) -> None:
+    """Fail a request whose engine child process has already exited.
+
+    Raises:
+        EngineExitedError: Naming the exit code, so a crash is distinguishable
+            from an orderly unload in a log.
+    """
+    exit_code = engine_exit_code(process)
+    if exit_code is None:
+        return
+    msg = (
+        f"SGLang engine for {served_name!r} is not running "
+        f"(process exited with code {exit_code}). The model must be reloaded."
+    )
+    raise EngineExitedError(msg)
+
+
 def startup_failure_error(
     output_file: tempfile._TemporaryFileWrapper | None,
     crash_exit_code: int | None = None,
@@ -608,11 +631,14 @@ def startup_failure_error(
     from a fictional number. Callers pass the pre-terminate ``poll()`` result
     as ``crash_exit_code``; None means the health poll genuinely timed out.
     """
-    prefix = f"{ERR_SERVER_CRASH} (exit code {crash_exit_code})" if crash_exit_code is not None else ERR_SERVER_STARTUP
+    if crash_exit_code is None:
+        error_type, prefix = RuntimeError, ERR_SERVER_STARTUP
+    else:
+        error_type, prefix = EngineStartupError, f"{ERR_SERVER_CRASH} (exit code {crash_exit_code})"
     output = read_subprocess_output_tail(output_file).strip()
     if output and is_oom_error(RuntimeError(output)):
-        return RuntimeError(f"{prefix}: out of memory detected in startup log")
-    return RuntimeError(prefix)
+        return error_type(f"{prefix}: out of memory detected in startup log")
+    return error_type(prefix)
 
 
 def estimate_load_required_memory_bytes(

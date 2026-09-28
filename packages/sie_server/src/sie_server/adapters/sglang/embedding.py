@@ -117,21 +117,13 @@ class SGLangEmbeddingAdapter(BaseAdapter):
     def _check_loaded(self) -> None:
         if self._server_url is None:
             raise RuntimeError(ERR_NOT_LOADED)
-        process = self._process
-        if process is None:
-            return
-        exit_code = process.poll()
-        if exit_code is None:
-            return
         # Without this the adapter never notices its engine exiting, and every
         # later request opens a connection to a port nobody is listening on,
-        # waits out the connect timeout and returns a transport error, with no
-        # reload and no readiness change.
-        msg = (
-            f"SGLang engine for {self._model_name_or_path!r} is not running "
-            f"(process exited with code {exit_code}). The model must be reloaded."
-        )
-        raise RuntimeError(msg)
+        # waits out the connect timeout and returns a transport error.
+        _server.raise_if_engine_exited(self._process, str(self._model_name_or_path))
+
+    def engine_exit_code(self) -> int | None:
+        return _server.engine_exit_code(self._process)
 
     def __init__(
         self,

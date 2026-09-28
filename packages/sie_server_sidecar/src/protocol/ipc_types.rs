@@ -204,8 +204,10 @@ pub enum ReadinessState {
     /// Terminal, non-retryable load failure. The Python executor
     /// reports this when the registry holds a PERMANENT `LoadFailure`
     /// (`cooldown=permanent`: `GATED` / `NOT_FOUND` / `DEPENDENCY` /
-    /// `UNKNOWN`) — the same classification used by the gateway
-    /// readiness gate. It exists
+    /// `CONFIG`, or a transient failure that exhausted its attempt budget)
+    /// — the same classification used by the gateway readiness gate. A
+    /// transient failure still in its cooldown is reported as `RetryLater`
+    /// instead. It exists
     /// so the sidecar can DISTINGUISH "still loading" (retry) from
     /// "dead on arrival" (dead-letter): on `Failed` the dispatcher stops
     /// re-driving `EnsureModelReady` and publishes a typed

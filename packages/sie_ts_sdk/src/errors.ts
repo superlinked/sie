@@ -342,7 +342,8 @@ export class ModelLoadFailedError extends ServerError {
   readonly model: string | undefined;
   /**
    * Server-side classification: one of `GATED`, `OOM`, `DEPENDENCY`,
-   * `NOT_FOUND`, `NETWORK`, `UNKNOWN`. Use this to route to specific
+   * `NOT_FOUND`, `CONFIG`, `NETWORK`, `STORAGE`, `ENGINE`, `TIMEOUT`,
+   * `PLACEMENT`, `UNKNOWN`. Use this to route to specific
    * remediation paths (e.g. surface a "set HF_TOKEN" hint for `GATED`).
    */
   readonly errorClass: string | undefined;

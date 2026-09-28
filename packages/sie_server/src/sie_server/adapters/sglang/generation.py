@@ -1275,20 +1275,13 @@ class SGLangGenerationAdapter(GenerationAdapter):
         request.
 
         Raises:
-            RuntimeError: Naming the exit code, so a crash is distinguishable
-                from an orderly unload in a log.
+            EngineExitedError: Naming the exit code, so a crash is
+                distinguishable from an orderly unload in a log.
         """
-        process = self._process
-        if process is None:
-            return
-        exit_code = process.poll()
-        if exit_code is None:
-            return
-        msg = (
-            f"SGLang engine for {self._served_model_name!r} is not running "
-            f"(process exited with code {exit_code}). The model must be reloaded."
-        )
-        raise RuntimeError(msg)
+        _server.raise_if_engine_exited(self._process, self._served_model_name)
+
+    def engine_exit_code(self) -> int | None:
+        return _server.engine_exit_code(self._process)
 
     async def _get_or_create_http_client(self) -> httpx.AsyncClient:
         """Return the shared client, opening it if this is the first call.

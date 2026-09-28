@@ -589,7 +589,7 @@ class ModelLoader:
         :class:`ModelLoadTimeoutError` so the
         registry's failure classifier buckets them as
         ``LoadErrorClass.TIMEOUT`` (30 s cooldown) rather than
-        ``UNKNOWN`` (permanent) — consistent with the executor path.
+        ``UNKNOWN`` (600 s cooldown) — consistent with the executor path.
 
         Args:
             name: Model name.
@@ -907,8 +907,9 @@ def _raise_if_adapter_startup_timeout(name: str, started: float, exc: RuntimeErr
     their own startup timeouts should follow the same convention.
 
     A child process that CRASHED during startup deliberately does not match:
-    the adapters raise the distinct "... process exited during startup" message
-    for that case, which stays a plain load failure. On the genuine-timeout
+    the adapters raise ``EngineStartupError`` with the distinct "... process
+    exited during startup" message for that case, which is classified
+    ``ENGINE`` rather than ``TIMEOUT``. On the genuine-timeout
     path ``timeout_s=elapsed`` below is an approximation that only holds
     because the health poll ran the budget out (run 32945082497 showed the
     old crash-as-timeout labeling reporting a 16.5s crash as configured=16s).

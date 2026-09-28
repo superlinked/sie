@@ -229,6 +229,16 @@ class ModelAdapter(ABC):
         _ = (device_type, device_total_bytes)
         return None
 
+    def engine_exit_code(self) -> int | None:
+        """Return the exit code of this adapter's engine process once it has exited.
+
+        An adapter that serves through a child engine process reports the
+        child's exit code after the child dies, so the registry can unload the
+        model and load it again. ``None`` means the engine is running, is not
+        started, or the adapter has no separate engine process.
+        """
+        return None
+
     def encode(
         self,
         items: list[Item],
