@@ -186,11 +186,14 @@ The agent or maintainer carrying the SIE release owns this follow-up:
    merge within the authorized scope through normal repository protections.
    Do not bypass a missing review or attempt to approve a PR as its author.
 6. After the updates merge, inspect the module's release-please PR. Confirm it
-   includes the new SIE references and required checks before carrying it through
-   that repository's release process where authorized. Module release versions
-   are independent of SIE's version. Verify the resulting immutable tag and
-   Terraform Registry version/download source; a merged update PR alone does
-   not publish a module version.
+   includes the new SIE references. Inspect its exact-head workflow runs and
+   reviews: `action_required` CI needs workflow-execution approval, and a skipped
+   bot review does not satisfy required reviews. Approve workflow execution where
+   authorized, or report that gate; require actual Terraform CI completion and
+   the required reviews before carrying the PR through the repository's release
+   process. Module release versions are independent of SIE's version. Verify the
+   resulting immutable tag and Terraform Registry version/download source; a
+   merged update PR alone does not publish a module version.
 
 Report SIE artifact publication and Terraform follow-up separately. For each
 module, include the update PR/merge SHA and published module version, or the
