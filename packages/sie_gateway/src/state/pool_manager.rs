@@ -294,17 +294,17 @@ impl PoolManager {
             .as_secs_f64()
     }
 
-    fn effective_ttl_seconds(&self, pool: &Pool) -> Option<u64> {
+    /// Lease TTL in whole seconds: the pool's own TTL or the gateway default,
+    /// capped at `PoolLimits::max_ttl_seconds`.
+    fn effective_ttl_seconds(&self, pool: &Pool) -> u64 {
         pool.spec
             .ttl_seconds
-            .map(|s| s.min(self.limits.max_ttl_seconds))
+            .unwrap_or(self.lease_duration_s as u64)
+            .min(self.limits.max_ttl_seconds)
     }
 
-    /// Compute the Lease TTL in whole seconds from the pool spec or global default.
     fn lease_ttl_seconds(&self, pool: &Pool) -> i32 {
-        self.effective_ttl_seconds(pool)
-            .map(|s| s.min(i32::MAX as u64) as i32)
-            .unwrap_or((DEFAULT_LEASE_DURATION_S as u64).min(i32::MAX as u64) as i32)
+        self.effective_ttl_seconds(pool).min(i32::MAX as u64) as i32
     }
 
     fn normalize_gpus_and_caps(
@@ -1155,10 +1155,7 @@ impl PoolManager {
                 {
                     continue;
                 }
-                let ttl = self
-                    .effective_ttl_seconds(pool)
-                    .map(|s| s as f64)
-                    .unwrap_or(self.lease_duration_s);
+                let ttl = self.effective_ttl_seconds(pool) as f64;
                 if now - pool.status.last_renewed > ttl {
                     expired.push(name.clone());
                 }
@@ -2919,6 +2916,36 @@ mod tests {
 
         assert_eq!(expired, vec!["legacy".to_string()]);
         assert!(pm.get_pool("legacy").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_ttl_limit_below_the_default_lease_also_caps_pools_without_ttl() {
+        let pm = limited_pool_manager(PoolLimits {
+            max_ttl_seconds: 600,
+            ..PoolLimits::default()
+        });
+        pm.create_pool("no-ttl", l4_gpus(), None, None, 0, vec![])
+            .await
+            .unwrap();
+        let pool = pm.get_pool("no-ttl").await.unwrap();
+        assert_eq!(pm.lease_ttl_seconds(&pool), 600);
+        {
+            let mut pools = pm.pools.write().await;
+            pools.get_mut("no-ttl").unwrap().status.last_renewed -= 601.0;
+        }
+
+        assert_eq!(pm.check_expired_leases().await, vec!["no-ttl".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn test_default_limits_keep_the_default_lease() {
+        let pm = PoolManager::new(vec!["l4-spot".to_string()]);
+        pm.create_pool("no-ttl", l4_gpus(), None, None, 0, vec![])
+            .await
+            .unwrap();
+        let pool = pm.get_pool("no-ttl").await.unwrap();
+
+        assert_eq!(pm.lease_ttl_seconds(&pool), DEFAULT_LEASE_DURATION_S as i32);
     }
 
     #[tokio::test]
