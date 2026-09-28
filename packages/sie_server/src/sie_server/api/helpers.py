@@ -450,6 +450,48 @@ class ModelStateChecker:
             headers={"Retry-After": "5"},
         )
 
+    async def ensure_lora_loaded(self, lora: str) -> None:
+        """Start loading a LoRA adapter if needed, raise 503 to retry.
+
+        Args:
+            lora: LoRA id selected by the resolved profile or request options.
+
+        Raises:
+            HTTPException: 503 ``LORA_LOADING`` with ``Retry-After`` while the
+                adapter loads, 500 if it failed to load, 400 if the model does
+                not support LoRA.
+        """
+        try:
+            is_ready, is_loading = await self.registry.ensure_lora_loaded_async(self.model, lora)
+            if is_loading:
+                self.span.set_attribute("error", "lora_loading")
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail={
+                        "code": ErrorCode.LORA_LOADING.value,
+                        "message": f"LoRA '{lora}' is loading for model '{self.model}', please retry",
+                    },
+                    headers={"Retry-After": "1"},
+                )
+            if not is_ready:
+                self.span.set_attribute("error", "lora_load_failed")
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail={
+                        "code": ErrorCode.INFERENCE_ERROR.value,
+                        "message": f"Failed to load LoRA '{lora}' for model '{self.model}'",
+                    },
+                )
+        except ValueError as e:
+            self.span.set_attribute("error", "lora_not_supported")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": ErrorCode.INVALID_INPUT.value,
+                    "message": str(e),
+                },
+            ) from e
+
     async def validate_ready(self, device: str) -> None:
         """Run all state checks to ensure model is ready for inference.
 

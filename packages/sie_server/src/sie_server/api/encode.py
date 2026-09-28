@@ -298,40 +298,7 @@ async def encode(
         # Check if LoRA is specified and ensure it's loaded
         lora = options.get("lora_id")
         if lora is not None:
-            try:
-                is_ready, is_loading = await registry.ensure_lora_loaded_async(model, lora)
-                if is_loading:
-                    # LoRA is loading - return 503 with retry hint
-                    span.set_attribute("error", "lora_loading")
-                    raise HTTPException(
-                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                        detail={
-                            "code": ErrorCode.LORA_LOADING.value,
-                            "message": f"LoRA '{lora}' is loading for model '{model}', please retry",
-                        },
-                        headers={"Retry-After": "1"},
-                    )
-                if not is_ready:
-                    # LoRA load failed
-                    span.set_attribute("error", "lora_load_failed")
-                    raise HTTPException(
-                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                        detail={
-                            "code": ErrorCode.INFERENCE_ERROR.value,
-                            "message": f"Failed to load LoRA '{lora}' for model '{model}'",
-                        },
-                    )
-            except ValueError as e:
-                # Model doesn't support LoRA
-                span.set_attribute("error", "lora_not_supported")
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail={
-                        "code": ErrorCode.INVALID_INPUT.value,
-                        "message": str(e),
-                    },
-                ) from e
-
+            await model_checker.ensure_lora_loaded(lora)
             # Worker batcher routes on options["lora"]; profile uses "lora_id".
             options["lora"] = lora
 

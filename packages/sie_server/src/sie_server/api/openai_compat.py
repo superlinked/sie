@@ -3,10 +3,14 @@
 POST /v1/embeddings - Generate embeddings using OpenAI's API format.
 
 This enables zero-friction migration from OpenAI, Azure OpenAI, or any
-OpenAI-compatible embedding service. Works with LangChain's OpenAIEmbeddings
-class out of the box:
+OpenAI-compatible embedding service. Input must be text; token-id arrays are
+rejected with 400, so LangChain's OpenAIEmbeddings needs its client-side
+tiktoken chunking turned off:
 
-    embeddings = OpenAIEmbeddings(base_url="http://localhost:8080/v1")
+    embeddings = OpenAIEmbeddings(
+        base_url="http://localhost:8080/v1",
+        check_embedding_ctx_length=False,
+    )
 
 This module implements the OpenAI-compatible embeddings API surface.
 """
@@ -22,6 +26,7 @@ import numpy as np
 from fastapi import APIRouter, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
+from pydantic.json_schema import SkipJsonSchema
 
 from sie_server.api.helpers import (
     WORKER_DRAINED_RETRY_AFTER_S,
@@ -30,8 +35,9 @@ from sie_server.api.helpers import (
     oom_retry_after_from_registry,
     openai_error_response,
 )
+from sie_server.api.options import resolve_runtime_options_with_profile
 from sie_server.api.validation import validate_machine_profile_header
-from sie_server.core.encode_pipeline import EncodePipeline
+from sie_server.core.encode_pipeline import EncodePipeline, resolve_encode_output_types
 from sie_server.core.model_suggestions import suggestion_suffix
 from sie_server.core.oom import is_oom_error
 from sie_server.core.worker import QueueFullError
@@ -56,9 +62,10 @@ router = APIRouter(prefix="/v1", tags=["openai-compat"])
 # OpenAI-compatible request/response types
 
 
-# Type alias for OpenAI input formats
-# OpenAI accepts: string, array of strings, array of tokens, or array of token arrays
-OpenAIInput = str | list[str] | list[int] | list[list[int]]
+OpenAIInput = str | list[str]
+# Parsed but never published, so the route can reject OpenAI token-id input
+# with the same 400 envelope as the gateway instead of a 422.
+TokenArrayInput = list[int] | list[list[int]]
 
 
 class OpenAIEmbeddingRequest(BaseModel):
@@ -71,8 +78,8 @@ class OpenAIEmbeddingRequest(BaseModel):
 
     model: Annotated[str, Field(description="Model ID to use for embedding")]
     input: Annotated[
-        OpenAIInput,
-        Field(description="Input text(s) or token array(s) to embed."),
+        OpenAIInput | SkipJsonSchema[TokenArrayInput],
+        Field(description="Input text or list of texts to embed. Token-id arrays are rejected with 400."),
     ]
     encoding_format: Annotated[
         Literal["float", "base64"] | None,
@@ -146,85 +153,29 @@ def _estimate_tokens(texts: list[str]) -> int:
     return max(1, total_chars // 4)
 
 
-def _normalize_input(input_data: OpenAIInput, registry: object, model: str) -> tuple[list[str], int]:
-    """Normalize OpenAI input format to list of strings.
+def _normalize_input(input_data: OpenAIInput | TokenArrayInput) -> list[str]:
+    """Return the request's input as a list of texts.
 
-    OpenAI accepts:
-    - str: single text
-    - list[str]: multiple texts
-    - list[int]: single token array
-    - list[list[int]]: multiple token arrays
-
-    Args:
-        input_data: Raw input from request
-        registry: Model registry (for tokenizer access)
-        model: Model name
-
-    Returns:
-        Tuple of (list of texts, token count)
+    Raises:
+        HTTPException: 400 ``invalid_request`` for token-id input, which SIE
+            cannot map back to the text the caller tokenized.
     """
-    # Single string
     if isinstance(input_data, str):
-        return [input_data], _estimate_tokens([input_data])
-
-    # Empty list
-    if not input_data:
-        return [], 0
-
-    # Check if it's a token array (list[int]) or list of token arrays (list[list[int]])
-    first = input_data[0]
-
-    if isinstance(first, str):
-        # list[str] - multiple texts
-        return list(input_data), _estimate_tokens(input_data)  # type: ignore
-
-    if isinstance(first, int):
-        # list[int] - single token array, decode it
-        token_count = len(input_data)
-        text = _decode_tokens(input_data, registry, model)  # type: ignore
-        return [text], token_count
-
-    if isinstance(first, list):
-        # list[list[int]] - multiple token arrays
-        texts = []
-        token_count = 0
-        for tokens in input_data:
-            if isinstance(tokens, list) and all(isinstance(t, int) for t in tokens):
-                texts.append(_decode_tokens(tokens, registry, model))
-                token_count += len(tokens)
-            else:
-                # Unexpected format
-                texts.append(str(tokens))
-        return texts, token_count
-
-    # Fallback: convert to string
-    return [str(input_data)], 1
-
-
-def _decode_tokens(tokens: list[int], registry: object, model: str) -> str:
-    """Decode token IDs back to text using the model's tokenizer.
-
-    Args:
-        tokens: List of token IDs
-        registry: Model registry
-        model: Model name
-
-    Returns:
-        Decoded text string
-    """
-    try:
-        preprocessor_registry = registry.preprocessor_registry  # type: ignore
-        if preprocessor_registry.has_preprocessor(model, "text"):
-            tokenizer = preprocessor_registry.get_tokenizer(model)
-            if tokenizer is not None:
-                return tokenizer.decode(tokens, skip_special_tokens=True)
-    except (AttributeError, TypeError, ValueError) as e:
-        logger.debug("Token decoding failed for model %s: %s", model, e)
-
-    # Fallback: can't decode, return placeholder
-    # This happens if the model doesn't have a registered tokenizer
-    logger.warning("Cannot decode tokens for model %s, using placeholder", model)
-    return f"[{len(tokens)} tokens]"
+        return [input_data]
+    texts = [value for value in input_data if isinstance(value, str)]
+    if len(texts) == len(input_data):
+        return texts
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail={
+            "error": {
+                "code": "invalid_request",
+                "message": "token-array embeddings input is not supported; use text input",
+                "type": "invalid_request_error",
+                "param": "input",
+            }
+        },
+    )
 
 
 def _openai_state_error(error: HTTPException) -> HTTPException:
@@ -299,7 +250,6 @@ def _build_embeddings_response(
     texts: list[str],
     model: str,
     encoding_format: str,
-    token_count: int | None = None,
 ) -> OpenAIEmbeddingResponse:
     """Build OpenAI-format response from encoding results.
 
@@ -308,7 +258,6 @@ def _build_embeddings_response(
         texts: Input texts
         model: Model name
         encoding_format: "float" or "base64"
-        token_count: Known token count (from token input), or None to estimate
     """
     embeddings_data: list[OpenAIEmbeddingData] = []
 
@@ -345,9 +294,7 @@ def _build_embeddings_response(
             )
         )
 
-    # Use provided token count or estimate
-    if token_count is None or token_count == 0:
-        token_count = _estimate_tokens(texts)
+    token_count = _estimate_tokens(texts)
 
     return OpenAIEmbeddingResponse(
         object="list",
@@ -443,7 +390,7 @@ async def _create_embeddings(
 
         registry = http_request.app.state.registry
 
-        # Check if model exists first (needed for token decoding)
+        # Check if model exists first
         if not registry.has_model(model):
             span.set_attribute("error", "model_not_found")
             raise HTTPException(
@@ -475,8 +422,7 @@ async def _create_embeddings(
                 },
             )
 
-        # Normalize input (handles strings, token arrays, etc.)
-        texts, token_count = _normalize_input(request.input, registry, model)
+        texts = _normalize_input(request.input)
 
         if not texts:
             raise HTTPException(
@@ -526,6 +472,31 @@ async def _create_embeddings(
 
         config = registry.get_config(model)
 
+        # Same profile resolution as native /v1/encode with no request params,
+        # which is the body the gateway rewrites this route into.
+        options, selected_profile = resolve_runtime_options_with_profile(config, None, span)
+        try:
+            adapter_output_types, response_output_types = resolve_encode_output_types(
+                config, ["dense"], selected_profile, options
+            )
+        except ValueError as e:
+            span.set_attribute("error", "unsupported_output_types")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "error": {
+                        "code": "invalid_request",
+                        "message": str(e),
+                        "type": "invalid_request_error",
+                        "param": "model",
+                    }
+                },
+            ) from e
+        lora = options.get("lora_id")
+        if lora is not None:
+            await checker.ensure_lora_loaded(lora)
+            options["lora"] = lora
+
         # Run encoding
         telemetry_enabled = worker_telemetry_enabled()
         inference_started = time.perf_counter() if telemetry_enabled else None
@@ -534,11 +505,12 @@ async def _create_embeddings(
                 registry=registry,
                 model=model,
                 items=items,
-                output_types=["dense"],
-                instruction=None,
+                output_types=adapter_output_types,
+                instruction=options.get("instruction"),
                 config=config,
-                is_query=False,
-                options={},
+                is_query=bool(options.get("is_query", False)),
+                options=options,
+                response_output_types=response_output_types,
             )
         except QueueFullError as e:
             span.set_attribute("error", "queue_full")
@@ -659,4 +631,4 @@ async def _create_embeddings(
                 postprocessing_s=timing.postprocessing_ms / 1000.0,
                 units=units,
             )
-        return _build_embeddings_response(results, texts, model, encoding_format, token_count)
+        return _build_embeddings_response(results, texts, model, encoding_format)

@@ -1829,25 +1829,10 @@
                   "type": "string"
                 },
                 "type": "array"
-              },
-              {
-                "items": {
-                  "type": "integer"
-                },
-                "type": "array"
-              },
-              {
-                "items": {
-                  "items": {
-                    "type": "integer"
-                  },
-                  "type": "array"
-                },
-                "type": "array"
               }
             ],
             "title": "Input",
-            "description": "Input text(s) or token array(s) to embed."
+            "description": "Input text or list of texts to embed. Token-id arrays are rejected with 400."
           },
           "encoding_format": {
             "anyOf": [

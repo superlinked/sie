@@ -1,6 +1,7 @@
 """Tests for OpenAI-compatible embeddings endpoint."""
 
 import time
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -8,12 +9,46 @@ import numpy as np
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sie_server.api.encode import router as encode_router
 from sie_server.api.openai_compat import router as openai_router
-from sie_server.config.model import EmbeddingDim, EncodeTask, ModelConfig, ProfileConfig, Tasks
+from sie_server.config.model import AdapterOptions, EmbeddingDim, EncodeTask, ModelConfig, ProfileConfig, Tasks
 from sie_server.core.load_errors import LoadErrorClass, LoadFailure
 from sie_server.core.oom import ResourceExhausted, ResourceExhaustedError
+from sie_server.core.postprocessor_registry import PostprocessorRegistry
+from sie_server.core.preprocessor_registry import PreprocessorRegistry
 from sie_server.core.registry import ModelRegistry
 from sie_server.types.inputs import MAX_ITEM_TEXT_BYTES
+
+# A fake embedder whose vector depends on the runtime options it receives, so a
+# route that drops profile options produces a different vector.
+_OPTION_AWARE_ADAPTER_SOURCE = """
+import hashlib
+
+import numpy as np
+
+from sie_server.adapters._utils import extract_texts, resolve_embedding_options
+from sie_server.adapters.fake.adapter import FakeAdapter
+from sie_server.core.inference_output import EncodeOutput
+
+
+class OptionAwareFakeAdapter(FakeAdapter):
+    def encode(self, items, output_types, *, instruction=None, is_query=False, prepared_items=None, options=None):
+        _, pooling, query_template, doc_template = resolve_embedding_options(
+            options,
+            default_normalize=True,
+            default_pooling="mean",
+            default_query_template=None,
+            default_doc_template=None,
+        )
+        texts = extract_texts(
+            items, instruction, is_query=is_query, query_template=query_template, doc_template=doc_template
+        )
+        digests = [hashlib.sha256(f"{pooling}|{text}".encode()).digest()[:8] for text in texts]
+        dense = np.stack([np.frombuffer(digest, dtype=np.uint8) for digest in digests]).astype(np.float32)
+        return EncodeOutput(dense=dense, is_query=is_query, dense_dim=8)
+"""
+
+_PROFILED_MODEL = "test/profiled-embedder"
 
 
 def _mock_encode_impl(items: list[Any], output_types: list[str], **kwargs: Any) -> Any:
@@ -61,13 +96,12 @@ def mock_registry(mock_adapter: MagicMock) -> MagicMock:
         profiles={"default": ProfileConfig(adapter_path="test:TestAdapter", max_batch_tokens=8192)},
     )
     registry.model_names = ["text-embedding-3-small"]
-    # Mock preprocessor_registry to NOT have a tokenizer (use direct adapter path)
-    preprocessor_registry = MagicMock()
-    preprocessor_registry.has_tokenizer.return_value = False
+    # No registered text preprocessor, so encode takes the direct adapter path.
+    preprocessor_registry = MagicMock(spec=PreprocessorRegistry)
     preprocessor_registry.has_preprocessor.return_value = False
     registry.preprocessor_registry = preprocessor_registry
 
-    postprocessor_registry = MagicMock()
+    postprocessor_registry = MagicMock(spec=PostprocessorRegistry)
     postprocessor_registry.transform_sync.return_value = 0
     registry.postprocessor_registry = postprocessor_registry
 
@@ -243,6 +277,31 @@ class TestOpenAIEmbeddings:
             "message": f"Field 'input[1]' must hold at most {MAX_ITEM_TEXT_BYTES} bytes of UTF-8 text",
             "type": "invalid_request_error",
             "param": "input",
+        }
+        mock_adapter.encode.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "token_input",
+        [[9906, 1917], [[9906, 1917], [3923, 374]], [[]]],
+        ids=["token-array", "token-arrays", "empty-token-array"],
+    )
+    def test_token_id_input_rejected_like_the_gateway(
+        self, client: TestClient, mock_adapter: MagicMock, token_input: list[Any]
+    ) -> None:
+        """Token ids cannot be mapped back to text, so they must fail instead of embedding a placeholder."""
+        response = client.post(
+            "/v1/embeddings",
+            json={"model": "text-embedding-3-small", "input": token_input},
+        )
+
+        assert response.status_code == 400
+        assert response.json() == {
+            "error": {
+                "message": "token-array embeddings input is not supported; use text input",
+                "type": "invalid_request_error",
+                "param": "input",
+                "code": "invalid_request",
+            }
         }
         mock_adapter.encode.assert_not_called()
 
@@ -537,3 +596,158 @@ class TestOpenAIEmbeddingsOom:
         error = data["error"]
         assert error["code"] == "RESOURCE_EXHAUSTED"
         assert error["type"] == "server_error"
+
+
+def _profiled_embedder_config() -> ModelConfig:
+    return ModelConfig.model_validate(
+        {
+            "sie_id": _PROFILED_MODEL,
+            "package_backed": True,
+            "inputs": {"text": True},
+            "tasks": {"encode": {"dense": {"dim": 8}}},
+            "max_sequence_length": 512,
+            "profiles": {
+                "default": {
+                    "max_batch_tokens": 8192,
+                    "adapter_path": "option_aware_adapter.py:OptionAwareFakeAdapter",
+                    "adapter_options": {
+                        "loadtime": {"dense_dim": 8},
+                        "runtime": {
+                            "pooling": "last",
+                            "query_template": "query: {text}",
+                            "doc_template": "passage: {text}",
+                        },
+                    },
+                },
+                "cls": {
+                    "extends": "default",
+                    "adapter_options": {
+                        "runtime": {"pooling": "cls", "doc_template": "search_document: {text}"},
+                    },
+                },
+            },
+        }
+    )
+
+
+class TestOpenAIEmbeddingsProfileParity:
+    """/v1/embeddings must embed exactly what native /v1/encode embeds.
+
+    Runs the real registry, worker, and encode pipeline. Only the adapter is a
+    weightless fake, and its vector depends on the profile's pooling and
+    document template, like a real embedder's does.
+    """
+
+    @pytest.fixture
+    def app(self, tmp_path: Path) -> FastAPI:
+        (tmp_path / "option_aware_adapter.py").write_text(_OPTION_AWARE_ADAPTER_SOURCE)
+        registry = ModelRegistry()
+        registry.add_config(_profiled_embedder_config(), model_dir=tmp_path)
+        app = FastAPI()
+        app.include_router(encode_router)
+        app.include_router(openai_router)
+        app.state.registry = registry
+        return app
+
+    def test_profile_runtime_options_match_native_encode(self, app: FastAPI) -> None:
+        registry: ModelRegistry = app.state.registry
+        texts = ["hello world", "second text"]
+        vectors: dict[str, list[list[float]]] = {}
+        with TestClient(app) as client:
+            try:
+                for model in (_PROFILED_MODEL, f"{_PROFILED_MODEL}:cls"):
+                    client.portal.call(registry.load_async, model, "cpu")
+                    native = client.post(
+                        f"/v1/encode/{model}",
+                        json={"items": [{"text": text} for text in texts]},
+                        headers={"Accept": "application/json"},
+                    )
+                    openai = client.post("/v1/embeddings", json={"model": model, "input": texts})
+
+                    assert native.status_code == 200, native.text
+                    assert openai.status_code == 200, openai.text
+                    native_vectors = [item["dense"]["values"] for item in native.json()["items"]]
+                    vectors[model] = [item["embedding"] for item in openai.json()["data"]]
+                    assert vectors[model] == native_vectors, model
+            finally:
+                client.portal.call(registry.unload_all_async)
+
+        assert vectors[_PROFILED_MODEL] != vectors[f"{_PROFILED_MODEL}:cls"]
+
+
+class TestOpenAIEmbeddingsProfileResolution:
+    """Profile-level encode settings that are not vector-shaping options."""
+
+    def test_profile_lora_is_loaded_and_routed(
+        self, client: TestClient, mock_registry: MagicMock, mock_adapter: MagicMock
+    ) -> None:
+        mock_registry.get_config.return_value = ModelConfig(
+            sie_id="text-embedding-3-small",
+            hf_id="org/test",
+            tasks=Tasks(encode=EncodeTask(dense=EmbeddingDim(dim=3))),
+            profiles={
+                "default": ProfileConfig(
+                    adapter_path="test:TestAdapter",
+                    max_batch_tokens=8192,
+                    adapter_options=AdapterOptions(
+                        runtime={"lora_id": "org/test-lora", "instruction": "Classify banking intent"}
+                    ),
+                )
+            },
+        )
+        mock_registry.ensure_lora_loaded_async = AsyncMock(return_value=(True, False))
+
+        response = client.post("/v1/embeddings", json={"model": "text-embedding-3-small", "input": "hello"})
+
+        assert response.status_code == 200, response.text
+        mock_registry.ensure_lora_loaded_async.assert_awaited_once_with("text-embedding-3-small", "org/test-lora")
+        call = mock_adapter.encode.call_args
+        assert call.kwargs["options"]["lora"] == "org/test-lora"
+        assert call.kwargs["instruction"] == "Classify banking intent"
+        assert call.kwargs["is_query"] is False
+
+    def test_profile_lora_still_loading_is_retryable(
+        self, client: TestClient, mock_registry: MagicMock, mock_adapter: MagicMock
+    ) -> None:
+        mock_registry.get_config.return_value = ModelConfig(
+            sie_id="text-embedding-3-small",
+            hf_id="org/test",
+            tasks=Tasks(encode=EncodeTask(dense=EmbeddingDim(dim=3))),
+            profiles={
+                "default": ProfileConfig(
+                    adapter_path="test:TestAdapter",
+                    max_batch_tokens=8192,
+                    adapter_options=AdapterOptions(runtime={"lora_id": "org/test-lora"}),
+                )
+            },
+        )
+        mock_registry.ensure_lora_loaded_async = AsyncMock(return_value=(False, True))
+
+        response = client.post("/v1/embeddings", json={"model": "text-embedding-3-small", "input": "hello"})
+
+        assert response.status_code == 503, response.text
+        assert response.headers.get("Retry-After") == "1"
+        error = response.json()["error"]
+        assert error["code"] == "LORA_LOADING"
+        assert error["type"] == "server_error"
+        mock_adapter.encode.assert_not_called()
+
+    def test_model_without_dense_output_rejected(
+        self, client: TestClient, mock_registry: MagicMock, mock_adapter: MagicMock
+    ) -> None:
+        mock_registry.get_config.return_value = ModelConfig(
+            sie_id="text-embedding-3-small",
+            hf_id="org/test",
+            tasks=Tasks(encode=EncodeTask(sparse=EmbeddingDim(dim=30522))),
+            profiles={"default": ProfileConfig(adapter_path="test:TestAdapter", max_batch_tokens=8192)},
+        )
+
+        response = client.post("/v1/embeddings", json={"model": "text-embedding-3-small", "input": "hello"})
+
+        assert response.status_code == 400, response.text
+        error = response.json()["error"]
+        assert error["code"] == "invalid_request"
+        assert error["type"] == "invalid_request_error"
+        assert error["param"] == "model"
+        assert "does not support output types" in error["message"]
+        mock_adapter.encode.assert_not_called()
