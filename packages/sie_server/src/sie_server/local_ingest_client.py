@@ -132,7 +132,9 @@ def stream_generate(socket_path: str, items: bytes, params: bytes, meta: dict[st
     return _traced_generate(socket_path, items, params, meta)
 
 
-async def _traced_generate(socket_path: str, items: bytes, params: bytes, meta: dict[str, Any]) -> AsyncGenerator[bytes, None]:
+async def _traced_generate(
+    socket_path: str, items: bytes, params: bytes, meta: dict[str, Any]
+) -> AsyncGenerator[bytes, None]:
     carrier = {
         key: value
         for key, limit in (("traceparent", 256), ("tracestate", 512))
