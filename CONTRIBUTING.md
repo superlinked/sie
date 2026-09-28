@@ -174,7 +174,7 @@ under `HF_HOME`. The Qdrant and Weaviate suites also need the containers below:
 mise run full-sync
 mise run ts -- build
 docker run -d -p 6333:6333 qdrant/qdrant:v1.17.1
-docker run -d -p 8090:8080 -p 50051:50051 -e AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED=true -e DEFAULT_VECTORIZER_MODULE=none semitechnologies/weaviate:1.28.0
+docker run -d -p 8090:8080 -p 50051:50051 -e AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED=true -e DEFAULT_VECTORIZER_MODULE=none semitechnologies/weaviate:1.32.0
 mise exec -- uv run --frozen --project . --no-sync python -m tools.ci.real_models run
 ```
 

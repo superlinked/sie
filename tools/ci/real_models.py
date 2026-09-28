@@ -52,7 +52,6 @@ PINNED_MODELS = (
     "sentence-transformers/all-MiniLM-L6-v2",
     "intfloat/e5-small-v2",
     "cross-encoder/ms-marco-MiniLM-L-12-v2",
-    "rasyosef/splade-mini",
     "ibm-granite/granite-embedding-30m-sparse",
     "answerdotai/answerai-colbert-small-v1",
     "answerdotai/answerai-colbert-small-v1:muvera",

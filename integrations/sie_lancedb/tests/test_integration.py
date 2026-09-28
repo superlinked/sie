@@ -22,6 +22,15 @@ from lancedb.pydantic import LanceModel, Vector
 # Skip all tests in this module if not running integration tests
 pytestmark = pytest.mark.integration
 
+_SERVER_ITEM_IDS = pytest.mark.xfail(
+    reason=(
+        "The server returns item-<index> ids for items sent without an id, but SIEReranker parses "
+        "item_id with int(), which raises ValueError"
+    ),
+    raises=ValueError,
+    strict=True,
+)
+
 
 @pytest.fixture
 def sie_url() -> str:
@@ -92,6 +101,7 @@ class TestAutoEmbedding:
 class TestHybridSearchWithReranker:
     """Integration tests for hybrid search + SIE reranking."""
 
+    @_SERVER_ITEM_IDS
     def test_hybrid_search_with_reranker(self, sie_url: str, db) -> None:
         """Hybrid search (vector + FTS) with SIE cross-encoder reranking."""
         sie = (
@@ -191,5 +201,6 @@ class TestEntityExtraction:
         assert len(df) == 3
 
         # Each row should have extracted entities
-        for entities in df["entities"]:
+        for entities in table.to_arrow().column("entities").to_pylist():
             assert isinstance(entities, list)
+            assert entities

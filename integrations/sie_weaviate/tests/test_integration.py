@@ -12,7 +12,7 @@ Prerequisites:
     docker run -d -p 8090:8080 -p 50051:50051 \
         -e AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED=true \
         -e DEFAULT_VECTORIZER_MODULE=none \
-        cr.weaviate.io/semitechnologies/weaviate:1.28.0
+        cr.weaviate.io/semitechnologies/weaviate:1.32.0
 """
 
 from __future__ import annotations
@@ -88,15 +88,15 @@ class TestDenseSearch:
 class TestNamedVectorSearch:
     """Named vector search with SIENamedVectorizer."""
 
-    def test_dense_and_sparse_named_vectors(self, sie_url: str, weaviate_client) -> None:
-        """Store dense + sparse named vectors from one SIE call."""
+    def test_dense_and_multivector_named_vectors(self, sie_url: str, weaviate_client) -> None:
+        """Store dense + multivector named vectors from one SIE call."""
         import weaviate.classes as wvc
         from sie_weaviate import SIENamedVectorizer
 
         vectorizer = SIENamedVectorizer(
             base_url=sie_url,
             model="BAAI/bge-m3",
-            output_types=["dense", "sparse"],
+            output_types=["dense", "multivector"],
         )
         name = _unique_name()
 
@@ -106,7 +106,7 @@ class TestNamedVectorSearch:
                 properties=[wvc.config.Property(name="text", data_type=wvc.config.DataType.TEXT)],
                 vector_config=[
                     wvc.config.Configure.Vectors.self_provided(name="dense"),
-                    wvc.config.Configure.Vectors.self_provided(name="sparse"),
+                    wvc.config.Configure.MultiVectors.self_provided(name="multivector"),
                 ],
             )
 

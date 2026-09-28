@@ -62,7 +62,7 @@ jobs:
         ports:
           - 6333:6333
       weaviate:
-        image: semitechnologies/weaviate:1.28.0@sha256:58b576d36eace6a33f1a0866b9fd13fd58abfb9ce1eaaa419758c70b6a427e36
+        image: semitechnologies/weaviate:1.32.0@sha256:9452e68c58c287c8c29a525ff1468c209cd5e106cc927d67b7d34d61533151b3
         ports:
           - 8090:8080
           - 50051:50051
