@@ -14,9 +14,15 @@ from unittest.mock import MagicMock, patch
 import pytest
 from sie_server.adapters.sglang import _server as sglang_server
 from sie_server.config.model import EmbeddingDim, EncodeTask, ModelConfig, ProfileConfig, Tasks
-from sie_server.core.load_errors import EngineExitedError, LoadErrorClass, LoadFailure
+from sie_server.core.load_errors import (
+    MAX_TRANSIENT_ATTEMPTS,
+    EngineExitedError,
+    LoadErrorClass,
+    LoadFailure,
+    cooldown_for,
+)
 from sie_server.core.memory import MemoryConfig
-from sie_server.core.registry import ModelRegistry
+from sie_server.core.registry import _ENGINE_STABLE_UPTIME_S, ModelRegistry
 
 MODEL = "test-model"
 
@@ -217,6 +223,69 @@ class TestEngineExitAfterLoad:
         await registry._reap_exited_engines()
 
         assert registry.is_loaded(MODEL)
+
+
+class TestRepeatedEngineExits:
+    """An engine that dies after every load backs off instead of reloading forever."""
+
+    @staticmethod
+    async def _load_and_crash(registry: ModelRegistry, engines: list[FakeEngine]) -> LoadFailure:
+        if registry.get_failure(MODEL) is not None:
+            _expire_cooldown(registry)
+        assert await registry.start_load_async(MODEL, "cpu") is True
+        await _wait_for(lambda: registry.is_loaded(MODEL))
+        assert registry.get_failure(MODEL) is None
+        engines[-1].die()
+        await registry._reap_exited_engines()
+        failure = registry.get_failure(MODEL)
+        assert failure is not None
+        return failure
+
+    async def test_consecutive_exits_back_off_and_become_permanent(self, engines: list[FakeEngine]) -> None:
+        registry = _registry()
+        with patch("sie_server.core.model_loader.load_adapter", side_effect=_engine_adapter(engines)):
+            for exits in range(1, MAX_TRANSIENT_ATTEMPTS + 1):
+                failure = await self._load_and_crash(registry, engines)
+                assert failure.error_class is LoadErrorClass.ENGINE
+                assert failure.attempts == exits
+                assert failure.cooldown_s == cooldown_for(LoadErrorClass.ENGINE, exits)
+
+            failure = await self._load_and_crash(registry, engines)
+
+            assert failure.attempts == MAX_TRANSIENT_ATTEMPTS + 1
+            assert failure.is_permanent
+            _expire_cooldown(registry)
+            assert await registry.start_load_async(MODEL, "cpu") is False
+
+    async def test_an_engine_that_stayed_up_starts_counting_again(self, engines: list[FakeEngine]) -> None:
+        registry = _registry()
+        with patch("sie_server.core.model_loader.load_adapter", side_effect=_engine_adapter(engines)):
+            await self._load_and_crash(registry, engines)
+            assert (await self._load_and_crash(registry, engines)).attempts == 2
+
+            _expire_cooldown(registry)
+            assert await registry.start_load_async(MODEL, "cpu") is True
+            await _wait_for(lambda: registry.is_loaded(MODEL))
+            info = registry._memory_manager_for_model(MODEL).get_model_info(MODEL)
+            assert info is not None
+            info.loaded_at -= _ENGINE_STABLE_UPTIME_S
+            engines[-1].die()
+            await registry._reap_exited_engines()
+
+        failure = registry.get_failure(MODEL)
+        assert failure is not None
+        assert failure.attempts == 1
+
+    async def test_a_config_change_resets_the_count(self, engines: list[FakeEngine]) -> None:
+        registry = _registry()
+        with patch("sie_server.core.model_loader.load_adapter", side_effect=_engine_adapter(engines)):
+            await self._load_and_crash(registry, engines)
+            await self._load_and_crash(registry, engines)
+
+            registry.add_config(_make_config())
+            assert registry.get_failure(MODEL) is None
+
+            assert (await self._load_and_crash(registry, engines)).attempts == 1
 
 
 class TestSGLangEngineExitProbe:

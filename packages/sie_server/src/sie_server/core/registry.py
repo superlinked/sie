@@ -63,6 +63,8 @@ _ERR_MODEL_NOT_FOUND = "Model '{name}' not found in registry"
 _ERR_MODEL_NOT_LOADED = "Model '{name}' is not loaded"
 _ERR_MODEL_ALREADY_LOADED = "Model '{name}' is already loaded"
 
+_ENGINE_STABLE_UPTIME_S = 600.0
+
 
 class _ConfigChangedDuringLoadError(RuntimeError):
     """The downloaded config is no longer current; a later request may retry."""
@@ -333,6 +335,11 @@ class ModelRegistry:
         # short-circuits hot retry loops (see ``start_load_async``). Cleared
         # through ``clear_failure`` on a successful load or a config change.
         self._failed: dict[str, LoadFailure] = {}
+        # Consecutive engine exits per model. Survives the reload that clears
+        # ``_failed``, so an engine that dies after every load still backs off
+        # and eventually fails permanently; reset by a config change or by an
+        # engine that stayed up for ``_ENGINE_STABLE_UPTIME_S``.
+        self._engine_exits: dict[str, int] = {}
 
         # Background memory monitor
         self._monitor_task: asyncio.Task[None] | None = None
@@ -1123,6 +1130,11 @@ class ModelRegistry:
         """
         return self._failed.pop(name, None) is not None
 
+    def _clear_config_failures(self, name: str) -> None:
+        """Forget every failure recorded against ``name``'s previous config."""
+        self._engine_exits.pop(name, None)
+        self.clear_failure(name)
+
     def _bind_lifecycle_loop(self) -> asyncio.AbstractEventLoop:
         """Bind every asynchronous registry lifecycle operation to one loop."""
         loop = asyncio.get_running_loop()
@@ -1752,17 +1764,18 @@ class ModelRegistry:
             # For normal loads, load_async already discarded, so this is a no-op.
             self._loading.discard(name)
 
-    def _record_load_failure(self, name: str, exc: BaseException) -> None:
+    def _record_load_failure(self, name: str, exc: BaseException, *, attempts: int | None = None) -> None:
         """Classify ``exc`` and record a :class:`LoadFailure` for ``name``.
 
-        Increments ``attempts`` if a failure is already on file, which
-        doubles a transient class's cooldown and, past the attempt budget,
-        makes the failure permanent. Emits a log with structured fields so
-        operators see the actionable hint immediately rather than waiting
-        for the SDK's retry budget to elapse.
+        Increments ``attempts`` if a failure is already on file, unless the
+        caller supplies the count, which doubles a transient class's cooldown
+        and, past the attempt budget, makes the failure permanent. Emits a
+        log with structured fields so operators see the actionable hint
+        immediately rather than waiting for the SDK's retry budget to elapse.
         """
-        previous = self._failed.get(name)
-        attempts = (previous.attempts + 1) if previous is not None else 1
+        if attempts is None:
+            previous = self._failed.get(name)
+            attempts = (previous.attempts + 1) if previous is not None else 1
         classification = classify_load_error(exc, attempts=attempts)
         message = f"{type(exc).__name__}: {exc}"
         failure = LoadFailure(
@@ -2328,7 +2341,7 @@ class ModelRegistry:
         if self._model_filter is not None:
             self._model_filter.discard(model_id)
         self._model_dirs.pop(model_id, None)
-        self.clear_failure(model_id)
+        self._clear_config_failures(model_id)
         self._config_version += 1
 
     def _add_config_entry(self, config: ModelConfig, model_dir: Path | None = None) -> None:
@@ -2385,7 +2398,7 @@ class ModelRegistry:
         # broken adapter option). Clear any sticky failure so the next
         # request retries with the new config.
         for name in expanded_configs:
-            self.clear_failure(name)
+            self._clear_config_failures(name)
         self._config_version += 1
         # The config for an already-pinned model may have just arrived at runtime
         # (default Helm workers receive configs via the sidecar after a pin was
@@ -2456,7 +2469,7 @@ class ModelRegistry:
                     for name in new_configs:
                         self._model_dirs[name] = model_dir
                 for name in invalidated:
-                    self.clear_failure(name)
+                    self._clear_config_failures(name)
                 self._config_version += 1
 
             self._refresh_worker_metric_catalog()
@@ -2879,9 +2892,11 @@ class ModelRegistry:
 
         The exit is recorded as a transient ``ENGINE`` failure, so the model
         reports ``failed`` with the exit code while the cooldown runs and the
-        first request after it loads the model again. Each model is claimed
-        in the same step as its probe and unloaded through the ordinary
-        drain-then-teardown path, one at a time, without holding
+        first request after it loads the model again. The attempt count is
+        the number of consecutive exits, so an engine that dies after every
+        load backs off and eventually fails permanently. Each model is
+        claimed in the same step as its probe and unloaded through the
+        ordinary drain-then-teardown path, one at a time, without holding
         ``_load_lock``.
         """
         for name in list(self._loaded):
@@ -2891,12 +2906,16 @@ class ModelRegistry:
             exit_code = _engine_exit_code(loaded.adapter)
             if exit_code is None:
                 continue
+            info = self._memory_manager_for_model(name).get_model_info(name)
+            stayed_up = info is not None and time.monotonic() - info.loaded_at >= _ENGINE_STABLE_UPTIME_S
             claimed = self._begin_unload(name)
             if claimed is None:
                 continue
+            exits = 1 if stayed_up else self._engine_exits.get(name, 0) + 1
+            self._engine_exits[name] = exits
             error = EngineExitedError(f"Model '{name}' engine process exited with code {exit_code} after load")
             logger.error("%s; unloading it so the next request after the cooldown reloads it", error)
-            self._record_load_failure(name, error)
+            self._record_load_failure(name, error, attempts=exits)
             try:
                 await self._finish_unload(name, claimed, reason="other")
             except Exception:
