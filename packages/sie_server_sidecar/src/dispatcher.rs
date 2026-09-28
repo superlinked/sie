@@ -1879,17 +1879,34 @@ impl Dispatcher {
         handles.push(handle);
     }
 
-    /// `EnsureModelReady`, bounded by a parked group's readiness deadline;
-    /// `None` when the deadline passes first.
+    /// `EnsureModelReady` for `items`. A parked group's call is bounded by its
+    /// readiness deadline and progress-ACKs the group while it is pending, so
+    /// a slow call neither outlives the deadline nor lets JetStream redeliver
+    /// the group; `None` when the deadline passes first.
     async fn ensure_model_ready_by(
         &self,
         model_id: &str,
+        items: &[(WorkItem, Delivery)],
         ready_deadline: Option<tokio::time::Instant>,
     ) -> Option<Result<crate::ipc_types::EnsureModelReadyResponse, BackendError>> {
         let readiness = self.backend.ensure_model_ready(model_id);
-        match ready_deadline {
-            Some(deadline) => tokio::time::timeout_at(deadline, readiness).await.ok(),
-            None => Some(readiness.await),
+        let Some(deadline) = ready_deadline else {
+            return Some(readiness.await);
+        };
+        tokio::pin!(readiness);
+        let progress_every = Duration::from_secs(crate::nats_consumer::ACK_WAIT_SECS)
+            / READINESS_PROGRESS_ACK_WAIT_FRACTION as u32;
+        loop {
+            let next_progress = (tokio::time::Instant::now() + progress_every).min(deadline);
+            tokio::select! {
+                result = &mut readiness => return Some(result),
+                () = tokio::time::sleep_until(next_progress) => {
+                    if next_progress >= deadline {
+                        return None;
+                    }
+                    progress_all(items, &self.runtime_state.telemetry).await;
+                }
+            }
         }
     }
 
@@ -1938,7 +1955,10 @@ impl Dispatcher {
             if items.is_empty() {
                 return Ok(());
             }
-            let Some(readiness) = self.ensure_model_ready_by(model_id, ready_deadline).await else {
+            let Some(readiness) = self
+                .ensure_model_ready_by(model_id, &items, ready_deadline)
+                .await
+            else {
                 self.nak_group_past_ready_deadline(model_id, &items).await;
                 return Ok(());
             };
@@ -5727,26 +5747,29 @@ mod tests {
 
     /// Reports `LoadingInProgress` for one model until `loaded` is set and
     /// `Ready` for every other model; records which models were encoded.
-    /// When `stall_after_first_probe` is set, every readiness call for the
-    /// loading model after the first never returns.
+    /// When `later_probe_delay` is set, every readiness call for the loading
+    /// model after the first takes that long.
     struct LoadingModelBackend {
         loading_model: &'static str,
         loaded: AtomicBool,
-        stall_after_first_probe: bool,
+        later_probe_delay: Option<Duration>,
         probes: std::sync::atomic::AtomicUsize,
         encoded_models: std::sync::Mutex<Vec<String>>,
     }
 
     impl LoadingModelBackend {
         fn new(loading_model: &'static str) -> Arc<Self> {
-            Self::with_stall(loading_model, false)
+            Self::with_later_probe_delay(loading_model, None)
         }
 
-        fn with_stall(loading_model: &'static str, stall_after_first_probe: bool) -> Arc<Self> {
+        fn with_later_probe_delay(
+            loading_model: &'static str,
+            later_probe_delay: Option<Duration>,
+        ) -> Arc<Self> {
             Arc::new(Self {
                 loading_model,
                 loaded: AtomicBool::new(false),
-                stall_after_first_probe,
+                later_probe_delay,
                 probes: std::sync::atomic::AtomicUsize::new(0),
                 encoded_models: std::sync::Mutex::new(Vec::new()),
             })
@@ -5771,11 +5794,10 @@ mod tests {
             &self,
             model_id: &str,
         ) -> Result<crate::ipc_types::EnsureModelReadyResponse, BackendError> {
-            if model_id == self.loading_model
-                && self.probes.fetch_add(1, Ordering::SeqCst) > 0
-                && self.stall_after_first_probe
-            {
-                std::future::pending::<()>().await;
+            if model_id == self.loading_model && self.probes.fetch_add(1, Ordering::SeqCst) > 0 {
+                if let Some(delay) = self.later_probe_delay {
+                    tokio::time::sleep(delay).await;
+                }
             }
             let state = if model_id == self.loading_model && !self.loaded.load(Ordering::SeqCst) {
                 ReadinessState::LoadingInProgress
@@ -5963,9 +5985,34 @@ mod tests {
         slots
     }
 
+    /// Far longer than any readiness deadline the tests use.
+    const STALLED_PROBE: Duration = Duration::from_secs(1_000_000);
+
+    #[tokio::test(start_paused = true)]
+    async fn a_parked_readiness_call_slower_than_the_ack_wait_still_dispatches() {
+        let slow_probe = Duration::from_secs(crate::nats_consumer::ACK_WAIT_SECS * 3);
+        let backend = LoadingModelBackend::with_later_probe_delay("cold", Some(slow_probe));
+        let dispatcher = dispatcher_with_backend(backend.clone());
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        dispatcher
+            .dispatch_decoded(
+                local_group("cold-req", "cold", 0..2, &tx),
+                2,
+                Instant::now(),
+            )
+            .await;
+        backend.loaded.store(true, Ordering::SeqCst);
+        dispatcher
+            .join_parked_groups(crate::nats_consumer::redelivery_envelope() * 2)
+            .await;
+
+        assert_eq!(backend.encoded_models(), vec!["cold".to_string()]);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn a_stalled_readiness_call_does_not_outlive_the_parked_wait() {
-        let backend = LoadingModelBackend::with_stall("cold", true);
+        let backend = LoadingModelBackend::with_later_probe_delay("cold", Some(STALLED_PROBE));
         let dispatcher = dispatcher_with_backend(backend.clone());
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
@@ -5985,7 +6032,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn shutdown_aborts_a_parked_group_that_does_not_settle_in_time() {
-        let backend = LoadingModelBackend::with_stall("cold", true);
+        let backend = LoadingModelBackend::with_later_probe_delay("cold", Some(STALLED_PROBE));
         let dispatcher = dispatcher_with_backend(backend.clone());
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
