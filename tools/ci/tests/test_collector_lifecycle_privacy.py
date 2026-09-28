@@ -179,6 +179,20 @@ def test_lifecycle_allowlist_in_real_collector(tmp_path):
         send("untrusted-claimed-name", "response_body")
         send("sie-worker", "worker_generation", application=True)
         send("sie-dispatcher", "dispatch_attempt", application=True)
+        # Valid elapsed times have no daily ceiling. Preserve both numeric
+        # types, very large finite doubles, and zero at each receiver boundary.
+        long_timings = [(86400001, 86400000), (86400001.5, 86400000.5), (1e300, 1e299), (0.0, 0.0)]
+        for duration, first_token in long_timings:
+            for service, phase, application in [
+                ("sie-gateway", "response_body", False),
+                ("sie-worker", "worker_generation", True),
+            ]:
+                send(
+                    service,
+                    phase,
+                    application=application,
+                    changes={"duration_ms": duration, "first_token_ms": first_token},
+                )
         # Malformed protobuf can repeat a key: filters read the first value,
         # while keep_keys alone retains both. Rebuild the validated scalars.
         duplicate = ExportLogsServiceRequest()
@@ -264,7 +278,11 @@ def test_lifecycle_allowlist_in_real_collector(tmp_path):
             {"duration_ms": "payload-secret"},
             {"duration_ms": -1},
             {"duration_ms": float("nan")},
+            {"duration_ms": float("inf")},
+            {"duration_ms": float("-inf")},
             {"first_token_ms": float("nan")},
+            {"first_token_ms": float("inf")},
+            {"first_token_ms": float("-inf")},
             {"first_token_ms": "payload-secret"},
             {"first_token_ms": 100},
             {"event.schema.version": "2"},
@@ -305,10 +323,19 @@ def test_lifecycle_allowlist_in_real_collector(tmp_path):
                             completions.append(attrs)
                         else:
                             records.append((resource["service.name"], attrs))
-            if len(records) + len(completions) >= 6:
+            if len(records) + len(completions) >= 6 + 2 * len(long_timings):
                 deadline = min(deadline, time.monotonic() + 1)
         assert {service for service, _attrs in records} == {"sie-gateway", "sie-worker", "sie-dispatcher"}
-        assert len(records) == 4
+        assert len(records) == 4 + 2 * len(long_timings)
+        timings = []
+        for _, attrs in records:
+            values = [attrs[key] for key in ("duration_ms", "first_token_ms")]
+            assert all(value.WhichOneof("value") in {"double_value", "int_value"} for value in values)
+            timings.append(
+                tuple(value.double_value if value.HasField("double_value") else value.int_value for value in values)
+            )
+        for timing in long_timings:
+            assert timings.count(timing) == 2
         assert len(completions) == 2
         assert {attrs["event.schema.version"].string_value for attrs in completions} == {"1", "2"}
         allowed = {

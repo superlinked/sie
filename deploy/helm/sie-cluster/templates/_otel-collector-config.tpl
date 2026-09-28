@@ -595,7 +595,8 @@ processors:
         - 'attributes["outcome"] != "success" and attributes["outcome"] != "rejected" and attributes["outcome"] != "error" and attributes["outcome"] != "cancelled"'
         - 'attributes["error_class"] != "none" and attributes["error_class"] != "client_error" and attributes["error_class"] != "server_error" and attributes["error_class"] != "transport" and attributes["error_class"] != "timeout" and attributes["error_class"] != "worker" and attributes["error_class"] != "cancelled" and attributes["error_class"] != "protocol" and attributes["error_class"] != "other"'
         - 'not IsDouble(attributes["duration_ms"]) and not IsInt(attributes["duration_ms"])'
-        - 'attributes["duration_ms"] != attributes["duration_ms"] or attributes["duration_ms"] < 0 or attributes["duration_ms"] > 86400000'
+        # Collector 0.119 has no IsFinite: x - x is zero only for finite numeric values.
+        - 'attributes["duration_ms"] != attributes["duration_ms"] or attributes["duration_ms"] < 0 or attributes["duration_ms"] - attributes["duration_ms"] != 0'
         - 'attributes["first_token_ms"] != nil and not IsDouble(attributes["first_token_ms"]) and not IsInt(attributes["first_token_ms"])'
         - 'attributes["first_token_ms"] != nil and (attributes["first_token_ms"] != attributes["first_token_ms"] or attributes["first_token_ms"] < 0 or attributes["first_token_ms"] > attributes["duration_ms"])'
   filter/gateway_lifecycle_logs:

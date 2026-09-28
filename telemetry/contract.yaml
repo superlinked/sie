@@ -2657,7 +2657,7 @@ logs:
       operation: operation
       outcome: lifecycle_outcome
       error_class: lifecycle_error_class
-      duration_ms: nonnegative_phase_duration_ms
+      duration_ms: finite_nonnegative_phase_duration_ms
       first_token_ms: optional_nonnegative_first_content_delta_ms_from_phase_start
     correlation: [trace_id, span_id]
     export: [otlp]

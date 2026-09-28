@@ -109,8 +109,10 @@ classified without exporting their text or automatic exception events.
 phase, operation, outcome, bounded error class, duration, optional first-content
 timing, and structural trace/span IDs. Each phase emits once; no raw stdout or
 logging bridge is enabled. Service/phase pairs and exact numeric/string types
-are rechecked by the collector. Cancellation and rejection leave structural
-status UNSET; their safe record carries the distinction.
+are rechecked by the collector. Durations must be finite and nonnegative; they
+have no 24-hour ceiling. First-content timing must not exceed phase duration.
+Cancellation and rejection leave structural status UNSET; their safe record
+carries the distinction.
 
 **Retention is sampled and best effort.** Lifecycle logs require a valid sampled
 span context and the enabled safe-log exporter. They follow the enclosing head
