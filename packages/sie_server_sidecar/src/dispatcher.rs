@@ -1906,11 +1906,13 @@ impl Dispatcher {
                 }
             };
             tokio::select! {
-                result = &mut readiness => return Some(result),
+                // A ready response must not start work when shutdown is also ready.
+                biased;
                 () = shutdown_wait => {
                     nak_all(items, NAK_DELAY_DRAINING_MS, &self.runtime_state.telemetry).await;
                     return None;
                 }
+                result = &mut readiness => return Some(result),
                 () = tokio::time::sleep_until(next_progress) => {
                     if next_progress >= deadline {
                         self.nak_group_past_ready_deadline(model_id, items).await;
@@ -6135,6 +6137,48 @@ mod tests {
         );
         assert!(backend.encoded_models().is_empty());
         assert_eq!(Arc::strong_count(&dispatcher), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_wins_when_parked_readiness_is_already_ready() {
+        // Exercise repeated ties so randomized select ordering cannot hide dispatch
+        // after shutdown. Neither signal yields before the parked task resumes.
+        for _ in 0..32 {
+            let backend = LoadingModelBackend::new("cold");
+            let shutdown = Arc::new(Shutdown::new());
+            let mut dispatcher = dispatcher_with_backend(backend.clone());
+            Arc::get_mut(&mut dispatcher).unwrap().shutdown = Some(Arc::clone(&shutdown));
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+            dispatcher
+                .dispatch_decoded(
+                    local_group("cold-req", "cold", 0..2, &tx),
+                    2,
+                    Instant::now(),
+                )
+                .await;
+            assert_eq!(backend.probes.load(Ordering::SeqCst), 1);
+            backend.loaded.store(true, Ordering::SeqCst);
+            shutdown.fire();
+            dispatcher.join_parked_groups(Duration::from_secs(1)).await;
+
+            assert!(backend.encoded_models().is_empty());
+            let mut retries = Vec::new();
+            while let Ok(event) = rx.try_recv() {
+                match event {
+                    crate::delivery::LocalDeliveryEvent::Retry { slot, delay_ms, .. } => {
+                        retries.push((slot, delay_ms));
+                    }
+                    other => panic!("unexpected settlement: {other:?}"),
+                }
+            }
+            retries.sort_unstable();
+            assert_eq!(
+                retries,
+                vec![(0, NAK_DELAY_DRAINING_MS), (1, NAK_DELAY_DRAINING_MS)]
+            );
+            assert_eq!(Arc::strong_count(&dispatcher), 1);
+        }
     }
 
     #[tokio::test(start_paused = true)]
