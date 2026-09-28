@@ -172,8 +172,22 @@ struct RequestBody {
     dispatch_context: serde_bytes::ByteBuf,
     payload_digest: serde_bytes::ByteBuf,
     timeout_ms: i64,
+    #[serde(deserialize_with = "optional_trace_string")]
     traceparent: Option<String>,
+    #[serde(deserialize_with = "optional_trace_string")]
     tracestate: Option<String>,
+}
+
+// These optional fields used to be ignored as unknown keys. Malformed
+// telemetry must continue to leave the underlying request admissible.
+fn optional_trace_string<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    let value = rmpv::Value::deserialize(deserializer)?;
+    Ok(value
+        .as_str()
+        .filter(|value| value.len() <= 512)
+        .map(str::to_owned))
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -1861,6 +1875,25 @@ mod tests {
         assert!(spans[0].events.is_empty());
         assert!(spans[0].links.is_empty());
         provider.shutdown().unwrap();
+    }
+
+    #[test]
+    fn malformed_optional_carriers_do_not_reject_request_decode() {
+        for value in [
+            rmpv::Value::from(42),
+            rmpv::Value::Binary(vec![1, 2]),
+            rmpv::Value::Array(vec![]),
+            rmpv::Value::from("x".repeat(513)),
+        ] {
+            let frame = rmpv::Value::Map(vec![
+                ("traceparent".into(), value.clone()),
+                ("tracestate".into(), value),
+            ]);
+            let body: RequestBody =
+                rmp_serde::from_slice(&rmp_serde::to_vec_named(&frame).unwrap()).unwrap();
+            assert!(body.traceparent.is_none());
+            assert!(body.tracestate.is_none());
+        }
     }
 
     #[test]
