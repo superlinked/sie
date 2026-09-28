@@ -4,7 +4,8 @@
 ``sie_server.config.model.ModelConfig``; a test keeps it equal to the worker
 model. Only unknown keys and value types are enforced: ``required`` is dropped
 because append-only writes carry partial bodies, and cross-field rules stay
-with the worker.
+with the worker. JSON types apply strictly, so values pydantic's lax mode would
+coerce (a quoted number, a boolean in an integer field) are rejected.
 """
 
 from __future__ import annotations
