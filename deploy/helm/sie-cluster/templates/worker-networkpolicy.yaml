@@ -1,0 +1,30 @@
+{{- $networkPolicy := default (dict) .Values.workers.networkPolicy }}
+{{- if $networkPolicy.enabled }}
+{{- $maxWorkerChildCount := int (include "sie-cluster.worker.maxChildCount" .) }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "sie-cluster.fullname" . }}-worker
+  namespace: {{ include "sie-cluster.namespace" . }}
+  labels:
+    {{- include "sie-cluster.worker.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "sie-cluster.worker.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "sie-cluster.gateway.selectorLabels" . | nindent 14 }}
+      ports:
+        {{- range $i := until $maxWorkerChildCount }}
+        - port: {{ add $.Values.workers.common.port $i }}
+          protocol: TCP
+        {{- end }}
+    {{- with $networkPolicy.extraIngress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}

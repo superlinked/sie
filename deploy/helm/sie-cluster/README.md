@@ -755,7 +755,8 @@ fail-closed isolation behavior.
 `values-ha.yaml` is the tested composition of the durability knobs below with
 a replicated broker and a second gateway: two gateway replicas, a three-member
 NATS cluster with a JetStream file store per member, and file-backed work-queue
-streams replicated across all three. Layer it under a provider overlay:
+streams replicated across all three. It also enables the
+[worker NetworkPolicy](#worker-networkpolicy). Layer it under a provider overlay:
 
 ```bash
 helm install sie deploy/helm/sie-cluster \
@@ -1118,10 +1119,12 @@ contain the generated tokens.
 
 ## Ingress
 
-Enable the Ingress with `ingress.enabled=true` and route traffic to the gateway by
-hostname. Use the list-valued `ingress.hosts` to front the gateway with one or more
-hostnames — each entry becomes an Ingress rule (and, when TLS is enabled, a SAN on
-the cert):
+The Ingress is off by default, including in the AWS, GKE, AKS, and ACK
+overlays. Install an ingress controller first, then enable it with
+`ingress.enabled=true` and route traffic to the gateway by hostname. Use the
+list-valued `ingress.hosts` to front the gateway with one or more hostnames —
+each entry becomes an Ingress rule (and, when TLS is enabled, a SAN on the
+cert):
 
 ```yaml
 ingress:
@@ -1130,12 +1133,68 @@ ingress:
   hosts:
     - sie.example.com
     - api.example.com
+  tlsConfig:
+    enabled: true
 ```
 
 The singular `ingress.host` is the backward-compatible single-host shorthand; it is
 ignored whenever `ingress.hosts` is non-empty. With neither set the chart renders a
 host-less catch-all Ingress. All hosts share the single `ingress.tlsConfig.secretName`
 (one multi-SAN certificate).
+
+### Unauthenticated gateways
+
+The gateway authenticates nothing by default (`gateway.auth.mode: none`). While
+nothing authenticates requests, the chart refuses to render an Ingress that has
+no host or no TLS, because such an Ingress publishes the inference API and the
+pool API, which keeps GPU workers warm, to anyone who can reach the ingress
+controller. The render passes when any of the following holds:
+
+- the gateway requires a token: `gateway.auth.mode=static` with
+  `gateway.auth.tokenSecretName` naming a Secret of comma-separated tokens
+  (SDK clients send one as `api_key`/`apiKey`, or read it from `SIE_API_KEY`);
+- the oauth2-proxy edge is enabled (`auth.enabled=true`);
+- the Ingress is scoped to at least one host and has TLS
+  (`ingress.tlsConfig.enabled=true`, or `ingress.tlsConfig.mode=disabled` when
+  TLS terminates upstream);
+- `ingress.allowUnauthenticated=true` explicitly accepts an unauthenticated
+  Ingress, for example behind a private ingress controller.
+
+Independently of auth, the gateway bounds API-created pools: the warm floor
+(`minimum_worker_count`, default cap 4), the lease TTL (default cap 3600 s), and
+the number of live pools (default cap 64). Tune them with
+`SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT`, `SIE_GATEWAY_POOL_MAX_TTL_S`, and
+`SIE_GATEWAY_MAX_POOLS` in `gateway.extraEnv`.
+
+> **Upgrade note:** `values-aws.yaml`, `values-gke.yaml`, and `values-aks.yaml`
+> used to enable a host-less, TLS-less Ingress. Upgrading with those overlays
+> now removes that Ingress. To keep external access, set `ingress.enabled=true`
+> together with gateway auth, or with `ingress.hosts` and TLS. To keep the
+> previous unauthenticated catch-all Ingress unchanged, also set
+> `ingress.allowUnauthenticated=true`. An upgrade with `--reuse-values` keeps
+> `ingress.enabled=true` and fails the render until one of these is chosen.
+
+### Worker NetworkPolicy
+
+Worker pods serve an HTTP API without authentication of their own; the gateway
+is the only in-chart caller. `workers.networkPolicy.enabled=true` renders an
+ingress `NetworkPolicy` that admits connections to every worker HTTP port only
+from this release's gateway pods. Kubelet probes and traffic between containers
+of the same pod are unaffected. It requires a CNI that enforces NetworkPolicy.
+It is off by default and on in `values-ha.yaml`. Add
+`workers.networkPolicy.extraIngress` rules for any caller outside the chart that
+must reach workers directly:
+
+```yaml
+workers:
+  networkPolicy:
+    enabled: true
+    extraIngress:
+      - from:
+          - namespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: benchmarks
+```
 
 ## TLS / HTTPS
 

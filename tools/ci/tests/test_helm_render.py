@@ -209,9 +209,10 @@ def test_dashboards_cover_public_prometheus_metrics(tmp_path: Path) -> None:
     )
 
 
-def render_chart(tmp_path: Path, values: dict) -> subprocess.CompletedProcess[str]:
+def render_chart(tmp_path: Path, values: dict, overlays: tuple[str, ...] = ()) -> subprocess.CompletedProcess[str]:
     values_file = tmp_path / "chart-values.yaml"
     values_file.write_text(yaml.safe_dump(values), encoding="utf-8")
+    overlay_args = [arg for overlay in overlays for arg in ("-f", str(helm.CHART_DIR / overlay))]
     return subprocess.run(
         [
             "mise",
@@ -223,6 +224,7 @@ def render_chart(tmp_path: Path, values: dict) -> subprocess.CompletedProcess[st
             str(helm.CHART_DIR),
             "--namespace",
             "sie",
+            *(helm.validation_args(overlay_args) if overlays else []),
             "-f",
             str(values_file),
         ],
@@ -233,8 +235,8 @@ def render_chart(tmp_path: Path, values: dict) -> subprocess.CompletedProcess[st
     )
 
 
-def rendered_documents(tmp_path: Path, values: dict) -> list[dict]:
-    result = render_chart(tmp_path, values)
+def rendered_documents(tmp_path: Path, values: dict, overlays: tuple[str, ...] = ()) -> list[dict]:
+    result = render_chart(tmp_path, values, overlays)
     assert result.returncode == 0, result.stderr
     return [doc for doc in yaml.safe_load_all(result.stdout) if doc]
 
@@ -567,3 +569,135 @@ def test_reused_token_must_exist_and_have_at_least_32_characters(
     else:
         assert result.returncode != 0
         assert error.format(setting=setting) in result.stderr
+
+
+INGRESS_GUARD = "Refusing to render the gateway Ingress"
+CLOUD_PRESETS = ["values-aws.yaml", "values-gke.yaml", "values-aks.yaml", "values-ack.yaml"]
+
+
+def gateway_ingresses(documents: list[dict]) -> list[dict]:
+    return [
+        doc
+        for doc in documents
+        if doc["kind"] == "Ingress"
+        and any(
+            path["backend"]["service"]["name"].endswith("-gateway")
+            for rule in doc["spec"]["rules"]
+            for path in rule["http"]["paths"]
+        )
+    ]
+
+
+def worker_network_policies(documents: list[dict]) -> list[dict]:
+    return [
+        doc
+        for doc in documents
+        if doc["kind"] == "NetworkPolicy" and doc["metadata"]["labels"].get("app.kubernetes.io/component") == "worker"
+    ]
+
+
+@pytest.mark.parametrize("preset", CLOUD_PRESETS)
+def test_cloud_presets_do_not_publish_an_ingress(tmp_path: Path, preset: str) -> None:
+    assert gateway_ingresses(rendered_documents(tmp_path, {}, (preset,))) == []
+
+
+@pytest.mark.parametrize("preset", CLOUD_PRESETS)
+def test_enabling_a_bare_ingress_on_a_preset_fails_while_auth_is_off(tmp_path: Path, preset: str) -> None:
+    result = render_chart(tmp_path, {"ingress": {"enabled": True}}, (preset,))
+    assert result.returncode != 0
+    assert INGRESS_GUARD in result.stderr
+    assert "no host and no TLS" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("ingress", "missing"),
+    [
+        ({}, "no host and no TLS"),
+        ({"hosts": ["sie.example.com"]}, "no TLS"),
+        ({"host": "sie.example.com"}, "no TLS"),
+        ({"tlsConfig": {"enabled": True, "mode": "byo"}}, "no host"),
+    ],
+)
+def test_unauthenticated_ingress_without_host_or_tls_fails(tmp_path: Path, ingress: dict, missing: str) -> None:
+    result = render_chart(tmp_path, {"ingress": {"enabled": True, **ingress}})
+    assert result.returncode != 0
+    assert f"{INGRESS_GUARD}: it has {missing} while" in result.stderr
+    assert "ingress.allowUnauthenticated=true" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"ingress": {"hosts": ["sie.example.com"], "tlsConfig": {"enabled": True, "mode": "byo"}}},
+        {"ingress": {"host": "sie.example.com", "tls": {"enabled": True}}},
+        {"ingress": {"hosts": ["sie.example.com"], "tlsConfig": {"enabled": False, "mode": "disabled"}}},
+        {"gateway": {"auth": {"mode": "static", "tokenSecretName": "sie-gateway-auth"}}},
+        {"gateway": {"auth": {"mode": "token", "tokenSecretName": "sie-gateway-auth"}}},
+        {"ingress": {"allowUnauthenticated": True}},
+    ],
+)
+def test_ingress_renders_when_host_and_tls_or_auth_or_opt_in_are_set(tmp_path: Path, values: dict) -> None:
+    values = {**values, "ingress": {"enabled": True, **values.get("ingress", {})}}
+    assert len(gateway_ingresses(rendered_documents(tmp_path, values))) == 1
+
+
+def test_scoped_unauthenticated_ingress_keeps_its_host_and_tls(tmp_path: Path) -> None:
+    values = {
+        "ingress": {
+            "enabled": True,
+            "hosts": ["sie.example.com"],
+            "tlsConfig": {"enabled": True, "mode": "byo", "secretName": "sie-tls"},
+        }
+    }
+    (ingress,) = gateway_ingresses(rendered_documents(tmp_path, values))
+    assert [rule["host"] for rule in ingress["spec"]["rules"]] == ["sie.example.com"]
+    assert ingress["spec"]["tls"] == [{"hosts": ["sie.example.com"], "secretName": "sie-tls"}]
+
+
+def test_worker_network_policy_is_off_by_default(tmp_path: Path) -> None:
+    assert (
+        worker_network_policies(rendered_documents(tmp_path, {"workers": {"pools": {"l4": {"enabled": True}}}})) == []
+    )
+
+
+def test_ha_overlay_admits_only_gateway_pods_to_every_worker_port(tmp_path: Path) -> None:
+    values = {"workers": {"pools": {"l4": {"enabled": True, "gpu": {"count": 2}}}}}
+    documents = rendered_documents(tmp_path, values, ("values-aws.yaml", "values-ha.yaml"))
+    (policy,) = worker_network_policies(documents)
+    (gateway,) = [
+        doc
+        for doc in documents
+        if doc["kind"] == "Deployment" and doc["metadata"]["labels"].get("app.kubernetes.io/component") == "gateway"
+    ]
+    workers = [
+        doc for doc in documents if doc["kind"] == "StatefulSet" and doc["metadata"]["name"].startswith("sie-worker-")
+    ]
+    assert workers
+    selector = policy["spec"]["podSelector"]["matchLabels"]
+    for worker in workers:
+        pod_labels = worker["spec"]["template"]["metadata"]["labels"]
+        assert selector.items() <= pod_labels.items()
+    worker_ports = {
+        port["containerPort"]
+        for worker in workers
+        for container in worker["spec"]["template"]["spec"]["containers"]
+        if container["name"] != "worker-sidecar"
+        for port in container.get("ports", [])
+    }
+    assert policy["spec"]["policyTypes"] == ["Ingress"]
+    (rule,) = policy["spec"]["ingress"]
+    (peer,) = rule["from"]
+    assert peer["podSelector"]["matchLabels"].items() <= gateway["spec"]["template"]["metadata"]["labels"].items()
+    assert {port["port"] for port in rule["ports"]} == worker_ports == {8080, 8081}
+
+
+def test_worker_network_policy_appends_extra_ingress_rules(tmp_path: Path) -> None:
+    extra = {"from": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "bench"}}}]}
+    values = {
+        "workers": {
+            "networkPolicy": {"enabled": True, "extraIngress": [extra]},
+            "pools": {"l4": {"enabled": True}},
+        }
+    }
+    (policy,) = worker_network_policies(rendered_documents(tmp_path, values))
+    assert policy["spec"]["ingress"][1] == extra

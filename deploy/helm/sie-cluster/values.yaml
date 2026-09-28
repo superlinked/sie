@@ -841,6 +841,17 @@ workers:
           cpu: "2"
           memory: "2Gi"
 
+  # -- Ingress NetworkPolicy for worker pods. When enabled, only this release's
+  # gateway pods may open connections to the worker HTTP ports (the worker API
+  # has no authentication of its own); kubelet probes and in-pod sidecar
+  # traffic are unaffected. Requires a CNI that enforces NetworkPolicy.
+  # Disabled by default; values-ha.yaml enables it.
+  networkPolicy:
+    enabled: false
+    # -- Additional NetworkPolicy ingress rules (standard `from`/`ports`
+    # entries) for callers outside this chart that must reach workers directly.
+    extraIngress: []
+
   # -- Worker pools (one StatefulSet per enabled queuePool/machineProfile/bundle lane)
   # Each map entry creates a WorkerGroup family: one StatefulSet + one
   # pre-pull DaemonSet per enabled bundle.
@@ -1145,6 +1156,13 @@ ingress:
   enabled: false
   className: nginx
   annotations: {}
+  # -- Allow an Ingress with no host or no TLS while nothing authenticates
+  # requests (gateway.auth.mode=none and auth.enabled=false). The chart refuses
+  # that render by default, because it publishes the inference API and the
+  # pool API, which keeps GPU workers warm, to anyone who can reach the ingress
+  # controller. Set true only when the controller is private or another layer
+  # in front of it authenticates every request.
+  allowUnauthenticated: false
   # -- Hostnames served by the ingress. Each entry becomes an ingress rule and,
   # when tls.enabled, a SAN on the TLS cert (all hosts share tls.secretName).
   # Empty => host-less catch-all ingress.
