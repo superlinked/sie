@@ -1574,6 +1574,30 @@ profiles:
         assert resp.applied_models == sorted(previous)
         assert all(registry.get_config(name) is config for name, config in previous.items())
 
+    @pytest.mark.asyncio
+    async def test_replace_model_configs_valid_entry_wins_over_a_rejected_duplicate(self) -> None:
+        def request(epoch: int, model_configs: list[str]) -> ReplaceModelConfigsRequest:
+            return ReplaceModelConfigsRequest(
+                bundle_id="sglang",
+                epoch=epoch,
+                bundle_config_hash="",
+                models=[
+                    ReplaceModelConfigEntry(model_id="Qwen/Qwen3.6-27B", model_config=model_config)
+                    for model_config in model_configs
+                ],
+            )
+
+        registry = ModelRegistry(models_dir=None)
+        executor = QueueExecutor(registry)
+        await executor.replace_model_configs(request(7, [_qwen_profile_variant_yaml()]))
+
+        resp = await executor.replace_model_configs(
+            request(8, ["unknown_field: 1\n" + _qwen_profile_variant_yaml(), _qwen_default_only_yaml()])
+        )
+
+        assert resp.applied_models == ["Qwen/Qwen3.6-27B"]
+        assert not registry.has_model("Qwen/Qwen3.6-27B:rtx-pro-6000")
+
 
 # -----------------------------------------------------------------------------
 # SetPinnedModels
