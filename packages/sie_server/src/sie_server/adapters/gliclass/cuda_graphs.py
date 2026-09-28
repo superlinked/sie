@@ -438,8 +438,16 @@ class CudaGraphRunner:
                 self._recording_failed(key, exc)
                 return None, "recording_failed"
             # The graph answers the forward that recorded it, before the
-            # budget check below can drop it.
-            logits = self._replay(key, entry, inputs, max_num_classes)
+            # budget check below can drop it. Its first replay is part of
+            # recording it: a failure other than memory runs the forward
+            # eagerly and the graph is not kept.
+            try:
+                logits = self._replay(key, entry, inputs, max_num_classes)
+            except Exception as exc:
+                if is_oom_error(exc):
+                    raise
+                self._recording_failed(key, exc)
+                return None, "recording_failed"
             self._keep(key, entry, input_ids.device)
             self.stats.recorded += 1
             return logits, None

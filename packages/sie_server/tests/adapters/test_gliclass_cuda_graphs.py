@@ -476,6 +476,33 @@ class TestRecordingPolicy:
         assert runner.run(_inputs(1, 32), 4, "bucketed") is None
         assert runner.stats.eager["disabled"] == 1
 
+    def test_a_first_replay_that_fails_counts_as_a_failed_recording(self) -> None:
+        runner = _Runner()
+        runner.run(_inputs(1, 100), 4, "bucketed")
+        runner.replay_error = RuntimeError("the head failed")
+
+        assert runner.run(_inputs(1, 200), 4, "bucketed") is None  # the adapter answers eagerly
+
+        assert set(runner._graphs) == {(1, 128)}  # the new graph is not kept
+        assert runner.stats.recording_failures == 1
+        assert runner.stats.eager == {"recording_failed": 1}
+        runner.replay_error = None
+        assert runner.run(_inputs(1, 200), 4, "bucketed") is None  # not recorded again
+        assert runner.stats.eager["failed_shape"] == 1
+        assert not cuda_graphs_module._RECORDING_LOCK.locked()
+
+    def test_a_first_replay_that_runs_out_of_memory_reaches_oom_recovery(self) -> None:
+        runner = _Runner()
+        runner.run(_inputs(1, 100), 4, "bucketed")
+        runner.replay_error = torch.cuda.OutOfMemoryError("CUDA out of memory")
+
+        with pytest.raises(torch.cuda.OutOfMemoryError):
+            runner.run(_inputs(1, 200), 4, "bucketed")
+
+        assert (1, 224) not in runner._graphs
+        assert runner.stats.recording_failures == 0
+        assert not cuda_graphs_module._RECORDING_LOCK.locked()
+
     def test_running_out_of_memory_while_recording_pauses_recording(self) -> None:
         runner = _Runner()
         runner.run(_inputs(1, 100), 4, "bucketed")
