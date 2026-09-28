@@ -117,6 +117,7 @@ class TestNamedVectorSearch:
             ]
 
             named_vectors = vectorizer.embed_documents(texts)
+            assert all(set(vectors) == {"dense", "multivector"} for vectors in named_vectors)
             collection.data.insert_many(
                 [
                     wvc.data.DataObject(
@@ -126,6 +127,10 @@ class TestNamedVectorSearch:
                     for t, v in zip(texts, named_vectors)
                 ]
             )
+
+            stored = collection.query.fetch_objects(limit=len(texts), include_vector=["multivector"])
+            assert len(stored.objects) == len(texts)
+            assert all(obj.vector["multivector"] for obj in stored.objects)
 
             query_named = vectorizer.embed_query("neural networks")
             results = collection.query.near_vector(

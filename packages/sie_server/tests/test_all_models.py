@@ -445,6 +445,7 @@ _BGE_M3_CPU_BFLOAT16 = pytest.mark.xfail(
         "The default profile's compute_precision: bfloat16 also applies on CPU, so BGEM3Adapter runs in "
         "bfloat16 and drifts from the float32 FlagEmbedding output pinned here (bge_m3_flag still matches it)"
     ),
+    raises=AssertionError,
     strict=True,
 )
 
