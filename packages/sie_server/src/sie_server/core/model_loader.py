@@ -524,9 +524,9 @@ class ModelLoader:
              run; it cannot be interrupted from outside.
           2. The wedged executor is ``shutdown(wait=False)``'d and replaced
              with a fresh single-worker pool so subsequent loads do not
-             queue behind the leaked thread (the registry holds
-             ``_load_lock`` while awaiting us, so this happens with the
-             registry quiesced).
+             queue behind the leaked thread (the registry holds its load
+             admission lock while awaiting us, so no other load is using
+             the executor).
           3. A structured error is logged.
           4. :class:`ModelLoadTimeoutError` is raised; the registry's
              ``_record_load_failure`` classifies it as ``TIMEOUT``, records

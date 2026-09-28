@@ -4,8 +4,9 @@
 //!
 //!   fetch -> decode + validate (subject, reply_subject, model_id)
 //!         -> group by model_id
-//!         -> per model (concurrent, capped by batch_semaphore):
-//!              EnsureModelReady
+//!         -> per model (concurrent):
+//!              EnsureModelReady (still loading -> park the group in its own task)
+//!              then, capped by batch_semaphore:
 //!              apply per-model batch_budget (overflow -> NAK fast)
 //!              fan out encode/score/extract concurrently:
 //!                 resolve payload -> IPC ProcessXxxBatch -> publish + ACK
@@ -578,9 +579,17 @@ pub struct Dispatcher {
     /// `SIE_PULL_QUANTUM_INCLUDE_QUEUE_MS=1`. See
     /// `crate::pull_quantum_includes_queue_ms` for the rationale.
     pub latency_tracker: Arc<Mutex<LatencyTracker>>,
-    /// Caps concurrent model-group processing. Acquired once per group,
-    /// held for the lifetime of the encode/score/extract fan-out.
+    /// Caps concurrent model-group processing. Acquired once per group
+    /// after its model is ready, held for the lifetime of the
+    /// encode/score/extract fan-out.
     pub batch_semaphore: Arc<Semaphore>,
+    /// Caps queue items parked while their model loads, at one fetch
+    /// (`SIE_NATS_FETCH_BUDGET`). A parked item gives its pull-loop admission
+    /// permit back and holds one of these instead, so a cold model cannot
+    /// stop the pull loop admitting work for models that are already loaded.
+    parked_item_permits: Arc<Semaphore>,
+    /// Groups parked while their model loads, joined at shutdown.
+    parked_group_handles: Arc<std::sync::Mutex<Vec<JoinHandle<()>>>>,
     /// Bounds the largest CPU allocation path independently of batch fan-out.
     /// One 12-minute 48 kHz decode can transiently hold about 230 MiB.
     audio_prep_semaphore: Arc<Semaphore>,
@@ -670,6 +679,8 @@ impl Dispatcher {
             runtime_state,
             latency_tracker,
             batch_semaphore: Arc::new(Semaphore::new(default_max_concurrent_batches())),
+            parked_item_permits: Arc::new(Semaphore::new(default_batch_budget().max(1) as usize)),
+            parked_group_handles: Arc::new(std::sync::Mutex::new(Vec::new())),
             audio_prep_semaphore: Arc::new(Semaphore::new(default_audio_prep_permits())),
             tokenizer_registry,
             scheduler_registry,
@@ -1016,8 +1027,10 @@ impl Dispatcher {
     ///
     /// Concurrency:
     /// * group by `model_id` only.
-    /// * model groups run concurrently, capped by `batch_semaphore` to
-    ///   avoid ACK-timeout storms.
+    /// * model groups run concurrently; once a group's model is ready its
+    ///   dispatch is capped by `batch_semaphore` to avoid ACK-timeout storms,
+    ///   and a group whose model is still loading is parked in its own task
+    ///   so this call does not wait for the load.
     /// * within a model, encode/score/extract run concurrently via
     ///   `tokio::join!` so slow payload fetches don't block other ops.
     pub(crate) async fn handle_batch(self: &Arc<Self>, messages: Vec<QueuedMessage>) {
@@ -1203,22 +1216,7 @@ impl Dispatcher {
         for (model_id, items) in model_groups {
             let this = Arc::clone(self);
             futs.push(async move {
-                let permit = match this.batch_semaphore.clone().acquire_owned().await {
-                    Ok(p) => p,
-                    Err(_) => {
-                        warn!(model = %model_id, "batch semaphore closed — dropping group");
-                        return;
-                    }
-                };
-                let count_model_group_inflight = this.scheduler_registry.is_none();
-                if count_model_group_inflight {
-                    this.runtime_state.inflight_batches.inc();
-                }
-                let result = this.handle_model_group(&model_id, items).await;
-                if count_model_group_inflight {
-                    this.runtime_state.inflight_batches.dec();
-                }
-                drop(permit);
+                let result = this.handle_model_group(&model_id, items, None).await;
                 if let Err(e) = result {
                     warn!(model = %model_id, error = %ErrChain(&e), "model group handling failed");
                 }
@@ -1822,10 +1820,115 @@ impl Dispatcher {
         }
     }
 
+    /// Move a group whose model is still loading into its own task, so the
+    /// wait holds no batch permit, keeps no pull-loop dispatch task alive,
+    /// and gives back each item's pull-loop admission permit. Items trade
+    /// that permit for a parked-item permit; items beyond the parked-item
+    /// capacity are NAKed for redelivery rather than held.
+    fn park_model_group(self: &Arc<Self>, model_id: &str, items: Vec<(WorkItem, Delivery)>) {
+        let mut parked = Vec::with_capacity(items.len());
+        let mut overflow = Vec::new();
+        for (wi, mut delivery) in items {
+            if delivery.holds_admission_permit() {
+                match Arc::clone(&self.parked_item_permits).try_acquire_owned() {
+                    Ok(permit) => delivery.exchange_admission_permit(permit),
+                    Err(_) => {
+                        overflow.push((wi, delivery));
+                        continue;
+                    }
+                }
+            }
+            parked.push((wi, delivery));
+        }
+        // Parked items are progress-ACKed, so JetStream never redelivers
+        // them on its own; bound the wait by the envelope it would give an
+        // unacknowledged message instead.
+        let ready_deadline =
+            tokio::time::Instant::now() + crate::nats_consumer::redelivery_envelope();
+        let this = Arc::clone(self);
+        let model = model_id.to_string();
+        let handle = tokio::spawn(async move {
+            if !overflow.is_empty() {
+                info!(
+                    model = %model,
+                    overflow = overflow.len(),
+                    "parked-item capacity exhausted while the model loads — NAKing overflow"
+                );
+                nak_all(
+                    &overflow,
+                    base_nak_delay_ms(),
+                    &this.runtime_state.telemetry,
+                )
+                .await;
+            }
+            if parked.is_empty() {
+                return;
+            }
+            if let Err(e) = this
+                .handle_model_group(&model, parked, Some(ready_deadline))
+                .await
+            {
+                warn!(model = %model, error = %ErrChain(&e), "parked model group handling failed");
+            }
+        });
+        let mut handles = self
+            .parked_group_handles
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        handles.retain(|h| !h.is_finished());
+        handles.push(handle);
+    }
+
+    /// `EnsureModelReady` for `items`. A parked group's call is bounded by its
+    /// readiness deadline and progress-ACKs the group while it is pending, so
+    /// a slow call neither outlives the deadline nor lets JetStream redeliver
+    /// the group. `None` when the group was NAKed instead: the deadline passed
+    /// first, or a progress ACK failed.
+    async fn ensure_model_ready_by(
+        &self,
+        model_id: &str,
+        items: &[(WorkItem, Delivery)],
+        ready_deadline: Option<tokio::time::Instant>,
+    ) -> Option<Result<crate::ipc_types::EnsureModelReadyResponse, BackendError>> {
+        let readiness = self.backend.ensure_model_ready(model_id);
+        let Some(deadline) = ready_deadline else {
+            return Some(readiness.await);
+        };
+        tokio::pin!(readiness);
+        let progress_every = Duration::from_secs(crate::nats_consumer::ACK_WAIT_SECS)
+            / READINESS_PROGRESS_ACK_WAIT_FRACTION as u32;
+        loop {
+            let next_progress = (tokio::time::Instant::now() + progress_every).min(deadline);
+            tokio::select! {
+                result = &mut readiness => return Some(result),
+                () = tokio::time::sleep_until(next_progress) => {
+                    if next_progress >= deadline {
+                        self.nak_group_past_ready_deadline(model_id, items).await;
+                        return None;
+                    }
+                    if !progress_all(items, &self.runtime_state.telemetry).await {
+                        nak_all(items, base_nak_delay_ms(), &self.runtime_state.telemetry).await;
+                        return None;
+                    }
+                }
+            }
+        }
+    }
+
+    async fn nak_group_past_ready_deadline(&self, model_id: &str, items: &[(WorkItem, Delivery)]) {
+        info!(
+            model = %model_id,
+            group_size = items.len(),
+            "model not ready within the parked readiness wait — NAKing group"
+        );
+        nak_all(items, base_nak_delay_ms(), &self.runtime_state.telemetry).await;
+    }
+
     async fn handle_model_group(
         self: &Arc<Self>,
         model_id: &str,
         items: Vec<(WorkItem, Delivery)>,
+        ready_deadline: Option<tokio::time::Instant>,
     ) -> Result<(), DispatchError> {
         let mut items = self
             .retain_uncancelled(items, "before_model_readiness")
@@ -1857,7 +1960,13 @@ impl Dispatcher {
             if items.is_empty() {
                 return Ok(());
             }
-            let readiness_resp = match self.backend.ensure_model_ready(model_id).await {
+            let Some(readiness) = self
+                .ensure_model_ready_by(model_id, &items, ready_deadline)
+                .await
+            else {
+                return Ok(());
+            };
+            let readiness_resp = match readiness {
                 Ok(r) => r,
                 Err(e) => {
                     warn!(
@@ -1892,6 +2001,14 @@ impl Dispatcher {
             if let Some(delay_ms) =
                 readiness_progress_delay_ms(&readiness_resp.state, base_delay_ms)
             {
+                let Some(ready_deadline) = ready_deadline else {
+                    self.park_model_group(model_id, items);
+                    return Ok(());
+                };
+                if tokio::time::Instant::now() >= ready_deadline {
+                    self.nak_group_past_ready_deadline(model_id, &items).await;
+                    return Ok(());
+                }
                 info!(
                     model = %model_id,
                     group_size,
@@ -1918,6 +2035,21 @@ impl Dispatcher {
             nak_all(&items, base_delay_ms, &self.runtime_state.telemetry).await;
             return Ok(());
         };
+
+        // A parked group's last progress ACK may be a full readiness delay
+        // old; refresh it so the batch-permit wait starts from a full ACK wait.
+        if ready_deadline.is_some() && !progress_all(&items, &self.runtime_state.telemetry).await {
+            nak_all(&items, base_delay_ms, &self.runtime_state.telemetry).await;
+            return Ok(());
+        }
+        let Ok(_batch_permit) = self.batch_semaphore.acquire().await else {
+            warn!(model = %model_id, "batch semaphore closed — dropping group");
+            return Ok(());
+        };
+        let _inflight_batch = self
+            .scheduler_registry
+            .is_none()
+            .then(|| InflightBatchGuard::enter(Arc::clone(&self.runtime_state)));
 
         items = self
             .retain_uncancelled(items, "after_model_readiness")
@@ -3119,6 +3251,45 @@ impl Dispatcher {
     pub async fn take_generation_handles(&self) -> Vec<JoinHandle<()>> {
         let mut guard = self.generation_handles.lock().await;
         guard.drain(..).collect()
+    }
+
+    /// Wait, up to `deadline`, for groups parked while their model loads.
+    /// Called at shutdown after the pull loops stop and before the scheduler
+    /// drain: a parked group sees the shutdown signal, NAKs its items and
+    /// exits, or enqueues them if its model became ready first.
+    pub async fn join_parked_groups(&self, deadline: Duration) {
+        let handles: Vec<JoinHandle<()>> = self
+            .parked_group_handles
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .drain(..)
+            .collect();
+        if handles.is_empty() {
+            return;
+        }
+        let mut pending = handles;
+        let joined = tokio::time::timeout(deadline, async {
+            while let Some(handle) = pending.last_mut() {
+                let _ = handle.await;
+                pending.pop();
+            }
+        })
+        .await;
+        if joined.is_err() {
+            // An aborted group drops its deliveries unsettled, so JetStream
+            // redelivers them after the ACK wait.
+            warn!(
+                parked_groups = pending.len(),
+                deadline_ms = deadline.as_millis() as u64,
+                "parked model groups did not settle before the shutdown deadline — aborting them"
+            );
+            for handle in &pending {
+                handle.abort();
+            }
+            for handle in pending {
+                let _ = handle.await;
+            }
+        }
     }
 
     /// Resolve every encode item's payload then submit it into the
@@ -5576,6 +5747,361 @@ mod tests {
             payload_fetch_ms: 0.0,
             prepared_tokens: None,
         })
+    }
+
+    /// Reports `LoadingInProgress` for one model until `loaded` is set and
+    /// `Ready` for every other model; records which models were encoded.
+    /// When `later_probe_delay` is set, every readiness call for the loading
+    /// model after the first takes that long.
+    struct LoadingModelBackend {
+        loading_model: &'static str,
+        loaded: AtomicBool,
+        later_probe_delay: Option<Duration>,
+        probes: std::sync::atomic::AtomicUsize,
+        encoded_models: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl LoadingModelBackend {
+        fn new(loading_model: &'static str) -> Arc<Self> {
+            Self::with_later_probe_delay(loading_model, None)
+        }
+
+        fn with_later_probe_delay(
+            loading_model: &'static str,
+            later_probe_delay: Option<Duration>,
+        ) -> Arc<Self> {
+            Arc::new(Self {
+                loading_model,
+                loaded: AtomicBool::new(false),
+                later_probe_delay,
+                probes: std::sync::atomic::AtomicUsize::new(0),
+                encoded_models: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+
+        fn encoded_models(&self) -> Vec<String> {
+            self.encoded_models.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::backend::InferenceBackend for LoadingModelBackend {
+        fn name(&self) -> &'static str {
+            "loading-model"
+        }
+
+        fn supports(&self, _model_id: &str) -> bool {
+            true
+        }
+
+        async fn ensure_model_ready(
+            &self,
+            model_id: &str,
+        ) -> Result<crate::ipc_types::EnsureModelReadyResponse, BackendError> {
+            if model_id == self.loading_model && self.probes.fetch_add(1, Ordering::SeqCst) > 0 {
+                if let Some(delay) = self.later_probe_delay {
+                    tokio::time::sleep(delay).await;
+                }
+            }
+            let state = if model_id == self.loading_model && !self.loaded.load(Ordering::SeqCst) {
+                ReadinessState::LoadingInProgress
+            } else {
+                ReadinessState::Ready
+            };
+            Ok(crate::ipc_types::EnsureModelReadyResponse {
+                state,
+                batch_budget: None,
+                descriptor: None,
+            })
+        }
+
+        async fn process_encode_batch(
+            &self,
+            req: ProcessEncodeBatchRequest,
+        ) -> Result<BatchOutcome, BackendError> {
+            self.encoded_models
+                .lock()
+                .unwrap()
+                .push(req.model_id.clone());
+            let outcomes = req
+                .items
+                .iter()
+                .map(|item| {
+                    outcome(
+                        &item.request_id,
+                        item.item_index,
+                        Disposition::NakRetry,
+                        None,
+                        None,
+                    )
+                })
+                .collect();
+            Ok(BatchOutcome {
+                outcomes,
+                batched_f16_multivectors: Vec::new(),
+            })
+        }
+
+        async fn process_score_batch(
+            &self,
+            _req: ProcessScoreBatchRequest,
+        ) -> Result<BatchOutcome, BackendError> {
+            Err(BackendError::UnsupportedModel("score".into()))
+        }
+
+        async fn process_extract_batch(
+            &self,
+            _req: ProcessExtractBatchRequest,
+        ) -> Result<BatchOutcome, BackendError> {
+            Err(BackendError::UnsupportedModel("extract".into()))
+        }
+    }
+
+    fn dispatcher_with_backend(backend: SharedBackend) -> Arc<Dispatcher> {
+        let runtime_state = Arc::new(RuntimeState::new());
+        Arc::new(Dispatcher::new(
+            backend,
+            adapter_pool_with_runtime_state(Arc::clone(&runtime_state)),
+            Arc::new(crate::payload_store::LocalPayloadStore::new(
+                None::<PathBuf>,
+            )),
+            None,
+            "worker-test".into(),
+            runtime_state,
+            Arc::new(Mutex::new(LatencyTracker::new(200, 10))),
+            TokenizerRegistry::empty(),
+            None,
+            None,
+            None,
+            None,
+            BatchCancelState::default(),
+            RequestCancelState::new(Duration::from_secs(60)),
+        ))
+    }
+
+    fn local_group(
+        request: &str,
+        model: &str,
+        slots: std::ops::Range<u32>,
+        tx: &tokio::sync::mpsc::UnboundedSender<crate::delivery::LocalDeliveryEvent>,
+    ) -> Vec<(WorkItem, Delivery)> {
+        slots
+            .map(|slot| {
+                (
+                    wi(request, slot, model, "encode"),
+                    Delivery::Local(LocalDelivery::new(slot as usize, 0, tx.clone())),
+                )
+            })
+            .collect()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn loading_model_group_is_parked_while_other_models_dispatch() {
+        let backend = LoadingModelBackend::new("cold");
+        let dispatcher = dispatcher_with_backend(backend.clone());
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        // Under the paused clock any wait for the load would run the
+        // timeout out; parking returns without waiting.
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            dispatcher.dispatch_decoded(
+                local_group("cold-req", "cold", 0..3, &tx),
+                3,
+                Instant::now(),
+            ),
+        )
+        .await
+        .expect("a loading model must not hold the dispatch call");
+        assert_eq!(
+            dispatcher.batch_semaphore.available_permits(),
+            default_max_concurrent_batches(),
+            "a parked group must not hold a batch permit"
+        );
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            dispatcher.dispatch_decoded(
+                local_group("warm-req", "warm", 3..4, &tx),
+                1,
+                Instant::now(),
+            ),
+        )
+        .await
+        .expect("a loaded model must dispatch while another model loads");
+        assert_eq!(backend.encoded_models(), vec!["warm".to_string()]);
+
+        backend.loaded.store(true, Ordering::SeqCst);
+        dispatcher.join_parked_groups(Duration::from_secs(60)).await;
+        assert_eq!(
+            backend.encoded_models(),
+            vec!["warm".to_string(), "cold".to_string()],
+            "the parked group dispatches once its model is ready"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn parked_group_is_naked_when_its_model_never_becomes_ready() {
+        let backend = LoadingModelBackend::new("cold");
+        let dispatcher = dispatcher_with_backend(backend.clone());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        dispatcher
+            .dispatch_decoded(
+                local_group("cold-req", "cold", 0..2, &tx),
+                2,
+                Instant::now(),
+            )
+            .await;
+        dispatcher
+            .join_parked_groups(crate::nats_consumer::redelivery_envelope() * 2)
+            .await;
+
+        let mut retried = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                crate::delivery::LocalDeliveryEvent::Retry { slot, delay_ms, .. } => {
+                    retried.push((slot, delay_ms));
+                }
+                crate::delivery::LocalDeliveryEvent::Result { slot, .. } => {
+                    panic!("slot {slot} settled with a result instead of a retry")
+                }
+            }
+        }
+        retried.sort_unstable();
+        assert_eq!(
+            retried,
+            vec![(0, base_nak_delay_ms()), (1, base_nak_delay_ms())]
+        );
+        assert!(backend.encoded_models().is_empty());
+    }
+
+    fn retried_slots(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<crate::delivery::LocalDeliveryEvent>,
+    ) -> Vec<usize> {
+        let mut slots = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let crate::delivery::LocalDeliveryEvent::Retry { slot, .. } = event {
+                slots.push(slot);
+            }
+        }
+        slots.sort_unstable();
+        slots
+    }
+
+    /// Far longer than any readiness deadline the tests use.
+    const STALLED_PROBE: Duration = Duration::from_secs(1_000_000);
+
+    /// A NATS delivery whose ACK, NAK and progress calls fail: it has no
+    /// reply subject and its client never reaches a server.
+    async fn unacknowledgeable_nats_delivery() -> Delivery {
+        let client = async_nats::ConnectOptions::new()
+            .retry_on_initial_connect()
+            .connect("nats://127.0.0.1:1")
+            .await
+            .expect("an offline client needs no server");
+        let message = Message {
+            message: async_nats::Message {
+                subject: "sie.work.test".into(),
+                reply: None,
+                payload: Default::default(),
+                headers: None,
+                status: None,
+                description: None,
+                length: 0,
+            },
+            context: async_nats::jetstream::new(client),
+        };
+        Delivery::Nats(message, None)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_progress_ack_ends_the_parked_wait() {
+        let slow_probe = Duration::from_secs(crate::nats_consumer::ACK_WAIT_SECS * 3);
+        let backend = LoadingModelBackend::with_later_probe_delay("cold", Some(slow_probe));
+        let dispatcher = dispatcher_with_backend(backend.clone());
+        let group = vec![(
+            wi("cold-req", 0, "cold", "encode"),
+            unacknowledgeable_nats_delivery().await,
+        )];
+
+        dispatcher.dispatch_decoded(group, 1, Instant::now()).await;
+        backend.loaded.store(true, Ordering::SeqCst);
+        let started = tokio::time::Instant::now();
+        dispatcher
+            .join_parked_groups(crate::nats_consumer::redelivery_envelope() * 2)
+            .await;
+
+        assert!(
+            started.elapsed() < slow_probe,
+            "the wait must end at the first failed progress ACK, not when readiness returns"
+        );
+        assert!(backend.encoded_models().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_parked_readiness_call_slower_than_the_ack_wait_still_dispatches() {
+        let slow_probe = Duration::from_secs(crate::nats_consumer::ACK_WAIT_SECS * 3);
+        let backend = LoadingModelBackend::with_later_probe_delay("cold", Some(slow_probe));
+        let dispatcher = dispatcher_with_backend(backend.clone());
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        dispatcher
+            .dispatch_decoded(
+                local_group("cold-req", "cold", 0..2, &tx),
+                2,
+                Instant::now(),
+            )
+            .await;
+        backend.loaded.store(true, Ordering::SeqCst);
+        dispatcher
+            .join_parked_groups(crate::nats_consumer::redelivery_envelope() * 2)
+            .await;
+
+        assert_eq!(backend.encoded_models(), vec!["cold".to_string()]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_readiness_call_does_not_outlive_the_parked_wait() {
+        let backend = LoadingModelBackend::with_later_probe_delay("cold", Some(STALLED_PROBE));
+        let dispatcher = dispatcher_with_backend(backend.clone());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        dispatcher
+            .dispatch_decoded(
+                local_group("cold-req", "cold", 0..2, &tx),
+                2,
+                Instant::now(),
+            )
+            .await;
+        dispatcher
+            .join_parked_groups(crate::nats_consumer::redelivery_envelope() * 2)
+            .await;
+
+        assert_eq!(retried_slots(&mut rx), vec![0, 1]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_aborts_a_parked_group_that_does_not_settle_in_time() {
+        let backend = LoadingModelBackend::with_later_probe_delay("cold", Some(STALLED_PROBE));
+        let dispatcher = dispatcher_with_backend(backend.clone());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        dispatcher
+            .dispatch_decoded(
+                local_group("cold-req", "cold", 0..2, &tx),
+                2,
+                Instant::now(),
+            )
+            .await;
+        dispatcher.join_parked_groups(Duration::from_secs(1)).await;
+
+        assert_eq!(
+            Arc::strong_count(&dispatcher),
+            1,
+            "the aborted parked task must have released the dispatcher"
+        );
+        assert!(retried_slots(&mut rx).is_empty());
     }
 
     #[test]

@@ -46,11 +46,15 @@ async def _wait_until(predicate, timeout_s: float = 10.0) -> None:
 # -- Scenario: evict during load (latch-sequenced) -------------------------------
 
 
-async def test_evict_during_load_returns_lock_timeout(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Characterizes the drain/load-under-lock stall (registry.py:1668-1678):
-    while a load holds the global load-lock, a concurrent eviction attempt
-    reports LOCK_TIMEOUT rather than deadlocking, and completes once the
-    load finishes.
+async def test_evict_during_load_does_not_wait_for_the_load(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """An eviction requested while another model's load is pinned mid-flight
+    completes at once.
+
+    **A conscious flip.** This test used to characterize the opposite: the
+    load held the registry load lock across the adapter load, so the same
+    eviction reported LOCK_TIMEOUT until the load finished. The load now
+    holds only the admission lock there, and the load lock guards short
+    decisions, so an OOM-recovery eviction no longer waits out a cold load.
     """
     monkeypatch.setenv(SIE_FAKE_MEMORY_BUDGET_ENV, "1GiB")
     latch = tmp_path / "release-load"
@@ -62,23 +66,20 @@ async def test_evict_during_load_returns_lock_timeout(monkeypatch: pytest.Monkey
     await registry.load_async("sie-fake:small-a", device="cpu")
 
     load_task = asyncio.create_task(registry.load_async("sie-fake:small-b", device="cpu"))
-    # Deterministic sequencing: wait until the in-flight load holds the lock.
+    # Deterministic sequencing: wait until the in-flight load is admitted.
     # Private-state reach is deliberate — the registry exposes no public
     # "load in flight" observation seam, and polling the lock is the only
     # race-free way to sequence this characterization.
-    await _wait_until(lambda: registry._get_load_lock().locked())
+    await _wait_until(lambda: registry._get_load_admission_lock().locked())
 
     # The race: eviction requested while the load is pinned mid-flight.
-    result = await registry.evict_lru_excluding("sie-fake:small-b", timeout_s=0.2)
-    assert result is EvictionResult.LOCK_TIMEOUT
+    result = await registry.evict_lru_excluding("sie-fake:small-b", timeout_s=5.0)
+    assert result is EvictionResult.EVICTED
+    assert not load_task.done()
+    assert registry.memory_manager.loaded_models == []
 
     latch.touch()
     await load_task
-    assert set(registry.memory_manager.loaded_models) == {"sie-fake:small-a", "sie-fake:small-b"}
-
-    # After the load releases the lock the same eviction succeeds.
-    result = await registry.evict_lru_excluding("sie-fake:small-b", timeout_s=5.0)
-    assert result is EvictionResult.EVICTED
     assert registry.memory_manager.loaded_models == ["sie-fake:small-b"]
 
 
@@ -87,7 +88,7 @@ async def test_evict_during_load_returns_lock_timeout(monkeypatch: pytest.Monkey
 
 async def test_concurrent_cross_model_load_under_pressure(monkeypatch: pytest.MonkeyPatch) -> None:
     """Three models race to load into a 150 MiB budget (64+64+128 MiB
-    declared). The global load-lock serializes them FIFO, and the pre-load
+    declared). The load admission lock serializes them FIFO, and the pre-load
     eviction loop must keep the declared usage within budget at every step —
     the last loader evicts both predecessors. Only same-model dedupe had
     coverage before (test_registry_async.py:126); this is the cross-model

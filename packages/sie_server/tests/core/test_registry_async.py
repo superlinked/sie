@@ -1050,6 +1050,21 @@ async def test_config_replaced_during_download_is_not_registered(
         assert not registry.is_loading("slow")
 
 
+async def test_identical_config_reapplied_during_download_still_loads(patch_ensure_model_cached: MagicMock) -> None:
+    """Re-applying an unchanged config replaces the object but must not fail the load."""
+    download = _BlockingDownload("org/slow")
+    patch_ensure_model_cached.side_effect = download
+    registry = _two_model_registry()
+    with patch("sie_server.core.model_loader.load_adapter", side_effect=_adapter_factory()):
+        slow = asyncio.create_task(registry.load_async("slow", "cpu"))
+        await asyncio.to_thread(download.entered.wait, 5)
+
+        await registry.add_config_async(_make_config(name="slow", hf_id="org/slow"))
+        download.release.set()
+        await asyncio.wait_for(slow, timeout=5)
+        assert registry.is_loaded("slow")
+
+
 def test_loader_shutdown_closes_the_download_executor() -> None:
     from sie_server.core.model_loader import ModelLoader
 
