@@ -161,7 +161,9 @@ from ._shared import (
     raise_if_estimate_unroutable,
     raise_if_input_too_long,
     raise_if_model_load_failed,
+    read_timeout_message,
     request_matches_base_url_origin,
+    resolve_timeouts,
     retry_after_or_default,
     settled_charge_from_usage,
     sse_chunk_error,
@@ -189,12 +191,29 @@ from .errors import (
 logger = logging.getLogger(__name__)
 
 
-# Mid-flight transport errors retried under `wait_for_capacity=True`:
-# the request was in flight and the peer severed the connection before a
-# complete response arrived (proxy idle timeout, rolling restart,
-# TCP reset). `httpx.ConnectError` is retried separately at each call
-# site to preserve its distinct "Failed to connect" message.
+# Failures before the request reached the server; retried under
+# `wait_for_capacity=True` on every path.
+_CONNECT_PHASE_ERRORS: tuple[type[Exception], ...] = (
+    httpx.ConnectError,
+    httpx.ConnectTimeout,
+    httpx.PoolTimeout,
+)
+
+# Transport errors retried under `wait_for_capacity=True` on the idempotent
+# encode/score/extract paths: the body could not be written, or the peer
+# severed the connection before a complete response arrived (proxy idle
+# timeout, rolling restart, TCP reset). A read timeout is deliberately absent:
+# the server received the request and may still be running it.
 _RETRYABLE_TRANSPORT_ERRORS: tuple[type[Exception], ...] = (
+    httpx.WriteTimeout,
+    httpx.RemoteProtocolError,
+    httpx.ReadError,
+    httpx.WriteError,
+)
+
+# Failures after the request may have reached the server; terminal on the
+# non-idempotent generation paths.
+_MID_FLIGHT_TRANSPORT_ERRORS: tuple[type[Exception], ...] = (
     httpx.TimeoutException,
     httpx.RemoteProtocolError,
     httpx.ReadError,
@@ -372,7 +391,9 @@ class SIEClient:
 
     Args:
         base_url: Base URL of the SIE server (e.g., "http://localhost:8080").
-        timeout_s: Request timeout in seconds (default: 30.0).
+        timeout_s: One per-attempt limit in seconds for both connecting and
+            waiting for response data. Sets ``connect_timeout_s`` and
+            ``read_timeout_s`` together; either of those overrides it.
         api_key: Optional API key for authentication (sent as Bearer token).
         gpu: Default GPU/machine profile for requests (e.g., "l4", "l4-spot").
             Can be overridden per-call.
@@ -385,6 +406,13 @@ class SIEClient:
             origin. Values are copied at construction and never forwarded to a
             control-plane URL, external payload-store reference, or redirect
             target. Same-origin capability refs receive only these edge headers.
+        connect_timeout_s: Seconds allowed to establish a connection (default:
+            10). A connection that cannot be established is retried under
+            ``wait_for_capacity``.
+        read_timeout_s: Seconds to wait for response data once a request is
+            sent (default: 150, longer than the gateway's default 120 s
+            request deadline). A read timeout is never retried, because the
+            server may still be processing the request.
 
     Example:
         >>> client = SIEClient("http://localhost:8080")
@@ -414,7 +442,7 @@ class SIEClient:
         self,
         base_url: str,
         *,
-        timeout_s: float = 30.0,
+        timeout_s: float | None = None,
         api_key: str | None = None,
         gpu: str | None = None,
         options: dict[str, Any] | None = None,
@@ -423,6 +451,8 @@ class SIEClient:
         control_plane_url: str | None = None,
         org: str | None = None,
         base_url_headers: Mapping[str, str] | None = None,
+        connect_timeout_s: float | None = None,
+        read_timeout_s: float | None = None,
     ) -> None:
         # Normalize base_url (remove trailing slash)
         validate_base_url(base_url)
@@ -431,7 +461,7 @@ class SIEClient:
         if self._base_url_headers and not base_url_accepts_origin_credentials(self._base_url):
             msg = "base_url_headers require an absolute https base_url without embedded credentials"
             raise ValueError(msg)
-        self._timeout = timeout_s
+        self._connect_timeout, self._timeout = resolve_timeouts(timeout_s, connect_timeout_s, read_timeout_s)
         self._default_gpu = gpu
         self._default_options = options
         self._api_key = api_key
@@ -473,7 +503,7 @@ class SIEClient:
 
         client_kwargs: dict[str, Any] = {
             "base_url": self._base_url,
-            "timeout": timeout_s,
+            "timeout": httpx.Timeout(self._timeout, connect=self._connect_timeout),
             "headers": headers,
             "follow_redirects": False,
         }
@@ -545,6 +575,14 @@ class SIEClient:
     def _record_retry(self) -> None:
         self._request_state.last_retry_count = self.last_retry_count + 1
 
+    def _attempt_timeout(self, remaining: float, read_timeout_s: float | None = None) -> httpx.Timeout:
+        """Timeouts for one attempt, capped by the remaining provision budget.
+
+        An explicit per-call ``read_timeout_s`` is honoured as given.
+        """
+        read = read_timeout_s if read_timeout_s is not None else min(self._timeout, remaining)
+        return httpx.Timeout(read, connect=min(self._connect_timeout, remaining))
+
     def _check_server_version(self, response: httpx.Response) -> None:
         revision = response.headers.get(MODEL_REVISION_HEADER)
         self._request_state.last_model_revision = revision if isinstance(revision, str) and revision else None
@@ -580,7 +618,7 @@ class SIEClient:
                 response = self._client.get(
                     path,
                     headers={"Accept": accept},
-                    timeout=min(self._timeout, remaining),
+                    timeout=self._attempt_timeout(remaining),
                 )
             except httpx.HTTPError as exc:
                 msg = f"Failed to retrieve the in-flight generation result: {type(exc).__name__}"
@@ -1161,14 +1199,16 @@ class SIEClient:
             wait_for_capacity: When True (default), auto-retry transient "not
                 enough capacity yet" responses under ``provision_timeout_s`` —
                 ``503 PROVISIONING`` (scale-from-zero provisioning);
-                ``504`` gateway result timeouts for idempotent queue paths; local
-                ``httpx`` read/connect/pool timeouts; and transient
-                mid-flight transport errors (``RemoteProtocolError``,
+                ``504`` gateway result timeouts for idempotent queue paths;
+                connection failures and connect/pool/write timeouts; and
+                transient mid-flight transport errors (``RemoteProtocolError``,
                 ``ReadError``, ``WriteError`` — peer severed the connection
                 before a complete response arrived). Retries honour the
                 server's ``Retry-After`` header when present. When False,
                 these surface immediately as ``ProvisioningError`` /
-                ``ServerError`` / ``SIEConnectionError``.
+                ``ServerError`` / ``SIEConnectionError``. A read timeout is
+                never retried: the request was sent and the server may still
+                be processing it, so it raises ``SIEConnectionError``.
                 Note: ``503 MODEL_LOADING``, ``503 LORA_LOADING`` and
                 ``503 RESOURCE_EXHAUSTED`` are retried regardless of this
                 flag — the worker has already accepted the request and is
@@ -1178,10 +1218,11 @@ class SIEClient:
                 ``ResourceExhaustedError`` below; the ``RESOURCE_EXHAUSTED``
                 branch can be disabled by passing ``max_oom_retries=0``.
                 The pre-dispatch admission signals ``429 RATE_LIMIT``,
-                ``503 BILLING_CAPACITY_UNAVAILABLE`` and ``503 QUEUE_FULL``
-                are likewise retried regardless of this flag — no work has
-                been published yet — honouring ``Retry-After`` and capped by
-                ``provision_timeout_s``. On give-up they raise
+                ``503 BILLING_CAPACITY_UNAVAILABLE``, ``503 QUEUE_FULL`` and
+                ``503 QUEUE_UNAVAILABLE`` with ``Retry-After`` (queue
+                backpressure) are likewise retried regardless of this flag —
+                no work has been published yet — honouring ``Retry-After`` and
+                capped by ``provision_timeout_s``. On give-up they raise
                 ``RateLimitError`` (429) or the server's terminal 503.
             provision_timeout_s: Maximum time to wait for capacity when wait_for_capacity=True.
                 Default: 900 seconds (15 minutes).
@@ -1326,13 +1367,13 @@ class SIEClient:
             if remaining <= 0:
                 msg = f"Provision timeout ({timeout:.1f}s) exceeded before request could be sent"
                 raise ProvisioningError(msg, gpu=resolved_gpu)
-            request_timeout = min(self._timeout, remaining)
+            request_timeout = self._attempt_timeout(remaining)
 
             try:
                 response = self._client.post(
                     f"/v1/encode/{model}", content=body, headers=headers, timeout=request_timeout
                 )
-            except httpx.ConnectError as e:
+            except _CONNECT_PHASE_ERRORS as e:
                 if wait_for_capacity and is_transient_connect_error(e):
                     delay_s = compute_retry_delay(
                         start_time=start_time,
@@ -1369,6 +1410,8 @@ class SIEClient:
                         f"the peer closed the connection before sending a complete response: {e}"
                     )
                 raise SIEConnectionError(msg) from e
+            except httpx.TimeoutException as e:
+                raise SIEConnectionError(read_timeout_message(e)) from e
 
             response = self._follow_modal_continuations(
                 response,
@@ -1521,6 +1564,11 @@ class SIEClient:
         if isinstance(response_model, str) and response_model:
             for result in results:
                 result["model"] = response_model
+        if timing:
+            for result in results:
+                result["timing"] = timing
+
+        attach_request_metadata(results, response.headers, response_data)
         # Guard the 1:1 input↔output contract before any positional access
         # (``results[0]`` below, or batch reassembly in callers). The gateway's
         # queue path returns mixed-success batches as 200 with only the
@@ -1533,11 +1581,6 @@ class SIEClient:
             operation="encode",
             request=parse_request_metadata(response.headers),
         )
-        if timing:
-            for result in results:
-                result["timing"] = timing
-
-        attach_request_metadata(results, response.headers, response_data)
 
         # Return single result if single item was passed
         return results[0] if single_item else results
@@ -2055,14 +2098,16 @@ class SIEClient:
             wait_for_capacity: When True (default), auto-retry transient "not
                 enough capacity yet" responses under ``provision_timeout_s`` —
                 ``503 PROVISIONING`` (scale-from-zero provisioning);
-                ``504`` gateway result timeouts for idempotent queue paths; local
-                ``httpx`` read/connect/pool timeouts; and transient
-                mid-flight transport errors (``RemoteProtocolError``,
+                ``504`` gateway result timeouts for idempotent queue paths;
+                connection failures and connect/pool/write timeouts; and
+                transient mid-flight transport errors (``RemoteProtocolError``,
                 ``ReadError``, ``WriteError`` — peer severed the connection
                 before a complete response arrived). Retries honour the
                 server's ``Retry-After`` header when present. When False,
                 these surface immediately as ``ProvisioningError`` /
-                ``ServerError`` / ``SIEConnectionError``.
+                ``ServerError`` / ``SIEConnectionError``. A read timeout is
+                never retried: the request was sent and the server may still
+                be processing it, so it raises ``SIEConnectionError``.
                 Note: ``503 MODEL_LOADING`` and ``503 RESOURCE_EXHAUSTED``
                 are retried regardless of this flag — the worker has
                 already accepted the request and is loading the target
@@ -2071,9 +2116,10 @@ class SIEClient:
                 ``ResourceExhaustedError`` below; the
                 ``RESOURCE_EXHAUSTED`` branch can be disabled by passing
                 ``max_oom_retries=0``. The pre-dispatch admission signals
-                ``429 RATE_LIMIT``, ``503 BILLING_CAPACITY_UNAVAILABLE`` and
-                ``503 QUEUE_FULL`` are likewise retried regardless of this
-                flag — no work has been published yet — honouring
+                ``429 RATE_LIMIT``, ``503 BILLING_CAPACITY_UNAVAILABLE``,
+                ``503 QUEUE_FULL`` and ``503 QUEUE_UNAVAILABLE`` with
+                ``Retry-After`` (queue backpressure) are likewise retried
+                regardless of this flag — no work has been published yet — honouring
                 ``Retry-After`` and capped by ``provision_timeout_s``. On
                 give-up they raise ``RateLimitError`` (429) or the server's
                 terminal 503.
@@ -2161,13 +2207,13 @@ class SIEClient:
             if remaining <= 0:
                 msg = f"Provision timeout ({timeout:.1f}s) exceeded before request could be sent"
                 raise ProvisioningError(msg, gpu=resolved_gpu)
-            request_timeout = min(self._timeout, remaining)
+            request_timeout = self._attempt_timeout(remaining)
 
             try:
                 response = self._client.post(
                     f"/v1/score/{model}", content=body, headers=headers, timeout=request_timeout
                 )
-            except httpx.ConnectError as e:
+            except _CONNECT_PHASE_ERRORS as e:
                 if wait_for_capacity and is_transient_connect_error(e):
                     delay_s = compute_retry_delay(
                         start_time=start_time,
@@ -2204,6 +2250,8 @@ class SIEClient:
                         f"the peer closed the connection before sending a complete response: {e}"
                     )
                 raise SIEConnectionError(msg) from e
+            except httpx.TimeoutException as e:
+                raise SIEConnectionError(read_timeout_message(e)) from e
 
             response = self._follow_modal_continuations(
                 response,
@@ -2350,6 +2398,7 @@ class SIEClient:
         wait_for_capacity: bool = True,
         provision_timeout_s: float | None = None,
         max_oom_retries: int = RESOURCE_EXHAUSTED_MAX_RETRIES,
+        read_timeout_s: float | None = None,
     ) -> GenerateResult:
         """Generate text from a prompt (walking-skeleton SDK surface).
 
@@ -2407,13 +2456,22 @@ class SIEClient:
                 (matching encode/score/extract): the worker has already
                 accepted the request and is loading the target model. The
                 pre-dispatch admission signals ``429 RATE_LIMIT``,
-                ``503 BILLING_CAPACITY_UNAVAILABLE`` and ``503 QUEUE_FULL``
-                are also retried regardless of this flag — they reject the
-                request before any generation is published, so retrying
-                cannot double-bill — honouring ``Retry-After`` and capped by
+                ``503 BILLING_CAPACITY_UNAVAILABLE``, ``503 QUEUE_FULL`` and
+                ``503 QUEUE_UNAVAILABLE`` with ``Retry-After`` are also
+                retried regardless of this flag — they reject the request
+                before any generation is published, so retrying cannot
+                double-bill — honouring ``Retry-After`` and capped by
                 ``provision_timeout_s``; on give-up they raise
                 ``RateLimitError`` (429) or the server's terminal 503.
             provision_timeout_s: Maximum time to wait for capacity.
+            max_oom_retries: Maximum number of worker-side
+                ``503 RESOURCE_EXHAUSTED`` retries.
+            read_timeout_s: Seconds to wait for the complete response once
+                the request is sent. Defaults to the client's
+                ``read_timeout_s``, capped by the remaining
+                ``provision_timeout_s``; an explicit value is used as given.
+                Set it to at least the model profile's ``overall_timeout_s``
+                for long generations. A read timeout is never retried.
 
         Returns:
             :class:`GenerateResult` with text, usage, finish_reason, and
@@ -2473,7 +2531,7 @@ class SIEClient:
             if remaining <= 0:
                 msg = f"Provision timeout ({timeout:.1f}s) exceeded before request could be sent"
                 raise ProvisioningError(msg, gpu=resolved_gpu)
-            request_timeout = min(self._timeout, remaining)
+            request_timeout = self._attempt_timeout(remaining, read_timeout_s)
 
             try:
                 response = self._client.post(
@@ -2482,9 +2540,9 @@ class SIEClient:
                     headers=headers,
                     timeout=request_timeout,
                 )
-            except httpx.ConnectError as e:
-                # ``ConnectError`` fails *before* the request is sent, so no
-                # generation could have started — safe to retry.
+            except _CONNECT_PHASE_ERRORS as e:
+                # A connect-phase failure happens *before* the request is
+                # sent, so no generation could have started — safe to retry.
                 if wait_for_capacity and is_transient_connect_error(e):
                     delay_s = compute_retry_delay(
                         start_time=start_time,
@@ -2501,7 +2559,7 @@ class SIEClient:
                         continue
                 msg = f"Failed to connect to {self._base_url}: {e}"
                 raise SIEConnectionError(msg) from e
-            except _RETRYABLE_TRANSPORT_ERRORS as e:
+            except _MID_FLIGHT_TRANSPORT_ERRORS as e:
                 # Unlike the idempotent encode/score/extract paths, generation
                 # is NOT idempotent and carries no dedup key. By the time these
                 # mid-flight errors fire (read/write timeout, peer reset) the
@@ -2642,6 +2700,7 @@ class SIEClient:
         wait_for_capacity: bool = True,
         provision_timeout_s: float | None = None,
         max_oom_retries: int = RESOURCE_EXHAUSTED_MAX_RETRIES,
+        read_timeout_s: float | None = None,
     ) -> ResponseResult:
         """Create one non-streaming OpenAI-compatible Responses result.
 
@@ -2652,10 +2711,11 @@ class SIEClient:
         supported by this surface.
 
         Generation is non-idempotent. Only explicit pre-execution 503
-        PROVISIONING / MODEL_LOADING / RESOURCE_EXHAUSTED responses and
-        connect-before-send failures are retried. Mid-flight transport errors
-        and post-publish 504 responses are terminal so a retry cannot
-        double-bill or create a second completion.
+        PROVISIONING / MODEL_LOADING / RESOURCE_EXHAUSTED responses,
+        pre-dispatch admission rejections (see :meth:`generate`) and
+        connect-before-send failures are retried. Mid-flight transport errors,
+        read timeouts and post-publish 504 responses are terminal so a retry
+        cannot double-bill or create a second completion.
 
         Args:
             model: Model name to use for generation.
@@ -2671,6 +2731,8 @@ class SIEClient:
             provision_timeout_s: Maximum time to wait for capacity.
             max_oom_retries: Maximum number of worker-side
                 ``503 RESOURCE_EXHAUSTED`` retries.
+            read_timeout_s: Seconds to wait for the complete response once
+                the request is sent; see :meth:`generate`.
 
         Returns:
             A typed :class:`ResponseResult`.
@@ -2716,9 +2778,9 @@ class SIEClient:
                     "/v1/responses",
                     content=body,
                     headers=headers,
-                    timeout=min(self._timeout, remaining),
+                    timeout=self._attempt_timeout(remaining, read_timeout_s),
                 )
-            except httpx.ConnectError as e:
+            except _CONNECT_PHASE_ERRORS as e:
                 if wait_for_capacity and is_transient_connect_error(e):
                     delay_s = compute_retry_delay(
                         start_time=start_time,
@@ -2735,7 +2797,7 @@ class SIEClient:
                         continue
                 msg = f"Failed to connect to {self._base_url}: {e}"
                 raise SIEConnectionError(msg) from e
-            except _RETRYABLE_TRANSPORT_ERRORS as e:
+            except _MID_FLIGHT_TRANSPORT_ERRORS as e:
                 msg = f"Connection lost mid-request ({type(e).__name__}): {e}"
                 raise SIEConnectionError(msg) from e
 
@@ -2792,14 +2854,17 @@ class SIEClient:
         wait_for_capacity: bool = True,
         provision_timeout_s: float | None = None,
         max_oom_retries: int = RESOURCE_EXHAUSTED_MAX_RETRIES,
+        read_timeout_s: float | None = None,
     ) -> ChatCompletion:
         """Non-streaming OpenAI-compatible chat completion (``/v1/chat/completions``).
 
         Mirrors the subset of OpenAI's ``chat.completions.create`` the gateway
         honours. For token streaming use :meth:`stream_chat_completions`.
         Generation is non-idempotent, so — like :meth:`generate` — only
-        pre-execution 503 PROVISIONING / MODEL_LOADING responses are retried; a 504 (post-publish)
-        surfaces as :class:`ServerError`.
+        pre-execution capacity signals and pre-dispatch admission rejections
+        are retried; a 504 (post-publish) surfaces as :class:`ServerError`.
+        ``read_timeout_s`` sets how long to wait for the complete response
+        once the request is sent; see :meth:`generate`.
 
         Typed kwargs cover the full gateway-supported field set (see
         :func:`build_chat_body` for the canonical list); ``extra_body`` is
@@ -2858,9 +2923,9 @@ class SIEClient:
                     "/v1/chat/completions",
                     content=body,
                     headers=headers,
-                    timeout=min(self._timeout, remaining),
+                    timeout=self._attempt_timeout(remaining, read_timeout_s),
                 )
-            except httpx.ConnectError as e:
+            except _CONNECT_PHASE_ERRORS as e:
                 if wait_for_capacity and is_transient_connect_error(e):
                     delay_s = compute_retry_delay(
                         start_time=start_time,
@@ -2877,7 +2942,7 @@ class SIEClient:
                         continue
                 msg = f"Failed to connect to {self._base_url}: {e}"
                 raise SIEConnectionError(msg) from e
-            except _RETRYABLE_TRANSPORT_ERRORS as e:
+            except _MID_FLIGHT_TRANSPORT_ERRORS as e:
                 # Non-idempotent: a mid-flight failure may have already started
                 # a generation, so surface it instead of silently re-running.
                 msg = f"Connection lost mid-request ({type(e).__name__}): {e}"
@@ -3120,7 +3185,7 @@ class SIEClient:
             retry_delay: float | None = None
             try:
                 with self._client.stream(
-                    "POST", url, content=body, headers=headers, timeout=min(self._timeout, remaining)
+                    "POST", url, content=body, headers=headers, timeout=self._attempt_timeout(remaining)
                 ) as response:
                     if response.status_code != 200:
                         # Buffer the body so the decision helper can read the
@@ -3199,7 +3264,7 @@ class SIEClient:
                             yielded_chunk = True
                         else:
                             return
-            except httpx.ConnectError as e:
+            except _CONNECT_PHASE_ERRORS as e:
                 if wait_for_capacity and is_transient_connect_error(e):
                     delay_s = compute_retry_delay(
                         start_time=start_time,
@@ -3216,7 +3281,7 @@ class SIEClient:
                         continue
                 msg = f"Failed to connect to {self._base_url}: {e}"
                 raise SIEConnectionError(msg) from e
-            except _RETRYABLE_TRANSPORT_ERRORS as e:
+            except _MID_FLIGHT_TRANSPORT_ERRORS as e:
                 # Mid-stream/connection failure: non-idempotent, do not retry.
                 msg = f"Connection lost during stream ({type(e).__name__}): {e}"
                 raise SIEConnectionError(msg) from e
@@ -3285,14 +3350,16 @@ class SIEClient:
             wait_for_capacity: When True (default), auto-retry transient "not
                 enough capacity yet" responses under ``provision_timeout_s`` —
                 ``503 PROVISIONING`` (scale-from-zero provisioning);
-                ``504`` gateway result timeouts for idempotent queue paths; local
-                ``httpx`` read/connect/pool timeouts; and transient
-                mid-flight transport errors (``RemoteProtocolError``,
+                ``504`` gateway result timeouts for idempotent queue paths;
+                connection failures and connect/pool/write timeouts; and
+                transient mid-flight transport errors (``RemoteProtocolError``,
                 ``ReadError``, ``WriteError`` — peer severed the connection
                 before a complete response arrived). Retries honour the
                 server's ``Retry-After`` header when present. When False,
                 these surface immediately as ``ProvisioningError`` /
-                ``ServerError`` / ``SIEConnectionError``.
+                ``ServerError`` / ``SIEConnectionError``. A read timeout is
+                never retried: the request was sent and the server may still
+                be processing it, so it raises ``SIEConnectionError``.
                 Note: ``503 MODEL_LOADING`` and ``503 RESOURCE_EXHAUSTED``
                 are retried regardless of this flag — the worker has
                 already accepted the request and is loading the target
@@ -3301,9 +3368,10 @@ class SIEClient:
                 ``ResourceExhaustedError`` below; the
                 ``RESOURCE_EXHAUSTED`` branch can be disabled by passing
                 ``max_oom_retries=0``. The pre-dispatch admission signals
-                ``429 RATE_LIMIT``, ``503 BILLING_CAPACITY_UNAVAILABLE`` and
-                ``503 QUEUE_FULL`` are likewise retried regardless of this
-                flag — no work has been published yet — honouring
+                ``429 RATE_LIMIT``, ``503 BILLING_CAPACITY_UNAVAILABLE``,
+                ``503 QUEUE_FULL`` and ``503 QUEUE_UNAVAILABLE`` with
+                ``Retry-After`` (queue backpressure) are likewise retried
+                regardless of this flag — no work has been published yet — honouring
                 ``Retry-After`` and capped by ``provision_timeout_s``. On
                 give-up they raise ``RateLimitError`` (429) or the server's
                 terminal 503.
@@ -3424,13 +3492,13 @@ class SIEClient:
             if remaining <= 0:
                 msg = f"Provision timeout ({timeout:.1f}s) exceeded before request could be sent"
                 raise ProvisioningError(msg, gpu=resolved_gpu)
-            request_timeout = min(self._timeout, remaining)
+            request_timeout = self._attempt_timeout(remaining)
 
             try:
                 response = self._client.post(
                     f"/v1/extract/{model}", content=body, headers=headers, timeout=request_timeout
                 )
-            except httpx.ConnectError as e:
+            except _CONNECT_PHASE_ERRORS as e:
                 if wait_for_capacity and is_transient_connect_error(e):
                     delay_s = compute_retry_delay(
                         start_time=start_time,
@@ -3467,6 +3535,8 @@ class SIEClient:
                         f"the peer closed the connection before sending a complete response: {e}"
                     )
                 raise SIEConnectionError(msg) from e
+            except httpx.TimeoutException as e:
+                raise SIEConnectionError(read_timeout_message(e)) from e
 
             response = self._follow_modal_continuations(
                 response,
@@ -3593,6 +3663,7 @@ class SIEClient:
         if isinstance(response_model, str) and response_model:
             for result in results:
                 result["model"] = response_model
+        attach_request_metadata(results, response.headers, response_data)
         # Same positional contract as encode: ``results[0]`` below and
         # index-based reassembly in batch callers both assume one result per
         # input, and the queue path drops failed items from a 200 body.
@@ -3603,8 +3674,6 @@ class SIEClient:
             operation="extract",
             request=parse_request_metadata(response.headers),
         )
-
-        attach_request_metadata(results, response.headers, response_data)
 
         # Return single result if single item was passed
         return results[0] if single_item else results

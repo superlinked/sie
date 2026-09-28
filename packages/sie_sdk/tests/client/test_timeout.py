@@ -47,10 +47,12 @@ class TestTimeoutEnforcement:
             # (should be capped to remaining provision time, not 300s)
             calls = mock_client.return_value.post.call_args_list
             for call in calls:
-                # The timeout kwarg should be present and <= provision_timeout_s
+                # Every phase of the timeout should be present and <= provision_timeout_s
                 timeout_used = call.kwargs.get("timeout")
-                assert timeout_used is not None, "Per-request timeout should be set"
-                assert timeout_used <= 0.5, f"Request timeout {timeout_used}s should be <= provision_timeout 0.5s"
+                assert isinstance(timeout_used, httpx.Timeout), "Per-request timeout should be set"
+                for phase in (timeout_used.connect, timeout_used.read, timeout_used.write, timeout_used.pool):
+                    assert phase is not None
+                    assert phase <= 0.5, f"Request timeout {phase}s should be <= provision_timeout 0.5s"
 
             client.close()
 
@@ -90,62 +92,61 @@ class TestTimeoutEnforcement:
             client.close()
 
     def test_httpx_timeout_exception_respects_provision_timeout(self) -> None:
-        """httpx.TimeoutException is retried but respects provision_timeout_s.
-
-        When httpx times out (e.g., server hanging), the SDK retries but still
-        enforces the overall provision_timeout_s.
-        """
+        """A timeout after the request was sent fails fast without a retry."""
         with patch("sie_sdk.client.sync.httpx.Client") as mock_client:
-            # Always raise httpx.TimeoutException
             mock_client.return_value.post = MagicMock(side_effect=httpx.TimeoutException("Request timed out"))
             client = SIEClient("http://localhost:8080")
 
             start_time = time.monotonic()
-            provision_timeout = 0.15
-
-            # Without wait_for_capacity, timeout is not retried
             with pytest.raises(SIEConnectionError, match="timed out"):
-                client.encode(
-                    "bge-m3", {"text": "hello"}, provision_timeout_s=provision_timeout, wait_for_capacity=False
-                )
+                client.encode("bge-m3", {"text": "hello"}, provision_timeout_s=0.15, wait_for_capacity=False)
 
             elapsed = time.monotonic() - start_time
-
-            # Should fail quickly on first timeout (no retry without wait_for_capacity)
             assert elapsed < 0.5, f"Should fail quickly, took {elapsed:.2f}s"
+            assert mock_client.return_value.post.call_count == 1
 
             client.close()
 
-    def test_httpx_timeout_retried_with_wait_for_capacity(self) -> None:
-        """httpx.TimeoutException is retried when wait_for_capacity=True.
-
-        The SDK retries on httpx timeout but enforces provision_timeout_s.
-        """
+    @pytest.mark.parametrize(
+        "exc",
+        [httpx.ReadTimeout("read timed out"), httpx.TimeoutException("timed out")],
+        ids=["read_timeout", "unknown_phase_timeout"],
+    )
+    def test_sent_request_timeout_not_retried_with_wait_for_capacity(self, exc: httpx.TimeoutException) -> None:
+        """A request that may already be running is never re-sent after a timeout."""
         with patch("sie_sdk.client.sync.httpx.Client") as mock_client:
-            # Always raise httpx.TimeoutException
-            mock_client.return_value.post = MagicMock(side_effect=httpx.TimeoutException("Request timed out"))
+            mock_client.return_value.post = MagicMock(side_effect=exc)
             client = SIEClient("http://localhost:8080")
 
-            start_time = time.monotonic()
-            provision_timeout = 0.05
+            with pytest.raises(SIEConnectionError, match="timed out") as exc_info:
+                client.encode("bge-m3", {"text": "hello"}, wait_for_capacity=True, provision_timeout_s=10.0)
 
-            # With wait_for_capacity, timeout is retried until provision_timeout.
-            # Depending on whether the budget is exhausted before the next
-            # request or immediately after the final transport timeout, either
-            # terminal error is valid.
-            with pytest.raises((ProvisioningError, SIEConnectionError)) as exc_info:
-                client.encode(
-                    "bge-m3",
-                    {"text": "hello"},
-                    wait_for_capacity=True,
-                    provision_timeout_s=provision_timeout,
-                )
-            message = str(exc_info.value).lower()
-            assert "timeout" in message or "timed out" in message
+            assert "Not retried" in str(exc_info.value)
+            assert mock_client.return_value.post.call_count == 1
+            assert client.last_retry_count == 0
+            client.close()
 
-            elapsed = time.monotonic() - start_time
+    @pytest.mark.parametrize(
+        "exc",
+        [httpx.ConnectTimeout("connect timed out"), httpx.PoolTimeout("pool timed out")],
+        ids=["connect_timeout", "pool_timeout"],
+    )
+    def test_timeout_before_send_retried_with_wait_for_capacity(self, exc: httpx.TimeoutException) -> None:
+        """A timeout before the request reached the server is safe to retry."""
+        ok = MagicMock()
+        ok.status_code = 200
+        ok.headers = {"content-type": "application/msgpack"}
+        ok.content = msgpack.packb({"items": [{"dense": {"dims": 4, "values": np.zeros(4)}}]}, use_bin_type=True)
+        with (
+            patch("sie_sdk.client.sync.httpx.Client") as mock_client,
+            patch("sie_sdk.client.sync.time.sleep"),
+        ):
+            mock_client.return_value.post = MagicMock(side_effect=[exc, ok])
+            client = SIEClient("http://localhost:8080")
 
-            # Should timeout around provision_timeout (with some overhead)
-            assert elapsed < provision_timeout + 0.1, (
-                f"Operation took {elapsed:.2f}s, should timeout around {provision_timeout}s"
-            )
+            result = client.encode("bge-m3", {"text": "hello"}, wait_for_capacity=True, provision_timeout_s=10.0)
+
+            assert result["dense"].shape == (4,)
+            assert mock_client.return_value.post.call_count == 2
+            assert client.last_retry_count == 1
+            client.close()

@@ -744,11 +744,16 @@ export type StatusMessage = WorkerStatusMessage | ClusterStatusMessage;
  */
 export interface SIEClientOptions {
   /**
-   * Per-request timeout in MILLISECONDS (default: 30000).
+   * Per-attempt timeout in MILLISECONDS for receiving a response once the
+   * request is sent (default: 150000, longer than the gateway's default 120 s
+   * request deadline). A request that times out is never retried, because the
+   * server may still be processing it. Connection establishment is bounded
+   * by the runtime's own connect timeout.
    *
-   * Note the unit: the Python SDK's equivalent knob (`timeout_s`) is in
-   * SECONDS, so a value ported verbatim is off by 1000x. Prefer the
-   * unit-encoded `timeoutMs`, which reads identically but names the unit.
+   * Note the unit: the Python SDK's equivalent knob (`read_timeout_s`, or
+   * `timeout_s` for both phases) is in SECONDS, so a value ported verbatim is
+   * off by 1000x. Prefer the unit-encoded `timeoutMs`, which reads identically
+   * but names the unit.
    */
   timeoutMs?: number;
   /**
@@ -783,7 +788,8 @@ export interface SIEClientOptions {
    *   fixed retry count): the worker has already accepted the request.
    *
    * A read/pool `SIEConnectionError` (`kind === "timeout"`) is never
-   * retried on any path.
+   * retried on any path. DNS name, TLS and certificate failures are
+   * permanent (`kind === "other"`) and are not retried either.
    *
    * Default: `true`, matching the Python SDK's `wait_for_capacity=True`.
    * BREAKING (0.7): the default was previously `false` — pass `false`
@@ -1049,6 +1055,13 @@ export interface GenerateOptions {
   gpu?: string;
   /** Auto-retry under provisioning. */
   waitForCapacity?: boolean;
+  /**
+   * Milliseconds to wait for the response once the request is sent, for this
+   * call only (for a stream, until it opens). Defaults to the client's
+   * `timeoutMs`. Set it to at least the model profile's `overall_timeout_s`
+   * for long buffered generations. A timeout is never retried.
+   */
+  timeoutMs?: number;
 }
 
 /** Options for streaming native generation. */
@@ -1400,6 +1413,12 @@ export interface ChatCompletionOptions {
    * `provisionTimeout` (typically 15 minutes).
    */
   provisionTimeoutMs?: number;
+  /**
+   * Milliseconds to wait for the response once the request is sent, for this
+   * call only. Defaults to the client's `timeoutMs`. A timeout is never
+   * retried.
+   */
+  timeoutMs?: number;
 }
 
 // ---------------------------------------------------------------------------

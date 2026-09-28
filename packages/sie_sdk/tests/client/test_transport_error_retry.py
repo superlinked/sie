@@ -296,9 +296,9 @@ class TestAsyncTransportErrorRetry:
         [
             aiohttp.ServerDisconnectedError("Server disconnected"),
             aiohttp.ClientPayloadError("Response payload is not completed"),
-            aiohttp.ServerTimeoutError("Timeout on reading data from socket"),
+            aiohttp.ConnectionTimeoutError("Connection timeout to host"),
         ],
-        ids=["server_disconnected", "client_payload_error", "server_timeout_error"],
+        ids=["server_disconnected", "client_payload_error", "connection_timeout_error"],
     )
     async def test_transport_error_retried_when_wait_for_capacity_true_then_succeeds(self, exc: Exception) -> None:
         from sie_sdk import SIEAsyncClient
@@ -317,6 +317,30 @@ class TestAsyncTransportErrorRetry:
 
         assert result["dense"].shape == (4,)
         assert client._post.call_count == 2
+        await client.close()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            aiohttp.SocketTimeoutError("Timeout on reading data from socket"),
+            aiohttp.ServerTimeoutError("Timeout on reading data from socket"),
+            TimeoutError(),
+        ],
+        ids=["socket_timeout_error", "server_timeout_error", "total_timeout"],
+    )
+    async def test_sent_request_timeout_not_retried(self, exc: Exception) -> None:
+        from sie_sdk import SIEAsyncClient
+        from sie_sdk.client.errors import SIEConnectionError
+
+        client = SIEAsyncClient("http://localhost:8080")
+        client._post = AsyncMock(side_effect=[exc, _async_response_200()])  # type: ignore
+
+        with pytest.raises(SIEConnectionError, match="Not retried"):
+            await client.encode("bge-m3", {"text": "hello"}, wait_for_capacity=True, provision_timeout_s=10.0)
+
+        assert client._post.call_count == 1
+        assert client.last_retry_count == 0
         await client.close()
 
     @pytest.mark.asyncio

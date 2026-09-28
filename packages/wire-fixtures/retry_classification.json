@@ -1,0 +1,203 @@
+{
+  "description": "How the SDKs classify one non-2xx response to a buffered call. Each case is served verbatim, followed by a success; 'retry' means the SDK sends the request again and returns that success, 'terminal' means it raises after one request. 'idempotent' covers encode, score and extract; 'generation' covers buffered generate, chat completions and responses. Decisions assume the default wait_for_capacity=true.",
+  "responses": [
+    {
+      "name": "provisioning",
+      "status": 503,
+      "headers": {"Retry-After": "1"},
+      "body": {"detail": {"code": "PROVISIONING", "message": "Provisioning capacity"}},
+      "idempotent": "retry",
+      "generation": "retry"
+    },
+    {
+      "name": "model_loading",
+      "status": 503,
+      "headers": {"Retry-After": "1"},
+      "body": {"detail": {"code": "MODEL_LOADING", "message": "Model is loading"}},
+      "idempotent": "retry",
+      "generation": "retry"
+    },
+    {
+      "name": "resource_exhausted",
+      "status": 503,
+      "headers": {"Retry-After": "1"},
+      "body": {"detail": {"code": "RESOURCE_EXHAUSTED", "message": "Out of memory"}},
+      "idempotent": "retry",
+      "generation": "retry"
+    },
+    {
+      "name": "queue_full",
+      "status": 503,
+      "headers": {"Retry-After": "1"},
+      "body": {"detail": {"code": "QUEUE_FULL", "message": "Queue is full"}},
+      "idempotent": "retry",
+      "generation": "retry"
+    },
+    {
+      "name": "queue_full_without_retry_after",
+      "status": 503,
+      "headers": {},
+      "body": {"detail": {"code": "QUEUE_FULL", "message": "Queue is full"}},
+      "idempotent": "retry",
+      "generation": "retry"
+    },
+    {
+      "name": "billing_capacity_unavailable",
+      "status": 503,
+      "headers": {"Retry-After": "1"},
+      "body": {"error": {"code": "BILLING_CAPACITY_UNAVAILABLE", "message": "Capacity unavailable"}},
+      "idempotent": "retry",
+      "generation": "retry"
+    },
+    {
+      "name": "queue_unavailable_backpressure",
+      "status": 503,
+      "headers": {"Retry-After": "5"},
+      "body": {"detail": {"code": "QUEUE_UNAVAILABLE", "message": "Queue publish failed: backpressure"}},
+      "idempotent": "retry",
+      "generation": "retry"
+    },
+    {
+      "name": "queue_unavailable_backpressure_http_date",
+      "status": 503,
+      "headers": {"Retry-After": "Wed, 21 Oct 2015 07:28:00 GMT"},
+      "body": {"detail": {"code": "QUEUE_UNAVAILABLE", "message": "Queue publish failed: backpressure"}},
+      "idempotent": "retry",
+      "generation": "retry"
+    },
+    {
+      "name": "queue_unavailable_header_code",
+      "status": 503,
+      "headers": {"Retry-After": "5", "X-SIE-Error-Code": "QUEUE_UNAVAILABLE"},
+      "body": {"error": {"message": "queue unavailable", "type": "server_error", "param": null, "code": "transport_failure"}},
+      "idempotent": "retry",
+      "generation": "retry"
+    },
+    {
+      "name": "queue_unavailable_without_retry_after",
+      "status": 503,
+      "headers": {},
+      "body": {"detail": {"code": "QUEUE_UNAVAILABLE", "message": "Queue durability confirmation failed"}},
+      "idempotent": "terminal",
+      "generation": "terminal"
+    },
+    {
+      "name": "queue_unavailable_malformed_retry_after",
+      "status": 503,
+      "headers": {"Retry-After": "soon"},
+      "body": {"detail": {"code": "QUEUE_UNAVAILABLE", "message": "Queue unavailable"}},
+      "idempotent": "terminal",
+      "generation": "terminal"
+    },
+    {
+      "name": "openai_transport_failure_backpressure",
+      "status": 503,
+      "headers": {"Retry-After": "5"},
+      "body": {"error": {"message": "Queue publish failed: backpressure", "type": "server_error", "param": null, "code": "transport_failure"}},
+      "idempotent": "retry",
+      "generation": "retry"
+    },
+    {
+      "name": "openai_transport_failure_without_retry_after",
+      "status": 503,
+      "headers": {},
+      "body": {"error": {"message": "Queue durability confirmation failed", "type": "server_error", "param": null, "code": "transport_failure"}},
+      "idempotent": "terminal",
+      "generation": "terminal"
+    },
+    {
+      "name": "account_state_unavailable",
+      "status": 503,
+      "headers": {"Retry-After": "1"},
+      "body": {"error": {"code": "ACCOUNT_STATE_UNAVAILABLE", "message": "Account state unavailable"}},
+      "idempotent": "terminal",
+      "generation": "terminal"
+    },
+    {
+      "name": "service_unavailable_without_code",
+      "status": 503,
+      "headers": {},
+      "body": {"detail": "Service unavailable"},
+      "idempotent": "terminal",
+      "generation": "terminal"
+    },
+    {
+      "name": "rate_limit",
+      "status": 429,
+      "headers": {"Retry-After": "1"},
+      "body": {"error": {"code": "RATE_LIMIT", "message": "Rate limited"}},
+      "idempotent": "retry",
+      "generation": "retry"
+    },
+    {
+      "name": "rate_limit_without_retry_after",
+      "status": 429,
+      "headers": {},
+      "body": {"error": {"code": "RATE_LIMIT", "message": "Rate limited"}},
+      "idempotent": "retry",
+      "generation": "retry"
+    },
+    {
+      "name": "gateway_timeout",
+      "status": 504,
+      "headers": {"Retry-After": "5"},
+      "body": {"detail": {"code": "GATEWAY_TIMEOUT", "message": "Timed out waiting for a worker result"}},
+      "idempotent": "retry",
+      "generation": "terminal"
+    },
+    {
+      "name": "model_load_failed",
+      "status": 502,
+      "headers": {},
+      "body": {"detail": {"code": "MODEL_LOAD_FAILED", "message": "Model failed to load", "error_class": "GATED", "permanent": true, "attempts": 1}},
+      "idempotent": "terminal",
+      "generation": "terminal"
+    },
+    {
+      "name": "internal_error",
+      "status": 500,
+      "headers": {},
+      "body": {"detail": {"code": "INTERNAL_SERVER_ERROR", "message": "Internal error"}},
+      "idempotent": "terminal",
+      "generation": "terminal"
+    },
+    {
+      "name": "input_too_long",
+      "status": 400,
+      "headers": {},
+      "body": {"detail": {"code": "INPUT_TOO_LONG", "message": "Input exceeds the model's maximum token capacity"}},
+      "idempotent": "terminal",
+      "generation": "terminal"
+    },
+    {
+      "name": "insufficient_credits",
+      "status": 402,
+      "headers": {},
+      "body": {"error": {"code": "INSUFFICIENT_CREDITS", "message": "Insufficient credits"}},
+      "idempotent": "terminal",
+      "generation": "terminal"
+    },
+    {
+      "name": "account_suspended",
+      "status": 403,
+      "headers": {},
+      "body": {"error": {"code": "ACCOUNT_SUSPENDED", "message": "Account suspended"}},
+      "idempotent": "terminal",
+      "generation": "terminal"
+    }
+  ],
+  "retry_after": [
+    {"header": "5", "seconds": 5},
+    {"header": "0", "seconds": 0},
+    {"header": "1.5", "seconds": 1.5},
+    {"header": "300", "seconds": 300},
+    {"header": "-1", "seconds": null},
+    {"header": "nan", "seconds": null},
+    {"header": "inf", "seconds": null},
+    {"header": "12abc", "seconds": null},
+    {"header": "soon", "seconds": null},
+    {"header": "", "seconds": null},
+    {"header": "Wed, 21 Oct 2015 07:28:00 GMT", "seconds": 0},
+    {"header": "Fri, 31 Dec 9999 23:59:59 GMT", "seconds": "future"}
+  ]
+}

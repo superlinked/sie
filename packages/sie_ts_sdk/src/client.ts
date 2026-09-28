@@ -728,19 +728,69 @@ function urlOriginForLogging(url: string): string {
 }
 
 /**
+ * Fetch failure codes worth retrying: the connection could not be made, or the
+ * peer dropped it before a response arrived. Mirrors the Python SDK's
+ * transient connect errnos plus undici's own connect-timeout and socket codes.
+ */
+const TRANSIENT_FETCH_ERROR_CODES: ReadonlySet<string> = new Set([
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "ETIMEDOUT",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "ENETDOWN",
+  "EHOSTDOWN",
+  "EAI_AGAIN",
+  "EPIPE",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_SOCKET",
+]);
+
+/** Timeouts undici raises after the request was sent; never retried. */
+const SENT_REQUEST_TIMEOUT_CODES: ReadonlySet<string> = new Set([
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_BODY_TIMEOUT",
+]);
+
+/** Error codes on a fetch failure's `cause` chain, including aggregated causes. */
+function fetchErrorCodes(error: unknown): string[] {
+  const codes: string[] = [];
+  let current: unknown = error;
+  for (let depth = 0; depth < 5 && typeof current === "object" && current !== null; depth += 1) {
+    const { code, errors, cause } = current as {
+      code?: unknown;
+      errors?: unknown;
+      cause?: unknown;
+    };
+    if (typeof code === "string") codes.push(code);
+    if (Array.isArray(errors)) {
+      for (const inner of errors) {
+        const innerCode = (inner as { code?: unknown } | null)?.code;
+        if (typeof innerCode === "string") codes.push(innerCode);
+      }
+    }
+    current = cause;
+  }
+  return codes;
+}
+
+/**
  * Convert a `fetch()` `TypeError` into a typed connection error.
  *
  * A URL-parse failure (e.g. a scheme-less baseUrl: Node throws
  * `TypeError: Failed to parse URL …` with `cause.code === "ERR_INVALID_URL"`)
  * is a permanent configuration error, NOT a transient network failure —
  * classify it as kind `"other"` so the connect-retry loops never spin on it,
- * and point at the fix. Every other fetch `TypeError` is a genuine
- * network-level connection failure and keeps kind `"connect"`.
+ * and point at the fix. The remaining failures are classified by the error
+ * codes on the `cause` chain: transient connection codes keep kind
+ * `"connect"`; a timeout after the request was sent is `"timeout"`; any other
+ * code (DNS name not found, TLS or certificate failures) is permanent and
+ * `"other"`. A failure without a code (browser `fetch`) stays `"connect"`.
  */
 function connectionErrorFromFetchTypeError(error: TypeError): SIEConnectionError {
-  const cause = (error as { cause?: { code?: unknown } }).cause;
+  const codes = fetchErrorCodes(error);
   if (
-    cause?.code === "ERR_INVALID_URL" ||
+    codes.includes("ERR_INVALID_URL") ||
     error.message.includes("Failed to parse URL") ||
     error.message.includes("Invalid URL")
   ) {
@@ -749,7 +799,20 @@ function connectionErrorFromFetchTypeError(error: TypeError): SIEConnectionError
       "other",
     );
   }
-  return new SIEConnectionError(`Connection failed: ${error.message}`, "connect");
+  if (codes.length === 0) {
+    return new SIEConnectionError(`Connection failed: ${error.message}`, "connect");
+  }
+  const detail = `${error.message} (${codes.join(", ")})`;
+  if (codes.some((code) => SENT_REQUEST_TIMEOUT_CODES.has(code))) {
+    return new SIEConnectionError(
+      `Request timed out waiting for the response: ${detail}. Not retried because the server may already be processing the request.`,
+      "timeout",
+    );
+  }
+  if (codes.every((code) => TRANSIENT_FETCH_ERROR_CODES.has(code))) {
+    return new SIEConnectionError(`Connection failed: ${detail}`, "connect");
+  }
+  return new SIEConnectionError(`Connection failed: ${detail}`, "other");
 }
 
 const MODAL_CONTINUATION_MAX_HOPS = 20;
@@ -1041,6 +1104,7 @@ export class SIEClient {
     const data = unpackMessage<WireResponse>(new Uint8Array(await response.arrayBuffer()));
 
     const results = parseEncodeResults(data.items);
+    attachRequestMetadata(results, response.headers, data);
     // Guard the 1:1 input-to-output contract before any positional access
     // (`results[0]` below, or index-based reassembly in callers). The queue
     // path returns mixed-success batches as 200 with only the successful
@@ -1053,7 +1117,6 @@ export class SIEClient {
       "encode",
       response.headers.get("x-sie-request-id") ?? undefined,
     );
-    attachRequestMetadata(results, response.headers, data);
 
     if (isSingleItem) {
       const first = results[0];
@@ -1311,12 +1374,16 @@ export class SIEClient {
     const url = `${this.baseUrl}/v1/generate/${encodeURIComponent(safeModel)}`;
     const waitForCapacity = options.waitForCapacity ?? this.defaultWaitForCapacity;
 
-    const response = await withProvisioningRetry(() => this.performJsonPost(url, body, headers), {
-      model,
-      gpu,
-      waitForCapacity,
-      provisionTimeoutMs: this.provisionTimeout,
-    });
+    const timeoutMs = options.timeoutMs ?? this.timeout;
+    const response = await withProvisioningRetry(
+      () => this.performJsonPost(url, body, headers, timeoutMs),
+      {
+        model,
+        gpu,
+        waitForCapacity,
+        provisionTimeoutMs: this.provisionTimeout,
+      },
+    );
 
     const data = await parseTerminalJsonObject(response, "generate");
     const result = parseGenerateResult(data);
@@ -1337,16 +1404,17 @@ export class SIEClient {
    *     silently re-issuing a billable generation)
    *
    * Each call uses a fresh `AbortController` so concurrent retries don't
-   * share state, and the per-attempt timeout is bounded by `this.timeout`
-   * (NOT the cumulative provisioning budget).
+   * share state, and the per-attempt timeout is `timeoutMs` (NOT the
+   * cumulative provisioning budget).
    */
   private async performJsonPost(
     url: string,
     body: unknown,
     headers: Record<string, string>,
+    timeoutMs: number,
   ): Promise<Response> {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), this.timeout);
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
     try {
       let response = await fetch(url, {
         method: "POST",
@@ -1375,7 +1443,7 @@ export class SIEClient {
       return response;
     } catch (err) {
       if (err instanceof Error && err.name === "AbortError") {
-        throw new SIEConnectionError(`Request timeout after ${this.timeout}ms`, "timeout");
+        throw new SIEConnectionError(`Request timeout after ${timeoutMs}ms`, "timeout");
       }
       if (err instanceof TypeError) {
         // `generate()` / `chatCompletions()` are non-idempotent and carry
@@ -1452,12 +1520,16 @@ export class SIEClient {
     // The loop also surfaces `ProvisioningError` when the caller opted out
     // (`waitForCapacity: false`) or the provision budget is exhausted,
     // matching `generate()`.
-    const response = await withProvisioningRetry(() => this.performJsonPost(url, body, headers), {
-      model: req.model,
-      gpu: undefined,
-      waitForCapacity,
-      provisionTimeoutMs,
-    });
+    const timeoutMs = options.timeoutMs ?? this.timeout;
+    const response = await withProvisioningRetry(
+      () => this.performJsonPost(url, body, headers, timeoutMs),
+      {
+        model: req.model,
+        gpu: undefined,
+        waitForCapacity,
+        provisionTimeoutMs,
+      },
+    );
 
     this.checkServerVersion(response);
 
@@ -1594,7 +1666,7 @@ export class SIEClient {
       signal,
       (chunk) => extractGenerateChunkError(chunk),
       { pool, gpu },
-      { waitForCapacity },
+      { waitForCapacity, timeoutMs: options.timeoutMs },
     );
   }
 
@@ -1612,7 +1684,8 @@ export class SIEClient {
    * Retry policy mirrors {@link generate}: only explicit SAFE
    * pre-execution capacity signals — `503 PROVISIONING`,
    * `503 MODEL_LOADING` and `503 RESOURCE_EXHAUSTED` (the latter only
-   * under `waitForCapacity`) — are retried while the provision budget
+   * under `waitForCapacity`) — and the pre-dispatch admission rejections
+   * handled by `admissionRetryDelay` are retried while the provision budget
    * remains; a `504` is post-publish and therefore terminal.
    * Once the body opens we never retry (the call is non-idempotent; a
    * mid-stream failure must not re-issue generation).
@@ -1626,12 +1699,13 @@ export class SIEClient {
     signal: AbortSignal | undefined,
     extractError: (chunk: T) => SIEStreamError | null,
     routing?: { pool?: string; gpu?: string },
-    provisioning?: { waitForCapacity?: boolean },
+    provisioning?: { waitForCapacity?: boolean; timeoutMs?: number },
   ): AsyncGenerator<T, void, undefined> {
     const headers = this.buildChatHeaders("text/event-stream");
     if (routing?.pool) headers["X-SIE-Pool"] = routing.pool;
     if (routing?.gpu) headers["X-SIE-MACHINE-PROFILE"] = routing.gpu;
     const waitForCapacity = provisioning?.waitForCapacity ?? this.defaultWaitForCapacity;
+    const preStreamTimeoutMs = provisioning?.timeoutMs ?? this.timeout;
     const gpu = routing?.gpu;
 
     // Compose the caller's signal with our internal timeout-controller so
@@ -1664,7 +1738,7 @@ export class SIEClient {
         // three-tier taxonomy). Setting `this.timeout` for the whole stream
         // would cap long generations at 30s. A fresh per-attempt timeout
         // covers each pre-stream fetch.
-        const preStreamTimeoutId = setTimeout(() => controller.abort(), this.timeout);
+        const preStreamTimeoutId = setTimeout(() => controller.abort(), preStreamTimeoutMs);
         let attemptResponse: Response;
         try {
           attemptResponse = await fetch(url, {
@@ -1679,7 +1753,10 @@ export class SIEClient {
             throw new SIEConnectionError("Stream aborted before response", "other");
           }
           if (error instanceof Error && error.name === "AbortError") {
-            throw new SIEConnectionError(`Stream open timeout after ${this.timeout}ms`, "timeout");
+            throw new SIEConnectionError(
+              `Stream open timeout after ${preStreamTimeoutMs}ms`,
+              "timeout",
+            );
           }
           if (error instanceof TypeError) {
             throw connectionErrorFromFetchTypeError(error);
@@ -1779,6 +1856,17 @@ export class SIEClient {
             }
             continue;
           }
+        }
+
+        const admissionDelay = await admissionRetryDelay(attemptResponse, {
+          startTime,
+          provisionTimeoutMs: this.provisionTimeout,
+        });
+        if (admissionDelay !== undefined) {
+          if (await abortableSleep(admissionDelay, controller.signal)) {
+            throw new SIEConnectionError("Stream aborted while provisioning", "other");
+          }
+          continue;
         }
 
         // 504 is terminal on the streaming path: post-publish, a worker may
@@ -1974,6 +2062,7 @@ export class SIEClient {
     const data = unpackMessage<WireResponse>(new Uint8Array(await response.arrayBuffer()));
 
     const results = parseExtractResults(data.items);
+    attachRequestMetadata(results, response.headers, data);
     // Same positional contract as encode: `results[0]` below and index-based
     // reassembly in batch callers both assume one result per input, and the
     // queue path drops failed items from a 200 body.
@@ -1984,7 +2073,6 @@ export class SIEClient {
       "extract",
       response.headers.get("x-sie-request-id") ?? undefined,
     );
-    attachRequestMetadata(results, response.headers, data);
 
     if (isSingleItem) {
       const first = results[0];

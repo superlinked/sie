@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+from unittest.mock import NonCallableMagicMock
+
+import pytest
 from sie_llamaindex import create_sie_extractor_tool
+from sie_llamaindex.extractors import _SIEExtractor
+from sie_sdk import RequestError
 
 
 class TestSIEExtractorTool:
@@ -105,3 +110,22 @@ class TestSIEExtractorTool:
 
         # The tool wraps a function that uses _SIEExtractor
         assert callable(tool.fn)
+
+
+def test_extract_raises_on_item_error(
+    mock_sie_client: NonCallableMagicMock, extract_error_text: str, extract_item_error: dict[str, str]
+) -> None:
+    extractor = _SIEExtractor(
+        base_url="http://localhost:8080",
+        model="test-extractor",
+        labels=["person"],
+        options=None,
+        gpu=None,
+        timeout_s=180.0,
+    )
+    extractor._client = mock_sie_client
+
+    with pytest.raises(RequestError, match="Extraction failed") as excinfo:
+        extractor.extract(extract_error_text)
+
+    assert excinfo.value.code == extract_item_error["code"]

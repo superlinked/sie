@@ -30,6 +30,7 @@ from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
+from sie_server.observability.batch_fanin import BatchFanInSpanProcessor
 from sie_server.observability.worker_telemetry import worker_resource_attributes
 
 if TYPE_CHECKING:
@@ -180,7 +181,7 @@ def setup_tracing(app: FastAPI) -> None:
     # can't stall on an unreachable collector.
     try:
         exporter = _build_span_exporter(config)
-        provider.add_span_processor(BatchSpanProcessor(exporter))
+        provider.add_span_processor(BatchFanInSpanProcessor(BatchSpanProcessor(exporter)))
         logger.info(
             "OTLP exporter configured for endpoint: %s (%s)",
             _endpoint_origin_for_log(config.endpoint),

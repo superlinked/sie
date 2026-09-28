@@ -9,12 +9,20 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Iterator, Mapping
 from typing import Any, Self
 
-from sie_sdk import SIEAsyncClient, SIEClient
+from sie_sdk import RequestError, SIEAsyncClient, SIEClient
 from sie_sdk.encoding import dense_embedding
 from sie_sdk.types import Item
+
+
+def _raise_for_item_error(result: Any) -> None:
+    """Raise when SIE reports that extraction failed for this item."""
+    error = result.get("error") if isinstance(result, Mapping) else None
+    if isinstance(error, Mapping):
+        msg = f"Extraction failed: {error.get('message')}"
+        raise RequestError(msg, code=error.get("code"), request=result.get("request"))
 
 
 @dataclasses.dataclass
@@ -366,10 +374,12 @@ class SIEDocumentEnricher:
             raw_classifications: list[dict[str, Any]] | None = None
 
             if extract_results is not None:
+                _raise_for_item_error(extract_results[i])
                 raw_entities = self._get_entities(extract_results[i])
                 self._merge_entity_properties(properties, raw_entities)
 
             if classify_results is not None:
+                _raise_for_item_error(classify_results[i])
                 raw_classifications = self._get_classifications(classify_results[i])
                 self._merge_classification_properties(properties, raw_classifications)
 

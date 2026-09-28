@@ -13,10 +13,9 @@ lifecycle signals remain excluded until a deployed producer owns them;
 undeclared new instruments are not permitted.
 
 The current inventory is 122 application families: 120 may reach the remote
-OTLP branch and two remain Prometheus-only controls. Nine additional,
-exact collector-self families form a separate operational allowlist. The
-Better Stack dashboard code therefore covers 129 remotely eligible families
-without turning collector self-telemetry into a version-dependent wildcard.
+OTLP branch and two remain Prometheus-only controls. Ten additional,
+exact collector-self families form a separate operational allowlist without
+turning collector self-telemetry into a version-dependent wildcard.
 
 `sie.gateway.pool.pinned_model.loaded` is intentionally Prometheus-only. Its
 `pool` attribute is an API-defined logical pool name (`logical_pool`), which is
@@ -177,11 +176,43 @@ forwarder. It preserves trace/span/parent IDs, start/end timestamps, kind,
 status code, flags, a bounded span name, and the five safe resource identity
 fields declared in `contract.yaml`. It removes every span event and span/scope
 attribute, clears status text, inbound trace-state text, and scope identity,
-drops unknown resource attributes, and collapses unknown span names to `other`.
+reconstructs the five retained string resource fields after receiver identity
+stamping (discarding duplicate keys and non-string values), and collapses
+unknown span names to `other`.
 Because each link can carry arbitrary attributes and trace-state text, and the
 pinned collector cannot reliably mutate links in place, the remote branch
-drops the entire linked span. Unlinked sibling spans continue through the
-allowlist; the unchanged local OSS branch may retain linked spans. When Helm is
+drops the entire linked span. Do not remove this guard: Collector 0.119 accepts
+`set(links, [])` but leaves the links untouched at runtime.
+
+For `worker.run_batch` and `sidecar.dispatch`, the shared SDK processor adds
+`.request` timing leaves when the recorded, sampled original has links. Each
+leaf has a fresh span ID under a distinct valid contributing parent, the exact
+shared start/end time and kind, and the original status code without text. It
+contains no span attributes, events, links or tracestate. The original and its
+rich links stay unchanged locally. Remote filtering drops the linked original
+and retains the safe leaves; ordinary unlinked batches need no extra spans.
+Repeated parent IDs are deduplicated even if tracestate differs, and unsampled
+linked parents are not promoted into sampled traces.
+
+These leaves show each request's participation in shared execution. Their
+durations must not be summed as independent compute, and they do not reparent
+detailed descendants: those still belong to the original shared span, which
+is absent remotely. A sampled linked request cannot recover an unsampled
+original batch. SDK-discarded links likewise cannot be reconstructed; the
+original's dropped-link count remains visible locally. Leaves enter the same
+bounded export queue as originals, so fan-in adds queue pressure and can incur
+the existing exporter losses. No sampler, collector pin, metric/control path,
+or log schema changes are required.
+
+The collector's isolated self pipeline exports
+`otelcol_processor_filter_spans_filtered` only for
+`filter=filter/remote_linked_spans`, retaining no other point attributes. This
+counts removed original spans, not lost requests: successfully projected leaves
+can accompany each dropped original. It distinguishes privacy filtering from
+receiver refusal or exporter failure. It cannot measure head-sampling loss,
+producer queue drops, or SDK-discarded links.
+
+Unlinked sibling spans continue through the allowlist. When Helm is
 configured with Tempo as well as Better Stack, those are separate collector
 pipelines: the local OSS branch receives the producer trace unchanged, while
 only the remote branch runs the privacy processors. Producers still export one

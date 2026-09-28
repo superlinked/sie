@@ -1,6 +1,7 @@
 from typing import Self
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import numpy as np
 import pytest
 from msgpack.exceptions import UnpackException
@@ -105,7 +106,7 @@ def test_sync_terminal_operation_consumes_same_origin_modal_continuation(operati
     client_cls.return_value.get.assert_called_once_with(
         path,
         headers={"Accept": "application/msgpack"},
-        timeout=30,
+        timeout=httpx.Timeout(150.0, connect=10.0),
     )
 
 

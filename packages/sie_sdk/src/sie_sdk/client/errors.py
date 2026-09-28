@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from sie_sdk.types import RequestMetadata
 
 
@@ -460,9 +462,9 @@ class IncompleteBatchError(ServerError):
     contract even though the HTTP status was 200 — so existing ``ServerError``
     handlers keep working (this refines the untyped guard from #1526).
     ``status_code`` is ``None``: the response was not an HTTP error. Callers
-    can catch :class:`IncompleteBatchError` specifically and retry item-wise
-    (single-item batches get per-item error visibility) using
-    :attr:`missing_ids` when available.
+    can catch :class:`IncompleteBatchError` specifically, keep the items in
+    :attr:`results`, and retry only the failed items (single-item batches get
+    per-item error visibility) using :attr:`missing_ids` when available.
 
     Attributes:
         expected: Number of items submitted in this HTTP request.
@@ -472,6 +474,11 @@ class IncompleteBatchError(ServerError):
             when ids identify every item on both sides (every submitted item
             carried an ``id`` and every returned item echoed one), ``None``
             otherwise.
+        results: The results the response did carry, parsed exactly as a
+            successful call returns them, in response order. Positions do not
+            line up with the submitted items; match them by ``id``. Extract
+            results may still carry a per-item ``error``. The response body
+            names no reason for the items it dropped.
         request_id: Gateway request id (``x-sie-request-id``) when the
             response carried one; quote it when reporting the incident.
     """
@@ -486,12 +493,14 @@ class IncompleteBatchError(ServerError):
         model: str | None = None,
         missing_ids: list[str] | None = None,
         request: RequestMetadata | None = None,
+        results: Sequence[Any] | None = None,
     ) -> None:
         super().__init__(message, code=code, request=request)
         self.expected = expected
         self.received = received
         self.model = model
         self.missing_ids = missing_ids
+        self.results: list[Any] = list(results) if results is not None else []
         self.request_id: str | None = (request or {}).get("id")
 
 
