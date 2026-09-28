@@ -84,7 +84,16 @@ def context(trace: int, parent: int, *, sampled=True):
 
 def sample_spans() -> list[ReadableSpan]:
     exporter = InMemorySpanExporter()
-    provider = TracerProvider(resource=Resource({"service.name": "sie-worker", "customer": SENTINEL}))
+    provider = TracerProvider(
+        resource=Resource(
+            {
+                "service.name": "sie-worker",
+                "service.instance.id": "worker-instance",
+                "service.version": "test-version",
+                "customer": SENTINEL,
+            }
+        )
+    )
     provider.add_span_processor(BatchFanInSpanProcessor(SimpleSpanProcessor(exporter)))
     tracer = provider.get_tracer(SENTINEL, attributes={"customer": SENTINEL})
     # Distinct traces, same-trace distinct parents, and duplicate parents.
@@ -185,6 +194,20 @@ def test_batch_fanin_survives_remote_privacy_with_local_links_intact(tmp_path, r
         wait_for(lambda: urllib.request.urlopen(f"http://127.0.0.1:{ports[13133]}", timeout=1).status == 200)
         source = sample_spans()
         wire = encode_spans(source)
+        for resource_spans in wire.resource_spans:
+            # OTTL reads the first key, while keep_keys can retain later
+            # unvalidated duplicates. Remote reconstruction must remove both
+            # string and nested duplicates after authoritative identity stamping.
+            for key in [
+                "service.name",
+                "service.instance.id",
+                "service.version",
+                "deployment.environment",
+                "cloud.region",
+            ]:
+                resource_spans.resource.attributes.add(key=key).value.string_value = SENTINEL
+                nested = resource_spans.resource.attributes.add(key=key).value.kvlist_value
+                nested.values.add(key="payload").value.string_value = SENTINEL
         # Inject fields the SDK normally validates: zero IDs and adversarial
         # link attributes/tracestate still must never cross the remote branch.
         linked = next(s for rs in wire.resource_spans for sc in rs.scope_spans for s in sc.spans if s.links)
@@ -206,6 +229,17 @@ def test_batch_fanin_survives_remote_privacy_with_local_links_intact(tmp_path, r
         assert SENTINEL in (tmp_path / "unsafe.json").read_text()
         assert SENTINEL in (tmp_path / "local.json").read_text()
         assert SENTINEL not in (tmp_path / "remote.json").read_text()
+        for line in (tmp_path / "remote.json").read_text().splitlines():
+            for resource_spans in json.loads(line)["resourceSpans"]:
+                attrs = resource_spans["resource"]["attributes"]
+                assert len({a["key"] for a in attrs}) == len(attrs)
+                assert {a["key"]: a["value"] for a in attrs} == {
+                    "service.name": {"stringValue": "sie-gateway" if receiver == "gateway" else "sie-worker"},
+                    "service.instance.id": {"stringValue": "worker-instance"},
+                    "service.version": {"stringValue": "test-version"},
+                    "deployment.environment": {"stringValue": "dev"},
+                    "cloud.region": {"stringValue": "test-region"},
+                }
         assert not any(
             s.get("links")
             or s.get("events")

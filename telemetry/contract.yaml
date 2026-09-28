@@ -632,6 +632,8 @@ traces:
         unknown_service: drop
       local_oss_action: retain_producer_identity_unchanged
     resource_attributes:
+      duplicate_keys: reconstruct_first_validated_scalar_after_receiver_identity_stamping
+      non_string_identity: drop_field
       allow:
         - service.name
         - service.instance.id

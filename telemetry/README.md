@@ -176,7 +176,9 @@ forwarder. It preserves trace/span/parent IDs, start/end timestamps, kind,
 status code, flags, a bounded span name, and the five safe resource identity
 fields declared in `contract.yaml`. It removes every span event and span/scope
 attribute, clears status text, inbound trace-state text, and scope identity,
-drops unknown resource attributes, and collapses unknown span names to `other`.
+reconstructs the five retained string resource fields after receiver identity
+stamping (discarding duplicate keys and non-string values), and collapses
+unknown span names to `other`.
 Because each link can carry arbitrary attributes and trace-state text, and the
 pinned collector cannot reliably mutate links in place, the remote branch
 drops the entire linked span. Do not remove this guard: Collector 0.119 accepts

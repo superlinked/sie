@@ -332,7 +332,8 @@ processors:
       - context: datapoint
         statements:
           - 'keep_keys(attributes, []) where metric.name == "up"'
-          - 'keep_keys(attributes, ["filter"]) where metric.name == "otelcol_processor_filter_spans_filtered"'
+          - 'keep_keys(attributes, []) where metric.name == "otelcol_processor_filter_spans_filtered"'
+          - 'set(attributes["filter"], "filter/remote_linked_spans") where metric.name == "otelcol_processor_filter_spans_filtered"'
           - 'keep_keys(attributes, ["exporter", "data_type"]) where IsMatch(metric.name, "^(otelcol_exporter_queue_size|otelcol_exporter_queue_capacity)$")'
           - 'keep_keys(attributes, ["receiver", "transport"]) where IsMatch(metric.name, "^(otelcol_receiver_refused_spans|otelcol_receiver_refused_metric_points|otelcol_receiver_refused_log_records)$")'
           - 'keep_keys(attributes, ["exporter", "transport"]) where IsMatch(metric.name, "^(otelcol_exporter_send_failed_spans|otelcol_exporter_send_failed_metric_points|otelcol_exporter_send_failed_log_records)$")'
@@ -385,7 +386,17 @@ processors:
     trace_statements:
       - context: resource
         statements:
-          - keep_keys(attributes, ["service.name", "service.instance.id", "deployment.environment", "cloud.region", "service.version"])
+          - set(cache["service.name"], attributes["service.name"]) where IsString(attributes["service.name"])
+          - set(cache["service.instance.id"], attributes["service.instance.id"]) where IsString(attributes["service.instance.id"])
+          - set(cache["deployment.environment"], attributes["deployment.environment"]) where IsString(attributes["deployment.environment"])
+          - set(cache["cloud.region"], attributes["cloud.region"]) where IsString(attributes["cloud.region"])
+          - set(cache["service.version"], attributes["service.version"]) where IsString(attributes["service.version"])
+          - keep_keys(attributes, [])
+          - set(attributes["service.name"], cache["service.name"])
+          - set(attributes["service.instance.id"], cache["service.instance.id"])
+          - set(attributes["deployment.environment"], cache["deployment.environment"])
+          - set(attributes["cloud.region"], cache["cloud.region"])
+          - set(attributes["service.version"], cache["service.version"])
           - set(schema_url, "")
       - context: scope
         statements:
