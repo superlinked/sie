@@ -214,6 +214,9 @@ def test_remote_metric_maps_have_one_scalar_per_retained_key(tmp_path, receiver)
                                 assert point["explicitBounds"] == [1]
         assert len(seen) == 6
     finally:
-        logs = run("docker", "logs", container, include_stderr=True)
-        run("docker", "rm", "-f", container)
-        assert "Error: " not in logs, logs
+        try:
+            run("docker", "stop", "--time", "10", container)
+            logs = run("docker", "logs", container, include_stderr=True)
+            assert "Error: " not in logs, logs
+        finally:
+            run("docker", "rm", "-f", container)
