@@ -111,9 +111,10 @@ Work-item deadlines:
   ACKed, NAKed, or dropped, so a slow scheduler queue or backend call does not
   trigger a redelivery of work that is still running. Settlement waits for a
   progress ACK already in flight, so none follows the ACK or NAK. Progress
-  pauses while the backend heartbeat is not ready or the sidecar is draining,
-  so JetStream can move the work to another worker; the pause and the resume
-  are logged. With enforcement on, the lease
+  pauses once an established backend heartbeat goes stale or the sidecar is
+  draining, so JetStream can move the work to another worker; the pause and
+  the resume are logged. Before the first successful heartbeat the backend
+  state is unknown and progress continues. With enforcement on, the lease
   ends at the deadline and a later redelivery is dropped as expired; with
   enforcement off it lasts one more maximum budget past the deadline.
 - A `RunBatch` call waits for the longer of `SIE_IPC_REQUEST_TIMEOUT_S` and

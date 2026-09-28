@@ -528,6 +528,24 @@ class TestFraming:
             await client.close()
 
     @pytest.mark.asyncio
+    async def test_first_ping_reports_ready_with_the_sidecar_heartbeat_probe(self, server_and_path) -> None:
+        srv, sock = server_and_path
+        mark_ready()
+        register_liveness_probe(srv.is_heartbeat_fresh)
+        client = await _Client.connect(sock)
+        try:
+            with patch(
+                "sie_server.ipc_server.gpu_is_healthy_async",
+                new=AsyncMock(return_value=True),
+            ):
+                first = await client.rpc("Ping", {"timestamp_ms": 1.0})
+                second = await client.rpc("Ping", {"timestamp_ms": 2.0})
+            assert first["body"]["ready"] is True
+            assert second["body"]["ready"] is True
+        finally:
+            await client.close()
+
+    @pytest.mark.asyncio
     async def test_ping_reports_not_ready_when_gpu_health_fails(self, server_and_path) -> None:
         _srv, sock = server_and_path
         mark_ready()

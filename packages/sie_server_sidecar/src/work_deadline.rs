@@ -456,9 +456,10 @@ impl NatsProgressLeases {
         }
     }
 
-    /// Only extend leases while the backend answers its heartbeat and the
-    /// sidecar is not draining, so JetStream can move work off a worker whose
-    /// backend stopped responding.
+    /// Stop extending leases once an established backend heartbeat goes stale
+    /// or the sidecar starts draining, so JetStream can move work off a worker
+    /// whose backend stopped responding. Before the first successful heartbeat
+    /// the backend state is unknown and leases are extended.
     pub(crate) fn gate_on_backend_readiness(&self, readiness: Arc<Readiness>) {
         let _ = self.backend_readiness.set(readiness);
     }
@@ -466,7 +467,8 @@ impl NatsProgressLeases {
     /// Why progress ACKs are paused, or `None` while they may be sent.
     fn progress_blocked_reason(&self) -> Option<String> {
         let snapshot = self.backend_readiness.get()?.snapshot();
-        (!snapshot.is_ready()).then(|| snapshot.reason())
+        let blocked = snapshot.draining || (snapshot.handshaked && !snapshot.is_ready());
+        blocked.then(|| snapshot.reason())
     }
 
     pub(crate) fn hold(
@@ -903,26 +905,42 @@ mod tests {
     }
 
     #[test]
-    fn progress_pauses_while_the_backend_is_not_ready() {
+    fn progress_pauses_only_on_a_stale_heartbeat_or_draining() {
         let leases = NatsProgressLeases::new();
         assert_eq!(leases.progress_blocked_reason(), None);
 
-        let readiness = Arc::new(Readiness::new(2_000, 3));
+        let readiness = Arc::new(Readiness::new(1, 1));
         leases.gate_on_backend_readiness(Arc::clone(&readiness));
         assert_eq!(
-            leases.progress_blocked_reason().as_deref(),
-            Some("handshake pending"),
-            "no successful backend ping yet"
+            leases.progress_blocked_reason(),
+            None,
+            "an unknown backend state before the first heartbeat fails open"
         );
 
         readiness.record_ping_success();
-        assert_eq!(leases.progress_blocked_reason(), None);
+        std::thread::sleep(Duration::from_millis(5));
+        assert!(
+            leases
+                .progress_blocked_reason()
+                .is_some_and(|reason| reason.starts_with("heartbeat stale")),
+            "an established heartbeat that went stale pauses progress"
+        );
 
+        readiness.record_ping_success();
         readiness.mark_draining();
         assert_eq!(
             leases.progress_blocked_reason().as_deref(),
             Some("draining")
         );
+    }
+
+    #[test]
+    fn progress_continues_while_the_backend_heartbeat_is_fresh() {
+        let leases = NatsProgressLeases::new();
+        let readiness = Arc::new(Readiness::new(60_000, 3));
+        leases.gate_on_backend_readiness(Arc::clone(&readiness));
+        readiness.record_ping_success();
+        assert_eq!(leases.progress_blocked_reason(), None);
     }
 
     #[test]
