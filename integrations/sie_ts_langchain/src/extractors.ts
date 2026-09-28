@@ -27,6 +27,7 @@ import { Tool } from "@langchain/core/tools";
 import {
   type ExtractOptions,
   type ExtractResult,
+  RequestError,
   SIEClient,
   type SIEClientOptions,
 } from "@superlinked/sie-sdk";
@@ -179,6 +180,7 @@ export class SIEExtractor extends Tool {
    *
    * @param text - Text to extract from.
    * @returns JSON string with entities, relations, classifications, and objects.
+   * @throws {RequestError} If SIE reports that extraction failed for the text.
    */
   async _call(text: string): Promise<string> {
     const extractOptions: ExtractOptions = {
@@ -189,6 +191,14 @@ export class SIEExtractor extends Tool {
     }
 
     const result: ExtractResult = await this.client.extract(this.model, { text }, extractOptions);
+    if (result.error) {
+      throw new RequestError(
+        `Extraction failed: ${result.error.message}`,
+        result.error.code,
+        undefined,
+        result.request?.id,
+      );
+    }
 
     return JSON.stringify({
       entities: result.entities.map((e) => ({

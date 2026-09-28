@@ -13,6 +13,7 @@
 //! pipeline. Those are per-crate surfaces (their name sets are disjoint;
 //! see `telemetry/contract.yaml` and the parity test).
 
+pub mod batch_fanin;
 pub mod env;
 pub mod exporters;
 pub mod propagation;

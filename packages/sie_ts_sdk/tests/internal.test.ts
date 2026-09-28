@@ -143,12 +143,12 @@ describe("Retry-After header parsing", () => {
     expect(delay).toBeLessThan(12000);
   });
 
-  it("should return undefined for past date", () => {
+  it("should treat a past date as retry-immediately (0ms)", () => {
     const pastDate = new Date(Date.now() - 10000);
     const httpDate = pastDate.toUTCString();
 
     const delay = getRetryAfter(httpDate);
-    expect(delay).toBeUndefined();
+    expect(delay).toBe(0);
   });
 
   it("should return undefined for invalid format", () => {

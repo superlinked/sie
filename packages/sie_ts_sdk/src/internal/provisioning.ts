@@ -44,6 +44,7 @@ import {
   RATE_LIMIT_DEFAULT_DELAY,
   RESOURCE_EXHAUSTED_ERROR_CODE,
   RESOURCE_EXHAUSTED_MAX_RETRIES,
+  RETRY_AFTER_GATED_503_ERROR_CODES,
 } from "./constants.js";
 import {
   getErrorCode,
@@ -149,6 +150,13 @@ export function nextOomRetryDelay(opts: {
  *   cap, NOT customer credit exhaustion) and `503 QUEUE_FULL` (B7 — self-hosted
  *   queue backpressure, #3180). On give-up throws the server's terminal 503
  *   verbatim via {@link handleError} (a {@link ServerError} preserving the code).
+ * - `503 QUEUE_UNAVAILABLE` / `transport_failure` carrying a usable
+ *   `Retry-After`: the gateway rejected the publish under queue backpressure.
+ *   Without the hint these codes stay terminal. The give-up matches the
+ *   previous arm.
+ *
+ * `packages/wire-fixtures/retry_classification.json` pins these decisions for
+ * both SDKs.
  *
  * Retry timing mirrors the PROVISIONING arm: the server-supplied `Retry-After`
  * is honored verbatim, and only the SDK's own fallback default is jittered.
@@ -194,8 +202,12 @@ export async function admissionRetryDelay(
 
   if (status === 503) {
     const code = await getErrorCode(response.clone());
-    if (code !== undefined && BACKPRESSURE_503_ERROR_CODES.has(code)) {
-      const retryAfter = getRetryAfter(response);
+    const retryAfter = getRetryAfter(response);
+    const backpressure =
+      code !== undefined &&
+      (BACKPRESSURE_503_ERROR_CODES.has(code) ||
+        (RETRY_AFTER_GATED_503_ERROR_CODES.has(code) && retryAfter !== undefined));
+    if (backpressure) {
       const elapsed = Date.now() - startTime;
       const remaining = provisionTimeoutMs - elapsed;
       const delay =

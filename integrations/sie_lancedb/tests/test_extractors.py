@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from unittest.mock import NonCallableMagicMock
+
 import lancedb
 import pyarrow as pa
 import pytest
 from sie_lancedb import SIEExtractor
 from sie_lancedb.extractors import _build_entities_array, _format_entities
+from sie_sdk import RequestError
 
 
 @pytest.fixture
@@ -247,3 +250,22 @@ class TestBuildEntitiesArray:
 
         assert isinstance(result, pa.Array)
         assert len(result) == 0
+
+
+def test_extract_raises_on_item_error_with_position(
+    mock_sie_client: NonCallableMagicMock, extract_item_error: dict[str, str]
+) -> None:
+    ok = {"entities": [], "relations": [], "classifications": [], "objects": []}
+    mock_sie_client.extract.side_effect = [
+        [ok, ok],
+        [
+            ok,
+            {"entities": [], "relations": [], "classifications": [], "objects": [], "error": dict(extract_item_error)},
+        ],
+    ]
+    extractor = SIEExtractor(model="test-model", client=mock_sie_client)
+
+    with pytest.raises(RequestError, match="for item 3") as excinfo:
+        extractor.extract(["a", "b", "c", "d"], labels=["person"], batch_size=2)
+
+    assert excinfo.value.code == extract_item_error["code"]

@@ -147,6 +147,29 @@ Retry semantics for transient `503` codes:
   exponential backoff; throws `ResourceExhaustedError` (a `ServerError`
   subclass) when retries run out.
 
+Admission rejections happen before any work is dispatched, so every call
+retries them within `provisionTimeout`, honouring `Retry-After` (delay
+seconds or an HTTP date): `429 RATE_LIMIT`, `503 QUEUE_FULL`, and the
+gateway's queue backpressure, a `503 QUEUE_UNAVAILABLE` that carries
+`Retry-After`. A `QUEUE_UNAVAILABLE` without `Retry-After` is terminal.
+[`packages/wire-fixtures/retry_classification.json`](../wire-fixtures/retry_classification.json)
+lists how each response is classified; the TypeScript and Python SDKs
+both test against it.
+
+Each attempt waits up to `timeoutMs` (default 150000 ms, longer than the
+gateway's default 120 s request deadline) for a response. A timed-out
+request is never retried, because the server may still be processing it.
+`generate` and `chatCompletions` accept a per-call `timeoutMs`; set it to
+at least the model profile's `overall_timeout_s` for long generations.
+Connection failures are classified by their cause: refused, unreachable
+or reset connections are retried under `waitForCapacity`, while DNS name,
+TLS and certificate failures fail immediately.
+
+When a batch response carries fewer items than were sent, `encode` and
+`extract` throw `IncompleteBatchError`. Its `results` holds the items
+that did come back (match them by `id`), and `missingIds` names the
+dropped items when every submitted item carried an `id`.
+
 Streaming calls throw `SIEStreamError` for mid-stream error chunks —
 the HTTP connection was healthy but the worker or gateway emitted an
 error envelope partway through. Branch on `error.code` (for example

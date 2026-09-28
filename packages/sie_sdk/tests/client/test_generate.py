@@ -499,7 +499,7 @@ class TestSyncGenerate:
         mock_client.return_value.get.assert_called_once_with(
             "/v1/generate/m?__modal_attempt_token=opaque",
             headers={"Accept": "application/json"},
-            timeout=pytest.approx(30),
+            timeout=httpx.Timeout(150.0, connect=10.0),
         )
         assert client.last_retry_count == 0
 

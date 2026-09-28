@@ -11,9 +11,11 @@ The extractor supports two usage patterns:
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 import pyarrow as pa
+from sie_sdk import RequestError
 
 if TYPE_CHECKING:
     import lancedb
@@ -137,7 +139,8 @@ class SIEExtractor:
             items = [Item(text=t) for t in batch]
             results = self.client.extract(self._model, items, labels=labels)
 
-            for result in results:
+            for offset, result in enumerate(results):
+                _raise_for_item_error(result, i + offset)
                 entities = result.get("entities", []) if isinstance(result, dict) else getattr(result, "entities", [])
                 all_entities.append(_format_entities(entities))
 
@@ -197,6 +200,14 @@ class SIEExtractor:
                 }
             )
             table.merge(enrichment, id_column)
+
+
+def _raise_for_item_error(result: Any, index: int) -> None:
+    """Raise when SIE reports that extraction failed for the item at ``index``."""
+    error = result.get("error") if isinstance(result, Mapping) else None
+    if isinstance(error, Mapping):
+        msg = f"Extraction failed for item {index}: {error.get('message')}"
+        raise RequestError(msg, code=error.get("code"), request=result.get("request"))
 
 
 def _format_entities(entities: list) -> list[dict[str, Any]]:
