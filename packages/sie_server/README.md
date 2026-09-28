@@ -26,11 +26,11 @@ pip install sie-server
   pip install sie-server "transformers<5"
   ```
 
-- **Transformers 5 bundle** (LightOnOCR, GLM-OCR, GLiGuard, and the GLiNER2.5-Decide models) — requires
-  `transformers` 5.x, and is served with `-b transformers5`. The GLiNER2.5-Decide models also need `gliner2`
-  2.x. `sie-server` itself asks for `gliner2<2`, which the default bundle's GLiNER2 models need, so pip
-  reports that conflict when the second command below installs 2.x; the transformers5 bundle's GLiNER2
-  models are verified on 2.0.0:
+- **Transformers 5 bundle** (LightOnOCR, GLM-OCR, GLiGuard, the GLiNER2.5-Decide models, and the TopK-Embed-V1
+  multi-vector models) — requires `transformers` 5.x, and is served with `-b transformers5`. The GLiNER2.5-Decide
+  models also need `gliner2` 2.x. `sie-server` itself asks for `gliner2<2`, which the default bundle's GLiNER2
+  models need, so pip reports that conflict when the second command below installs 2.x; the transformers5
+  bundle's GLiNER2 models are verified on 2.0.0:
 
   ```bash
   pip install sie-server "transformers>=5,<6"

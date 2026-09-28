@@ -9,6 +9,8 @@ adapters:
 - sie_server.adapters.gliner2.classification
 - sie_server.adapters.gliner2.decide
 - sie_server.adapters.st_sparse_vision.adapter
+# TopK-Embed-V1 multi-vector text + page-image models (Qwen3.5 backbone, transformers>=5.2).
+- sie_server.adapters.topk_embed.adapter
 deps:
   # Transformers 5.x for models requiring newer architecture support
   # (e.g., LightOnOCR-2-1B needs LightOnOcrForConditionalGeneration,

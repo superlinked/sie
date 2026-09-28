@@ -69,7 +69,7 @@ docker run --gpus all -p 8080:8080 \
   -v sie-hf-cache:/app/.cache/huggingface \
   ghcr.io/superlinked/sie-server:latest-cuda12-default
 
-# Linux, NVIDIA GPU: Transformers 5 models (LightOnOCR, GLM-OCR, and the GLiNER2.5-Decide models)
+# Linux, NVIDIA GPU: Transformers 5 models (LightOnOCR, GLM-OCR, GLiNER2.5-Decide, and TopK-Embed-V1)
 docker run --gpus all -p 8080:8080 \
   -v sie-hf-cache:/app/.cache/huggingface \
   ghcr.io/superlinked/sie-server:latest-cuda12-transformers5
@@ -87,8 +87,8 @@ docker run -p 8080:8080 \
 
 Docker images are bundle-specific so dependency-incompatible model families stay isolated. Use the
 `sglang-vision-extract` image for LightOnOCR, GLM-OCR, and PaddleOCR-VL, or the `transformers5` image for the
-`:transformers` profiles of LightOnOCR and GLM-OCR and for the GLiNER2.5-Decide models; the `default` image
-intentionally does not advertise them.
+`:transformers` profiles of LightOnOCR and GLM-OCR, the GLiNER2.5-Decide models, and the TopK-Embed-V1 models; the
+`default` image intentionally does not advertise them.
 
 ```bash
 # in a second terminal
