@@ -641,6 +641,31 @@ def test_ingress_renders_when_host_and_tls_or_auth_or_opt_in_are_set(tmp_path: P
     assert len(gateway_ingresses(rendered_documents(tmp_path, values))) == 1
 
 
+@pytest.mark.parametrize(
+    "extra_env",
+    [
+        [{"name": "SIE_AUTH_MODE", "value": "none"}, {"name": "SIE_AUTH_TOKEN", "value": ""}],
+        [{"name": "SIE_AUTH_MODE", "valueFrom": {"configMapKeyRef": {"name": "gateway-auth", "key": "mode"}}}],
+    ],
+)
+def test_extra_env_auth_mode_override_is_not_credited(tmp_path: Path, extra_env: list[dict]) -> None:
+    values = {
+        "ingress": {"enabled": True},
+        "gateway": {"auth": {"mode": "static", "tokenSecretName": "sie-gateway-auth"}, "extraEnv": extra_env},
+    }
+    result = render_chart(tmp_path, values)
+    assert result.returncode != 0
+    assert f"{INGRESS_GUARD}: it has no host and no TLS while" in result.stderr
+
+
+def test_extra_env_auth_mode_enabling_auth_is_credited(tmp_path: Path) -> None:
+    values = {
+        "ingress": {"enabled": True},
+        "gateway": {"extraEnv": [{"name": "SIE_AUTH_MODE", "value": "token"}]},
+    }
+    assert len(gateway_ingresses(rendered_documents(tmp_path, values))) == 1
+
+
 def test_scoped_unauthenticated_ingress_keeps_its_host_and_tls(tmp_path: Path) -> None:
     values = {
         "ingress": {

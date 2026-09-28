@@ -821,14 +821,22 @@ Runs from NOTES.txt so every install/upgrade is checked, regardless of which (or
 
 {{/*
 Validation: an Ingress with no host or no TLS must not publish a gateway that
-authenticates nothing. The gateway authenticates when gateway.auth.mode is
-static or token; the oauth2-proxy edge (auth.enabled) authenticates at the
+authenticates nothing. The gateway authenticates when its effective
+SIE_AUTH_MODE is static or token: gateway.auth.mode, unless a later
+gateway.extraEnv entry overrides SIE_AUTH_MODE (an entry without a literal value
+is not credited). The oauth2-proxy edge (auth.enabled) authenticates at the
 Ingress. TLS counts as present when ingress.tlsConfig is enabled or its mode
 declares upstream termination (disabled).
 */}}
 {{- define "sie-cluster.validateIngressExposure" -}}
 {{- if and .Values.ingress.enabled (not .Values.ingress.allowUnauthenticated) -}}
-{{- $gatewayAuthMode := trim (toString (dig "auth" "mode" "none" (default (dict) .Values.gateway))) -}}
+{{- $gateway := default (dict) .Values.gateway -}}
+{{- $gatewayAuthMode := trim (toString (dig "auth" "mode" "none" $gateway)) -}}
+{{- range $entry := (default (list) $gateway.extraEnv) -}}
+{{- if and (kindIs "map" $entry) (eq (toString (index $entry "name")) "SIE_AUTH_MODE") -}}
+{{- $gatewayAuthMode = trim (toString (dig "value" "" $entry)) -}}
+{{- end -}}
+{{- end -}}
 {{- $gatewayAuth := has $gatewayAuthMode (list "static" "token") -}}
 {{- $edgeAuth := dig "enabled" false (default (dict) .Values.auth) -}}
 {{- if not (or $gatewayAuth $edgeAuth) -}}
@@ -839,7 +847,7 @@ declares upstream termination (disabled).
 {{- if not $hosts -}}{{- $missing = append $missing "no host" -}}{{- end -}}
 {{- if not $tlsPresent -}}{{- $missing = append $missing "no TLS" -}}{{- end -}}
 {{- if $missing -}}
-{{- fail (printf "Refusing to render the gateway Ingress: it has %s while the gateway has no authentication (gateway.auth.mode=%q, auth.enabled=false), which publishes the inference and pool APIs to anyone who can reach the ingress controller. Enable gateway auth (gateway.auth.mode=static with gateway.auth.tokenSecretName) or the oauth2-proxy edge (auth.enabled=true), or set ingress.hosts and ingress.tlsConfig.enabled=true, or set ingress.allowUnauthenticated=true to publish it without authentication." (join " and " $missing) $gatewayAuthMode) -}}
+{{- fail (printf "Refusing to render the gateway Ingress: it has %s while the gateway has no authentication (effective SIE_AUTH_MODE=%q from gateway.auth.mode and gateway.extraEnv, auth.enabled=false), which publishes the inference and pool APIs to anyone who can reach the ingress controller. Enable gateway auth (gateway.auth.mode=static with gateway.auth.tokenSecretName) or the oauth2-proxy edge (auth.enabled=true), or set ingress.hosts and ingress.tlsConfig.enabled=true, or set ingress.allowUnauthenticated=true to publish it without authentication." (join " and " $missing) $gatewayAuthMode) -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
