@@ -16,14 +16,15 @@ import pytest
 # Skip all tests in this module if not running integration tests
 pytestmark = pytest.mark.integration
 
-_SERVER_ITEM_IDS = pytest.mark.xfail(
-    reason=(
-        "The server returns item-<index> ids for items sent without an id, but SIENodePostprocessor parses "
-        "item_id with int(), so every score falls back to 0.0 and the input order is kept"
-    ),
-    raises=AssertionError,
-    strict=True,
+_SERVER_ITEM_IDS = (
+    "The server returns item-<index> ids for items sent without an id, but SIENodePostprocessor parses "
+    "item_id with int(), so every score falls back to 0.0 and the input order is kept"
 )
+
+
+def _xfail_if_scores_dropped(scores: list[float]) -> None:
+    if scores and all(score == 0.0 for score in scores):
+        pytest.xfail(_SERVER_ITEM_IDS)
 
 
 @pytest.fixture
@@ -214,7 +215,6 @@ class TestRAGPipelineIntegration:
     with embeddings and reranking (without the LLM generation step).
     """
 
-    @_SERVER_ITEM_IDS
     def test_rag_retrieval_pipeline(self, sie_url: str) -> None:
         """Example: Two-stage retrieval with embedding + reranking."""
         from llama_index.core import Document, Settings, VectorStoreIndex
@@ -267,6 +267,7 @@ class TestRAGPipelineIntegration:
         )
 
         assert len(final_results) == 2
+        _xfail_if_scores_dropped([n.score for n in final_results])
         # The encoding API doc should be highly ranked
         top_content = final_results[0].node.get_content()
         assert "encode" in top_content.lower() or "embedding" in top_content.lower()
@@ -274,6 +275,7 @@ class TestRAGPipelineIntegration:
     def test_query_engine_with_reranking(self, sie_url: str) -> None:
         """Example: Using reranker in query engine pipeline."""
         from llama_index.core import Document, Settings, VectorStoreIndex
+        from llama_index.core.llms import MockLLM
         from sie_llamaindex import SIEEmbedding, SIENodePostprocessor
 
         # Configure embeddings
@@ -294,11 +296,14 @@ class TestRAGPipelineIntegration:
             top_n=2,
         )
 
-        # Rerank the retrieved nodes
-        retriever = index.as_retriever(similarity_top_k=3)
-        query = "How does search work?"
-        nodes = reranker.postprocess_nodes(retriever.retrieve(query), query_str=query)
-        assert len(nodes) == 2  # Limited by top_n
+        # Query engine with a mock LLM, so retrieval and reranking are the real steps
+        query_engine = index.as_query_engine(
+            llm=MockLLM(),
+            similarity_top_k=3,
+            node_postprocessors=[reranker],
+        )
+        response = query_engine.query("How does search work?")
+        assert len(response.source_nodes) == 2  # Limited by top_n
 
 
 class TestExtractorIntegration:

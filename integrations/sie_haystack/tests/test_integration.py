@@ -16,14 +16,15 @@ import pytest
 # Skip all tests in this module if not running integration tests
 pytestmark = pytest.mark.integration
 
-_SERVER_ITEM_IDS = pytest.mark.xfail(
-    reason=(
-        "The server returns item-<index> ids for items sent without an id, but SIERanker parses "
-        "item_id with int(), so every score falls back to 0.0 and the input order is kept"
-    ),
-    raises=AssertionError,
-    strict=True,
+_SERVER_ITEM_IDS = (
+    "The server returns item-<index> ids for items sent without an id, but SIERanker parses "
+    "item_id with int(), so every score falls back to 0.0 and the input order is kept"
 )
+
+
+def _xfail_if_scores_dropped(scores: list[float]) -> None:
+    if scores and all(score == 0.0 for score in scores):
+        pytest.xfail(_SERVER_ITEM_IDS)
 
 
 @pytest.fixture
@@ -255,7 +256,6 @@ class TestRAGPipelineIntegration:
     with embeddings and reranking (without the LLM generation step).
     """
 
-    @_SERVER_ITEM_IDS
     def test_two_stage_retrieval_pipeline(self, sie_url: str) -> None:
         """Example: Two-stage retrieval with embedding + reranking."""
         from haystack import Document, Pipeline
@@ -320,6 +320,7 @@ class TestRAGPipelineIntegration:
 
         final_docs = result["ranker"]["documents"]
         assert len(final_docs) == 2
+        _xfail_if_scores_dropped([d.meta["score"] for d in final_docs])
         # The encoding API doc should be highly ranked
         top_content = final_docs[0].content.lower()
         assert "encode" in top_content or "embedding" in top_content
