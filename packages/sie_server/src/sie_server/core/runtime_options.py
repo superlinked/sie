@@ -253,6 +253,9 @@ def apply_generation_runtime_options(
     return result
 
 
+_GENERATION_CLOSE_TIMEOUT_S = 2.0
+
+
 @dataclass(frozen=True, slots=True)
 class GenerationTimeouts:
     """Governed generation timeouts in seconds; ``None`` leaves that bound off."""
@@ -304,12 +307,15 @@ async def bound_generation[ChunkT](
 
     On expiry the pending read is cancelled and ``chunks`` is closed, which
     aborts the engine request, and :class:`GenerationTimeoutError` is raised.
+    Closing is itself bounded, so an engine whose abort hangs cannot hold back
+    the timeout response.
     """
     loop = asyncio.get_running_loop()
     started = loop.time()
     first_chunk_at = None if timeouts.first_chunk_s is None else started + timeouts.first_chunk_s
     overall_at = None if timeouts.overall_s is None else started + timeouts.overall_s
     received_first = False
+    exhausted = False
     try:
         while True:
             pending: list[tuple[float, Literal["first_chunk", "overall"]]] = []
@@ -323,6 +329,7 @@ async def bound_generation[ChunkT](
                 async with timeout:
                     chunk = await anext(chunks)
             except StopAsyncIteration:
+                exhausted = True
                 return
             except TimeoutError as exc:
                 if timeout.expired():
@@ -333,6 +340,7 @@ async def bound_generation[ChunkT](
     finally:
         await aclose_with_error_precedence(
             chunks,
-            outcome_selected=False,
+            outcome_selected=exhausted,
             context="bounded generation iterator",
+            timeout_s=_GENERATION_CLOSE_TIMEOUT_S,
         )

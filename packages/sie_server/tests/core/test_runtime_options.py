@@ -15,6 +15,7 @@ from collections.abc import AsyncIterator
 
 import pytest
 from sie_server.config.model import ModelConfig
+from sie_server.core import runtime_options
 from sie_server.core.encode_pipeline import resolve_encode_output_types
 from sie_server.core.runtime_options import (
     GenerationTimeoutError,
@@ -405,6 +406,36 @@ async def test_bound_generation_overall_timeout_applies_after_the_first_chunk() 
 
     assert raised.value.code == "overall_timeout"
     assert engine.closed
+
+
+class _EngineWithHangingAbort:
+    def __init__(self) -> None:
+        self.close_started = False
+
+    def __aiter__(self) -> _EngineWithHangingAbort:
+        return self
+
+    async def __anext__(self) -> int:
+        await asyncio.sleep(10)
+        return 0
+
+    async def aclose(self) -> None:
+        self.close_started = True
+        await asyncio.sleep(10)
+
+
+async def test_bound_generation_does_not_wait_on_a_hung_engine_abort(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(runtime_options, "_GENERATION_CLOSE_TIMEOUT_S", 0.05)
+    engine = _EngineWithHangingAbort()
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+
+    with pytest.raises(GenerationTimeoutError) as raised:
+        await _drain(bound_generation(engine, GenerationTimeouts(first_chunk_s=0.05)))
+
+    assert raised.value.code == "first_chunk_timeout"
+    assert engine.close_started
+    assert loop.time() - started < 2.0
 
 
 async def test_bound_generation_keeps_engine_timeout_errors() -> None:

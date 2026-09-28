@@ -1819,6 +1819,16 @@ async fn publish_work_item_with_admission_pool(
     .await
 }
 
+/// `(timestamp, deadline)` for an item published `age_s` ago whose deadline is
+/// `budget_s` after publication.
+fn deadline_timing(age_s: f64, budget_s: f64) -> Option<(f64, f64)> {
+    let now_s = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs_f64();
+    Some((now_s - age_s, now_s - age_s + budget_s))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn publish_encode_work_item(
     js: &async_nats::jetstream::Context,
@@ -1828,12 +1838,15 @@ async fn publish_encode_work_item(
     pool: &str,
     admission_pool: &str,
     reply_subject: &str,
-    deadline: Option<f64>,
+    timing: Option<(f64, f64)>,
 ) -> (String, u64) {
     let now_s = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs_f64();
+    let (timestamp, deadline) = timing.map_or((now_s, None), |(timestamp, deadline)| {
+        (timestamp, Some(deadline))
+    });
     let work_item = WorkItem {
         work_item_id: format!("{request_id}.0"),
         request_id: request_id.into(),
@@ -1866,7 +1879,7 @@ async fn publish_encode_work_item(
         reply_subject: reply_subject.into(),
         traceparent: None,
         tracestate: None,
-        timestamp: now_s,
+        timestamp,
         deadline,
     };
     let payload = rmp_serde::to_vec_named(&work_item).expect("encode WorkItem");
@@ -1896,9 +1909,10 @@ async fn assert_acked_before_ipc(
     }
 }
 
-/// Gateway deadlines and the gateway's request cancel both stop encode work
-/// that has not started, while live items and items from a gateway that
-/// predates deadlines still run.
+/// With `SIE_WORK_DEADLINE_ENFORCE=true`, gateway deadlines and the gateway's
+/// request cancel both stop encode work that has not started, while live
+/// items, items from a gateway that predates deadlines, and generation still
+/// run.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn expired_or_cancelled_encode_work_is_acked_before_ipc() {
     if skip_unless_tools_available() {
@@ -1907,12 +1921,29 @@ async fn expired_or_cancelled_encode_work_is_acked_before_ipc() {
     let _guard = smoke_test_guard().await;
 
     let nats = NatsHarness::start().await;
+    let generation_model = "Qwen/Qwen3-0.6B";
     let sock = ShortSocket::new("ipc.sock");
-    let python = PythonHarness::start_with_delay_ms(sock.path.clone(), 1_500).await;
+    let python = PythonHarness::start_with_extra_args(
+        sock.path.clone(),
+        1_500,
+        vec![
+            "--fake-generate-model".to_string(),
+            generation_model.to_string(),
+        ],
+    )
+    .await;
     let pool = "smoke-deadline";
     let bundle = "default";
     let probe_port = find_free_tcp_port();
-    let _worker = WorkerHarness::spawn(&nats.url, &sock.path, pool, bundle, probe_port, None);
+    let _worker = WorkerHarness::spawn_with_env(
+        &nats.url,
+        &sock.path,
+        pool,
+        bundle,
+        probe_port,
+        None,
+        &[("SIE_WORK_DEADLINE_ENFORCE", "true")],
+    );
     wait_for_tcp(probe_port, Duration::from_secs(30))
         .await
         .expect("worker probe port");
@@ -1929,13 +1960,9 @@ async fn expired_or_cancelled_encode_work_is_acked_before_ipc() {
         .expect("subscribe reply");
     let model = "BAAI/bge-m3";
     let subject = pool_work_subject(pool, pool, bundle, model);
-    let now_s = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs_f64();
 
-    for (request_id, deadline) in [
-        ("smoke-deadline-live", Some(now_s + 120.0)),
+    for (request_id, timing) in [
+        ("smoke-deadline-live", deadline_timing(0.0, 120.0)),
         ("smoke-deadline-predates-deadlines", None),
     ] {
         publish_encode_work_item(
@@ -1946,7 +1973,7 @@ async fn expired_or_cancelled_encode_work_is_acked_before_ipc() {
             pool,
             "",
             &reply_subject,
-            deadline,
+            timing,
         )
         .await;
         let reply = timeout(Duration::from_secs(10), sub.next())
@@ -1966,7 +1993,7 @@ async fn expired_or_cancelled_encode_work_is_acked_before_ipc() {
         pool,
         "",
         &reply_subject,
-        Some(now_s - 60.0),
+        deadline_timing(180.0, 120.0),
     )
     .await;
     assert_acked_before_ipc(&js, &stream_name, expired_sequence, "expired encode").await;
@@ -1995,7 +2022,7 @@ async fn expired_or_cancelled_encode_work_is_acked_before_ipc() {
         pool,
         "",
         &reply_subject,
-        Some(now_s + 120.0),
+        deadline_timing(0.0, 120.0),
     )
     .await;
     assert_acked_before_ipc(&js, &stream_name, cancelled_sequence, "cancelled encode").await;
@@ -2005,6 +2032,117 @@ async fn expired_or_cancelled_encode_work_is_acked_before_ipc() {
             .is_err(),
         "cancelled encode unexpectedly published a result",
     );
+
+    let (timestamp, deadline) = deadline_timing(180.0, 120.0).expect("timing");
+    let generation_request = "smoke-deadline-generation";
+    let generation_work = WorkItem {
+        work_item_id: format!("{generation_request}.0"),
+        request_id: generation_request.into(),
+        item_index: 0,
+        total_items: 1,
+        operation: "generate".into(),
+        model_id: generation_model.into(),
+        profile_id: String::new(),
+        engine: String::new(),
+        pool_name: pool.into(),
+        admission_pool: String::new(),
+        machine_profile: pool.into(),
+        item: None,
+        payload_ref: None,
+        output_types: None,
+        instruction: None,
+        is_query: false,
+        options: None,
+        query_item: None,
+        query_payload_ref: None,
+        score_items: None,
+        labels: None,
+        output_schema: None,
+        generate: Some(msg_value(serde_json::json!({
+            "prompt": "generation keeps its own timeout contract",
+            "max_new_tokens": 4,
+            "temperature": 0.0,
+            "top_p": 1.0,
+        }))),
+        routing_key: None,
+        prompt_cache_key: None,
+        bundle_config_hash: String::new(),
+        router_id: "stress-gw".into(),
+        accepts_result_chunks: false,
+        reply_subject: reply_subject.clone(),
+        traceparent: None,
+        tracestate: None,
+        timestamp,
+        deadline: Some(deadline),
+    };
+    let payload = rmp_serde::to_vec_named(&generation_work).expect("encode generate WorkItem");
+    let generation_subject =
+        worker_work_subject(pool, pool, bundle, generation_model, "smoke-worker");
+    let _ = publish_jetstream_with_retry(&js, &generation_subject, payload).await;
+    let reply = timeout(Duration::from_secs(30), sub.next())
+        .await
+        .expect("an expired generation item is not dropped by the work-item deadline")
+        .expect("reply stream closed");
+    let body: serde_json::Value =
+        rmp_serde::from_slice(&reply.payload).expect("decode raw generate payload");
+    assert_eq!(body["request_id"], generation_request);
+
+    drop(_worker);
+    drop(python);
+    drop(nats);
+    let _ = sock;
+    sleep(Duration::from_millis(200)).await;
+}
+
+/// By default deadline enforcement is off: an expired encode item is counted
+/// and logged but still executes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn expired_encode_work_executes_while_deadline_enforcement_is_off() {
+    if skip_unless_tools_available() {
+        return;
+    }
+    let _guard = smoke_test_guard().await;
+
+    let nats = NatsHarness::start().await;
+    let sock = ShortSocket::new("ipc.sock");
+    let python = PythonHarness::start(sock.path.clone()).await;
+    let pool = "smoke-deadline-shadow";
+    let bundle = "default";
+    let probe_port = find_free_tcp_port();
+    let _worker = WorkerHarness::spawn(&nats.url, &sock.path, pool, bundle, probe_port, None);
+    wait_for_tcp(probe_port, Duration::from_secs(30))
+        .await
+        .expect("worker probe port");
+    sleep(Duration::from_millis(500)).await;
+
+    let client = async_nats::connect(&nats.url)
+        .await
+        .expect("client connect");
+    let js = async_nats::jetstream::new(client.clone());
+    let reply_subject = format!("_INBOX.smoke-deadline-shadow.{}", uuid::Uuid::new_v4());
+    let mut sub = client
+        .subscribe(reply_subject.clone())
+        .await
+        .expect("subscribe reply");
+    let model = "BAAI/bge-m3";
+    publish_encode_work_item(
+        &js,
+        &pool_work_subject(pool, pool, bundle, model),
+        "smoke-deadline-shadow-expired",
+        model,
+        pool,
+        "",
+        &reply_subject,
+        deadline_timing(180.0, 120.0),
+    )
+    .await;
+    let reply = timeout(Duration::from_secs(10), sub.next())
+        .await
+        .expect("expired work executes while enforcement is off")
+        .expect("reply stream closed");
+    let result: WorkResult = rmp_serde::from_slice(&reply.payload).expect("decode WorkResult");
+    assert!(result.success);
+    assert_eq!(result.request_id, "smoke-deadline-shadow-expired");
 
     drop(_worker);
     drop(python);

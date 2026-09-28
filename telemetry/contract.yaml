@@ -246,6 +246,7 @@ cardinality_budgets:
       shutdown_drain_outcome: shutdown_drain_outcome
       result_transport_mode: result_transport_mode
       result_transport_outcome: result_transport_outcome
+      deadline_action: deadline_action
     instrument_limits:
       queue_and_batch_core:
         metrics:
@@ -261,6 +262,10 @@ cardinality_budgets:
         metrics: [sie.worker.work_item.age]
         formula: operation * lane_per_process
         limit: 7
+      work_item_deadline:
+        metrics: [sie.worker.work_item.deadline_exceeded]
+        formula: operation * deadline_action * lane_per_process
+        limit: 21
       batch_fill:
         metrics: [sie.worker.batch.fill_ratio]
         formula: operation * catalog_series_pairs * flush_reason
@@ -916,6 +921,7 @@ enums:
     - deadline_exceeded
     - other
   delivery_redelivered: ["true", "false"]
+  deadline_action: [dropped, executed, other]
   payload_reason:
     - none
     - not_found
@@ -1113,6 +1119,10 @@ attribute_sets:
   # catalog (model, profile) pair the scheduler-local queue families carry.
   worker_work_item_age:
     operation: operation
+    lane: lane
+  worker_work_item_deadline:
+    operation: operation
+    action: deadline_action
     lane: lane
   worker_batch:
     operation: operation
@@ -1918,6 +1928,14 @@ metrics:
     attributes: worker_work_item_age
     buckets: worker_work_item_age_seconds
     prometheus_name: sie_worker_work_item_age_seconds
+    export: [prometheus, otlp]
+  - name: sie.worker.work_item.deadline_exceeded
+    owner: worker_sidecar
+    facade_event: worker.work_item_deadline_exceeded
+    type: counter
+    unit: "{item}"
+    attributes: worker_work_item_deadline
+    prometheus_name: sie_worker_work_item_deadline_exceeded_total
     export: [prometheus, otlp]
   - name: sie.worker.scheduler.request_batch.dispatch_wait
     owner: worker_sidecar

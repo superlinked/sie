@@ -80,26 +80,42 @@ Message settlement:
 Work-item deadlines:
 
 - The gateway stamps non-streaming work items with an optional `deadline`, an
-  absolute Unix time in seconds on the clock that stamps `timestamp`. Items
-  without it keep the behaviour below that predates deadlines.
-- A NATS delivery whose deadline, plus `SIE_WORK_DEADLINE_SKEW_TOLERANCE_MS`
-  (default 5000), has passed is ACK-dropped at the same checkpoints as
-  `work_cancel`, before payload fetch and backend IPC, and counted as
-  `sie.worker.nats.operations{operation="ack",reason="deadline_exceeded"}`.
-  `SIE_WORK_DEADLINE_ENFORCE=false` logs the decision before IPC and executes
-  the item instead. Local-ingest callers bound their own calls and are not
-  dropped.
-- Encode, score, and extract deliveries with a live deadline are progress-ACKed
-  every few seconds from intake until they are ACKed, NAKed, or deliberately
-  left unacked for redelivery, so a slow scheduler queue or backend call does
-  not trigger a redelivery of work that is still running. While enforcement is
-  on, the lease also ends at the deadline, after which JetStream redelivers as
-  before and the redelivery is dropped as expired. With enforcement off,
-  expired work still executes, so the lease is bounded by the work-stream
-  lifetime instead.
+  absolute Unix time in seconds on the clock that stamps `timestamp`. An item
+  without one, with a non-numeric one, or whose `deadline - timestamp` is
+  negative or larger than `SIE_WORK_DEADLINE_MAX_BUDGET_S` (default 180) keeps
+  the behaviour that predates deadlines. Generation items are never judged by
+  this field.
+- The comparison is between the gateway and worker wall clocks plus
+  `SIE_WORK_DEADLINE_SKEW_TOLERANCE_MS` (default 5000, at most 60000). Keep
+  gateway and worker hosts synchronised, for example with NTP. The sidecar
+  logs a rate-limited warning when an item's publish timestamp is ahead of its
+  own clock by more than the tolerance, and when a first delivery is already
+  past its deadline, which means it waited in the stream longer than its budget
+  or the worker clock is ahead.
+- By default a NATS delivery past its deadline still executes. It is counted as
+  `sie.worker.work_item.deadline_exceeded{action="executed"}` and logged with a
+  rate-limited warning before backend IPC. With
+  `SIE_WORK_DEADLINE_ENFORCE=true` it is instead ACK-dropped at the same
+  checkpoints as `work_cancel`, before payload fetch and backend IPC, and
+  counted as `sie.worker.work_item.deadline_exceeded{action="dropped"}` (and as
+  `sie.worker.nats.operations{operation="ack",reason="deadline_exceeded"}`).
+  Run with the default first and alert on a sustained
+  `sie_worker_work_item_deadline_exceeded_total` rate, which points at a
+  backlog or at clock skew, before enabling enforcement. Local-ingest callers
+  bound their own calls and are never dropped.
+- Encode, score, and extract deliveries with a deadline hold a progress lease
+  from intake: they are progress-ACKed at most about 10 s apart until they are
+  ACKed, NAKed, or dropped, so a slow scheduler queue or backend call does not
+  trigger a redelivery of work that is still running. Settlement waits for a
+  progress ACK already in flight, so none follows the ACK or NAK. Progress
+  pauses while the backend misses its heartbeat or the sidecar is draining, so
+  JetStream can move the work to another worker. With enforcement on, the lease
+  ends at the deadline and a later redelivery is dropped as expired; with
+  enforcement off it lasts one more maximum budget past the deadline.
 - A `RunBatch` call waits for the longer of `SIE_IPC_REQUEST_TIMEOUT_S` and
-  the time until the batch's latest deadline, bounded by the work-stream
-  lifetime, so a legitimate slow batch is not cut short and retried.
+  the time until the batch's latest deadline, at most
+  `SIE_WORK_DEADLINE_MAX_BUDGET_S`, so a legitimate slow batch is not cut short
+  and retried.
 
 Source: [`dispatcher.rs`](../src/dispatcher.rs),
 [`publisher.rs`](../src/publisher.rs), and [`work_types.rs`](../src/work_types.rs).

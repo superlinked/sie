@@ -313,6 +313,7 @@ pub async fn run(config: WorkerConfig) -> anyhow::Result<()> {
         freshness_ms = readiness.freshness_ms(),
         "readiness: /readyz freshness window configured"
     );
+    crate::work_deadline::nats_progress_leases().gate_on_backend_readiness(Arc::clone(&readiness));
 
     // Construct the single telemetry facade and neutral runtime-pressure state
     // before wiring components that report semantic observations through it.

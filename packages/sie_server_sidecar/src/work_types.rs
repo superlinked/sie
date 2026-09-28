@@ -6,7 +6,10 @@
 //! Wire format is msgpack **named** (`rmp_serde::to_vec_named` / decoded
 //! from a msgpack map into the named struct).
 
-use serde::{Deserialize, Serialize};
+use std::fmt;
+
+use serde::de::{self, IgnoredAny, MapAccess, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// User-supplied item payload carried as msgpack. Do not convert this to
 /// `serde_json::Value`: msgpack `bin` / `ext` fields are valid for documents,
@@ -88,8 +91,85 @@ pub struct WorkItem {
     pub timestamp: f64,
     /// Absolute Unix-epoch seconds on the gateway clock after which no caller
     /// waits for this item. Older gateways omit it and the item is unbounded.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// A non-numeric value is treated as absent rather than making the whole
+    /// item undecodable.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_lenient_seconds",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub deadline: Option<f64>,
+}
+
+fn deserialize_lenient_seconds<'de, D>(deserializer: D) -> Result<Option<f64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct LenientSeconds;
+
+    impl<'de> Visitor<'de> for LenientSeconds {
+        type Value = Option<f64>;
+
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("a number of seconds; any other value is treated as absent")
+        }
+
+        fn visit_f64<E: de::Error>(self, value: f64) -> Result<Self::Value, E> {
+            Ok(Some(value))
+        }
+
+        fn visit_i64<E: de::Error>(self, value: i64) -> Result<Self::Value, E> {
+            Ok(Some(value as f64))
+        }
+
+        fn visit_u64<E: de::Error>(self, value: u64) -> Result<Self::Value, E> {
+            Ok(Some(value as f64))
+        }
+
+        fn visit_bool<E: de::Error>(self, _: bool) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_str<E: de::Error>(self, _: &str) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_bytes<E: de::Error>(self, _: &[u8]) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_some<D2: Deserializer<'de>>(self, inner: D2) -> Result<Self::Value, D2::Error> {
+            inner.deserialize_any(self)
+        }
+
+        fn visit_newtype_struct<D2: Deserializer<'de>>(
+            self,
+            inner: D2,
+        ) -> Result<Self::Value, D2::Error> {
+            IgnoredAny::deserialize(inner)?;
+            Ok(None)
+        }
+
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+            while seq.next_element::<IgnoredAny>()?.is_some() {}
+            Ok(None)
+        }
+
+        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+            while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+            Ok(None)
+        }
+    }
+
+    deserializer.deserialize_any(LenientSeconds)
 }
 
 /// Per-item result published back to the gateway's inbox.
@@ -228,6 +308,49 @@ mod tests {
         let bytes = rmp_serde::to_vec_named(&map).unwrap();
         let back: WorkItem = rmp_serde::from_slice(&bytes).unwrap();
         assert_eq!(back.request_id, "req-1");
+    }
+
+    #[test]
+    fn work_item_deadline_decodes_numbers_and_treats_other_values_as_absent() {
+        let decode = |deadline: Option<serde_json::Value>| {
+            let mut map = serde_json::to_value(sample_work_item()).unwrap();
+            let object = map.as_object_mut().expect("work item map");
+            object.remove("deadline");
+            if let Some(deadline) = deadline {
+                object.insert("deadline".into(), deadline);
+            }
+            let bytes = rmp_serde::to_vec_named(&map).unwrap();
+            let item: WorkItem = rmp_serde::from_slice(&bytes)
+                .expect("a malformed deadline must not make the item undecodable");
+            assert_eq!(item.request_id, "req-1");
+            item.deadline
+        };
+
+        assert_eq!(decode(None), None);
+        assert_eq!(
+            decode(Some(serde_json::json!(1_700_000_120.5))),
+            Some(1_700_000_120.5)
+        );
+        assert_eq!(
+            decode(Some(serde_json::json!(1_700_000_120))),
+            Some(1_700_000_120.0)
+        );
+        assert_eq!(decode(Some(serde_json::json!(-3))), Some(-3.0));
+        for other in [
+            serde_json::json!("1700000120"),
+            serde_json::json!(true),
+            serde_json::Value::Null,
+            serde_json::json!([1, 2]),
+            serde_json::json!({"seconds": 1}),
+        ] {
+            assert_eq!(decode(Some(other.clone())), None, "{other}");
+        }
+
+        let mut item = sample_work_item();
+        item.deadline = Some(1_700_000_120.5);
+        let bytes = rmp_serde::to_vec_named(&item).unwrap();
+        let back: WorkItem = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(back.deadline, Some(1_700_000_120.5));
     }
 
     #[test]

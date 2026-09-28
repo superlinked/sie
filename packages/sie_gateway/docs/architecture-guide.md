@@ -370,10 +370,13 @@ same way and also publishes `work_cancel`, because a failed ACK does not prove
 the broker discarded the item.
 
 Every non-streaming work item also carries `deadline`, the publish timestamp
-plus the request timeout, as absolute Unix seconds. Sidecars ACK-drop items
-past it before execution, which covers workers that never saw the
-`work_cancel` signal. Streaming generation items omit it because their
-timeouts are resolved per profile after publication.
+plus the request timeout, as absolute Unix seconds. Sidecars use it to keep
+held deliveries leased and to size backend calls, count items found past it,
+and, when `SIE_WORK_DEADLINE_ENFORCE=true` is set on the workers, ACK-drop
+them before execution, which covers workers that never saw the `work_cancel`
+signal. The comparison spans the gateway and worker clocks, so both must be
+synchronised. Streaming generation items omit it because their timeouts are
+resolved per profile after publication.
 
 The managed Modal dispatcher implements the same ownership contract without a
 NATS cancellation hop. It registers an abort handle for each detached
