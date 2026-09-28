@@ -420,7 +420,17 @@ processors:
     log_statements:
       - context: resource
         statements:
-          - keep_keys(attributes, ["service.name", "service.instance.id", "deployment.environment", "cloud.region", "service.version"])
+          - set(cache["service.name"], attributes["service.name"])
+          - set(cache["service.instance.id"], attributes["service.instance.id"])
+          - set(cache["deployment.environment"], attributes["deployment.environment"])
+          - set(cache["cloud.region"], attributes["cloud.region"])
+          - set(cache["service.version"], attributes["service.version"])
+          - keep_keys(attributes, [])
+          - set(attributes["service.name"], cache["service.name"]) where cache["service.name"] != nil
+          - set(attributes["service.instance.id"], cache["service.instance.id"]) where cache["service.instance.id"] != nil
+          - set(attributes["deployment.environment"], cache["deployment.environment"]) where cache["deployment.environment"] != nil
+          - set(attributes["cloud.region"], cache["cloud.region"]) where cache["cloud.region"] != nil
+          - set(attributes["service.version"], cache["service.version"]) where cache["service.version"] != nil
           - set(schema_url, "")
       - context: scope
         statements:
@@ -430,7 +440,25 @@ processors:
           - set(schema_url, "")
       - context: log
         statements:
-          - keep_keys(attributes, ["event.name", "event.schema.version", "operation", "outcome", "http.status_code", "model", "machine_profile", "duration_ms", "admission_outcome"])
+          - set(cache["event.name"], attributes["event.name"])
+          - set(cache["event.schema.version"], attributes["event.schema.version"])
+          - set(cache["operation"], attributes["operation"])
+          - set(cache["outcome"], attributes["outcome"])
+          - set(cache["http.status_code"], attributes["http.status_code"])
+          - set(cache["model"], attributes["model"])
+          - set(cache["machine_profile"], attributes["machine_profile"])
+          - set(cache["duration_ms"], attributes["duration_ms"])
+          - set(cache["admission_outcome"], attributes["admission_outcome"])
+          - keep_keys(attributes, [])
+          - set(attributes["event.name"], cache["event.name"]) where cache["event.name"] != nil
+          - set(attributes["event.schema.version"], cache["event.schema.version"]) where cache["event.schema.version"] != nil
+          - set(attributes["operation"], cache["operation"]) where cache["operation"] != nil
+          - set(attributes["outcome"], cache["outcome"]) where cache["outcome"] != nil
+          - set(attributes["http.status_code"], cache["http.status_code"]) where cache["http.status_code"] != nil
+          - set(attributes["model"], cache["model"]) where cache["model"] != nil
+          - set(attributes["machine_profile"], cache["machine_profile"]) where cache["machine_profile"] != nil
+          - set(attributes["duration_ms"], cache["duration_ms"]) where cache["duration_ms"] != nil
+          - set(attributes["admission_outcome"], cache["admission_outcome"]) where cache["admission_outcome"] != nil
           # Canonical release domains are rechecked at the collector boundary
           # so malformed producer values cannot become vendor dimensions.
           - 'set(attributes["model"], "other") where attributes["event.schema.version"] == "2" and not IsMatch(attributes["model"], "^(BAAI/bge-m3|IDEA-Research/grounding-dino-base|Qwen/Qwen3-Embedding-4B|Qwen/Qwen3-Reranker-0[.]6B|Qwen/Qwen3-Reranker-4B|Qwen/Qwen3-VL-Reranker-2B|Qwen/Qwen3[.]5-4B|Qwen/Qwen3[.]6-27B|Snowflake/snowflake-arctic-embed-l-v2[.]0|docling|fastino/gliguard-LLMGuardrails-300M|fastino/gliner2-base-v1|fastino/gliner2-large-v1|google/owlv2-base-patch16-ensemble|google/siglip-so400m-patch14-384|google/siglip2-base-patch16-224|ibm-granite/granite-guardian-3[.]0-2b|knowledgator/gliclass-large-v3[.]0|lightonai/GTE-ModernColBERT-v1|lightonai/LightOnOCR-2-1B|numind/NuNER_Zero|openai/whisper-large-v3-turbo|other|prithivida/Splade_PP_en_v2|tencent/R3-embedding-0[.]6b|tencent/R3-rerank-0[.]6b|urchade/gliner_multi-v2[.]1|urchade/gliner_multi_pii-v1)$")'

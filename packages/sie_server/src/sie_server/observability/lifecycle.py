@@ -34,14 +34,15 @@ _ERROR_CLASSES = frozenset(
 )
 
 
-def configure_lifecycle_logs(exporter: LogRecordExporter, resource: Resource) -> None:
+def configure_lifecycle_logs(exporter: LogRecordExporter, resource: Resource) -> LoggerProvider:
     """Install a dedicated safe logger; deployment owns transport credentials."""
     global _provider
     if _provider is not None:
-        return
+        return _provider
     provider = LoggerProvider(resource=resource, shutdown_on_exit=False)
     provider.add_log_record_processor(BatchLogRecordProcessor(exporter))
     _provider = provider
+    return provider
 
 
 def setup_lifecycle_logs() -> None:
@@ -149,5 +150,7 @@ def observe_generation() -> Iterator[None]:
         lifecycle.outcome, lifecycle.error_class = "error", "worker"
         raise
     finally:
-        lifecycle.finish()
-        _current.reset(token)
+        try:
+            lifecycle.finish()
+        finally:
+            _current.reset(token)

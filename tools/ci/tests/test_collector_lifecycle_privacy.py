@@ -41,7 +41,8 @@ def render_config(directory: Path, endpoint: str) -> dict:
         ROOT / "deploy/helm/sie-cluster/templates/_otel-collector-config.tpl", chart / "templates/_collector.tpl"
     )
     (chart / "templates/config.yaml").write_text(
-        'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: test\ndata:\n  collector.yaml: |\n    {{- include "sie-cluster.otel.collectorConfig" .Values | nindent 4 }}\n'
+        "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: test\ndata:\n  collector.yaml: |\n"
+        '    {{- include "sie-cluster.otel.collectorConfig" .Values | nindent 4 }}\n'
     )
     values = {
         "metricsEnabled": False,
@@ -221,6 +222,40 @@ def test_lifecycle_allowlist_in_real_collector(tmp_path):
         with urllib.request.urlopen(raw_request, timeout=5) as response:  # noqa: S310 - fixed loopback HTTP
             assert response.status == 200
 
+        for version in ("1", "2"):
+            completion = ExportLogsServiceRequest()
+            completion.CopyFrom(duplicate)
+            resource = completion.resource_logs[0]
+            record = resource.scope_logs[0].log_records[0]
+            record.body.string_value = "inference.request.completed"
+            del record.attributes[:]
+            attrs = {
+                "event.name": "inference.request.completed",
+                "event.schema.version": version,
+                "operation": "generate",
+                "outcome": "success",
+                "http.status_code": 200,
+            }
+            if version == "2":
+                attrs.update(model="other", machine_profile="other", duration_ms=12.0, admission_outcome="admitted")
+            for key, value in attrs.items():
+                attr = record.attributes.add(key=key)
+                if isinstance(value, float):
+                    attr.value.double_value = value
+                elif isinstance(value, int):
+                    attr.value.int_value = value
+                else:
+                    attr.value.string_value = value
+                record.attributes.add(key=key).value.string_value = "payload-secret"
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{ports[4318]}/v1/logs",
+                data=completion.SerializeToString(),
+                headers={"Content-Type": "application/x-protobuf"},
+                method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=5) as response:  # noqa: S310 - fixed loopback HTTP
+                assert response.status == 200
+
         # Invalid enum/type/body/service/phase fixtures must vanish completely.
         for changes in (
             {"error_class": "payload-secret"},
@@ -243,6 +278,7 @@ def test_lifecycle_allowlist_in_real_collector(tmp_path):
         providers.clear()
         time.sleep(0.5)
         records = []
+        completions = []
         while not received.empty():
             request = ExportLogsServiceRequest.FromString(received.get_nowait())
             assert b"payload-secret" not in request.SerializeToString()
@@ -251,15 +287,22 @@ def test_lifecycle_allowlist_in_real_collector(tmp_path):
                 assert resource["deployment.environment"] == "dev"
                 assert resource["cloud.region"] == "local"
                 for scope in resource_logs.scope_logs:
-                    assert not scope.scope.name
+                    assert scope.scope.name in ("", "sie-gateway.request-completion")
                     assert not scope.scope.version
                     assert not scope.scope.attributes
                     for record in scope.log_records:
                         assert record.trace_id == (0x1234567890).to_bytes(16, "big")
                         assert record.span_id == (0x12345678).to_bytes(8, "big")
-                        records.append((resource["service.name"], {a.key: a.value for a in record.attributes}))
+                        attrs = {a.key: a.value for a in record.attributes}
+                        assert len(attrs) == len(record.attributes)
+                        if record.body.string_value == "inference.request.completed":
+                            completions.append(attrs)
+                        else:
+                            records.append((resource["service.name"], attrs))
         assert {service for service, _attrs in records} == {"sie-gateway", "sie-worker", "sie-dispatcher"}
         assert len(records) == 4
+        assert len(completions) == 2
+        assert {attrs["event.schema.version"].string_value for attrs in completions} == {"1", "2"}
         allowed = {
             "event.name",
             "event.schema.version",
