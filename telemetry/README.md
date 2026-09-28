@@ -98,9 +98,12 @@ TTFT/TPOT metrics retain their ownership and meaning; these additions create
 no metrics.
 
 The Python `worker.streaming_processor` observes a generation attempt through
-terminal publication and handler exit. A published error terminal marks ERROR,
-a published cancelled terminal or task cancellation records cancellation, and
-return without a confirmed terminal is a transport failure. Exceptions are
+terminal publication and handler exit. A published worker or transport error
+terminal marks ERROR; bounded validation errors are rejected client errors. A
+confirmed retry handoff ends this attempt as rejected without completing the
+generation. A published cancelled terminal or task cancellation records
+cancellation, and return without a confirmed terminal or retry handoff is a
+transport failure. Exceptions are
 classified without exporting their text or automatic exception events.
 
 `inference.lifecycle.completed` schema v1 is a fixed OTLP-only record carrying

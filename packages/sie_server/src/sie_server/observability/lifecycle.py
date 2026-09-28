@@ -10,10 +10,11 @@ import asyncio
 import logging
 import os
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
+from typing import cast
 
 from opentelemetry import trace
 from opentelemetry._logs import LogRecord, SeverityNumber
@@ -116,7 +117,7 @@ class Lifecycle:
             self.outcome, self.error_class = "cancelled", "cancelled"
         elif envelope.get("error") is not None or envelope.get("finish_reason") == "error":
             error = envelope.get("error")
-            code = error.get("code") if isinstance(error, dict) else None
+            code = cast("Mapping[str, object]", error).get("code") if isinstance(error, dict) else None
             if isinstance(code, str) and code in _CLIENT_ERROR_CODES:
                 self.outcome, self.error_class = "rejected", "client_error"
             elif code == "transport_failure":
