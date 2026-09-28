@@ -106,16 +106,20 @@ async def _validated_chunks(
     grammar: GrammarSpec,
 ) -> AsyncIterator[GenerationChunk]:
     texts: dict[int, list[str]] = {}
-    saw_tool_call = False
+    choice_finish_reasons: dict[int, str] = {}
+    tool_call_choices: set[int] = set()
     terminal_outcome_selected = False
     try:
         async for chunk in chunks:
             if chunk.text_delta:
                 texts.setdefault(chunk.choice_index, []).append(chunk.text_delta)
-            saw_tool_call = saw_tool_call or chunk.tool_call_delta is not None
+            if chunk.tool_call_delta is not None:
+                tool_call_choices.add(chunk.choice_index)
+            if not chunk.done and chunk.finish_reason is not None:
+                choice_finish_reasons[chunk.choice_index] = chunk.finish_reason
             if chunk.done:
-                if not saw_tool_call and chunk.error_code is None and (chunk.finish_reason or "stop") == "stop":
-                    outputs = _terminal_outputs(chunk, texts)
+                if chunk.error_code is None and (chunk.finish_reason or "stop") == "stop":
+                    outputs = _terminal_outputs(chunk, texts, choice_finish_reasons, tool_call_choices)
                     violation = await asyncio.to_thread(first_output_violation, grammar, outputs)
                     if violation is not None:
                         chunk = replace(
@@ -134,16 +138,30 @@ async def _validated_chunks(
         )
 
 
-def _terminal_outputs(chunk: GenerationChunk, texts: Mapping[int, Sequence[str]]) -> list[str]:
+def _terminal_outputs(
+    chunk: GenerationChunk,
+    texts: Mapping[int, Sequence[str]],
+    choice_finish_reasons: Mapping[int, str],
+    tool_call_choices: set[int],
+) -> list[str]:
+    """Return the text of every choice that stopped naturally without a tool call.
+
+    Non-streamed candidates carry their own finish reasons on the terminal.
+    Streamed choices of an ``n > 1`` request finish on earlier per-choice
+    chunks, before the shared terminal.
+    """
     if chunk.candidates:
         return [
             text if isinstance(text := candidate.get("text"), str) else ""
             for candidate in chunk.candidates
             if candidate.get("finish_reason") in (None, "stop")
         ]
-    if not texts:
-        return [""]
-    return ["".join(parts) for _, parts in sorted(texts.items())]
+    choices = sorted(set(texts) | set(choice_finish_reasons) | tool_call_choices) or [chunk.choice_index]
+    return [
+        "".join(texts.get(index, ()))
+        for index in choices
+        if index not in tool_call_choices and choice_finish_reasons.get(index, "stop") == "stop"
+    ]
 
 
 def _reject_json_constant(value: str) -> Any:

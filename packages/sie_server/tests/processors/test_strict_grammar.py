@@ -274,6 +274,42 @@ async def test_streamed_choices_are_verified_independently() -> None:
 
 
 @pytest.mark.asyncio
+async def test_streamed_choice_finish_reasons_exclude_truncated_and_tool_call_choices() -> None:
+    upstream = [
+        GenerationChunk(text_delta="ABC-1234", choice_index=0),
+        GenerationChunk(text_delta="XYZ-", choice_index=1),
+        GenerationChunk(text_delta="", choice_index=0, finish_reason="stop"),
+        GenerationChunk(text_delta="12", choice_index=1, finish_reason="length"),
+        GenerationChunk(
+            text_delta="",
+            choice_index=2,
+            tool_call_delta=ToolCallDelta(index=0, id="call_1", function_name="lookup"),
+        ),
+        GenerationChunk(text_delta="", choice_index=2, finish_reason="stop"),
+        GenerationChunk(text_delta="", done=True, finish_reason="stop"),
+    ]
+
+    chunks = await _drain(enforce_strict_grammar(_stream(upstream), _STRICT_REGEX))
+
+    assert chunks[-1].finish_reason == "stop"
+    assert chunks[-1].error_code is None
+
+
+@pytest.mark.asyncio
+async def test_streamed_choice_that_stops_is_still_verified() -> None:
+    upstream = [
+        GenerationChunk(text_delta="ABC-1234", choice_index=0, finish_reason="length"),
+        GenerationChunk(text_delta="not a code", choice_index=1),
+        GenerationChunk(text_delta="", choice_index=1, finish_reason="stop"),
+        GenerationChunk(text_delta="", done=True, finish_reason="stop"),
+    ]
+
+    chunks = await _drain(enforce_strict_grammar(_stream(upstream), _STRICT_REGEX))
+
+    assert chunks[-1].error_code == MODEL_OUTPUT_PARSE_ERROR
+
+
+@pytest.mark.asyncio
 async def test_closing_the_wrapper_closes_the_upstream_iterator() -> None:
     closed = False
 
