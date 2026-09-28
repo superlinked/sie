@@ -671,6 +671,8 @@ traces:
         unknown: other
         allow:
           - gateway.request
+          - gateway.response_body
+          - gateway.generation_stream
           - gateway.publish
           - gateway.proxy
           - gateway.proxy_chat
@@ -697,6 +699,9 @@ enums:
   signup_review_status: [pending, approved, rejected, other]
   launch_credit_status: [pending, approved, rejected, other]
   request_outcome: [success, redirect, client_error, server_error, other]
+  lifecycle_phase: [request, response_body, generation_stream, worker_generation, dispatch_attempt]
+  lifecycle_outcome: [success, rejected, error, cancelled]
+  lifecycle_error_class: [none, client_error, server_error, transport, timeout, worker, cancelled, protocol, other]
   admission_outcome:
     - admitted
     - unauthenticated
@@ -2592,12 +2597,32 @@ logs:
     correlation: [trace_id, span_id]
     export: [structured_stdout, otlp]
 
+  - event_name: inference.lifecycle.completed
+    owner: application
+    producers: [gateway, worker, dispatcher]
+    facade_event: lifecycle.completed
+    body: inference.lifecycle.completed
+    severity: INFO
+    sampling: enclosing_trace_sampled
+    attributes:
+      event.name: inference.lifecycle.completed
+      event.schema.version: "1"
+      phase: lifecycle_phase
+      operation: operation
+      outcome: lifecycle_outcome
+      error_class: lifecycle_error_class
+      duration_ms: nonnegative_phase_duration_ms
+      first_token_ms: optional_nonnegative_first_content_delta_ms_from_phase_start
+    correlation: [trace_id, span_id]
+    export: [otlp]
+
 log_processing:
   declared_events_only: true
   accepted_schema_versions: ["1", "2"]
   helm_receiver_binding:
     receiver: gateway
-    other_receivers: reject
+    other_receivers: reject_completion_event
+    lifecycle_application_receiver: sie-worker_worker_generation_or_sie-dispatcher_dispatch_attempt_only
     service_name: collector_authoritative_sie-gateway
   resource_identity:
     deployment.environment: collector_authoritative

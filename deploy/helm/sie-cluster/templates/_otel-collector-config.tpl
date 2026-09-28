@@ -69,7 +69,7 @@ processors:
         value: {{ $cloudRegion | quote }}
         action: upsert
 {{- end }}
-{{- if or $metricsEnabled (and $tracesEnabled $betterStack.enabled) }}
+{{- if or $metricsEnabled $logsEnabled (and $tracesEnabled $betterStack.enabled) }}
   # Application producers share one receiver, so service.name is retained
   # only after the signal-specific allowlist accepts it. Environment and
   # region are still collector-authored routing dimensions.
@@ -394,7 +394,7 @@ processors:
           - set(status.message, "")
           - set(trace_state, "")
           - set(links, [])
-          - 'set(name, "other") where name != "gateway.request" and name != "gateway.publish" and name != "gateway.proxy" and name != "gateway.proxy_chat" and name != "gateway.proxy_request" and name != "gateway.proxy_generate" and name != "sidecar.dispatch" and name != "worker.run_batch" and name != "worker.streaming_processor" and name != "encode" and name != "score" and name != "extract" and name != "generate" and name != "openai_embeddings" and name != "chat_completions" and name != "rerank" and name != "other"'
+          - 'set(name, "other") where name != "gateway.request" and name != "gateway.response_body" and name != "gateway.generation_stream" and name != "gateway.publish" and name != "gateway.proxy" and name != "gateway.proxy_chat" and name != "gateway.proxy_request" and name != "gateway.proxy_generate" and name != "sidecar.dispatch" and name != "worker.run_batch" and name != "worker.streaming_processor" and name != "encode" and name != "score" and name != "extract" and name != "generate" and name != "openai_embeddings" and name != "chat_completions" and name != "rerank" and name != "other"'
 {{- end }}
 {{- if $logsEnabled }}
   # Logs are allowlisted just like metrics are declared: only the fixed,
@@ -439,6 +439,51 @@ processors:
           - set(body, "inference.request.completed")
           - set(severity_text, "INFO")
           - set(severity_number, SEVERITY_NUMBER_INFO)
+  # Fixed structured lifecycle records only; never a stdout/logging bridge.
+  filter/lifecycle_logs:
+    error_mode: propagate
+    logs:
+      log_record:
+        - 'attributes["event.name"] != "inference.lifecycle.completed"'
+        - 'body != "inference.lifecycle.completed"'
+        - 'attributes["event.schema.version"] != "1"'
+        - 'attributes["phase"] != "request" and attributes["phase"] != "response_body" and attributes["phase"] != "generation_stream" and attributes["phase"] != "worker_generation" and attributes["phase"] != "dispatch_attempt"'
+        - 'attributes["operation"] != "encode" and attributes["operation"] != "score" and attributes["operation"] != "extract" and attributes["operation"] != "generate" and attributes["operation"] != "embeddings" and attributes["operation"] != "moderations" and attributes["operation"] != "other"'
+        - 'attributes["outcome"] != "success" and attributes["outcome"] != "rejected" and attributes["outcome"] != "error" and attributes["outcome"] != "cancelled"'
+        - 'attributes["error_class"] != "none" and attributes["error_class"] != "client_error" and attributes["error_class"] != "server_error" and attributes["error_class"] != "transport" and attributes["error_class"] != "timeout" and attributes["error_class"] != "worker" and attributes["error_class"] != "cancelled" and attributes["error_class"] != "protocol" and attributes["error_class"] != "other"'
+        - 'not IsDouble(attributes["duration_ms"]) and not IsInt(attributes["duration_ms"])'
+        - 'attributes["duration_ms"] < 0 or attributes["duration_ms"] > 86400000'
+        - 'attributes["first_token_ms"] != nil and not IsDouble(attributes["first_token_ms"]) and not IsInt(attributes["first_token_ms"])'
+        - 'attributes["first_token_ms"] != nil and (attributes["first_token_ms"] < 0 or attributes["first_token_ms"] > attributes["duration_ms"])'
+  filter/gateway_lifecycle_logs:
+    error_mode: propagate
+    logs:
+      log_record:
+        - 'attributes["phase"] != "request" and attributes["phase"] != "response_body" and attributes["phase"] != "generation_stream"'
+  filter/application_lifecycle_logs:
+    error_mode: propagate
+    logs:
+      log_record:
+        - 'not (resource.attributes["service.name"] == "sie-worker" and attributes["phase"] == "worker_generation") and not (resource.attributes["service.name"] == "sie-dispatcher" and attributes["phase"] == "dispatch_attempt")'
+  transform/lifecycle_logs:
+    error_mode: propagate
+    log_statements:
+      - context: resource
+        statements:
+          - keep_keys(attributes, ["service.name", "service.instance.id", "deployment.environment", "cloud.region", "service.version"])
+          - set(schema_url, "")
+      - context: scope
+        statements:
+          - keep_keys(attributes, [])
+          - set(name, "")
+          - set(version, "")
+          - set(schema_url, "")
+      - context: log
+        statements:
+          - keep_keys(attributes, ["event.name", "event.schema.version", "phase", "operation", "outcome", "error_class", "duration_ms", "first_token_ms"])
+          - set(severity_text, "INFO")
+          - set(severity_number, SEVERITY_NUMBER_INFO)
+
 {{- end }}
 
 exporters:
@@ -556,6 +601,14 @@ service:
     logs:
       receivers: [otlp/gateway]
       processors: [memory_limiter, resource/gateway_identity, filter/contract_logs, transform/contract_logs, batch]
+      exporters: {{ toJson $logExporters }}
+    logs/lifecycle/gateway:
+      receivers: [otlp/gateway]
+      processors: [memory_limiter, resource/gateway_identity, filter/gateway_lifecycle_logs, filter/lifecycle_logs, transform/lifecycle_logs, batch]
+      exporters: {{ toJson $logExporters }}
+    logs/lifecycle/application:
+      receivers: [otlp/application]
+      processors: [memory_limiter, filter/application_lifecycle_logs, resource/application_identity, filter/lifecycle_logs, transform/lifecycle_logs, batch]
       exporters: {{ toJson $logExporters }}
   {{- end }}
 {{- end -}}

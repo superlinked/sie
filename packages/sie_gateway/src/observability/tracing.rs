@@ -668,6 +668,54 @@ pub fn record_inference_completion_log(
     ));
 }
 
+/// Fixed lifecycle schema. Deliberately no message, exception, identifier, or
+/// caller-defined attribute API. Like completion logs, failures are sampled.
+pub fn record_lifecycle_log(
+    context: &opentelemetry::Context,
+    phase: &'static str,
+    operation: &'static str,
+    outcome: super::lifecycle::Outcome,
+    error_class: super::lifecycle::ErrorClass,
+    duration_ms: f64,
+    first_token_ms: Option<f64>,
+) {
+    use opentelemetry::trace::TraceContextExt;
+    let span = context.span();
+    let Some(span_context) = sampled_log_span_context(Some(span.span_context())) else {
+        return;
+    };
+    let Some(logger) = REQUEST_LOGGER.get() else {
+        return;
+    };
+    let mut record = logger.create_log_record();
+    record.set_timestamp(SystemTime::now());
+    record.set_severity_number(Severity::Info);
+    record.set_severity_text("INFO");
+    record.set_body(AnyValue::from("inference.lifecycle.completed"));
+    record.set_trace_context(
+        span_context.trace_id(),
+        span_context.span_id(),
+        Some(span_context.trace_flags()),
+    );
+    record.add_attribute("event.name", "inference.lifecycle.completed");
+    record.add_attribute("event.schema.version", "1");
+    record.add_attribute("phase", phase);
+    record.add_attribute(
+        "operation",
+        match operation {
+            "encode" | "score" | "extract" | "generate" | "embeddings" | "moderations" => operation,
+            _ => "other",
+        },
+    );
+    record.add_attribute("outcome", outcome.as_str());
+    record.add_attribute("error_class", error_class.as_str());
+    record.add_attribute("duration_ms", duration_ms);
+    if let Some(first_token_ms) = first_token_ms {
+        record.add_attribute("first_token_ms", first_token_ms);
+    }
+    logger.emit(record);
+}
+
 fn sampled_log_span_context(span_context: Option<&SpanContext>) -> Option<&SpanContext> {
     span_context.filter(|cx| cx.is_valid() && cx.is_sampled())
 }

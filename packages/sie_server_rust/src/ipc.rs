@@ -256,7 +256,16 @@ impl IpcServer {
                         }
                     }
                 }
-                let resp = self.backend.run_batch(req).instrument(span).await;
+                let resp = self.backend.run_batch(req).instrument(span.clone()).await;
+                if resp
+                    .outcomes
+                    .iter()
+                    .any(|item| item.disposition != crate::ipc_types::Disposition::PublishAndAck)
+                {
+                    // Structural status survives the remote attribute filter.
+                    // Never put an item's error string into status text.
+                    span.set_status(opentelemetry::trace::Status::error(""));
+                }
                 response_ok(&envelope.request_id, resp)
             }
             METHOD_APPLY_MODEL_CONFIG => {

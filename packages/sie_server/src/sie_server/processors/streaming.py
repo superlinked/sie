@@ -80,6 +80,7 @@ from sie_server.core.video_frames import (
     sniff_video_container,
 )
 from sie_server.observability import worker_telemetry as _metrics
+from sie_server.observability.lifecycle import current_lifecycle, observe_generation
 from sie_server.processors.grammar_cache import GrammarLRU
 from sie_server.processors.grammar_compile import compile_outlines
 from sie_server.processors.tool_call_grammar import (
@@ -1544,15 +1545,20 @@ class StreamingProcessor:
         parent_ctx = propagate.extract(carrier)
         tracer = _otel_trace.get_tracer("sie_server.processors.streaming")
         try:
-            with tracer.start_as_current_span(
-                "worker.streaming_processor",
-                context=parent_ctx,
-                attributes={
-                    "sie.request_id": request_id,
-                    "sie.attempt_id": attempt_id,
-                    "sie.model": model_id,
-                    "sie.adapter": "streaming",
-                },
+            with (
+                tracer.start_as_current_span(
+                    "worker.streaming_processor",
+                    context=parent_ctx,
+                    record_exception=False,
+                    set_status_on_exception=False,
+                    attributes={
+                        "sie.request_id": request_id,
+                        "sie.attempt_id": attempt_id,
+                        "sie.model": model_id,
+                        "sie.adapter": "streaming",
+                    },
+                ),
+                observe_generation(),
             ):
                 await self._process_inner(msg, model_id, wi, reply_subject, request_id, attempt_id, received_at)
         finally:
@@ -2731,7 +2737,7 @@ class StreamingProcessor:
         await self._nc.publish(reply_subject, payload)
         # Empty in disabled mode, so no msgpack decode or attribute work lands
         # on the default serving path.
-        if self._completion_by_attempt:
+        if self._completion_by_attempt or current_lifecycle() is not None:
             self._record_published_terminal(payload)
 
     def _record_published_terminal(self, payload: bytes) -> None:
@@ -2750,6 +2756,8 @@ class StreamingProcessor:
             return
         if not isinstance(envelope, dict) or envelope.get("kind") != "chunk" or envelope.get("done") is not True:
             return
+        if lifecycle := current_lifecycle():
+            lifecycle.published_terminal(envelope)
         attempt_id = str(envelope.get("attempt_id") or "")
         completion = self._completion_by_attempt.get(attempt_id)
         if completion is None or completion.completed:

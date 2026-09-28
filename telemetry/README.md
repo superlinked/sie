@@ -76,6 +76,48 @@ Collectors accept schema v1 only while older gateway pods drain during a
 rolling update; they preserve its version and never relabel an incomplete v1
 record as v2.
 
+### Request and generation lifecycle
+
+`gateway.request`, `sie.gateway.requests`, `sie.gateway.request.duration`, and
+`inference.request.completed` retain their response-ready boundary: the inner
+HTTP service has returned headers. They do not measure a streamed body. HTTP
+5xx and service errors set structural OTel ERROR with no status description;
+4xx are rejections, not server span errors.
+
+`gateway.response_body` is a child covering response-ready to body EOF, body
+error, or drop. EOF means server-side body consumption, not acknowledgement by
+the client. Drop before EOF is cancellation (client disconnect, server abort,
+or a consumer that stops reading); telemetry cannot distinguish those causes.
+`gateway.generation_stream` covers the SSE driver's lifetime after publication
+until its semantic terminal observation. It records errors inside HTTP 200
+streams, timeout and cancellation independently of HTTP status. Its optional
+`first_token_ms` is the first nonempty text or tool delta observed by that driver,
+measured from driver start; heartbeats, role-only frames and terminal-only
+responses do not create this value. Existing adapter and gateway generation
+TTFT/TPOT metrics retain their ownership and meaning; these additions create
+no metrics.
+
+The Python `worker.streaming_processor` observes a generation attempt through
+terminal publication and handler exit. A published error terminal marks ERROR,
+a published cancelled terminal or task cancellation records cancellation, and
+return without a confirmed terminal is a transport failure. Exceptions are
+classified without exporting their text or automatic exception events.
+
+`inference.lifecycle.completed` schema v1 is a fixed OTLP-only record carrying
+phase, operation, outcome, bounded error class, duration, optional first-content
+timing, and structural trace/span IDs. Each phase emits once; no raw stdout or
+logging bridge is enabled. Service/phase pairs and exact numeric/string types
+are rechecked by the collector. Cancellation and rejection leave structural
+status UNSET; their safe record carries the distinction.
+
+**Retention is sampled and best effort.** Lifecycle logs require a valid sampled
+span context and the enabled safe-log exporter. They follow the enclosing head
+sampling decision, even for errors. A parent-based 5% root sampler therefore
+cannot retain every failure trace or failure record; inbound sampling decisions
+and exporter/collector loss also affect retention. Metrics remain unsampled.
+These changes do not enable tail sampling, change sampling rates, or promise
+complete error coverage.
+
 Every deployment uses the same application path: OTel instruments and log
 records leave the process through OTLP. Prometheus is a collector exporter, not
 an application instrumentation API. The bundled OSS/Kubernetes collector

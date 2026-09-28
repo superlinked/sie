@@ -52,8 +52,10 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::observability::lifecycle::{ErrorClass, Lifecycle, Outcome};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
+use opentelemetry::trace::FutureExt;
 use serde_json::{json, Value};
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::ReceiverStream;
@@ -303,31 +305,35 @@ pub async fn build_sse_response(params: SseParams<'_>) -> Response {
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
-    tokio::spawn(async move {
-        run_sse_driver(SseDriverArgs {
-            event_tx,
-            chunk_rx,
-            outcome_rx,
-            durability_completion,
-            publisher: driver_publisher,
-            demand_tracker: driver_demand_tracker,
-            physical_lane: driver_physical_lane,
-            request_id: driver_request_id,
-            model: driver_model.clone(),
-            pool: driver_pool.clone(),
-            bundle: driver_bundle,
-            gpu: driver_gpu,
-            endpoint,
-            stream_chat_id,
-            created,
-            first_chunk_timeout: timeout_config.first_chunk,
-            inter_chunk_timeout: timeout_config.inter_chunk,
-            overall_timeout: effective_overall,
-            was_direct_dispatched,
-            pool_fallback_lane_worker_count,
-        })
-        .await;
-    });
+    let context = opentelemetry::Context::current();
+    tokio::spawn(
+        async move {
+            run_sse_driver(SseDriverArgs {
+                event_tx,
+                chunk_rx,
+                outcome_rx,
+                durability_completion,
+                publisher: driver_publisher,
+                demand_tracker: driver_demand_tracker,
+                physical_lane: driver_physical_lane,
+                request_id: driver_request_id,
+                model: driver_model.clone(),
+                pool: driver_pool.clone(),
+                bundle: driver_bundle,
+                gpu: driver_gpu,
+                endpoint,
+                stream_chat_id,
+                created,
+                first_chunk_timeout: timeout_config.first_chunk,
+                inter_chunk_timeout: timeout_config.inter_chunk,
+                overall_timeout: effective_overall,
+                was_direct_dispatched,
+                pool_fallback_lane_worker_count,
+            })
+            .await;
+        }
+        .with_context(context),
+    );
 
     let stream = ReceiverStream::new(event_rx);
     let sse = Sse::new(stream).keep_alive(KeepAlive::default());
@@ -508,6 +514,12 @@ async fn wait_for_terminal_durability(
 /// timeout fires the SSE response has already started (`200 OK` +
 /// headers sent).
 async fn run_sse_driver(args: SseDriverArgs) {
+    let lifecycle = crate::observability::tracing::request_telemetry_enabled()
+        .then(|| Lifecycle::generation_stream(opentelemetry::Context::current()));
+    run_sse_driver_with_lifecycle(args, lifecycle).await;
+}
+
+async fn run_sse_driver_with_lifecycle(args: SseDriverArgs, mut lifecycle: Option<Lifecycle>) {
     let SseDriverArgs {
         event_tx,
         mut chunk_rx,
@@ -531,9 +543,26 @@ async fn run_sse_driver(args: SseDriverArgs) {
         pool_fallback_lane_worker_count,
     } = args;
     let wait_start = std::time::Instant::now();
-    let record_wait = |outcome| {
-        telemetry::record_queue_result_wait("generate", outcome, wait_start.elapsed());
-    };
+    macro_rules! record_wait {
+        ($outcome:expr) => {{
+            let outcome = $outcome;
+            telemetry::record_queue_result_wait("generate", outcome, wait_start.elapsed());
+            if let Some(lifecycle) = lifecycle.as_mut() {
+                let (outcome, class) = match outcome {
+                    telemetry::QueueResultOutcome::Success => (Outcome::Success, ErrorClass::None),
+                    telemetry::QueueResultOutcome::Cancelled => {
+                        (Outcome::Cancelled, ErrorClass::Cancelled)
+                    }
+                    telemetry::QueueResultOutcome::Timeout => (Outcome::Error, ErrorClass::Timeout),
+                    telemetry::QueueResultOutcome::WorkerError => {
+                        (Outcome::Error, ErrorClass::Worker)
+                    }
+                    _ => (Outcome::Error, ErrorClass::Transport),
+                };
+                lifecycle.finish(outcome, class);
+            }
+        }};
+    }
 
     // Install the cancel-on-drop guard. Mirrors
     // `run_streaming_generate`: a normal completion path defuses it;
@@ -616,7 +645,7 @@ async fn run_sse_driver(args: SseDriverArgs) {
             )
             .await;
             send_done(&event_tx).await;
-            record_wait(telemetry::QueueResultOutcome::Timeout);
+            record_wait!(telemetry::QueueResultOutcome::Timeout);
             cancel_guard.defuse();
             publisher.publish_cancel(&request_id).await;
             publisher.drop_pending_stream(&request_id);
@@ -700,7 +729,7 @@ async fn run_sse_driver(args: SseDriverArgs) {
             )
             .await;
             send_done(&event_tx).await;
-            record_wait(telemetry::QueueResultOutcome::Timeout);
+            record_wait!(telemetry::QueueResultOutcome::Timeout);
             cancel_guard.defuse();
             publisher.publish_cancel(&request_id).await;
             publisher.drop_pending_stream(&request_id);
@@ -720,7 +749,7 @@ async fn run_sse_driver(args: SseDriverArgs) {
                 )
                 .await;
                 send_done(&event_tx).await;
-                record_wait(telemetry::QueueResultOutcome::Timeout);
+                record_wait!(telemetry::QueueResultOutcome::Timeout);
                 cancel_guard.defuse();
                 publisher.publish_cancel(&request_id).await;
                 publisher.drop_pending_stream(&request_id);
@@ -756,7 +785,7 @@ async fn run_sse_driver(args: SseDriverArgs) {
                         )
                         .await;
                         send_done(&event_tx).await;
-                        record_wait(telemetry::QueueResultOutcome::DurabilityError);
+                        record_wait!(telemetry::QueueResultOutcome::DurabilityError);
                         cancel_guard.defuse();
                         return;
                     }
@@ -773,7 +802,7 @@ async fn run_sse_driver(args: SseDriverArgs) {
                         )
                         .await;
                         send_done(&event_tx).await;
-                        record_wait(telemetry::QueueResultOutcome::DurabilityError);
+                        record_wait!(telemetry::QueueResultOutcome::DurabilityError);
                         cancel_guard.defuse();
                         return;
                     }
@@ -788,7 +817,7 @@ async fn run_sse_driver(args: SseDriverArgs) {
             // explicitly to the receiver's lifecycle closes that leak.
             _ = event_tx.closed() => {
                 debug!(request_id = %request_id, "SSE receiver dropped; tearing down driver");
-                record_wait(telemetry::QueueResultOutcome::Cancelled);
+                record_wait!(telemetry::QueueResultOutcome::Cancelled);
                 telemetry::record_generation_event(
                     telemetry::GenerationEvent::Cancellation,
                     if first_seen {
@@ -843,7 +872,7 @@ async fn run_sse_driver(args: SseDriverArgs) {
                             )
                             .await;
                             send_done(&event_tx).await;
-                            record_wait(telemetry::QueueResultOutcome::WorkerError);
+                            record_wait!(telemetry::QueueResultOutcome::WorkerError);
                             cancel_guard.defuse();
                             publisher.drop_pending_stream(&request_id);
                             return;
@@ -909,7 +938,7 @@ async fn run_sse_driver(args: SseDriverArgs) {
                 )
                 .await;
                 send_done(&event_tx).await;
-                record_wait(telemetry::QueueResultOutcome::WorkerError);
+                record_wait!(telemetry::QueueResultOutcome::WorkerError);
                 cancel_guard.defuse();
                 // Only cancel the worker if the generation is still in flight.
                 // A request whose terminal outcome already resolved Ok has
@@ -943,7 +972,7 @@ async fn run_sse_driver(args: SseDriverArgs) {
                     .await;
                     send_done(&event_tx).await;
                 }
-                record_wait(if stream_succeeded {
+                record_wait!(if stream_succeeded {
                     telemetry::QueueResultOutcome::Success
                 } else {
                     telemetry::QueueResultOutcome::ChannelClosed
@@ -954,6 +983,16 @@ async fn run_sse_driver(args: SseDriverArgs) {
         };
 
         // Non-stale chunk arrived. Update timing trackers.
+        if !chunk.text_delta.is_empty()
+            || chunk
+                .tool_calls
+                .as_ref()
+                .is_some_and(|calls| !calls.is_empty())
+        {
+            if let Some(lifecycle) = lifecycle.as_mut() {
+                lifecycle.first_token();
+            }
+        }
         first_seen = true;
         last_chunk_at = Some(tokio::time::Instant::now());
 
@@ -989,7 +1028,7 @@ async fn run_sse_driver(args: SseDriverArgs) {
                     )
                     .await;
                     send_done(&event_tx).await;
-                    record_wait(telemetry::QueueResultOutcome::DurabilityError);
+                    record_wait!(telemetry::QueueResultOutcome::DurabilityError);
                     cancel_guard.defuse();
                     // Tear the stream down like the sibling durability arm
                     // below. This exit writes no usage surface, so it never
@@ -1014,7 +1053,7 @@ async fn run_sse_driver(args: SseDriverArgs) {
                     )
                     .await;
                     send_done(&event_tx).await;
-                    record_wait(telemetry::QueueResultOutcome::DurabilityError);
+                    record_wait!(telemetry::QueueResultOutcome::DurabilityError);
                     cancel_guard.defuse();
                     publisher.publish_cancel(&request_id).await;
                     publisher.drop_pending_stream(&request_id);
@@ -1022,7 +1061,7 @@ async fn run_sse_driver(args: SseDriverArgs) {
                 }
                 TerminalDurabilityWait::ClientClosed => {
                     debug!(request_id = %request_id, "SSE receiver dropped while awaiting terminal durability");
-                    record_wait(telemetry::QueueResultOutcome::Cancelled);
+                    record_wait!(telemetry::QueueResultOutcome::Cancelled);
                     telemetry::record_generation_event(
                         telemetry::GenerationEvent::Cancellation,
                         telemetry::GenerationEventReason::MidStream,
@@ -1051,7 +1090,7 @@ async fn run_sse_driver(args: SseDriverArgs) {
                     )
                     .await;
                     send_done(&event_tx).await;
-                    record_wait(telemetry::QueueResultOutcome::Timeout);
+                    record_wait!(telemetry::QueueResultOutcome::Timeout);
                     cancel_guard.defuse();
                     publisher.publish_cancel(&request_id).await;
                     publisher.drop_pending_stream(&request_id);
@@ -1122,7 +1161,7 @@ async fn run_sse_driver(args: SseDriverArgs) {
                 // a detached task and can race the outer return / next
                 // request).
                 debug!(request_id = %request_id, "SSE client disconnected mid-stream");
-                record_wait(telemetry::QueueResultOutcome::Cancelled);
+                record_wait!(telemetry::QueueResultOutcome::Cancelled);
                 telemetry::record_generation_event(
                     telemetry::GenerationEvent::Cancellation,
                     if first_seen {
@@ -1156,8 +1195,10 @@ async fn run_sse_driver(args: SseDriverArgs) {
                 let _ = send_event(&event_tx, Event::default().data(body.to_string())).await;
             }
             send_done(&event_tx).await;
-            record_wait(if chunk.error.is_some() {
+            record_wait!(if chunk.error.is_some() {
                 telemetry::QueueResultOutcome::WorkerError
+            } else if chunk.finish_reason.as_deref() == Some("cancelled") {
+                telemetry::QueueResultOutcome::Cancelled
             } else {
                 telemetry::QueueResultOutcome::Success
             });
@@ -1942,6 +1983,45 @@ mod tests {
         AfterFirstDelta,
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn live_driver_records_structural_error_before_and_after_first_delta() {
+        use opentelemetry::trace::TracerProvider;
+        use tracing_subscriber::prelude::*;
+        let exporter = opentelemetry_sdk::trace::InMemorySpanExporter::default();
+        let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test")));
+        let _guard = tracing::subscriber::set_default(subscriber);
+        for delivery in [
+            WorkerTerminalDelivery::BackloggedBeforeFirstPoll,
+            WorkerTerminalDelivery::AfterFirstDelta,
+        ] {
+            let _ = run_driver_worker_error_race(
+                SseEndpoint::Generate,
+                delivery,
+                ChunkError {
+                    code: "inference_error".into(),
+                    message: "sensitive diagnostic".into(),
+                    param: None,
+                    retry_after_s: None,
+                },
+            )
+            .await;
+        }
+        let spans = exporter.get_finished_spans().unwrap();
+        let streams: Vec<_> = spans
+            .iter()
+            .filter(|span| span.name == "gateway.generation_stream")
+            .collect();
+        assert_eq!(streams.len(), 2);
+        assert!(streams
+            .iter()
+            .all(|span| span.status == opentelemetry::trace::Status::error("")));
+        assert!(streams.iter().all(|span| span.events.is_empty()));
+    }
+
     async fn run_driver_worker_error_race(
         endpoint: SseEndpoint,
         delivery: WorkerTerminalDelivery,
@@ -2002,7 +2082,16 @@ mod tests {
 
         let mut payloads = Vec::new();
         if matches!(delivery, WorkerTerminalDelivery::AfterFirstDelta) {
-            let driver = tokio::spawn(run_sse_driver(args));
+            use tracing::instrument::WithSubscriber;
+            let driver = tokio::spawn(
+                run_sse_driver_with_lifecycle(
+                    args,
+                    Some(Lifecycle::generation_stream(
+                        opentelemetry::Context::current(),
+                    )),
+                )
+                .with_current_subscriber(),
+            );
             assert!(matches!(
                 collector.apply(_delta_chunk(41, "partial")),
                 ChunkApplied::Delta
@@ -2054,7 +2143,13 @@ mod tests {
             outcome_tx
                 .send(collector.build_outcome().expect("terminal outcome"))
                 .expect("outcome receiver is live");
-            run_sse_driver(args).await;
+            run_sse_driver_with_lifecycle(
+                args,
+                Some(Lifecycle::generation_stream(
+                    opentelemetry::Context::current(),
+                )),
+            )
+            .await;
         }
 
         loop {

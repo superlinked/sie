@@ -12,6 +12,7 @@
 //! changes. The helpers in [`propagation`] are only needed at the
 //! *edges* — inbound HTTP and outbound NATS publish.
 
+pub mod lifecycle;
 pub mod metrics;
 pub mod propagation;
 pub mod tracing;
