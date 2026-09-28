@@ -92,9 +92,11 @@ Work-item deadlines:
 - Encode, score, and extract deliveries with a live deadline are progress-ACKed
   every few seconds from intake until they are ACKed, NAKed, or deliberately
   left unacked for redelivery, so a slow scheduler queue or backend call does
-  not trigger a redelivery of work that is still running. The lease also ends
-  at the deadline, after which JetStream redelivers as before and the
-  redelivery is dropped as expired.
+  not trigger a redelivery of work that is still running. While enforcement is
+  on, the lease also ends at the deadline, after which JetStream redelivers as
+  before and the redelivery is dropped as expired. With enforcement off,
+  expired work still executes, so the lease is bounded by the work-stream
+  lifetime instead.
 - A `RunBatch` call waits for the longer of `SIE_IPC_REQUEST_TIMEOUT_S` and
   the time until the batch's latest deadline, bounded by the work-stream
   lifetime, so a legitimate slow batch is not cut short and retried.

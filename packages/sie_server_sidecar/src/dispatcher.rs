@@ -999,18 +999,16 @@ impl Dispatcher {
     }
 
     /// Keep a held NATS delivery's JetStream lease alive until it settles or
-    /// its deadline passes, so slow queues and long backend calls do not
+    /// its lease horizon passes, so slow queues and long backend calls do not
     /// trigger a redelivery of work that is still running.
     fn hold_progress_lease(&self, wi: &WorkItem, delivery: &Delivery) {
         let Delivery::Nats(msg, _) = delivery else {
             return;
         };
-        if let DeadlineStatus::Live(remaining) =
-            self.work_deadline.status(wi.deadline, unix_now_s())
-        {
+        if let Some(horizon) = self.work_deadline.lease_horizon(wi.deadline, unix_now_s()) {
             nats_progress_leases().hold(
                 msg,
-                Instant::now() + remaining,
+                Instant::now() + horizon,
                 &self.runtime_state.telemetry,
             );
         }

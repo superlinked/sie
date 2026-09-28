@@ -106,6 +106,20 @@ impl WorkDeadlinePolicy {
         }
     }
 
+    /// How long a held delivery's JetStream lease may be kept alive, or `None`
+    /// for no lease. When enforcing, a redelivery after the deadline is
+    /// dropped anyway, so the lease lapses there and a stuck holder can still
+    /// be recovered. Without enforcement expired work still executes, so the
+    /// lease lasts until the policy horizon to avoid running it twice.
+    pub fn lease_horizon(&self, deadline: Option<f64>, now_unix_s: f64) -> Option<Duration> {
+        match self.status(deadline, now_unix_s) {
+            DeadlineStatus::Unbounded => None,
+            DeadlineStatus::Live(remaining) if self.enforce => Some(remaining),
+            DeadlineStatus::Expired(_) if self.enforce => None,
+            DeadlineStatus::Live(_) | DeadlineStatus::Expired(_) => Some(self.max_horizon),
+        }
+    }
+
     /// Time until the latest live deadline among `deadlines`, or `None` when
     /// no item carries one. A backend call for these items is given at least
     /// this long.
@@ -351,6 +365,23 @@ mod tests {
             policy.status(Some(1.0e300), 1_700_000_000.0),
             DeadlineStatus::Live(HORIZON)
         );
+    }
+
+    #[test]
+    fn lease_lapses_at_the_deadline_only_while_enforcing() {
+        let now = 1_700_000_000.0;
+        let enforcing = WorkDeadlinePolicy::from_values(None, Some("0"), HORIZON);
+        assert_eq!(enforcing.lease_horizon(None, now), None);
+        assert_eq!(
+            enforcing.lease_horizon(Some(now + 30.0), now),
+            Some(Duration::from_secs(30))
+        );
+        assert_eq!(enforcing.lease_horizon(Some(now - 30.0), now), None);
+
+        let shadow = WorkDeadlinePolicy::from_values(Some("false"), Some("0"), HORIZON);
+        assert_eq!(shadow.lease_horizon(None, now), None);
+        assert_eq!(shadow.lease_horizon(Some(now + 30.0), now), Some(HORIZON));
+        assert_eq!(shadow.lease_horizon(Some(now - 30.0), now), Some(HORIZON));
     }
 
     #[test]
