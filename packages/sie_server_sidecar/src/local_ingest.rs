@@ -183,11 +183,61 @@ struct RequestBody {
 fn optional_trace_string<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<String>, D::Error> {
-    let value = rmpv::Value::deserialize(deserializer)?;
-    Ok(value
-        .as_str()
-        .filter(|value| value.len() <= 512)
-        .map(str::to_owned))
+    struct TraceString;
+    impl<'de> serde::de::Visitor<'de> for TraceString {
+        type Value = Option<String>;
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("optional bounded trace string")
+        }
+        fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+            Ok((value.len() <= 512).then(|| value.to_owned()))
+        }
+        fn visit_bool<E: serde::de::Error>(self, _: bool) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_i64<E: serde::de::Error>(self, _: i64) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_u64<E: serde::de::Error>(self, _: u64) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_bytes<E: serde::de::Error>(self, _: &[u8]) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_newtype_struct<D: serde::Deserializer<'de>>(
+            self,
+            deserializer: D,
+        ) -> Result<Self::Value, D::Error> {
+            serde::de::IgnoredAny::deserialize(deserializer)?;
+            Ok(None)
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut sequence: A,
+        ) -> Result<Self::Value, A::Error> {
+            while sequence.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+            Ok(None)
+        }
+        fn visit_map<A: serde::de::MapAccess<'de>>(
+            self,
+            mut map: A,
+        ) -> Result<Self::Value, A::Error> {
+            while map
+                .next_entry::<serde::de::IgnoredAny, serde::de::IgnoredAny>()?
+                .is_some()
+            {}
+            Ok(None)
+        }
+    }
+    // Skip wrong-typed containers without materializing a potentially large
+    // Value tree. String input is borrowed and copied only within the bound.
+    deserializer.deserialize_any(TraceString)
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -1897,7 +1947,16 @@ mod tests {
     fn malformed_optional_carriers_do_not_reject_request_decode() {
         for value in [
             rmpv::Value::from(42),
+            rmpv::Value::from(true),
+            rmpv::Value::from(-1),
+            rmpv::Value::from(1.5),
+            rmpv::Value::Nil,
+            rmpv::Value::Map(vec![(
+                "nested".into(),
+                rmpv::Value::Array(vec![rmpv::Value::Nil; 100_000]),
+            )]),
             rmpv::Value::Binary(vec![1, 2]),
+            rmpv::Value::Ext(1, vec![1, 2]),
             rmpv::Value::Array(vec![]),
             rmpv::Value::from("x".repeat(513)),
         ] {
