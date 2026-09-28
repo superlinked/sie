@@ -287,10 +287,19 @@ class ModelRegistry:
                 cache_config.local_cache,
             )
 
-        # Concurrency-safe loading
+        # Lock order, outermost first: per-model load lock, config update lock,
+        # load admission lock, load lock. The load lock guards registry state
+        # transitions, eviction decisions and adapter teardown, and is never
+        # held across a worker drain, adapter instantiation or adapter load.
+        # The admission lock serializes the memory-changing part of every load
+        # with other loads and with config mutations. Waiting for an in-flight
+        # unload is allowed under any lock except the load lock, because the
+        # unload's teardown takes the load lock.
         self._load_lock: asyncio.Lock | None = None  # Created lazily on first use
         self._model_load_locks: dict[str, asyncio.Lock] = {}
+        self._load_admission_lock: asyncio.Lock | None = None
         self._config_update_lock: asyncio.Lock | None = None
+        self._unload_done: dict[str, asyncio.Event] = {}
         # Async lifecycle state is owned by one long-lived server event loop.
         # Legacy synchronous callers are serialized independently until that
         # loop is known; after binding they submit work back to the owner loop.
@@ -852,27 +861,29 @@ class ModelRegistry:
         Raises:
             DevicePlacementError: When no block of that width can be freed.
         """
-        candidates = self._group_candidates(width, requested_device)
-        cheapest: tuple[tuple[int, float], str, list[str], set[str]] | None = None
-        for anchor, members in candidates:
-            blockers = self._group_blockers(members, for_model=name)
-            if blockers is None:
-                continue
-            if not blockers:
-                return anchor, members
-            if any(self._is_pinned(blocker) for blocker in blockers):
-                continue
-            cost = (len(blockers), max(self._last_used_at(blocker) for blocker in blockers))
-            if cheapest is None or cost < cheapest[0]:
-                cheapest = (cost, anchor, members, blockers)
+        lock = self._get_load_lock()
+        async with lock:
+            candidates = self._group_candidates(width, requested_device)
+            cheapest: tuple[tuple[int, float], str, list[str], set[str]] | None = None
+            for anchor, members in candidates:
+                blockers = self._group_blockers(members, for_model=name)
+                if blockers is None:
+                    continue
+                if not blockers:
+                    return anchor, members
+                if any(self._is_pinned(blocker) for blocker in blockers):
+                    continue
+                cost = (len(blockers), max(self._last_used_at(blocker) for blocker in blockers))
+                if cheapest is None or cost < cheapest[0]:
+                    cheapest = (cost, anchor, members, blockers)
 
-        if cheapest is None:
-            msg = (
-                f"Model '{name}' declares tensor_parallel_size={width} but no block of {width} "
-                f"device(s) on this worker can be freed for it (devices={self._devices}, "
-                f"claims={sorted(self._device_claims)}, pinned={sorted(self._pinned_models)})"
-            )
-            raise DevicePlacementError(msg)
+            if cheapest is None:
+                msg = (
+                    f"Model '{name}' declares tensor_parallel_size={width} but no block of {width} "
+                    f"device(s) on this worker can be freed for it (devices={self._devices}, "
+                    f"claims={sorted(self._device_claims)}, pinned={sorted(self._pinned_models)})"
+                )
+                raise DevicePlacementError(msg)
 
         _, anchor, members, blockers = cheapest
         for blocker in sorted(blockers):
@@ -887,12 +898,13 @@ class ModelRegistry:
             )
             await self._do_unload(blocker, reason="group_placement")
 
-        if not self._is_group_free(members, for_model=name):
-            msg = (
-                f"Model '{name}' declares tensor_parallel_size={width} but {members} did not come "
-                f"free after evicting {sorted(blockers)}"
-            )
-            raise DevicePlacementError(msg)
+        async with lock:
+            if not self._is_group_free(members, for_model=name):
+                msg = (
+                    f"Model '{name}' declares tensor_parallel_size={width} but {members} did not come "
+                    f"free after evicting {sorted(blockers)}"
+                )
+                raise DevicePlacementError(msg)
         return anchor, members
 
     def _group_holder_to_evict(self, requested_device: str) -> str | None:
@@ -932,18 +944,20 @@ class ModelRegistry:
         Raises:
             DevicePlacementError: When no device is free and no group can be displaced.
         """
+        lock = self._get_load_lock()
         for _ in range(len(self._devices) + 1):
-            try:
-                load_device = self._resolve_load_device(requested_device)
-                self._reject_claimed_device(name, load_device)
-            except DevicePlacementError:
-                holder = self._group_holder_to_evict(requested_device)
-                if holder is None:
-                    raise
-                logger.info("Placement: evicting multi-device model '%s' to place '%s'", holder, name)
-                await self._do_unload(holder, reason="group_placement")
-                continue
-            return load_device
+            async with lock:
+                try:
+                    load_device = self._resolve_load_device(requested_device)
+                    self._reject_claimed_device(name, load_device)
+                except DevicePlacementError:
+                    holder = self._group_holder_to_evict(requested_device)
+                    if holder is None:
+                        raise
+                    logger.info("Placement: evicting multi-device model '%s' to place '%s'", holder, name)
+                else:
+                    return load_device
+            await self._do_unload(holder, reason="group_placement")
         msg = f"Model '{name}' found no device after displacing every eligible multi-device model"
         raise DevicePlacementError(msg)
 
@@ -1161,6 +1175,13 @@ class ModelRegistry:
         if lock is None:
             lock = self._model_load_locks[name] = asyncio.Lock()
         return lock
+
+    def _get_load_admission_lock(self) -> asyncio.Lock:
+        """Serialize placement, eviction, load and registration across models."""
+        self._bind_lifecycle_loop()
+        if self._load_admission_lock is None:
+            self._load_admission_lock = asyncio.Lock()
+        return self._load_admission_lock
 
     def _get_config_update_lock(self) -> asyncio.Lock:
         """Serialize async config mutations across IPC/hot-reload entrypoints."""
@@ -1405,7 +1426,11 @@ class ModelRegistry:
         """Load a model onto a device (async, concurrency-safe).
 
         This method:
-        - Serializes all load/unload operations via an async lock
+        - Serializes loads of one model with a per-model lock, and the placement,
+          eviction, load and registration of every model with the admission lock;
+          the registry load lock is held only for state transitions and eviction
+          decisions, so batched traffic for loaded models keeps flowing
+        - Waits for an in-flight unload of the same model instead of failing
         - Proactively evicts LRU models if memory pressure or load headroom requires it
         - Runs the blocking load in a thread pool to avoid blocking the event loop
         - Falls back to OOM-triggered eviction if load still fails (fragmentation)
@@ -1429,21 +1454,28 @@ class ModelRegistry:
 
         lock = self._get_load_lock()
         async with self._get_model_load_lock(name):
-            async with lock:
-                # Double-check after acquiring lock (another request may have loaded it)
-                if name in self._loaded:
-                    self._memory_manager_for_model(name).touch(name)
-                    return self._loaded[name].adapter
+            while True:
+                # A config mutation unloads and swaps as one step; reading the
+                # config in between would load from the one being replaced.
+                async with self._get_config_update_lock(), lock:
+                    pending_unload = self._unload_done.get(name)
+                    if pending_unload is None:
+                        # Double-check after acquiring lock (another request may have loaded it)
+                        if name in self._loaded:
+                            self._memory_manager_for_model(name).touch(name)
+                            return self._loaded[name].adapter
 
-                # Check if model is being unloaded - caller should retry
-                if name in self._unloading:
-                    msg = f"Model '{name}' is currently being unloaded"
-                    raise RuntimeError(msg)
+                        # Check if model is being unloaded - caller should retry
+                        if name in self._unloading:
+                            msg = f"Model '{name}' is currently being unloaded"
+                            raise RuntimeError(msg)
 
-                config = self._configs[name]
+                        config = self._configs[name]
 
-                # Mark as loading before starting (visible to WebSocket status)
-                self._loading.add(name)
+                        # Mark as loading before starting (visible to WebSocket status)
+                        self._loading.add(name)
+                        break
+                await pending_unload.wait()
 
             load_start = time.monotonic()
             load_outcome = "error"
@@ -1461,27 +1493,31 @@ class ModelRegistry:
                 self._reject_unservable_width(name, width)
                 await self._loader.ensure_weights_cached_async(name, config)
 
-                async with lock:
-                    if name in self._loaded:
-                        self._memory_manager_for_model(name).touch(name)
-                        load_outcome = "success"
-                        return self._loaded[name].adapter
-                    if name in self._unloading:
-                        msg = f"Model '{name}' is currently being unloaded"
-                        raise RuntimeError(msg)
-                    # Config mutation only takes the registry lock, so the
-                    # config this load started from may have been removed or
-                    # replaced while the weights were fetched. Never register
-                    # an adapter built from a config the registry no longer
-                    # serves; a changed one is retried by the caller.
-                    current_config = self._configs.get(name)
-                    if current_config is None:
-                        msg = f"Model '{name}' config was removed while its weights were being fetched"
-                        raise RuntimeError(msg)
-                    if current_config != config:
-                        msg = f"Model '{name}' config changed while its weights were being fetched; retry"
-                        raise RuntimeError(msg)
-                    model_dir = self._model_dirs.get(name, Path())
+                async with self._get_load_admission_lock():
+                    # Memory decisions below must see what in-flight unloads
+                    # release, or this load would evict another model instead.
+                    await self._wait_for_unloads()
+                    async with lock:
+                        if name in self._loaded:
+                            self._memory_manager_for_model(name).touch(name)
+                            load_outcome = "success"
+                            return self._loaded[name].adapter
+                        if name in self._unloading:
+                            msg = f"Model '{name}' is currently being unloaded"
+                            raise RuntimeError(msg)
+                        # Config mutation does not wait for the download, so the
+                        # config this load started from may have been removed or
+                        # replaced while the weights were fetched. Never register
+                        # an adapter built from a config the registry no longer
+                        # serves; a changed one is retried by the caller.
+                        current_config = self._configs.get(name)
+                        if current_config is None:
+                            msg = f"Model '{name}' config was removed while its weights were being fetched"
+                            raise RuntimeError(msg)
+                        if not _model_configs_semantically_equal(current_config, config):
+                            msg = f"Model '{name}' config changed while its weights were being fetched; retry"
+                            raise RuntimeError(msg)
+                        model_dir = self._model_dirs.get(name, Path())
 
                     if width > 1:
                         # Refuse a profile the adapter would reject before evicting
@@ -1500,36 +1536,40 @@ class ModelRegistry:
 
                     # Pre-load eviction: evict LRU non-pinned models until current pressure
                     # and any adapter-provided load headroom requirement are satisfied.
-                    while memory_manager.should_evict_for_load(required_load_bytes):
-                        lru_model = memory_manager.get_lru_model(exclude=self._pinned_models)
-                        if lru_model is None:
-                            break  # No non-pinned models to evict, proceed with load attempt
+                    while True:
+                        await self._wait_for_unloads()
+                        async with lock:
+                            if not memory_manager.should_evict_for_load(required_load_bytes):
+                                break
+                            lru_model = memory_manager.get_lru_model(exclude=self._pinned_models)
+                            if lru_model is None:
+                                break  # No non-pinned models to evict, proceed with load attempt
 
-                        if lru_model not in self._loaded:
-                            # Belt-and-braces: a MemoryManager entry with no matching
-                            # ``_loaded`` model is a ghost (see #1600). ``_do_unload``
-                            # would no-op on it, so drop the stale accounting entry and
-                            # re-evaluate rather than spin. The ``_do_unload`` finally
-                            # normally prevents ghosts; this guards any other source.
-                            logger.warning(
-                                "Evictor found ghost '%s' (in memory manager, not loaded); dropping stale entry",
+                            if lru_model not in self._loaded:
+                                # Belt-and-braces: a MemoryManager entry with no matching
+                                # ``_loaded`` model is a ghost (see #1600). ``_do_unload``
+                                # would no-op on it, so drop the stale accounting entry and
+                                # re-evaluate rather than spin. The ``_do_unload`` finally
+                                # normally prevents ghosts; this guards any other source.
+                                logger.warning(
+                                    "Evictor found ghost '%s' (in memory manager, not loaded); dropping stale entry",
+                                    lru_model,
+                                )
+                                memory_manager.unregister_model(lru_model)
+                                continue
+
+                            stats = memory_manager.get_stats()
+                            logger.info(
+                                "Pre-load eviction: %s %.2f GB free, %.2f GB required, %.1f%% used "
+                                "(threshold %.1f%%); evicting '%s' before loading '%s'",
+                                load_device,
+                                stats.available_gb,
+                                (required_load_bytes or 0) / (1024**3),
+                                stats.usage_ratio * 100,
+                                memory_manager.pressure_threshold_pct,
                                 lru_model,
+                                name,
                             )
-                            memory_manager.unregister_model(lru_model)
-                            continue
-
-                        stats = memory_manager.get_stats()
-                        logger.info(
-                            "Pre-load eviction: %s %.2f GB free, %.2f GB required, %.1f%% used "
-                            "(threshold %.1f%%); evicting '%s' before loading '%s'",
-                            load_device,
-                            stats.available_gb,
-                            (required_load_bytes or 0) / (1024**3),
-                            stats.usage_ratio * 100,
-                            memory_manager.pressure_threshold_pct,
-                            lru_model,
-                            name,
-                        )
                         await self._do_unload(lru_model, reason="preload_pressure")
 
                     try:
@@ -1540,7 +1580,9 @@ class ModelRegistry:
                             raise
 
                         # OOM despite pre-load eviction: evict LRU non-pinned model and retry once
-                        lru_model = memory_manager.get_lru_model(exclude=self._pinned_models)
+                        await self._wait_for_unloads()
+                        async with lock:
+                            lru_model = memory_manager.get_lru_model(exclude=self._pinned_models)
                         if lru_model is None:
                             logger.error("OOM loading '%s' but no non-pinned models to evict", name)
                             raise
@@ -1557,11 +1599,12 @@ class ModelRegistry:
                         adapter = await self._loader.instantiate_adapter_async(name, config, model_dir, load_device)
                         loaded = await self._loader.load_and_register_async(name, load_device, adapter, config)
 
-                    # Track loaded state
-                    self._loaded[name] = loaded
+                    async with lock:
+                        # Track loaded state
+                        self._loaded[name] = loaded
 
-                    # Register with memory manager for LRU tracking
-                    self._register_across_group(name, loaded)
+                        # Register with memory manager for LRU tracking
+                        self._register_across_group(name, loaded)
 
                     load_duration = time.monotonic() - load_start
                     if load_duration > 300:
@@ -1812,7 +1855,7 @@ class ModelRegistry:
         """Run the blocking ``adapter.unload()`` on a worker thread.
 
         Shielded, and awaited again if we are cancelled. Once teardown has
-        begun it must be allowed to finish: ``_do_unload``'s ``finally``
+        begun it must be allowed to finish: ``_finish_unload``'s ``finally``
         drops the model's MemoryManager entry and the load lock is released
         as the exception unwinds, so returning early would expose a window
         in which a concurrent load sizes itself against VRAM this adapter
@@ -1864,21 +1907,47 @@ class ModelRegistry:
             raise TimeoutError
         await asyncio.wait_for(task, timeout=remaining)
 
-    async def _do_unload(self, name: str, *, reason: str = "other") -> None:
-        """Unload a model safely (drains worker first).
+    def _begin_unload(self, name: str) -> LoadedModel | None:
+        """Claim a loaded model for unload; None if it is not loaded or already unloading.
 
-        Must be called while holding _load_lock.
+        Synchronous on purpose: a caller that decides on ``name`` and claims it
+        without an ``await`` in between cannot be overtaken by a request that
+        would refresh or restart the model, or by another evictor.
+        """
+        loaded = self._loaded.get(name)
+        if loaded is None or name in self._unloading:
+            return None
+        self._unloading.add(name)
+        self._unload_done[name] = asyncio.Event()
+        return loaded
+
+    async def _wait_for_unloads(self) -> None:
+        """Wait for the unloads in flight now; unloads that begin later are not awaited."""
+        for done in list(self._unload_done.values()):
+            await done.wait()
+
+    async def _do_unload(self, name: str, *, reason: str = "other") -> None:
+        """Unload a model safely (drains worker first), or wait for its unload in flight.
+
+        Must be called WITHOUT holding ``_load_lock``: the drain runs unlocked
+        and the teardown takes the lock itself. The model is claimed before the
+        first suspension point, so a caller that chose ``name`` under the lock
+        and awaits this right after releasing it cannot be overtaken.
 
         Args:
             name: Model name.
         """
-        loaded = self._loaded.get(name)
+        loaded = self._begin_unload(name)
         if loaded is None:
+            pending_unload = self._unload_done.get(name)
+            if pending_unload is not None:
+                await pending_unload.wait()
             return
+        await self._finish_unload(name, loaded, reason=reason)
 
-        # Mark as unloading so new requests get 503
-        self._unloading.add(name)
-
+    async def _finish_unload(self, name: str, loaded: LoadedModel, *, reason: str) -> None:
+        """Drain and tear down a model claimed by :meth:`_begin_unload`."""
+        done = self._unload_done[name]
         try:
             logger.info("Unloading model '%s' (draining worker first)", name)
 
@@ -1920,88 +1989,92 @@ class ModelRegistry:
                 except Exception:  # noqa: BLE001 - teardown continues after best-effort drain
                     logger.warning("Generation adapter drain failed during unload of '%s'", name, exc_info=True)
 
-            # Remove from loaded dict before unloading adapter
-            del self._loaded[name]
-            device = loaded.device
-            worker_telemetry().model_evicted(model=name, reason=reason)
+            async with self._get_load_lock():
+                # Remove from loaded dict before unloading adapter
+                del self._loaded[name]
+                device = loaded.device
+                worker_telemetry().model_evicted(model=name, reason=reason)
 
-            # Once removed from ``_loaded`` above, the model is committed-gone
-            # from the registry's view, so its MemoryManager entry MUST be
-            # dropped even if adapter teardown below raises. Otherwise the
-            # model becomes a "ghost" — absent from ``_loaded`` but still
-            # counted in ``_models`` — that ``get_lru_model`` keeps
-            # re-selecting while ``_do_unload`` no-ops on it: a no-yield spin
-            # under ``_load_lock`` that starves the whole event loop. See #1600.
-            try:
-                # Some adapters (e.g. the SGLang generation adapter) hold an
-                # async HTTP client to a subprocess. ``unload()`` is sync and
-                # can only fire-and-forget the client close, which races the
-                # subprocess termination on the next line — the close could be
-                # cut off before its connections drain, leaking fds / wedging
-                # on a half-open socket. When the adapter exposes an awaitable
-                # ``aclose_client``, drive it to completion HERE (we're on the
-                # event loop) so the client is fully closed against the still-
-                # live subprocess before ``unload()`` terminates it.
-                aclose_client = getattr(loaded.adapter, "aclose_client", None)
-                if aclose_client is not None:
-                    try:
-                        await aclose_client()
-                    except Exception:  # noqa: BLE001 - close is best-effort
-                        logger.warning("aclose_client() failed during unload of '%s'", name, exc_info=True)
-
-                # Adapter.unload() handles gc.collect + empty_cache, and for
-                # subprocess-backed adapters a SIGTERM/SIGKILL wait of up to
-                # 15s. All of it is blocking, and running it inline froze the
-                # event loop for the duration: every other coroutine —
-                # health probes, in-flight responses on models that are not
-                # being evicted, the metrics endpoint — stopped, not merely
-                # the load path the lock already serialises (design proposal
-                # ``settlement-and-queue-scalability.md``, B6 part one; same
-                # class as the #1600 scar above).
-                #
-                # The load lock stays held across this on purpose. The
-                # ``finally`` below drops this model's MemoryManager entry,
-                # and until ``unload()`` returns the VRAM is not actually
-                # free, so a load admitted against the freed accounting
-                # would size itself against memory the dying adapter still
-                # holds. A slow unload beats an OOM.
-                await self._run_adapter_unload(loaded.adapter, name)
-            finally:
-                # Always run, even if adapter teardown above raised, so a
-                # failed unload can never leave a ghost behind (#1600).
+                # Once removed from ``_loaded`` above, the model is committed-gone
+                # from the registry's view, so its MemoryManager entry MUST be
+                # dropped even if adapter teardown below raises. Otherwise the
+                # model becomes a "ghost" — absent from ``_loaded`` but still
+                # counted in ``_models`` — that ``get_lru_model`` keeps
+                # re-selecting while ``_do_unload`` no-ops on it: a no-yield spin
+                # under ``_load_lock`` that starves the whole event loop. See #1600.
                 try:
-                    # Unregister tokenizer, preprocessor, and clear metrics
-                    self._loader.unregister(name, device)
-                except Exception:  # noqa: BLE001 - best-effort; must not skip below
-                    logger.warning("loader.unregister failed during unload of '%s'", name, exc_info=True)
-                # Unregister from every manager that accounted for it (plain
-                # dict-pops; never raise). Ordered before the claim release,
-                # because the claim is what names the group's members.
-                self._unregister_across_group(name, device)
-                # Hand back any exclusively held devices. A no-op for the
-                # single-device models that are every profile today.
-                self._release_device_claims(name)
+                    # Some adapters (e.g. the SGLang generation adapter) hold an
+                    # async HTTP client to a subprocess. ``unload()`` is sync and
+                    # can only fire-and-forget the client close, which races the
+                    # subprocess termination on the next line — the close could be
+                    # cut off before its connections drain, leaking fds / wedging
+                    # on a half-open socket. When the adapter exposes an awaitable
+                    # ``aclose_client``, drive it to completion HERE (we're on the
+                    # event loop) so the client is fully closed against the still-
+                    # live subprocess before ``unload()`` terminates it.
+                    aclose_client = getattr(loaded.adapter, "aclose_client", None)
+                    if aclose_client is not None:
+                        try:
+                            await aclose_client()
+                        except Exception:  # noqa: BLE001 - close is best-effort
+                            logger.warning("aclose_client() failed during unload of '%s'", name, exc_info=True)
 
-            # Freeing memory makes any prior OOM-class load failure on a
-            # *sibling* model retryable; clear those records so the next
-            # request can re-attempt without waiting out the cooldown.
-            cleared = self._clear_transient_failures((LoadErrorClass.OOM, LoadErrorClass.PLACEMENT))
-            if cleared:
-                logger.debug(
-                    "Cleared %d transient failure record(s) after unloading '%s'",
-                    cleared,
-                    name,
-                )
+                    # Adapter.unload() handles gc.collect + empty_cache, and for
+                    # subprocess-backed adapters a SIGTERM/SIGKILL wait of up to
+                    # 15s. All of it is blocking, and running it inline froze the
+                    # event loop for the duration: every other coroutine —
+                    # health probes, in-flight responses on models that are not
+                    # being evicted, the metrics endpoint — stopped, not merely
+                    # the load path the lock already serialises (design proposal
+                    # ``settlement-and-queue-scalability.md``, B6 part one; same
+                    # class as the #1600 scar above).
+                    #
+                    # The load lock stays held across this on purpose. The
+                    # ``finally`` below drops this model's MemoryManager entry,
+                    # and until ``unload()`` returns the VRAM is not actually
+                    # free, so a load admitted against the freed accounting
+                    # would size itself against memory the dying adapter still
+                    # holds. A slow unload beats an OOM.
+                    await self._run_adapter_unload(loaded.adapter, name)
+                finally:
+                    # Always run, even if adapter teardown above raised, so a
+                    # failed unload can never leave a ghost behind (#1600).
+                    try:
+                        # Unregister tokenizer, preprocessor, and clear metrics
+                        self._loader.unregister(name, device)
+                    except Exception:  # noqa: BLE001 - best-effort; must not skip below
+                        logger.warning("loader.unregister failed during unload of '%s'", name, exc_info=True)
+                    # Unregister from every manager that accounted for it (plain
+                    # dict-pops; never raise). Ordered before the claim release,
+                    # because the claim is what names the group's members.
+                    self._unregister_across_group(name, device)
+                    # Hand back any exclusively held devices. A no-op for the
+                    # single-device models that are every profile today.
+                    self._release_device_claims(name)
+
+                # Freeing memory makes any prior OOM-class load failure on a
+                # *sibling* model retryable; clear those records so the next
+                # request can re-attempt without waiting out the cooldown.
+                cleared = self._clear_transient_failures((LoadErrorClass.OOM, LoadErrorClass.PLACEMENT))
+                if cleared:
+                    logger.debug(
+                        "Cleared %d transient failure record(s) after unloading '%s'",
+                        cleared,
+                        name,
+                    )
 
             logger.info("Model '%s' unloaded", name)
         finally:
             self._unloading.discard(name)
+            if self._unload_done.get(name) is done:
+                del self._unload_done[name]
+            done.set()
 
     async def unload_async(self, name: str, *, reason: str = "manual") -> None:
         """Unload a model and free resources (async, concurrency-safe).
 
-        This method acquires the load lock and safely drains the worker
-        before unloading the model.
+        This method waits for an in-flight load or unload of the same model,
+        then drains the worker before unloading the model.
 
         Args:
             name: Model name.
@@ -2018,8 +2091,10 @@ class ModelRegistry:
             msg = _ERR_MODEL_NOT_FOUND.format(name=name)
             raise KeyError(msg)
 
-        lock = self._get_load_lock()
-        async with lock:
+        async with self._get_model_load_lock(name):
+            pending_unload = self._unload_done.get(name)
+            if pending_unload is not None:
+                await pending_unload.wait()
             if name not in self._loaded:
                 msg = _ERR_MODEL_NOT_LOADED.format(name=name)
                 raise KeyError(msg)
@@ -2049,8 +2124,7 @@ class ModelRegistry:
 
     async def unload_all_async(self) -> None:
         """Unload all loaded models (async, concurrency-safe)."""
-        lock = self._get_load_lock()
-        async with lock:
+        async with self._get_load_admission_lock():
             for name in list(self._loaded.keys()):
                 await self._do_unload(name, reason="shutdown")
 
@@ -2141,7 +2215,7 @@ class ModelRegistry:
         return updated_ids | removed_ids
 
     async def add_config_async(self, config: ModelConfig, model_dir: Path | None = None) -> set[str]:
-        """Add a model config, draining removed loaded variants under the load lock."""
+        """Add a model config, draining removed loaded variants while no load is admitted."""
         update_lock = self._get_config_update_lock()
         async with update_lock:
             expanded, updated_ids, removed_ids = self._prepare_config_update(config)
@@ -2154,8 +2228,7 @@ class ModelRegistry:
             }
             invalidated_ids = removed_ids | changed_ids
             if invalidated_ids:
-                lock = self._get_load_lock()
-                async with lock:
+                async with self._get_load_admission_lock():
                     for model_id in sorted(invalidated_ids):
                         if model_id in self._loaded:
                             await self._do_unload(model_id, reason="config_change")
@@ -2179,8 +2252,7 @@ class ModelRegistry:
             if not removed_ids:
                 return set()
 
-            lock = self._get_load_lock()
-            async with lock:
+            async with self._get_load_admission_lock():
                 for removed_id in sorted(removed_ids):
                     if removed_id in self._loaded:
                         await self._do_unload(removed_id, reason="config_change")
@@ -2303,7 +2375,7 @@ class ModelRegistry:
         """Replace the registry config set from an authoritative snapshot.
 
         Used by worker-sidecar export reconciliation. Removed or changed
-        loaded models are unloaded under the registry load lock before the
+        loaded models are unloaded while no load is admitted, before the
         config map is swapped, so a worker cannot keep serving a model that
         disappeared from the authoritative bundle export.
         """
@@ -2331,8 +2403,7 @@ class ModelRegistry:
 
         update_lock = self._get_config_update_lock()
         async with update_lock:
-            lock = self._get_load_lock()
-            async with lock:
+            async with self._get_load_admission_lock():
                 removed = set(self._configs) - set(new_configs)
                 changed = {
                     name
@@ -2431,9 +2502,13 @@ class ModelRegistry:
     async def start_worker(self, name: str) -> ModelWorker:
         """Start the worker for a loaded model.
 
-        If already running, this is a no-op. Uses the load/unload lock so
-        request-driven idle touches cannot race an idle-eviction unload
-        decision.
+        A running worker is returned without taking the load lock, so a
+        request is never queued behind another model's load or eviction.
+        Starting a stopped worker takes the lock. Either way the LRU touch
+        and the ``_unloading`` check happen without a suspension point, and
+        every eviction claims its model in the same step as its decision, so
+        a request either refreshes the model before an idle re-check or sees
+        it unloading; it can never revive or use a model mid-unload.
 
         Args:
             name: Model name.
@@ -2447,6 +2522,12 @@ class ModelRegistry:
         if name not in self._configs:
             msg = _ERR_MODEL_NOT_FOUND.format(name=name)
             raise KeyError(msg)
+        loaded = self._loaded.get(name)
+        if loaded is not None and name not in self._unloading:
+            running = loaded.worker
+            if running is not None and running.is_running:
+                self._memory_manager_for_model(name).touch(name)
+                return running
         lock = self._get_load_lock()
         async with lock:
             if name not in self._loaded:
@@ -2517,17 +2598,11 @@ class ModelRegistry:
         load-lock is acquired with a soft timeout so a deadlocked / busy
         registry doesn't stall the worker indefinitely.
 
-        **Concurrency caveat — drain-under-lock:** this method holds the
-        registry's load-lock for the duration of ``_do_unload``, which
-        includes ``worker.stop()`` waiting up to ``_DRAIN_TIMEOUT_S`` (30 s)
-        for in-flight requests to complete. During a memory-pressure
-        incident multiple workers may invoke ``evict_lru_excluding``
-        concurrently; the soft ``timeout_s`` here prevents permanent
-        deadlock, but a single eviction can still block other registry
-        operations (additional loads / unloads) for up to the drain
-        timeout. Operators should expect a transient stall window during
-        large multi-worker OOM episodes and not interpret it as a hang.
-        Splitting the drain off the lock is tracked as a follow-up.
+        The load-lock is held only to choose and claim the sibling. Its
+        worker drain, which waits up to the registry drain timeout (30 s by
+        default) for in-flight requests, runs without the lock, and only the
+        adapter teardown takes it again, so an eviction does not stall other
+        models' requests or registry operations for the drain.
 
         Args:
             exclude_name: The calling worker's own model. Never evicted, even
@@ -2574,14 +2649,14 @@ class ModelRegistry:
                 manager.device,
                 exclude_name,
             )
-            try:
-                await self._do_unload(candidate, reason="oom_recovery")
-            except Exception:
-                logger.exception("OOM recovery: failed to evict '%s'", candidate)
-                return EvictionResult.UNLOAD_FAILED
-            return EvictionResult.EVICTED
         finally:
             lock.release()
+        try:
+            await self._do_unload(candidate, reason="oom_recovery")
+        except Exception:
+            logger.exception("OOM recovery: failed to evict '%s'", candidate)
+            return EvictionResult.UNLOAD_FAILED
+        return EvictionResult.EVICTED
 
     async def start_memory_monitor(self) -> None:
         """Start the background memory monitor task.
@@ -2656,16 +2731,18 @@ class ModelRegistry:
 
         Runs at the same cadence as the pressure monitor. On each tick:
         1. Snapshot stale models (no lock — read-only over the LRU dict).
-        2. Take the load lock once, walk the snapshot, evict the first
-           still-stale model, then release. Subsequent stale models wait
-           for the next tick. This caps lock contention against in-flight
-           ``load_async`` callers and matches the "one eviction per tick"
-           cadence of the existing pressure monitor.
+        2. Take the load lock once, walk the snapshot and pick the first
+           still-stale model, then release the lock and unload it; the
+           drain runs without the lock. Subsequent stale models wait for the
+           next tick, matching the "one eviction per tick" cadence of the
+           existing pressure monitor.
 
         The recheck inside the lock guards against the snapshot/unload race:
         a request that arrived after the snapshot may have bumped
         ``last_used_at``, in which case we skip and look at the next
-        candidate.
+        candidate. The unload claims the model before the next suspension
+        point, so ``start_worker``'s unlocked path either touched it before
+        the recheck or observes it unloading.
 
         Idle eviction *can* unload the only loaded model. The pressure
         monitor explicitly skips that case (because the eviction would
@@ -2695,12 +2772,13 @@ class ModelRegistry:
                     continue
 
                 lock = self._get_load_lock()
+                victim: str | None = None
                 async with lock:
                     for name in stale:
                         # Re-check under the lock: model may have been
-                        # unloaded already, or bumped by a request that
-                        # arrived after the snapshot.
-                        if name not in self._loaded:
+                        # unloaded already, be unloading, or have been
+                        # bumped by a request that arrived after the snapshot.
+                        if name not in self._loaded or name in self._unloading:
                             continue
                         info = self._memory_manager_for_model(name).get_model_info(name)
                         if info is None:
@@ -2714,14 +2792,15 @@ class ModelRegistry:
                             age,
                             threshold,
                         )
-                        try:
-                            await self._do_unload(name, reason="idle")
-                        except Exception:
-                            logger.exception("Idle eviction failed for '%s'", name)
-                        # One eviction per tick: yield the lock so other
-                        # registry operations can make progress. The next
-                        # tick handles any remaining stale models.
+                        # One eviction per tick. The next tick handles any
+                        # remaining stale models.
+                        victim = name
                         break
+                if victim is not None:
+                    try:
+                        await self._do_unload(victim, reason="idle")
+                    except Exception:
+                        logger.exception("Idle eviction failed for '%s'", victim)
 
             except asyncio.CancelledError:
                 break
@@ -2780,12 +2859,17 @@ class ModelRegistry:
                 if not pressured_managers:
                     continue
 
-                # Pressure detected - acquire lock and evict
+                # Pressure detected - decide under the lock, evict outside it
                 lock = self._get_load_lock()
-                async with lock:
-                    for manager in pressured_managers:
-                        # Re-check under lock (may have resolved)
-                        while manager.check_pressure():
+                for manager in pressured_managers:
+                    while True:
+                        # Memory an in-flight unload is about to free may
+                        # already resolve the pressure.
+                        await self._wait_for_unloads()
+                        async with lock:
+                            # Re-check under lock (may have resolved)
+                            if not manager.check_pressure():
+                                break
                             # Don't evict if only 1 model loaded - would cause immediate reload
                             if manager.loaded_model_count <= 1:
                                 logger.debug(
@@ -2818,7 +2902,7 @@ class ModelRegistry:
                                 manager.pressure_threshold_pct,
                                 lru_model,
                             )
-                            await self._do_unload(lru_model, reason="memory_pressure")
+                        await self._do_unload(lru_model, reason="memory_pressure")
 
             except asyncio.CancelledError:
                 break
