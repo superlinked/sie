@@ -400,9 +400,9 @@ def _fresh_runner(rig: _Rig, monkeypatch: pytest.MonkeyPatch) -> Any:
     runner.replayed = []
     replay = runner._replay
 
-    def counted(entry: Any, inputs: dict[str, torch.Tensor], length: int) -> torch.Tensor:
-        runner.replayed.append(length)
-        return replay(entry, inputs, length)
+    def counted(key: Any, entry: Any, inputs: dict[str, torch.Tensor], max_num_classes: int | None) -> torch.Tensor:
+        runner.replayed.append(key)
+        return replay(key, entry, inputs, max_num_classes)
 
     monkeypatch.setattr(runner, "_replay", counted)
     return runner
@@ -433,7 +433,7 @@ def test_exact_cuda_graphs_score_bit_for_bit_like_eager(
     assert runner.replayed  # the third pass replayed
     assert not runner.disabled
     # Graphs of one length share its relative-position table.
-    assert set(runner._relative_pos) == {length for _, length, _ in runner._graphs}
+    assert set(runner._relative_pos) == {length for _, length in runner._graphs}
 
 
 @pytest.mark.gpu_hw
@@ -461,6 +461,66 @@ def test_bucketed_cuda_graphs_stay_close_to_eager(
     assert runner.graph_count > 0
     assert runner.replayed  # the second pass replayed
     assert not runner.disabled
+
+
+@pytest.mark.gpu_hw
+def test_bucketed_graphs_serve_every_label_count(bucketed_rig: _Rig, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Label counts do not enter a graph's shape: the scoring head runs eagerly
+    # with each forward's own label slots. More labels only lengthen the
+    # prompt, which can move a forward to a longer length bucket.
+    texts = _TEXTS[:4]
+    items = [Item(text=text) for text in texts]
+    labels = [*_LABELS, "low", "high", "yes", "no"]
+    runner = _fresh_runner(bucketed_rig, monkeypatch)
+    pipe = bucketed_rig.adapter._pipe
+    recorded = runner.stats.recorded
+    shapes = set()
+    for count in range(1, len(labels) + 1):
+        batch, length = pipe.prepare_inputs(texts, labels[:count], same_labels=True)["input_ids"].shape
+        shapes.add(runner.key(batch, length, "bucketed"))
+        eager = bucketed_rig.adapter.extract(items, labels=labels[:count], options=_EAGER)
+        for _ in range(2):
+            graphed = bucketed_rig.adapter.extract(items, labels=labels[:count])
+            for expected, got in zip(_scores(eager), _scores(graphed), strict=True):
+                assert got == pytest.approx(expected, abs=2e-2)
+
+    assert None not in shapes
+    assert len(shapes) < len(labels)
+    assert set(runner._graphs) == shapes
+    assert runner.stats.recorded - recorded == len(shapes)
+    assert not runner.disabled
+
+
+@pytest.mark.gpu_hw
+def test_a_bucketed_replay_scores_like_an_eager_forward_of_its_padded_shape(
+    bucketed_rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The graph replays the encoder's kernels for the padded shape, and the
+    # head runs eagerly on its output: bit-identical to an eager forward of
+    # that shape when the batch is already a bucket.
+    runner = _fresh_runner(bucketed_rig, monkeypatch)
+    pipe = bucketed_rig.adapter._pipe
+    with torch.inference_mode():
+        inputs = dict(pipe.prepare_inputs(_TEXTS[:4], _LABELS, same_labels=True))
+        batch, length = inputs["input_ids"].shape
+        key = runner.key(batch, length, "bucketed")
+        assert key is not None
+        assert key[0] == batch
+        assert key[1] > length  # padded
+        padded = {
+            name: torch.nn.functional.pad(value, (0, key[1] - length), value=runner._pad_values[name])
+            for name, value in inputs.items()
+        }
+        eager = pipe.model(**padded, max_num_classes=len(_LABELS)).logits
+        before = (runner.stats.recorded, runner.stats.replayed)
+        recorded = runner.run(dict(inputs), len(_LABELS), "bucketed")
+        replayed = runner.run(dict(inputs), len(_LABELS), "bucketed")
+
+    assert (runner.stats.recorded, runner.stats.replayed) == (before[0] + 1, before[1] + 1)
+    assert recorded is not None
+    assert replayed is not None
+    assert torch.equal(recorded, eager)
+    assert torch.equal(replayed, eager)
 
 
 @pytest.mark.gpu_hw
@@ -549,17 +609,20 @@ def test_a_forward_that_cannot_be_recorded_falls_back_to_eager(monkeypatch: pyte
         pytest.skip("requires CUDA")
     rig = _Rig(prompt_first=True, scorer="mlp", device="cuda:0", dtype=torch.float16, cuda_graphs="bucketed")
     items = [Item(text=text) for text in _TEXTS[:3]]
-    eager = _outputs(rig.adapter.extract(items, labels=_LABELS, options=_EAGER))
     runner = rig.adapter._graphs
     assert runner is not None
     # Without the precomputed table, DeBERTa copies a CPU scalar to the GPU
-    # while recording, which CUDA refuses: the runner turns itself off.
+    # while recording, which CUDA refuses: each shape then runs eagerly, and
+    # after three such shapes the runner turns itself off.
     monkeypatch.setattr(runner, "_build_relative_pos", lambda hidden: None)
 
-    graphed = rig.adapter.extract(items, labels=_LABELS)
+    for count in (1, 2, 3):  # three batch sizes: three shapes
+        eager = _outputs(rig.adapter.extract(items[:count], labels=_LABELS, options=_EAGER))
+        assert _outputs(rig.adapter.extract(items[:count], labels=_LABELS)) == eager
+        assert runner.disabled == (count == 3)
 
-    assert runner.disabled
-    assert _outputs(graphed) == eager
+    assert runner.stats.recording_failures == 3
+    assert runner.graph_count == 0
     assert _outputs(rig.adapter.extract(items, labels=_LABELS)) == eager
 
 

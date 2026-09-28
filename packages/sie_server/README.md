@@ -88,37 +88,45 @@ profiles:
         cuda_graphs: bucketed
 ```
 
+A graph records the encoder. The scoring head (label features, pooling and
+scorer) runs eagerly on the graph's output with each forward's own number of
+labels, so one graph serves every label count.
+
 | Value | Shapes recorded | Scores |
 |--|--|--|
 | `off` (default) | none | eager |
-| `exact` | each (batch, sequence length, label slots) seen twice | bit-identical to eager |
-| `bucketed` | sequence lengths padded up to a multiple of 32 tokens (64 on 1,024-token models) | padding moves fp16 probabilities (see below) |
+| `exact` | each (batch size, sequence length) seen twice; the 64 most recently used are kept | bit-identical to eager |
+| `bucketed` | sequence lengths padded up to a multiple of 32 tokens (64 on 1,024-token models), batch sizes up to a power of two: a fixed set of shapes, all kept | padding moves fp16 probabilities (see below) |
 
 A request can send `options={"cuda_graphs": "off"}` to run eagerly on a model
 loaded with graphs. It cannot turn graphs on: any other value is refused.
 
-Padding is masked, but a longer sequence rounds fp16 sums differently, the same
-kind of change batching requests together makes. We compared `bucketed` with
-eager execution on the 384 CVE descriptions from `examples/typed-decisions`,
-three questions each, asked one at a time, as separate groups and as joint
-groups, plus 65 long documents. Each input was sent three times (long
-documents twice), so that graphs were recorded and then replayed: 11,538
-answers per model. A small change can still flip a near tie between the top
-two labels:
+Padding is masked, and padded rows are dropped before scoring, but a longer
+sequence or a larger batch rounds fp16 sums differently, the same kind of
+change batching requests together makes. We compared `bucketed` with eager
+execution on the 384 CVE descriptions from `examples/typed-decisions`, three
+questions each, asked one at a time, as separate groups and as joint groups,
+plus 65 long documents. Each input was sent three times (long documents
+twice), so that graphs were recorded and then replayed: 11,538 answers per
+model. The three models that ship with graphs were measured again with padded
+batches, adding the same questions over 3- and 5-item requests (18,450
+answers). A small change can still flip a near tie between the top two
+labels:
 
 | Model | Largest probability change | Top label changed | Shipped profile |
 |--|--|--|--|
 | `gliclass-small-v1.0` | 0.0039 | 3 answers | `off` |
-| `gliclass-base-v1.0` | 0.0049 | none | `bucketed` |
-| `gliclass-large-v1.0` | 0.0056 | none | `bucketed` |
+| `gliclass-base-v1.0` | 0.0068 | none | `bucketed` |
+| `gliclass-large-v1.0` | 0.0063 | none | `bucketed` |
 | `gliclass-base-v3.0` | 0.0054 | 3 | `off` |
 | `gliclass-large-v3.0` | 0.0093 | 3 | `off` |
 | `gliclass-instruct-base-v1.0` | 0.0076 | 12 | `off` |
 | `gliclass-instruct-large-v1.0` | 0.0098 | 18 | `off` |
-| `opir-multitask-large-v1.0` | 0.0144 | none | `bucketed` |
+| `opir-multitask-large-v1.0` | 0.0190 | none | `bucketed` |
 | `gliclass-multilang-mini` (100 descriptions, no joint groups: 2,016 answers) | 0.0227 | 3 | `off` |
 
-`exact` changed nothing.
+`exact` changed nothing. A forward whose batch size is already a bucket (one
+item, for example) scores exactly as it did before batches were padded.
 
 The shipped profiles load with `bucketed` graphs only where no top label
 changed: `gliclass-base-v1.0`, `gliclass-large-v1.0` and
@@ -134,28 +142,42 @@ ModernBERT-based models (the edge models, `gliclass-multilang-edge` and the
 Opir edge models), CPU and MPS run eagerly with any value, and the load logs a
 warning.
 
+**Shapes.** A graph holds at most 2,048 tokens (batch size times padded
+length), or 1,024 for encoders wider than 768 such as DeBERTa-v3-large.
+Larger forwards are bound by the GPU rather than by kernel launches and run
+eagerly: on an L4, a `gliclass-large-v1.0` forward stops gaining from a graph
+at about 1,000 tokens, a `gliclass-base-v1.0` forward at about 2,000. In
+`bucketed` mode that leaves a fixed set of shapes, 52 for
+`gliclass-large-v1.0`, 71 for `gliclass-base-v1.0` and 33 for
+`opir-multitask-large-v1.0`, and the model keeps a graph for every one. Once
+they are recorded, every forward under the token bound replays a graph,
+whatever mix of label counts, batch sizes and lengths the traffic has, and no
+request's shapes push out another's.
+
 Nothing is recorded at load. A shape is recorded the first time a request
-needs it (the second time in `exact` mode), and that request takes a little
-over two eager forwards (76 ms against 33 ms on `gliclass-large-v1.0` on an
-L4). A model keeps at most 64 graphs, least recently used first
-out. A graph holds at most 2,048 tokens (batch times padded length); larger
-forwards are bound by the GPU rather than by kernel launches and run eagerly.
+needs it (the second time in `exact` mode), and the new graph's first replay
+answers that request, which takes 52 to 66 ms against 43 ms for an eager
+forward on `gliclass-large-v1.0` on an L4. Recording is rationed (see below),
+so traffic that needs every shape has them all recorded within about two
+minutes.
 
 **Memory, and other models on the same GPU.** Graph memory counts as device
 memory in use, but it is not attributed to the model: under memory pressure
 the server evicts whole models, least recently used first, which may be
-another model. A model's graphs share one memory pool, and the driver keeps a
-copy of each graph: about 8 MB for a `gliclass-large-v1.0` forward. On
-`gliclass-large-v1.0` in `bucketed` mode, the 31 graphs recorded for the CVE
-descriptions above took 555 MB of device memory: 490 MB for the pool and
-the graphs, 60 MB cached on the recording stream (its cuBLAS workspace and one
-warm-up row) and 5 MB of relative-position tables. The pool keeps what evicted
-graphs used, so traffic with many shapes keeps growing it. The runner therefore
-adds up the device memory its graphs hold (what each recording took, plus the
-tables and buffers they read), and past 4% of the device's memory (900 MB on
-an L4) it drops every graph, returns their memory to the device and records
-again. Graphs are also released when the model unloads, and
-when one of its forwards runs out of memory.
+another model. A model's graphs share one memory pool and write their output
+into one shared buffer, and the driver keeps a copy of each graph: about 7 MB
+for the `gliclass-large-v1.0` encoder. The runner adds up the device memory
+its graphs hold (what each recording took, plus the tables and buffers they
+read) against 4% of the device's memory (900 MB on an L4). On an L4, all of a
+model's `bucketed` shapes took 720 MB for `gliclass-large-v1.0`, 630 MB for
+`gliclass-base-v1.0` and 677 MB for `opir-multitask-large-v1.0`, plus about
+150 MB cached on the recording stream (its cuBLAS workspace and one warm-up
+row). On a smaller GPU, where the shapes do not all fit, recording stops at the
+budget and the graphs already recorded keep replaying; the other shapes run
+eagerly. In `exact` mode, whose shapes are unbounded, a model past its budget
+drops every graph, returns their memory to the device and records again.
+Graphs are also released when the model unloads, and when one of its forwards
+runs out of memory.
 
 While a graph records, PyTorch's caching allocator does not free cached blocks
 to satisfy other allocations, so another model on the same GPU that needs
@@ -169,10 +191,17 @@ the model drops its graphs and records nothing for a minute.
 Both limits are approximate. The free-memory check reads the device once,
 before recording, so a model loading at the same moment can still meet one
 recording. The memory budget is checked after each recording, so a model's
-graphs can exceed it by one recording: up to about 330 MB, one graph of the
-largest shape on `gliclass-large-v1.0`. On a GPU shared with other models,
+graphs can exceed it by one recording. On a GPU shared with other models,
 leave memory headroom, or enable graphs only where the model has the GPU to
 itself. Usage and billing do not change.
+
+**Failures and counters.** A shape that fails to record for a reason other
+than memory runs eagerly from then on, and the failure is logged as a warning
+with its traceback. After three such shapes, the model runs eagerly for the
+rest of the process, logged as an error. Each model counts the forwards it
+replays, records, and runs eagerly (by reason: past the token bound, recording
+paused, budget full, and so on), and logs the counts every ten minutes while it
+serves requests.
 
 ### GLiNER2.5-Decide usage and limits
 

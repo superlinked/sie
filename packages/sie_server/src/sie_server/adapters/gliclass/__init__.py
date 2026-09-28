@@ -978,8 +978,9 @@ class GLiClassAdapter(BaseAdapter):
     ) -> torch.Tensor:
         """Run the model on tokenized rows, passing the class-slot count the pipeline passes.
 
-        With ``graphs`` other than "off", a CUDA graph replays the forward
-        when the model and shape allow it; otherwise it runs eagerly.
+        With ``graphs`` other than "off", a CUDA graph replays the encoder
+        when the model and shape allow it, and the scoring head runs on its
+        output with this forward's class slots; otherwise it runs eagerly.
         """
         forward_kwargs: dict[str, Any] = {}
         resolve_max_num_classes = getattr(pipe, "_resolve_max_num_classes", None)
@@ -987,7 +988,7 @@ class GLiClassAdapter(BaseAdapter):
             forward_kwargs["max_num_classes"] = resolve_max_num_classes(labels, same_labels)
         classes = forward_kwargs.get("max_num_classes")
         try:
-            if self._graphs is not None and isinstance(classes, int):
+            if self._graphs is not None:
                 logits = self._graphs.run(dict(inputs), classes, graphs)
                 if logits is not None:
                     return logits
@@ -1018,6 +1019,8 @@ class GLiClassAdapter(BaseAdapter):
             pad_token_id=int(tokenizer.pad_token_id),
             pad_token_type_id=int(getattr(tokenizer, "pad_token_type_id", 0) or 0),
             max_length=int(pipe.max_length),
+            mode=self._cuda_graphs,
+            name=self._model_name_or_path,
         )
 
     @staticmethod

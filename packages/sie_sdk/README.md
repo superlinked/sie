@@ -151,11 +151,11 @@ billed. The other items still succeed.
 
 On a CUDA server, the operator can load the DeBERTa-based GLiClass models with
 CUDA graphs, which cut the CPU time spent launching kernels. With `bucketed`
-graphs, sequence lengths are padded to buckets, which moves probabilities
-slightly, as batching requests together does. `gliclass-base-v1.0`,
+graphs, sequence lengths and batch sizes are padded to buckets, which moves
+probabilities slightly, as batching requests together does. `gliclass-base-v1.0`,
 `gliclass-large-v1.0` and `opir-multitask-large-v1.0` load with `bucketed`
 graphs by default: their probabilities differed from eager execution by up to
-0.0144 in our tests, with no top label changed. Send
+0.019 in our tests, with no top label changed. Send
 `options={"cuda_graphs": "off"}` to run a request eagerly; a request cannot
 turn graphs on. See the server README for each model's measurements and the
 memory graphs use.
