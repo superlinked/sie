@@ -98,6 +98,10 @@ mise run test -- -i
 mise run test -- -i integrations/sie_langchain/
 ```
 
+Hosted CI runs these suites against a real CPU server in the advisory
+`Real models / CPU` job. See [CONTRIBUTING.md](../CONTRIBUTING.md#hosted-ci-equivalents)
+to run the same lane locally.
+
 ### Creating a New Integration
 
 1. Create the package directory:
@@ -135,8 +139,12 @@ mise run test -- -i integrations/sie_langchain/
 
 The `conftest.py` file provides common fixtures for all integrations:
 
-- `mock_sie_client` - Mocked `SIEClient` that returns test embeddings
-- `mock_sie_async_client` - Mocked async client
+- `mock_sie_client` - `SIEClient` mock autospecced from the SDK. A call with an
+  argument the SDK does not accept raises `TypeError`. Change a method's behavior
+  through its `side_effect` or `return_value` rather than assigning a new mock.
+- `mock_sie_async_client` - The same for `SIEAsyncClient`
+- `extract_error_text` and `extract_item_error` - Item text for which the mocks
+  return a per-item extract `error`, and that error
 - `sie_server_url` - URL of running SIE server (for integration tests)
 
 Example usage:

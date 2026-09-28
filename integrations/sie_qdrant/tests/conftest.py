@@ -9,10 +9,11 @@ common test utilities package.
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import NonCallableMagicMock, create_autospec
 
 import numpy as np
 import pytest
+from sie_sdk import SIEClient
 
 EMBEDDING_DIM = 384
 SPARSE_DIM = 30522  # BERT vocab size
@@ -65,9 +66,9 @@ def _get_text(item: Any) -> str:
 
 
 @pytest.fixture
-def mock_sie_client() -> MagicMock:
+def mock_sie_client() -> NonCallableMagicMock:
     """Create a mocked SIEClient for unit testing."""
-    client = MagicMock()
+    client = create_autospec(SIEClient, instance=True)
 
     def mock_encode(
         _model: str,
@@ -101,7 +102,7 @@ def mock_sie_client() -> MagicMock:
             include_multivector=include_multivector,
         )
 
-    client.encode = MagicMock(side_effect=mock_encode)
+    client.encode.side_effect = mock_encode
     client.base_url = "http://localhost:8080"
 
     return client

@@ -17,7 +17,10 @@ test without access to another repository, private registry, or secret.
 
 Every pull request runs the public lint, typecheck, unit, integration, and
 package/container checks; these are not selected by changed paths. Benchmark
-and quality-evaluation jobs are not part of this CI.
+and quality-evaluation jobs are not part of this CI. The separate `Real models`
+workflow serves pinned public checkpoints on CPU nightly, on manual dispatch,
+and for pull requests that change model-serving, SDK, or integration paths. It
+is advisory and not part of `CI / Required`.
 
 The main tasks are `mise run lint`, `mise run typecheck`, `mise run test`,
 `mise run test-integrations`, `mise run ts -- build`, `mise run ts -- lint`,
