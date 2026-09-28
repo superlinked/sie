@@ -150,6 +150,54 @@ packed-distribution checks and CPU/container verification. Full release image
 builds include the declared CUDA variants. Building a CUDA image is not a claim
 that GPU inference was exercised.
 
+## Terraform module follow-up
+
+Every stable SIE release needs a follow-up in all four public Terraform module
+repositories. The modules provision infrastructure; their installation examples
+select the SIE Helm chart, cloud values files, and runtime images. SIE's release
+workflow does not update or release these repositories automatically.
+
+| Cloud | Repository |
+| --- | --- |
+| AWS | [terraform-aws-sie](https://github.com/superlinked/terraform-aws-sie) |
+| Google Cloud | [terraform-google-sie](https://github.com/superlinked/terraform-google-sie) |
+| Azure | [terraform-azure-sie](https://github.com/superlinked/terraform-azure-sie) |
+| Alibaba Cloud | [terraform-alicloud-sie](https://github.com/superlinked/terraform-alicloud-sie) |
+
+The agent or maintainer carrying the SIE release owns this follow-up:
+
+1. Verify that the stable tag, release source, final publication job, versioned
+   images, and public Helm chart agree. Use the successfully published version,
+   not an open release PR or a tag whose publication is incomplete.
+2. Inspect current `main`, open update/release PRs, and the module's contributor
+   and release instructions in each repository. Work in isolated worktrees and
+   update an existing matching PR when possible.
+3. Update every SIE chart pin, matching tagged cloud-overlay URL, chart reference,
+   and image-mirroring example. Preserve the image's platform, bundle, and Rust
+   architecture suffixes. Keep the Terraform module's own version, provider
+   constraints, and infrastructure sizing independent of the SIE version.
+   Retain applicable upgrade guidance and check for new breaking changes.
+4. Run the module's existing relevant checks and render the actual published
+   chart with its documented cloud values and Terraform output formats. Verify
+   that the rendered image tags exist, mirrored tags cover enabled workers,
+   and workload identity, payload-store wiring, and GPU selectors still match
+   the example. This validation does not require applying infrastructure.
+5. Open focused PRs, follow CI and review findings on their final heads, and
+   merge within the authorized scope through normal repository protections.
+   Do not bypass a missing review or attempt to approve a PR as its author.
+6. After the updates merge, inspect the module's release-please PR. Confirm it
+   includes the new SIE references and required checks before carrying it through
+   that repository's release process where authorized. Module release versions
+   are independent of SIE's version. Verify the resulting immutable tag and
+   Terraform Registry version/download source; a merged update PR alone does
+   not publish a module version.
+
+Report SIE artifact publication and Terraform follow-up separately. For each
+module, include the update PR/merge SHA and published module version, or the
+exact outstanding release PR, review, CI, or publication gate. If module
+publication is outside the current authorization, report it as pending. Do not
+leave this follow-up implicit or describe pending module releases as published.
+
 ## Publisher setup
 
 Finalize these identities before enabling uploads:
