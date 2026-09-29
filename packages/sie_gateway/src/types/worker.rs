@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use std::time::Instant;
 use utoipa::ToSchema;
 
@@ -46,8 +47,16 @@ pub struct WorkerState {
     pub saturated: bool,
     /// Routable model ids covered by `bundle_config_hash` that this worker
     /// reported it cannot serve. Empty for workers that predate the field.
-    pub unsupported_models: Vec<String>,
+    /// Shared so snapshot rebuilds do not copy it.
+    pub unsupported_models: Arc<[String]>,
+    /// The worker reported more than [`MAX_UNSUPPORTED_MODELS`] ids. It is
+    /// then treated as unable to serve any model, because a dropped id would
+    /// otherwise read as supported.
+    pub unsupported_overflow: bool,
 }
+
+/// Upper bound on the `unsupported_models` one heartbeat may carry.
+pub const MAX_UNSUPPORTED_MODELS: usize = 1024;
 
 impl WorkerState {
     pub fn healthy(&self) -> bool {
@@ -57,10 +66,11 @@ impl WorkerState {
     /// Whether this worker can serve `model` under its advertised config.
     /// A worker that sends no list serves every model its hash covers.
     pub fn supports_model(&self, model: &str) -> bool {
-        !self
-            .unsupported_models
-            .iter()
-            .any(|unsupported| unsupported.eq_ignore_ascii_case(model))
+        !self.unsupported_overflow
+            && !self
+                .unsupported_models
+                .iter()
+                .any(|unsupported| unsupported.eq_ignore_ascii_case(model))
     }
 
     /// Eligible for dispatch: healthy, with at least one ready slot, and not saturated.
@@ -112,6 +122,10 @@ pub struct WorkerInfo {
     /// gateway does not route these models to it. Omitted when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unsupported_models: Vec<String>,
+    /// The worker reported more unsupported models than the gateway accepts
+    /// (1024), so no model is routed to it. Omitted when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unsupported_models_overflow: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -274,7 +288,8 @@ mod tests {
             last_heartbeat: Instant::now(),
             pool_name: String::new(),
             saturated: false,
-            unsupported_models: Vec::new(),
+            unsupported_models: Arc::from([]),
+            unsupported_overflow: false,
         }
     }
 
@@ -378,10 +393,12 @@ mod tests {
     fn test_worker_supports_model_ignores_ascii_case_and_defaults_to_all() {
         let mut w = make_worker(WorkerHealth::Healthy, 0, 0);
         assert!(w.supports_model("org/new"));
-        w.unsupported_models = vec!["Org/New".into(), "org/model:fast".into()];
+        w.unsupported_models = vec!["Org/New".to_string(), "org/model:fast".to_string()].into();
         assert!(!w.supports_model("org/new"));
         assert!(!w.supports_model("org/model:fast"));
         assert!(w.supports_model("org/model"));
+        w.unsupported_overflow = true;
+        assert!(!w.supports_model("org/model"));
     }
 
     #[test]

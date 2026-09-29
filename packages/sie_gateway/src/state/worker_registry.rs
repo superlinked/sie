@@ -8,6 +8,7 @@ use tokio::sync::RwLock;
 
 use crate::routing::hrw::{RingEntry, RingSnapshot};
 use crate::state::pool_manager::normalize_pool_name;
+use crate::types::worker::MAX_UNSUPPORTED_MODELS;
 use crate::types::{
     ClusterStatus, ModelInfo, WorkerHealth, WorkerInfo, WorkerState, WorkerStatusMessage,
 };
@@ -214,7 +215,8 @@ impl WorkerRegistry {
                     last_heartbeat: Instant::now(),
                     pool_name: String::new(),
                     saturated: false,
-                    unsupported_models: Vec::new(),
+                    unsupported_models: Arc::from([]),
+                    unsupported_overflow: false,
                 });
 
             let was_healthy = w.healthy();
@@ -233,7 +235,23 @@ impl WorkerRegistry {
                 msg.bundle.clone()
             };
             w.bundle_config_hash = msg.bundle_config_hash.clone();
-            w.unsupported_models = msg.unsupported_models.clone();
+            let overflow = msg.unsupported_models.len() > MAX_UNSUPPORTED_MODELS;
+            if overflow && !w.unsupported_overflow {
+                tracing::warn!(
+                    worker = %w.name,
+                    reported = msg.unsupported_models.len(),
+                    max = MAX_UNSUPPORTED_MODELS,
+                    "worker reported more unsupported models than the gateway accepts; \
+                     routing no model to it until it reports fewer"
+                );
+            }
+            w.unsupported_overflow = overflow;
+            w.unsupported_models = msg
+                .unsupported_models
+                .iter()
+                .take(MAX_UNSUPPORTED_MODELS)
+                .cloned()
+                .collect();
             w.machine_profile = msg.machine_profile.clone();
             w.pool_name = msg.pool_name.clone();
             w.models = msg.loaded_models.clone();
@@ -837,7 +855,8 @@ impl WorkerRegistry {
                 healthy: w.healthy(),
                 bundle: w.bundle.clone(),
                 bundle_config_hash: w.bundle_config_hash.clone(),
-                unsupported_models: w.unsupported_models.clone(),
+                unsupported_models: w.unsupported_models.to_vec(),
+                unsupported_models_overflow: w.unsupported_overflow,
             });
 
             if w.healthy() {
@@ -2214,6 +2233,34 @@ mod tests {
             "org/kept", "default", "l4", "default", "h1", &admitted,
         );
         assert_eq!(kept.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_oversized_unsupported_list_fails_closed_and_is_capped() {
+        let reg = registry();
+        let oversized: Vec<String> = (0..=MAX_UNSUPPORTED_MODELS)
+            .map(|i| format!("org/model-{i}"))
+            .collect();
+        let mut msg = make_dispatch_msg(true, false, "default", &["org/kept"]).await;
+        msg.name = "flooded".into();
+        msg.bundle_config_hash = "h1".into();
+        msg.unsupported_models = oversized;
+        reg.update_worker("http://flooded:8080", msg).await;
+
+        let workers = reg.workers().await;
+        let flooded = &workers["http://flooded:8080"];
+        assert!(flooded.unsupported_overflow);
+        assert_eq!(flooded.unsupported_models.len(), MAX_UNSUPPORTED_MODELS);
+        assert!(!flooded.supports_model("org/kept"));
+        assert!(route(&reg, "", "h1", "org/kept").route.is_none());
+        let status = reg.get_cluster_status().await;
+        assert!(status.workers[0].unsupported_models_overflow);
+
+        lane_worker(&reg, "flooded", "l4", "h1", &["org/kept"], &["org/other"]).await;
+        let recovered = reg.workers().await;
+        let flooded = &recovered["http://flooded:8080"];
+        assert!(!flooded.unsupported_overflow);
+        assert!(flooded.supports_model("org/kept"));
     }
 
     #[tokio::test]

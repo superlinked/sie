@@ -3980,6 +3980,10 @@
             },
             "type": "array"
           },
+          "unsupported_models_overflow": {
+            "description": "The worker reported more unsupported models than the gateway accepts\n(1024), so no model is routed to it. Omitted when false.",
+            "type": "boolean"
+          },
           "url": {
             "type": "string"
           }
