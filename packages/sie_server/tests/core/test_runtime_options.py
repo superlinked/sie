@@ -10,13 +10,24 @@ pooling / normalize) for every queued request.
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import AsyncIterator
+from typing import Any
+
 import pytest
+from sie_server.adapters._generation_base import GenerationChunk
+from sie_server.adapters.fake.adapter import FakeAdapter
 from sie_server.config.model import ModelConfig
+from sie_server.core import runtime_options
 from sie_server.core.encode_pipeline import resolve_encode_output_types
 from sie_server.core.runtime_options import (
+    GenerationTimeoutError,
+    GenerationTimeouts,
     apply_generation_runtime_options,
+    bound_generation,
     merge_runtime_options,
     merge_runtime_options_with_profile,
+    resolve_generation_timeouts,
 )
 from sie_server.types.inputs import InvalidInputError
 
@@ -331,3 +342,155 @@ def test_generation_invalid_sampling_option_fails_closed(sampling: dict[str, obj
 def test_generation_non_finite_timeout_fails_closed(value: float) -> None:
     with pytest.raises(ValueError, match="positive number"):
         apply_generation_runtime_options(_generation_config(), {"overall_timeout_s": value}, {"prompt": "hi"})
+
+
+def test_generation_timeouts_resolve_from_profile_and_request() -> None:
+    config = _generation_config()
+
+    assert resolve_generation_timeouts(config, None) == GenerationTimeouts(first_chunk_s=None, overall_s=60.0)
+    assert resolve_generation_timeouts(
+        config,
+        {"first_chunk_timeout_s": 5, "overall_timeout_s": 12.5},
+    ) == GenerationTimeouts(first_chunk_s=5.0, overall_s=12.5)
+
+    undeclared = _generation_config()
+    del undeclared.profiles["default"].adapter_options.runtime["overall_timeout_s"]
+    assert resolve_generation_timeouts(undeclared, None) == GenerationTimeouts()
+
+
+class _Engine:
+    def __init__(self, delays: list[float]) -> None:
+        self.delays = delays
+        self.closed = False
+
+    async def chunks(self) -> AsyncIterator[int]:
+        try:
+            for index, delay in enumerate(self.delays):
+                await asyncio.sleep(delay)
+                yield index
+        finally:
+            self.closed = True
+
+
+async def _drain(chunks: AsyncIterator[int]) -> list[int]:
+    return [chunk async for chunk in chunks]
+
+
+async def test_bound_generation_passes_chunks_through_within_timeouts() -> None:
+    engine = _Engine([0.0, 0.0, 0.0])
+
+    chunks = await _drain(bound_generation(engine.chunks(), GenerationTimeouts(first_chunk_s=1.0, overall_s=1.0)))
+
+    assert chunks == [0, 1, 2]
+    assert engine.closed
+
+
+async def test_bound_generation_without_timeouts_is_unbounded() -> None:
+    engine = _Engine([0.05, 0.05])
+
+    assert await _drain(bound_generation(engine.chunks(), GenerationTimeouts())) == [0, 1]
+
+
+async def test_bound_generation_first_chunk_timeout_aborts_the_engine() -> None:
+    engine = _Engine([5.0])
+
+    with pytest.raises(GenerationTimeoutError) as raised:
+        await _drain(bound_generation(engine.chunks(), GenerationTimeouts(first_chunk_s=0.05, overall_s=5.0)))
+
+    assert raised.value.code == "first_chunk_timeout"
+    assert engine.closed
+
+
+async def test_bound_generation_overall_timeout_applies_after_the_first_chunk() -> None:
+    engine = _Engine([0.0, 0.0, 5.0])
+
+    with pytest.raises(GenerationTimeoutError) as raised:
+        await _drain(bound_generation(engine.chunks(), GenerationTimeouts(first_chunk_s=0.05, overall_s=0.2)))
+
+    assert raised.value.code == "overall_timeout"
+    assert engine.closed
+
+
+class _EngineWithHangingAbort:
+    def __init__(self) -> None:
+        self.close_started = False
+
+    def __aiter__(self) -> _EngineWithHangingAbort:
+        return self
+
+    async def __anext__(self) -> int:
+        await asyncio.sleep(10)
+        return 0
+
+    async def aclose(self) -> None:
+        self.close_started = True
+        await asyncio.sleep(10)
+
+
+async def test_bound_generation_does_not_wait_on_a_hung_engine_abort(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(runtime_options, "_GENERATION_CLOSE_TIMEOUT_S", 0.05)
+    engine = _EngineWithHangingAbort()
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+
+    with pytest.raises(GenerationTimeoutError) as raised:
+        await _drain(bound_generation(engine, GenerationTimeouts(first_chunk_s=0.05)))
+
+    assert raised.value.code == "first_chunk_timeout"
+    assert engine.close_started
+    assert loop.time() - started < 2.0
+
+
+class _AdapterWithHangingAbort(FakeAdapter):
+    """A generation engine whose abort on cancellation takes a while."""
+
+    def __init__(self, abort_s: float) -> None:
+        super().__init__()
+        self.abort_s = abort_s
+        self.abort_started = False
+        self.abort_finished = False
+
+    async def generate(self, prompt: str, **kwargs: Any) -> AsyncIterator[GenerationChunk]:
+        _ = (prompt, kwargs)
+        try:
+            await asyncio.sleep(30)
+            yield GenerationChunk(text_delta="late")
+        except asyncio.CancelledError:
+            self.abort_started = True
+            await asyncio.sleep(self.abort_s)
+            self.abort_finished = True
+            raise
+
+
+async def test_bound_generation_answers_before_a_slow_engine_abort_finishes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(runtime_options, "_GENERATION_CLOSE_TIMEOUT_S", 0.1)
+    adapter = _AdapterWithHangingAbort(abort_s=0.5)
+    adapter.load("cpu")
+    chunks = adapter.generate_with_preflight({"prompt": "hi", "max_new_tokens": 4}, None)
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+
+    with pytest.raises(GenerationTimeoutError) as raised:
+        await _drain(bound_generation(chunks, GenerationTimeouts(first_chunk_s=0.05)))
+
+    elapsed = loop.time() - started
+    assert raised.value.code == "first_chunk_timeout"
+    assert elapsed < 0.4, elapsed
+    assert adapter.abort_started
+    assert not adapter.abort_finished
+
+    await asyncio.sleep(0.6)
+    assert adapter.abort_finished, "the engine abort must be allowed to finish in the background"
+
+
+async def test_bound_generation_keeps_engine_timeout_errors() -> None:
+    async def failing() -> AsyncIterator[int]:
+        raise TimeoutError("engine read timed out")
+        yield 0
+
+    with pytest.raises(TimeoutError) as raised:
+        await _drain(bound_generation(failing(), GenerationTimeouts(overall_s=5.0)))
+
+    assert not isinstance(raised.value, GenerationTimeoutError)

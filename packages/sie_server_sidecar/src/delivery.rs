@@ -25,6 +25,8 @@ use async_nats::jetstream::Message;
 use tokio::sync::mpsc;
 use tokio::sync::OwnedSemaphorePermit;
 
+use crate::observability::metrics::SidecarTelemetry;
+use crate::work_deadline::{nats_progress_leases, NatsProgressLease};
 use crate::work_types::WorkResult;
 
 /// Event emitted by the dispatcher for one local-ingest slot.
@@ -110,6 +112,9 @@ pub enum Delivery {
         /// this delivery settles (ACK / NAK / drop) — exactly the
         /// queue-admission bound. Local-ingest deliveries carry no permit.
         Option<OwnedSemaphorePermit>,
+        /// Progress lease keeping the JetStream delivery alive while it is
+        /// held. It ends on ACK or NAK and whenever the delivery is dropped.
+        Option<NatsProgressLease>,
     ),
     Local(LocalDelivery),
 }
@@ -124,20 +129,20 @@ impl Delivery {
     /// the same signal on every path.
     pub fn worker_direct(&self) -> bool {
         match self {
-            Self::Nats(msg, _) => crate::subject::is_worker_direct_work_subject(&msg.subject),
+            Self::Nats(msg, ..) => crate::subject::is_worker_direct_work_subject(&msg.subject),
             Self::Local(_) => true,
         }
     }
 
     /// True when this delivery holds a pull-loop admission permit.
     pub(crate) fn holds_admission_permit(&self) -> bool {
-        matches!(self, Self::Nats(_, Some(_)))
+        matches!(self, Self::Nats(_, Some(_), _))
     }
 
     /// Give the pull-loop admission permit back and hold `permit` until
     /// settlement instead. A no-op when no admission permit is held.
     pub(crate) fn exchange_admission_permit(&mut self, permit: OwnedSemaphorePermit) {
-        if let Self::Nats(_, held @ Some(_)) = self {
+        if let Self::Nats(_, held @ Some(_), _) = self {
             *held = Some(permit);
         }
     }
@@ -146,21 +151,32 @@ impl Delivery {
     /// their terminal [`LocalDeliveryEvent::Result`], so this is a no-op.
     pub async fn ack(&self) -> Result<(), String> {
         match self {
-            Self::Nats(msg, _) => msg.ack().await.map_err(|e| e.to_string()),
+            Self::Nats(msg, _, lease) => {
+                if let Some(lease) = lease {
+                    lease.settle().await;
+                }
+                msg.ack().await.map_err(|e| e.to_string())
+            }
             Self::Local(_) => Ok(()),
         }
     }
 
     /// NAK — "not settled, redeliver after `delay_ms`". Local deliveries
-    /// route this to the ingest layer's bounded re-dispatch.
+    /// route this to the ingest layer's bounded re-dispatch. A progress ACK
+    /// sent after a NAK would postpone the redelivery, so the progress lease
+    /// ends first.
     pub async fn nak(&self, delay_ms: u64) -> Result<(), String> {
         match self {
-            Self::Nats(msg, _) => msg
-                .ack_with(async_nats::jetstream::AckKind::Nak(Some(
+            Self::Nats(msg, _, lease) => {
+                if let Some(lease) = lease {
+                    lease.settle().await;
+                }
+                msg.ack_with(async_nats::jetstream::AckKind::Nak(Some(
                     Duration::from_millis(delay_ms),
                 )))
                 .await
-                .map_err(|e| e.to_string()),
+                .map_err(|e| e.to_string())
+            }
             Self::Local(local) => {
                 if local.send_retry(delay_ms) {
                     Ok(())
@@ -171,12 +187,20 @@ impl Delivery {
         }
     }
 
+    /// Keep this NATS delivery's JetStream lease alive for up to `horizon`
+    /// while it is held.
+    pub(crate) fn hold_progress_lease(&mut self, horizon: Duration, telemetry: &SidecarTelemetry) {
+        if let Self::Nats(msg, _, lease) = self {
+            *lease = nats_progress_leases().hold(msg, horizon, telemetry);
+        }
+    }
+
     /// Progress ACK — "still working, reset the redelivery clock". The
     /// local ingest caller holds one synchronous call open with no
     /// ack-wait clock, so this is a no-op there.
     pub async fn progress(&self) -> Result<(), String> {
         match self {
-            Self::Nats(msg, _) => msg
+            Self::Nats(msg, ..) => msg
                 .ack_with(async_nats::jetstream::AckKind::Progress)
                 .await
                 .map_err(|e| e.to_string()),
@@ -187,7 +211,7 @@ impl Delivery {
     /// Log-friendly origin reference (NATS subject / local slot).
     pub fn log_ref(&self) -> String {
         match self {
-            Self::Nats(msg, _) => msg.subject.to_string(),
+            Self::Nats(msg, ..) => msg.subject.to_string(),
             Self::Local(local) => format!("local[slot={},attempt={}]", local.slot, local.attempt),
         }
     }
@@ -305,7 +329,7 @@ mod tests {
         let admitted = std::sync::Arc::clone(&admission)
             .try_acquire_owned()
             .unwrap();
-        let mut delivery = Delivery::Nats(offline_message().await, Some(admitted));
+        let mut delivery = Delivery::Nats(offline_message().await, Some(admitted), None);
         assert!(delivery.holds_admission_permit());
 
         delivery
@@ -320,7 +344,7 @@ mod tests {
     #[tokio::test]
     async fn a_delivery_without_an_admission_permit_takes_no_parked_permit() {
         let parked = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
-        let mut delivery = Delivery::Nats(offline_message().await, None);
+        let mut delivery = Delivery::Nats(offline_message().await, None, None);
         assert!(!delivery.holds_admission_permit());
 
         delivery

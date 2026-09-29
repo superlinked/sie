@@ -1863,6 +1863,7 @@ mod tests {
             traceparent: None,
             tracestate: None,
             timestamp: 0.0,
+            deadline: None,
         }
     }
 
@@ -2420,6 +2421,7 @@ mod tests {
             traceparent: None,
             tracestate: None,
             timestamp: 0.0,
+            deadline: None,
         };
         let items = rmp_serde::to_vec_named(&vec![work_item]).unwrap();
         let request = RequestEnvelope {

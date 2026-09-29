@@ -24,6 +24,7 @@ from sie_config.model_registry import (
     ProfileConflictError,
     parse_model_spec,
 )
+from sie_config.model_schema import model_config_schema_errors
 from sie_config.nats_publisher import NatsPublisher, PartialPublishError
 from sie_config.types import AuditEntry
 
@@ -343,6 +344,16 @@ def _validate_model_id(model_id: str) -> None:
         )
 
 
+def _reject_worker_schema_errors(config: dict[str, Any]) -> None:
+    """Reject a body with 422 when a worker's model-config schema would refuse it."""
+    details = model_config_schema_errors(config)
+    if details:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "validation_error", "details": details},
+        )
+
+
 def _load_filesystem_yaml(models_dir: Any, model_name: str) -> str | None:
     """Load raw YAML for a filesystem-backed model (blocking; call via to_thread).
 
@@ -599,6 +610,7 @@ async def add_model(request: Request) -> Response:
                 status_code=400,
                 detail={"error": "parse_error", "message": "Expected YAML mapping at top level"},
             )
+        _reject_worker_schema_errors(config)
 
         # Validate model ID before touching the registry
         model_id = config.get("sie_id", "")
@@ -703,7 +715,7 @@ async def add_model(request: Request) -> Response:
             #    Merge invariants (append-only):
             #      - Existing top-level fields that the new body omits
             #        are PRESERVED (minimal profile-append bodies must
-            #        not erase `description`, `default_bundle`, etc.).
+            #        not erase `hf_id`, `max_sequence_length`, etc.).
             #      - A new body may introduce top-level fields that the
             #        stored document doesn't have.
             #      - If both sides set the same non-`profiles` top-level
@@ -1032,6 +1044,7 @@ async def replace_model(request: Request, model_id: str) -> Response:
                 status_code=400,
                 detail={"error": "parse_error", "message": "Expected YAML mapping at top level"},
             )
+        _reject_worker_schema_errors(config)
 
         body_sie_id = config.get("sie_id")
         if body_sie_id and body_sie_id != model_id:

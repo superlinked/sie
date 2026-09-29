@@ -306,9 +306,10 @@ release record conservative with maximum-length, high-entropy identities. With
 Helm 3.16.4, the external profile encodes 192 lanes to about 840 KiB and the
 worst bundled profile encodes 96 lanes to about 853 KiB, each leaving at least
 64 KiB below the 917,504-byte release budget at this revision.
-The ordinary post-install/post-upgrade hook applies the target shards and
-prunes removed release-managed ScaledObjects. It refuses to adopt a same-name
-object unless that object already carries this Helm release's exact identity.
+The ordinary post-install/post-upgrade/post-rollback hook applies the target
+shards and prunes removed release-managed ScaledObjects. It refuses to adopt a
+same-name object unless that object already carries this Helm release's exact
+identity.
 Because those manifests are intentionally non-secret ConfigMaps, restrict
 write access in the workload namespace to trusted control-plane principals.
 
@@ -361,6 +362,12 @@ kubectl delete configmap "$LEGACY_KEDA_CONFIGMAP" -n <NAMESPACE> --ignore-not-fo
 ```
 
 Fresh installs and later compatible releases use the normal Helm procedure.
+`helm rollback` runs the target revision's stored hooks: it re-applies that
+revision's ScaledObjects and prunes the others, and a target revision with
+autoscaling disabled first removes the release-owned ScaledObjects. Health
+gates run on install and upgrade only. A revision installed by an earlier chart
+version carries no rollback hooks, so rolling back to it leaves ScaledObjects
+unchanged; roll forward instead.
 
 Disabling autoscaling or uninstalling runs a small hook that deletes only
 ScaledObjects carrying this release's managed identity or the exact canonical
@@ -823,6 +830,27 @@ and recreating the stream, destroying exactly the queued work that durability is
 meant to protect. Drain the pool and delete the streams during a maintenance
 window to pick up the new storage. `streamReplicas`, by contrast, **is**
 reconciled onto existing streams.
+
+### Work-item deadlines
+
+The gateway stamps every non-streaming work item with an absolute `deadline`
+(publish time plus the gateway request timeout). Worker sidecars use it to keep
+slow deliveries leased, to size backend calls, and to count work that is picked
+up after its caller gave up. Set these on
+`workers.common.workerSidecar.extraEnv`:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `SIE_WORK_DEADLINE_ENFORCE` | `false` | `true` ACK-drops expired work before execution instead of only counting it |
+| `SIE_WORK_DEADLINE_SKEW_TOLERANCE_MS` | `5000` | Allowed clock skew between gateway and worker hosts (at most 60000) |
+| `SIE_WORK_DEADLINE_MAX_BUDGET_S` | `180` | Largest accepted `deadline - timestamp`, and the ceiling on deadline-derived backend call budgets |
+
+`SIE_WORK_DEADLINE_MAX_BUDGET_S` must be at least the gateway's
+`SIE_GATEWAY_REQUEST_TIMEOUT` (120 s by default). If the gateway timeout is
+raised above it, workers ignore every deadline and log a rate-limited warning.
+The comparison spans the gateway and worker clocks, so keep the nodes
+synchronised (for example with NTP). Watch
+`sie_worker_work_item_deadline_exceeded_total` before enabling enforcement.
 
 ### Upgrading from the legacy single-bundle pool schema
 

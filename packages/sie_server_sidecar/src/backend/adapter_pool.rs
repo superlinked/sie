@@ -812,13 +812,19 @@ impl InferenceBackend for AdapterWorkerPool {
     }
 
     async fn run_batch(&self, req: RunBatchRequest) -> Result<BatchOutcome, BackendError> {
+        self.run_batch_with_budget(req, None).await
+    }
+
+    async fn run_batch_with_budget(
+        &self,
+        req: RunBatchRequest,
+        budget: Option<Duration>,
+    ) -> Result<BatchOutcome, BackendError> {
         let model_id = req.model_id.clone();
         let child = self.child_for_model(&model_id);
-        self.run_child_batch(
-            model_id,
-            child,
-            |ipc| async move { ipc.run_batch(req).await },
-        )
+        self.run_child_batch(model_id, child, |ipc| async move {
+            ipc.run_batch_with_budget(req, budget).await
+        })
         .await
         .map_err(map_ipc_error)
     }

@@ -35,11 +35,17 @@ from sie_server.api.openai_completions import (
     _error_response,
     _from_generation_error,
     _from_http_exception,
+    _generation_timeout_error,
     _number,
     _read_json_body,
 )
 from sie_server.api.validation import validate_machine_profile_header, validate_signed_i64
-from sie_server.core.runtime_options import apply_generation_runtime_options
+from sie_server.core.runtime_options import (
+    GenerationTimeoutError,
+    apply_generation_runtime_options,
+    bound_generation,
+    resolve_generation_timeouts,
+)
 from sie_server.observability.tracing import tracer
 from sie_server.types.openapi import OpenAIResponsesResponseModel
 
@@ -220,6 +226,7 @@ def _parse_params(body: dict[str, Any]) -> _ResponsesParams:
         413: {"description": "Request body or rendered input is too large"},
         500: {"description": "Generation failed"},
         503: {"description": "Model loading or temporarily unavailable"},
+        504: {"description": "Non-streaming generation exceeded its first_chunk_timeout_s or overall_timeout_s"},
     },
     openapi_extra={
         "requestBody": {
@@ -343,9 +350,13 @@ async def responses(
                     reasoning_format=reasoning_format,
                 )
             try:
-                text, terminal = await _collect_completion(chunks)
+                text, terminal = await _collect_completion(
+                    bound_generation(chunks, resolve_generation_timeouts(config, None))
+                )
             except _CompletionError:
                 raise
+            except GenerationTimeoutError as exc:
+                raise _generation_timeout_error(exc) from exc
             except GenerationError as exc:
                 raise _from_generation_error(exc, registry) from exc
             except Exception as exc:

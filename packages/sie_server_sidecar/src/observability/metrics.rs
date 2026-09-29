@@ -19,6 +19,7 @@ use opentelemetry::{global, KeyValue};
 pub const QUEUE_DURATION_METRIC_NAME: &str = "sie.worker.queue.duration";
 pub const QUEUE_DEPTH_METRIC_NAME: &str = "sie.worker.queue.depth";
 pub const WORK_ITEM_AGE_METRIC_NAME: &str = "sie.worker.work_item.age";
+pub const WORK_ITEM_DEADLINE_EXCEEDED_METRIC_NAME: &str = "sie.worker.work_item.deadline_exceeded";
 pub const SCHEDULER_REQUEST_BATCH_DISPATCH_WAIT_METRIC_NAME: &str =
     "sie.worker.scheduler.request_batch.dispatch_wait";
 pub const SCHEDULER_REQUEST_BATCH_TOTAL_METRIC_NAME: &str =
@@ -85,7 +86,7 @@ const CONFIG_OPERATION_SERIES: usize = 6;
 const CONFIG_OUTCOME_SERIES: usize = 18;
 const NATS_OPERATION_SERIES: usize = 7;
 const BINARY_OUTCOME_SERIES: usize = 3;
-const NATS_REASON_SERIES: usize = 10;
+const NATS_REASON_SERIES: usize = 11;
 const DELIVERY_REDELIVERED_SERIES: usize = 2;
 const RESULT_TRANSPORT_MODE_SERIES: usize = 4;
 const RESULT_TRANSPORT_OUTCOME_SERIES: usize = 4;
@@ -96,6 +97,7 @@ const SCHEDULER_P50_KIND_SERIES: usize = 2;
 const GENERATION_LOADING_STATE_SERIES: usize = 4;
 const GENERATION_RESPONSE_OUTCOME_SERIES: usize = 4;
 const SHUTDOWN_DRAIN_OUTCOME_SERIES: usize = 3;
+const DEADLINE_ACTION_SERIES: usize = 3;
 
 pub(crate) const SIDECAR_QUEUE_CARDINALITY_LIMIT: usize =
     OPERATION_SERIES * SIDECAR_CATALOG_PAIR_SERIES;
@@ -105,6 +107,8 @@ pub(crate) const SIDECAR_QUEUE_CARDINALITY_LIMIT: usize =
 /// the work this worker is executing?") is a transport-queue property, and
 /// multiplying it by 257 catalog pairs would buy no extra answer.
 pub(crate) const SIDECAR_WORK_ITEM_AGE_CARDINALITY_LIMIT: usize = OPERATION_SERIES;
+pub(crate) const SIDECAR_WORK_ITEM_DEADLINE_CARDINALITY_LIMIT: usize =
+    OPERATION_SERIES * DEADLINE_ACTION_SERIES;
 pub(crate) const SIDECAR_BATCH_FILL_CARDINALITY_LIMIT: usize =
     SIDECAR_QUEUE_CARDINALITY_LIMIT * FLUSH_REASON_SERIES;
 pub(crate) const SIDECAR_IPC_CARDINALITY_LIMIT: usize = IPC_METHOD_SERIES * IPC_OUTCOME_SERIES;
@@ -139,6 +143,9 @@ pub(crate) fn sidecar_metric_cardinality_limit(name: &str) -> Option<usize> {
         | BATCH_SIZE_METRIC_NAME
         | BATCH_COST_METRIC_NAME => Some(SIDECAR_QUEUE_CARDINALITY_LIMIT),
         WORK_ITEM_AGE_METRIC_NAME => Some(SIDECAR_WORK_ITEM_AGE_CARDINALITY_LIMIT),
+        WORK_ITEM_DEADLINE_EXCEEDED_METRIC_NAME => {
+            Some(SIDECAR_WORK_ITEM_DEADLINE_CARDINALITY_LIMIT)
+        }
         BATCH_FILL_RATIO_METRIC_NAME => Some(SIDECAR_BATCH_FILL_CARDINALITY_LIMIT),
         IPC_REQUESTS_METRIC_NAME | IPC_REQUEST_DURATION_METRIC_NAME => {
             Some(SIDECAR_IPC_CARDINALITY_LIMIT)
@@ -473,6 +480,18 @@ impl TelemetryContext {
         ]
     }
 
+    fn work_item_deadline_attributes(
+        &self,
+        operation: &'static str,
+        action: &'static str,
+    ) -> [KeyValue; 3] {
+        [
+            KeyValue::new("operation", operation),
+            KeyValue::new("action", action),
+            KeyValue::new("lane", self.lane.to_string()),
+        ]
+    }
+
     fn batch_attributes(
         &self,
         operation: &'static str,
@@ -612,6 +631,7 @@ pub struct EnabledSidecarTelemetry {
     queue_duration: Histogram<f64>,
     queue_depth: Gauge<u64>,
     work_item_age: Histogram<f64>,
+    work_item_deadline_exceeded: opentelemetry::metrics::Counter<u64>,
     scheduler_request_batch_dispatch_wait: Histogram<f64>,
     scheduler_request_batch_total: Histogram<f64>,
     batch_size: Histogram<u64>,
@@ -738,6 +758,13 @@ impl SidecarTelemetry {
             )
             .with_unit("s")
             .with_boundaries(WORK_ITEM_AGE_BUCKETS.to_vec())
+            .build();
+        let work_item_deadline_exceeded = meter
+            .u64_counter(WORK_ITEM_DEADLINE_EXCEEDED_METRIC_NAME)
+            .with_description(
+                "Work items found past their gateway deadline before backend execution, by whether they were dropped or executed.",
+            )
+            .with_unit("{item}")
             .build();
         let scheduler_request_batch_dispatch_wait = meter
             .f64_histogram(SCHEDULER_REQUEST_BATCH_DISPATCH_WAIT_METRIC_NAME)
@@ -947,6 +974,7 @@ impl SidecarTelemetry {
             queue_duration,
             queue_depth,
             work_item_age,
+            work_item_deadline_exceeded,
             scheduler_request_batch_dispatch_wait,
             scheduler_request_batch_total,
             batch_size,
@@ -1154,6 +1182,22 @@ impl SidecarTelemetry {
         self.work_item_age.record(
             age_seconds,
             &self.context.work_item_age_attributes(operation),
+        );
+    }
+
+    /// Record a work item found past its gateway deadline before backend
+    /// execution. `action` is `dropped` when enforcement ACK-dropped it and
+    /// `executed` when enforcement is off and it ran anyway.
+    pub fn work_item_deadline_exceeded(&self, operation: &str, action: &str) {
+        if self.inner.is_none() {
+            return;
+        }
+        self.work_item_deadline_exceeded.add(
+            1,
+            &self.context.work_item_deadline_attributes(
+                bounded_operation(operation),
+                bounded_deadline_action(action),
+            ),
         );
     }
 
@@ -2130,6 +2174,14 @@ fn bounded_operation(operation: &str) -> &'static str {
     }
 }
 
+fn bounded_deadline_action(action: &str) -> &'static str {
+    match action {
+        "dropped" => "dropped",
+        "executed" => "executed",
+        _ => OTHER,
+    }
+}
+
 fn bounded_flush_reason(reason: &str) -> &'static str {
     match reason {
         "cost_cap" => "cost_cap",
@@ -2258,6 +2310,7 @@ fn bounded_nats_reason(reason: &str) -> &'static str {
         "metadata_unavailable" => "metadata_unavailable",
         "transport" => "transport",
         "stream_ended" => "stream_ended",
+        "deadline_exceeded" => "deadline_exceeded",
         _ => OTHER,
     }
 }
@@ -2586,6 +2639,7 @@ mod tests {
             QUEUE_DURATION_METRIC_NAME,
             QUEUE_DEPTH_METRIC_NAME,
             WORK_ITEM_AGE_METRIC_NAME,
+            WORK_ITEM_DEADLINE_EXCEEDED_METRIC_NAME,
             SCHEDULER_REQUEST_BATCH_DISPATCH_WAIT_METRIC_NAME,
             SCHEDULER_REQUEST_BATCH_TOTAL_METRIC_NAME,
             BATCH_SIZE_METRIC_NAME,
@@ -2630,6 +2684,7 @@ mod tests {
         assert_eq!(SIDECAR_QUEUE_CARDINALITY_LIMIT, 7 * 257);
         // Operation alone; `lane` is fixed for the process lifetime.
         assert_eq!(SIDECAR_WORK_ITEM_AGE_CARDINALITY_LIMIT, 7);
+        assert_eq!(SIDECAR_WORK_ITEM_DEADLINE_CARDINALITY_LIMIT, 7 * 3);
         assert_eq!(SIDECAR_BATCH_FILL_CARDINALITY_LIMIT, 7 * 257 * 8);
         assert_eq!(SIDECAR_IPC_RESPONSE_CHUNK_CARDINALITY_LIMIT, 3);
         assert_eq!(SIDECAR_RESULT_TRANSPORT_CARDINALITY_LIMIT, 4 * 4);
@@ -2796,6 +2851,7 @@ mod tests {
         telemetry.generation_model_loading_response("model-a", None, "loading_started", "success");
         telemetry.shutdown_drain_completed("success", Duration::from_millis(1));
         telemetry.work_item_age_observed("encode", 1.5);
+        telemetry.work_item_deadline_exceeded("encode", "dropped");
 
         provider.force_flush().expect("force_flush");
         let resource_metrics = exporter.get_finished_metrics().expect("finished metrics");
@@ -2955,6 +3011,7 @@ mod tests {
             "customer error text",
         );
         metrics.shutdown_drain_completed("deadline_exceeded", Duration::from_secs(12));
+        metrics.work_item_deadline_exceeded("encode", "dropped");
 
         provider.force_flush().expect("force_flush");
         let resource_metrics = exporter.get_finished_metrics().expect("finished metrics");
@@ -2973,6 +3030,7 @@ mod tests {
                 QUEUE_DURATION_METRIC_NAME.to_string(),
                 QUEUE_DEPTH_METRIC_NAME.to_string(),
                 WORK_ITEM_AGE_METRIC_NAME.to_string(),
+                WORK_ITEM_DEADLINE_EXCEEDED_METRIC_NAME.to_string(),
                 SCHEDULER_REQUEST_BATCH_DISPATCH_WAIT_METRIC_NAME.to_string(),
                 SCHEDULER_REQUEST_BATCH_TOTAL_METRIC_NAME.to_string(),
                 BATCH_SIZE_METRIC_NAME.to_string(),

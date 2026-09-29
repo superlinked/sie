@@ -55,6 +55,8 @@ class WorkItem(_WorkItemRequired, total=False):
         router_id: Originating gateway identifier (for observability).
         reply_subject: NATS subject where the worker should publish results.
         timestamp: Unix timestamp when the work item was created.
+        deadline: Absolute Unix timestamp, on the clock that stamps ``timestamp``,
+            after which no caller waits for this item. Absent when unknown.
     """
 
     bundle_config_hash: str
@@ -97,6 +99,8 @@ class WorkItem(_WorkItemRequired, total=False):
     # plus flags. Do not log it at info-level; debug is fine.
     traceparent: str | None
     tracestate: str | None
+
+    deadline: float
 
 
 class _WorkResultRequired(TypedDict):

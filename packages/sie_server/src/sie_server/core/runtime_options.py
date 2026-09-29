@@ -21,14 +21,20 @@ queued requests. Routing both paths through this helper keeps them in lockstep.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import math
-from typing import TYPE_CHECKING, Any
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from sie_server.types.inputs import InvalidInputError
 from sie_server.types.overflow_policy import VALID_OVERFLOW_POLICIES
 
 if TYPE_CHECKING:
     from sie_server.config.model import ModelConfig, ResolvedProfile
+
+logger = logging.getLogger(__name__)
 
 
 def _resolve_profile_or_raise(
@@ -247,3 +253,149 @@ def apply_generation_runtime_options(
             raise ValueError(f"'options.{key}' must be a positive number")
 
     return result
+
+
+_GENERATION_CLOSE_TIMEOUT_S = 2.0
+_EXHAUSTED = object()
+_GENERATION_CLEANUP_TASKS: set[asyncio.Task[Any]] = set()
+
+
+@dataclass(frozen=True, slots=True)
+class GenerationTimeouts:
+    """Governed generation timeouts in seconds; ``None`` leaves that bound off."""
+
+    first_chunk_s: float | None = None
+    overall_s: float | None = None
+
+
+class GenerationTimeoutError(TimeoutError):
+    """A buffered generation exceeded a governed timeout.
+
+    ``code`` matches the gateway's generation timeout codes, so a direct server
+    and a gateway report the same expiry the same way.
+    """
+
+    def __init__(self, kind: Literal["first_chunk", "overall"]) -> None:
+        self.kind = kind
+        self.code = f"{kind}_timeout"
+        super().__init__(f"Generation aborted: {kind} timeout")
+
+
+def _timeout_seconds(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, int | float) or not _is_finite_number(value):
+        return None
+    return float(value) if value > 0 else None
+
+
+def resolve_generation_timeouts(
+    config: ModelConfig,
+    request_options: dict[str, Any] | None,
+) -> GenerationTimeouts:
+    """Resolve the profile and request ``first_chunk_timeout_s`` / ``overall_timeout_s``.
+
+    Call after :func:`apply_generation_runtime_options` has validated the same
+    options.
+    """
+    runtime = merge_runtime_options(config, request_options)
+    return GenerationTimeouts(
+        first_chunk_s=_timeout_seconds(runtime.get("first_chunk_timeout_s")),
+        overall_s=_timeout_seconds(runtime.get("overall_timeout_s")),
+    )
+
+
+async def bound_generation[ChunkT](
+    chunks: AsyncIterator[ChunkT],
+    timeouts: GenerationTimeouts,
+) -> AsyncIterator[ChunkT]:
+    """Yield ``chunks`` under the first-chunk and overall timeouts.
+
+    On expiry the pending read is cancelled, which aborts the engine request,
+    and :class:`GenerationTimeoutError` is raised. Engine cleanup is waited for
+    at most ``_GENERATION_CLOSE_TIMEOUT_S``; cleanup still running then keeps
+    going in the background, so a hung abort cannot hold back the response and
+    is not itself cancelled.
+    """
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    first_chunk_at = None if timeouts.first_chunk_s is None else started + timeouts.first_chunk_s
+    overall_at = None if timeouts.overall_s is None else started + timeouts.overall_s
+    received_first = False
+    pending_read: asyncio.Task[Any] | None = None
+    cleanup_by: float | None = None
+    try:
+        while True:
+            pending: list[tuple[float, Literal["first_chunk", "overall"]]] = []
+            if first_chunk_at is not None and not received_first:
+                pending.append((first_chunk_at, "first_chunk"))
+            if overall_at is not None:
+                pending.append((overall_at, "overall"))
+            if not pending:
+                chunk = await _next_chunk(chunks)
+            else:
+                deadline, kind = min(pending, key=lambda entry: entry[0])
+                read = asyncio.ensure_future(_next_chunk(chunks))
+                pending_read = read
+                try:
+                    done, _ = await asyncio.wait({read}, timeout=max(0.0, deadline - loop.time()))
+                except BaseException:
+                    read.cancel()
+                    raise
+                if read not in done:
+                    read.cancel()
+                    cleanup_by = loop.time() + _GENERATION_CLOSE_TIMEOUT_S
+                    await asyncio.wait({read}, timeout=_GENERATION_CLOSE_TIMEOUT_S)
+                    if read.done():
+                        _log_cleanup_failure(read, "cancelled generation read")
+                    raise GenerationTimeoutError(kind)
+                pending_read = None
+                chunk = read.result()
+            if chunk is _EXHAUSTED:
+                return
+            received_first = True
+            yield cast("ChunkT", chunk)
+    finally:
+        if pending_read is not None and not pending_read.done():
+            _finish_in_background(pending_read, "cancelled generation read")
+        else:
+            budget = _GENERATION_CLOSE_TIMEOUT_S if cleanup_by is None else cleanup_by - loop.time()
+            await _close_within(chunks, budget)
+
+
+async def _next_chunk(chunks: AsyncIterator[Any]) -> Any:
+    try:
+        return await anext(chunks)
+    except StopAsyncIteration:
+        return _EXHAUSTED
+
+
+async def _aclose(chunks: Any) -> None:
+    await chunks.aclose()
+
+
+async def _close_within(chunks: AsyncIterator[Any], budget_s: float) -> None:
+    if getattr(chunks, "aclose", None) is None:
+        return
+    close = asyncio.ensure_future(_aclose(chunks))
+    done, _ = await asyncio.wait({close}, timeout=max(0.0, budget_s))
+    if close not in done:
+        _finish_in_background(close, "generation stream close")
+        return
+    _log_cleanup_failure(close, "generation stream close")
+
+
+def _finish_in_background(task: asyncio.Task[Any], context: str) -> None:
+    _GENERATION_CLEANUP_TASKS.add(task)
+
+    def _done(finished: asyncio.Task[Any]) -> None:
+        _GENERATION_CLEANUP_TASKS.discard(finished)
+        _log_cleanup_failure(finished, context)
+
+    task.add_done_callback(_done)
+
+
+def _log_cleanup_failure(task: asyncio.Task[Any], context: str) -> None:
+    if task.cancelled():
+        return
+    error = task.exception()
+    if error is not None and not isinstance(error, asyncio.CancelledError):
+        logger.warning("%s failed after the generation outcome was decided", context, exc_info=error)

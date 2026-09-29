@@ -11,9 +11,21 @@ from tools.mise_tasks import helm
 
 ROOT = Path(__file__).resolve().parents[3]
 WORKER_TEMPLATE = "templates/worker-statefulset.yaml"
+KEDA_APPLY_TEMPLATE = "templates/keda-scaledobject.yaml"
+KEDA_CLEANUP_TEMPLATE = "templates/keda-lifecycle.yaml"
+AUTOSCALING_VALUES = {
+    "autoscaling": {"enabled": True},
+    "observability": {
+        "otel": {"collector": {"prometheus": {"networkPolicy": {"scrapeNamespaceNames": ["monitoring"]}}}}
+    },
+}
 
 
 def render_workers(tmp_path: Path, values: dict) -> subprocess.CompletedProcess[str]:
+    return render_template(tmp_path, values, WORKER_TEMPLATE)
+
+
+def render_template(tmp_path: Path, values: dict, template: str) -> subprocess.CompletedProcess[str]:
     values_file = tmp_path / "values.yaml"
     values_file.write_text(yaml.safe_dump(values), encoding="utf-8")
     return subprocess.run(
@@ -27,7 +39,7 @@ def render_workers(tmp_path: Path, values: dict) -> subprocess.CompletedProcess[
             str(helm.CHART_DIR),
             "--namespace",
             "sie",
-            *helm.validation_args(["-f", str(values_file), "--show-only", WORKER_TEMPLATE]),
+            *helm.validation_args(["-f", str(values_file), "--show-only", template]),
         ],
         cwd=ROOT,
         capture_output=True,
@@ -109,3 +121,34 @@ def test_readme_device_group_example_renders(tmp_path: Path) -> None:
     ]
     assert worker["resources"]["limits"]["nvidia.com/gpu"] == str(pool["gpu"]["count"])
     assert worker["resources"]["limits"]["memory"] == pool["resources"]["limits"]["memory"]
+
+
+def hook_events(tmp_path: Path, values: dict, template: str) -> dict[tuple[str, str], set[str]]:
+    result = render_template(tmp_path, values, template)
+    assert result.returncode == 0, result.stderr
+    return {
+        (doc["kind"], doc["metadata"]["name"]): set(doc["metadata"]["annotations"]["helm.sh/hook"].split(","))
+        for doc in yaml.safe_load_all(result.stdout)
+        if doc and "helm.sh/hook" in doc["metadata"].get("annotations", {})
+    }
+
+
+def test_scaledobject_apply_hook_also_runs_on_rollback(tmp_path: Path) -> None:
+    hooks = hook_events(tmp_path, AUTOSCALING_VALUES, KEDA_APPLY_TEMPLATE)
+
+    assert sorted(kind for kind, _ in hooks) == ["Job", "Role", "RoleBinding", "ServiceAccount"]
+    assert all(events == {"post-install", "post-upgrade", "post-rollback"} for events in hooks.values()), hooks
+
+
+@pytest.mark.parametrize(
+    ("values", "expected"),
+    [
+        ({}, {"pre-upgrade", "pre-rollback", "pre-delete"}),
+        (AUTOSCALING_VALUES, {"pre-delete"}),
+    ],
+)
+def test_scaledobject_cleanup_hook_events(tmp_path: Path, values: dict, expected: set[str]) -> None:
+    hooks = hook_events(tmp_path, values, KEDA_CLEANUP_TEMPLATE)
+
+    assert sorted(kind for kind, _ in hooks) == ["Job", "Role", "RoleBinding", "ServiceAccount"]
+    assert all(events == expected for events in hooks.values()), hooks

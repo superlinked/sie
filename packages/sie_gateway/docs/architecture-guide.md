@@ -79,7 +79,7 @@ Gateway-generated **JSON error** bodies (validation, routing, auth, config read,
 All config mutations go to `sie-config`. The gateway has no write handler.
 
 1. Admin or deploy tooling sends `POST /v1/configs/models` with a model config YAML body to `sie-config`. Auth: `_check_write_auth` (`packages/sie_config/src/sie_config/config_api.py`) requires a bearer matching `SIE_ADMIN_TOKEN` when that variable is set; if `SIE_ADMIN_TOKEN` is unset and `SIE_AUTH_TOKEN` is set, writes are rejected with `403` (the inference token never grants write access); if neither token is set (dev/local only) writes are accepted unauthenticated. Production deployments always set `SIE_ADMIN_TOKEN`.
-2. **Pre-lock validation** (outside the per-app write lock, on the FastAPI event loop): parse the YAML body and — when a top-level `sie_id` is present — run `_validate_model_id` (regex + `..`/`\\` rejection + `status`-suffix rejection). Reject invalid input with `400` before any state is touched.
+2. **Pre-lock validation** (outside the per-app write lock, on the FastAPI event loop): parse the YAML body and — when a top-level `sie_id` is present — run `_validate_model_id` (regex + `..`/`\\` rejection + `status`-suffix rejection). Reject invalid input with `400` before any state is touched. The body is also checked against `packages/sie_config/src/sie_config/model_config.schema.json`, the JSON Schema of the worker's `ModelConfig` (a test keeps the two equal): an unknown key or a wrong value type at any level returns `422 validation_error` with one `{loc, message}` entry per field, instead of accepting a config that every worker rejects. JSON types are applied strictly, so values that pydantic's lax mode would coerce, such as a quoted number, are rejected too. Required fields are not enforced here, since append bodies are partial. `PUT` runs the same check.
 3. **Critical section** under `_get_write_lock` (a lazy, per-app `asyncio.Lock` stored on `app.state`):
    1. `ModelRegistry.validate_model_config` — pure check against the in-memory registry (no mutation), run under the registry's internal `threading.RLock`. Validation rejects any write whose post-state resolves to zero routable bundles (`422`), so an `extends`-only profile cannot land a brand-new model that no worker bundle can serve. Appending a new `extends`-only profile to an already-routable model is allowed.
    2. **Compute `created_profiles` vs `existing_profiles_skipped`.** The write is treated as append-only: profiles already present in the registry with a compatible body are reported as skipped, not rewritten. If there are no new profiles *and* at least one skip, an on-disk conflict check compares the incoming YAML against `ConfigStore`'s existing file for this model (guards against disk drift from the in-memory registry).
@@ -236,7 +236,7 @@ Concurrency on the gateway's `ModelRegistry`:
 
 ## 6. Worker-Ack Status (`GET /v1/configs/models/{id}/status`)
 
-Admin tooling uses this endpoint after a `sie-config` write to observe whether configured workers are reporting the expected `bundle_config_hash` for each affected bundle. Worker-sidecar containers advance that hash after their bundle-scoped NATS delta is accepted by backend IPC `ApplyModelConfig`, or after the worker export reconciler replaces the bundle-scoped backend registry/catalog view from `sie-config`.
+Admin tooling uses this endpoint after a `sie-config` write to observe whether configured workers are reporting the expected `bundle_config_hash` for each affected bundle. Worker-sidecar containers advance that hash after their bundle-scoped NATS delta is accepted by backend IPC `ApplyModelConfig`, or after the worker export reconciler replaces the bundle-scoped backend registry/catalog view from `sie-config`. During that replacement the Python worker applies every entry its `ModelConfig` schema accepts; for a rejected entry it logs the model and reason and keeps that model's current registry entries, if any. The sidecar still advances the advertised hash only when the worker's resulting hash equals the control-plane hash.
 
 Response shape:
 
@@ -302,7 +302,7 @@ Per-subject transport:
 | Pool inference work (`encode` / `score` / `extract`) | `sie.work.{pool}.{machine_profile}.{bundle}.{model}` | JetStream | Durability and max-delivery semantics required. Work-item payload is msgpack. One stream per pool (`WORK_POOL_{pool}`) captures ordinary non-generation work for the pool, while worker consumers filter one concrete machine-profile/bundle lane; see §8.2. |
 | Worker direct-dispatch | `sie.work.{pool}.{machine_profile}.{bundle}.{model}.{worker_id}` | JetStream | Worker-specific stream used by generation and by capped logical batch pools that must target an assigned worker instead of allowing unassigned workers on the same backing queue to burn JetStream delivery attempts. |
 | Batch direct cancel | `batch_cancel.{router_id}.{worker_id}.{request_id}` | NATS Core | Best-effort worker-scoped signal emitted only after non-streaming worker-direct fallback publishes are durably acked on the pool subject. Sidecars ACK-drop queued worker-direct encode/score/extract items for the request; pool fallback items are never cancelled by this signal. |
-| Non-generation request abandonment | `work_cancel.{router_id}.{request_id}` | NATS Core | Best-effort request-wide signal emitted when the gateway abandons encode/score/extract work. Active sidecars retain bounded namespaced tombstones and ACK-drop matching work before backend IPC. The signal is not replayed to disconnected or restarted workers, and static inference already past IPC is not preempted. |
+| Non-generation request abandonment | `work_cancel.{router_id}.{request_id}` | NATS Core | Best-effort request-wide signal emitted when the gateway abandons encode/score/extract work, including when a publish ACK fails and the stored item's fate is unknown. Active sidecars retain bounded namespaced tombstones and ACK-drop matching work before backend IPC. The signal is not replayed to disconnected or restarted workers, and static inference already past IPC is not preempted. |
 | Inference results | `_INBOX.{router_id}.{request_id}` | NATS Core | Gateway is waiting synchronously; a brief blip after publish but before delivery means the result is lost and the client may retry (the gateway returns `504` with `X-SIE-Error-Code: GATEWAY_TIMEOUT` and `Retry-After: 5` — see §2). Result payload is msgpack. |
 | Config deltas | `sie.config.models.{bundle}`, `sie.config.models._all` | NATS Core | Lightweight fan-out. Gateway durability comes from the snapshot/export path (section 4), not the bus. JSON payload (control plane, not hot path). The gateway subscribes on `_all`; worker-sidecar containers subscribe on their bundle subject and apply through backend IPC. |
 | Worker health | `sie.health.>` | NATS Core | Ephemeral, last-heartbeat-wins. The gateway subscribes in `health_mode=nats` (see `discovery/nats_health.rs`) and supervises the subscriber task: reconnects normally resume in `async-nats`, but a terminated subscription stream is recreated with bounded backoff because there is no full-state health poller. Worker-sidecar containers publish this heartbeat and include the latest bundle hash after successful config apply. Helm sidecar deployments set `health_mode=nats`; the gateway binary default remains `ws` so standalone/test deployments can use the Python WebSocket path. |
@@ -365,7 +365,21 @@ performs request abandonment: it releases chunk-memory reservations, terminates
 the response path without partial success, publishes `work_cancel`, and deletes
 exact-key offloaded payloads. Late results see no collector and are
 dropped. JetStream stays at-least-once; abandonment does not claim exactly-once
-delivery or execution.
+delivery or execution. A failed durable publish ACK removes the collector the
+same way and also publishes `work_cancel`, because a failed ACK does not prove
+the broker discarded the item.
+
+Every non-streaming work item also carries `deadline`, the publish timestamp
+plus the request timeout, as absolute Unix seconds. Sidecars use it to keep
+held deliveries leased and to size backend calls, count items found past it,
+and, when `SIE_WORK_DEADLINE_ENFORCE=true` is set on the workers, ACK-drop
+them before execution, which covers workers that never saw the `work_cancel`
+signal. The comparison spans the gateway and worker clocks, so both must be
+synchronised. Workers ignore a deadline more than `SIE_WORK_DEADLINE_MAX_BUDGET_S`
+(default 180 s) after its timestamp and log a warning, so raising
+`SIE_GATEWAY_REQUEST_TIMEOUT` above that value requires raising the worker
+setting too. Streaming generation items omit it because their timeouts are
+resolved per profile after publication.
 
 The managed Modal dispatcher implements the same ownership contract without a
 NATS cancellation hop. It registers an abort handle for each detached
@@ -790,6 +804,8 @@ WorkItem {
   machine_profile: "default",
   item:          { "text": "..." },       // or omitted + payload_ref if >1MB
   reply_subject: "_INBOX.gw-1.abc-123",
+  timestamp:     1700000000.0,
+  deadline:      1700000120.0,             // timestamp + request timeout; omitted when unknown
   accepts_result_chunks: true,              // supports result_chunk_v1 only; absent/false keeps one-shot
   bundle_config_hash: "a1b2c3…",
   …

@@ -362,6 +362,9 @@
           "503": {
             "description": "Model loading or unavailable"
           },
+          "504": {
+            "description": "Non-streaming generation exceeded its first_chunk_timeout_s or overall_timeout_s"
+          },
           "422": {
             "description": "Validation Error",
             "content": {
@@ -824,6 +827,9 @@
           "503": {
             "description": "Model loading or temporarily unavailable"
           },
+          "504": {
+            "description": "Non-streaming generation exceeded its first_chunk_timeout_s or overall_timeout_s"
+          },
           "422": {
             "description": "Validation Error",
             "content": {
@@ -898,6 +904,9 @@
           },
           "503": {
             "description": "Model loading or temporarily unavailable"
+          },
+          "504": {
+            "description": "Non-streaming generation exceeded its first_chunk_timeout_s or overall_timeout_s"
           },
           "422": {
             "description": "Validation Error",

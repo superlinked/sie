@@ -374,7 +374,9 @@ because it does not change their batch-shape semantics; fill ratio retains it.
 `sie.worker.work_item.age` omits the catalog pair entirely and costs seven
 series: transport-queue age is a property of the queue rather than of the
 model on the far side of it, so the catalog factor would multiply the series
-count without adding an answer. The resulting high-product ceilings are 14,392
+count without adding an answer. `sie.worker.work_item.deadline_exceeded`
+likewise carries only `operation` and `action` (`dropped` or `executed`), for
+21 series. The resulting high-product ceilings are 14,392
 fill-ratio series and 4,112 generation-loading series, while all other sidecar
 ceilings are at or below 1,799. These are upper bounds on retained SDK series,
 not expected steady-state usage or byte-size claims; the machine-checked

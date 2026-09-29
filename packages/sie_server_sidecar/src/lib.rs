@@ -38,6 +38,7 @@ pub mod scheduler;
 pub mod shutdown;
 pub mod subject;
 pub mod tokenize;
+pub mod work_deadline;
 pub mod work_types;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -53,8 +54,8 @@ use tracing::{debug, info, warn};
 
 use crate::backend::{AdapterWorkerPool, BackendRouter, SharedBackend};
 use crate::batch_cancel::{
-    request_id_from_batch_cancel_subject, request_id_from_work_cancel_subject, BatchCancelState,
-    RequestCancelState,
+    request_id_from_batch_cancel_subject, request_id_from_generation_cancel_subject,
+    request_id_from_work_cancel_subject, BatchCancelState, RequestCancelState,
 };
 use crate::config::WorkerConfig;
 use crate::config_subscriber::ConfigApplyState;
@@ -312,6 +313,7 @@ pub async fn run(config: WorkerConfig) -> anyhow::Result<()> {
         freshness_ms = readiness.freshness_ms(),
         "readiness: /readyz freshness window configured"
     );
+    crate::work_deadline::nats_progress_leases().gate_on_backend_readiness(Arc::clone(&readiness));
 
     // Construct the single telemetry facade and neutral runtime-pressure state
     // before wiring components that report semantic observations through it.
@@ -1078,6 +1080,7 @@ impl GenerationDirectDispatch {
         let generation_cancel = spawn_generation_cancel_subscriber(
             self.nats_client.clone(),
             Arc::clone(&self.worker_pool),
+            self.request_cancel_state.clone(),
             Arc::clone(&self.shutdown),
         );
 
@@ -1219,9 +1222,15 @@ async fn spawn_work_cancel_subscriber(
     }))
 }
 
+/// Forwards `cancel.{router_id}.{request_id}` to generation in the backend
+/// and records the same request-wide tombstone that `work_cancel` does, so
+/// queued encode, score, and extract items for that request are ACK-dropped
+/// before execution. Request IDs are unique per request, so the tombstone
+/// never matches another request's work.
 fn spawn_generation_cancel_subscriber(
     nats_client: async_nats::Client,
     worker_pool: Arc<AdapterWorkerPool>,
+    request_cancel_state: RequestCancelState,
     shutdown: Arc<Shutdown>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -1243,6 +1252,11 @@ fn spawn_generation_cancel_subscriber(
                         return;
                     };
                     let subject = msg.subject.to_string();
+                    if let Some((router_id, request_id)) =
+                        request_id_from_generation_cancel_subject(&subject)
+                    {
+                        request_cancel_state.cancel(router_id, request_id);
+                    }
                     let Some(request_id) = request_id_from_cancel_subject(&subject) else {
                         debug!(subject = %subject, "generation: ignoring malformed cancel subject");
                         continue;

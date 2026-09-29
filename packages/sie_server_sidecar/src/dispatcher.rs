@@ -55,6 +55,11 @@ use crate::scheduler::{
 use crate::shutdown::Shutdown;
 use crate::subject::{extract_model_id, is_worker_direct_work_subject};
 use crate::tokenize::TokenizerRegistry;
+use crate::work_deadline::{
+    apparent_age_ms, unix_now_s, ClockSkewSignal, DeadlineStatus, WorkDeadlinePolicy,
+    CLOCK_SKEW_WARNINGS, EXPIRED_DROP_WARNINGS, EXPIRED_EXECUTE_WARNINGS,
+    REJECTED_DEADLINE_WARNINGS,
+};
 use crate::work_types::WorkItem;
 use half::f16;
 
@@ -633,6 +638,8 @@ pub struct Dispatcher {
     pub generation_handles: Arc<Mutex<Vec<JoinHandle<()>>>>,
     pub batch_cancel_state: BatchCancelState,
     pub request_cancel_state: RequestCancelState,
+    /// Gateway-stamped deadline enforcement, read from env at construction.
+    pub work_deadline: WorkDeadlinePolicy,
 }
 
 impl Dispatcher {
@@ -691,6 +698,7 @@ impl Dispatcher {
             generation_handles: Arc::new(Mutex::new(Vec::new())),
             batch_cancel_state,
             request_cancel_state,
+            work_deadline: WorkDeadlinePolicy::from_env(),
         }
     }
 }
@@ -921,6 +929,9 @@ impl Dispatcher {
         delivery: &Delivery,
         stage: &'static str,
     ) -> bool {
+        if self.settle_if_expired(wi, delivery, stage).await {
+            return true;
+        }
         let Some(scope) = self.cancellation_for(
             &wi.router_id,
             &wi.request_id,
@@ -945,6 +956,128 @@ impl Dispatcher {
             }
         }
         true
+    }
+
+    /// Handle a NATS delivery whose gateway deadline has passed. With
+    /// enforcement on it is ACK-dropped; otherwise it is counted and executed.
+    /// Local-ingest callers bound their own calls and always get a result, and
+    /// generation keeps its own cancellation contract.
+    async fn settle_if_expired(
+        &self,
+        wi: &WorkItem,
+        delivery: &Delivery,
+        stage: &'static str,
+    ) -> bool {
+        if wi.operation == "generate" || !matches!(delivery, Delivery::Nats(..)) {
+            return false;
+        }
+        let now = unix_now_s();
+        let DeadlineStatus::Expired(overdue) =
+            self.work_deadline.status(wi.deadline, wi.timestamp, now)
+        else {
+            return false;
+        };
+        let telemetry = &self.runtime_state.telemetry;
+        if !self.work_deadline.enforce {
+            if stage == "before_ipc" {
+                telemetry.work_item_deadline_exceeded(&wi.operation, "executed");
+                if let Some(suppressed) = EXPIRED_EXECUTE_WARNINGS.allow() {
+                    warn!(
+                        request_id = %wi.request_id,
+                        work_item_id = %wi.work_item_id,
+                        operation = %wi.operation,
+                        overdue_ms = overdue.as_millis() as u64,
+                        apparent_age_ms = apparent_age_ms(wi.timestamp, now),
+                        suppressed,
+                        "executing work item past its deadline because SIE_WORK_DEADLINE_ENFORCE is off"
+                    );
+                }
+            }
+            return false;
+        }
+        telemetry.work_item_deadline_exceeded(&wi.operation, "dropped");
+        if let Some(suppressed) = EXPIRED_DROP_WARNINGS.allow() {
+            warn!(
+                request_id = %wi.request_id,
+                work_item_id = %wi.work_item_id,
+                operation = %wi.operation,
+                overdue_ms = overdue.as_millis() as u64,
+                apparent_age_ms = apparent_age_ms(wi.timestamp, now),
+                stage,
+                suppressed,
+                "ACK-dropping work item past its deadline"
+            );
+        }
+        if let Err(e) = ack_with_reason(delivery, telemetry, "deadline_exceeded").await {
+            warn!(error = %e, stage, "ack failed on expired work item");
+        }
+        true
+    }
+
+    /// Warn when a delivery's deadline is ignored for its budget, or when its
+    /// timestamps show that this worker's clock and the gateway's disagree by
+    /// more than the skew tolerance.
+    fn observe_deadline_clock(&self, wi: &WorkItem, delivery: &Delivery) {
+        let Delivery::Nats(msg, ..) = delivery else {
+            return;
+        };
+        if wi.operation == "generate" {
+            return;
+        }
+        if let Some(budget_s) = self
+            .work_deadline
+            .rejected_budget_s(wi.deadline, wi.timestamp)
+        {
+            if let Some(suppressed) = REJECTED_DEADLINE_WARNINGS.allow() {
+                warn!(
+                    request_id = %wi.request_id,
+                    deadline_budget_s = budget_s,
+                    max_budget_s = self.work_deadline.max_budget.as_secs(),
+                    suppressed,
+                    "ignoring a work item deadline that is not within SIE_WORK_DEADLINE_MAX_BUDGET_S of its timestamp; raise the setting to at least the gateway request timeout"
+                );
+            }
+            return;
+        }
+        let now = unix_now_s();
+        let first_delivery = msg.info().is_ok_and(|info| info.delivered == 1);
+        let Some(signal) =
+            self.work_deadline
+                .clock_skew_signal(wi.deadline, wi.timestamp, first_delivery, now)
+        else {
+            return;
+        };
+        let Some(suppressed) = CLOCK_SKEW_WARNINGS.allow() else {
+            return;
+        };
+        match signal {
+            ClockSkewSignal::TimestampAhead { ahead_ms } => warn!(
+                request_id = %wi.request_id,
+                ahead_ms,
+                skew_tolerance_ms = self.work_deadline.skew_tolerance.as_millis() as u64,
+                suppressed,
+                "work item was published later than this worker's clock reads; the worker clock is likely behind the gateway clock"
+            ),
+            ClockSkewSignal::FirstDeliveryExpired { overdue_ms } => warn!(
+                request_id = %wi.request_id,
+                overdue_ms,
+                apparent_age_ms = apparent_age_ms(wi.timestamp, now),
+                suppressed,
+                "first delivery of a work item is already past its deadline; it waited in the stream longer than its budget or this worker's clock is ahead of the gateway clock"
+            ),
+        }
+    }
+
+    /// Keep a held NATS delivery's JetStream lease alive until it settles or
+    /// its lease horizon passes, so slow queues and long backend calls do not
+    /// trigger a redelivery of work that is still running.
+    fn hold_progress_lease(&self, wi: &WorkItem, delivery: &mut Delivery) {
+        if let Some(horizon) =
+            self.work_deadline
+                .lease_horizon(wi.deadline, wi.timestamp, unix_now_s())
+        {
+            delivery.hold_progress_lease(horizon, &self.runtime_state.telemetry);
+        }
     }
 
     async fn retain_uncancelled(
@@ -1060,7 +1193,7 @@ impl Dispatcher {
                         "could not extract model_id from subject — NAKing for redelivery",
                     );
                     nak_one(
-                        &Delivery::Nats(msg, admission_permit),
+                        &Delivery::Nats(msg, admission_permit, None),
                         base_delay_ms,
                         &self.runtime_state.telemetry,
                     )
@@ -1079,7 +1212,7 @@ impl Dispatcher {
                             "rejecting WorkItem with suspicious reply_subject — ACKing to drop",
                         );
                         match ack(
-                            &Delivery::Nats(msg, admission_permit),
+                            &Delivery::Nats(msg, admission_permit, None),
                             &self.runtime_state.telemetry,
                         )
                         .await
@@ -1091,7 +1224,8 @@ impl Dispatcher {
                         }
                         continue;
                     }
-                    let delivery = Delivery::Nats(msg, admission_permit);
+                    let mut delivery = Delivery::Nats(msg, admission_permit, None);
+                    self.observe_deadline_clock(&wi, &delivery);
                     if self.settle_if_cancelled(&wi, &delivery, "intake").await {
                         continue;
                     }
@@ -1125,6 +1259,9 @@ impl Dispatcher {
                         );
                         wi.model_id = subject_model;
                     }
+                    if wi.operation != "generate" {
+                        self.hold_progress_lease(&wi, &mut delivery);
+                    }
                     decoded.push((wi, delivery));
                 }
                 Err(e) => {
@@ -1134,7 +1271,7 @@ impl Dispatcher {
                     // item on a transient msgpack glitch.
                     warn!(error = %e, subject = %msg.subject, "failed to decode WorkItem — NAKing for redelivery");
                     nak_one(
-                        &Delivery::Nats(msg, admission_permit),
+                        &Delivery::Nats(msg, admission_permit, None),
                         base_delay_ms,
                         &self.runtime_state.telemetry,
                     )
@@ -1173,7 +1310,7 @@ impl Dispatcher {
                     // Generation bypasses the scheduler; re-bundle the permit
                     // with the message so intake capacity stays held until
                     // the generate task settles the delivery.
-                    Delivery::Nats(msg, permit) => {
+                    Delivery::Nats(msg, permit, _) => {
                         generate_items.push((wi, QueuedMessage::new(msg, permit)))
                     }
                     delivery @ Delivery::Local(_) => {
@@ -4409,12 +4546,20 @@ async fn ack(
     delivery: &Delivery,
     telemetry: &crate::observability::metrics::SidecarTelemetry,
 ) -> Result<(), DispatchError> {
+    ack_with_reason(delivery, telemetry, "completed").await
+}
+
+async fn ack_with_reason(
+    delivery: &Delivery,
+    telemetry: &crate::observability::metrics::SidecarTelemetry,
+    reason: &str,
+) -> Result<(), DispatchError> {
     let result = delivery.ack().await.map_err(DispatchError::Ack);
     if matches!(delivery, Delivery::Nats(..)) {
         telemetry.nats_operation(
             "ack",
             if result.is_ok() { "success" } else { "error" },
-            "completed",
+            reason,
             1,
         );
     }
@@ -4946,6 +5091,15 @@ async fn process_scheduler_batch(
         batch.metadata.iter().map(|meta| &meta.wi),
     );
 
+    let run_batch_budget = dispatcher.work_deadline.run_batch_budget(
+        batch
+            .metadata
+            .iter()
+            .filter(|meta| matches!(meta.delivery, Delivery::Nats(..)))
+            .map(|meta| (meta.wi.deadline, meta.wi.timestamp)),
+        unix_now_s(),
+    );
+
     // Capture this monotonic boundary immediately before the backend RPC. The
     // enqueue→dispatch histogram therefore includes time parked behind the
     // scheduler pipeline permit, config execution barrier, and local request
@@ -4953,7 +5107,11 @@ async fn process_scheduler_batch(
     // the backend roundtrip.
     let dispatch_started_at = Instant::now();
 
-    let outcome = match dispatcher.backend.run_batch(req).await {
+    let outcome = match dispatcher
+        .backend
+        .run_batch_with_budget(req, run_batch_budget)
+        .await
+    {
         Ok(o) => o,
         Err(e) => {
             dispatcher.runtime_state.inflight_batches.dec();
@@ -5739,6 +5897,7 @@ mod tests {
             traceparent: None,
             tracestate: None,
             timestamp: 0.0,
+            deadline: None,
         }
     }
 
@@ -6024,7 +6183,7 @@ mod tests {
             },
             context: async_nats::jetstream::new(client),
         };
-        Delivery::Nats(message, None)
+        Delivery::Nats(message, None, None)
     }
 
     #[tokio::test(start_paused = true)]

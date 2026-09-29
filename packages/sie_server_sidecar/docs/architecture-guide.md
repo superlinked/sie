@@ -77,6 +77,51 @@ Message settlement:
 - Reply publication failure, including a partial chunk sequence, leaves the
   JetStream message unacked for redelivery.
 
+Work-item deadlines:
+
+- The gateway stamps non-streaming work items with an optional `deadline`, an
+  absolute Unix time in seconds on the clock that stamps `timestamp`. An item
+  without one, with a non-numeric one, or whose `deadline - timestamp` is
+  negative or larger than `SIE_WORK_DEADLINE_MAX_BUDGET_S` (default 180) keeps
+  the behaviour that predates deadlines, and a numeric deadline ignored this
+  way is reported with a rate-limited warning naming its budget. Keep
+  `SIE_WORK_DEADLINE_MAX_BUDGET_S` at or above the gateway's
+  `SIE_GATEWAY_REQUEST_TIMEOUT`; otherwise every item's deadline is ignored.
+  Generation items are never judged by this field.
+- The comparison is between the gateway and worker wall clocks plus
+  `SIE_WORK_DEADLINE_SKEW_TOLERANCE_MS` (default 5000, at most 60000). Keep
+  gateway and worker hosts synchronised, for example with NTP. The sidecar
+  logs a rate-limited warning when an item's publish timestamp is ahead of its
+  own clock by more than the tolerance, and when a first delivery is already
+  past its deadline, which means it waited in the stream longer than its budget
+  or the worker clock is ahead.
+- By default a NATS delivery past its deadline still executes. It is counted as
+  `sie.worker.work_item.deadline_exceeded{action="executed"}` and logged with a
+  rate-limited warning before backend IPC. With
+  `SIE_WORK_DEADLINE_ENFORCE=true` it is instead ACK-dropped at the same
+  checkpoints as `work_cancel`, before payload fetch and backend IPC, and
+  counted as `sie.worker.work_item.deadline_exceeded{action="dropped"}` (and as
+  `sie.worker.nats.operations{operation="ack",reason="deadline_exceeded"}`).
+  Run with the default first and alert on a sustained
+  `sie_worker_work_item_deadline_exceeded_total` rate, which points at a
+  backlog or at clock skew, before enabling enforcement. Local-ingest callers
+  bound their own calls and are never dropped.
+- Encode, score, and extract deliveries with a deadline hold a progress lease
+  from intake: they are progress-ACKed at most about 10 s apart until they are
+  ACKed, NAKed, or dropped, so a slow scheduler queue or backend call does not
+  trigger a redelivery of work that is still running. Settlement waits for a
+  progress ACK already in flight, so none follows the ACK or NAK. Progress
+  pauses once an established backend heartbeat goes stale or the sidecar is
+  draining, so JetStream can move the work to another worker; the pause and
+  the resume are logged. Before the first successful heartbeat the backend
+  state is unknown and progress continues. With enforcement on, the lease
+  ends at the deadline and a later redelivery is dropped as expired; with
+  enforcement off it lasts one more maximum budget past the deadline.
+- A `RunBatch` call waits for the longer of `SIE_IPC_REQUEST_TIMEOUT_S` and
+  the time until the batch's latest deadline, at most
+  `SIE_WORK_DEADLINE_MAX_BUDGET_S`, so a legitimate slow batch is not cut short
+  and retried.
+
 Source: [`dispatcher.rs`](../src/dispatcher.rs),
 [`publisher.rs`](../src/publisher.rs), and [`work_types.rs`](../src/work_types.rs).
 
@@ -124,7 +169,10 @@ Lookups are constant-time and occur before model readiness, during readiness
 waits, around offloaded-payload fetch, at scheduler admission, and immediately
 before backend IPC. Matching encode, score, and extract deliveries are
 ACK-dropped through one settlement path; generation is excluded because its
-streaming cancellation contract uses `cancel.*`.
+streaming cancellation contract uses `cancel.*`. The gateway's
+`cancel.{router_id}.{request_id}` records the same tombstone, so encode, score,
+and extract work for a request cancelled that way is also dropped before
+IPC.
 
 The greater of the work stream age and retry window is the active worker's
 tombstone expiry horizon. A 100,000-entry process cap evicts the oldest

@@ -780,6 +780,11 @@ workers:
       # Use workers.common.modelReadyTimeoutSec for cold-load timeout tuning so
       # Python SGLang health waits, Rust EnsureModelReady IPC calls, and worker
       # liveness-budget validation stay in sync.
+      # Work-item deadline settings are set here, for example
+      # SIE_WORK_DEADLINE_ENFORCE, SIE_WORK_DEADLINE_SKEW_TOLERANCE_MS, and
+      # SIE_WORK_DEADLINE_MAX_BUDGET_S. The last must be at least the gateway's
+      # SIE_GATEWAY_REQUEST_TIMEOUT (default 120 s against 180 s); see the
+      # chart README, "Work-item deadlines".
       extraEnv: []
       # -- Resource requests/limits for the sidecar. Conservative
       # defaults; the heavy lifting still happens in the adapter worker.
@@ -1281,8 +1286,9 @@ dashboards:
 
 # -- Health gate hooks. autoscaling.enabled always enables the Prometheus and
 # KEDA ScaledObject/HPA control-path gates. The explicit switch below adds
-# application HTTP smoke Jobs. The KEDA/OTLP transition is forward-only and
-# deliberately has no post-rollback hook path.
+# application HTTP smoke Jobs. Gates run on install and upgrade only; a
+# rollback re-applies the target revision's ScaledObjects without re-running
+# them. The canonical 0.6.20 KEDA/OTLP transition itself is forward-only.
 healthGates:
   # -- Enable gateway and config HTTP health gates.
   # This cannot disable the mandatory autoscaling control-path gates.
