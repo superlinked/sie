@@ -355,8 +355,17 @@ def _maybe_multivector_raw_output(
     formatted: dict[str, Any],
     config: Any,
     output_types: list[str],
+    *,
+    f16_bytes: bool = False,
 ) -> RawOutput | None:
     """Multivector-only fast path for the Rust output shaper.
+
+    With ``f16_bytes`` (the sidecar declares it takes float16 byte buffers) a
+    float16 matrix travels as its little-endian bytes in ``values_f16``: 2 bytes
+    a value, where a list of Python floats packs as 9-byte msgpack doubles.
+    Wide multivector models need it to stay under the IPC response cap: one
+    8,192-token document of a 2,048-dim model is 16.8M values, 144 MiB as
+    doubles against 32 MiB as float16.
 
     Mirrors the invariants of the ``multivector`` branch of
     ``_wrap_encode_output``:
@@ -401,6 +410,17 @@ def _maybe_multivector_raw_output(
         token_dims = int(mv_dim)
     else:
         token_dims = int(arr.shape[1])
+
+    if f16_bytes and arr.dtype == np.float16:
+        return RawOutput(
+            multivector=MultivectorOutput(
+                values=[],
+                num_tokens=num_tokens,
+                token_dims=token_dims,
+                dtype="float16",
+                values_f16=np.ascontiguousarray(arr, dtype="<f2").tobytes(),
+            ),
+        )
 
     # Values must be contiguous in C order so ``.tobytes()`` (and the
     # Rust ``values.to_le_bytes()`` equivalent) agree. ``tolist()``
@@ -1000,6 +1020,7 @@ class QueueExecutor:
                 request_options=group[0].options or {},
                 outcomes=outcomes,
                 isolation=isolation,
+                f16_bytes=req.accepts_batched_f16_multivectors,
             )
 
         return BatchOutcome(outcomes=[outcomes[bi.work_item_id] for bi in items])
@@ -1017,6 +1038,7 @@ class QueueExecutor:
         outcomes: dict[str, ItemOutcome],
         isolation: _IsolationBudget,
         depth: int = 0,
+        f16_bytes: bool = False,
     ) -> None:
         """Run one encode sub-group and record its per-item outcomes.
 
@@ -1024,7 +1046,8 @@ class QueueExecutor:
         ``InvalidInputError`` can be isolated by re-running narrower groups —
         see :meth:`_isolate_encode_invalid_input`. ``isolation`` is the batch's
         shared re-run budget and ``depth`` the current bisection depth, both
-        carried only for that path.
+        carried only for that path. ``f16_bytes``: the sidecar takes float16
+        multivectors as byte buffers (see :func:`_maybe_multivector_raw_output`).
         """
         # Validate each item against the typed Item contract at the seam
         # (parity with the HTTP path). A per-item decode failure is isolated
@@ -1165,6 +1188,7 @@ class QueueExecutor:
                             formatted_outputs[idx],
                             config,
                             response_output_types,
+                            f16_bytes=f16_bytes,
                         )
                     if raw_output is None:
                         output = _wrap_encode_output(formatted_outputs[idx], config)
@@ -1216,6 +1240,7 @@ class QueueExecutor:
                 error=e,
                 isolation=isolation,
                 depth=depth,
+                f16_bytes=f16_bytes,
             )
         except Exception as e:  # noqa: BLE001
             logger.warning("Encode sub-batch failed for model %s: %s", model_id, e)
@@ -1236,6 +1261,7 @@ class QueueExecutor:
         error: InvalidInputError,
         isolation: _IsolationBudget,
         depth: int,
+        f16_bytes: bool = False,
     ) -> None:
         """Fail only the request that supplied the malformed input.
 
@@ -1322,6 +1348,7 @@ class QueueExecutor:
                 outcomes=outcomes,
                 isolation=isolation,
                 depth=depth + 1,
+                f16_bytes=f16_bytes,
             )
 
     # -- Score -------------------------------------------------------------
