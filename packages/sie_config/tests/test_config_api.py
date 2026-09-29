@@ -1110,7 +1110,7 @@ class TestConfigAPIExportNoConfigStore:
 
 
 class TestConfigAPIExportAuth:
-    """Export is admin-gated. These tests protect the internal-only contract."""
+    """Export bearer parsing, and the admin token on the export route."""
 
     def setup_method(self) -> None:
         self._tmpdir = tempfile.TemporaryDirectory()
@@ -1158,18 +1158,6 @@ class TestConfigAPIExportAuth:
         )
         assert resp.status_code == 403
 
-    def test_export_forbidden_with_inference_only_token(self, monkeypatch) -> None:
-        # SIE_AUTH_TOKEN alone is not an admin credential, even for reads that
-        # go through the write-auth gate (export is admin-only).
-        monkeypatch.delenv("SIE_ADMIN_TOKEN", raising=False)
-        monkeypatch.setenv("SIE_AUTH_TOKEN", "inference-token")
-        resp = self.client.get(
-            "/v1/configs/export",
-            headers={"Authorization": "Bearer inference-token"},
-        )
-        assert resp.status_code == 403
-        assert "SIE_ADMIN_TOKEN" in resp.text
-
     def test_export_allowed_with_correct_admin_token(self, monkeypatch) -> None:
         monkeypatch.setenv("SIE_ADMIN_TOKEN", "the-real-admin")
         resp = self.client.get(
@@ -1180,6 +1168,127 @@ class TestConfigAPIExportAuth:
         data = resp.json()
         assert data["snapshot_version"] == 1
         assert any(m["model_id"] == "test/model" for m in data["models"])
+
+
+_WRITE_BODY = (
+    "sie_id: test/model\n"
+    "profiles:\n"
+    "  extra:\n"
+    "    adapter_path: sie_server.adapters.bert_flash:BertFlashAdapter\n"
+    "    max_batch_tokens: 1\n"
+)
+_READ_ROUTES = [
+    ("GET", "/v1/configs/models", None),
+    ("GET", "/v1/configs/models/test/model", None),
+    ("GET", "/v1/configs/bundles", None),
+    ("GET", "/v1/configs/bundles/default", None),
+    ("POST", "/v1/configs/resolve", '{"model": "test/model"}'),
+    ("GET", "/v1/configs/epoch", None),
+    ("GET", "/v1/configs/export", None),
+]
+_WRITE_ROUTES = [
+    ("POST", "/v1/configs/models", _WRITE_BODY),
+    ("PUT", "/v1/configs/models/test/model", _WRITE_BODY),
+    ("DELETE", "/v1/configs/models/test/model", None),
+]
+_CREDENTIALS = {
+    "admin": "Bearer admin-secret",
+    "config-read": "Bearer config-read-secret",
+    "inference": "Bearer inference-secret",
+    "wrong": "Bearer not-a-configured-token",
+    "non-ascii": "Bearer café".encode(),
+}
+
+
+class TestConfigAPIRouteAuth:
+    """Every route against every credential, with all three tokens configured."""
+
+    def setup_method(self) -> None:
+        self._tmpdir = tempfile.TemporaryDirectory()
+        root = Path(self._tmpdir.name)
+        bundles = root / "bundles"
+        models = root / "models"
+        bundles.mkdir()
+        models.mkdir()
+        _write_bundle(bundles, "default", ["sie_server.adapters.bert_flash"])
+        _write_model(models, "test/model", "sie_server.adapters.bert_flash:BertFlashAdapter")
+        self.client = TestClient(_create_test_app(bundles, models, str(root / "store")))
+
+    def teardown_method(self) -> None:
+        self._tmpdir.cleanup()
+
+    @pytest.fixture(autouse=True)
+    def _tokens(self, monkeypatch) -> None:
+        monkeypatch.setenv("SIE_ADMIN_TOKEN", "admin-secret")
+        monkeypatch.setenv("SIE_CONFIG_READ_TOKEN", "config-read-secret")
+        monkeypatch.setenv("SIE_AUTH_TOKEN", "inference-secret")
+        monkeypatch.setenv("SIE_DEPLOYMENT_ENV", "production")
+
+    def _call(self, method: str, path: str, body: str | None, credential: str | None) -> int:
+        headers = {} if credential is None else {"Authorization": _CREDENTIALS[credential]}
+        return self.client.request(method, path, content=body, headers=headers).status_code
+
+    @pytest.mark.parametrize(("method", "path", "body"), _READ_ROUTES + _WRITE_ROUTES)
+    def test_missing_credential_is_401(self, method: str, path: str, body: str | None) -> None:
+        assert self._call(method, path, body, None) == 401
+
+    @pytest.mark.parametrize("credential", ["wrong", "non-ascii"])
+    @pytest.mark.parametrize(("method", "path", "body"), _READ_ROUTES + _WRITE_ROUTES)
+    def test_unknown_credential_is_403(self, method: str, path: str, body: str | None, credential: str) -> None:
+        assert self._call(method, path, body, credential) == 403
+
+    @pytest.mark.parametrize("credential", ["admin", "config-read", "inference"])
+    @pytest.mark.parametrize(("method", "path", "body"), _READ_ROUTES)
+    def test_every_configured_credential_reads(self, method: str, path: str, body: str | None, credential: str) -> None:
+        assert self._call(method, path, body, credential) == 200
+
+    @pytest.mark.parametrize("credential", ["config-read", "inference"])
+    @pytest.mark.parametrize(("method", "path", "body"), _WRITE_ROUTES)
+    def test_read_credentials_never_write(self, method: str, path: str, body: str | None, credential: str) -> None:
+        assert self._call(method, path, body, credential) == 403
+
+    @pytest.mark.parametrize(("method", "path", "body"), _WRITE_ROUTES)
+    def test_admin_credential_writes(self, method: str, path: str, body: str | None) -> None:
+        assert self._call(method, path, body, "admin") not in (401, 403)
+
+
+class TestConfigAPIReadTokenWithoutAdmin:
+    """A read token without an admin token keeps writes closed in any environment."""
+
+    def setup_method(self) -> None:
+        self._tmpdir = tempfile.TemporaryDirectory()
+        root = Path(self._tmpdir.name)
+        bundles = root / "bundles"
+        models = root / "models"
+        bundles.mkdir()
+        models.mkdir()
+        _write_bundle(bundles, "default", ["sie_server.adapters.bert_flash"])
+        _write_model(models, "test/model", "sie_server.adapters.bert_flash:BertFlashAdapter")
+        self.client = TestClient(_create_test_app(bundles, models, str(root / "store")))
+
+    def teardown_method(self) -> None:
+        self._tmpdir.cleanup()
+
+    @pytest.mark.parametrize("deployment_env", [None, "development", "production"])
+    @pytest.mark.parametrize("read_var", ["SIE_CONFIG_READ_TOKEN", "SIE_AUTH_TOKEN"])
+    def test_writes_refused_and_reads_need_the_token(
+        self, monkeypatch, read_var: str, deployment_env: str | None
+    ) -> None:
+        for var in ("SIE_ADMIN_TOKEN", "SIE_CONFIG_READ_TOKEN", "SIE_AUTH_TOKEN", "SIE_ENV", "SIE_DEPLOYMENT_ENV"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv(read_var, "read-secret")
+        if deployment_env is not None:
+            monkeypatch.setenv("SIE_DEPLOYMENT_ENV", deployment_env)
+        read = {"Authorization": "Bearer read-secret"}
+
+        assert self.client.get("/v1/configs/export").status_code == 401
+        assert self.client.get("/v1/configs/export", headers=read).status_code == 200
+        assert self.client.get("/v1/configs/epoch", headers=read).status_code == 200
+        for headers in ({}, read):
+            resp = self.client.post("/v1/configs/models", content=_WRITE_BODY, headers=headers)
+            assert resp.status_code == 403
+            assert "require SIE_ADMIN_TOKEN" in resp.text
+            assert self.client.delete("/v1/configs/models/test/model", headers=headers).status_code == 403
 
 
 class TestConfigAPIEpoch:
@@ -1300,8 +1409,6 @@ class TestConfigAPIEpoch:
         assert "epoch" in resp.json()
 
     def test_epoch_accepts_admin_token(self, monkeypatch) -> None:
-        # Read auth accepts the admin token too — the gateway passes its
-        # admin token here rather than maintaining two credentials.
         monkeypatch.setenv("SIE_ADMIN_TOKEN", "real-admin")
         resp = self.client.get(
             "/v1/configs/epoch",

@@ -388,13 +388,19 @@ _PROD_ENVS = frozenset({"prod", "production"})
 _ENV_SIGNAL_VARS = ("SIE_DEPLOYMENT_ENV", "SIE_ENV")
 
 
+# Read-scoped credentials: accepted on every read route, never on a write.
+# `SIE_CONFIG_READ_TOKEN` is the one gateways and worker sidecars present;
+# `SIE_AUTH_TOKEN` is the inference token. `SIE_ADMIN_TOKEN` authorizes reads
+# and writes.
+_READ_TOKEN_VARS = ("SIE_CONFIG_READ_TOKEN", "SIE_AUTH_TOKEN")
+
+
 def _refuse_open_in_prod() -> None:
     """Raise 403 when no auth token is configured in a production environment."""
     if any(os.environ.get(var, "").strip().lower() in _PROD_ENVS for var in _ENV_SIGNAL_VARS):
         raise HTTPException(
             status_code=403,
-            detail="config service requires SIE_ADMIN_TOKEN/SIE_AUTH_TOKEN in production "
-            "(refusing to serve unauthenticated)",
+            detail="config service requires SIE_ADMIN_TOKEN in production (refusing to serve unauthenticated)",
         )
 
 
@@ -416,34 +422,38 @@ def _token_matches(presented: str, expected: str) -> bool:
     return hmac.compare_digest(presented.encode(), expected.encode())
 
 
+def _configured_read_tokens() -> list[str]:
+    return [token for var in _READ_TOKEN_VARS if (token := os.environ.get(var)) is not None]
+
+
 def _check_read_auth(request: Request) -> None:
-    """Validate read auth (inference token or admin token)."""
-    auth_token = os.environ.get("SIE_AUTH_TOKEN")
+    """Validate read auth (a read-scoped token or the admin token)."""
+    accepted = _configured_read_tokens()
     admin_token = os.environ.get("SIE_ADMIN_TOKEN")
-    if auth_token is None and admin_token is None:
+    if admin_token is not None:
+        accepted.append(admin_token)
+    if not accepted:
         _refuse_open_in_prod()
         return  # No auth configured (dev / self-host localhost posture)
 
     token = _extract_bearer_token(request.headers.get("Authorization", ""))
     if not token:
         raise HTTPException(status_code=401, detail="Missing Authorization header")
-    token_match = (auth_token is not None and _token_matches(token, auth_token)) or (
-        admin_token is not None and _token_matches(token, admin_token)
-    )
-    if not token_match:
+    matches = [_token_matches(token, expected) for expected in accepted]
+    if not any(matches):
         raise HTTPException(status_code=403, detail="Invalid token")
 
 
 def _check_write_auth(request: Request) -> None:
-    """Validate write auth (admin token, or inference token as fallback)."""
+    """Validate write auth (admin token only)."""
     admin_token = os.environ.get("SIE_ADMIN_TOKEN")
     if admin_token is None:
-        # If SIE_ADMIN_TOKEN is not set, refuse writes when SIE_AUTH_TOKEN
-        # is present (inference token must not implicitly grant write access).
-        if os.environ.get("SIE_AUTH_TOKEN"):
+        # A configured read-scoped token never implies write access, so writes
+        # stay closed rather than falling through to the open dev posture.
+        if _configured_read_tokens():
             raise HTTPException(
                 status_code=403,
-                detail="Write operations require SIE_ADMIN_TOKEN (inference token is not sufficient).",
+                detail="Write operations require SIE_ADMIN_TOKEN (read tokens are not sufficient).",
             )
         _refuse_open_in_prod()
         return  # No auth configured at all (dev / self-host localhost posture)
@@ -1597,8 +1607,13 @@ async def export_snapshot(request: Request) -> Response:
     operation (gateway bootstrap + drift recovery), so the brief
     write-path blockage is acceptable. Read-path handlers like
     `/epoch`, `/models`, `/bundles` remain fully concurrent.
+
+    Read auth: the snapshot carries the same model configs that
+    `GET /v1/configs/models/{id}` serves, plus bundle membership, pool names
+    and hashes, so gateways and worker sidecars fetch it with a read-scoped
+    token.
     """
-    _check_write_auth(request)  # admin-only
+    _check_read_auth(request)
     model_registry = _require_model_registry(request)
     config_store: ConfigStore | None = getattr(request.app.state, "config_store", None)
 
