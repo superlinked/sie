@@ -37,6 +37,7 @@ import json
 import logging
 import math
 import threading
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -52,7 +53,7 @@ from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ComputePrecision
 from sie_server.adapters._utils import grouped_score_pairs, validate_output_types
 from sie_server.adapters.topk_embed.graphs import GRAPH_MODES, GraphMode, GraphRunner, default_max_tokens
-from sie_server.adapters.topk_embed.packed import PackedTextModel, Packing, resolve_kernels
+from sie_server.adapters.topk_embed.packed import PackedTextModel, Packing, resolve_kernels, to_device
 from sie_server.core.inference_output import EncodeOutput
 from sie_server.core.oom import is_oom_error
 from sie_server.core.postprocessor import MuveraConfig, MuveraPostprocessor
@@ -105,6 +106,25 @@ class _ImageRow:
     input_ids: torch.Tensor
     pixel_values: torch.Tensor
     grid_thw: tuple[int, int, int]
+
+
+@dataclass
+class _Launched:
+    """A forward whose vectors are on their way to the host.
+
+    On CUDA the copy runs asynchronously into pinned memory and ``copied`` marks its
+    end, so the host can launch the next batch before this one is unpacked.
+    """
+
+    vectors: torch.Tensor
+    copied: Any
+    split: Callable[[torch.Tensor], list[torch.Tensor]]
+
+    def rows(self) -> list[torch.Tensor]:
+        """One ``[len, dim]`` host tensor per input row; waits for the copy."""
+        if self.copied is not None:
+            self.copied.synchronize()
+        return self.split(self.vectors)
 
 
 class TopkEmbedAdapter(BaseAdapter):
@@ -404,7 +424,12 @@ class TopkEmbedAdapter(BaseAdapter):
         validate_output_types(output_types, {"multivector"}, type(self).__name__)
         if instruction:
             raise InvalidInputError(_ERR_INSTRUCTION)
-        normalize = bool((options or {}).get("normalize", self._normalize))
+        opts = options or {}
+        normalize = bool(opts.get("normalize", self._normalize))
+        # Vectors cross to the host in 16 bits when the response is 16-bit anyway and nothing
+        # after the adapter reads them at full precision (the MUVERA postprocessor does).
+        half = opts.get("output_dtype") == "float16" and opts.get("muvera") is None
+        dtype = torch.float16 if half else torch.float32
 
         # Items route by modality: a batch of the reference model carries one modality,
         # so text and image items run as separate forward passes. An item with images
@@ -430,12 +455,12 @@ class TopkEmbedAdapter(BaseAdapter):
                 raise InvalidInputError(_ERR_NO_INPUT)
 
         if texts:
-            vectors, lengths = self._encode_texts(texts, is_query=is_query, normalize=normalize)
+            vectors, lengths = self._encode_texts(texts, is_query=is_query, normalize=normalize, dtype=dtype)
             for idx, vector, length in zip(text_slots, vectors, lengths, strict=True):
                 results[idx] = vector
                 token_counts[idx] = length
         if images:
-            per_image = self._encode_images(images, normalize=normalize)
+            per_image = self._encode_images(images, normalize=normalize, dtype=dtype)
             cursor = 0
             for idx, count in image_slots:
                 segment = per_image[cursor : cursor + count]
@@ -456,7 +481,9 @@ class TopkEmbedAdapter(BaseAdapter):
             output.extra["input_token_counts"] = token_counts
         return output
 
-    def _encode_texts(self, texts: list[str], *, is_query: bool, normalize: bool) -> tuple[list[np.ndarray], list[int]]:
+    def _encode_texts(
+        self, texts: list[str], *, is_query: bool, normalize: bool, dtype: torch.dtype = torch.float32
+    ) -> tuple[list[np.ndarray], list[int]]:
         if is_query:
             payloads = [self._query_template + (text or "").strip() for text in texts]
             cap = self._query_max_length
@@ -472,10 +499,15 @@ class TopkEmbedAdapter(BaseAdapter):
         ]
 
         vectors: list[np.ndarray | None] = [None] * len(rows)
-        for batch in self._plan_text_batches([len(row) for row in rows]):
-            outputs = self._forward([rows[i] for i in batch], normalize=normalize)
-            for output, i in zip(outputs, batch, strict=True):
+
+        def deliver(batch: list[int], launched: _Launched) -> None:
+            for output, i in zip(launched.rows(), batch, strict=True):
                 vectors[i] = output[keeps[i]].numpy()
+
+        batches = [
+            (batch, [rows[i] for i in batch], None) for batch in self._plan_text_batches([len(row) for row in rows])
+        ]
+        self._run_batches(batches, normalize=normalize, dtype=dtype, deliver=deliver)
         return [vector for vector in vectors if vector is not None], [len(row) for row in rows]
 
     def _plan_text_batches(self, lengths: list[int]) -> list[list[int]]:
@@ -500,35 +532,68 @@ class TopkEmbedAdapter(BaseAdapter):
             batches.append(current)
         return batches
 
-    def _encode_images(self, images: list[PILImage.Image], *, normalize: bool) -> list[np.ndarray]:
+    def _encode_images(
+        self, images: list[PILImage.Image], *, normalize: bool, dtype: torch.dtype = torch.float32
+    ) -> list[np.ndarray]:
         rows = self._image_rows(images)
         order = sorted(range(len(rows)), key=lambda i: len(rows[i].input_ids))
         vectors: list[np.ndarray | None] = [None] * len(rows)
+
+        def deliver(batch: list[int], launched: _Launched) -> None:
+            for output, i in zip(launched.rows(), batch, strict=True):
+                vectors[i] = output[rows[i].input_ids == self._image_token_id].numpy()
+
+        batches = []
         for start in range(0, len(order), self._image_batch_size):
             batch = order[start : start + self._image_batch_size]
-            outputs = self._forward(
-                [rows[i].input_ids for i in batch], images=[rows[i] for i in batch], normalize=normalize
-            )
-            for output, i in zip(outputs, batch, strict=True):
-                vectors[i] = output[rows[i].input_ids == self._image_token_id].numpy()
-            if self._device and str(self._device).startswith("cuda"):
-                torch.cuda.empty_cache()
+            batches.append((batch, [rows[i].input_ids for i in batch], [rows[i] for i in batch]))
+        self._run_batches(batches, normalize=normalize, dtype=dtype, deliver=deliver)
+        # Page batches vary in size; hand the cached blocks back once the request is done.
+        if self._device and str(self._device).startswith("cuda"):
+            torch.cuda.empty_cache()
         return [vector for vector in vectors if vector is not None]
 
     # ------------------------------------------------------------------
     # Forward
     # ------------------------------------------------------------------
 
-    def _forward(
-        self, rows: list[torch.Tensor], *, images: list[_ImageRow] | None = None, normalize: bool
-    ) -> list[torch.Tensor]:
-        """Run rows through the backbone and head; one float32 ``[len, dim]`` CPU tensor per row."""
+    def _run_batches(
+        self,
+        batches: list[tuple[list[int], list[torch.Tensor], list[_ImageRow] | None]],
+        *,
+        normalize: bool,
+        dtype: torch.dtype,
+        deliver: Callable[[list[int], _Launched], None],
+    ) -> None:
+        """Run ``(indices, rows, images)`` batches back to back.
+
+        Each batch is launched before the previous one is unpacked, so on a GPU the host
+        prepares and unpacks batches while the device computes.
+        """
+        pending: tuple[list[int], _Launched] | None = None
+        for indices, rows, images in batches:
+            launched = self._launch(rows, images=images, normalize=normalize, dtype=dtype)
+            if pending is not None:
+                deliver(*pending)
+            pending = (indices, launched)
+        if pending is not None:
+            deliver(*pending)
+
+    def _launch(
+        self,
+        rows: list[torch.Tensor],
+        *,
+        images: list[_ImageRow] | None = None,
+        normalize: bool,
+        dtype: torch.dtype = torch.float32,
+    ) -> _Launched:
+        """Run rows through the backbone and head; the vectors come back as ``dtype`` on the host."""
         assert self._model is not None
         assert self._head is not None
         try:
             if self._packed_text is not None:
-                return self._forward_packed(rows, images=images, normalize=normalize)
-            return self._forward_padded(rows, images=images, normalize=normalize)
+                return self._forward_packed(rows, images=images, normalize=normalize, dtype=dtype)
+            return self._forward_padded(rows, images=images, normalize=normalize, dtype=dtype)
         except Exception as exc:
             if self._graphs is not None and is_oom_error(exc):
                 # Give the graphs' memory back before the worker's out-of-memory recovery retries.
@@ -538,8 +603,8 @@ class TopkEmbedAdapter(BaseAdapter):
             raise
 
     def _forward_padded(
-        self, rows: list[torch.Tensor], *, images: list[_ImageRow] | None, normalize: bool
-    ) -> list[torch.Tensor]:
+        self, rows: list[torch.Tensor], *, images: list[_ImageRow] | None, normalize: bool, dtype: torch.dtype
+    ) -> _Launched:
         device = self._device or "cpu"
         width = max(len(row) for row in rows)
         pad_id = self._tokenizer.pad_token_id
@@ -565,61 +630,74 @@ class TopkEmbedAdapter(BaseAdapter):
                 position_ids=position_ids,
                 use_cache=False,
             ).last_hidden_state
-            vectors = self._project(hidden, normalize=normalize)
-        return [vectors[i, : len(row)] for i, row in enumerate(rows)]
+            vectors = self._project(hidden, normalize=normalize, dtype=dtype).cpu()
+        return _Launched(vectors, None, lambda host: [host[i, : len(row)] for i, row in enumerate(rows)])
 
     def _forward_packed(
-        self, rows: list[torch.Tensor], *, images: list[_ImageRow] | None, normalize: bool
-    ) -> list[torch.Tensor]:
+        self, rows: list[torch.Tensor], *, images: list[_ImageRow] | None, normalize: bool, dtype: torch.dtype
+    ) -> _Launched:
         packed_text = self._packed_text
         assert packed_text is not None
-        if not images and self._graphs is not None:
-            with self._forward_lock, torch.inference_mode():
+        device = self._device or "cpu"
+        lengths = [len(row) for row in rows]
+        with self._forward_lock, torch.inference_mode():
+            if not images and self._graphs is not None:
                 hidden = self._graphs.run(rows)
                 if hidden is not None:
                     # Rows come back right-padded to the graph's length.
-                    vectors = self._project(hidden, normalize=normalize)
-                    return [vectors[i, : len(row)] for i, row in enumerate(rows)]
-        device = self._device or "cpu"
-        lengths = [len(row) for row in rows]
-        input_ids = torch.cat(rows).unsqueeze(0).to(device)
-        packing = Packing.from_lengths(lengths, device)
-        if images:
-            position_ids = torch.cat([self._image_position_ids([row], len(row.input_ids)) for row in images], dim=2)
-        else:
-            # Text: every packed input restarts at position 0 on all three rotary axes.
-            position_ids = torch.cat([torch.arange(n) for n in lengths]).view(1, 1, -1).expand(3, 1, -1)
-
-        with self._forward_lock, torch.inference_mode():
+                    vectors = self._project(hidden, normalize=normalize, dtype=dtype)
+                    return self._to_host(vectors, lambda host: [host[i, :n] for i, n in enumerate(lengths)])
+            ids = torch.cat(rows)
+            # Host-to-device copies do not wait for the previous batch still on the GPU.
+            input_ids = to_device(ids, device).unsqueeze(0)
+            packing = Packing.from_lengths(lengths, device)
+            if images:
+                positions = torch.cat([self._image_position_ids([row], len(row.input_ids)) for row in images], dim=2)
+            else:
+                # Text: every packed input restarts at position 0 on all three rotary axes.
+                positions = torch.cat([torch.arange(n) for n in lengths]).view(1, 1, -1).expand(3, 1, -1).contiguous()
             embeds = self._model.get_input_embeddings()(input_ids)
             if images:
                 image_hidden = self._vision_forward(images)
-                embeds[input_ids == self._image_token_id] = image_hidden.to(embeds.dtype)
-            hidden = packed_text(embeds, position_ids.to(device), packing)
-            vectors = self._project(hidden, normalize=normalize)[0]
-        return list(vectors.split(lengths))
+                # Positions found on the host: a boolean mask on the device would wait for the GPU.
+                slots = to_device((ids == self._image_token_id).nonzero().squeeze(1), device)
+                embeds[0].index_copy_(0, slots, image_hidden.to(embeds.dtype))
+            hidden = packed_text(embeds, to_device(positions, device), packing)
+            vectors = self._project(hidden, normalize=normalize, dtype=dtype)[0]
+            return self._to_host(vectors, lambda host: list(host.split(lengths)))
 
-    def _project(self, hidden: torch.Tensor, *, normalize: bool) -> torch.Tensor:
-        """Head, truncation to the token dim, then L2 normalization (float32, on CPU)."""
+    def _project(self, hidden: torch.Tensor, *, normalize: bool, dtype: torch.dtype) -> torch.Tensor:
+        """Head, truncation to the token dim, L2 normalization in float32, then ``dtype``; on the device."""
         vectors = self._head(hidden).float()
         vectors = vectors[..., : self._multivector_dim]
         if normalize:
             vectors = F.normalize(vectors, p=2, dim=-1)
-        return vectors.cpu()
+        return vectors.to(dtype)
+
+    @staticmethod
+    def _to_host(vectors: torch.Tensor, split: Callable[[torch.Tensor], list[torch.Tensor]]) -> _Launched:
+        """Start copying ``vectors`` to the host: asynchronously into pinned memory on CUDA."""
+        if vectors.device.type != "cuda":
+            return _Launched(vectors.cpu(), None, split)
+        host = torch.empty(vectors.shape, dtype=vectors.dtype, pin_memory=True)
+        host.copy_(vectors, non_blocking=True)
+        copied = torch.cuda.Event()
+        copied.record()
+        return _Launched(host, copied, split)
 
     def _vision_forward(self, images: list[_ImageRow]) -> torch.Tensor:
         """The reference's packed vision tower: every image in one sequence, attention kept per image."""
         visual = self._model.visual
         device = self._device or "cpu"
         weight = visual.patch_embed.proj.weight
-        pixel_values = torch.cat([row.pixel_values for row in images]).to(device)
+        pixel_values = to_device(torch.cat([row.pixel_values for row in images]), device)
         # The patch-embed Conv3d has kernel == stride over pre-patched input: one matmul.
         hidden = F.linear(pixel_values.to(weight.dtype), weight.view(weight.shape[0], -1), visual.patch_embed.proj.bias)
 
         per_grid = [self._grid_inputs(row.grid_thw) for row in images]
-        pos_index = torch.cat([grid[0] for grid in per_grid], dim=1).to(device)
-        pos_weight = torch.cat([grid[1] for grid in per_grid], dim=1).to(device)
-        rot_pos = torch.cat([grid[2] for grid in per_grid]).to(device)
+        pos_index = to_device(torch.cat([grid[0] for grid in per_grid], dim=1), device)
+        pos_weight = to_device(torch.cat([grid[1] for grid in per_grid], dim=1), device)
+        rot_pos = to_device(torch.cat([grid[2] for grid in per_grid]), device)
         hidden = hidden + (visual.pos_embed(pos_index) * pos_weight.unsqueeze(-1)).sum(0)
 
         inv_freq = self._vision_inv_freq
@@ -639,8 +717,8 @@ class TopkEmbedAdapter(BaseAdapter):
         max_len = int(lengths.max())
         seq_idx = torch.repeat_interleave(torch.arange(len(images)), lengths)
         within = torch.arange(int(lengths.sum())) - torch.repeat_interleave(lengths.cumsum(0) - lengths, lengths)
-        pad_index = (seq_idx * max_len + within).to(device)
-        key_mask = (torch.arange(max_len) < lengths[:, None])[:, None, None, :].to(device)
+        pad_index = to_device(seq_idx * max_len + within, device)
+        key_mask = to_device((torch.arange(max_len) < lengths[:, None])[:, None, None, :].contiguous(), device)
         for block in visual.blocks:
             attended = _vision_attention(
                 block.attn, block.norm1(hidden), cos, sin, pad_index=pad_index, key_mask=key_mask, max_len=max_len
@@ -773,6 +851,8 @@ class TopkEmbedAdapter(BaseAdapter):
     ) -> list[float]:
         """Score documents (text or page images) against a text query with MaxSim."""
         self._check_loaded()
+        # MaxSim runs here on the host in float32, whatever the response dtype.
+        options = {key: value for key, value in (options or {}).items() if key != "output_dtype"}
         query_output = self.encode([query], ["multivector"], instruction=instruction, is_query=True, options=options)
         doc_output = self.encode(items, ["multivector"], instruction=instruction, is_query=False, options=options)
         if query_output.multivector is None or doc_output.multivector is None:

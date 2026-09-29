@@ -41,6 +41,13 @@ from torch.nn import functional as F
 logger = logging.getLogger(__name__)
 
 
+def to_device(tensor: torch.Tensor, device: str | torch.device) -> torch.Tensor:
+    """Copy a host tensor to ``device``; on CUDA from pinned memory, without waiting for queued GPU work."""
+    if torch.device(device).type != "cuda":
+        return tensor.to(device)
+    return tensor.pin_memory().to(device, non_blocking=True)
+
+
 @dataclass(frozen=True)
 class Packing:
     """Where each input of a packed batch starts and ends.
@@ -60,9 +67,9 @@ class Packing:
     def from_lengths(cls, lengths: Sequence[int], device: str | torch.device) -> Packing:
         offsets = torch.tensor([0, *itertools.accumulate(lengths)], dtype=torch.long)
         return cls(
-            cu_seqlens=offsets.to(device),
+            cu_seqlens=to_device(offsets, device),
             cu_seqlens_cpu=offsets,
-            cu_seqlens_int32=offsets.to(device, torch.int32),
+            cu_seqlens_int32=to_device(offsets.to(torch.int32), device),
             max_len=max(lengths),
         )
 
