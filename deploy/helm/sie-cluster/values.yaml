@@ -1462,8 +1462,9 @@ nats:
     # replaced. Set it back to false once every pod has restarted.
     allowAnonymous: false
     # -- Existing Secrets, each holding the component's NATS password under
-    # the key `password` (at least 32 letters and digits for the bundled
-    # server). An empty name makes the chart generate
+    # the key `password`. For the bundled server it must be letters and digits
+    # and start with a letter, because the server parses it as a
+    # configuration value. An empty name makes the chart generate
     # "<release>-nats-auth-<component>". Required for config, gateway, and
     # worker when nats.install=false.
     existingSecrets:

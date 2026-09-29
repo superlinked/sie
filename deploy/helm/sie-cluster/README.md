@@ -902,18 +902,18 @@ to the subjects that component uses:
 
 **Passwords.** The chart generates one Secret per user,
 `<release>-nats-auth-config`, `-gateway`, and `-worker`, plus `-route` when the
-NATS cluster is enabled. Each holds a random 48-character `password`. On
-upgrade the chart reads the existing Secret with `lookup` and keeps its
-password. The render fails if a kept Secret has no `password` key, or a
-password shorter than 32 characters or with characters other than letters and
-digits. The Secrets carry `helm.sh/resource-policy: keep`. The NATS server
+NATS cluster is enabled. Each holds a random 48-character `password` of
+letters and digits that starts with a letter. On upgrade the chart reads the
+existing Secret with `lookup` and keeps its password. The render fails if a
+kept Secret has no `password` key, or a password shorter than 32 characters,
+with characters other than letters and digits, or starting with a digit. The Secrets carry `helm.sh/resource-policy: keep`. The NATS server
 reads the passwords from its environment, and each client container gets
 `SIE_NATS_USER` and `SIE_NATS_PASSWORD`.
 
 To manage a password yourself, set `nats.auth.existingSecrets.<config|gateway|worker|route>`
 to a Secret with a `password` key. For the bundled server it must be letters
-and digits only, because the server reads it into its configuration and route
-URLs.
+and digits and start with a letter: the server parses it as a configuration
+value, where a leading digit reads as a number, and embeds it in route URLs.
 
 Renderers without cluster access, such as `helm template` and many GitOps
 controllers, cannot read the existing Secrets and generate new passwords on

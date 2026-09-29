@@ -1136,7 +1136,7 @@ def test_nats_authentication_is_on_by_default(tmp_path: Path, auth: dict) -> Non
     assert sorted(secrets) == ["sie-nats-auth-config", "sie-nats-auth-gateway", "sie-nats-auth-worker"]
     for secret in secrets.values():
         assert secret["metadata"]["annotations"] == {"helm.sh/resource-policy": "keep"}
-        assert re.fullmatch(r"[A-Za-z0-9]{48}", base64.b64decode(secret["data"]["password"]).decode())
+        assert re.fullmatch(r"[A-Za-z][A-Za-z0-9]{47}", base64.b64decode(secret["data"]["password"]).decode())
     assert nats_client_credentials(docs) == {
         component: (f"sie-{component}", {"name": f"sie-nats-auth-{component}", "key": "password"})
         for component in NATS_CLIENTS
@@ -1249,7 +1249,8 @@ def test_nats_anonymous_upgrade_aid(tmp_path: Path) -> None:
     [
         ("", "Secret nats exists but has no password key"),
         ("a" * 31, "shorter than 32 characters"),
-        ("a" * 31 + "$", "characters other than letters and digits"),
+        ("a" * 31 + "$", "not letters and digits starting with a letter"),
+        ("1" + "a" * 31, "not letters and digits starting with a letter"),
         ("a" * 32, None),
     ],
 )

@@ -6,7 +6,7 @@
 //! `nats-server` is not on `PATH`, unless `NATS_URL` is set as in CI, where a
 //! missing binary fails the test.
 
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
@@ -23,14 +23,14 @@ struct Passwords {
 }
 
 fn random_password() -> String {
-    uuid::Uuid::new_v4().simple().to_string()
+    format!("p{}", uuid::Uuid::new_v4().simple())
 }
 
 struct NatsServer {
     child: Child,
     url: String,
     passwords: Passwords,
-    _dir: tempfile::TempDir,
+    dir: tempfile::TempDir,
 }
 
 impl Drop for NatsServer {
@@ -47,13 +47,6 @@ fn nats_server_binary() -> Option<PathBuf> {
         .find(|path| path.is_file())
 }
 
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .and_then(|listener| listener.local_addr())
-        .expect("free port")
-        .port()
-}
-
 async fn start_nats() -> Option<NatsServer> {
     let Some(binary) = nats_server_binary() else {
         assert!(
@@ -66,7 +59,7 @@ async fn start_nats() -> Option<NatsServer> {
     let config =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/ci/fixtures/sie-cluster-nats.conf");
     let dir = tempfile::tempdir().expect("tempdir");
-    let port = free_port();
+    let log = std::fs::File::create(dir.path().join("nats.log")).expect("log file");
     let passwords = Passwords {
         config: random_password(),
         gateway: random_password(),
@@ -75,8 +68,9 @@ async fn start_nats() -> Option<NatsServer> {
     let child = Command::new(binary)
         .arg("-c")
         .arg(&config)
-        .args(["-a", "127.0.0.1", "-p", &port.to_string()])
-        .args(["-m", &free_port().to_string()])
+        .args(["-a", "127.0.0.1", "-p", "-1", "-m", "-1"])
+        .arg("--ports_file_dir")
+        .arg(dir.path())
         .arg("-sd")
         .arg(dir.path().join("jetstream"))
         .arg("-P")
@@ -86,22 +80,37 @@ async fn start_nats() -> Option<NatsServer> {
         .env("SIE_NATS_AUTH_GATEWAY_PASSWORD", &passwords.gateway)
         .env("SIE_NATS_AUTH_WORKER_PASSWORD", &passwords.worker)
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(log)
         .spawn()
         .expect("start nats-server");
-    let server = NatsServer {
+    let mut server = NatsServer {
         child,
-        url: format!("nats://127.0.0.1:{port}"),
+        url: String::new(),
         passwords,
-        _dir: dir,
+        dir,
     };
-    for _ in 0..200 {
-        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+    for _ in 0..600 {
+        if let Some(url) = listening_url(server.dir.path()) {
+            server.url = url;
             return Some(server);
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    panic!("nats-server did not listen on {port}");
+    let log = std::fs::read_to_string(server.dir.path().join("nats.log")).unwrap_or_default();
+    panic!("nats-server did not start:\n{log}");
+}
+
+/// The client URL from the `*.ports` file nats-server writes once it listens.
+fn listening_url(dir: &Path) -> Option<String> {
+    let ports = std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(Result::ok)
+        .find(|entry| entry.path().extension().is_some_and(|ext| ext == "ports"))?;
+    let ports: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(ports.path()).ok()?).ok()?;
+    let url = ports["nats"][0].as_str()?.to_string();
+    let address = url.trim_start_matches("nats://").to_string();
+    TcpStream::connect(address).ok().map(|_| url)
 }
 
 async fn connect_as(url: &str, user: &str, password: &str) -> async_nats::Client {

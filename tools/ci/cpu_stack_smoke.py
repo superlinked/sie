@@ -190,7 +190,7 @@ def main() -> None:
         def image(service: str) -> str:
             return f"{registry}/{service}:v0.0.0"
 
-        nats_passwords = {component: secrets.token_hex(24) for component in ("config", "gateway", "worker")}
+        nats_passwords = {component: f"p{secrets.token_hex(24)}" for component in ("config", "gateway", "worker")}
 
         def nats_client_env(component: str) -> dict[str, str]:
             return {

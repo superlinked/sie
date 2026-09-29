@@ -66,10 +66,11 @@ authentication is off. Args (dict): root (top-level context), component.
 
 {{/*
 Fail when a reused generated NATS password Secret has no usable password,
-instead of replacing a password that running pods hold. The server reads the
-password into its configuration and cluster route URLs, so it must be letters
-and digits only. Args (dict): name (Secret), data (base64 value, empty when
-the key is missing).
+instead of replacing a password that running pods hold. The server parses the
+password as a configuration value and embeds it in cluster route URLs, so it
+must be letters and digits and start with a letter (a leading digit parses as
+a number). Args (dict): name (Secret), data (base64 value, empty when the key
+is missing).
 */}}
 {{- define "sie-cluster.nats.validateReusedPassword" -}}
 {{- if not .data -}}
@@ -79,8 +80,8 @@ the key is missing).
 {{- if lt (len $password) 32 -}}
 {{- fail (printf "Secret %s holds a password shorter than 32 characters. Replace it with a random value of at least 32 letters and digits, or delete the Secret so the chart generates a new one, then restart NATS, sie-config, the gateway, and the workers." .name) -}}
 {{- end -}}
-{{- if not (regexMatch "^[A-Za-z0-9]+$" $password) -}}
-{{- fail (printf "Secret %s holds a password with characters other than letters and digits. The NATS server reads it into its configuration and route URLs, where other characters break parsing. Replace it, or delete the Secret so the chart generates a new one." .name) -}}
+{{- if not (regexMatch "^[A-Za-z][A-Za-z0-9]*$" $password) -}}
+{{- fail (printf "Secret %s holds a password that is not letters and digits starting with a letter. The NATS server parses it as a configuration value and embeds it in route URLs, where other characters or a leading digit break parsing. Replace it, or delete the Secret so the chart generates a new one." .name) -}}
 {{- end -}}
 {{- end }}
 
