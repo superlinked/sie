@@ -1037,6 +1037,7 @@
               "minimum": 0,
               "type": "integer"
             },
+            "description": "Required workers per machine profile. A requirement above the gateway\nlimit (`SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT`, default 4) is\nrejected.",
             "propertyNames": {
               "type": "string"
             },

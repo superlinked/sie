@@ -20,9 +20,9 @@ type WorkerAssignment = (String, String, String, String, String);
 /// static Helm queue pools are operator-owned and never bounded here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PoolLimits {
-    /// Largest accepted `minimum_worker_count` (per-pool warm floor). It also
-    /// caps how many assigned workers per machine profile a pool keeps warm
-    /// through its active lease.
+    /// Largest accepted `minimum_worker_count` (per-pool warm floor) and
+    /// per-profile `gpus` requirement. It also caps how many assigned workers
+    /// per machine profile a stored pool keeps warm through its active lease.
     pub max_minimum_worker_count: u32,
     /// Largest accepted `ttl_seconds`; also caps the effective lease of any
     /// stored pool, including pools restored from Kubernetes.
@@ -46,9 +46,22 @@ impl Default for PoolLimits {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum PoolLimitError {
-    MinimumWorkerCount { requested: u32, max: u32 },
-    Ttl { requested: u64, max: u64 },
-    TooManyPools { max: usize },
+    MinimumWorkerCount {
+        requested: u32,
+        max: u32,
+    },
+    GpuRequirement {
+        profile: String,
+        requested: u32,
+        max: u32,
+    },
+    Ttl {
+        requested: u64,
+        max: u64,
+    },
+    TooManyPools {
+        max: usize,
+    },
 }
 
 impl std::fmt::Display for PoolLimitError {
@@ -57,6 +70,14 @@ impl std::fmt::Display for PoolLimitError {
             PoolLimitError::MinimumWorkerCount { requested, max } => write!(
                 f,
                 "minimum_worker_count {requested} exceeds the gateway limit of {max} (SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT)"
+            ),
+            PoolLimitError::GpuRequirement {
+                profile,
+                requested,
+                max,
+            } => write!(
+                f,
+                "gpus requirement {requested} for machine profile '{profile}' exceeds the gateway limit of {max} (SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT)"
             ),
             PoolLimitError::Ttl { requested, max } => write!(
                 f,
@@ -387,13 +408,27 @@ impl PoolManager {
 
     fn check_pool_spec_limits(
         &self,
+        gpus: &HashMap<String, u32>,
         ttl_seconds: Option<u64>,
         minimum_worker_count: u32,
     ) -> Result<(), PoolLimitError> {
-        if minimum_worker_count > self.limits.max_minimum_worker_count {
+        let max = self.limits.max_minimum_worker_count;
+        if minimum_worker_count > max {
             return Err(PoolLimitError::MinimumWorkerCount {
                 requested: minimum_worker_count,
-                max: self.limits.max_minimum_worker_count,
+                max,
+            });
+        }
+        let mut over_limit: Vec<(&String, &u32)> = gpus
+            .iter()
+            .filter(|(_, required)| **required > max)
+            .collect();
+        over_limit.sort();
+        if let Some((profile, requested)) = over_limit.first() {
+            return Err(PoolLimitError::GpuRequirement {
+                profile: (*profile).clone(),
+                requested: **requested,
+                max,
             });
         }
         if let Some(ttl) = ttl_seconds {
@@ -648,7 +683,7 @@ impl PoolManager {
         }
         let is_default_pool = name == DEFAULT_POOL_NAME;
         if !is_default_pool {
-            self.check_pool_spec_limits(ttl_seconds, minimum_worker_count)?;
+            self.check_pool_spec_limits(&gpus, ttl_seconds, minimum_worker_count)?;
         }
         let static_pool_names = self.static_pool_names.read().await.clone();
 
@@ -2857,6 +2892,113 @@ mod tests {
                 .minimum_worker_count,
             1
         );
+    }
+
+    #[tokio::test]
+    async fn test_create_pool_rejects_gpu_requirement_above_limit() {
+        let pm = limited_pool_manager(PoolLimits {
+            max_minimum_worker_count: 4,
+            ..PoolLimits::default()
+        });
+
+        pm.create_pool(
+            "at-limit",
+            HashMap::from([("l4-spot".to_string(), 4)]),
+            None,
+            None,
+            0,
+            vec![],
+        )
+        .await
+        .expect("a requirement at the limit is accepted");
+        let error = pm
+            .create_pool(
+                "eval",
+                HashMap::from([("l4-spot".to_string(), 6)]),
+                None,
+                None,
+                0,
+                vec![],
+            )
+            .await
+            .expect_err("a requirement above the limit is rejected");
+
+        assert_eq!(
+            limit_error(error),
+            PoolLimitError::GpuRequirement {
+                profile: "l4-spot".to_string(),
+                requested: 6,
+                max: 4
+            }
+        );
+        assert!(pm.get_pool("eval").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_update_cannot_raise_gpu_requirement_above_limit() {
+        let pm = limited_pool_manager(PoolLimits {
+            max_minimum_worker_count: 4,
+            ..PoolLimits::default()
+        });
+        pm.create_pool("eval", l4_gpus(), None, None, 0, vec![])
+            .await
+            .unwrap();
+
+        let error = pm
+            .create_pool(
+                "eval",
+                HashMap::from([("l4-spot".to_string(), 6)]),
+                None,
+                None,
+                0,
+                vec![],
+            )
+            .await
+            .expect_err("an update above the limit is rejected");
+
+        assert!(matches!(
+            limit_error(error),
+            PoolLimitError::GpuRequirement { .. }
+        ));
+        assert_eq!(
+            pm.get_pool("eval").await.unwrap().spec.gpus.get("l4-spot"),
+            Some(&1)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_pool_at_the_requirement_limit_stays_active_and_leased() {
+        let pm = limited_pool_manager(PoolLimits {
+            max_minimum_worker_count: 4,
+            ..PoolLimits::default()
+        });
+        pm.create_pool(
+            "eval",
+            HashMap::from([("l4-spot".to_string(), 4)]),
+            None,
+            None,
+            0,
+            vec![],
+        )
+        .await
+        .unwrap();
+        let workers: Vec<_> = (0..4)
+            .map(|index| {
+                worker(
+                    &format!("worker-{index}"),
+                    &format!("http://worker-{index}:8080"),
+                    "l4-spot",
+                    "default",
+                )
+            })
+            .collect();
+
+        assert!(pm.assign_workers("eval", &workers).await);
+        assert_eq!(
+            pm.get_pool("eval").await.unwrap().status.state,
+            PoolState::Active
+        );
+        assert_eq!(leased_counts(&pm).await.get("eval"), Some(&4));
     }
 
     #[tokio::test]

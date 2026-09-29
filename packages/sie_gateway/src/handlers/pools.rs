@@ -23,6 +23,9 @@ pub struct CreatePoolRequest {
     /// `queueRouting.staticQueuePools` for dedicated capacity.
     #[serde(default)]
     pub queue_pool: Option<String>,
+    /// Required workers per machine profile. A requirement above the gateway
+    /// limit (`SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT`, default 4) is
+    /// rejected.
     #[serde(default)]
     pub gpus: HashMap<String, u32>,
     #[serde(default)]
@@ -462,6 +465,11 @@ mod tests {
         for error in [
             PoolLimitError::MinimumWorkerCount {
                 requested: 10,
+                max: 4,
+            },
+            PoolLimitError::GpuRequirement {
+                profile: "l4".to_string(),
+                requested: 6,
                 max: 4,
             },
             PoolLimitError::Ttl {

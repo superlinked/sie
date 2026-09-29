@@ -1097,6 +1097,7 @@ mod flat_404_tests {
         for body in [
             serde_json::json!({"name": "bench", "gpus": {"l4": 1}, "minimum_worker_count": 99}),
             serde_json::json!({"name": "bench", "gpus": {"l4": 1}, "ttl_seconds": 86_400}),
+            serde_json::json!({"name": "bench", "gpus": {"l4": 6}}),
         ] {
             let (status, detail) = post_pool(&app, body).await;
             assert_eq!(status, StatusCode::BAD_REQUEST);
