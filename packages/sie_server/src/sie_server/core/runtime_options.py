@@ -123,6 +123,8 @@ _GENERATION_RUNTIME_KEYS = frozenset(
         "overall_timeout_s",
     }
 )
+# The gateway rejects a request timeout that does not fit in its duration type.
+_MAX_REQUEST_TIMEOUT_S = 2.0**64
 _GENERATION_SAMPLING_KEYS = {
     "temperature": "temperature",
     "top_p": "top_p",
@@ -175,9 +177,13 @@ def apply_generation_runtime_options(
         if "stop_tokens" in request_options and not isinstance(request_options["stop_tokens"], list):
             raise ValueError("'options.stop_tokens' must be an array of non-empty strings")
         for key in ("first_chunk_timeout_s", "inter_chunk_timeout_s", "overall_timeout_s"):
-            value = request_options.get(key)
-            if key in request_options and (isinstance(value, bool) or not isinstance(value, int | float) or value <= 0):
+            if key not in request_options:
+                continue
+            value = request_options[key]
+            if isinstance(value, bool) or not isinstance(value, int | float) or value <= 0:
                 raise ValueError(f"'options.{key}' must be a positive number")
+            if _is_finite_number(value) and float(value) >= _MAX_REQUEST_TIMEOUT_S:
+                raise ValueError(f"'options.{key}' must be less than 2^64 seconds")
 
     runtime = merge_runtime_options(config, request_options)
     profile_sampling = config.resolve_profile("default").runtime.get("default_sampling")

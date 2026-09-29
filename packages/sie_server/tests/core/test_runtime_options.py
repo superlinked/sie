@@ -344,6 +344,18 @@ def test_generation_non_finite_timeout_fails_closed(value: float) -> None:
         apply_generation_runtime_options(_generation_config(), {"overall_timeout_s": value}, {"prompt": "hi"})
 
 
+@pytest.mark.parametrize("key", ["first_chunk_timeout_s", "inter_chunk_timeout_s", "overall_timeout_s"])
+@pytest.mark.parametrize("value", [1e300, 2.0**64, 1 << 64])
+def test_generation_request_timeout_beyond_duration_range_fails_closed(key: str, value: float) -> None:
+    with pytest.raises(ValueError, match=r"less than 2\^64 seconds"):
+        apply_generation_runtime_options(_generation_config(), {key: value}, {"prompt": "hi"})
+
+
+def test_generation_request_timeout_below_duration_range_is_accepted() -> None:
+    largest_below = float.fromhex("0x1.fffffffffffffp+63")
+    apply_generation_runtime_options(_generation_config(), {"overall_timeout_s": largest_below}, {"prompt": "hi"})
+
+
 def test_generation_timeouts_resolve_from_profile_and_request() -> None:
     config = _generation_config()
 
