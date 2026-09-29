@@ -1,3 +1,4 @@
+{{- include "sie-cluster.validateGatewayAuth" . }}
 {{- /* Validate: at most one static overlay may be active. Zero overlays is the
      default; the gateway fetches bundles+models from sie-config at startup
      and has NO baked-in filesystem seed (see

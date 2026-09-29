@@ -24,6 +24,12 @@ Grafana password: kubectl get secret -n {{ include "sie-cluster.kubePrometheusSt
 {{- if .Values.keda.install }}
 KEDA:       enabled
 {{- end }}
+{{- if and .Release.IsUpgrade (not .Values.ingress.enabled) (lookup "networking.k8s.io/v1" "Ingress" (include "sie-cluster.namespace" .) (include "sie-cluster.fullname" .)) }}
+
+WARNING: this upgrade removes the gateway Ingress {{ include "sie-cluster.fullname" . }} because
+ingress.enabled is false (the cloud overlays no longer enable it). To keep external access, set
+ingress.enabled=true with gateway auth and TLS; see the chart README section "Ingress".
+{{- end }}
 {{- if and $tls.enabled (eq (default "byo" $tls.mode) "cert-manager") }}
 
 TLS via cert-manager: certificate is being issued via ACME HTTP-01 challenge.

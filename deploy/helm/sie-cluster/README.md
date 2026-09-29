@@ -1121,12 +1121,16 @@ contain the generated tokens.
 
 The Ingress is off by default, including in the AWS, GKE, AKS, and ACK
 overlays. Install an ingress controller first, then enable it with
-`ingress.enabled=true` and route traffic to the gateway by hostname. Use the
-list-valued `ingress.hosts` to front the gateway with one or more hostnames —
-each entry becomes an Ingress rule (and, when TLS is enabled, a SAN on the
-cert):
+`ingress.enabled=true`, gateway auth, and TLS, and route traffic to the gateway
+by hostname. Use the list-valued `ingress.hosts` to front the gateway with one
+or more hostnames — each entry becomes an Ingress rule (and, when TLS is
+enabled, a SAN on the cert):
 
 ```yaml
+gateway:
+  auth:
+    mode: static
+    tokenSecretName: sie-gateway-auth   # Secret with comma-separated tokens
 ingress:
   enabled: true
   className: nginx
@@ -1146,37 +1150,66 @@ ignored whenever `ingress.hosts` is non-empty. With neither set the chart render
 host-less catch-all Ingress. All hosts share the single `ingress.tlsConfig.secretName`
 (one multi-SAN certificate).
 
-### Unauthenticated gateways
+### Authentication and TLS requirements
 
-The gateway authenticates nothing by default (`gateway.auth.mode: none`). While
-nothing authenticates requests, the chart refuses to render an Ingress that has
-no host or no TLS, because such an Ingress publishes the inference API and the
-pool API, which keeps GPU workers warm, to anyone who can reach the ingress
-controller. The render passes when any of the following holds:
+The gateway authenticates nothing by default (`gateway.auth.mode: none`). The
+chart refuses to render a gateway Ingress unless something authenticates its
+requests, because an Ingress publishes the inference API and the pool API,
+which keeps GPU workers warm, to anyone who can reach the ingress controller.
+A hostname or a certificate is not access control: hostnames are public DNS and
+certificates appear in Certificate Transparency logs. One of the following must
+hold:
 
 - the gateway requires a token: `gateway.auth.mode=static` with
-  `gateway.auth.tokenSecretName` naming a Secret of comma-separated tokens
-  (SDK clients send one as `api_key`/`apiKey`, or read it from `SIE_API_KEY`);
-- the oauth2-proxy edge is enabled (`auth.enabled=true`);
-- the Ingress is scoped to at least one host and has TLS
-  (`ingress.tlsConfig.enabled=true`, or `ingress.tlsConfig.mode=disabled` when
-  TLS terminates upstream);
+  `gateway.auth.tokenSecretName` naming a Secret of comma-separated tokens.
+  SDK clients pass one as `api_key`/`apiKey`, or read it from `SIE_API_KEY`
+  when their base URL comes from `SIE_BASE_URL`;
+- the oauth2-proxy edge is enabled (`auth.enabled=true`). It works through
+  ingress-nginx `auth-url` annotations, so the chart accepts it only with
+  `ingress.className=nginx`. Its default `auth.oauth2Proxy.emailDomain: "*"`
+  admits any account the configured OIDC issuer authenticates; narrow it for
+  a shared issuer;
 - `ingress.allowUnauthenticated=true` explicitly accepts an unauthenticated
   Ingress, for example behind a private ingress controller.
 
-Independently of auth, the gateway bounds API-created pools: the warm floor
-(`minimum_worker_count`, default cap 4), the lease TTL (default cap 3600 s), and
-the number of live pools (default cap 64). Tune them with
-`SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT`, `SIE_GATEWAY_POOL_MAX_TTL_S`, and
-`SIE_GATEWAY_MAX_POOLS` in `gateway.extraEnv`.
+The Ingress also needs TLS, so tokens and session cookies do not cross the
+network in cleartext: `ingress.tlsConfig.enabled=true` with at least one host
+(the Ingress carries TLS only for named hosts), `ingress.tlsConfig.mode=disabled`
+as an explicit statement that TLS terminates upstream of the Ingress, or the
+explicit `ingress.allowPlaintext=true`.
 
-> **Upgrade note:** `values-aws.yaml`, `values-gke.yaml`, and `values-aks.yaml`
-> used to enable a host-less, TLS-less Ingress. Upgrading with those overlays
-> now removes that Ingress. To keep external access, set `ingress.enabled=true`
-> together with gateway auth, or with `ingress.hosts` and TLS. To keep the
-> previous unauthenticated catch-all Ingress unchanged, also set
-> `ingress.allowUnauthenticated=true`. An upgrade with `--reuse-values` keeps
-> `ingress.enabled=true` and fails the render until one of these is chosen.
+Both opt-ins accept only a YAML boolean; a quoted `"false"` fails the render.
+`gateway.auth.mode` must be `none`, `static`, or `token` exactly as the gateway
+reads it, and token auth without `gateway.auth.tokenSecretName` (or a
+`SIE_AUTH_TOKEN(S)` entry in `gateway.extraEnv`) fails the render because the
+gateway would refuse every request. A `gateway.extraEnv` entry that overrides
+`SIE_AUTH_MODE` takes precedence over `gateway.auth.mode`.
+
+The same authentication requirement applies to `gateway.service.type:
+LoadBalancer` or `NodePort`, which are reachable from outside the cluster on
+most managed platforms; `gateway.service.allowUnauthenticated=true` is the
+explicit opt-in there. `config.service.type` must stay `ClusterIP`: sie-config
+is the configuration write authority and accepts unauthenticated writes unless
+an admin token is configured.
+
+Independently of auth, the gateway bounds API-created pools: the warm floor
+(`minimum_worker_count`, default cap 4), the number of assigned workers per
+machine profile a pool keeps warm through its active lease (its GPU
+requirement, at most the same cap), the lease TTL (default cap 3600 s), and the
+number of live pools (default cap 64, counted by each gateway replica). Tune
+them with `SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT`,
+`SIE_GATEWAY_POOL_MAX_TTL_S`, and `SIE_GATEWAY_MAX_POOLS` in `gateway.extraEnv`.
+
+> **Upgrade note (breaking):** `values-aws.yaml`, `values-gke.yaml`, and
+> `values-aks.yaml` used to enable a host-less, TLS-less Ingress in front of an
+> unauthenticated gateway. Upgrading with those overlays now removes that
+> Ingress, and the install notes warn when that happens. To keep external
+> access, set `ingress.enabled=true` with gateway auth and TLS as above. To keep
+> the previous unauthenticated plain-HTTP catch-all Ingress unchanged, set both
+> `ingress.allowUnauthenticated=true` and `ingress.allowPlaintext=true`. An
+> upgrade with `--reuse-values` keeps `ingress.enabled=true` and fails the
+> render until one of these is chosen. An existing Ingress with gateway auth
+> but no TLS needs TLS or `ingress.allowPlaintext=true`.
 
 ### Worker NetworkPolicy
 

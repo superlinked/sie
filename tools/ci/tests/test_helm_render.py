@@ -601,44 +601,101 @@ def test_cloud_presets_do_not_publish_an_ingress(tmp_path: Path, preset: str) ->
     assert gateway_ingresses(rendered_documents(tmp_path, {}, (preset,))) == []
 
 
+AUTH_GUARD = f"{INGRESS_GUARD}: nothing authenticates its requests"
+TLS_GUARD = f"{INGRESS_GUARD} without TLS"
+GATEWAY_AUTH = {"auth": {"mode": "static", "tokenSecretName": "sie-gateway-auth"}}
+SCOPED_TLS = {"hosts": ["sie.example.com"], "tlsConfig": {"enabled": True, "mode": "byo", "secretName": "sie-tls"}}
+UPSTREAM_TLS = {"hosts": ["sie.example.com"], "tlsConfig": {"enabled": False, "mode": "disabled"}}
+OAUTH2_EDGE = {"enabled": True, "oauth2Proxy": {"oidcIssuerUrl": "https://issuer.example.com"}}
+
+
+def ingress_values(ingress: dict | None = None, **values: dict) -> dict:
+    return {**values, "ingress": {"enabled": True, **(ingress or {})}}
+
+
+def render_error(tmp_path: Path, values: dict, overlays: tuple[str, ...] = ()) -> str:
+    result = render_chart(tmp_path, values, overlays)
+    assert result.returncode != 0, "render unexpectedly succeeded"
+    return result.stderr
+
+
 @pytest.mark.parametrize("preset", CLOUD_PRESETS)
-def test_enabling_a_bare_ingress_on_a_preset_fails_while_auth_is_off(tmp_path: Path, preset: str) -> None:
-    result = render_chart(tmp_path, {"ingress": {"enabled": True}}, (preset,))
-    assert result.returncode != 0
-    assert INGRESS_GUARD in result.stderr
-    assert "no host and no TLS" in result.stderr
+def test_enabling_an_ingress_on_a_preset_requires_authentication(tmp_path: Path, preset: str) -> None:
+    assert AUTH_GUARD in render_error(tmp_path, ingress_values(), (preset,))
 
 
-@pytest.mark.parametrize(
-    ("ingress", "missing"),
-    [
-        ({}, "no host and no TLS"),
-        ({"hosts": ["sie.example.com"]}, "no TLS"),
-        ({"host": "sie.example.com"}, "no TLS"),
-        ({"tlsConfig": {"enabled": True, "mode": "byo"}}, "no host"),
-    ],
-)
-def test_unauthenticated_ingress_without_host_or_tls_fails(tmp_path: Path, ingress: dict, missing: str) -> None:
-    result = render_chart(tmp_path, {"ingress": {"enabled": True, **ingress}})
-    assert result.returncode != 0
-    assert f"{INGRESS_GUARD}: it has {missing} while" in result.stderr
-    assert "ingress.allowUnauthenticated=true" in result.stderr
+@pytest.mark.parametrize("ingress", [{}, SCOPED_TLS, UPSTREAM_TLS, {"allowPlaintext": True}])
+def test_unauthenticated_ingress_fails_whatever_its_host_and_tls(tmp_path: Path, ingress: dict) -> None:
+    stderr = render_error(tmp_path, ingress_values(ingress))
+    assert AUTH_GUARD in stderr
+    assert "A hostname or TLS is not access control" in stderr
+    assert "ingress.allowUnauthenticated=true" in stderr
 
 
 @pytest.mark.parametrize(
     "values",
     [
-        {"ingress": {"hosts": ["sie.example.com"], "tlsConfig": {"enabled": True, "mode": "byo"}}},
-        {"ingress": {"host": "sie.example.com", "tls": {"enabled": True}}},
-        {"ingress": {"hosts": ["sie.example.com"], "tlsConfig": {"enabled": False, "mode": "disabled"}}},
-        {"gateway": {"auth": {"mode": "static", "tokenSecretName": "sie-gateway-auth"}}},
+        {"gateway": GATEWAY_AUTH},
         {"gateway": {"auth": {"mode": "token", "tokenSecretName": "sie-gateway-auth"}}},
+        {"auth": OAUTH2_EDGE},
         {"ingress": {"allowUnauthenticated": True}},
     ],
 )
-def test_ingress_renders_when_host_and_tls_or_auth_or_opt_in_are_set(tmp_path: Path, values: dict) -> None:
+def test_authenticated_ingress_without_tls_fails(tmp_path: Path, values: dict) -> None:
     values = {**values, "ingress": {"enabled": True, **values.get("ingress", {})}}
-    assert len(gateway_ingresses(rendered_documents(tmp_path, values))) == 1
+    stderr = render_error(tmp_path, values)
+    assert TLS_GUARD in stderr
+    assert "ingress.allowPlaintext=true" in stderr
+
+
+@pytest.mark.parametrize(
+    "ingress",
+    [
+        SCOPED_TLS,
+        {"host": "sie.example.com", "tls": {"enabled": True}},
+        UPSTREAM_TLS,
+        {"allowPlaintext": True},
+    ],
+)
+def test_authenticated_ingress_renders_with_tls_or_the_plaintext_opt_in(tmp_path: Path, ingress: dict) -> None:
+    assert len(gateway_ingresses(rendered_documents(tmp_path, ingress_values(ingress, gateway=GATEWAY_AUTH)))) == 1
+
+
+def test_tls_without_a_host_does_not_count_as_tls(tmp_path: Path) -> None:
+    values = ingress_values({"tlsConfig": {"enabled": True, "mode": "byo"}}, gateway=GATEWAY_AUTH)
+    assert TLS_GUARD in render_error(tmp_path, values)
+
+
+def test_both_opt_ins_keep_the_previous_catch_all_ingress(tmp_path: Path) -> None:
+    values = ingress_values({"allowUnauthenticated": True, "allowPlaintext": True})
+    (ingress,) = gateway_ingresses(rendered_documents(tmp_path, values))
+    assert [rule.get("host") for rule in ingress["spec"]["rules"]] == [None]
+    assert "tls" not in ingress["spec"]
+
+
+def test_scoped_ingress_keeps_its_host_and_tls(tmp_path: Path) -> None:
+    (ingress,) = gateway_ingresses(rendered_documents(tmp_path, ingress_values(SCOPED_TLS, gateway=GATEWAY_AUTH)))
+    assert [rule["host"] for rule in ingress["spec"]["rules"]] == ["sie.example.com"]
+    assert ingress["spec"]["tls"] == [{"hosts": ["sie.example.com"], "secretName": "sie-tls"}]
+
+
+@pytest.mark.parametrize("field", ["allowUnauthenticated", "allowPlaintext"])
+@pytest.mark.parametrize("value", ["false", "true", 1])
+def test_ingress_opt_ins_accept_only_booleans(tmp_path: Path, field: str, value: object) -> None:
+    stderr = render_error(tmp_path, ingress_values({field: value, **SCOPED_TLS}, gateway=GATEWAY_AUTH))
+    assert f"ingress.{field} must be a boolean" in stderr
+
+
+@pytest.mark.parametrize("class_name", ["alb", "traefik", ""])
+def test_oauth2_edge_is_refused_outside_ingress_nginx(tmp_path: Path, class_name: str) -> None:
+    values = ingress_values({"className": class_name, **SCOPED_TLS}, auth=OAUTH2_EDGE)
+    assert "does not honour" in render_error(tmp_path, values)
+
+
+def test_oauth2_edge_on_ingress_nginx_counts_as_authentication(tmp_path: Path) -> None:
+    values = ingress_values({"className": "nginx", **SCOPED_TLS}, auth=OAUTH2_EDGE)
+    (ingress,) = gateway_ingresses(rendered_documents(tmp_path, values))
+    assert "nginx.ingress.kubernetes.io/auth-url" in ingress["metadata"]["annotations"]
 
 
 @pytest.mark.parametrize(
@@ -649,34 +706,47 @@ def test_ingress_renders_when_host_and_tls_or_auth_or_opt_in_are_set(tmp_path: P
     ],
 )
 def test_extra_env_auth_mode_override_is_not_credited(tmp_path: Path, extra_env: list[dict]) -> None:
-    values = {
-        "ingress": {"enabled": True},
-        "gateway": {"auth": {"mode": "static", "tokenSecretName": "sie-gateway-auth"}, "extraEnv": extra_env},
-    }
-    result = render_chart(tmp_path, values)
-    assert result.returncode != 0
-    assert f"{INGRESS_GUARD}: it has no host and no TLS while" in result.stderr
+    values = ingress_values(SCOPED_TLS, gateway={**GATEWAY_AUTH, "extraEnv": extra_env})
+    assert AUTH_GUARD in render_error(tmp_path, values)
 
 
 def test_extra_env_auth_mode_enabling_auth_is_credited(tmp_path: Path) -> None:
-    values = {
-        "ingress": {"enabled": True},
-        "gateway": {"extraEnv": [{"name": "SIE_AUTH_MODE", "value": "token"}]},
-    }
+    extra_env = [
+        {"name": "SIE_AUTH_MODE", "value": "token"},
+        {"name": "SIE_AUTH_TOKENS", "valueFrom": {"secretKeyRef": {"name": "gateway-auth", "key": "tokens"}}},
+    ]
+    values = ingress_values(SCOPED_TLS, gateway={"extraEnv": extra_env})
     assert len(gateway_ingresses(rendered_documents(tmp_path, values))) == 1
 
 
-def test_scoped_unauthenticated_ingress_keeps_its_host_and_tls(tmp_path: Path) -> None:
-    values = {
-        "ingress": {
-            "enabled": True,
-            "hosts": ["sie.example.com"],
-            "tlsConfig": {"enabled": True, "mode": "byo", "secretName": "sie-tls"},
-        }
-    }
-    (ingress,) = gateway_ingresses(rendered_documents(tmp_path, values))
-    assert [rule["host"] for rule in ingress["spec"]["rules"]] == ["sie.example.com"]
-    assert ingress["spec"]["tls"] == [{"hosts": ["sie.example.com"], "secretName": "sie-tls"}]
+@pytest.mark.parametrize("mode", ["Static", "static ", "bearer"])
+def test_unsupported_gateway_auth_mode_fails(tmp_path: Path, mode: str) -> None:
+    stderr = render_error(tmp_path, {"gateway": {"auth": {"mode": mode, "tokenSecretName": "sie-gateway-auth"}}})
+    assert "is not supported" in stderr
+
+
+@pytest.mark.parametrize("mode", ["static", "token"])
+def test_gateway_token_auth_needs_a_token_source(tmp_path: Path, mode: str) -> None:
+    assert "needs tokens" in render_error(tmp_path, {"gateway": {"auth": {"mode": mode}}})
+
+
+@pytest.mark.parametrize("service_type", ["LoadBalancer", "NodePort"])
+def test_external_gateway_service_requires_auth_or_opt_in(tmp_path: Path, service_type: str) -> None:
+    stderr = render_error(tmp_path, {"gateway": {"service": {"type": service_type}}})
+    assert f"Refusing to render gateway.service.type={service_type} without gateway auth" in stderr
+    rendered_documents(tmp_path, {"gateway": {**GATEWAY_AUTH, "service": {"type": service_type}}})
+    rendered_documents(tmp_path, {"gateway": {"service": {"type": service_type, "allowUnauthenticated": True}}})
+
+
+def test_gateway_service_opt_in_accepts_only_booleans(tmp_path: Path) -> None:
+    values = {"gateway": {"service": {"type": "LoadBalancer", "allowUnauthenticated": "false"}}}
+    assert "gateway.service.allowUnauthenticated must be a boolean" in render_error(tmp_path, values)
+
+
+@pytest.mark.parametrize("service_type", ["LoadBalancer", "NodePort"])
+def test_config_service_must_stay_cluster_ip(tmp_path: Path, service_type: str) -> None:
+    stderr = render_error(tmp_path, {"config": {"service": {"type": service_type}}})
+    assert f"config.service.type={service_type} is not supported" in stderr
 
 
 def test_worker_network_policy_is_off_by_default(tmp_path: Path) -> None:
@@ -717,7 +787,10 @@ def test_ha_overlay_admits_only_gateway_pods_to_every_worker_port(tmp_path: Path
 
 
 def test_worker_network_policy_appends_extra_ingress_rules(tmp_path: Path) -> None:
-    extra = {"from": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "bench"}}}]}
+    extra = {
+        "from": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "bench"}}}],
+        "ports": [{"port": 8080, "protocol": "TCP"}],
+    }
     values = {
         "workers": {
             "networkPolicy": {"enabled": True, "extraIngress": [extra]},
@@ -726,3 +799,17 @@ def test_worker_network_policy_appends_extra_ingress_rules(tmp_path: Path) -> No
     }
     (policy,) = worker_network_policies(rendered_documents(tmp_path, values))
     assert policy["spec"]["ingress"][1] == extra
+
+
+@pytest.mark.parametrize(
+    "rule",
+    [
+        {"from": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "bench"}}}]},
+        {"ports": [{"port": 8080, "protocol": "TCP"}]},
+    ],
+)
+def test_worker_network_policy_rejects_rules_without_from_or_ports(tmp_path: Path, rule: dict) -> None:
+    values = {
+        "workers": {"networkPolicy": {"enabled": True, "extraIngress": [rule]}, "pools": {"l4": {"enabled": True}}}
+    }
+    assert "workers.networkPolicy.extraIngress[0] needs a non-empty from and ports" in render_error(tmp_path, values)

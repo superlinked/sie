@@ -266,9 +266,15 @@ gateway:
 
   # -- Service configuration
   service:
+    # -- LoadBalancer or NodePort requires gateway auth (auth.mode=static) or
+    # allowUnauthenticated=true, because those Services are reachable from
+    # outside the cluster on most managed platforms.
     type: ClusterIP
     port: 8080
     annotations: {}
+    # -- Allow a LoadBalancer or NodePort gateway Service without gateway auth
+    # (a boolean).
+    allowUnauthenticated: false
 
   # -- Block the gateway pod on sie-config readiness before it starts the
   # cold-start bootstrap. Prevents the rolling-upgrade race where the
@@ -850,8 +856,9 @@ workers:
   # Disabled by default; values-ha.yaml enables it.
   networkPolicy:
     enabled: false
-    # -- Additional NetworkPolicy ingress rules (standard `from`/`ports`
-    # entries) for callers outside this chart that must reach workers directly.
+    # -- Additional NetworkPolicy ingress rules for callers outside this chart
+    # that must reach workers directly. Each entry needs a non-empty `from` and
+    # `ports` so a rule cannot admit every source or every port.
     extraIngress: []
 
   # -- Worker pools (one StatefulSet per enabled queuePool/machineProfile/bundle lane)
@@ -1158,13 +1165,18 @@ ingress:
   enabled: false
   className: nginx
   annotations: {}
-  # -- Allow an Ingress with no host or no TLS while nothing authenticates
-  # requests (gateway.auth.mode=none and auth.enabled=false). The chart refuses
-  # that render by default, because it publishes the inference API and the
-  # pool API, which keeps GPU workers warm, to anyone who can reach the ingress
-  # controller. Set true only when the controller is private or another layer
-  # in front of it authenticates every request.
+  # -- Allow the gateway Ingress while nothing authenticates requests (gateway
+  # auth mode none and auth.enabled=false). The chart refuses that render by
+  # default, whatever the hosts and TLS, because it publishes the inference API
+  # and the pool API, which keeps GPU workers warm, to anyone who can reach the
+  # ingress controller. Set true (a boolean) only when the controller is
+  # private or another layer in front of it authenticates every request.
   allowUnauthenticated: false
+  # -- Allow the gateway Ingress without TLS. The chart refuses an Ingress that
+  # carries no TLS (tlsConfig.enabled with at least one host) unless
+  # tlsConfig.mode=disabled states that TLS terminates upstream. Set true (a
+  # boolean) to serve plain HTTP, which sends tokens and cookies in cleartext.
+  allowPlaintext: false
   # -- Hostnames served by the ingress. Each entry becomes an ingress rule and,
   # when tls.enabled, a SAN on the TLS cert (all hosts share tls.secretName).
   # Empty => host-less catch-all ingress.

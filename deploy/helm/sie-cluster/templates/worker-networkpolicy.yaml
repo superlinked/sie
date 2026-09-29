@@ -1,5 +1,10 @@
 {{- $networkPolicy := default (dict) .Values.workers.networkPolicy }}
 {{- if $networkPolicy.enabled }}
+{{- range $index, $rule := (default (list) $networkPolicy.extraIngress) }}
+{{- if not (and (kindIs "map" $rule) $rule.from $rule.ports) }}
+{{- fail (printf "workers.networkPolicy.extraIngress[%d] needs a non-empty from and ports: a rule without them admits every source or every port on the worker pods." $index) }}
+{{- end }}
+{{- end }}
 {{- $maxWorkerChildCount := int (include "sie-cluster.worker.maxChildCount" .) }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

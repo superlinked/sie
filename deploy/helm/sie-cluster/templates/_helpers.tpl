@@ -820,36 +820,130 @@ Runs from NOTES.txt so every install/upgrade is checked, regardless of which (or
 {{- end }}
 
 {{/*
-Validation: an Ingress with no host or no TLS must not publish a gateway that
-authenticates nothing. The gateway authenticates when its effective
-SIE_AUTH_MODE is static or token: gateway.auth.mode, unless a later
-gateway.extraEnv entry overrides SIE_AUTH_MODE (an entry without a literal value
-is not credited). The oauth2-proxy edge (auth.enabled) authenticates at the
-Ingress. TLS counts as present when ingress.tlsConfig is enabled or its mode
-declares upstream termination (disabled).
+Strict boolean opt-in: only a YAML boolean true enables it. Any other non-null
+value fails the render so a quoted "false" can never read as true.
+Args (dict): value, path.
 */}}
-{{- define "sie-cluster.validateIngressExposure" -}}
-{{- if and .Values.ingress.enabled (not .Values.ingress.allowUnauthenticated) -}}
+{{- define "sie-cluster.optIn" -}}
+{{- $value := .value -}}
+{{- if not (or (kindIs "invalid" $value) (kindIs "bool" $value)) -}}
+{{- fail (printf "%s must be a boolean (true or false), got %q" .path (toString $value)) -}}
+{{- end -}}
+{{- if and (kindIs "bool" $value) $value -}}true{{- end -}}
+{{- end }}
+
+{{/*
+The SIE_AUTH_MODE the gateway container receives, as JSON {"mode", "known"}.
+gateway.auth.mode is passed verbatim; a later gateway.extraEnv entry named
+SIE_AUTH_MODE replaces it. An override without a literal value (valueFrom) is
+not known at render time.
+*/}}
+{{- define "sie-cluster.gateway.effectiveAuthMode" -}}
 {{- $gateway := default (dict) .Values.gateway -}}
-{{- $gatewayAuthMode := trim (toString (dig "auth" "mode" "none" $gateway)) -}}
+{{- $mode := toString (dig "auth" "mode" "none" $gateway) -}}
+{{- $known := true -}}
 {{- range $entry := (default (list) $gateway.extraEnv) -}}
 {{- if and (kindIs "map" $entry) (eq (toString (index $entry "name")) "SIE_AUTH_MODE") -}}
-{{- $gatewayAuthMode = trim (toString (dig "value" "" $entry)) -}}
+{{- if hasKey $entry "value" -}}
+{{- $mode = toString (index $entry "value") -}}
+{{- $known = true -}}
+{{- else -}}
+{{- $mode = "" -}}
+{{- $known = false -}}
 {{- end -}}
 {{- end -}}
-{{- $gatewayAuth := has $gatewayAuthMode (list "static" "token") -}}
+{{- end -}}
+{{- dict "mode" $mode "known" $known | toJson -}}
+{{- end }}
+
+{{/*
+"true" when the gateway enforces token auth: the effective SIE_AUTH_MODE is
+known and is exactly static or token, the values the gateway accepts.
+*/}}
+{{- define "sie-cluster.gateway.authenticates" -}}
+{{- $auth := include "sie-cluster.gateway.effectiveAuthMode" . | fromJson -}}
+{{- if and $auth.known (has $auth.mode (list "static" "token")) -}}true{{- end -}}
+{{- end }}
+
+{{/*
+Validation: gateway auth values. The gateway accepts exactly none, "", static,
+and token, and refuses every request when token auth has no token.
+*/}}
+{{- define "sie-cluster.validateGatewayAuth" -}}
+{{- $gateway := default (dict) .Values.gateway -}}
+{{- $auth := include "sie-cluster.gateway.effectiveAuthMode" . | fromJson -}}
+{{- if $auth.known -}}
+{{- if not (has $auth.mode (list "none" "" "static" "token")) -}}
+{{- fail (printf "gateway auth mode %q is not supported; set gateway.auth.mode (or a gateway.extraEnv SIE_AUTH_MODE override) to none, static, or token." $auth.mode) -}}
+{{- end -}}
+{{- if has $auth.mode (list "static" "token") -}}
+{{- $tokenSource := dig "auth" "tokenSecretName" "" $gateway -}}
+{{- range $entry := (default (list) $gateway.extraEnv) -}}
+{{- if and (kindIs "map" $entry) (has (toString (index $entry "name")) (list "SIE_AUTH_TOKEN" "SIE_AUTH_TOKENS")) -}}
+{{- $tokenSource = "extraEnv" -}}
+{{- end -}}
+{{- end -}}
+{{- if not $tokenSource -}}
+{{- fail (printf "gateway auth mode %q needs tokens: set gateway.auth.tokenSecretName to a Secret holding comma-separated tokens, or the gateway refuses every request." $auth.mode) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Validation: a gateway Ingress needs authentication and TLS.
+Authentication is gateway token auth, the oauth2-proxy edge (auth.enabled,
+enforced through ingress-nginx annotations, so only with className nginx), or
+the explicit ingress.allowUnauthenticated opt-in. A hostname is not access
+control. TLS is ingress.tlsConfig.enabled with at least one host (the chart
+renders no TLS block without one), ingress.tlsConfig.mode=disabled as an
+explicit statement that TLS terminates upstream, or the explicit
+ingress.allowPlaintext opt-in.
+*/}}
+{{- define "sie-cluster.validateIngressExposure" -}}
+{{- if .Values.ingress.enabled -}}
+{{- $allowUnauthenticated := include "sie-cluster.optIn" (dict "value" .Values.ingress.allowUnauthenticated "path" "ingress.allowUnauthenticated") -}}
+{{- $allowPlaintext := include "sie-cluster.optIn" (dict "value" .Values.ingress.allowPlaintext "path" "ingress.allowPlaintext") -}}
+{{- $className := toString (default "" .Values.ingress.className) -}}
 {{- $edgeAuth := dig "enabled" false (default (dict) .Values.auth) -}}
-{{- if not (or $gatewayAuth $edgeAuth) -}}
+{{- if and $edgeAuth (ne $className "nginx") -}}
+{{- fail (printf "auth.enabled=true puts the oauth2-proxy edge in front of the gateway through ingress-nginx auth annotations, which ingress.className=%q does not honour, so the gateway would be published without that check. Use ingress.className=nginx with ingress-nginx, or enable gateway auth (gateway.auth.mode=static) and set auth.enabled=false." $className) -}}
+{{- end -}}
+{{- $gatewayAuth := include "sie-cluster.gateway.authenticates" . -}}
+{{- if not (or $gatewayAuth $edgeAuth $allowUnauthenticated) -}}
+{{- $auth := include "sie-cluster.gateway.effectiveAuthMode" . | fromJson -}}
+{{- fail (printf "Refusing to render the gateway Ingress: nothing authenticates its requests (effective SIE_AUTH_MODE=%q, auth.enabled=false), so it would publish the inference and pool APIs to anyone who can reach the ingress controller. A hostname or TLS is not access control. Enable gateway auth (gateway.auth.mode=static with gateway.auth.tokenSecretName) or the oauth2-proxy edge (auth.enabled=true with ingress.className=nginx), or set ingress.allowUnauthenticated=true to publish it without authentication." $auth.mode) -}}
+{{- end -}}
 {{- $hosts := include "sie-cluster.ingress.hosts" . | fromJsonArray -}}
 {{- $tls := include "sie-cluster.ingressTlsConfig" . | fromYaml -}}
-{{- $tlsPresent := or $tls.enabled (eq (toString (default "byo" $tls.mode)) "disabled") -}}
-{{- $missing := list -}}
-{{- if not $hosts -}}{{- $missing = append $missing "no host" -}}{{- end -}}
-{{- if not $tlsPresent -}}{{- $missing = append $missing "no TLS" -}}{{- end -}}
-{{- if $missing -}}
-{{- fail (printf "Refusing to render the gateway Ingress: it has %s while the gateway has no authentication (effective SIE_AUTH_MODE=%q from gateway.auth.mode and gateway.extraEnv, auth.enabled=false), which publishes the inference and pool APIs to anyone who can reach the ingress controller. Enable gateway auth (gateway.auth.mode=static with gateway.auth.tokenSecretName) or the oauth2-proxy edge (auth.enabled=true), or set ingress.hosts and ingress.tlsConfig.enabled=true, or set ingress.allowUnauthenticated=true to publish it without authentication." (join " and " $missing) $gatewayAuthMode) -}}
+{{- $upstreamTls := eq (toString (default "byo" $tls.mode)) "disabled" -}}
+{{- $ingressTls := and $tls.enabled (gt (len $hosts) 0) -}}
+{{- if not (or $upstreamTls $ingressTls $allowPlaintext) -}}
+{{- fail "Refusing to render the gateway Ingress without TLS: tokens and session cookies would cross the network in plaintext. Set ingress.hosts with ingress.tlsConfig.enabled=true (the Ingress carries TLS only for named hosts), set ingress.tlsConfig.mode=disabled when TLS terminates upstream of the Ingress, or set ingress.allowPlaintext=true to serve plain HTTP." -}}
 {{- end -}}
 {{- end -}}
+{{- end }}
+
+{{/*
+Validation: a gateway Service of type LoadBalancer or NodePort is reachable
+from outside the cluster on most managed Kubernetes platforms, so it needs
+gateway token auth or the explicit gateway.service.allowUnauthenticated
+opt-in. sie-config accepts unauthenticated writes unless an admin token is
+configured (outside a production deployment environment), so its Service
+stays ClusterIP.
+*/}}
+{{- define "sie-cluster.validateServiceExposure" -}}
+{{- $serviceType := toString (dig "service" "type" "ClusterIP" (default (dict) .Values.gateway)) -}}
+{{- if has $serviceType (list "LoadBalancer" "NodePort") -}}
+{{- $allowUnauthenticated := include "sie-cluster.optIn" (dict "value" (dig "service" "allowUnauthenticated" nil (default (dict) .Values.gateway)) "path" "gateway.service.allowUnauthenticated") -}}
+{{- if not (or (include "sie-cluster.gateway.authenticates" .) $allowUnauthenticated) -}}
+{{- fail (printf "Refusing to render gateway.service.type=%s without gateway auth: the Service is reachable from outside the cluster on most managed platforms and would publish the inference and pool APIs. Enable gateway auth (gateway.auth.mode=static with gateway.auth.tokenSecretName), or set gateway.service.allowUnauthenticated=true." $serviceType) -}}
+{{- end -}}
+{{- end -}}
+{{- $config := default (dict) .Values.config -}}
+{{- $configServiceType := toString (dig "service" "type" "ClusterIP" $config) -}}
+{{- if and $config.enabled (ne $configServiceType "ClusterIP") -}}
+{{- fail (printf "config.service.type=%s is not supported: sie-config is the configuration write authority and must stay ClusterIP. Reach it in-cluster or through kubectl port-forward." $configServiceType) -}}
 {{- end -}}
 {{- end }}
 
