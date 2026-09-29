@@ -75,11 +75,19 @@ The models that read the labels before the document (`prompt_first` in the
 checkpoint's config: every shipped GLiClass model except `gliclass-small-v1.0`,
 `gliclass-base-v1.0` and `gliclass-large-v1.0`) cut the document to the room
 the label prompt and instruction leave, and count only the part of the document
-they read, as `truncate_text` would. When the labels leave no room for any of
-the document, each item returns a per-item `INPUT_TOO_LONG` error and counts
-nothing, rather than being scored without its document. With `overflow_policy`
-`truncate_text` or `error`, such a request is refused with `INPUT_TOO_LONG`, as
+they read, as `truncate_text` would. When the labels leave fewer than 8 tokens
+for the document (a margin for tokenization at the boundary), each item returns
+a per-item `INPUT_TOO_LONG` error and counts nothing, rather than being scored
+with little or none of its document. With `overflow_policy` `truncate_text` or
+`error`, the document is cut to that room or checked against it instead, and a
+request whose labels leave no room at all is refused with `INPUT_TOO_LONG`, as
 before.
+
+With `options={"overflow_policy": "error"}`, an item whose document does not
+fit whole next to the labels returns a per-item `INPUT_TOO_LONG` error and
+counts nothing, while the other items succeed. Concurrent requests that share
+labels and options are batched into one model call, so an over-long document
+fails only its own item, never another request's.
 
 The instruction and each example text may be at most 2,048 characters, and
 together with the example labels at most 8,192 characters. Up to 32 examples
