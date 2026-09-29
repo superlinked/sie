@@ -1671,6 +1671,48 @@ profiles:
         "invalid_config",
         [
             pytest.param("unknown_field: 1\n" + _qwen_profile_variant_yaml(), id="schema"),
+            pytest.param("sie_id: [broken", id="yaml"),
+        ],
+    )
+    async def test_replace_model_configs_rejects_unidentified_invalid_entry_before_mutation(
+        self, invalid_config: str, invalid_first: bool
+    ) -> None:
+        registry = ModelRegistry(models_dir=None)
+        executor = QueueExecutor(registry)
+        await executor.replace_model_configs(
+            ReplaceModelConfigsRequest(
+                bundle_id="sglang",
+                epoch=7,
+                bundle_config_hash="",
+                models=[ReplaceModelConfigEntry(model_id="", model_config=_qwen_profile_variant_yaml())],
+            )
+        )
+        previous = registry.get_configs_snapshot()
+        version = registry._config_version
+        registry._loaded["Qwen/Qwen3.6-27B"] = MagicMock()
+        registry._do_unload = AsyncMock()
+        entries = [
+            ReplaceModelConfigEntry(model_id="", model_config=invalid_config),
+            ReplaceModelConfigEntry(model_id="new/model", model_config=_worker_telemetry_model_yaml("new/model")),
+        ]
+        if not invalid_first:
+            entries.reverse()
+
+        with pytest.raises(ValueError, match=r"cannot identify .*snapshot was not applied"):
+            await executor.replace_model_configs(
+                ReplaceModelConfigsRequest(bundle_id="sglang", epoch=8, bundle_config_hash="", models=entries)
+            )
+
+        assert registry.get_configs_snapshot() == previous
+        assert registry._config_version == version
+        registry._do_unload.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("invalid_first", [False, True])
+    @pytest.mark.parametrize(
+        "invalid_config",
+        [
+            pytest.param("unknown_field: 1\n" + _qwen_profile_variant_yaml(), id="schema"),
             pytest.param(_qwen_invalid_legacy_lora_yaml(), id="legacy-lora"),
         ],
     )

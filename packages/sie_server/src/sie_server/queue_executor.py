@@ -629,9 +629,10 @@ class QueueExecutor:
         """Replace the bundle-scoped registry view from a full export snapshot.
 
         An entry with an invalid schema or per-model options is logged, and
-        that model keeps its current registry entries, if any. Duplicate valid
-        model IDs and cross-model pool conflicts reject the whole snapshot
-        before any registry mutation. The returned hash covers what the registry
+        that model keeps its current registry entries, if any. An invalid entry
+        without an identifiable model, duplicate valid model IDs, and cross-model
+        pool conflicts reject the whole snapshot before any registry mutation.
+        The returned hash covers what the registry
         then holds; the sidecar advertises it only when it equals the
         control-plane hash.
         """
@@ -650,6 +651,9 @@ class QueueExecutor:
                     validate_no_legacy_scalar_lora_id(name=expanded.sie_id, config=expanded)
                 configs.append(model_config)
             except (TypeError, ValueError, yaml.YAMLError) as exc:
+                if not model_id:
+                    msg = "cannot identify rejected model config; authoritative snapshot was not applied"
+                    raise ValueError(msg) from exc
                 logger.warning(
                     "Rejected exported model config %r for bundle %s; keeping its current config, if any: %s",
                     model_id,
