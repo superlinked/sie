@@ -236,10 +236,7 @@ def test_log_privacy_with_malformed_protobuf(tmp_path, kind):
         output = tmp_path / "received.json"
         wait_for(lambda: len(read_records(output)) >= len(expected))
         # Include late records that should have been rejected.
-        deadline = time.monotonic() + 1
-        while time.monotonic() < deadline:
-            records = read_records(output)
-            time.sleep(0.05)
+        time.sleep(1)
         records = read_records(output)
         assert SENTINEL not in output.read_text()
         assert len(records) == len(expected)
