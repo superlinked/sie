@@ -16,16 +16,6 @@ import pytest
 # Skip all tests in this module if not running integration tests
 pytestmark = pytest.mark.integration
 
-_SERVER_ITEM_IDS = (
-    "The server returns item-<index> ids for items sent without an id, but SIENodePostprocessor parses "
-    "item_id with int(), so every score falls back to 0.0 and the input order is kept"
-)
-
-
-def _xfail_if_scores_dropped(scores: list[float]) -> None:
-    if scores and all(score == 0.0 for score in scores):
-        pytest.xfail(_SERVER_ITEM_IDS)
-
 
 @pytest.fixture
 def sie_url() -> str:
@@ -267,7 +257,6 @@ class TestRAGPipelineIntegration:
         )
 
         assert len(final_results) == 2
-        _xfail_if_scores_dropped([n.score for n in final_results])
         # The encoding API doc should be highly ranked
         top_content = final_results[0].node.get_content()
         assert "encode" in top_content.lower() or "embedding" in top_content.lower()
@@ -306,7 +295,6 @@ class TestRAGPipelineIntegration:
         assert len(response.source_nodes) == 2  # Limited by top_n
         scores = [node.score for node in response.source_nodes]
         assert all(isinstance(score, float) for score in scores)
-        _xfail_if_scores_dropped(scores)
         assert scores == sorted(scores, reverse=True)
 
 

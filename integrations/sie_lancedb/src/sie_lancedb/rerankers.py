@@ -12,7 +12,34 @@ import pyarrow as pa
 from lancedb.rerankers import Reranker
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from sie_sdk import SIEClient
+
+
+def _scores_by_index(results: Mapping[str, Any], count: int) -> list[float]:
+    """Map ScoreResult entries back to input positions by item_id.
+
+    Each input is sent with ``id=str(position)``, which the server echoes as
+    the entry's ``item_id``. Only an exact echo of a sent id is used: an entry
+    whose ``item_id`` is missing, not a string, or not a sent id is skipped
+    (that row keeps its 0.0 default), so a malformed entry can neither crash
+    the rerank nor mis-assign a score to the wrong row.
+
+    Args:
+        results: ScoreResult envelope from ``SIEClient.score()``.
+        count: Number of input rows.
+
+    Returns:
+        Scores indexed by input position (0.0 for any unscored/invalid row).
+    """
+    positions = {str(index): index for index in range(count)}
+    scores = [0.0] * count
+    for entry in results.get("scores", []):
+        item_id = entry.get("item_id")
+        if isinstance(item_id, str) and item_id in positions:
+            scores[positions[item_id]] = float(entry.get("score", 0.0))
+    return scores
 
 
 class SIEReranker(Reranker):
@@ -147,26 +174,11 @@ class SIEReranker(Reranker):
 
         texts = table.column(self._column).to_pylist()
         query_item = Item(text=query)
-        doc_items = [Item(text=str(t)) for t in texts]
+        doc_items = [Item(text=str(t), id=str(idx)) for idx, t in enumerate(texts)]
 
         results = self.client.score(self._model, query_item, doc_items)
 
-        # Build score array indexed by input position
-        scores = [0.0] * len(texts)
-        for result in results["scores"]:
-            if isinstance(result, dict):
-                idx = result.get("item_id", result.get("index"))
-                score = result.get("score", 0.0)
-            else:
-                idx = getattr(result, "item_id", getattr(result, "index", None))
-                score = getattr(result, "score", 0.0)
-
-            if idx is None:
-                continue
-            if isinstance(idx, str):
-                idx = int(idx)
-            if idx < len(scores):
-                scores[idx] = float(score)
+        scores = _scores_by_index(results, len(texts))
 
         # Add _relevance_score column and sort
         table = table.append_column(

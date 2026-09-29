@@ -16,16 +16,6 @@ import pytest
 # Skip all tests in this module if not running integration tests
 pytestmark = pytest.mark.integration
 
-_SERVER_ITEM_IDS = (
-    "The server returns item-<index> ids for items sent without an id, but SIEReranker parses "
-    "item_id with int(), so every score falls back to 0.0 and the input order is kept"
-)
-
-
-def _xfail_if_scores_dropped(scores: list[float]) -> None:
-    if scores and all(score == 0.0 for score in scores):
-        pytest.xfail(_SERVER_ITEM_IDS)
-
 
 @pytest.fixture
 def sie_url() -> str:
@@ -201,7 +191,6 @@ class TestRerankerIntegration:
         assert all("relevance_score" in d.metadata for d in reranked)
         # Scores should be in descending order
         scores = [d.metadata["relevance_score"] for d in reranked]
-        _xfail_if_scores_dropped(scores)
         assert scores == sorted(scores, reverse=True)
         # Scores must be distinct, not all 0.0. The envelope-read bug returned the
         # same document duplicated at 0.0, which still satisfied len==3 and the
@@ -266,7 +255,6 @@ class TestRAGPipelineIntegration:
         final_results = reranker.compress_documents(candidates, query)
 
         assert len(final_results) == 2
-        _xfail_if_scores_dropped([d.metadata["relevance_score"] for d in final_results])
         # The encoding API doc should be highly ranked
         top_content = final_results[0].page_content
         assert "encode" in top_content.lower() or "embedding" in top_content.lower()

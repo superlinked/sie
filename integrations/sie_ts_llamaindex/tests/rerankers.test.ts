@@ -39,6 +39,23 @@ function mockNodeWithScore(text: string, score?: number) {
   };
 }
 
+/**
+ * A score mock with the SIE server's response contract: entries sorted by
+ * relevance, each `itemId` echoing the item's `id` or `item-<index>` without one.
+ */
+function serverScore(relevance: Record<string, number>) {
+  return vi.fn(async (model: string, _query: unknown, items: { id?: string; text?: string }[]) => ({
+    model,
+    scores: items
+      .map((item, index) => ({
+        itemId: item.id ?? `item-${index}`,
+        score: relevance[item.text ?? ""] ?? 0,
+      }))
+      .sort((a, b) => b.score - a.score)
+      .map((entry, rank) => ({ ...entry, rank })),
+  }));
+}
+
 describe("SIENodePostprocessor", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -104,9 +121,9 @@ describe("SIENodePostprocessor", () => {
     );
 
     expect(mockScore).toHaveBeenCalledWith("test-reranker", { text: "search query" }, [
-      { text: "First doc" },
-      { text: "Second doc" },
-      { text: "Third doc" },
+      { id: "0", text: "First doc" },
+      { id: "1", text: "Second doc" },
+      { id: "2", text: "Third doc" },
     ]);
 
     expect(result).toHaveLength(3);
@@ -119,6 +136,57 @@ describe("SIENodePostprocessor", () => {
 
     expect(result[2].node.getContent()).toBe("Third doc");
     expect(result[2].score).toBe(0.31);
+  });
+
+  it("maps the server's item ids back to their nodes", async () => {
+    const { SIEClient } = await import("@superlinked/sie-sdk");
+    const mockScore = serverScore({ doc1: 0.2, doc2: 0.9, doc3: 0.5 });
+    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+      asConstructor({
+        score: mockScore,
+        close: vi.fn(),
+      }),
+    );
+
+    const nodes = [mockNodeWithScore("doc1"), mockNodeWithScore("doc2"), mockNodeWithScore("doc3")];
+
+    const postprocessor = new SIENodePostprocessor();
+    const result = await postprocessor.postprocessNodes(
+      nodes as unknown as NodeWithScore[],
+      "query",
+    );
+
+    expect(result.map((n) => n.node.getContent())).toEqual(["doc2", "doc3", "doc1"]);
+    expect(result.map((n) => n.score)).toEqual([0.9, 0.5, 0.2]);
+  });
+
+  it("skips score entries whose itemId was not sent", async () => {
+    const { SIEClient } = await import("@superlinked/sie-sdk");
+    const mockScore = vi.fn().mockResolvedValue({
+      scores: [
+        { itemId: "item-0", score: 0.99, rank: 0 },
+        { itemId: "01", score: 0.98, rank: 1 },
+        { itemId: "1", score: 0.5, rank: 2 },
+        { itemId: "1", score: 0.4, rank: 3 },
+        { itemId: "7", score: 0.3, rank: 4 },
+      ],
+    });
+    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+      asConstructor({
+        score: mockScore,
+        close: vi.fn(),
+      }),
+    );
+
+    const nodes = [mockNodeWithScore("doc1"), mockNodeWithScore("doc2")];
+
+    const postprocessor = new SIENodePostprocessor();
+    const result = await postprocessor.postprocessNodes(
+      nodes as unknown as NodeWithScore[],
+      "query",
+    );
+
+    expect(result.map((n) => [n.node.getContent(), n.score])).toEqual([["doc2", 0.5]]);
   });
 
   it("applies topN client-side", async () => {

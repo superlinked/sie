@@ -25,6 +25,23 @@ vi.mock("@superlinked/sie-sdk", async (importOriginal) => {
   };
 });
 
+/**
+ * A score mock with the SIE server's response contract: entries sorted by
+ * relevance, each `itemId` echoing the item's `id` or `item-<index>` without one.
+ */
+function serverScore(relevance: Record<string, number>) {
+  return vi.fn(async (model: string, _query: unknown, items: { id?: string; text?: string }[]) => ({
+    model,
+    scores: items
+      .map((item, index) => ({
+        itemId: item.id ?? `item-${index}`,
+        score: relevance[item.text ?? ""] ?? 0,
+      }))
+      .sort((a, b) => b.score - a.score)
+      .map((entry, rank) => ({ ...entry, rank })),
+  }));
+}
+
 describe("SIEReranker", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -78,9 +95,9 @@ describe("SIEReranker", () => {
     const result = await reranker.compressDocuments(documents, "search query");
 
     expect(mockScore).toHaveBeenCalledWith("test-reranker", { text: "search query" }, [
-      { text: "First document" },
-      { text: "Second document" },
-      { text: "Third document" },
+      { id: "0", text: "First document" },
+      { id: "1", text: "Second document" },
+      { id: "2", text: "Third document" },
     ]);
 
     expect(result).toHaveLength(3);
@@ -94,6 +111,60 @@ describe("SIEReranker", () => {
 
     expect(result[2].pageContent).toBe("Third document");
     expect(result[2].metadata.relevance_score).toBe(0.31);
+  });
+
+  it("compressDocuments maps the server's item ids back to their documents", async () => {
+    const { SIEClient } = await import("@superlinked/sie-sdk");
+    const mockScore = serverScore({ "Doc A": 0.2, "Doc B": 0.9, "Doc C": 0.5 });
+    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+      asConstructor({
+        score: mockScore,
+        close: vi.fn(),
+      }),
+    );
+
+    const documents = [
+      { pageContent: "Doc A", metadata: {} },
+      { pageContent: "Doc B", metadata: {} },
+      { pageContent: "Doc C", metadata: {} },
+    ];
+
+    const reranker = new SIEReranker();
+    const result = await reranker.compressDocuments(documents, "query");
+
+    expect(result.map((doc) => doc.pageContent)).toEqual(["Doc B", "Doc C", "Doc A"]);
+    expect(result.map((doc) => doc.metadata.relevance_score)).toEqual([0.9, 0.5, 0.2]);
+  });
+
+  it("compressDocuments skips score entries whose itemId was not sent", async () => {
+    const { SIEClient } = await import("@superlinked/sie-sdk");
+    const mockScore = vi.fn().mockResolvedValue({
+      scores: [
+        { itemId: "item-0", score: 0.99, rank: 0 },
+        { itemId: "01", score: 0.98, rank: 1 },
+        { itemId: "1", score: 0.5, rank: 2 },
+        { itemId: "1", score: 0.4, rank: 3 },
+        { itemId: "7", score: 0.3, rank: 4 },
+      ],
+    });
+    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+      asConstructor({
+        score: mockScore,
+        close: vi.fn(),
+      }),
+    );
+
+    const documents = [
+      { pageContent: "Doc A", metadata: {} },
+      { pageContent: "Doc B", metadata: {} },
+    ];
+
+    const reranker = new SIEReranker();
+    const result = await reranker.compressDocuments(documents, "query");
+
+    expect(result.map((doc) => [doc.pageContent, doc.metadata.relevance_score])).toEqual([
+      ["Doc B", 0.5],
+    ]);
   });
 
   it("compressDocuments applies topK client-side", async () => {

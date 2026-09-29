@@ -160,16 +160,22 @@ export class SIENodePostprocessor implements BaseNodePostprocessor {
     }
 
     const queryItem = { text: queryText };
-    const docItems = nodes.map((n) => ({ text: n.node.getContent(MetadataMode.NONE) }));
+    const docItems = nodes.map((n, idx) => ({
+      id: String(idx),
+      text: n.node.getContent(MetadataMode.NONE),
+    }));
 
     const result = await this.client.score(this.modelName, queryItem, docItems);
 
     // Map score entries back to NodeWithScore with updated scores.
-    // ScoreResult.scores are already sorted by score descending.
+    // ScoreResult.scores are already sorted by score descending, and each
+    // entry's itemId echoes the id sent for its node.
+    const positions = new Map(docItems.map((item, idx) => [item.id, idx]));
     const reranked: NodeWithScore[] = [];
     for (const entry of result.scores) {
-      const idx = Number.parseInt(entry.itemId, 10);
-      const original = nodes[idx];
+      const idx = positions.get(entry.itemId);
+      positions.delete(entry.itemId);
+      const original = idx === undefined ? undefined : nodes[idx];
       if (original) {
         reranked.push({
           node: original.node,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from typing import Any
 
 from llama_index.core.schema import NodeWithScore, QueryBundle, TextNode
 from sie_llamaindex import SIENodePostprocessor
@@ -90,6 +91,22 @@ class TestSIENodePostprocessor:
         by_content = {n.node.get_content(): n.score for n in result}
         assert by_content == {"doc-1": 0.8, "doc-0": 0.0, "doc-2": 0.0}
         assert result[0].node.get_content() == "doc-1"
+
+    def test_postprocess_nodes_ranks_through_sie_client(self, score_stub_server: Any) -> None:
+        """Scores returned by a real ``SIEClient.score()`` call rank the matching node first."""
+        texts = [
+            "The weather today is sunny with clear skies.",
+            "Python is a popular programming language.",
+            "Nearest neighbor search uses distance metrics.",
+            "Vector similarity search finds similar embeddings.",
+        ]
+        nodes = [NodeWithScore(node=TextNode(text=text), score=0.5) for text in texts]
+        postprocessor = SIENodePostprocessor(base_url=score_stub_server.url, model="test-reranker")
+
+        result = postprocessor._postprocess_nodes(nodes, QueryBundle(query_str="vector similarity search"))
+
+        assert [n.node.get_content() for n in result] == [texts[i] for i in (3, 2, 0, 1)]
+        assert [n.score for n in result] == [3.0, 1.0, 0.0, 0.0]
 
     def test_postprocess_nodes_empty(self, mock_sie_client: object) -> None:
         """Test reranking empty list returns empty."""

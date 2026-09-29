@@ -22,11 +22,6 @@ from lancedb.pydantic import LanceModel, Vector
 # Skip all tests in this module if not running integration tests
 pytestmark = pytest.mark.integration
 
-_SERVER_ITEM_IDS = (
-    "The server returns item-<index> ids for items sent without an id, but SIEReranker parses "
-    "item_id with int(), which raises ValueError"
-)
-
 
 @pytest.fixture
 def sie_url() -> str:
@@ -131,20 +126,14 @@ class TestHybridSearchWithReranker:
         )
 
         query = "How does hybrid search improve results?"
-        assert len(table.search(query, query_type="hybrid").limit(3).to_list()) == 3
-
-        try:
-            results = table.search(query, query_type="hybrid").rerank(reranker).limit(3).to_list()
-        except ValueError as exc:
-            if "'item-" not in str(exc):
-                raise
-            pytest.xfail(_SERVER_ITEM_IDS)
+        results = table.search(query, query_type="hybrid").rerank(reranker).limit(3).to_list()
 
         assert len(results) == 3
         assert "_relevance_score" in results[0]
         # Scores should be descending
         scores = [r["_relevance_score"] for r in results]
         assert scores == sorted(scores, reverse=True)
+        assert results[0]["text"] == "Hybrid search combines vector and full-text search."
 
 
 class TestEntityExtraction:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from typing import Any
 from unittest.mock import NonCallableMagicMock, create_autospec
 
 import dspy
@@ -121,6 +122,21 @@ class TestSIEReranker:
         by_passage = dict(zip(result.passages, result.scores, strict=True))
         assert by_passage == {"doc-1": 0.8, "doc-0": 0.0, "doc-2": 0.0}
         assert result.passages[0] == "doc-1"
+
+    def test_rerank_ranks_through_sie_client(self, score_stub_server: Any) -> None:
+        """Scores returned by a real ``SIEClient.score()`` call rank the matching passage first."""
+        passages = [
+            "The weather today is sunny with clear skies.",
+            "Python is a popular programming language.",
+            "Nearest neighbor search uses distance metrics.",
+            "Vector similarity search finds similar embeddings.",
+        ]
+        reranker = SIEReranker(base_url=score_stub_server.url, model="test-reranker")
+
+        result = reranker(query="vector similarity search", passages=passages)
+
+        assert result.passages == [passages[i] for i in (3, 2, 0, 1)]
+        assert result.scores == [3.0, 1.0, 0.0, 0.0]
 
     def test_rerank_k_larger_than_passages(self, mock_sie_client: object) -> None:
         """Test reranking when k is larger than passage count."""

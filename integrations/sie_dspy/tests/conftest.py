@@ -57,12 +57,18 @@ def _create_mock_encode_result(
     return results
 
 
+def _server_item_id(item: Any, index: int) -> str:
+    """Return the ``item_id`` the SIE server reports: the sent ``id``, else ``item-<index>``."""
+    item_id = item.get("id") if isinstance(item, dict) else None
+    return item_id if item_id is not None else f"item-{index}"
+
+
 def _create_mock_score_result(query: str, items: list[dict]) -> list[dict[str, Any]]:
     """Create mock score results matching the ranked-envelope contract.
 
     The SDK's ScoreResult is sorted by descending score, so sort here too and
-    assign ``rank`` from the sorted position (``item_id`` stays the original
-    input index).
+    assign ``rank`` from the sorted position. ``item_id`` is the id the SIE
+    server reports for that input.
     """
     rng = np.random.default_rng(hash(query) % (2**32))
     scores = rng.uniform(0, 1, len(items))
@@ -70,7 +76,7 @@ def _create_mock_score_result(query: str, items: list[dict]) -> list[dict[str, A
     sorted_indices = np.argsort(scores)[::-1]
     return [
         {
-            "item_id": str(idx),
+            "item_id": items[idx]["id"],
             "score": float(scores[idx]),
             "rank": rank,
         }
@@ -139,7 +145,7 @@ def mock_sie_client() -> NonCallableMagicMock:
         # Mirror the real SDK: a ScoreResult envelope with ranked entries under
         # "scores", not a bare list.
         query_text = _get_text(query)
-        item_dicts = [{"id": str(idx), "text": _get_text(i)} for idx, i in enumerate(items)]
+        item_dicts = [{"id": _server_item_id(i, idx), "text": _get_text(i)} for idx, i in enumerate(items)]
         return {
             "model": _model,
             "scores": _create_mock_score_result(query_text, item_dicts),

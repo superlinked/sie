@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import NonCallableMagicMock, create_autospec
 
 import pytest
@@ -117,6 +118,26 @@ class TestSIERerankerTool:
         # bravo (the only scored doc) ranks first.
         assert result.index("bravo") < result.index("alpha")
         assert result.index("bravo") < result.index("charlie")
+
+    def test_rerank_ranks_through_sie_client(self, score_stub_server: Any) -> None:
+        """Scores returned by a real ``SIEClient.score()`` call rank the matching document first."""
+        documents = [
+            "The weather today is sunny with clear skies.",
+            "Python is a popular programming language.",
+            "Nearest neighbor search uses distance metrics.",
+            "Vector similarity search finds similar embeddings.",
+        ]
+        reranker = SIERerankerTool(base_url=score_stub_server.url, model="test-reranker")
+
+        result = reranker._run(query="vector similarity search", documents=documents)
+
+        assert result.splitlines() == [
+            "Ranked documents (most relevant first):",
+            f"1. [Score: 3.0000] {documents[3]}",
+            f"2. [Score: 1.0000] {documents[2]}",
+            f"3. [Score: 0.0000] {documents[0]}",
+            f"4. [Score: 0.0000] {documents[1]}",
+        ]
 
     def test_custom_model(self, mock_sie_client: object, research_documents: list[str]) -> None:
         """Test using a custom reranker model."""
