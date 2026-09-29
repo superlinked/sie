@@ -318,6 +318,7 @@ processors:
       - context: datapoint
         statements:
           - keep_keys(cache, [])
+          - 'set(cache["action"], attributes["action"]) where IsString(attributes["action"]) or IsInt(attributes["action"]) or IsDouble(attributes["action"]) or IsBool(attributes["action"])'
           - 'set(cache["backend"], attributes["backend"]) where IsString(attributes["backend"]) or IsInt(attributes["backend"]) or IsDouble(attributes["backend"]) or IsBool(attributes["backend"])'
           - 'set(cache["bundle"], attributes["bundle"]) where IsString(attributes["bundle"]) or IsInt(attributes["bundle"]) or IsDouble(attributes["bundle"]) or IsBool(attributes["bundle"])'
           - 'set(cache["dispatch.path"], attributes["dispatch.path"]) where IsString(attributes["dispatch.path"]) or IsInt(attributes["dispatch.path"]) or IsDouble(attributes["dispatch.path"]) or IsBool(attributes["dispatch.path"])'
@@ -357,6 +358,7 @@ processors:
           - 'set(cache["transport"], attributes["transport"]) where IsString(attributes["transport"]) or IsInt(attributes["transport"]) or IsDouble(attributes["transport"]) or IsBool(attributes["transport"])'
           - 'set(cache["unit.type"], attributes["unit.type"]) where IsString(attributes["unit.type"]) or IsInt(attributes["unit.type"]) or IsDouble(attributes["unit.type"]) or IsBool(attributes["unit.type"])'
           - keep_keys(attributes, [])
+          - set(attributes["action"], cache["action"])
           - set(attributes["backend"], cache["backend"])
           - set(attributes["bundle"], cache["bundle"])
           - set(attributes["dispatch.path"], cache["dispatch.path"])
