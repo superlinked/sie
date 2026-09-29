@@ -211,10 +211,10 @@ def test_sie_config_client_ignores_url_credentials(nats_url: str, monkeypatch: p
     monkeypatch.delenv("SIE_NATS_USER", raising=False)
     monkeypatch.delenv("SIE_NATS_PASSWORD", raising=False)
     monkeypatch.setenv("SIE_NATS_STARTUP_CONNECT_TIMEOUT_SEC", "2")
-    url_with_credentials = nats_url.replace("nats://", f"nats://sie-config:{PASSWORDS['config']}@")
+    monkeypatch.setenv("SIE_NATS_URL", nats_url.replace("nats://", f"nats://sie-config:{PASSWORDS['config']}@"))
 
     async def scenario() -> None:
-        publisher = NatsPublisher(nats_url=url_with_credentials)
+        publisher = NatsPublisher()
         await publisher.connect()
         assert not publisher.connected
         await publisher.disconnect()
