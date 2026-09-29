@@ -23,6 +23,8 @@ profiles:
     adapter_options:
       loadtime:
         cuda_graphs: bucketed
+        # At least as accurate as the unfused rotation against float32 (see the server README).
+        fused_rope: true
       runtime:
         pooling: mean
         normalize: true

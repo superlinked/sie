@@ -245,14 +245,17 @@ def graph_runner(
     )
 
 
-def modernbert_encoder(model: Any, *, window: int, dtype: torch.dtype) -> tuple[EncodeFn, list[torch.Tensor]]:
+def modernbert_encoder(
+    model: Any, *, window: int, dtype: torch.dtype, fused_rope: bool = False
+) -> tuple[EncodeFn, list[torch.Tensor]]:
     """The encoder a graph records for a Hugging Face ``ModernBertModel`` on the shared layer stack.
 
     Token embeddings (and their norm), ``run_modernbert_flash_layers`` and the
     final norm: what the dense and late-interaction adapters run eagerly.
     Eagerly they compute each forward's RoPE ``cos``/``sin`` rows from its
     positions; here the rows are gathered from tables over the model window,
-    computed the same way, so they hold the same values.
+    computed the same way, so they hold the same values. ``fused_rope`` goes to
+    the layer stack, so a graph records the rotation its model runs eagerly.
 
     Returns:
         The encoder, and the RoPE tables it reads (for the runner's memory budget).
@@ -292,6 +295,7 @@ def modernbert_encoder(model: Any, *, window: int, dtype: torch.dtype) -> tuple[
             global_sin[positions],
             local_cos[positions],
             local_sin[positions],
+            fused_rope=fused_rope,
         )
         if hasattr(model, "final_norm"):
             hidden = model.final_norm(hidden)

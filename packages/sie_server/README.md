@@ -132,17 +132,26 @@ between the top two labels, and eager execution flips some near ties too,
 depending on which inputs share its batch.
 
 **When a speed-up ships enabled.** A shipped GLiClass profile enables a
-speed-up that changes scores, such as `bucketed` graphs, only when both hold
-against eager execution on the evaluation sets below:
+speed-up that changes scores, such as `bucketed` graphs, only when, on the
+evaluation sets below, both of the first two conditions hold against eager
+execution, or the third holds against float32:
 
 1. no probability moves by more than 0.02;
 2. every answer whose top label changes had an eager top-two margin smaller
    than eager's own regrouping noise, δ_eager: the largest probability change
    eager execution makes on the same inputs when they share a batch with other
-   inputs.
+   inputs;
+3. against a float32 reference of the same checkpoint, the speed-up is at
+   least as accurate as the current path: its largest change against float32
+   is no larger than the current path's, and it changes no more top labels (or,
+   for scores, reorders no more pairs) against float32 than the current path
+   does.
 
 A top label that changes under the second condition was a near tie that eager
-fp16 execution already flips under batching.
+fp16 execution already flips under batching. The third condition admits a
+speed-up that rounds differently from the current path, by more than eager's
+own batching noise, but lands no farther from float32. The ModernBERT
+adapters below apply the same rule to their scores.
 
 **Evaluation sets.** The main set is the 384 CVE descriptions from
 `examples/typed-decisions`, three questions each, asked one at a time, as
@@ -527,6 +536,20 @@ fails to record for another reason runs eagerly from then on, and after
 three such shapes the model runs eagerly for the rest of the process. Each
 model counts the forwards it replays, records and runs eagerly (by reason),
 and logs the counts every ten minutes while it serves requests.
+
+**Fused rotary embedding.** The dense and late-interaction adapters rotate
+queries and keys with about ten small PyTorch kernels per layer. With
+`adapter_options.loadtime.fused_rope: true`, one Triton kernel per layer does
+it instead, with flash-attn's rotary arithmetic (float32, rounded once, as
+the Hugging Face flash-attention forward rotates): on an L4, 26.5 µs instead
+of 178 µs per layer at 2,048 tokens. For the models below that is 1.13-1.18x
+the speed of one-query requests (with CUDA graphs on both sides) and
+1.17-1.22x the throughput of 64-abstract requests. Outputs change by rounding, more than the eager path's own batching
+noise, so the option ships under the third condition of the rule above.
+Against a float32 reference of each checkpoint, on the SciFact sets of the
+graphs comparison, it is at least as accurate as the unfused rotation for
+`modernbert-embed-base`, `Reason-ModernColBERT` and `mLateOn`, and their
+profiles enable it. The other models load without it.
 
 ## Configuration
 

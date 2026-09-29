@@ -75,6 +75,14 @@ def modernbert_rope_theta(config: Any, *, use_global: bool) -> float:
     return theta
 
 
+def parse_fused_rope(value: object, *, adapter: str) -> bool:
+    """The load-time ``fused_rope`` option: a boolean."""
+    if isinstance(value, bool):
+        return value
+    msg = f"{adapter} fused_rope must be true or false, got {value!r}"
+    raise ValueError(msg)
+
+
 def modernbert_rope_cos_sin(
     position_ids: torch.Tensor,
     *,
@@ -106,6 +114,7 @@ def run_modernbert_flash_layers(
     local_sin: torch.Tensor,
     *,
     compute_dtype: torch.dtype | None = None,
+    fused_rope: bool = False,
 ) -> torch.Tensor:
     """Run a ModernBERT layer stack over a packed batch with flash attention.
 
@@ -114,11 +123,13 @@ def run_modernbert_flash_layers(
     with the global RoPE base; the rest use a sliding window of
     ``local_attention`` tokens with the local RoPE base.
 
-    On CUDA with Triton, queries and keys are rotated in place by one kernel
-    per layer (``rotate_packed_qkv_``): in float32 and rounded once, which is
-    flash-attn's rotary arithmetic, the one the Hugging Face ModernBERT
-    flash-attention forward runs. Elsewhere they are rotated with PyTorch
-    elementwise operations in the projection dtype.
+    Queries and keys are rotated with PyTorch elementwise operations in the
+    projection dtype. With ``fused_rope``, on CUDA with Triton, one kernel per
+    layer (``rotate_packed_qkv_``) rotates them in place instead: in float32
+    and rounded once, which is flash-attn's rotary arithmetic, the one the
+    Hugging Face ModernBERT flash-attention forward runs. It is faster, and
+    its outputs differ by rounding; a model's profile opts in (see the server
+    README), and elsewhere ``fused_rope`` changes nothing.
 
     ``compute_dtype`` lets a caller keep the residual stream (``hidden``) and
     the layer norms in a wider type than the projections, the way mixed
@@ -136,6 +147,7 @@ def run_modernbert_flash_layers(
         total_tokens: ``cu_seqlens[-1]``.
         global_cos, global_sin, local_cos, local_sin: Per-token RoPE tables.
         compute_dtype: Dtype of the attention/MLP projections, or ``None``.
+        fused_rope: Rotate queries and keys with the fused kernel where it runs.
 
     Returns:
         Hidden states ``[total_tokens, hidden_size]`` before ``final_norm``.
@@ -157,7 +169,7 @@ def run_modernbert_flash_layers(
     # The fused rotation reads row i of the per-token cos/sin tables for token i.
     token_rows = (
         torch.arange(total_tokens, dtype=torch.int32, device=hidden.device)
-        if packed_rope_available(hidden.device)
+        if fused_rope and packed_rope_available(hidden.device)
         else None
     )
     half = head_dim // 2
