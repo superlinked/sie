@@ -101,7 +101,7 @@ fn canonicalize_pinned_models(
     responses(
         (status = 201, description = "Pool created, renewed, or updated", body = crate::types::pool::Pool),
         (status = 400, description = "Invalid pool request, including a TTL or warm floor above the gateway limit", body = crate::openapi::StandardApiError),
-        (status = 403, description = "Admin token required for this mutation (or admin token not configured), or the gateway's limit on API-created pools is reached", body = crate::openapi::StandardApiError)
+        (status = 403, description = "Admin token required for this mutation (or admin token not configured), the pool is named `default`, or the gateway's limit on API-created pools is reached", body = crate::openapi::StandardApiError)
     )
 )]
 pub async fn create_pool(
@@ -114,6 +114,17 @@ pub async fn create_pool(
             Json(json_detail(
                 err_code::INVALID_REQUEST,
                 "Pool name is required",
+            )),
+        )
+            .into_response();
+    }
+
+    if req.name.eq_ignore_ascii_case(DEFAULT_POOL_NAME) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json_detail(
+                err_code::POOL_OPERATION_FORBIDDEN,
+                "The default pool is managed by the gateway and cannot be created or modified through the API",
             )),
         )
             .into_response();

@@ -20,12 +20,17 @@ type WorkerAssignment = (String, String, String, String, String);
 /// static Helm queue pools are operator-owned and never bounded here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PoolLimits {
-    /// Largest accepted `minimum_worker_count` (per-pool warm floor).
+    /// Largest accepted `minimum_worker_count` (per-pool warm floor). It also
+    /// caps how many assigned workers per machine profile a pool keeps warm
+    /// through its active lease.
     pub max_minimum_worker_count: u32,
     /// Largest accepted `ttl_seconds`; also caps the effective lease of any
     /// stored pool, including pools restored from Kubernetes.
     pub max_ttl_seconds: u64,
-    /// Largest number of live API-created pools.
+    /// Largest number of live API-created pools, checked by the replica that
+    /// serves the create against every pool it knows, including pools applied
+    /// from other replicas. Concurrent creates on different replicas can pass
+    /// the check before either sees the other's pool.
     pub max_pools: usize,
 }
 
@@ -351,6 +356,33 @@ impl PoolManager {
                 valid_profiles: self.configured_profiles.clone(),
             }))
         }
+    }
+
+    /// Assigned workers an API pool keeps warm through its active lease: per
+    /// machine profile, at most the pool's requirement for that profile and at
+    /// most `max_minimum_worker_count`. Assignment order is deterministic, so
+    /// every replica exports the same workers.
+    fn leased_workers(&self, pool: &Pool) -> Vec<AssignedWorker> {
+        let mut remaining: HashMap<String, u32> = HashMap::new();
+        for (profile, required) in &pool.spec.gpus {
+            let allowed = (*required).min(self.limits.max_minimum_worker_count);
+            let entry = remaining.entry(profile.to_ascii_lowercase()).or_insert(0);
+            *entry = (*entry).max(allowed);
+        }
+        pool.status
+            .assigned_workers
+            .iter()
+            .filter(
+                |worker| match remaining.get_mut(&worker.gpu.to_ascii_lowercase()) {
+                    Some(left) if *left > 0 => {
+                        *left -= 1;
+                        true
+                    }
+                    _ => false,
+                },
+            )
+            .cloned()
+            .collect()
     }
 
     fn check_pool_spec_limits(
@@ -871,6 +903,7 @@ impl PoolManager {
                     snapshot.minimum_worker_count = snapshot
                         .minimum_worker_count
                         .min(self.limits.max_minimum_worker_count);
+                    snapshot.assigned_workers = self.leased_workers(pool);
                 }
                 snapshot
             })
@@ -2946,6 +2979,74 @@ mod tests {
         let pool = pm.get_pool("no-ttl").await.unwrap();
 
         assert_eq!(pm.lease_ttl_seconds(&pool), DEFAULT_LEASE_DURATION_S as i32);
+    }
+
+    fn assigned(count: usize, gpu: &str) -> Vec<AssignedWorker> {
+        (0..count)
+            .map(|index| AssignedWorker {
+                name: format!("worker-{gpu}-{index}"),
+                url: format!("http://worker-{gpu}-{index}:8080"),
+                gpu: gpu.to_string(),
+                bundle: "default".to_string(),
+            })
+            .collect()
+    }
+
+    async fn leased_counts(pm: &PoolManager) -> HashMap<String, usize> {
+        pm.capacity_pools()
+            .await
+            .into_iter()
+            .map(|pool| (pool.name, pool.assigned_workers.len()))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn test_zero_requirement_api_pool_leases_no_workers() {
+        let pm = PoolManager::new(vec!["l4-spot".to_string()]);
+        let mut pool = remote_pool("burst", None, 0);
+        pool.spec.gpus = HashMap::from([("l4-spot".to_string(), 0)]);
+        pool.status.state = PoolState::Active;
+        pool.status.assigned_workers = assigned(10, "l4-spot");
+        pm.apply_remote_pool(pool).await;
+
+        assert_eq!(leased_counts(&pm).await.get("burst"), Some(&0));
+    }
+
+    #[tokio::test]
+    async fn test_api_pool_lease_is_capped_by_requirement_and_limit() {
+        let pm = limited_pool_manager(PoolLimits {
+            max_minimum_worker_count: 3,
+            ..PoolLimits::default()
+        });
+        let mut small = remote_pool("small", None, 0);
+        small.spec.gpus = HashMap::from([("L4-SPOT".to_string(), 2)]);
+        small.status.assigned_workers = assigned(10, "l4-spot");
+        let mut large = remote_pool("large", None, 0);
+        large.spec.gpus = HashMap::from([("l4-spot".to_string(), 50)]);
+        large.status.assigned_workers = assigned(10, "l4-spot");
+        pm.apply_remote_pool(small).await;
+        pm.apply_remote_pool(large).await;
+
+        let counts = leased_counts(&pm).await;
+        assert_eq!(counts.get("small"), Some(&2));
+        assert_eq!(counts.get("large"), Some(&3));
+    }
+
+    #[tokio::test]
+    async fn test_static_pool_lease_is_not_capped() {
+        let pm = limited_pool_manager(PoolLimits {
+            max_minimum_worker_count: 1,
+            ..PoolLimits::default()
+        });
+        pm.sync_static_pools(&[static_queue_pool("company-a", "l4-spot")])
+            .await
+            .unwrap();
+        {
+            let mut pools = pm.pools.write().await;
+            pools.get_mut("company-a").unwrap().status.assigned_workers = assigned(5, "l4-spot");
+        }
+
+        assert_eq!(leased_counts(&pm).await.get("company-a"), Some(&5));
     }
 
     #[tokio::test]

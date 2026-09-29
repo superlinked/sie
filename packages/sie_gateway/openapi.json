@@ -6844,7 +6844,7 @@
                 }
               }
             },
-            "description": "Admin token required for this mutation (or admin token not configured), or the gateway's limit on API-created pools is reached"
+            "description": "Admin token required for this mutation (or admin token not configured), the pool is named `default`, or the gateway's limit on API-created pools is reached"
           },
           "500": {
             "content": {

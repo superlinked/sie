@@ -482,23 +482,38 @@ fn env_u64(key: &str, fallback: u64) -> u64 {
 }
 
 /// Read the pool API bounds from `SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT`,
-/// `SIE_GATEWAY_POOL_MAX_TTL_S`, and `SIE_GATEWAY_MAX_POOLS`. An unset or
-/// unparsable value keeps that bound's default.
+/// `SIE_GATEWAY_POOL_MAX_TTL_S`, and `SIE_GATEWAY_MAX_POOLS`. An unset value
+/// keeps that bound's default; an unparsable one keeps it with a warning.
 pub fn pool_limits_from_env() -> PoolLimits {
     let defaults = PoolLimits::default();
     PoolLimits {
-        max_minimum_worker_count: env::var("SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT")
-            .ok()
-            .and_then(|s| s.trim().parse().ok())
-            .unwrap_or(defaults.max_minimum_worker_count),
-        max_ttl_seconds: env::var("SIE_GATEWAY_POOL_MAX_TTL_S")
-            .ok()
-            .and_then(|s| s.trim().parse().ok())
-            .unwrap_or(defaults.max_ttl_seconds),
-        max_pools: env::var("SIE_GATEWAY_MAX_POOLS")
-            .ok()
-            .and_then(|s| s.trim().parse().ok())
-            .unwrap_or(defaults.max_pools),
+        max_minimum_worker_count: env_pool_limit(
+            "SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT",
+            defaults.max_minimum_worker_count,
+        ),
+        max_ttl_seconds: env_pool_limit("SIE_GATEWAY_POOL_MAX_TTL_S", defaults.max_ttl_seconds),
+        max_pools: env_pool_limit("SIE_GATEWAY_MAX_POOLS", defaults.max_pools),
+    }
+}
+
+fn env_pool_limit<T>(key: &str, default: T) -> T
+where
+    T: std::str::FromStr + std::fmt::Display + Copy,
+{
+    let Ok(raw) = env::var(key) else {
+        return default;
+    };
+    match raw.trim().parse() {
+        Ok(value) => value,
+        Err(_) => {
+            tracing::warn!(
+                env = key,
+                value = %raw,
+                default = %default,
+                "ignoring unparsable pool limit; using the default"
+            );
+            default
+        }
     }
 }
 
