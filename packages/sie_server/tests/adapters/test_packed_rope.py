@@ -99,6 +99,7 @@ def test_strided_positions_and_rows_outside_the_tables() -> None:
     assert not torch.equal(got, qkv)
 
     outside = torch.tensor([2, -1, 16, 5], device="cuda", dtype=torch.int32)
+    qkv[2, 0, 0, 5] = float("inf")  # left as is, not multiplied by a zero sine
     rotated = qkv.clone()
     rotate_packed_qkv_(rotated, outside, cos, sin)
     assert torch.equal(rotated[1:3], qkv[1:3])

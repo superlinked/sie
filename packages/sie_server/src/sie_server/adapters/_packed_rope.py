@@ -64,12 +64,12 @@ if _TRITON:
         cols = tl.arange(0, block_half)
         mask = (tokens[:, None] < n_tokens) & (cols[None, :] < half)
         positions = tl.load(positions_ptr + tokens * stride_position, mask=tokens < n_tokens, other=0)
-        # A position outside the tables reads nothing: cos 1 and sin 0 leave
-        # its token as it was, as flash-attn's kernel does past its tables.
-        on_table = (positions >= 0) & (positions < n_rows)
+        # A position outside the tables reads and writes nothing: its token is
+        # left exactly as it was.
+        mask = mask & ((positions >= 0) & (positions < n_rows))[:, None]
         table = positions[:, None] * stride_table + cols[None, :]
-        cos = tl.load(cos_ptr + table, mask=mask & on_table[:, None], other=1.0).to(tl.float32)
-        sin = tl.load(sin_ptr + table, mask=mask & on_table[:, None], other=0.0).to(tl.float32)
+        cos = tl.load(cos_ptr + table, mask=mask, other=1.0).to(tl.float32)
+        sin = tl.load(sin_ptr + table, mask=mask, other=0.0).to(tl.float32)
         x = qk_ptr + tokens[:, None] * stride_token + pid_head * stride_head + cols[None, :]
         x0 = tl.load(x, mask=mask, other=0.0).to(tl.float32)
         x1 = tl.load(x + half, mask=mask, other=0.0).to(tl.float32)
@@ -88,9 +88,9 @@ def rotate_packed_qkv_(qkv: torch.Tensor, positions: torch.Tensor, cos: torch.Te
             values are untouched.
         positions: ``[tokens]`` integer position of each token, any stride.
             A position outside ``[0, max_positions)`` leaves its token
-            unrotated, as flash-attn's rotary kernel does past its tables:
-            checking positions on the host would wait for the device, which
-            a CUDA graph being recorded cannot do.
+            exactly as it was (flash-attn's rotary kernel, too, does not
+            rotate past its tables): checking positions on the host would
+            wait for the device, which a CUDA graph being recorded cannot do.
         cos, sin: ``[max_positions, head_dim / 2]`` tables in ``qkv``'s dtype,
             with rows laid out ``stride(0)`` apart (a ``[max_positions,
             head_dim]`` table's first half is accepted as a view).
