@@ -24,9 +24,10 @@ const managed = new SIEClient("https://your-gateway.example.com", {
 });
 ```
 
-In Node.js, an omitted `baseUrl` or `apiKey` falls back to the `SIE_BASE_URL`
-or `SIE_API_KEY` environment variable. An explicit value always wins;
-`apiKey: ""` sends no credential.
+In Node.js, an omitted `baseUrl` falls back to `SIE_BASE_URL`. An omitted
+`apiKey` falls back to `SIE_API_KEY` only for a base URL with the same origin
+as `SIE_BASE_URL`, so the environment key never goes to any other host. An
+explicit value always wins; `apiKey: ""` sends no credential.
 
 > **Warning:** only pass `apiKey` in server-side code. Shipping it in a
 > browser bundle exposes the bearer key to anyone who loads the page.

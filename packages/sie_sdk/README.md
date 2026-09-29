@@ -254,10 +254,12 @@ client = SIEClient(
 )
 ```
 
-When `base_url` or `api_key` is omitted, the client reads `SIE_BASE_URL` or
-`SIE_API_KEY` from the environment, so code and integrations that construct a
-client without credentials work against a gateway with token auth. An explicit
-argument always wins; `api_key=""` sends no credential.
+When `base_url` is omitted, the client reads `SIE_BASE_URL`. When `api_key` is
+omitted, it reads `SIE_API_KEY`, but only for a base URL with the same origin
+as `SIE_BASE_URL`, so the environment key never goes to any other host. Set
+both variables to let code and integrations that construct a client without
+credentials use a gateway with token auth. An explicit argument always wins;
+`api_key=""` sends no credential.
 
 ## Generation execution evidence
 

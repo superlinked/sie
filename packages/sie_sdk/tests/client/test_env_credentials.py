@@ -61,9 +61,47 @@ def test_sync_client_explicit_arguments_win_over_env(
     assert sync_headers["headers"]["Authorization"] == "Bearer explicit-key"
 
 
+@pytest.mark.parametrize(
+    "base_url",
+    ["https://gateway.example.com", "https://GATEWAY.example.com:443/v1", "https://gateway.example.com/"],
+)
+def test_sync_client_sends_env_key_to_the_env_base_url_origin(
+    monkeypatch: pytest.MonkeyPatch, sync_headers: dict[str, Any], base_url: str
+) -> None:
+    monkeypatch.setenv("SIE_BASE_URL", "https://gateway.example.com")
+    monkeypatch.setenv("SIE_API_KEY", "env-key")
+
+    SIEClient(base_url)
+
+    assert sync_headers["headers"]["Authorization"] == "Bearer env-key"
+
+
+@pytest.mark.parametrize(
+    ("env_base_url", "base_url"),
+    [
+        (None, "https://gateway.example.com"),
+        ("https://gateway.example.com", "https://other.example.com"),
+        ("https://gateway.example.com", "http://gateway.example.com"),
+        ("https://gateway.example.com", "https://gateway.example.com:8443"),
+        ("not a url", "https://gateway.example.com"),
+    ],
+)
+def test_sync_client_withholds_env_key_from_other_origins(
+    monkeypatch: pytest.MonkeyPatch, sync_headers: dict[str, Any], env_base_url: str | None, base_url: str
+) -> None:
+    if env_base_url is not None:
+        monkeypatch.setenv("SIE_BASE_URL", env_base_url)
+    monkeypatch.setenv("SIE_API_KEY", "env-key")
+
+    SIEClient(base_url)
+
+    assert "Authorization" not in sync_headers["headers"]
+
+
 def test_sync_client_empty_api_key_opts_out_of_env_key(
     monkeypatch: pytest.MonkeyPatch, sync_headers: dict[str, Any]
 ) -> None:
+    monkeypatch.setenv("SIE_BASE_URL", "http://localhost:8080")
     monkeypatch.setenv("SIE_API_KEY", "env-key")
 
     SIEClient("http://localhost:8080", api_key="")
@@ -72,6 +110,7 @@ def test_sync_client_empty_api_key_opts_out_of_env_key(
 
 
 def test_sync_client_ignores_blank_env_key(monkeypatch: pytest.MonkeyPatch, sync_headers: dict[str, Any]) -> None:
+    monkeypatch.setenv("SIE_BASE_URL", "http://localhost:8080")
     monkeypatch.setenv("SIE_API_KEY", "  ")
 
     SIEClient("http://localhost:8080")
@@ -123,7 +162,20 @@ async def test_async_client_explicit_arguments_win_over_env(monkeypatch: pytest.
 
 
 @pytest.mark.asyncio
+async def test_async_client_scopes_env_key_to_the_env_base_url_origin(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SIE_BASE_URL", "https://gateway.example.com")
+    monkeypatch.setenv("SIE_API_KEY", "env-key")
+
+    same_origin = await _async_session_kwargs(SIEAsyncClient("https://gateway.example.com/v1"))
+    other_origin = await _async_session_kwargs(SIEAsyncClient("https://other.example.com"))
+
+    assert same_origin["headers"]["Authorization"] == "Bearer env-key"
+    assert "Authorization" not in other_origin["headers"]
+
+
+@pytest.mark.asyncio
 async def test_async_client_empty_api_key_opts_out_of_env_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SIE_BASE_URL", "http://localhost:8080")
     monkeypatch.setenv("SIE_API_KEY", "env-key")
 
     kwargs = await _async_session_kwargs(SIEAsyncClient("http://localhost:8080", api_key=""))

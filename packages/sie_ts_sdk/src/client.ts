@@ -339,10 +339,34 @@ function sleep(ms: number): Promise<void> {
 const SIE_BASE_URL_ENV = "SIE_BASE_URL";
 const SIE_API_KEY_ENV = "SIE_API_KEY";
 
-/** Read a non-blank environment variable; always undefined outside Node-like runtimes. */
+/**
+ * Read a non-blank environment variable. Undefined outside Node-like runtimes
+ * and where reading the environment is not permitted (Deno without --allow-env
+ * throws).
+ */
 function readEnv(name: string): string | undefined {
-  const value = globalThis.process?.env?.[name]?.trim();
-  return value ? value : undefined;
+  try {
+    const value = globalThis.process?.env?.[name]?.trim();
+    return value ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function urlOrigin(url: string): string | undefined {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "http:" || parsed.protocol === "https:" ? parsed.origin : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** `SIE_API_KEY`, scoped to the origin named by `SIE_BASE_URL`. */
+function envApiKeyFor(baseUrl: string): string | undefined {
+  const apiKey = readEnv(SIE_API_KEY_ENV);
+  const envOrigin = urlOrigin(readEnv(SIE_BASE_URL_ENV) ?? "");
+  return apiKey && envOrigin !== undefined && urlOrigin(baseUrl) === envOrigin ? apiKey : undefined;
 }
 
 const CONTENT_SAFE_MEDIA_TYPES = new Set([
@@ -983,7 +1007,7 @@ export class SIEClient {
     // for the same MILLISECONDS value. `timeoutMs` wins if both are set.
     this.timeout = options.timeoutMs ?? options.timeout ?? DEFAULT_TIMEOUT;
     this.gpu = options.gpu;
-    this.apiKey = options.apiKey ?? readEnv(SIE_API_KEY_ENV);
+    this.apiKey = options.apiKey ?? envApiKeyFor(this.baseUrl);
     // BREAKING CHANGE (0.7): default flipped from `false` to `true` to match
     // the Python SDK (`wait_for_capacity=True`). Callers that relied on
     // fail-fast 503 PROVISIONING / connect-error behaviour must now pass

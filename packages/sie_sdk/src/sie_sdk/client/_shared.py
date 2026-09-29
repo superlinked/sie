@@ -159,15 +159,33 @@ def resolve_base_url(base_url: str | None) -> str:
     return env_base_url
 
 
-def resolve_api_key(api_key: str | None) -> str | None:
-    """Return ``api_key``, or the ``SIE_API_KEY`` environment variable when it is omitted.
+def _url_origin(url: str) -> tuple[str, str, int] | None:
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError:
+        return None
+    scheme = parts.scheme.lower()
+    if scheme not in {"http", "https"} or not parts.hostname:
+        return None
+    return scheme, parts.hostname.lower(), port or (443 if scheme == "https" else 80)
+
+
+def resolve_api_key(api_key: str | None, base_url: str) -> str | None:
+    """Return ``api_key``, or ``SIE_API_KEY`` when it is omitted and ``base_url`` is the ``SIE_BASE_URL`` origin.
 
     An explicit value, including an empty string, always wins, so a caller can
-    opt out of the environment credential.
+    opt out of the environment credential. The environment key is scoped to
+    the origin named by ``SIE_BASE_URL``, so a client built for any other URL
+    never sends it.
     """
     if api_key is not None:
         return api_key
-    return os.environ.get(SIE_API_KEY_ENV, "").strip() or None
+    env_api_key = os.environ.get(SIE_API_KEY_ENV, "").strip()
+    env_origin = _url_origin(os.environ.get(SIE_BASE_URL_ENV, "").strip())
+    if env_api_key and env_origin is not None and _url_origin(base_url) == env_origin:
+        return env_api_key
+    return None
 
 
 def url_origin_for_logging(url: str) -> str:

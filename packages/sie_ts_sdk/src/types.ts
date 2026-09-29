@@ -764,9 +764,10 @@ export interface SIEClientOptions {
   /** Default GPU type for all requests (e.g., "l4", "a100-80gb") */
   gpu?: string;
   /**
-   * API key for authentication (sent as Bearer token). Defaults to the
-   * `SIE_API_KEY` environment variable when omitted; pass `""` to send no
-   * credential.
+   * API key for authentication (sent as Bearer token). When omitted, the
+   * `SIE_API_KEY` environment variable is used only if the base URL has the
+   * same origin as `SIE_BASE_URL` (including when the base URL itself comes
+   * from `SIE_BASE_URL`); pass `""` to send no credential.
    */
   apiKey?: string;
   /**
