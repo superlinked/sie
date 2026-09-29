@@ -141,8 +141,8 @@ def test_vectors_and_scores_match(case: tuple[dict[str, Any], TopkEmbedAdapter])
         scores = _maxsim(encoded["queries"], documents)
         expected = np.array(golden[key])
         np.testing.assert_allclose(scores, expected, rtol=0, atol=_SCORE_TOLERANCE)
-        # Retrieval order is unchanged for every query with a clear winner.
+        # Retrieval order, for every query: by TopK's scores, the document SIE ranks first scores within
+        # twice the score tolerance of TopK's first. With a clear winner that is the same document; in a
+        # near tie (an empty query against pages of bars is within 0.001) rounding alone can swap them.
         for row, expected_row in zip(scores, expected, strict=True):
-            ranked = np.sort(expected_row)
-            if ranked[-1] - ranked[-2] > 2 * _SCORE_TOLERANCE:
-                assert row.argmax() == expected_row.argmax()
+            assert expected_row[row.argmax()] >= expected_row.max() - 2 * _SCORE_TOLERANCE

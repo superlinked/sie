@@ -743,16 +743,16 @@ def test_topk_io_topk_embed_v1_xsmall_image_multivector() -> None:
     )
 
 
-@pytest.mark.xfail(reason="2B model too slow for CPU unit tests", strict=False)
 def test_topk_io_topk_embed_v1_small_multivector() -> None:
     pytest.importorskip("transformers.models.qwen3_5", reason="needs transformers >= 5.2 (the transformers5 bundle)")
-    _assert_multivector("topk-io/topk-embed-v1-small", 2048, None)
+    _assert_multivector("topk-io/topk-embed-v1-small", 2048, [0.02752685546875, -0.04046630859375, 0.00592041015625])
 
 
-@pytest.mark.xfail(reason="2B model too slow for CPU unit tests", strict=False)
 def test_topk_io_topk_embed_v1_small_image_multivector() -> None:
     pytest.importorskip("transformers.models.qwen3_5", reason="needs transformers >= 5.2 (the transformers5 bundle)")
-    _assert_multivector_image("topk-io/topk-embed-v1-small", 2048, None)
+    _assert_multivector_image(
+        "topk-io/topk-embed-v1-small", 2048, [0.036773681640625, -0.04022216796875, -0.0186614990234375]
+    )
 
 
 # =============================================================================
