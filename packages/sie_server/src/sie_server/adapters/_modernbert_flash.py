@@ -15,6 +15,7 @@ from typing import Any
 
 import torch
 
+from sie_server.adapters._packed_rope import packed_rope_available, rotate_packed_qkv_
 from sie_server.adapters._utils import apply_rotary_pos_emb
 
 # ModernBertConfig class defaults in transformers 4.x.
@@ -113,6 +114,12 @@ def run_modernbert_flash_layers(
     with the global RoPE base; the rest use a sliding window of
     ``local_attention`` tokens with the local RoPE base.
 
+    On CUDA with Triton, queries and keys are rotated in place by one kernel
+    per layer (``rotate_packed_qkv_``): in float32 and rounded once, which is
+    flash-attn's rotary arithmetic, the one the Hugging Face ModernBERT
+    flash-attention forward runs. Elsewhere they are rotated with PyTorch
+    elementwise operations in the projection dtype.
+
     ``compute_dtype`` lets a caller keep the residual stream (``hidden``) and
     the layer norms in a wider type than the projections, the way mixed
     precision autocast runs the reference forward: norm outputs are cast to
@@ -147,6 +154,13 @@ def run_modernbert_flash_layers(
     local_window = getattr(cfg, "local_attention", -1)
     # flash_attn_varlen_func expects window_size as (left, right) tuple
     window = (local_window // 2, local_window // 2) if local_window > 0 else (-1, -1)
+    # The fused rotation reads row i of the per-token cos/sin tables for token i.
+    token_rows = (
+        torch.arange(total_tokens, dtype=torch.int32, device=hidden.device)
+        if packed_rope_available(hidden.device)
+        else None
+    )
+    half = head_dim // 2
 
     for layer_idx, layer in enumerate(model.layers):
         is_global = (layer_idx % global_every_n == 0) if global_every_n > 1 else True
@@ -159,12 +173,16 @@ def run_modernbert_flash_layers(
         # Fused QKV projection
         qkv = layer.attn.Wqkv(normed_hidden)
         qkv = qkv.view(total_tokens, 3, num_heads, head_dim)
-        query = qkv[:, 0]  # [total_tokens, num_heads, head_dim]
-        key = qkv[:, 1]
-        value = qkv[:, 2]
 
-        # Apply RoPE to Q and K (using layer-appropriate theta)
-        query, key = apply_rotary_pos_emb(query, key, cos, sin)
+        # Apply RoPE to Q and K (using layer-appropriate theta). The tables'
+        # two halves are equal (cos/sin of [freqs, freqs]); the fused kernel
+        # reads the first.
+        if token_rows is not None:
+            rotate_packed_qkv_(qkv, token_rows, cos[:, :half].to(qkv.dtype), sin[:, :half].to(qkv.dtype))
+            query, key = qkv[:, 0], qkv[:, 1]  # [total_tokens, num_heads, head_dim]
+        else:
+            query, key = apply_rotary_pos_emb(qkv[:, 0], qkv[:, 1], cos, sin)
+        value = qkv[:, 2]
 
         # Flash attention — global layers use full attention,
         # local layers use sliding window
