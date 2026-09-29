@@ -752,6 +752,7 @@ class TestConfigAPIExport:
             "default"
         )
         assert data["bundle_pool_config_hashes"]["default"]["default"] == data["bundle_config_hashes"]["default"]
+        assert data["bundle_adapters"] == {"default": ["sie_server.adapters.bert_flash"]}
         assert len(data["models"]) == 1
         assert data["models"][0]["model_id"] == "test/model"
         assert data["models"][0]["affected_bundles"] == ["default"]
@@ -1093,6 +1094,9 @@ class TestConfigAPIExportNoConfigStore:
         assert set(parsed.get("profiles", {}).keys()) == {"default", "fast"}, (
             f"NATS delta must carry merged profiles; got {list(parsed.get('profiles', {}).keys())}"
         )
+        assert last_call.kwargs["affected_bundles"] == ["default"]
+        assert last_call.kwargs["bundle_adapters"] == self.app.state.model_registry.get_bundle_adapters(["default"])
+        assert last_call.kwargs["bundle_adapters"]["default"]
 
 
 class TestConfigAPIExportAuth:

@@ -837,6 +837,7 @@ async def add_model(request: Request) -> Response:
                 bundle_id: all_bundle_pool_config_hashes.get(bundle_id, {}) for bundle_id in affected_bundles
             }
             model_pool = model_registry.get_model_pool_name(model_id)
+            bundle_adapters = model_registry.get_bundle_adapters(affected_bundles)
 
             nats_publish_failed = False
             partial_publish_failed_bundles: list[str] = []
@@ -852,6 +853,7 @@ async def add_model(request: Request) -> Response:
                             model_config_yaml=config_yaml,
                             model_pool=model_pool,
                             bundle_pool_config_hashes=bundle_pool_config_hashes,
+                            bundle_adapters=bundle_adapters,
                         )
                     )
                 except PartialPublishError as e:
@@ -1118,6 +1120,7 @@ async def replace_model(request: Request, model_id: str) -> Response:
                 bundle_id: all_bundle_pool_config_hashes.get(bundle_id, {}) for bundle_id in affected_bundles
             }
             model_pool = model_registry.get_model_pool_name(model_id)
+            bundle_adapters = model_registry.get_bundle_adapters(affected_bundles)
 
             nats_publish_failed = False
             partial_publish_failed_bundles: list[str] = []
@@ -1133,6 +1136,7 @@ async def replace_model(request: Request, model_id: str) -> Response:
                             model_config_yaml=config_yaml,
                             model_pool=model_pool,
                             bundle_pool_config_hashes=bundle_pool_config_hashes,
+                            bundle_adapters=bundle_adapters,
                         )
                     )
                 except PartialPublishError as e:
@@ -1646,6 +1650,7 @@ async def export_snapshot(request: Request) -> Response:
             for bundle_id in model_registry.list_bundles()
         }
         bundle_pool_config_hashes = model_registry.compute_bundle_pool_config_hashes()
+        bundle_adapters = model_registry.get_bundle_adapters()
 
     snapshot = {
         "snapshot_version": 1,
@@ -1653,6 +1658,7 @@ async def export_snapshot(request: Request) -> Response:
         "generated_at": datetime.now(UTC).isoformat(),
         "bundle_config_hashes": bundle_config_hashes,
         "bundle_pool_config_hashes": bundle_pool_config_hashes,
+        "bundle_adapters": bundle_adapters,
         "models": models,
     }
     return Response(content=orjson.dumps(snapshot), media_type="application/json")
