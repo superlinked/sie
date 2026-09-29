@@ -150,11 +150,12 @@ that row's label prompt, unless the document count alone is already higher.
 An item whose document pushes the labels out of the window, in any of its rows,
 comes back with an `INPUT_TOO_LONG` error in its `error` field and is not
 billed. The other items still succeed. Models that read the labels before
-the document count only the part of the document they read, and a row whose
-labels leave the document fewer than 8 tokens fails its item the same way,
-instead of being scored with little or none of the document. With
-`options={"overflow_policy": "error"}`, a document that does not fit whole
-fails only its own item, the same way.
+the document count only the part of the document they read. Under the default
+overflow policy, a row whose labels leave the document fewer than 8 tokens
+fails its item the same way, instead of being scored with little or none of
+the document; `truncate_text` and `error` accept a document cut to, or fitting
+in, a smaller room. With `options={"overflow_policy": "error"}`, a document
+that does not fit whole fails only its own item, the same way.
 
 On a CUDA server, the operator can load the DeBERTa-based GLiClass models with
 CUDA graphs, which cut the CPU time spent launching kernels. With `bucketed`
