@@ -1317,6 +1317,11 @@ profiles:
     async def test_replace_model_configs_rejects_duplicate_export_entries(self) -> None:
         registry = ModelRegistry(models_dir=None)
         executor = QueueExecutor(registry)
+        previous = ModelConfig(**yaml.safe_load(_worker_telemetry_model_yaml("kept/model")))
+        registry.add_config(previous)
+        registry._loaded["kept/model"] = MagicMock()
+        registry._do_unload = AsyncMock()
+        version = registry._config_version
 
         with pytest.raises(ValueError, match="duplicate model config"):
             await executor.replace_model_configs(
@@ -1336,6 +1341,36 @@ profiles:
                     ],
                 )
             )
+
+        assert registry.get_configs_snapshot() == {"kept/model": previous}
+        assert registry._config_version == version
+        registry._do_unload.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("reverse_order", [False, True])
+    async def test_replace_model_configs_rejects_pool_conflicts_before_mutation(self, reverse_order: bool) -> None:
+        registry = ModelRegistry(models_dir=None, pool_name="default")
+        executor = QueueExecutor(registry)
+        previous = ModelConfig(**yaml.safe_load(_worker_telemetry_model_yaml("kept/model")))
+        registry.add_config(previous)
+        registry._loaded["kept/model"] = MagicMock()
+        registry._do_unload = AsyncMock()
+        version = registry._config_version
+        entries = [
+            ReplaceModelConfigEntry(model_id="Qwen/Qwen3.6-27B", model_config=_qwen_default_only_yaml()),
+            ReplaceModelConfigEntry(model_id="new/model", model_config=_worker_telemetry_model_yaml("new/model")),
+        ]
+        if reverse_order:
+            entries.reverse()
+
+        with pytest.raises(ValueError, match=r"cannot register .* into pool"):
+            await executor.replace_model_configs(
+                ReplaceModelConfigsRequest(bundle_id="default", epoch=8, bundle_config_hash="", models=entries)
+            )
+
+        assert registry.get_configs_snapshot() == {"kept/model": previous}
+        assert registry._config_version == version
+        registry._do_unload.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_replace_model_configs_keeps_loaded_model_for_identical_config(self) -> None:
@@ -1539,6 +1574,7 @@ profiles:
                         ("renamed/model", model_yaml("other/model")),
                         ("empty/model", ""),
                         ("list/model", "- not\n- a mapping\n"),
+                        ("Qwen/Qwen3.6-27B", _qwen_invalid_legacy_lora_yaml()),
                     ],
                 )
             )
@@ -1567,13 +1603,27 @@ profiles:
         rejected = [
             record.getMessage() for record in caplog.records if "Rejected exported model" in record.getMessage()
         ]
-        assert len(rejected) == 4
+        assert len(rejected) == 5
         assert "'broken/model'" in rejected[0]
         assert "max_output_token" in rejected[0]
         assert "model_id mismatch" in rejected[1]
 
     @pytest.mark.asyncio
-    async def test_replace_model_configs_keeps_profile_variants_of_a_rejected_model(self) -> None:
+    @pytest.mark.parametrize(
+        "invalid_config",
+        [
+            pytest.param("unknown_field: 1\n" + _qwen_profile_variant_yaml(), id="schema"),
+            pytest.param(_qwen_invalid_legacy_lora_yaml(), id="default-lora"),
+            pytest.param(
+                _qwen_profile_variant_yaml().replace(
+                    "        max_seq_length: 32768",
+                    "        max_seq_length: 32768\n      runtime:\n        lora_id: legacy-lora",
+                ),
+                id="variant-lora",
+            ),
+        ],
+    )
+    async def test_replace_model_configs_keeps_profile_variants_of_a_rejected_model(self, invalid_config: str) -> None:
         def request(epoch: int, model_config: str) -> ReplaceModelConfigsRequest:
             return ReplaceModelConfigsRequest(
                 bundle_id="sglang",
@@ -1587,13 +1637,88 @@ profiles:
         await executor.replace_model_configs(request(7, _qwen_profile_variant_yaml()))
         previous = {name: registry.get_config(name) for name in ("Qwen/Qwen3.6-27B", "Qwen/Qwen3.6-27B:rtx-pro-6000")}
 
-        resp = await executor.replace_model_configs(request(8, "unknown_field: 1\n" + _qwen_profile_variant_yaml()))
+        resp = await executor.replace_model_configs(request(8, invalid_config))
 
         assert resp.applied_models == sorted(previous)
         assert all(registry.get_config(name) is config for name, config in previous.items())
 
     @pytest.mark.asyncio
-    async def test_replace_model_configs_valid_entry_wins_over_a_rejected_duplicate(self) -> None:
+    async def test_replace_model_configs_retains_parsed_identity_when_export_id_is_empty(self) -> None:
+        registry = ModelRegistry(models_dir=None)
+        executor = QueueExecutor(registry)
+
+        def request(model_config: str) -> ReplaceModelConfigsRequest:
+            return ReplaceModelConfigsRequest(
+                bundle_id="sglang",
+                epoch=8,
+                bundle_config_hash="",
+                models=[ReplaceModelConfigEntry(model_id="", model_config=model_config)],
+            )
+
+        await executor.replace_model_configs(request(_qwen_profile_variant_yaml()))
+        previous = registry.get_configs_snapshot()
+        version = registry._config_version
+
+        resp = await executor.replace_model_configs(request(_qwen_invalid_legacy_lora_yaml()))
+
+        assert resp.applied_models == sorted(previous)
+        assert registry.get_configs_snapshot() == previous
+        assert registry._config_version == version
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("invalid_first", [False, True])
+    @pytest.mark.parametrize(
+        "invalid_config",
+        [
+            pytest.param("unknown_field: 1\n" + _qwen_profile_variant_yaml(), id="schema"),
+            pytest.param("sie_id: [broken", id="yaml"),
+        ],
+    )
+    async def test_replace_model_configs_rejects_unidentified_invalid_entry_before_mutation(
+        self, invalid_config: str, invalid_first: bool
+    ) -> None:
+        registry = ModelRegistry(models_dir=None)
+        executor = QueueExecutor(registry)
+        await executor.replace_model_configs(
+            ReplaceModelConfigsRequest(
+                bundle_id="sglang",
+                epoch=7,
+                bundle_config_hash="",
+                models=[ReplaceModelConfigEntry(model_id="", model_config=_qwen_profile_variant_yaml())],
+            )
+        )
+        previous = registry.get_configs_snapshot()
+        version = registry._config_version
+        registry._loaded["Qwen/Qwen3.6-27B"] = MagicMock()
+        registry._do_unload = AsyncMock()
+        entries = [
+            ReplaceModelConfigEntry(model_id="", model_config=invalid_config),
+            ReplaceModelConfigEntry(model_id="new/model", model_config=_worker_telemetry_model_yaml("new/model")),
+        ]
+        if not invalid_first:
+            entries.reverse()
+
+        with pytest.raises(ValueError, match=r"cannot identify .*snapshot was not applied"):
+            await executor.replace_model_configs(
+                ReplaceModelConfigsRequest(bundle_id="sglang", epoch=8, bundle_config_hash="", models=entries)
+            )
+
+        assert registry.get_configs_snapshot() == previous
+        assert registry._config_version == version
+        registry._do_unload.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("invalid_first", [False, True])
+    @pytest.mark.parametrize(
+        "invalid_config",
+        [
+            pytest.param("unknown_field: 1\n" + _qwen_profile_variant_yaml(), id="schema"),
+            pytest.param(_qwen_invalid_legacy_lora_yaml(), id="legacy-lora"),
+        ],
+    )
+    async def test_replace_model_configs_valid_entry_wins_over_a_rejected_duplicate(
+        self, invalid_config: str, invalid_first: bool
+    ) -> None:
         def request(epoch: int, model_configs: list[str]) -> ReplaceModelConfigsRequest:
             return ReplaceModelConfigsRequest(
                 bundle_id="sglang",
@@ -1609,9 +1734,10 @@ profiles:
         executor = QueueExecutor(registry)
         await executor.replace_model_configs(request(7, [_qwen_profile_variant_yaml()]))
 
-        resp = await executor.replace_model_configs(
-            request(8, ["unknown_field: 1\n" + _qwen_profile_variant_yaml(), _qwen_default_only_yaml()])
-        )
+        entries = [invalid_config, _qwen_default_only_yaml()]
+        if not invalid_first:
+            entries.reverse()
+        resp = await executor.replace_model_configs(request(8, entries))
 
         assert resp.applied_models == ["Qwen/Qwen3.6-27B"]
         assert not registry.has_model("Qwen/Qwen3.6-27B:rtx-pro-6000")

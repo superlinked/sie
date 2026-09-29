@@ -22,7 +22,9 @@ from sie_server.core.extract_cost import (
     build_extract_prepared_items,
     output_schema_shape_error,
 )
+from sie_server.core.loader import expand_profile_variants
 from sie_server.core.oom import is_oom_error
+from sie_server.core.pool_isolation import validate_no_legacy_scalar_lora_id
 from sie_server.core.prepared import AudioPayload, AudioPreparedItem
 from sie_server.core.registry import ModelRegistry
 from sie_server.core.runtime_options import merge_runtime_options, merge_runtime_options_with_profile
@@ -646,9 +648,12 @@ class QueueExecutor:
     async def replace_model_configs(self, req: ReplaceModelConfigsRequest) -> ReplaceModelConfigsResponse:
         """Replace the bundle-scoped registry view from a full export snapshot.
 
-        An entry the model-config schema rejects is logged, and that model keeps
-        its current registry entries, if any. The returned hash covers what the
-        registry then holds; the sidecar advertises it only when it equals the
+        An entry with an invalid schema or per-model options is logged, and
+        that model keeps its current registry entries, if any. An invalid entry
+        without an identifiable model, duplicate valid model IDs, and cross-model
+        pool conflicts reject the whole snapshot before any registry mutation.
+        The returned hash covers what the registry
+        then holds; the sidecar advertises it only when it equals the
         control-plane hash.
         """
         if not req.bundle_id:
@@ -658,16 +663,24 @@ class QueueExecutor:
         configs: list[ModelConfig] = []
         rejected: set[str] = set()
         for entry in req.models:
+            model_id = entry.model_id
             try:
-                configs.append(_parse_exported_model_config(entry))
+                model_config = _parse_exported_model_config(entry)
+                model_id = model_config.sie_id
+                for expanded in expand_profile_variants([model_config]).values():
+                    validate_no_legacy_scalar_lora_id(name=expanded.sie_id, config=expanded)
+                configs.append(model_config)
             except (TypeError, ValueError, yaml.YAMLError) as exc:
+                if not model_id:
+                    msg = "cannot identify rejected model config; authoritative snapshot was not applied"
+                    raise ValueError(msg) from exc
                 logger.warning(
                     "Rejected exported model config %r for bundle %s; keeping its current config, if any: %s",
-                    entry.model_id,
+                    model_id,
                     req.bundle_id,
                     exc,
                 )
-                rejected.add(entry.model_id)
+                rejected.add(model_id)
 
         invalidated = await self._registry.replace_configs_async(configs, retained_models=rejected)
         for model_id in invalidated:

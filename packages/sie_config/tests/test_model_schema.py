@@ -5,10 +5,11 @@ import pytest
 import yaml
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from jsonschema import Draft202012Validator
 from sie_config.config_api import router as config_router
 from sie_config.config_store import ConfigStore
 from sie_config.model_registry import ModelRegistry
-from sie_config.model_schema import SCHEMA_PATH, model_config_schema_errors
+from sie_config.model_schema import SCHEMA_PATH, _without_required, model_config_schema_errors
 from sie_server.config.model import ModelConfig
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -40,6 +41,33 @@ def test_every_shipped_model_config_passes() -> None:
         path.name: errors for path in paths if (errors := model_config_schema_errors(yaml.safe_load(path.read_text())))
     }
     assert rejected == {}
+
+
+def test_partial_schema_preserves_required_named_properties_and_literal_data() -> None:
+    literal = {"required": ["literal"]}
+    schema = {
+        "type": "object",
+        "required": ["required", "payload"],
+        "properties": {
+            "required": {
+                "type": "object",
+                "required": ["count"],
+                "properties": {"count": {"type": "integer"}},
+            },
+            "payload": {"const": literal, "default": literal, "examples": [literal]},
+        },
+    }
+
+    partial = _without_required(schema)
+    validator = Draft202012Validator(partial)
+
+    assert validator.is_valid({})
+    assert validator.is_valid({"required": {}, "payload": literal})
+    assert not validator.is_valid({"required": {"count": "wrong"}})
+    assert not validator.is_valid({"payload": {}})
+    assert partial["properties"]["payload"] == schema["properties"]["payload"]
+    assert schema["required"] == ["required", "payload"]
+    assert schema["properties"]["required"]["required"] == ["count"]
 
 
 def test_partial_append_body_passes() -> None:
