@@ -1214,6 +1214,8 @@ termination through your provider's load-balancer annotations in
 is the configuration write authority and accepts unauthenticated writes unless
 an admin token is configured.
 
+With gateway token auth, pool create, renew, and delete also require the
+gateway admin token (see [Gateway admin token](#gateway-admin-token)).
 Independently of auth, the gateway bounds API-created pools:
 
 - the warm floor (`minimum_worker_count`, which applies to each of the pool's

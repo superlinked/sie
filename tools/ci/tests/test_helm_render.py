@@ -345,7 +345,8 @@ def test_operator_read_token_secret_is_used_unchanged(tmp_path: Path) -> None:
 
 
 def test_gateway_admin_token_is_wired_only_to_the_gateway(tmp_path: Path) -> None:
-    values = {**L4_POOL, "gateway": {"auth": {"mode": "token", "adminTokenSecretName": "gateway-admin"}}}
+    auth = {"mode": "token", "tokenSecretName": "gateway-tokens", "adminTokenSecretName": "gateway-admin"}
+    values = {**L4_POOL, "gateway": {"auth": auth}}
     docs = rendered_documents(tmp_path, values)
     assert env_entries(docs, "SIE_ADMIN_TOKEN") == {
         CONFIG_SERVICE: GENERATED_ADMIN,
