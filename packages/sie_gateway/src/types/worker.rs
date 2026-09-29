@@ -123,8 +123,8 @@ pub struct WorkerInfo {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unsupported_models: Vec<String>,
     /// The worker reported more unsupported models than the gateway accepts
-    /// (1024), so no model is routed to its lane (pool and machine profile)
-    /// while it overflows. Omitted when false.
+    /// (1024), so no model is routed to its lane (pool, machine profile,
+    /// bundle) while it overflows. Omitted when false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unsupported_models_overflow: bool,
 }
