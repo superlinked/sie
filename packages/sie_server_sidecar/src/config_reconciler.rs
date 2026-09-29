@@ -38,7 +38,7 @@ const DEFAULT_MODEL_POOL: &str = "default";
 #[derive(Clone)]
 pub struct ReconcilerConfig {
     pub base_url: String,
-    pub admin_token: Option<String>,
+    pub token: Option<String>,
     pub bundle: String,
     pub pool: String,
     pub poll_interval: Duration,
@@ -46,13 +46,13 @@ pub struct ReconcilerConfig {
 }
 
 impl std::fmt::Debug for ReconcilerConfig {
-    /// Hand-written so `admin_token` prints only as present or absent.
+    /// Hand-written so `token` prints only as present or absent.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Destructured without `..` so a new field fails to compile until it is
         // listed here, and so cannot be printed unredacted or silently omitted.
         let ReconcilerConfig {
             base_url,
-            admin_token,
+            token,
             bundle,
             pool,
             poll_interval,
@@ -60,7 +60,7 @@ impl std::fmt::Debug for ReconcilerConfig {
         } = self;
         f.debug_struct("ReconcilerConfig")
             .field("base_url", base_url)
-            .field("admin_token", &admin_token.as_ref().map(|_| "<redacted>"))
+            .field("token", &token.as_ref().map(|_| "<redacted>"))
             .field("bundle", bundle)
             .field("pool", pool)
             .field("poll_interval", poll_interval)
@@ -174,7 +174,7 @@ struct ExportReconcileOptions<'a> {
 
 struct ReconcileClient {
     base_url: String,
-    admin_token: Option<String>,
+    token: Option<String>,
     http: reqwest::Client,
 }
 
@@ -195,11 +195,11 @@ struct ReconcileScope<'a> {
 }
 
 impl ReconcileClient {
-    fn new(base_url: String, admin_token: Option<String>) -> Result<Self, reqwest::Error> {
+    fn new(base_url: String, token: Option<String>) -> Result<Self, reqwest::Error> {
         let http = reqwest::Client::builder().timeout(HTTP_TIMEOUT).build()?;
         Ok(Self {
             base_url,
-            admin_token,
+            token,
             http,
         })
     }
@@ -207,7 +207,7 @@ impl ReconcileClient {
     async fn fetch_epoch(&self) -> Result<EpochSnapshot, ReconcileError> {
         let url = format!("{}/v1/configs/epoch", self.base_url.trim_end_matches('/'));
         let mut req = self.http.get(&url);
-        if let Some(token) = &self.admin_token {
+        if let Some(token) = &self.token {
             req = req.bearer_auth(token);
         }
         let resp = req.send().await?;
@@ -226,7 +226,7 @@ impl ReconcileClient {
     async fn fetch_export(&self) -> Result<ExportSnapshot, ReconcileError> {
         let url = format!("{}/v1/configs/export", self.base_url.trim_end_matches('/'));
         let mut req = self.http.get(&url);
-        if let Some(token) = &self.admin_token {
+        if let Some(token) = &self.token {
             req = req.bearer_auth(token);
         }
         let resp = req.send().await?;
@@ -343,7 +343,7 @@ pub fn spawn(
     }
 
     Some(tokio::spawn(async move {
-        let client = match ReconcileClient::new(config.base_url.clone(), config.admin_token) {
+        let client = match ReconcileClient::new(config.base_url.clone(), config.token) {
             Ok(c) => c,
             Err(e) => {
                 warn!(error = %e, "worker-config: failed to build export reconciler client");
@@ -798,18 +798,18 @@ mod tests {
     use tokio::sync::Mutex;
 
     #[test]
-    fn reconciler_config_debug_redacts_admin_token() {
+    fn reconciler_config_debug_redacts_the_token() {
         let config = ReconcilerConfig {
             base_url: "http://sie-config:8080".into(),
-            admin_token: Some("config-admin-value".into()),
+            token: Some("config-read-value".into()),
             bundle: "default".into(),
             pool: "default".into(),
             poll_interval: DEFAULT_POLL_INTERVAL,
             full_export_interval: Some(DEFAULT_FULL_EXPORT_INTERVAL),
         };
         let rendered = format!("{config:?}");
-        assert!(!rendered.contains("config-admin-value"));
-        assert!(rendered.contains("admin_token: Some(\"<redacted>\")"));
+        assert!(!rendered.contains("config-read-value"));
+        assert!(rendered.contains("token: Some(\"<redacted>\")"));
         assert!(rendered.contains("base_url: \"http://sie-config:8080\""));
     }
 

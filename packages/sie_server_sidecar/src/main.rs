@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use clap::Parser;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use sie_server_sidecar::config::WorkerConfig;
 use sie_server_sidecar::config_subscriber::trusted_producers_from_env;
@@ -142,9 +142,10 @@ struct Cli {
     #[arg(long, env = "SIE_CONFIG_SERVICE_URL")]
     config_service_url: Option<String>,
 
-    /// Bearer token for sie-config export reads. Defaults from the shared
-    /// SIE_ADMIN_TOKEN secret in Helm when config auth is enabled.
-    #[arg(long, env = "SIE_ADMIN_TOKEN", hide_env_values = true)]
+    /// Bearer token for the sie-config epoch and export reads: a read-scoped
+    /// sie-config token (SIE_CONFIG_READ_TOKEN there). A blank value sends no
+    /// token. When this is unset, SIE_ADMIN_TOKEN is used instead (deprecated).
+    #[arg(long, env = "SIE_CONFIG_SERVICE_TOKEN", hide_env_values = true)]
     config_service_token: Option<String>,
 
     /// Worker-side config epoch poll interval in milliseconds.
@@ -196,6 +197,18 @@ async fn main() -> anyhow::Result<()> {
     let ipc_socket_paths = parse_ipc_socket_paths(cli.ipc_socket_paths.as_deref())
         .unwrap_or_else(|| vec![ipc_socket_path.clone()]);
     validate_unique_ipc_socket_paths(&ipc_socket_paths)?;
+    let config_service_token = resolve_config_service_token(
+        cli.config_service_token,
+        std::env::var_os(CONFIG_SERVICE_TOKEN_ENV).is_some(),
+        std::env::var(LEGACY_CONFIG_SERVICE_TOKEN_ENV).ok(),
+    );
+    if config_service_token.from_admin_token {
+        warn!(
+            "sie-config credential taken from {LEGACY_CONFIG_SERVICE_TOKEN_ENV} because \
+             {CONFIG_SERVICE_TOKEN_ENV} is unset; this is deprecated, set \
+             {CONFIG_SERVICE_TOKEN_ENV} to sie-config's read-scoped token (SIE_CONFIG_READ_TOKEN)"
+        );
+    }
     let config = WorkerConfig {
         nats_url: cli.nats_url,
         local_socket_path: cli.local_socket.map(Into::into),
@@ -229,9 +242,7 @@ async fn main() -> anyhow::Result<()> {
         gpu_count: cli.gpu_count,
         bundle_config_hash: cli.bundle_config_hash,
         config_service_url: cli.config_service_url.filter(|url| !url.trim().is_empty()),
-        config_service_token: cli
-            .config_service_token
-            .filter(|token| !token.trim().is_empty()),
+        config_service_token: config_service_token.token,
         config_poll_interval_ms: cli.config_poll_interval_ms.max(1_000),
         config_full_export_interval_ms: cli.config_full_export_interval_ms,
         nats_config_trusted_producers: trusted_producers_from_env(),
@@ -265,6 +276,36 @@ async fn main() -> anyhow::Result<()> {
     // Flush any pending OTLP spans before a clean exit.
     sie_server_sidecar::observability::tracing::shutdown_tracing();
     Ok(())
+}
+
+const CONFIG_SERVICE_TOKEN_ENV: &str = "SIE_CONFIG_SERVICE_TOKEN";
+const LEGACY_CONFIG_SERVICE_TOKEN_ENV: &str = "SIE_ADMIN_TOKEN";
+
+struct ConfigServiceToken {
+    token: Option<String>,
+    from_admin_token: bool,
+}
+
+/// `--config-service-token` / `SIE_CONFIG_SERVICE_TOKEN` decides whenever it is
+/// set, and a blank value means no token. Only when it is unset does the
+/// sidecar fall back to `SIE_ADMIN_TOKEN`.
+fn resolve_config_service_token(
+    configured: Option<String>,
+    configured_env_is_set: bool,
+    admin_token: Option<String>,
+) -> ConfigServiceToken {
+    let non_blank = |token: String| (!token.trim().is_empty()).then_some(token);
+    if configured.is_some() || configured_env_is_set {
+        return ConfigServiceToken {
+            token: configured.and_then(non_blank),
+            from_admin_token: false,
+        };
+    }
+    let token = admin_token.and_then(non_blank);
+    ConfigServiceToken {
+        from_admin_token: token.is_some(),
+        token,
+    }
 }
 
 fn init_tracing() {
@@ -398,6 +439,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::parse_ipc_socket_paths;
+    use super::resolve_config_service_token;
     use super::validate_ingest_mode;
     use super::validate_lane_segment;
     use super::validate_model_ready_liveness_budget;
@@ -423,9 +465,51 @@ mod tests {
             secret_args,
             vec![
                 ("SIE_GATEWAY_API_KEY".to_string(), true),
-                ("SIE_ADMIN_TOKEN".to_string(), true),
+                ("SIE_CONFIG_SERVICE_TOKEN".to_string(), true),
             ]
         );
+    }
+
+    fn resolved(
+        configured: Option<&str>,
+        configured_env_is_set: bool,
+        admin_token: Option<&str>,
+    ) -> (Option<String>, bool) {
+        let resolved = resolve_config_service_token(
+            configured.map(String::from),
+            configured_env_is_set,
+            admin_token.map(String::from),
+        );
+        (resolved.token, resolved.from_admin_token)
+    }
+
+    #[test]
+    fn config_service_token_is_preferred_over_the_admin_token() {
+        assert_eq!(
+            resolved(Some("config-read"), true, Some("admin")),
+            (Some("config-read".to_string()), false)
+        );
+        assert_eq!(
+            resolved(Some("config-read"), false, Some("admin")),
+            (Some("config-read".to_string()), false)
+        );
+    }
+
+    #[test]
+    fn a_set_but_blank_config_service_token_sends_no_token() {
+        for blank in [Some(""), Some("  "), None] {
+            assert_eq!(resolved(blank, true, Some("admin")), (None, false));
+        }
+    }
+
+    #[test]
+    fn an_unset_config_service_token_falls_back_to_the_admin_token() {
+        assert_eq!(
+            resolved(None, false, Some("admin")),
+            (Some("admin".to_string()), true)
+        );
+        assert_eq!(resolved(None, false, Some(" ")), (None, false));
+        assert_eq!(resolved(None, false, None), (None, false));
     }
 
     #[test]

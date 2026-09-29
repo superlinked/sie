@@ -505,7 +505,7 @@ pub async fn run(config: WorkerConfig) -> anyhow::Result<()> {
         config.config_service_url.as_ref().map(|base_url| {
             crate::config_reconciler::ReconcilerConfig {
                 base_url: base_url.clone(),
-                admin_token: config.config_service_token.clone(),
+                token: config.config_service_token.clone(),
                 bundle: config.bundle.clone(),
                 pool: config.pool.clone(),
                 poll_interval: Duration::from_millis(config.config_poll_interval_ms),
@@ -863,7 +863,7 @@ pub async fn run_local(config: WorkerConfig) -> anyhow::Result<()> {
         config.config_service_url.as_ref().map(|base_url| {
             crate::config_reconciler::ReconcilerConfig {
                 base_url: base_url.clone(),
-                admin_token: config.config_service_token.clone(),
+                token: config.config_service_token.clone(),
                 bundle: config.bundle.clone(),
                 pool: config.pool.clone(),
                 poll_interval: Duration::from_millis(config.config_poll_interval_ms),

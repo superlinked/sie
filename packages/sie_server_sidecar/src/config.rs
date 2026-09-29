@@ -129,9 +129,8 @@ pub struct WorkerConfig {
     /// `/v1/configs/export`.
     pub config_service_url: Option<String>,
 
-    /// Optional bearer token for `sie-config` export reads. Helm wires this
-    /// from `SIE_ADMIN_TOKEN` when config auth is enabled because
-    /// `/v1/configs/export` is admin-authenticated.
+    /// Optional bearer token for the `sie-config` epoch and export reads,
+    /// from `SIE_CONFIG_SERVICE_TOKEN`: a read-scoped sie-config token.
     pub config_service_token: Option<String>,
 
     /// Cadence for worker-side `/v1/configs/epoch` polling.
@@ -339,10 +338,10 @@ mod tests {
     fn debug_redacts_bearer_tokens() {
         let mut c = sample();
         c.gateway_api_key = Some("gateway-bearer-value".into());
-        c.config_service_token = Some("config-admin-value".into());
+        c.config_service_token = Some("config-read-value".into());
         let rendered = format!("{c:?}");
         assert!(!rendered.contains("gateway-bearer-value"));
-        assert!(!rendered.contains("config-admin-value"));
+        assert!(!rendered.contains("config-read-value"));
         assert!(rendered.contains("config_service_token: Some(\"<redacted>\")"));
         assert!(rendered.contains("gateway_api_key: Some(\"<redacted>\")"));
         assert!(rendered.contains("worker_id: \"worker-test\""));

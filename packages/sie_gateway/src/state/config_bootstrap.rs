@@ -229,7 +229,7 @@ pub(crate) fn telemetry_outcome(error: &BootstrapError) -> ConfigOutcome {
 
 pub struct BootstrapClient {
     base_url: String,
-    admin_token: Option<String>,
+    token: Option<String>,
     /// Optional Modal platform proxy-auth token (#1740). When set, every
     /// request also carries `Modal-Key` / `Modal-Secret` so it clears the
     /// Modal edge before app code sees it. Absent on self-host / dev.
@@ -344,7 +344,7 @@ impl BootstrapOutcome {
 }
 
 impl BootstrapClient {
-    pub fn new(base_url: String, admin_token: Option<String>) -> Result<Self, String> {
+    pub fn new(base_url: String, token: Option<String>) -> Result<Self, String> {
         let managed_proxy_auth = managed_proxy_auth_enabled();
         if managed_proxy_auth {
             validate_managed_config_origin(
@@ -357,7 +357,7 @@ impl BootstrapClient {
         let http = build_config_http_client(managed_proxy_auth)?;
         Ok(Self {
             base_url,
-            admin_token,
+            token,
             modal_proxy_token: None,
             managed_proxy_auth,
             http,
@@ -375,14 +375,14 @@ impl BootstrapClient {
         self
     }
 
-    /// Apply both auth layers to a request builder: the in-app admin bearer
+    /// Apply both auth layers to a request builder: the sie-config bearer
     /// (`config_service_token`) and, when configured, the Modal platform
     /// proxy-auth headers (#1740). The two are independent — the bearer is
     /// checked by `sie_config`, the `Modal-Key` / `Modal-Secret` pair by the
     /// Modal edge — so both are sent when present.
     fn apply_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         let mut req = req;
-        if let Some(token) = &self.admin_token {
+        if let Some(token) = &self.token {
             req = req.bearer_auth(token);
         }
         if let Some(proxy) = &self.modal_proxy_token {
@@ -752,7 +752,7 @@ const DEGRADED_AFTER: std::time::Duration = std::time::Duration::from_secs(5 * 6
 ///   `state::config_poller`.
 pub fn spawn_bootstrap_retry(
     base_url: Option<&str>,
-    admin_token: Option<&str>,
+    token: Option<&str>,
     modal_proxy_token: Option<&ModalProxyToken>,
     registry: Arc<ModelRegistry>,
     config_epoch: ConfigEpoch,
@@ -760,7 +760,7 @@ pub fn spawn_bootstrap_retry(
     bundle_config_hashes_hash: BundleConfigHashesHash,
 ) -> tokio::task::JoinHandle<()> {
     let base_url = base_url.map(str::to_string);
-    let admin_token = admin_token.map(str::to_string);
+    let token = token.map(str::to_string);
     let modal_proxy_token = modal_proxy_token.cloned();
     tokio::spawn(async move {
         telemetry::set_config_bootstrap_degraded(false);
@@ -768,7 +768,7 @@ pub fn spawn_bootstrap_retry(
             info!("SIE_CONFIG_SERVICE_URL not set; skipping config bootstrap");
             return;
         };
-        let client = match BootstrapClient::new(base, admin_token)
+        let client = match BootstrapClient::new(base, token)
             .map(|c| c.with_modal_proxy_token(modal_proxy_token))
         {
             Ok(c) => c,
@@ -1408,7 +1408,7 @@ mod tests {
 
         let client = BootstrapClient {
             base_url: server.uri(),
-            admin_token: Some("admin-secret".into()),
+            token: Some("admin-secret".into()),
             modal_proxy_token: None,
             managed_proxy_auth: false,
             http: reqwest::Client::new(),
@@ -1444,7 +1444,7 @@ mod tests {
 
         let client = BootstrapClient {
             base_url: origin.uri(),
-            admin_token: Some("admin-secret".into()),
+            token: Some("admin-secret".into()),
             modal_proxy_token: Some(ModalProxyToken {
                 key: "wk-abc".into(),
                 secret: "ws-xyz".into(),

@@ -742,8 +742,9 @@ mod tests {
 
     #[tokio::test]
     async fn middleware_admin_token_alone_with_disabled_mode_passes_through() {
-        // `SIE_ADMIN_TOKEN` is also the sie-config bootstrap credential, so
-        // "auth off + admin token present" is an ordinary deployment shape.
+        // With `SIE_CONFIG_SERVICE_TOKEN` unset, `SIE_ADMIN_TOKEN` is also the
+        // sie-config credential, so "auth off + admin token present" is an
+        // ordinary deployment shape.
         let cfg = cfg_for_middleware("none", vec![], "admin", false);
         let r = test_router(cfg);
         assert_eq!(

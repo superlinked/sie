@@ -208,10 +208,11 @@ pub struct Config {
     // examples); production Helm always sets this.
     pub config_service_url: Option<String>,
 
-    // Admin token the gateway presents as a bearer credential when calling
-    // `sie-config`'s bootstrap endpoints (`GET /v1/configs/export` and
-    // `GET /v1/configs/epoch`). Reuses SIE_ADMIN_TOKEN because both services
-    // share one admin secret in-cluster.
+    // Bearer the gateway presents to `sie-config` on its bootstrap and poll
+    // reads (`GET /v1/configs/bundles`, `/export`, `/epoch`), from
+    // `SIE_CONFIG_SERVICE_TOKEN`: a read-scoped sie-config token
+    // (`SIE_CONFIG_READ_TOKEN` there), separate from the inbound `admin_token`.
+    // Falls back to `SIE_ADMIN_TOKEN` only when that variable is unset.
     pub config_service_token: Option<String>,
 
     // Optional Modal platform proxy-auth token the gateway's config client
@@ -298,7 +299,7 @@ impl std::fmt::Debug for Config {
             .field("bundles_dir", &self.bundles_dir)
             .field("models_dir", &self.models_dir)
             .field("config_service_url", &self.config_service_url)
-            // Secret: same admin bearer as `admin_token`; keep present/absent.
+            // Secret: the sie-config bearer; keep present/absent.
             .field(
                 "config_service_token",
                 &self.config_service_token.as_ref().map(|_| "<redacted>"),
@@ -669,6 +670,19 @@ fn env_default(key: &str, fallback: &str) -> String {
     }
 }
 
+/// The bearer the gateway presents to `sie-config`. `SIE_CONFIG_SERVICE_TOKEN`
+/// decides whenever it is set, and a blank value means no credential. Only an
+/// unset `SIE_CONFIG_SERVICE_TOKEN` falls back to `SIE_ADMIN_TOKEN`, the
+/// inbound admin credential; `Config::audit_auth` reports that fallback.
+fn config_service_token_from_env() -> Option<String> {
+    let raw = if env::var_os("SIE_CONFIG_SERVICE_TOKEN").is_some() {
+        env::var("SIE_CONFIG_SERVICE_TOKEN").unwrap_or_default()
+    } else {
+        env::var("SIE_ADMIN_TOKEN").unwrap_or_default()
+    };
+    (!raw.trim().is_empty()).then_some(raw)
+}
+
 impl Config {
     pub fn load() -> Self {
         let mut auth_tokens = env_csv("SIE_AUTH_TOKENS");
@@ -757,14 +771,7 @@ impl Config {
                     Some(raw)
                 }
             },
-            config_service_token: {
-                let raw = env::var("SIE_ADMIN_TOKEN").unwrap_or_default();
-                if raw.is_empty() {
-                    None
-                } else {
-                    Some(raw)
-                }
-            },
+            config_service_token: config_service_token_from_env(),
             config_modal_proxy_token: {
                 // #1740: opt-in Modal platform proxy-auth. Both halves required
                 // for the pair to be sent — a half-set pair is a misconfig, not
@@ -833,19 +840,33 @@ impl Config {
             ));
         }
 
-        // `admin_token` alone is not dead configuration: `Config::load` also
-        // presents it to `sie-config` as the bootstrap credential
-        // (`config_service_token`), so a gateway with inbound auth off still
-        // legitimately carries it. Only the inbound tokens prove intent.
+        let admin_is_config_credential =
+            has_admin && self.config_service_token.as_deref() == Some(self.admin_token.as_str());
+
+        // `admin_token` alone is not dead configuration while it is also the
+        // `sie-config` credential, so it never audits as an error. Only the
+        // inbound tokens prove intent.
         if !is_enabled && has_tokens {
             issues.push((
                 AuditLevel::Error,
                 "SIE_AUTH_TOKEN(S) is set but SIE_AUTH_MODE is not 'static'/'token'. Auth is DISABLED; the tokens are dead configuration. Set SIE_AUTH_MODE=token to enforce auth.".to_string(),
             ));
         } else if !is_enabled && has_admin {
+            let usage = if admin_is_config_credential {
+                "the token is still presented to sie-config as its credential"
+            } else {
+                "the token is unused"
+            };
             issues.push((
                 AuditLevel::Warn,
-                "SIE_ADMIN_TOKEN is set but SIE_AUTH_MODE is not 'static'/'token': admin routes are not gated inbound (auth is disabled); the token is still presented to sie-config as the bootstrap credential.".to_string(),
+                format!("SIE_ADMIN_TOKEN is set but SIE_AUTH_MODE is not 'static'/'token': admin routes are not gated inbound (auth is disabled); {usage}."),
+            ));
+        }
+
+        if admin_is_config_credential {
+            issues.push((
+                AuditLevel::Warn,
+                "The gateway presents SIE_ADMIN_TOKEN, its inbound admin credential, to sie-config because SIE_CONFIG_SERVICE_TOKEN is unset or equal to it. This is deprecated: set SIE_CONFIG_SERVICE_TOKEN to sie-config's read-scoped token (SIE_CONFIG_READ_TOKEN) so the gateway does not need an admin credential to load its catalog.".to_string(),
             ));
         }
 
@@ -1639,22 +1660,87 @@ mod tests {
         assert_eq!(StreamStorage::parse("s3"), None);
     }
 
-    #[test]
-    fn test_admin_token_populates_config_service_token() {
-        with_env(&[("SIE_ADMIN_TOKEN", "super-secret")], || {
-            let cfg = Config::load();
-            assert_eq!(cfg.admin_token, "super-secret");
-            assert_eq!(cfg.config_service_token.as_deref(), Some("super-secret"));
+    const CONFIG_CREDENTIAL_VARS: &[&str] = &["SIE_CONFIG_SERVICE_TOKEN", "SIE_ADMIN_TOKEN"];
+
+    fn load_with_config_credentials(vars: &[(&str, &str)]) -> Config {
+        let mut loaded = None;
+        without_env(CONFIG_CREDENTIAL_VARS, || {
+            for (key, value) in vars {
+                env::set_var(key, value);
+            }
+            loaded = Some(Config::load());
         });
+        loaded.expect("Config::load ran")
+    }
+
+    fn deprecation_warnings(cfg: &Config) -> usize {
+        cfg.audit_auth()
+            .iter()
+            .filter(|(lvl, msg)| *lvl == AuditLevel::Warn && msg.contains("deprecated"))
+            .count()
     }
 
     #[test]
-    fn test_admin_token_unset_leaves_config_service_token_none() {
-        without_env(&["SIE_ADMIN_TOKEN"], || {
-            let cfg = Config::load();
-            assert!(cfg.admin_token.is_empty());
-            assert!(cfg.config_service_token.is_none());
-        });
+    fn test_config_service_token_is_separate_from_the_admin_token() {
+        let cfg = load_with_config_credentials(&[
+            ("SIE_CONFIG_SERVICE_TOKEN", "config-read-secret"),
+            ("SIE_ADMIN_TOKEN", "gateway-admin-secret"),
+        ]);
+        assert_eq!(cfg.admin_token, "gateway-admin-secret");
+        assert_eq!(
+            cfg.config_service_token.as_deref(),
+            Some("config-read-secret")
+        );
+        assert_eq!(deprecation_warnings(&cfg), 0);
+    }
+
+    #[test]
+    fn test_config_service_token_without_an_admin_token() {
+        let cfg =
+            load_with_config_credentials(&[("SIE_CONFIG_SERVICE_TOKEN", "config-read-secret")]);
+        assert!(cfg.admin_token.is_empty());
+        assert_eq!(
+            cfg.config_service_token.as_deref(),
+            Some("config-read-secret")
+        );
+    }
+
+    #[test]
+    fn test_unset_config_service_token_falls_back_to_the_admin_token() {
+        let cfg = load_with_config_credentials(&[("SIE_ADMIN_TOKEN", "super-secret")]);
+        assert_eq!(cfg.admin_token, "super-secret");
+        assert_eq!(cfg.config_service_token.as_deref(), Some("super-secret"));
+        assert_eq!(deprecation_warnings(&cfg), 1);
+        assert!(cfg.auth_config_error().is_none());
+    }
+
+    #[test]
+    fn test_blank_config_service_token_does_not_fall_back() {
+        for blank in ["", "   "] {
+            let cfg = load_with_config_credentials(&[
+                ("SIE_CONFIG_SERVICE_TOKEN", blank),
+                ("SIE_ADMIN_TOKEN", "gateway-admin-secret"),
+            ]);
+            assert_eq!(cfg.admin_token, "gateway-admin-secret");
+            assert!(cfg.config_service_token.is_none(), "{blank:?}");
+            assert_eq!(deprecation_warnings(&cfg), 0);
+        }
+    }
+
+    #[test]
+    fn test_no_config_service_credential() {
+        let cfg = load_with_config_credentials(&[]);
+        assert!(cfg.admin_token.is_empty());
+        assert!(cfg.config_service_token.is_none());
+    }
+
+    #[test]
+    fn test_config_service_token_equal_to_the_admin_token_is_reported() {
+        let cfg = load_with_config_credentials(&[
+            ("SIE_CONFIG_SERVICE_TOKEN", "shared-secret"),
+            ("SIE_ADMIN_TOKEN", "shared-secret"),
+        ]);
+        assert_eq!(deprecation_warnings(&cfg), 1);
     }
 
     #[test]
@@ -1726,14 +1812,15 @@ mod tests {
     fn test_config_debug_redacts_all_secret_fields() {
         // `Config` is `{:?}`-formatted at startup (and in tests), so EVERY
         // credential-bearing field must be redacted: the client API bearers
-        // (auth_tokens), the admin bearer (admin_token AND the config_service_token
-        // derived from it), and both halves of the Modal proxy token. Non-secret
-        // fields must stay visible for debuggability.
+        // (auth_tokens), the admin bearer (admin_token), the sie-config bearer
+        // (config_service_token), and both halves of the proxy token.
+        // Non-secret fields must stay visible for debuggability.
         with_env(
             &[
                 ("SIE_AUTH_MODE", "token"),
                 ("SIE_AUTH_TOKENS", "tok-secret-1,tok-secret-2"),
                 ("SIE_ADMIN_TOKEN", "super-admin-secret"),
+                ("SIE_CONFIG_SERVICE_TOKEN", "config-read-secret"),
                 ("SIE_MODAL_PROXY_TOKEN_ID", "wk-id-secret"),
                 ("SIE_MODAL_PROXY_TOKEN_SECRET", "ws-value-secret"),
                 ("SIE_NATS_URL", "nats://nats-host:4222"),
@@ -1745,13 +1832,14 @@ mod tests {
                 assert_eq!(cfg.admin_token, "super-admin-secret");
                 assert_eq!(
                     cfg.config_service_token.as_deref(),
-                    Some("super-admin-secret")
+                    Some("config-read-secret")
                 );
                 assert_eq!(cfg.auth_tokens.len(), 2);
 
                 let dbg = format!("{cfg:?}");
                 for leaked in [
-                    "super-admin-secret", // admin_token + config_service_token
+                    "super-admin-secret", // admin_token
+                    "config-read-secret", // config_service_token
                     "tok-secret-1",
                     "tok-secret-2", // auth_tokens
                     "wk-id-secret",
@@ -1843,20 +1931,44 @@ mod tests {
         );
     }
 
-    /// The admin token doubles as the `sie-config` bootstrap credential
-    /// (`config_service_token`), so a gateway running with inbound auth off
-    /// still carries it legitimately. That must never audit as an error, or
-    /// the fail-closed middleware would refuse every request on such a deploy.
+    /// Through the `SIE_ADMIN_TOKEN` fallback the admin token can also be the
+    /// `sie-config` credential (`config_service_token`), so a gateway running
+    /// with inbound auth off may carry it legitimately. That must never audit
+    /// as an error, or the fail-closed middleware would refuse every request
+    /// on such a deploy.
     #[test]
     fn test_audit_auth_none_with_only_admin_token_is_not_an_error() {
-        let cfg = cfg_with_auth("none", vec![], "admin", false);
+        for config_service_token in [None, Some("admin")] {
+            let mut cfg = cfg_with_auth("none", vec![], "admin", false);
+            cfg.config_service_token = config_service_token.map(String::from);
+            let issues = cfg.audit_auth();
+            assert!(
+                issues.iter().all(|(lvl, _)| *lvl != AuditLevel::Error),
+                "admin token alone must not be an error: {:?}",
+                issues
+            );
+            assert!(cfg.auth_config_error().is_none());
+        }
+    }
+
+    #[test]
+    fn test_audit_auth_none_admin_token_usage_follows_the_config_credential() {
+        let mut cfg = cfg_with_auth("none", vec![], "admin", false);
+        cfg.config_service_token = Some("config-read".to_string());
         let issues = cfg.audit_auth();
-        assert!(
-            issues.iter().all(|(lvl, _)| *lvl != AuditLevel::Error),
-            "admin token alone must not be an error: {:?}",
-            issues
-        );
-        assert!(cfg.auth_config_error().is_none());
+        assert!(issues
+            .iter()
+            .any(|(lvl, msg)| *lvl == AuditLevel::Warn && msg.contains("the token is unused")));
+        assert!(!issues.iter().any(|(_, msg)| msg.contains("deprecated")));
+
+        cfg.config_service_token = Some("admin".to_string());
+        let issues = cfg.audit_auth();
+        assert!(issues
+            .iter()
+            .any(|(lvl, msg)| *lvl == AuditLevel::Warn && msg.contains("presented to sie-config")));
+        assert!(issues
+            .iter()
+            .any(|(lvl, msg)| *lvl == AuditLevel::Warn && msg.contains("deprecated")));
     }
 
     #[test]
