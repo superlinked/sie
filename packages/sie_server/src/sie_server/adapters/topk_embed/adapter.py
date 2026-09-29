@@ -33,10 +33,12 @@ transformers release builds the vision rotary table (5.17 changed it).
 
 from __future__ import annotations
 
+import io
 import json
 import logging
 import math
 import threading
+import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -58,13 +60,12 @@ from sie_server.adapters.topk_embed.packed import PackedTextModel, Packing, reso
 from sie_server.core.inference_output import EncodeOutput
 from sie_server.core.oom import is_oom_error
 from sie_server.core.postprocessor import MuveraConfig, MuveraPostprocessor
-from sie_server.types.inputs import InvalidInputError, decode_image
+from sie_server.types.inputs import ImageInput, InvalidInputError, Item, decode_image
 
 if TYPE_CHECKING:
     from PIL import Image as PILImage
 
     from sie_server.core.inference_output import ScoreOutput
-    from sie_server.types.inputs import Item
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +101,12 @@ _IMAGE_MESSAGE = [{"role": "user", "content": [{"type": "image"}]}]
 _VISION_ROPE_THETA = 10000.0
 # Threads decoding, resizing and patchifying the pages of one request.
 _PREPROCESS_WORKERS = 4
+# flash-linear-attention tunes some kernels again as a batch grows: its short convolution
+# for every 1,024 tokens, its RMSNorm of narrow rows for every 2,048 rows. The attention
+# layers' per-head norms take one row per head, so theirs moves every 2,048 / heads tokens
+# (256 for TopK-Embed's 8 query heads). The warm-up runs one batch per step.
+_CONV_TUNING_TOKENS = 1024
+_NORM_TUNING_ROWS = 2048
 
 
 @dataclass
@@ -225,6 +232,7 @@ class TopkEmbedAdapter(BaseAdapter):
         self._query_max_length = 1024
         self._doc_max_length = max_seq_length or 8192
         self._image_token_id = 0
+        self._attention_heads = 1
         self._skip_ids = torch.empty(0, dtype=torch.long)
         self._image_prefix = torch.empty(0, dtype=torch.long)
         self._image_suffix = torch.empty(0, dtype=torch.long)
@@ -262,6 +270,7 @@ class TopkEmbedAdapter(BaseAdapter):
         config = Qwen3_5Config(**raw)
         # Bidirectional full-attention layers; the linear-attention layers stay causal recurrences.
         config.text_config.is_causal = False
+        self._attention_heads = int(config.text_config.num_attention_heads)
         config.text_config.use_cache = False
 
         attn_impl = self._attn_implementation or "sdpa"
@@ -373,6 +382,55 @@ class TopkEmbedAdapter(BaseAdapter):
             )
         logger.info("TopK-Embed CUDA graphs off: %s", reason)
         return None
+
+    def warmup(self) -> None:
+        """Compile and tune the GPU kernels before the model takes traffic.
+
+        flash-linear-attention's Triton kernels compile and autotune on first use, and
+        some tune again as a batch grows (see ``_NORM_TUNING_ROWS``). On a fresh machine
+        the first requests would stall, for seconds to over a minute, at every new batch
+        size. So one packed batch per tuning step, up to the largest batch the adapter
+        builds, runs here, then the CUDA graphs' padded forward at each size it tunes
+        for, a query and a page (the vision tower's kernels). Off CUDA or off the packed
+        path there is nothing to compile.
+        """
+        if self._packed_text is None or not str(self._device).startswith("cuda"):
+            return
+        started = time.perf_counter()
+        token = int(self._tokenizer.pad_token_id)
+        step = max(1, min(_CONV_TUNING_TOKENS, _NORM_TUNING_ROWS // self._attention_heads))
+        largest = self._largest_batch_tokens()
+        for total in range(step, largest + step, step):
+            full, rest = divmod(total, self._doc_max_length)
+            lengths = [self._doc_max_length] * full + ([rest] if rest else [])
+            rows = [torch.full((n,), token, dtype=torch.long) for n in lengths]
+            try:
+                self._forward_packed(rows, images=None, normalize=True, dtype=torch.float16, graphs=False).rows()
+            except Exception as exc:
+                if not is_oom_error(exc):
+                    raise
+                # A GPU shared with other models: serving splits what does not fit, so load anyway.
+                torch.cuda.empty_cache()
+                logger.warning("TopK-Embed warm-up stopped at %d tokens per batch: out of GPU memory", total)
+                break
+        if self._graphs is not None:
+            with self._forward_lock, torch.inference_mode():
+                self._graphs.warm_up(_CONV_TUNING_TOKENS)
+        options = {"output_dtype": "float16"}
+        self.encode([Item(text="warm up")], ["multivector"], is_query=True, options=options)
+        self.encode([Item(images=[_warmup_page()])], ["multivector"], options=options)
+        logger.info(
+            "TopK-Embed warm-up: batches up to %d tokens in steps of %d, a query and a page in %.1f s",
+            largest,
+            step,
+            time.perf_counter() - started,
+        )
+
+    def _largest_batch_tokens(self) -> int:
+        """Most tokens one packed forward holds: a text batch, one capped document, or a batch of pages."""
+        page = self._max_pixels // (self._patch_size * self._merge_size) ** 2
+        page += len(self._image_prefix) + len(self._image_suffix)
+        return max(self._text_batch_tokens, self._doc_max_length, self._image_batch_size * page)
 
     def _resolve_compute_dtype(self) -> torch.dtype:
         # Honoured on every device: the reference runs bf16 on CPU too.
@@ -635,14 +693,20 @@ class TopkEmbedAdapter(BaseAdapter):
         return _Launched(vectors, None, lambda host: [host[i, : len(row)] for i, row in enumerate(rows)])
 
     def _forward_packed(
-        self, rows: list[torch.Tensor], *, images: list[_ImageRow] | None, normalize: bool, dtype: torch.dtype
+        self,
+        rows: list[torch.Tensor],
+        *,
+        images: list[_ImageRow] | None,
+        normalize: bool,
+        dtype: torch.dtype,
+        graphs: bool = True,
     ) -> _Launched:
         packed_text = self._packed_text
         assert packed_text is not None
         device = self._device or "cpu"
         lengths = [len(row) for row in rows]
         with self._forward_lock, torch.inference_mode():
-            if not images and self._graphs is not None:
+            if not images and graphs and self._graphs is not None:
                 hidden = self._graphs.run(rows)
                 if hidden is not None:
                     # Rows come back right-padded to the graph's length.
@@ -993,3 +1057,12 @@ def _rotate_half(x: torch.Tensor) -> torch.Tensor:
     x1 = x[..., : x.shape[-1] // 2]
     x2 = x[..., x.shape[-1] // 2 :]
     return torch.cat((-x2, x1), dim=-1)
+
+
+def _warmup_page() -> ImageInput:
+    """A small blank page: its size does not matter to the kernels the warm-up compiles."""
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (256, 256), "white").save(buffer, "PNG")
+    return ImageInput(data=buffer.getvalue(), format="png")

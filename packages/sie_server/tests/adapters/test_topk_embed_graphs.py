@@ -243,6 +243,22 @@ class TestRecordingPolicy:
         assert runner.stats.forwards == 4
 
 
+class TestWarmUp:
+    def test_runs_the_padded_forward_at_each_step_up_to_the_bound(self) -> None:
+        runner = _runner(max_tokens=2500)
+        shapes: list[tuple[int, ...]] = []
+
+        def forward(input_ids: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+            assert bool(mask.all())
+            shapes.append(tuple(input_ids.shape))
+            return torch.zeros(*input_ids.shape, HIDDEN)
+
+        with patch.object(runner, "_forward", side_effect=forward):
+            runner.warm_up(1024)
+        assert shapes == [(1, 1024), (1, 2048), (1, 2500)]
+        assert runner.stats.forwards == 0  # nothing recorded, nothing counted
+
+
 class TestRecordedForward:
     """The padded forward a graph records gives each input what the packed forward gives it."""
 

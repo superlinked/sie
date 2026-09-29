@@ -381,6 +381,17 @@ class GraphRunner:
     def _total_memory(self) -> int:
         return torch.cuda.mem_get_info(self._device())[1]
 
+    def warm_up(self, step: int) -> None:
+        """Run the recorded computation eagerly at each ``step`` of tokens a graph can hold.
+
+        Its kernels are the padded variants of the packed path's, tuned on their own; the
+        adapter's warm-up calls this so a first recording does not tune them.
+        """
+        device = self._embed.weight.device
+        for tokens in range(step, self._max_tokens + step, step):
+            ids = torch.full((1, min(tokens, self._max_tokens)), self._pad_token_id, dtype=torch.long, device=device)
+            self._forward(ids, torch.ones_like(ids, dtype=torch.bool))
+
     def _forward(self, input_ids: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         """The recorded computation: embeddings and backbone over right-padded rows."""
         rows, length = input_ids.shape
