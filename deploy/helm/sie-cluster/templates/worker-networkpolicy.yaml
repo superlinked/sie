@@ -15,7 +15,7 @@
 {{- end }}
 {{- if $peer.ipBlock }}
 {{- $cidr := toString (dig "cidr" "" (default (dict) $peer.ipBlock)) }}
-{{- if has $cidr (list "0.0.0.0/0" "::/0") }}
+{{- if regexMatch "/0+$" (trim $cidr) }}
 {{- fail (printf "workers.networkPolicy.extraIngress[%d].from[%d] admits every address (ipBlock %s). To open the worker API to every source, disable workers.networkPolicy instead." $index $peerIndex $cidr) }}
 {{- end }}
 {{- $scoped = true }}
@@ -29,8 +29,8 @@
 {{- if not (and (kindIs "map" $port) $port.port) }}
 {{- fail (printf "workers.networkPolicy.extraIngress[%d].ports[%d] admits every port: set port." $index $portIndex) }}
 {{- end }}
-{{- if and $port.endPort (not (kindIs "string" $port.port)) (le (int $port.port) 1) (ge (int $port.endPort) 65535) }}
-{{- fail (printf "workers.networkPolicy.extraIngress[%d].ports[%d] covers every port (%v-%v): list the worker ports instead." $index $portIndex $port.port $port.endPort) }}
+{{- if and $port.endPort (not (kindIs "string" $port.port)) (gt (sub (int $port.endPort) (int $port.port)) 60000) }}
+{{- fail (printf "workers.networkPolicy.extraIngress[%d].ports[%d] spans nearly every port (%v-%v): list the worker ports instead." $index $portIndex $port.port $port.endPort) }}
 {{- end }}
 {{- end }}
 {{- end }}

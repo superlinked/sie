@@ -1169,8 +1169,12 @@ hold:
   controller honours; the NGINX Inc controller (`nginx.org/ingress-controller`)
   ignores them even when its class is also named `nginx`. With cluster access
   (`helm install`/`upgrade`), the chart looks up the IngressClass named by
-  `ingress.className`, or the default IngressClass when it is empty, and
-  requires `spec.controller: k8s.io/ingress-nginx`. An offline render
+  `ingress.className` and requires its `spec.controller` to be listed in
+  `auth.ingress.acceptedControllers` (default `k8s.io/ingress-nginx`; add the
+  controller string of a second ingress-nginx installation, for example
+  `k8s.io/internal-ingress-nginx`). When `ingress.className` is empty, the API
+  server assigns one of the default IngressClasses, so every class marked as
+  default must use an accepted controller. An offline render
   (`helm template`, including GitOps tools that render that way) cannot see
   IngressClasses, so it accepts only `ingress.className=nginx` and cannot tell
   the two controllers apart; use gateway token auth there if the class name
@@ -1232,6 +1236,14 @@ Tune them with `SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT`,
 > upgrade with `--reuse-values` keeps `ingress.enabled=true` and fails the
 > render until one of these is chosen. An existing Ingress with gateway auth
 > but no TLS needs TLS or `ingress.allowPlaintext=true`.
+>
+> API-created pools stored before the upgrade keep working but are held to
+> the new per-pool budget: a pool whose `gpus` requirements add up to more than
+> `SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT` is allotted the budget in
+> machine-profile name order, becomes Active once the allotted workers are
+> available, and keeps only those warm; a warm floor that no longer fits is
+> spread over its lanes (at least one worker each on as many lanes as the budget
+> allows). Recreate such a pool within the budget, or raise the budget.
 
 ### Worker NetworkPolicy
 
@@ -1248,9 +1260,11 @@ in the namespace. It is off by default and on in `values-ha.yaml`. Add
 must reach workers directly, and list the worker ports (`workers.common.port`,
 plus one port per additional child container on multi-GPU pools) so the rule
 does not open every port on the worker pods. The chart rejects rules that admit
-every source (an empty peer, an unscoped selector, or an `ipBlock` of
-`0.0.0.0/0` or `::/0`) or every port (a port entry without `port`, or the full
-1-65535 range); disable the policy instead to open the worker API to everything:
+every source (an empty peer, an unscoped selector, or an `ipBlock` with prefix
+length `/0`) or nearly every port (a port entry without `port`, or a range
+wider than 60000 ports); disable the policy instead to open the worker API to
+everything. These checks catch mistakes, not a determined operator: two `/1`
+halves still admit every address.
 
 ```yaml
 workers:

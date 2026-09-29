@@ -904,7 +904,7 @@ def test_worker_network_policy_rejects_wildcard_peers_and_ports(tmp_path: Path, 
         ({"from": [{"ipBlock": {"cidr": "::/0"}}], "ports": [{"port": 8080}]}, "admits every address"),
         (
             {"from": [{"ipBlock": {"cidr": "10.0.0.0/8"}}], "ports": [{"port": 1, "endPort": 65535}]},
-            "covers every port",
+            "spans nearly every port",
         ),
     ],
 )
@@ -925,3 +925,115 @@ def test_worker_network_policy_accepts_a_scoped_ip_block_and_port_range(tmp_path
     }
     (policy,) = worker_network_policies(rendered_documents(tmp_path, values))
     assert policy["spec"]["ingress"][1] == rule
+
+
+INGRESS_CLASS_LOOKUP = 'lookup "networking.k8s.io/v1" "IngressClass" "" ""'
+
+
+def ingress_class(name: str, controller: str, default: bool = False) -> dict:
+    annotations = {"ingressclass.kubernetes.io/is-default-class": "true"} if default else {}
+    return {"metadata": {"name": name, "annotations": annotations}, "spec": {"controller": controller}}
+
+
+def render_with_ingress_classes(tmp_path: Path, values: dict, classes: list[dict]) -> subprocess.CompletedProcess[str]:
+    chart = tmp_path / "chart"
+    shutil.copytree(ROOT / helm.CHART_DIR, chart, symlinks=True)
+    helpers = chart / "templates" / "_helpers.tpl"
+    source = helpers.read_text(encoding="utf-8")
+    assert source.count(INGRESS_CLASS_LOOKUP) == 1
+    helpers.write_text(
+        source.replace(INGRESS_CLASS_LOOKUP, "(default (dict) .Values.ingressClassFixture)"), encoding="utf-8"
+    )
+    values_file = tmp_path / "overrides.yaml"
+    values_file.write_text(yaml.safe_dump({**values, "ingressClassFixture": {"items": classes}}), encoding="utf-8")
+    return subprocess.run(
+        [
+            "mise",
+            "exec",
+            "--",
+            "helm",
+            "template",
+            "sie",
+            str(chart),
+            "--namespace",
+            "sie",
+            *helm.validation_args(["-f", str(values_file)]),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+INGRESS_NGINX = "k8s.io/ingress-nginx"
+NGINX_INC = "nginx.org/ingress-controller"
+
+
+@pytest.mark.parametrize(
+    ("class_name", "classes", "message"),
+    [
+        (
+            "",
+            [ingress_class("a-f5", NGINX_INC, default=True), ingress_class("z-nginx", INGRESS_NGINX, default=True)],
+            'IngressClass "a-f5" (a default IngressClass',
+        ),
+        ("nginx", [ingress_class("nginx", NGINX_INC)], 'IngressClass "nginx" uses controller "nginx.org'),
+        ("missing", [ingress_class("nginx", INGRESS_NGINX)], 'no IngressClass named "missing"'),
+        ("", [ingress_class("nginx", INGRESS_NGINX)], "no IngressClass is marked as the cluster default"),
+        (
+            "internal",
+            [ingress_class("internal", "k8s.io/internal-ingress-nginx")],
+            "not in auth.ingress.acceptedControllers",
+        ),
+    ],
+)
+def test_oauth2_edge_rejects_ingress_classes_without_an_accepted_controller(
+    tmp_path: Path, class_name: str, classes: list[dict], message: str
+) -> None:
+    values = ingress_values({"className": class_name, **SCOPED_TLS}, auth=OAUTH2_EDGE)
+    result = render_with_ingress_classes(tmp_path, values, classes)
+    assert result.returncode != 0
+    assert message in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("class_name", "classes", "accepted"),
+    [
+        ("", [ingress_class("a", INGRESS_NGINX, default=True), ingress_class("b", INGRESS_NGINX, default=True)], None),
+        ("nginx-internal", [ingress_class("nginx-internal", INGRESS_NGINX)], None),
+        (
+            "internal",
+            [ingress_class("internal", "k8s.io/internal-ingress-nginx")],
+            [INGRESS_NGINX, "k8s.io/internal-ingress-nginx"],
+        ),
+    ],
+)
+def test_oauth2_edge_accepts_ingress_classes_with_an_accepted_controller(
+    tmp_path: Path, class_name: str, classes: list[dict], accepted: list[str] | None
+) -> None:
+    auth = {**OAUTH2_EDGE, **({"ingress": {"acceptedControllers": accepted}} if accepted else {})}
+    values = ingress_values({"className": class_name, **SCOPED_TLS}, auth=auth)
+    result = render_with_ingress_classes(tmp_path, values, classes)
+    assert result.returncode == 0, result.stderr
+    assert len(gateway_ingresses([doc for doc in yaml.safe_load_all(result.stdout) if doc])) == 1
+
+
+@pytest.mark.parametrize(
+    ("rule", "message"),
+    [
+        ({"from": [{"ipBlock": {"cidr": "0::/0"}}], "ports": [{"port": 8080}]}, "admits every address"),
+        ({"from": [{"ipBlock": {"cidr": "1.2.3.4/0"}}], "ports": [{"port": 8080}]}, "admits every address"),
+        (
+            {"from": [{"ipBlock": {"cidr": "10.0.0.0/8"}}], "ports": [{"port": 2, "endPort": 65535}]},
+            "spans nearly every port",
+        ),
+    ],
+)
+def test_worker_network_policy_rejects_prefix_zero_and_near_full_port_ranges(
+    tmp_path: Path, rule: dict, message: str
+) -> None:
+    values = {
+        "workers": {"networkPolicy": {"enabled": True, "extraIngress": [rule]}, "pools": {"l4": {"enabled": True}}}
+    }
+    assert message in render_error(tmp_path, values)

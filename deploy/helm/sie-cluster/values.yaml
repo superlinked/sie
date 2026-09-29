@@ -863,10 +863,10 @@ workers:
     enabled: false
     # -- Additional NetworkPolicy ingress rules for callers outside this chart
     # that must reach workers directly. Each entry needs a non-empty `from`
-    # (scoped selectors or an ipBlock narrower than 0.0.0.0/0 and ::/0) and
-    # `ports` (each with a port, not the full 1-65535 range), so a rule cannot
-    # admit every source or every port. Disable the policy instead to open the
-    # worker API to everything.
+    # (scoped selectors, or an ipBlock with a prefix length above /0) and
+    # `ports` (each with a port, and no range wider than 60000 ports). These
+    # checks catch mistakes, not every broad rule. Disable the policy instead
+    # to open the worker API to everything.
     extraIngress: []
 
   # -- Worker pools (one StatefulSet per enabled queuePool/machineProfile/bundle lane)
@@ -1304,6 +1304,13 @@ auth:
   ingress:
     authResponseHeaders:
       - Authorization
+    # -- IngressClass spec.controller values whose controller honours the
+    # nginx.ingress.kubernetes.io/auth-* annotations the edge relies on. Add a
+    # second ingress-nginx controller's own controller string (for example
+    # k8s.io/internal-ingress-nginx) here. The NGINX Inc controller
+    # (nginx.org/ingress-controller) ignores these annotations; never list it.
+    acceptedControllers:
+      - k8s.io/ingress-nginx
 
 # -- Service account configuration
 # NAMING CONTRACT: The KSA name below ("sie-server") MUST match the name used in

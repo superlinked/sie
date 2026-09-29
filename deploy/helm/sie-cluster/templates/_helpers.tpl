@@ -893,43 +893,52 @@ and token, and refuses every request when token auth has no token.
 {{- end }}
 
 {{/*
-Validation: the oauth2-proxy edge (auth.enabled) is enforced only by the
-ingress-nginx controller (spec.controller k8s.io/ingress-nginx), which honours
-the nginx.ingress.kubernetes.io/auth-* annotations. With cluster access the
-chart looks up the IngressClass named by ingress.className, or the default
-IngressClass when it is empty. An offline render (helm template) cannot see
-IngressClasses and cannot tell ingress-nginx from other controllers that also
-use the class name nginx, so it accepts only ingress.className=nginx.
+Validation: the oauth2-proxy edge (auth.enabled) is enforced only by an
+ingress-nginx controller, which honours the nginx.ingress.kubernetes.io/auth-*
+annotations; auth.ingress.acceptedControllers lists the IngressClass
+spec.controller values that count (default k8s.io/ingress-nginx). With cluster
+access the chart looks up the IngressClass named by ingress.className. When it
+is empty, the API server assigns one of the classes marked as default, so every
+default class must use an accepted controller. An offline render (helm
+template) cannot see IngressClasses and cannot tell ingress-nginx from other
+controllers that also use the class name nginx, so it accepts only
+ingress.className=nginx.
 */}}
 {{- define "sie-cluster.validateOauth2EdgeController" -}}
 {{- $className := toString (default "" .Values.ingress.className) -}}
+{{- $accepted := list -}}
+{{- range $controller := (default (list "k8s.io/ingress-nginx") (dig "ingress" "acceptedControllers" nil (default (dict) .Values.auth))) -}}
+{{- $accepted = append $accepted (toString $controller) -}}
+{{- end -}}
 {{- $classes := lookup "networking.k8s.io/v1" "IngressClass" "" "" -}}
 {{- $items := list -}}
 {{- if $classes -}}
 {{- $items = default (list) $classes.items -}}
 {{- end -}}
 {{- if $items -}}
-{{- $selected := dict -}}
+{{- $candidates := list -}}
 {{- range $class := $items -}}
 {{- $metadata := default (dict) $class.metadata -}}
 {{- $annotations := default (dict) $metadata.annotations -}}
 {{- if $className -}}
 {{- if eq (toString $metadata.name) $className -}}
-{{- $selected = $class -}}
+{{- $candidates = append $candidates $class -}}
 {{- end -}}
 {{- else if eq (toString (index $annotations "ingressclass.kubernetes.io/is-default-class")) "true" -}}
-{{- $selected = $class -}}
+{{- $candidates = append $candidates $class -}}
 {{- end -}}
 {{- end -}}
-{{- if not $selected -}}
+{{- if not $candidates -}}
 {{- if $className -}}
-{{- fail (printf "auth.enabled=true needs the ingress-nginx IngressClass for the gateway Ingress, but no IngressClass named %q exists in the cluster." $className) -}}
+{{- fail (printf "auth.enabled=true needs an ingress-nginx IngressClass for the gateway Ingress, but no IngressClass named %q exists in the cluster." $className) -}}
 {{- end -}}
-{{- fail "auth.enabled=true needs the ingress-nginx IngressClass for the gateway Ingress, but ingress.className is empty and no IngressClass is marked as the cluster default." -}}
+{{- fail "auth.enabled=true needs an ingress-nginx IngressClass for the gateway Ingress, but ingress.className is empty and no IngressClass is marked as the cluster default." -}}
 {{- end -}}
-{{- $controller := toString (dig "spec" "controller" "" $selected) -}}
-{{- if ne $controller "k8s.io/ingress-nginx" -}}
-{{- fail (printf "auth.enabled=true puts the oauth2-proxy edge in front of the gateway through ingress-nginx auth annotations, but IngressClass %q uses controller %q, which does not honour them (the NGINX Inc controller, nginx.org/ingress-controller, ignores them too), so the gateway would be published without that check. Use an ingress-nginx IngressClass (controller k8s.io/ingress-nginx), or enable gateway auth (gateway.auth.mode=static) and set auth.enabled=false." (toString (dig "metadata" "name" "" $selected)) $controller) -}}
+{{- range $class := $candidates -}}
+{{- $controller := toString (dig "spec" "controller" "" $class) -}}
+{{- if not (has $controller $accepted) -}}
+{{- fail (printf "auth.enabled=true puts the oauth2-proxy edge in front of the gateway through ingress-nginx auth annotations, but IngressClass %q%s uses controller %q, which is not in auth.ingress.acceptedControllers %v; other controllers, such as the NGINX Inc controller (nginx.org/ingress-controller), ignore those annotations, so the gateway would be published without that check. Use an ingress-nginx IngressClass, add its controller to auth.ingress.acceptedControllers, or enable gateway auth (gateway.auth.mode=static) and set auth.enabled=false." (toString (dig "metadata" "name" "" $class)) (ternary "" " (a default IngressClass, which the API server may assign to the Ingress)" (ne $className "")) $controller $accepted) -}}
+{{- end -}}
 {{- end -}}
 {{- else if ne $className "nginx" -}}
 {{- fail (printf "auth.enabled=true puts the oauth2-proxy edge in front of the gateway through ingress-nginx auth annotations. This render cannot inspect IngressClasses (for example helm template), so it accepts only ingress.className=nginx and cannot verify the controller behind %q. Use ingress.className=nginx with ingress-nginx, install with cluster access so the chart can check the IngressClass controller, or enable gateway auth (gateway.auth.mode=static) and set auth.enabled=false." $className) -}}
