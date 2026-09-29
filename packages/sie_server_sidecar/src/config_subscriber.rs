@@ -144,6 +144,9 @@ impl ConfigApplyState {
         *guard = hash;
     }
 
+    /// Commit a hash and its unsupported models as one pair. Lock order is
+    /// hash, then list, matching the heartbeat encoder, so a heartbeat never
+    /// pairs one apply's hash with another apply's list.
     fn set_applied_view(&self, hash: String, unsupported_models: Vec<String>) {
         let mut unsupported: Vec<String> = unsupported_models
             .into_iter()
@@ -152,11 +155,15 @@ impl ConfigApplyState {
             .collect();
         unsupported.sort();
         unsupported.dedup();
+        let mut hash_guard = self
+            .bundle_config_hash
+            .write()
+            .expect("bundle config hash lock poisoned");
         *self
             .unsupported_models
             .write()
             .expect("unsupported models lock poisoned") = unsupported;
-        self.set_bundle_hash(hash);
+        *hash_guard = hash;
     }
 
     pub fn set_loaded_models<I>(&self, models: I)
@@ -1166,6 +1173,28 @@ mod tests {
         assert!(!state.accepts_bundle_config_hash("h0"));
         assert!(state.accepts_bundle_config_hash("h1"));
         assert!(!state.accepts_bundle_config_hash("missing"));
+    }
+
+    #[test]
+    fn applied_view_waits_for_a_heartbeat_that_holds_the_hash() {
+        let state = Arc::new(ConfigApplyState::new("h0".into()));
+        let hash = state.bundle_config_hash();
+        let unsupported = state.unsupported_models();
+        let heartbeat = hash.read().unwrap();
+        let writer_state = Arc::clone(&state);
+        let writer = std::thread::spawn(move || {
+            writer_state.mark_applied(1, "h1".into(), vec!["org/new".into()]);
+        });
+
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(
+            unsupported.read().unwrap().is_empty(),
+            "the list must not change while a heartbeat holds the hash it pairs with"
+        );
+        drop(heartbeat);
+        writer.join().unwrap();
+        assert_eq!(hash.read().unwrap().as_str(), "h1");
+        assert_eq!(unsupported.read().unwrap().as_slice(), ["org/new"]);
     }
 
     #[test]

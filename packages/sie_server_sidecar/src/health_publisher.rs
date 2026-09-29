@@ -180,6 +180,8 @@ fn encode_payload(
         Some(guard) => guard.as_slice(),
         None => &[],
     };
+    // Read under the hash guard taken above: the config subscriber writes the
+    // hash and this list under the same order, so the pair is consistent.
     let unsupported_models = config
         .unsupported_models
         .read()
