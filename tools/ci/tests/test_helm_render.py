@@ -290,6 +290,13 @@ def test_operator_admin_token_secret_is_used_unchanged(tmp_path: Path) -> None:
     assert admin_token_refs(docs) == dict.fromkeys(CONFIG_CLIENTS, {"name": "operator-admin", "key": "token"})
 
 
+@pytest.mark.parametrize("key", [None, "", " "])
+def test_empty_admin_token_key_fails_the_render(tmp_path: Path, key: str | None) -> None:
+    result = render_chart(tmp_path, {**L4_POOL, "config": {"auth": {"adminTokenSecretKey": key}}})
+    assert result.returncode != 0
+    assert "config.auth.adminTokenSecretKey is empty" in result.stderr
+
+
 @pytest.mark.parametrize("telemetry", [{}, {"deploymentEnv": "production"}, {"deploymentEnv": " Prod "}])
 def test_production_config_service_without_a_token_fails_the_render(tmp_path: Path, telemetry: dict) -> None:
     result = render_chart(tmp_path, {"config": {"auth": {"generateAdminToken": False}}, "telemetry": telemetry})

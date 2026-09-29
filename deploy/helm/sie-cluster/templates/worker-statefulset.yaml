@@ -549,7 +549,7 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: {{ . }}
-                  key: {{ $root.Values.config.auth.adminTokenSecretKey }}
+                  key: {{ include "sie-cluster.config.adminTokenSecretKey" $root }}
             {{- end }}
             {{- if $configReconcile.pollIntervalMs }}
             - name: SIE_WORKER_CONFIG_POLL_INTERVAL_MS

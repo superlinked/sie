@@ -953,8 +953,15 @@ catalog's contents.
 > those pods roll. sie-config then requires the token for every `/v1/configs`
 > request, including on installs with a non-production
 > `telemetry.deploymentEnv` that previously served the API without one. Update
-> admin tooling to send the token, or set `config.auth.generateAdminToken=false`
-> to keep the previous behavior in a non-production environment.
+> admin tooling to send the token. To keep an unauthenticated sie-config
+> instead, set `config.auth.generateAdminToken=false`; the chart renders that
+> only when `telemetry.deploymentEnv` is `staging`, `development`, or `ci`. An
+> install that uses another name (for example `dev`, `test`, `qa`, or
+> `preprod`) fails the render with that setting and must either keep the token
+> or switch to one of those names. Because the auth posture is keyed off the
+> telemetry value, switching the name also changes the anonymous-telemetry
+> environment tag and, unless `observability.otel.resource.deploymentEnvironment`
+> is set explicitly, the OTel `deployment.environment` label on dashboards.
 
 ### Who holds the token
 
@@ -975,9 +982,15 @@ sie-config accepts one admin token at a time, and every component reads the
 token at container start. To rotate it, update the Secret, restart sie-config
 first, and then restart the gateway and the worker StatefulSets. Until a
 gateway or worker sidecar restarts, sie-config answers its old token with
-`403`: a running gateway keeps serving its current catalog but misses config
-updates, a new gateway pod stays at `503`, and worker sidecars cannot
-reconcile missed updates.
+`403`: a running gateway keeps serving its current catalog and still receives
+live NATS config deltas, but its epoch poll and export catch-up fail; a new
+gateway pod stays at `503`; and worker sidecars cannot reconcile missed updates.
+
+Helm stores the rendered Secret, including the token, in every release
+revision. A `helm rollback` to a revision from before a rotation restores the
+old token, so rotate again after such a rollback. Anyone who can read Secrets
+in the release namespace can also read earlier tokens from the release
+history.
 
 ### GitOps and `helm template`
 

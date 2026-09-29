@@ -308,7 +308,7 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: {{ . }}
-                  key: {{ $.Values.config.auth.adminTokenSecretKey }}
+                  key: {{ include "sie-cluster.config.adminTokenSecretKey" $ }}
             {{- end }}
             {{- end }}
             {{- if $payloadStoreUrl }}

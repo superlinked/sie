@@ -310,6 +310,18 @@ production
 {{- end -}}
 {{- end }}
 
+{{/*
+Data key of the admin-token Secret (config.auth.adminTokenSecretKey). Fails the
+render when it is empty or null.
+*/}}
+{{- define "sie-cluster.config.adminTokenSecretKey" -}}
+{{- $key := default "" .Values.config.auth.adminTokenSecretKey | toString | trim -}}
+{{- if not $key -}}
+{{- fail "config.auth.adminTokenSecretKey is empty. Set it to the Secret key that holds the sie-config admin token (the chart default is SIE_ADMIN_TOKEN)." -}}
+{{- end -}}
+{{- $key -}}
+{{- end }}
+
 {{- define "sie-cluster.config.generatedAdminTokenSecretName" -}}
 {{- printf "%s-admin-token" (include "sie-cluster.config.serviceName" .) -}}
 {{- end }}
@@ -348,7 +360,7 @@ value, empty when the key is missing).
 */}}
 {{- define "sie-cluster.config.validateReusedAdminToken" -}}
 {{- if not .data -}}
-{{- fail (printf "Secret %s exists but has no %s key. Restore the key, or delete the Secret so the chart generates a new token, then restart sie-config, the gateway, and the workers." .name .key) -}}
+{{- fail (printf "Secret %s exists but has no %s key. If config.auth.adminTokenSecretKey was renamed, set it back to the key the Secret holds. If the Secret was created by hand, set config.auth.adminTokenSecretName to it so the chart uses it unchanged. Otherwise restore the key, or delete the Secret so the chart generates a new token, then restart sie-config, the gateway, and the workers." .name .key) -}}
 {{- else if lt (len (b64dec .data)) 32 -}}
 {{- fail (printf "Secret %s holds a %s value shorter than 32 characters. Replace it with a random value of at least 32 characters, or delete the Secret so the chart generates a new token, then restart sie-config, the gateway, and the workers." .name .key) -}}
 {{- end -}}
