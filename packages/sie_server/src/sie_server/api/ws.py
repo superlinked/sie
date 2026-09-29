@@ -328,7 +328,7 @@ def _profile_config_for_hash(config: ServerModelConfig, profile_name: str) -> di
 
 
 _ProfileHashes = dict[str, dict[str, object | None]]
-_HashEntry = tuple[str | None, _ProfileHashes]
+_HashEntry = tuple[object, _ProfileHashes]
 
 
 class BundleConfigView(NamedTuple):
@@ -394,8 +394,7 @@ def _received_hash_entry(
                 profiles[pname] = resolved
     except (TypeError, ValueError, AttributeError):
         return None
-    revision = raw.get("hf_revision")
-    entry = (revision if isinstance(revision, str) else None, profiles) if profiles else None
+    entry = (raw.get("hf_revision"), profiles) if profiles else None
     return entry, routes
 
 
