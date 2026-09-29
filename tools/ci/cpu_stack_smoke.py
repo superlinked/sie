@@ -91,17 +91,30 @@ def require_read_scoped_catalog(config_url: str, read_token: str) -> set[str]:
     return catalog
 
 
-def require_sidecar_export_reconcile(container: str, timeout: float = 120) -> None:
+RECONCILE_RESULTS = (
+    "export reconcile complete",
+    "export reconcile partial",
+    "export reconcile failed",
+    "epoch poll failed",
+)
+
+
+def latest_reconcile_result(logs: str) -> str | None:
+    positions = {result: logs.rfind(result) for result in RECONCILE_RESULTS}
+    latest = max(positions, key=positions.__getitem__)
+    return latest if positions[latest] >= 0 else None
+
+
+def require_sidecar_export_reconcile(container: str, timeout: float = 150) -> None:
     deadline = time.monotonic() + timeout
+    latest = None
     while time.monotonic() < deadline:
-        logs = docker("logs", container, check=False)
-        if "worker-config: startup export reconcile failed" in logs:
-            raise RuntimeError("Worker sidecar could not fetch the sie-config export with the read token")
-        if "worker-config: startup export reconcile" in logs:
-            print("Worker sidecar fetched the sie-config export with the read token.")
+        latest = latest_reconcile_result(docker("logs", container, check=False))
+        if latest == "export reconcile complete":
+            print("Worker sidecar completed an export reconcile with the read token.")
             return
         time.sleep(2)
-    raise RuntimeError("Worker sidecar did not report its startup export reconcile")
+    raise RuntimeError(f"Worker sidecar did not complete an export reconcile with the read token; latest: {latest}")
 
 
 def require_gateway_catalog(gateway_url: str, catalog: set[str]) -> None:

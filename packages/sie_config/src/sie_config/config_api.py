@@ -395,12 +395,13 @@ _ENV_SIGNAL_VARS = ("SIE_DEPLOYMENT_ENV", "SIE_ENV")
 _READ_TOKEN_VARS = ("SIE_CONFIG_READ_TOKEN", "SIE_AUTH_TOKEN")
 
 
-def _refuse_open_in_prod() -> None:
+def _refuse_open_in_prod(*, write: bool) -> None:
     """Raise 403 when no auth token is configured in a production environment."""
     if any(os.environ.get(var, "").strip().lower() in _PROD_ENVS for var in _ENV_SIGNAL_VARS):
+        required = "SIE_ADMIN_TOKEN" if write else "SIE_CONFIG_READ_TOKEN (or SIE_ADMIN_TOKEN)"
         raise HTTPException(
             status_code=403,
-            detail="config service requires SIE_ADMIN_TOKEN in production (refusing to serve unauthenticated)",
+            detail=f"config service requires {required} in production (refusing to serve unauthenticated)",
         )
 
 
@@ -433,7 +434,7 @@ def _check_read_auth(request: Request) -> None:
     if admin_token is not None:
         accepted.append(admin_token)
     if not accepted:
-        _refuse_open_in_prod()
+        _refuse_open_in_prod(write=False)
         return  # No auth configured (dev / self-host localhost posture)
 
     token = _extract_bearer_token(request.headers.get("Authorization", ""))
@@ -455,7 +456,7 @@ def _check_write_auth(request: Request) -> None:
                 status_code=403,
                 detail="Write operations require SIE_ADMIN_TOKEN (read tokens are not sufficient).",
             )
-        _refuse_open_in_prod()
+        _refuse_open_in_prod(write=True)
         return  # No auth configured at all (dev / self-host localhost posture)
 
     token = _extract_bearer_token(request.headers.get("Authorization", ""))

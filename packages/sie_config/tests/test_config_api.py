@@ -618,8 +618,12 @@ class TestConfigAPIEdgeCases:
         app = _create_test_app(self._bundles, self._models)
         client = TestClient(app)
         yaml_body = "sie_id: test/model\nprofiles:\n  default:\n    adapter_path: sie_server.adapters.bert_flash:B\n    max_batch_tokens: 1\n"
-        assert client.get("/v1/configs/models").status_code == 403
-        assert client.post("/v1/configs/models", content=yaml_body).status_code == 403
+        read = client.get("/v1/configs/models")
+        assert read.status_code == 403
+        assert "requires SIE_CONFIG_READ_TOKEN (or SIE_ADMIN_TOKEN) in production" in read.text
+        write = client.post("/v1/configs/models", content=yaml_body)
+        assert write.status_code == 403
+        assert "requires SIE_ADMIN_TOKEN in production" in write.text
 
     def test_non_ascii_token_is_rejected_not_an_error(self, monkeypatch) -> None:
         monkeypatch.setenv("SIE_ADMIN_TOKEN", "admin-secret")
