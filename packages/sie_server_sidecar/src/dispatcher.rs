@@ -717,11 +717,7 @@ impl Dispatcher {
         Fut: std::future::Future<Output = Result<(), String>>,
     {
         let model_id = wi.model_id.clone();
-        if self
-            .config_apply_state
-            .as_ref()
-            .is_some_and(|state| state.model_is_unsupported(&model_id))
-        {
+        if self.model_is_unsupported(&model_id) {
             return Err(GenerateDispatchError::new(
                 "BUNDLE_CONFIG_MISMATCH",
                 "worker configuration cannot serve this model",
@@ -899,6 +895,12 @@ impl Dispatcher {
                     format!("generation cancel IPC failed: {error}"),
                 )
             })
+    }
+
+    fn model_is_unsupported(&self, model_id: &str) -> bool {
+        self.config_apply_state
+            .as_ref()
+            .is_some_and(|state| state.model_is_unsupported(model_id))
     }
 
     fn current_bundle_config_hash(&self) -> Option<String> {
@@ -1271,11 +1273,7 @@ impl Dispatcher {
                         );
                         wi.model_id = subject_model;
                     }
-                    if self
-                        .config_apply_state
-                        .as_ref()
-                        .is_some_and(|state| state.model_is_unsupported(&wi.model_id))
-                    {
+                    if self.model_is_unsupported(&wi.model_id) {
                         debug!(
                             work_item_id = %wi.work_item_id,
                             request_id = %wi.request_id,
@@ -1432,6 +1430,21 @@ impl Dispatcher {
             "generate delivery received"
         );
 
+        if self.model_is_unsupported(&model_id) {
+            info!(
+                work_item_id = %wi.work_item_id,
+                model = %model_id,
+                "worker cannot serve this model under its current config — NAKing before readiness"
+            );
+            nak_msg_with_reason(
+                &msg,
+                base_delay_ms,
+                &self.runtime_state.telemetry,
+                "model_unsupported",
+            )
+            .await;
+            return;
+        }
         let readiness_resp = match self.backend.ensure_model_ready(&model_id).await {
             Ok(r) => r,
             Err(e) => {
@@ -2059,6 +2072,24 @@ impl Dispatcher {
         items: &[(WorkItem, Delivery)],
         ready_deadline: Option<tokio::time::Instant>,
     ) -> Option<Result<crate::ipc_types::EnsureModelReadyResponse, BackendError>> {
+        // A config commit between intake and readiness can list this model.
+        if self.model_is_unsupported(model_id) {
+            info!(
+                model = %model_id,
+                group_size = items.len(),
+                "worker cannot serve this model under its current config — NAKing group before readiness"
+            );
+            for (_, delivery) in items {
+                nak_one_with_reason(
+                    delivery,
+                    base_nak_delay_ms(),
+                    &self.runtime_state.telemetry,
+                    "model_unsupported",
+                )
+                .await;
+            }
+            return None;
+        }
         let readiness = self.backend.ensure_model_ready(model_id);
         let Some(deadline) = ready_deadline else {
             return Some(readiness.await);
@@ -4704,6 +4735,15 @@ async fn nak_msg(
     delay_ms: u64,
     telemetry: &crate::observability::metrics::SidecarTelemetry,
 ) {
+    nak_msg_with_reason(msg, delay_ms, telemetry, "retry").await;
+}
+
+async fn nak_msg_with_reason(
+    msg: &Message,
+    delay_ms: u64,
+    telemetry: &crate::observability::metrics::SidecarTelemetry,
+    reason: &str,
+) {
     let delay = std::time::Duration::from_millis(delay_ms);
     let result = msg
         .ack_with(async_nats::jetstream::AckKind::Nak(Some(delay)))
@@ -4711,7 +4751,7 @@ async fn nak_msg(
     telemetry.nats_operation(
         "nak",
         if result.is_ok() { "success" } else { "error" },
-        "retry",
+        reason,
         1,
     );
     match result {
@@ -6177,6 +6217,61 @@ mod tests {
             vec![(0, base_nak_delay_ms()), (1, base_nak_delay_ms())]
         );
         assert!(backend.encoded_models().is_empty());
+    }
+
+    fn dispatcher_listing_unsupported(
+        backend: SharedBackend,
+        unsupported: &[&str],
+    ) -> (Arc<Dispatcher>, Arc<ConfigApplyState>) {
+        let state = Arc::new(ConfigApplyState::new(String::new()));
+        assert!(state.mark_export_reconciled(
+            1,
+            Some("hash-1".into()),
+            unsupported.iter().map(|m| (*m).to_string()).collect(),
+            false
+        ));
+        let runtime_state = Arc::new(RuntimeState::new());
+        let dispatcher = Arc::new(Dispatcher::new(
+            backend,
+            adapter_pool_with_runtime_state(Arc::clone(&runtime_state)),
+            Arc::new(crate::payload_store::LocalPayloadStore::new(
+                None::<PathBuf>,
+            )),
+            None,
+            "worker-test".into(),
+            runtime_state,
+            Arc::new(Mutex::new(LatencyTracker::new(200, 10))),
+            TokenizerRegistry::empty(),
+            None,
+            None,
+            Some(Arc::clone(&state)),
+            None,
+            BatchCancelState::default(),
+            RequestCancelState::new(Duration::from_secs(60)),
+        ));
+        (dispatcher, state)
+    }
+
+    #[tokio::test]
+    async fn readiness_rechecks_a_model_listed_after_intake() {
+        let backend = LoadingModelBackend::new("org/new-family");
+        let (dispatcher, state) = dispatcher_listing_unsupported(backend.clone(), &[]);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let items = local_group("new-req", "org/new-family", 0..2, &tx);
+
+        assert!(state.mark_export_reconciled(
+            2,
+            Some("hash-2".into()),
+            vec!["org/new-family".into()],
+            false
+        ));
+        let readiness = dispatcher
+            .ensure_model_ready_by("org/new-family", &items, None)
+            .await;
+
+        assert!(readiness.is_none());
+        assert_eq!(backend.probes.load(Ordering::SeqCst), 0);
+        assert_eq!(retried_slots(&mut rx), [0, 1]);
     }
 
     #[tokio::test]
