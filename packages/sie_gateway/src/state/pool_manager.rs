@@ -389,26 +389,41 @@ impl PoolManager {
         }
     }
 
-    /// Assigned workers an API pool keeps warm through its active lease: per
-    /// machine profile, at most the pool's requirement for that profile, and
-    /// at most `max_minimum_worker_count` in total. Assignment order is
-    /// deterministic, so every replica exports the same workers.
-    fn leased_workers(&self, pool: &Pool) -> Vec<AssignedWorker> {
-        let mut total_left = self.limits.max_minimum_worker_count;
-        let mut remaining: HashMap<String, u32> = HashMap::new();
-        for (profile, required) in &pool.spec.gpus {
-            let allowed = (*required).min(self.limits.max_minimum_worker_count);
-            let entry = remaining.entry(profile.to_ascii_lowercase()).or_insert(0);
-            *entry = (*entry).max(allowed);
+    /// Per-profile requirements an API pool is held to: its own requirements,
+    /// allotted in profile-name order until `max_minimum_worker_count` runs
+    /// out. Equal to the requirements for every pool the API accepts; smaller
+    /// only for a pool stored before the budget existed.
+    fn capped_requirements(&self, pool: &Pool) -> HashMap<String, u32> {
+        let mut requirements: Vec<(String, u32)> = pool
+            .spec
+            .gpus
+            .iter()
+            .map(|(profile, required)| (profile.to_ascii_lowercase(), *required))
+            .collect();
+        requirements.sort();
+        let mut left = self.limits.max_minimum_worker_count;
+        let mut capped = HashMap::new();
+        for (profile, required) in requirements {
+            let allotted = required.min(left);
+            left -= allotted;
+            let entry = capped.entry(profile).or_insert(0);
+            *entry = (*entry).max(allotted);
         }
+        capped
+    }
+
+    /// Assigned workers an API pool keeps warm through its active lease: per
+    /// machine profile, at most its capped requirement, so at most
+    /// `max_minimum_worker_count` in total.
+    fn leased_workers(&self, pool: &Pool) -> Vec<AssignedWorker> {
+        let mut remaining = self.capped_requirements(pool);
         pool.status
             .assigned_workers
             .iter()
             .filter(
                 |worker| match remaining.get_mut(&worker.gpu.to_ascii_lowercase()) {
-                    Some(left) if *left > 0 && total_left > 0 => {
+                    Some(left) if *left > 0 => {
                         *left -= 1;
-                        total_left -= 1;
                         true
                     }
                     _ => false,
@@ -416,6 +431,28 @@ impl PoolManager {
             )
             .cloned()
             .collect()
+    }
+
+    /// Fit a stored API pool's warm floor, which applies to each of its lanes,
+    /// into `max_minimum_worker_count`: spread the budget evenly over the
+    /// lanes, and when there are more lanes than budget, keep one warm worker
+    /// on each of the first lanes in name order.
+    fn fit_warm_floor_to_budget(&self, snapshot: &mut CapacityPoolSnapshot) {
+        let budget = self.limits.max_minimum_worker_count;
+        let floor = snapshot.minimum_worker_count.min(budget);
+        let lanes = snapshot.machine_profiles.len() as u64;
+        snapshot.minimum_worker_count = floor;
+        if floor == 0 || u64::from(floor) * lanes <= u64::from(budget) {
+            return;
+        }
+        let per_lane = u32::try_from(u64::from(budget) / lanes).unwrap_or(0);
+        if per_lane > 0 {
+            snapshot.minimum_worker_count = per_lane;
+        } else {
+            snapshot.machine_profiles.sort();
+            snapshot.machine_profiles.truncate(budget as usize);
+            snapshot.minimum_worker_count = 1;
+        }
     }
 
     fn check_pool_spec_limits(
@@ -954,12 +991,7 @@ impl PoolManager {
             .map(|(key, pool)| {
                 let mut snapshot = CapacityPoolSnapshot::from_pool(pool);
                 if is_api_pool(key, &static_pool_names) {
-                    let lanes = u32::try_from(snapshot.machine_profiles.len())
-                        .unwrap_or(u32::MAX)
-                        .max(1);
-                    snapshot.minimum_worker_count = snapshot
-                        .minimum_worker_count
-                        .min(self.limits.max_minimum_worker_count / lanes);
+                    self.fit_warm_floor_to_budget(&mut snapshot);
                     snapshot.assigned_workers = self.leased_workers(pool);
                 }
                 snapshot
@@ -1039,6 +1071,9 @@ impl PoolManager {
             .get_mut(&pool_key)
             .expect("pool key resolved from the same map");
         let queue_pool = normalize_queue_pool(&pool.spec.queue_pool);
+        let capped_requirements = (!is_static_pool
+            && !pool_key.eq_ignore_ascii_case(DEFAULT_POOL_NAME))
+        .then(|| self.capped_requirements(pool));
 
         let filtered: Vec<&WorkerAssignment> = available_workers
             .iter()
@@ -1079,7 +1114,10 @@ impl PoolManager {
             let gpu_lower = gpu_type.to_lowercase();
             let available = workers_by_gpu.get_mut(&gpu_lower);
             let available_count = available.as_ref().map(|workers| workers.len()).unwrap_or(0);
-            let required = *required_count as usize;
+            let required = capped_requirements
+                .as_ref()
+                .and_then(|capped| capped.get(&gpu_lower).copied())
+                .unwrap_or(*required_count) as usize;
 
             if available_count < required {
                 all_met = false;
@@ -3019,8 +3057,50 @@ mod tests {
             assert_eq!(snapshots.len(), 1);
             (snapshots.into_iter().next().unwrap(),)
         };
-        assert_eq!(snapshot.minimum_worker_count, 0);
+        assert_eq!(snapshot.minimum_worker_count, 1);
+        assert_eq!(
+            snapshot.machine_profiles,
+            vec!["gpu-0", "gpu-1", "gpu-2", "gpu-3"]
+        );
         assert_eq!(snapshot.assigned_workers.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn test_stored_pool_floor_is_spread_over_lanes_within_the_budget() {
+        let pm = PoolManager::new(Vec::new());
+        let mut pool = remote_pool("legacy", None, 4);
+        pool.spec.gpus = (0..3).map(|index| (format!("gpu-{index}"), 0)).collect();
+        pm.apply_remote_pool(pool).await;
+
+        let snapshot = pm.capacity_pools().await.into_iter().next().unwrap();
+
+        assert_eq!(snapshot.minimum_worker_count, 1);
+        assert_eq!(snapshot.machine_profiles.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_stored_pool_over_the_requirement_budget_stays_active_with_a_capped_lease() {
+        let pm = PoolManager::new(vec!["l4-spot".to_string()]);
+        let mut pool = remote_pool("legacy", None, 0);
+        pool.spec.gpus = HashMap::from([("l4-spot".to_string(), 6)]);
+        pm.apply_remote_pool(pool).await;
+        let four: Vec<_> = (0..4)
+            .map(|index| {
+                worker(
+                    &format!("worker-{index}"),
+                    &format!("http://worker-{index}:8080"),
+                    "l4-spot",
+                    "default",
+                )
+            })
+            .collect();
+
+        assert!(pm.assign_workers("legacy", &four).await);
+        assert_eq!(
+            pm.get_pool("legacy").await.unwrap().status.state,
+            PoolState::Active
+        );
+        assert_eq!(leased_counts(&pm).await.get("legacy"), Some(&4));
     }
 
     #[tokio::test]
