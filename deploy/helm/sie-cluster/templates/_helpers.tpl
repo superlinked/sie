@@ -341,11 +341,15 @@ chart-generated Secret, otherwise empty (no token).
 {{- end }}
 
 {{/*
-Fail when the token reused from an existing admin-token Secret is shorter than
-32 characters. Args (dict): name (Secret), key (data key), data (base64 value).
+Fail when an existing admin-token Secret has no value under the configured key,
+or a value shorter than 32 characters, instead of replacing the token that
+running pods hold. Args (dict): name (Secret), key (data key), data (base64
+value, empty when the key is missing).
 */}}
 {{- define "sie-cluster.config.validateReusedAdminToken" -}}
-{{- if lt (len (b64dec .data)) 32 -}}
+{{- if not .data -}}
+{{- fail (printf "Secret %s exists but has no %s key. Restore the key, or delete the Secret so the chart generates a new token, then restart sie-config, the gateway, and the workers." .name .key) -}}
+{{- else if lt (len (b64dec .data)) 32 -}}
 {{- fail (printf "Secret %s holds a %s value shorter than 32 characters. Replace it with a random value of at least 32 characters, or delete the Secret so the chart generates a new token, then restart sie-config, the gateway, and the workers." .name .key) -}}
 {{- end -}}
 {{- end }}

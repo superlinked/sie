@@ -309,8 +309,17 @@ def test_non_production_config_service_may_opt_out_of_the_token(tmp_path: Path) 
     assert admin_token_refs(docs) == {}
 
 
-@pytest.mark.parametrize(("token", "accepted"), [("a" * 31, False), ("a" * 32, True)])
-def test_reused_admin_token_must_have_at_least_32_characters(tmp_path: Path, token: str, accepted: bool) -> None:
+@pytest.mark.parametrize(
+    ("token", "error"),
+    [
+        ("", "Secret admin exists but has no SIE_ADMIN_TOKEN key"),
+        ("a" * 31, "Secret admin holds a SIE_ADMIN_TOKEN value shorter than 32 characters"),
+        ("a" * 32, None),
+    ],
+)
+def test_reused_admin_token_must_exist_and_have_at_least_32_characters(
+    tmp_path: Path, token: str, error: str | None
+) -> None:
     chart = tmp_path / "helper-check"
     (chart / "templates").mkdir(parents=True)
     (chart / "Chart.yaml").write_text("apiVersion: v2\nname: helper-check\nversion: 0.1.0\n", encoding="utf-8")
@@ -328,6 +337,8 @@ def test_reused_admin_token_must_have_at_least_32_characters(tmp_path: Path, tok
         text=True,
         check=False,
     )
-    assert (result.returncode == 0) is accepted, result.stderr
-    if not accepted:
-        assert "Secret admin holds a SIE_ADMIN_TOKEN value shorter than 32 characters" in result.stderr
+    if error is None:
+        assert result.returncode == 0, result.stderr
+    else:
+        assert result.returncode != 0
+        assert error in result.stderr

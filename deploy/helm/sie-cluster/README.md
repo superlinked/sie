@@ -908,7 +908,8 @@ same Secret.
   `config.auth.adminTokenSecretKey` (`SIE_ADMIN_TOKEN`). An absent
   `generateAdminToken` key, as after `helm upgrade --reuse-values` from an
   older release, counts as `true`. Upgrades read the existing Secret and keep
-  its token; the render fails if that token is shorter than 32 characters. The
+  its token; the render fails if the Secret has no value under that key or the
+  value is shorter than 32 characters. The
   Secret carries `helm.sh/resource-policy: keep`, so `helm uninstall` leaves it
   in place; delete it manually when it is no longer needed.
 - **Operator-managed.** Set `config.auth.adminTokenSecretName` (and
@@ -940,8 +941,9 @@ catalog from sie-config, so a missing or mismatched token keeps new gateway
 pods out of the Service and fails `helm install --wait` instead of serving a
 partial catalog. Once a gateway pod has loaded its catalog, it stays ready
 through later sie-config outages. The gate proves that the gateway reached
-sie-config and authenticated; it accepts whatever complete catalog sie-config
-serves and does not validate the catalog's contents.
+sie-config and, when sie-config requires a token, authenticated. It accepts
+whatever complete catalog sie-config serves and does not validate the
+catalog's contents.
 
 > **Upgrade note:** upgrading an install without
 > `config.auth.adminTokenSecretName` creates the Secret and adds
