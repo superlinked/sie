@@ -201,8 +201,17 @@ may publish results into the gateway's `_INBOX` subjects, heartbeats on
 above: stream info, create, and update (the sidecar creates its
 direct-dispatch stream and reconciles the pool stream), and consumer list,
 info, create, delete, and pull. It cannot publish work, config deltas, or
-cancels, read the gateway's inboxes, or delete or purge streams. The full
-matrix is in the chart README ("NATS authentication").
+cancels, subscribe to the gateway's inboxes, or delete or purge streams. Its
+stream and consumer management still reaches other pools' streams, durables,
+and the gateway's inboxes; the full matrix and what the worker user can still
+do are in the chart README ("NATS authentication"). The worker pod mounts no
+Kubernetes API token.
+
+Because stream management lets the server deliver stored messages on a
+worker's behalf past its publish permissions, the sidecar drops cancel
+signals that carry a reply subject or a `Nats-` header, and drops (ACKs) work
+that carries a `Nats-` header other than the gateway's `Nats-Msg-Id`. A
+subject transform on the pool stream still adds work without such a header.
 
 On the generation path the sidecar publishes a backend `publish` event only
 when its reply subject equals the work item's `reply_subject`. The backend

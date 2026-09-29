@@ -12,8 +12,14 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use async_nats::jetstream;
+use async_nats::jetstream::message::PublishMessage;
+use async_nats::jetstream::stream::{
+    Config as StreamConfig, Republish, Source, StorageType, SubjectTransform,
+};
 use futures_util::StreamExt;
 use sie_server_sidecar::config::{NatsCredentials, WorkerConfig};
+use sie_server_sidecar::config_subscriber::server_originated;
+use sie_server_sidecar::dispatcher::unexpected_work_header;
 use sie_server_sidecar::nats_consumer;
 
 struct Passwords {
@@ -273,7 +279,7 @@ async fn worker_user_is_refused_outside_its_subjects() {
     );
     assert!(
         nothing_arrives(&mut gateway_results).await,
-        "workers cannot read gateway inboxes"
+        "workers cannot subscribe to gateway inboxes"
     );
     let stream = js
         .get_stream("WORK_POOL_authpool")
@@ -292,6 +298,153 @@ async fn worker_user_is_refused_outside_its_subjects() {
         .purge()
         .await
         .is_err());
+}
+
+async fn next_message(subscriber: &mut async_nats::Subscriber) -> async_nats::Message {
+    tokio::time::timeout(Duration::from_secs(5), subscriber.next())
+        .await
+        .expect("message delivered")
+        .expect("subscription open")
+}
+
+#[tokio::test]
+async fn deliveries_the_server_makes_for_a_worker_are_recognised() {
+    let Some(nats) = start_nats().await else {
+        return;
+    };
+    let config = worker_config(&nats);
+    let (worker, js) = nats_consumer::connect(&nats.url, config.nats_credentials.as_ref())
+        .await
+        .expect("connect as sie-worker");
+    let consumer = nats_consumer::ensure_stream_and_consumer(&js, &config)
+        .await
+        .expect("pool stream");
+    let gateway = connect_as(&nats.url, "sie-gateway", &nats.passwords.gateway).await;
+    let work_subject = "sie.work.authpool.l4.default.model";
+
+    jetstream::new(gateway.clone())
+        .send_publish(
+            work_subject,
+            PublishMessage::build()
+                .message_id("req-1")
+                .payload("gateway".into()),
+        )
+        .await
+        .expect("publish work")
+        .await
+        .expect("work stored");
+
+    js.create_stream(StreamConfig {
+        name: "COPY_REPUBLISH".into(),
+        subjects: vec!["sie.health.copy".into()],
+        storage: StorageType::Memory,
+        republish: Some(Republish {
+            source: "sie.health.copy".into(),
+            destination: work_subject.into(),
+            headers_only: false,
+        }),
+        ..Default::default()
+    })
+    .await
+    .expect("the worker user may create streams");
+    worker
+        .publish("sie.health.copy", "republished".into())
+        .await
+        .expect("publish");
+
+    js.create_stream(StreamConfig {
+        name: "COPY_SOURCE".into(),
+        subjects: vec!["sie.health.source".into()],
+        storage: StorageType::Memory,
+        ..Default::default()
+    })
+    .await
+    .expect("the worker user may create streams");
+    let mut pool_config = js
+        .get_stream("WORK_POOL_authpool")
+        .await
+        .expect("pool stream")
+        .cached_info()
+        .config
+        .clone();
+    pool_config.sources = Some(vec![Source {
+        name: "COPY_SOURCE".into(),
+        subject_transforms: vec![SubjectTransform {
+            source: "sie.health.source".into(),
+            destination: work_subject.into(),
+        }],
+        ..Default::default()
+    }]);
+    js.update_stream(pool_config)
+        .await
+        .expect("the worker user may update streams");
+    worker
+        .publish("sie.health.source", "sourced".into())
+        .await
+        .expect("publish");
+    worker.flush().await.expect("worker flush");
+
+    let mut messages = consumer.messages().await.expect("pull");
+    let mut rejected = std::collections::BTreeMap::new();
+    for _ in 0..3 {
+        let message = tokio::time::timeout(Duration::from_secs(5), messages.next())
+            .await
+            .expect("work delivered")
+            .expect("pull stream open")
+            .expect("work message");
+        rejected.insert(
+            String::from_utf8(message.payload.to_vec()).expect("utf-8"),
+            unexpected_work_header(message.headers.as_ref()),
+        );
+        message.ack().await.expect("ack");
+    }
+    assert_eq!(
+        rejected["gateway"], None,
+        "gateway work carries Nats-Msg-Id only"
+    );
+    assert!(rejected["republished"]
+        .as_deref()
+        .is_some_and(|header| header.starts_with("Nats-")));
+    assert_eq!(rejected["sourced"].as_deref(), Some("Nats-Stream-Source"));
+
+    for (index, subject) in [
+        "work_cancel.gateway-auth-test.req-9",
+        "cancel.gateway-auth-test.req-9",
+        "batch_cancel.gateway-auth-test.auth-worker-0.req-9",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut cancels = worker.subscribe(subject).await.expect("subscribe");
+        worker.flush().await.expect("worker flush");
+        let source = format!("sie.health.cancel{index}");
+        js.create_stream(StreamConfig {
+            name: format!("COPY_CANCEL_{index}"),
+            subjects: vec![source.clone()],
+            storage: StorageType::Memory,
+            republish: Some(Republish {
+                source: source.clone(),
+                destination: subject.into(),
+                headers_only: false,
+            }),
+            ..Default::default()
+        })
+        .await
+        .expect("the worker user may create streams");
+        worker.publish(source, "".into()).await.expect("publish");
+        worker.flush().await.expect("worker flush");
+        assert!(
+            server_originated(&next_message(&mut cancels).await).is_some(),
+            "{subject} republished for a worker"
+        );
+        gateway.publish(subject, "".into()).await.expect("publish");
+        gateway.flush().await.expect("gateway flush");
+        assert_eq!(
+            server_originated(&next_message(&mut cancels).await),
+            None,
+            "{subject} from the gateway"
+        );
+    }
 }
 
 #[test]

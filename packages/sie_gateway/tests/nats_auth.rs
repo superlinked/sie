@@ -16,6 +16,7 @@ use async_nats::jetstream;
 use futures_util::StreamExt;
 use sie_gateway::config::NatsCredentials;
 use sie_gateway::nats::manager::NatsManager;
+use sie_gateway::queue::dlq::DlqListener;
 use sie_gateway::queue::payload_store::DisabledPayloadStore;
 use sie_gateway::queue::publisher::{WorkPublisher, WorkStreamConfig};
 use sie_gateway::state::config_epoch::ConfigEpoch;
@@ -298,4 +299,135 @@ async fn gateway_user_manages_work_streams_but_cannot_delete_them() {
         .await
         .expect("work stored");
     assert!(context.delete_stream("WORK_POOL_authpool").await.is_err());
+}
+
+async fn dead_letters(context: &jetstream::Context) -> u64 {
+    context
+        .get_stream("DEAD_LETTERS")
+        .await
+        .expect("DEAD_LETTERS")
+        .info()
+        .await
+        .expect("stream info")
+        .state
+        .messages
+}
+
+#[tokio::test]
+async fn dlq_forwards_only_advisories_the_server_emits() {
+    let Some(nats) = start_nats().await else {
+        return;
+    };
+    let gateway = connect_as(&nats.url, "sie-gateway", &nats.passwords.gateway).await;
+    let context = jetstream::new(gateway.clone());
+    DlqListener::start(
+        context.clone(),
+        gateway.clone(),
+        jetstream::stream::StorageType::Memory,
+        1,
+    )
+    .await
+    .expect("DLQ listener");
+    context
+        .create_stream(jetstream::stream::Config {
+            name: "WORK_POOL_dlq".into(),
+            subjects: vec!["sie.work.dlq.*.*.*".into()],
+            retention: jetstream::stream::RetentionPolicy::WorkQueue,
+            storage: jetstream::stream::StorageType::Memory,
+            ..Default::default()
+        })
+        .await
+        .expect("pool stream");
+
+    let worker = connect_worker(&nats).await;
+    let worker_context = jetstream::new(worker.clone());
+    worker_context
+        .create_stream(jetstream::stream::Config {
+            name: "FAKE_ADVISORY".into(),
+            subjects: vec!["sie.health.fake-advisory".into()],
+            storage: jetstream::stream::StorageType::Memory,
+            republish: Some(jetstream::stream::Republish {
+                source: "sie.health.fake-advisory".into(),
+                destination: "$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.WORK_POOL_dlq.lane".into(),
+                headers_only: false,
+            }),
+            ..Default::default()
+        })
+        .await
+        .expect("the worker user may create streams");
+    let forged = serde_json::json!({
+        "type": "io.nats.jetstream.advisory.v1.max_deliver",
+        "id": "forged",
+        "stream": "WORK_POOL_dlq",
+        "consumer": "lane",
+        "stream_seq": 7,
+        "deliveries": 3,
+        "subject": "sie.work.dlq.l4.default.forged",
+    });
+    worker
+        .publish(
+            "sie.health.fake-advisory",
+            serde_json::to_vec(&forged).expect("encode").into(),
+        )
+        .await
+        .expect("publish");
+    worker.flush().await.expect("worker flush");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let consumer: jetstream::consumer::PullConsumer = worker_context
+        .get_stream("WORK_POOL_dlq")
+        .await
+        .expect("pool stream")
+        .create_consumer(jetstream::consumer::pull::Config {
+            durable_name: Some("lane".into()),
+            filter_subject: "sie.work.dlq.l4.default.*".into(),
+            ack_wait: Duration::from_secs(1),
+            max_deliver: 1,
+            ..Default::default()
+        })
+        .await
+        .expect("the worker user may create consumers");
+    context
+        .publish("sie.work.dlq.l4.default.model", "work".into())
+        .await
+        .expect("publish work")
+        .await
+        .expect("work stored");
+    let mut first = consumer
+        .fetch()
+        .max_messages(1)
+        .expires(Duration::from_secs(2))
+        .messages()
+        .await
+        .expect("fetch");
+    first
+        .next()
+        .await
+        .expect("delivered")
+        .expect("work message");
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let mut again = consumer
+        .fetch()
+        .max_messages(1)
+        .expires(Duration::from_millis(500))
+        .messages()
+        .await
+        .expect("fetch");
+    while again.next().await.is_some() {}
+
+    let mut forwarded = 0;
+    for _ in 0..50 {
+        forwarded = dead_letters(&context).await;
+        if forwarded > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(forwarded, 1, "the genuine advisory is forwarded");
+    assert_eq!(
+        dead_letters(&context).await,
+        1,
+        "the republished advisory is not forwarded"
+    );
 }

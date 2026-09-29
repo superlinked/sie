@@ -421,14 +421,15 @@ fn notification_is_stale(epoch: u64, current_epoch: u64) -> bool {
 
 /// Why `msg` did not come from a plain client publish, or `None` when it did.
 ///
-/// sie-config publishes config notifications with neither a reply subject nor
-/// headers. A NATS user that may manage JetStream streams or consumers can make
-/// the server itself deliver stored bytes to any subject, past that user's
-/// publish permissions: stream republish and direct-get replies carry
+/// sie-config publishes config notifications, and the gateway publishes
+/// cancel signals, with neither a reply subject nor `Nats-` headers. A NATS
+/// user that may manage JetStream streams or consumers can make the server
+/// itself deliver stored bytes to any subject, past that user's publish
+/// permissions: stream republish and direct-get replies carry
 /// `Nats-Stream`/`Nats-Sequence` headers, and consumer deliveries carry a
-/// `$JS.ACK` reply subject. Dropping those keeps config writes limited to the
-/// NATS users allowed to publish on the subject.
-pub(crate) fn server_originated(msg: &async_nats::Message) -> Option<&'static str> {
+/// `$JS.ACK` reply subject. Dropping those keeps these subjects limited to the
+/// NATS users allowed to publish on them.
+pub fn server_originated(msg: &async_nats::Message) -> Option<&'static str> {
     if msg.reply.is_some() {
         return Some("reply subject set");
     }

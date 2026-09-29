@@ -363,6 +363,22 @@ fn caller_item_id_from_value(value: &MsgValue) -> Option<String> {
 /// True if `reply_subject` is acceptable for use on a `WorkItem`.
 /// Empty is allowed (fire-and-forget). Non-empty subjects must start
 /// with `_INBOX.` so malicious producers can't redirect results.
+/// The first `Nats-` header on a work delivery other than `Nats-Msg-Id`.
+///
+/// The gateway publishes work with at most `Nats-Msg-Id`. The NATS server adds
+/// other `Nats-` headers when it copies stored messages into a work stream on
+/// a user's behalf, past that user's publish permissions: a stream republish
+/// adds `Nats-Stream`, and a stream source adds `Nats-Stream-Source`.
+pub fn unexpected_work_header(headers: Option<&async_nats::HeaderMap>) -> Option<String> {
+    headers?.iter().find_map(|(name, _)| {
+        let name: &str = name.as_ref();
+        let nats_header = name
+            .get(..5)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("nats-"));
+        (nats_header && !name.eq_ignore_ascii_case("Nats-Msg-Id")).then(|| name.to_string())
+    })
+}
+
 pub(crate) fn reply_subject_is_safe(reply_subject: &str) -> bool {
     reply_subject.is_empty() || reply_subject.starts_with(INBOX_PREFIX)
 }
@@ -1208,6 +1224,22 @@ impl Dispatcher {
             self.runtime_state
                 .telemetry
                 .nats_received(msg.info().ok().map(|info| info.delivered as u64));
+            if let Some(header) = unexpected_work_header(msg.headers.as_ref()) {
+                warn!(
+                    subject = %msg.subject,
+                    header = %header,
+                    "rejecting work the NATS server copied from another stream — ACKing to drop",
+                );
+                if let Err(e) = ack(
+                    &Delivery::Nats(msg, admission_permit, None),
+                    &self.runtime_state.telemetry,
+                )
+                .await
+                {
+                    warn!(error = %e, "ack failed on drop");
+                }
+                continue;
+            }
             // Source of truth for routing is the NATS subject (JetStream
             // already used it to dispatch to this consumer). If the subject
             // doesn't yield a model_id, we can't trust the payload either,
@@ -7130,6 +7162,24 @@ mod tests {
             unknown_bundle_config_hash([&served, &unsupported], Some(&state)),
             Some(("hash-1", 1))
         );
+    }
+
+    #[test]
+    fn unexpected_work_header_allows_only_the_gateway_message_id() {
+        assert_eq!(unexpected_work_header(None), None);
+        let mut gateway = async_nats::HeaderMap::new();
+        gateway.insert("Nats-Msg-Id", "req-1");
+        gateway.insert("traceparent", "00-abc-def-01");
+        assert_eq!(unexpected_work_header(Some(&gateway)), None);
+        for name in ["Nats-Stream", "Nats-Stream-Source", "nats-subject"] {
+            let mut copied = async_nats::HeaderMap::new();
+            copied.insert(name, "x");
+            assert_eq!(
+                unexpected_work_header(Some(&copied)).as_deref(),
+                Some(name),
+                "{name}"
+            );
+        }
     }
 
     #[test]

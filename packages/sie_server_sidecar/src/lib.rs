@@ -1212,7 +1212,9 @@ async fn spawn_work_cancel_subscriber(
                         }
                         continue;
                     };
-                    let subject = msg.subject.to_string();
+                    let Some(subject) = cancel_signal_subject(&msg, "work_cancel") else {
+                        continue;
+                    };
                     let Some((router_id, request_id)) = request_id_from_work_cancel_subject(&subject) else {
                         debug!(subject = %subject, "work-cancel: ignoring malformed subject");
                         continue;
@@ -1258,7 +1260,9 @@ fn spawn_generation_cancel_subscriber(
                         warn!("generation: cancel subscription ended");
                         return;
                     };
-                    let subject = msg.subject.to_string();
+                    let Some(subject) = cancel_signal_subject(&msg, "cancel") else {
+                        continue;
+                    };
                     if let Some((router_id, request_id)) =
                         request_id_from_generation_cancel_subject(&subject)
                     {
@@ -1330,7 +1334,9 @@ async fn spawn_batch_direct_cancel_subscriber(
                         }
                         continue;
                     };
-                    let subject = msg.subject.to_string();
+                    let Some(subject) = cancel_signal_subject(&msg, "batch_cancel") else {
+                        continue;
+                    };
                     let Some(request_id) =
                         request_id_from_batch_cancel_subject(&subject, &worker_id)
                     else {
@@ -1347,6 +1353,21 @@ async fn spawn_batch_direct_cancel_subscriber(
             }
         }
     }))
+}
+
+/// The subject of a cancel signal, or `None` when the NATS server delivered it
+/// on another user's behalf.
+fn cancel_signal_subject(msg: &async_nats::Message, kind: &'static str) -> Option<String> {
+    if let Some(reason) = config_subscriber::server_originated(msg) {
+        warn!(
+            subject = %msg.subject,
+            kind,
+            reason,
+            "dropping cancel signal that was not published directly by a client"
+        );
+        return None;
+    }
+    Some(msg.subject.to_string())
 }
 
 fn request_id_from_cancel_subject(subject: &str) -> Option<String> {
@@ -1882,6 +1903,34 @@ mod tests {
                 "queue_ms must be excluded by default — see Dispatcher docstring"
             );
         }
+    }
+
+    #[test]
+    fn cancel_signal_subject_drops_server_deliveries() {
+        let message =
+            |reply: Option<&str>, headers: Option<async_nats::HeaderMap>| async_nats::Message {
+                subject: "work_cancel.gw.req-1".into(),
+                reply: reply.map(Into::into),
+                payload: bytes::Bytes::new(),
+                headers,
+                status: None,
+                description: None,
+                length: 0,
+            };
+        assert_eq!(
+            cancel_signal_subject(&message(None, None), "work_cancel").as_deref(),
+            Some("work_cancel.gw.req-1")
+        );
+        assert_eq!(
+            cancel_signal_subject(&message(Some("$JS.ACK.S.c.1.1.1.1.0"), None), "work_cancel"),
+            None
+        );
+        let mut headers = async_nats::HeaderMap::new();
+        headers.insert("Nats-Stream", "COPY");
+        assert_eq!(
+            cancel_signal_subject(&message(None, Some(headers)), "work_cancel"),
+            None
+        );
     }
 
     #[test]
