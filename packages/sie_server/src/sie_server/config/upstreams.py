@@ -21,6 +21,7 @@ from urllib.parse import urlsplit
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from yaml.constructor import ConstructorError
 
 UPSTREAMS_FILE_ENV = "SIE_UPSTREAMS_FILE"
 
@@ -45,6 +46,10 @@ class _UniqueKeyLoader(yaml.SafeLoader):
         seen: set[object] = set()
         for key_node, _ in node.value:
             key = self.construct_object(key_node, deep=deep)
+            try:
+                hash(key)
+            except TypeError:
+                raise ConstructorError(problem="found an unhashable mapping key") from None
             if key in seen:
                 raise _DuplicateKeyError(key_node.start_mark.line + 1)
             seen.add(key)
