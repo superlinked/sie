@@ -174,6 +174,24 @@ def _get_write_lock(app_state: Any) -> asyncio.Lock:
     return existing_lock
 
 
+# Exports queue here, one at a time, before they take the write lock. The write
+# lock is FIFO, so without this a burst of N exports would put a write behind N
+# snapshot builds; with it, a write waits behind at most one.
+_APP_STATE_EXPORT_GATE_ATTR = "_config_export_gate"
+_APP_STATE_EXPORT_LOOP_ATTR = "_config_export_gate_loop"
+
+
+def _get_export_gate(app_state: Any) -> asyncio.Lock:
+    """Per-app export single-flight lock, event-loop-bound like the write lock."""
+    running_loop = asyncio.get_running_loop()
+    existing_gate = getattr(app_state, _APP_STATE_EXPORT_GATE_ATTR, None)
+    if existing_gate is None or getattr(app_state, _APP_STATE_EXPORT_LOOP_ATTR, None) is not running_loop:
+        existing_gate = asyncio.Lock()
+        setattr(app_state, _APP_STATE_EXPORT_GATE_ATTR, existing_gate)
+        setattr(app_state, _APP_STATE_EXPORT_LOOP_ATTR, running_loop)
+    return existing_gate
+
+
 def _get_idempotency_state(app_state: Any) -> _IdempotencyState:
     """Lazily fetch-or-create the per-app idempotency state.
 
@@ -388,11 +406,12 @@ _PROD_ENVS = frozenset({"prod", "production"})
 _ENV_SIGNAL_VARS = ("SIE_DEPLOYMENT_ENV", "SIE_ENV")
 
 
-# Read-scoped credentials: accepted on every read route, never on a write.
-# `SIE_CONFIG_READ_TOKEN` is the one gateways and worker sidecars present;
-# `SIE_AUTH_TOKEN` is the inference token. `SIE_ADMIN_TOKEN` authorizes reads
-# and writes.
-_READ_TOKEN_VARS = ("SIE_CONFIG_READ_TOKEN", "SIE_AUTH_TOKEN")
+# Read-scoped credentials, never accepted on a write. `SIE_CONFIG_READ_TOKEN`
+# is the one gateways and worker sidecars present and is accepted on every read
+# route; `SIE_AUTH_TOKEN` is the inference token and is accepted on every read
+# route except the export. `SIE_ADMIN_TOKEN` authorizes reads and writes.
+_INFERENCE_ENV_VAR = "SIE_AUTH_TOKEN"
+_READ_TOKEN_VARS = ("SIE_CONFIG_READ_TOKEN", _INFERENCE_ENV_VAR)
 
 
 def _refuse_open_in_prod(*, write: bool) -> None:
@@ -423,23 +442,34 @@ def _token_matches(presented: str, expected: str) -> bool:
     return hmac.compare_digest(presented.encode(), expected.encode())
 
 
+def warn_if_read_token_is_admin_token() -> None:
+    """Log a startup warning when the config read token equals the admin token."""
+    read_token = os.environ.get("SIE_CONFIG_READ_TOKEN")
+    admin_token = os.environ.get("SIE_ADMIN_TOKEN")
+    if read_token is not None and admin_token is not None and _token_matches(read_token, admin_token):
+        logger.warning(
+            "SIE_CONFIG_READ_TOKEN equals SIE_ADMIN_TOKEN, so every holder of the read token can write configs; "
+            "give the read token its own value"
+        )
+
+
 def _configured_read_tokens() -> list[str]:
     return [token for var in _READ_TOKEN_VARS if (token := os.environ.get(var)) is not None]
 
 
-def _check_read_auth(request: Request) -> None:
+def _check_read_auth(request: Request, *, accept_inference_token: bool = True) -> None:
     """Validate read auth (a read-scoped token or the admin token)."""
-    accepted = _configured_read_tokens()
-    admin_token = os.environ.get("SIE_ADMIN_TOKEN")
-    if admin_token is not None:
-        accepted.append(admin_token)
-    if not accepted:
+    configured = {
+        var: token for var in (*_READ_TOKEN_VARS, "SIE_ADMIN_TOKEN") if (token := os.environ.get(var)) is not None
+    }
+    if not configured:
         _refuse_open_in_prod(write=False)
         return  # No auth configured (dev / self-host localhost posture)
 
     token = _extract_bearer_token(request.headers.get("Authorization", ""))
     if not token:
         raise HTTPException(status_code=401, detail="Missing Authorization header")
+    accepted = [expected for var, expected in configured.items() if accept_inference_token or var != _INFERENCE_ENV_VAR]
     matches = [_token_matches(token, expected) for expected in accepted]
     if not any(matches):
         raise HTTPException(status_code=403, detail="Invalid token")
@@ -1604,22 +1634,27 @@ async def export_snapshot(request: Request) -> Response:
 
     We enforce consistency the cheapest way: take the per-app write
     lock around the snapshot. Writers serialize on the same lock so
-    the snapshot is always "between writes". Export is a rare
-    operation (gateway bootstrap + drift recovery), so the brief
-    write-path blockage is acceptable. Read-path handlers like
-    `/epoch`, `/models`, `/bundles` remain fully concurrent.
+    the snapshot is always "between writes". Each build blocks writes
+    for its duration, so exports first pass a per-app single-flight
+    gate: concurrent exports build one at a time and a write waits
+    behind at most one build, however many exports are queued.
+    Read-path handlers like `/epoch`, `/models`, `/bundles` remain
+    fully concurrent.
 
-    Read auth: the snapshot carries the same model configs that
+    Auth: the snapshot carries the same model configs that
     `GET /v1/configs/models/{id}` serves, plus bundle membership, pool names
-    and hashes, so gateways and worker sidecars fetch it with a read-scoped
-    token.
+    and hashes, so gateways and worker sidecars fetch it with the config
+    read token (`SIE_CONFIG_READ_TOKEN`). The admin token also works. The
+    inference token (`SIE_AUTH_TOKEN`) does not, because each build holds
+    the write lock.
     """
-    _check_read_auth(request)
+    _check_read_auth(request, accept_inference_token=False)
     model_registry = _require_model_registry(request)
     config_store: ConfigStore | None = getattr(request.app.state, "config_store", None)
 
+    export_gate = _get_export_gate(request.app.state)
     write_lock = _get_write_lock(request.app.state)
-    async with write_lock:
+    async with export_gate, write_lock:
         epoch = (await asyncio.to_thread(config_store.read_epoch)) if config_store else 0
         api_models = set(await asyncio.to_thread(config_store.list_models)) if config_store else set()
 

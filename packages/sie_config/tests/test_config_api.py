@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import tempfile
 import threading
 from pathlib import Path
@@ -8,6 +9,7 @@ import pytest
 import yaml
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sie_config import config_api
 from sie_config.config_api import router as config_router
 from sie_config.config_store import ConfigStore
 from sie_config.model_registry import ModelRegistry
@@ -1190,8 +1192,8 @@ _READ_ROUTES = [
     ("GET", "/v1/configs/bundles/default", None),
     ("POST", "/v1/configs/resolve", '{"model": "test/model"}'),
     ("GET", "/v1/configs/epoch", None),
-    ("GET", "/v1/configs/export", None),
 ]
+_EXPORT_ROUTE = ("GET", "/v1/configs/export", None)
 _WRITE_ROUTES = [
     ("POST", "/v1/configs/models", _WRITE_BODY),
     ("PUT", "/v1/configs/models/test/model", _WRITE_BODY),
@@ -1234,12 +1236,12 @@ class TestConfigAPIRouteAuth:
         headers = {} if credential is None else {"Authorization": _CREDENTIALS[credential]}
         return self.client.request(method, path, content=body, headers=headers).status_code
 
-    @pytest.mark.parametrize(("method", "path", "body"), _READ_ROUTES + _WRITE_ROUTES)
+    @pytest.mark.parametrize(("method", "path", "body"), [*_READ_ROUTES, _EXPORT_ROUTE, *_WRITE_ROUTES])
     def test_missing_credential_is_401(self, method: str, path: str, body: str | None) -> None:
         assert self._call(method, path, body, None) == 401
 
     @pytest.mark.parametrize("credential", ["wrong", "non-ascii"])
-    @pytest.mark.parametrize(("method", "path", "body"), _READ_ROUTES + _WRITE_ROUTES)
+    @pytest.mark.parametrize(("method", "path", "body"), [*_READ_ROUTES, _EXPORT_ROUTE, *_WRITE_ROUTES])
     def test_unknown_credential_is_403(self, method: str, path: str, body: str | None, credential: str) -> None:
         assert self._call(method, path, body, credential) == 403
 
@@ -1247,6 +1249,10 @@ class TestConfigAPIRouteAuth:
     @pytest.mark.parametrize(("method", "path", "body"), _READ_ROUTES)
     def test_every_configured_credential_reads(self, method: str, path: str, body: str | None, credential: str) -> None:
         assert self._call(method, path, body, credential) == 200
+
+    @pytest.mark.parametrize(("credential", "status"), [("admin", 200), ("config-read", 200), ("inference", 403)])
+    def test_export_accepts_the_config_read_and_admin_tokens_only(self, credential: str, status: int) -> None:
+        assert self._call(*_EXPORT_ROUTE, credential) == status
 
     @pytest.mark.parametrize("credential", ["config-read", "inference"])
     @pytest.mark.parametrize(("method", "path", "body"), _WRITE_ROUTES)
@@ -1288,13 +1294,108 @@ class TestConfigAPIReadTokenWithoutAdmin:
         read = {"Authorization": "Bearer read-secret"}
 
         assert self.client.get("/v1/configs/export").status_code == 401
-        assert self.client.get("/v1/configs/export", headers=read).status_code == 200
+        export_status = 200 if read_var == "SIE_CONFIG_READ_TOKEN" else 403
+        assert self.client.get("/v1/configs/export", headers=read).status_code == export_status
         assert self.client.get("/v1/configs/epoch", headers=read).status_code == 200
         for headers in ({}, read):
             resp = self.client.post("/v1/configs/models", content=_WRITE_BODY, headers=headers)
             assert resp.status_code == 403
             assert "require SIE_ADMIN_TOKEN" in resp.text
             assert self.client.delete("/v1/configs/models/test/model", headers=headers).status_code == 403
+
+
+class TestReadTokenSeparationWarning:
+    @pytest.mark.parametrize(
+        ("read_token", "admin_token", "warned"),
+        [("same-secret", "same-secret", True), ("read-secret", "admin-secret", False), (None, "admin-secret", False)],
+    )
+    def test_warns_only_when_the_read_token_is_the_admin_token(
+        self, monkeypatch, caplog, read_token: str | None, admin_token: str, warned: bool
+    ) -> None:
+        monkeypatch.delenv("SIE_CONFIG_READ_TOKEN", raising=False)
+        if read_token is not None:
+            monkeypatch.setenv("SIE_CONFIG_READ_TOKEN", read_token)
+        monkeypatch.setenv("SIE_ADMIN_TOKEN", admin_token)
+        with caplog.at_level(logging.WARNING, logger="sie_config.config_api"):
+            config_api.warn_if_read_token_is_admin_token()
+        assert ("SIE_CONFIG_READ_TOKEN equals SIE_ADMIN_TOKEN" in caplog.text) is warned
+        assert "secret" not in caplog.text
+
+
+class TestConfigAPIExportSingleFlight:
+    """Concurrent exports build one at a time, so a write waits behind at most one build."""
+
+    def test_a_write_waits_behind_at_most_one_export_build(self, monkeypatch) -> None:
+        for var in ("SIE_ADMIN_TOKEN", "SIE_CONFIG_READ_TOKEN", "SIE_AUTH_TOKEN", "SIE_ENV", "SIE_DEPLOYMENT_ENV"):
+            monkeypatch.delenv(var, raising=False)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bundles, models = root / "bundles", root / "models"
+            bundles.mkdir()
+            models.mkdir()
+            _write_bundle(bundles, "default", ["sie_server.adapters.bert_flash"])
+            _write_model(models, "test/model", "sie_server.adapters.bert_flash:BertFlashAdapter")
+            app = _create_test_app(bundles, models, str(root / "store"))
+            store = app.state.config_store
+
+            order: list[str] = []
+            first_build_started = threading.Event()
+            release_builds = threading.Event()
+            read_epoch, increment_epoch = store.read_epoch, store.increment_epoch
+            in_write = threading.local()
+
+            def gated_read_epoch() -> int:
+                if getattr(in_write, "active", False):
+                    return read_epoch()
+                order.append("export")
+                first_build_started.set()
+                assert release_builds.wait(timeout=10)
+                return read_epoch()
+
+            def recorded_increment_epoch() -> int:
+                order.append("write")
+                in_write.active = True
+                try:
+                    return increment_epoch()
+                finally:
+                    in_write.active = False
+
+            monkeypatch.setattr(store, "read_epoch", gated_read_epoch)
+            monkeypatch.setattr(store, "increment_epoch", recorded_increment_epoch)
+            exports = 8
+            lock_requests = 0
+            lock_request_events: dict[int, asyncio.Event] = {}
+            get_write_lock = config_api._get_write_lock
+
+            def counted_get_write_lock(app_state):
+                nonlocal lock_requests
+                lock_requests += 1
+                if lock_requests in lock_request_events:
+                    lock_request_events[lock_requests].set()
+                return get_write_lock(app_state)
+
+            monkeypatch.setattr(config_api, "_get_write_lock", counted_get_write_lock)
+
+            async def scenario() -> list[int]:
+                exports_queued, write_queued = asyncio.Event(), asyncio.Event()
+                lock_request_events.update({exports: exports_queued, exports + 1: write_queued})
+                transport = httpx.ASGITransport(app=app)
+                async with httpx.AsyncClient(transport=transport, base_url="http://sie-config") as client:
+                    export_tasks = [asyncio.create_task(client.get("/v1/configs/export")) for _ in range(exports)]
+                    assert await asyncio.to_thread(first_build_started.wait, 10)
+                    await exports_queued.wait()
+                    write_task = asyncio.create_task(client.post("/v1/configs/models", content=_WRITE_BODY))
+                    await write_queued.wait()
+                    release_builds.set()
+                    responses = await asyncio.gather(write_task, *export_tasks)
+                    return [response.status_code for response in responses]
+
+            statuses = asyncio.run(asyncio.wait_for(scenario(), timeout=20))
+
+        assert statuses[0] == 201
+        assert statuses[1:] == [200] * exports
+        assert order.index("write") == 1, order
+        assert order.count("export") == exports
 
 
 class TestConfigAPIEpoch:
