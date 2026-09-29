@@ -197,12 +197,13 @@ async fn main() -> anyhow::Result<()> {
     let ipc_socket_paths = parse_ipc_socket_paths(cli.ipc_socket_paths.as_deref())
         .unwrap_or_else(|| vec![ipc_socket_path.clone()]);
     validate_unique_ipc_socket_paths(&ipc_socket_paths)?;
+    let config_service_url = cli.config_service_url.filter(|url| !url.trim().is_empty());
     let config_service_token = resolve_config_service_token(
         cli.config_service_token,
         std::env::var_os(CONFIG_SERVICE_TOKEN_ENV).is_some(),
         std::env::var(LEGACY_CONFIG_SERVICE_TOKEN_ENV).ok(),
     );
-    if config_service_token.from_admin_token {
+    if config_service_url.is_some() && config_service_token.from_admin_token {
         warn!(
             "sie-config credential taken from {LEGACY_CONFIG_SERVICE_TOKEN_ENV} because \
              {CONFIG_SERVICE_TOKEN_ENV} is unset; this is deprecated, set \
@@ -241,7 +242,7 @@ async fn main() -> anyhow::Result<()> {
         machine_profile,
         gpu_count: cli.gpu_count,
         bundle_config_hash: cli.bundle_config_hash,
-        config_service_url: cli.config_service_url.filter(|url| !url.trim().is_empty()),
+        config_service_url,
         config_service_token: config_service_token.token,
         config_poll_interval_ms: cli.config_poll_interval_ms.max(1_000),
         config_full_export_interval_ms: cli.config_full_export_interval_ms,

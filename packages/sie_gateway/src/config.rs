@@ -840,12 +840,14 @@ impl Config {
             ));
         }
 
-        let admin_is_config_credential =
-            has_admin && self.config_service_token.as_deref() == Some(self.admin_token.as_str());
+        let admin_is_config_credential = has_admin
+            && self.config_service_url.is_some()
+            && self.config_service_token.as_deref() == Some(self.admin_token.as_str());
 
         // `admin_token` alone is not dead configuration while it is also the
         // `sie-config` credential, so it never audits as an error. Only the
-        // inbound tokens prove intent.
+        // inbound tokens prove intent. Without `config_service_url` the
+        // gateway never calls `sie-config`, so no credential is presented.
         if !is_enabled && has_tokens {
             issues.push((
                 AuditLevel::Error,
@@ -1660,7 +1662,12 @@ mod tests {
         assert_eq!(StreamStorage::parse("s3"), None);
     }
 
-    const CONFIG_CREDENTIAL_VARS: &[&str] = &["SIE_CONFIG_SERVICE_TOKEN", "SIE_ADMIN_TOKEN"];
+    const CONFIG_CREDENTIAL_VARS: &[&str] = &[
+        "SIE_CONFIG_SERVICE_URL",
+        "SIE_CONFIG_SERVICE_TOKEN",
+        "SIE_ADMIN_TOKEN",
+    ];
+    const CONFIG_URL: (&str, &str) = ("SIE_CONFIG_SERVICE_URL", "http://sie-config:8080");
 
     fn load_with_config_credentials(vars: &[(&str, &str)]) -> Config {
         let mut loaded = None;
@@ -1683,6 +1690,7 @@ mod tests {
     #[test]
     fn test_config_service_token_is_separate_from_the_admin_token() {
         let cfg = load_with_config_credentials(&[
+            CONFIG_URL,
             ("SIE_CONFIG_SERVICE_TOKEN", "config-read-secret"),
             ("SIE_ADMIN_TOKEN", "gateway-admin-secret"),
         ]);
@@ -1707,7 +1715,7 @@ mod tests {
 
     #[test]
     fn test_unset_config_service_token_falls_back_to_the_admin_token() {
-        let cfg = load_with_config_credentials(&[("SIE_ADMIN_TOKEN", "super-secret")]);
+        let cfg = load_with_config_credentials(&[CONFIG_URL, ("SIE_ADMIN_TOKEN", "super-secret")]);
         assert_eq!(cfg.admin_token, "super-secret");
         assert_eq!(cfg.config_service_token.as_deref(), Some("super-secret"));
         assert_eq!(deprecation_warnings(&cfg), 1);
@@ -1715,9 +1723,21 @@ mod tests {
     }
 
     #[test]
+    fn test_admin_token_without_a_config_service_is_not_reported_as_the_config_credential() {
+        let cfg = load_with_config_credentials(&[("SIE_ADMIN_TOKEN", "super-secret")]);
+        assert!(cfg.config_service_url.is_none());
+        assert_eq!(deprecation_warnings(&cfg), 0);
+        assert!(!cfg
+            .audit_auth()
+            .iter()
+            .any(|(_, msg)| msg.contains("presented to sie-config")));
+    }
+
+    #[test]
     fn test_blank_config_service_token_does_not_fall_back() {
         for blank in ["", "   "] {
             let cfg = load_with_config_credentials(&[
+                CONFIG_URL,
                 ("SIE_CONFIG_SERVICE_TOKEN", blank),
                 ("SIE_ADMIN_TOKEN", "gateway-admin-secret"),
             ]);
@@ -1737,6 +1757,7 @@ mod tests {
     #[test]
     fn test_config_service_token_equal_to_the_admin_token_is_reported() {
         let cfg = load_with_config_credentials(&[
+            CONFIG_URL,
             ("SIE_CONFIG_SERVICE_TOKEN", "shared-secret"),
             ("SIE_ADMIN_TOKEN", "shared-secret"),
         ]);
@@ -1954,6 +1975,7 @@ mod tests {
     #[test]
     fn test_audit_auth_none_admin_token_usage_follows_the_config_credential() {
         let mut cfg = cfg_with_auth("none", vec![], "admin", false);
+        cfg.config_service_url = Some("http://sie-config:8080".to_string());
         cfg.config_service_token = Some("config-read".to_string());
         let issues = cfg.audit_auth();
         assert!(issues
@@ -1969,6 +1991,13 @@ mod tests {
         assert!(issues
             .iter()
             .any(|(lvl, msg)| *lvl == AuditLevel::Warn && msg.contains("deprecated")));
+
+        cfg.config_service_url = None;
+        let issues = cfg.audit_auth();
+        assert!(issues
+            .iter()
+            .any(|(lvl, msg)| *lvl == AuditLevel::Warn && msg.contains("the token is unused")));
+        assert!(!issues.iter().any(|(_, msg)| msg.contains("deprecated")));
     }
 
     #[test]
