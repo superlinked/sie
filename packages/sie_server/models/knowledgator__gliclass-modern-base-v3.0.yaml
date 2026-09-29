@@ -1,6 +1,6 @@
-sie_id: knowledgator/opir-edge-v1.0
-hf_id: knowledgator/opir-edge-v1.0
-hf_revision: 467a0431f744522f92f4e37d7756309b4c12332a
+sie_id: knowledgator/gliclass-modern-base-v3.0
+hf_id: knowledgator/gliclass-modern-base-v3.0
+hf_revision: ac369222ca4375ca66ebaf7fb5220f223514c035
 inputs:
   text: true
   image: false
@@ -10,7 +10,7 @@ tasks:
   encode: null
   score: null
   extract: {}
-max_sequence_length: 1024  # trained with 1024-token inputs
+max_sequence_length: 512
 profiles:
   default:
     max_batch_tokens: 16384
@@ -21,4 +21,10 @@ profiles:
         classification_type: single-label
         modernbert_flash: true
       runtime:
+        threshold: 0.0
+  multi-label:
+    extends: default
+    adapter_options:
+      runtime:
+        classification_type: multi-label
         threshold: 0.0

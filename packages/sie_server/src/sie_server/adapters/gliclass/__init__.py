@@ -75,6 +75,8 @@ from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_NOT_LOADED, ComputePrecision
 from sie_server.adapters.errors import InputTooLongError
 from sie_server.adapters.gliclass.cuda_graphs import GRAPH_MODES, CudaGraphRunner, GraphMode, unsupported_reason
+from sie_server.adapters.gliclass.modernbert_flash import ModernBertFlashEncoder
+from sie_server.adapters.gliclass.modernbert_flash import unsupported_reason as flash_unsupported_reason
 from sie_server.core.extract_cost import MAX_EXTRACT_LABELS
 from sie_server.core.inference_output import ExtractItemError, ExtractOutput
 from sie_server.core.oom import is_oom_error
@@ -459,7 +461,7 @@ class GLiClassAdapter(BaseAdapter):
     spec: ClassVar[AdapterSpec] = AdapterSpec(
         inputs=("text",),
         outputs=("json",),
-        unload_fields=("_pipe", "_tokenizer", "_graphs"),
+        unload_fields=("_pipe", "_tokenizer", "_graphs", "_flash"),
     )
 
     def __init__(
@@ -472,6 +474,7 @@ class GLiClassAdapter(BaseAdapter):
         compute_precision: ComputePrecision = "float16",
         revision: str | None = None,
         cuda_graphs: str | bool = "off",
+        modernbert_flash: bool = False,
         **kwargs: Any,
     ) -> None:
         """Initialize GLiClass adapter.
@@ -496,10 +499,15 @@ class GLiClassAdapter(BaseAdapter):
                 (see ``cuda_graphs.py``). An operator setting: a request can
                 only opt out, with ``options={"cuda_graphs": "off"}``. YAML
                 reads an unquoted ``off`` as ``False``, which also means off.
+            modernbert_flash: Whether a model with a ModernBERT or mmBERT
+                encoder runs it through the packed flash-attention layer
+                stack on CUDA (see ``modernbert_flash.py``). Other models and
+                devices run as before. An operator setting.
             **kwargs: Additional arguments (ignored for compatibility).
 
         Raises:
-            ValueError: If ``cuda_graphs`` is not one of the three modes.
+            ValueError: If ``cuda_graphs`` is not one of the three modes, or
+                ``modernbert_flash`` is not a boolean.
         """
         self._model_name_or_path = str(model_name_or_path)
         self._classification_type = self._validate_classification_type(classification_type)
@@ -513,6 +521,10 @@ class GLiClassAdapter(BaseAdapter):
             msg = f"GLiClass cuda_graphs must be 'off', 'exact' or 'bucketed', got {cuda_graphs!r}"
             raise ValueError(msg)
         self._cuda_graphs = cast("GraphMode", cuda_graphs)
+        if not isinstance(modernbert_flash, bool):
+            msg = f"GLiClass modernbert_flash must be true or false, got {modernbert_flash!r}"
+            raise ValueError(msg)
+        self._modernbert_flash = modernbert_flash
 
         # The gliclass pipe for the model's architecture: it assembles and
         # tokenizes model inputs and holds the model.
@@ -520,6 +532,9 @@ class GLiClassAdapter(BaseAdapter):
         # Records and replays forwards as CUDA graphs, when the operator
         # enabled them and the model and device support them.
         self._graphs: CudaGraphRunner | None = None
+        # Runs a ModernBERT encoder on packed rows with flash attention, when
+        # the operator enabled it and the model and device support it.
+        self._flash: ModernBertFlashEncoder | None = None
         self._tokenizer: PreTrainedTokenizerBase | None = None
         self._special_count: int = 0
         self._max_token_chars: int = _DEFAULT_MAX_TOKEN_CHARS
@@ -591,6 +606,7 @@ class GLiClassAdapter(BaseAdapter):
         self._special_count = int(tokenizer.num_special_tokens_to_add(pair=False))
         self._max_token_chars = _longest_token_chars(tokenizer)
         self._graphs = self._graph_runner(pipe, tokenizer)
+        self._flash = self._flash_encoder(pipe)
 
     def _load_tokenizer(self, shared_kwargs: dict[str, Any]) -> PreTrainedTokenizerBase:
         try:
@@ -981,6 +997,8 @@ class GLiClassAdapter(BaseAdapter):
         With ``graphs`` other than "off", a CUDA graph replays the encoder
         when the model and shape allow it, and the scoring head runs on its
         output with this forward's class slots; otherwise it runs eagerly.
+        A model loaded with ``modernbert_flash`` runs its encoder on packed
+        rows instead, and the scoring head the same way.
         """
         forward_kwargs: dict[str, Any] = {}
         resolve_max_num_classes = getattr(pipe, "_resolve_max_num_classes", None)
@@ -988,6 +1006,10 @@ class GLiClassAdapter(BaseAdapter):
             forward_kwargs["max_num_classes"] = resolve_max_num_classes(labels, same_labels)
         classes = forward_kwargs.get("max_num_classes")
         try:
+            if self._flash is not None:
+                logits = self._flash.run(inputs, classes)
+                if logits is not None:
+                    return logits
             if self._graphs is not None:
                 logits = self._graphs.run(dict(inputs), classes, graphs)
                 if logits is not None:
@@ -1022,6 +1044,24 @@ class GLiClassAdapter(BaseAdapter):
             mode=self._cuda_graphs,
             name=self._model_name_or_path,
         )
+
+    def _flash_encoder(self, pipe: Any) -> ModernBertFlashEncoder | None:
+        """The packed flash-attention encoder for a loaded model; None when it is off or does not apply."""
+        model = getattr(pipe, "model", None)
+        if not self._modernbert_flash or model is None:
+            return None
+        device = getattr(pipe, "device", "cpu")
+        reason = flash_unsupported_reason(model, device)
+        if reason is not None:
+            # Off CUDA this is the expected fallback; on CUDA it is worth a look.
+            log = logger.info if not str(device).startswith("cuda") else logger.warning
+            log(
+                "GLiClass modernbert_flash does not apply to %s, which runs the gliclass forward: %s",
+                self._model_name_or_path,
+                reason,
+            )
+            return None
+        return ModernBertFlashEncoder(model, max_length=int(pipe.max_length))
 
     @staticmethod
     def _row_width(pipe: Any, labels: list[str], batch_width: int) -> int:
