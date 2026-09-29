@@ -20,7 +20,9 @@ neither ``trust_remote_code`` nor sentence-transformers 6:
 
 On CUDA with flash-linear-attention installed, each batch runs packed (see
 ``packed.py``): one sequence, no padding, variable-length kernels, as the
-reference pipeline runs. Otherwise every input is its own right-padded row.
+reference pipeline runs, with fused kernels for the per-token work (RMSNorm with
+the residual add, gated RMSNorm, SwiGLU). Otherwise every input is its own
+right-padded row.
 
 Numerics follow the reference stack (transformers 5.9): rotary tables built from
 bf16 ``inv_freq``, vision rotary phases in the weight dtype, pixel normalisation in
@@ -31,7 +33,6 @@ transformers release builds the vision rotary table (5.17 changed it).
 
 from __future__ import annotations
 
-import itertools
 import json
 import logging
 import math
@@ -50,7 +51,7 @@ from sie_server.adapters._multivector import maxsim_scores_batched
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ComputePrecision
 from sie_server.adapters._utils import grouped_score_pairs, validate_output_types
-from sie_server.adapters.topk_embed.packed import PackedKernels, resolve_kernels, text_forward
+from sie_server.adapters.topk_embed.packed import PackedTextModel, Packing, resolve_kernels
 from sie_server.core.inference_output import EncodeOutput
 from sie_server.core.postprocessor import MuveraConfig, MuveraPostprocessor
 from sie_server.types.inputs import InvalidInputError, decode_image
@@ -170,7 +171,7 @@ class TopkEmbedAdapter(BaseAdapter):
         self._muvera_config = muvera_config
         self._attn_implementation = attn_implementation
         self._packed = packed
-        self._kernels: PackedKernels | None = None
+        self._packed_text: PackedTextModel | None = None
         self._vision_varlen: Any = None
         self._preprocess_pool: ThreadPoolExecutor | None = None
         self._preprocess_pool_lock = threading.Lock()
@@ -256,18 +257,19 @@ class TopkEmbedAdapter(BaseAdapter):
         for layer in self._model.language_model.layers:
             if hasattr(layer, "self_attn"):
                 layer.self_attn.is_causal = False
-        self._kernels = resolve_kernels(device, mode=self._packed)
-        self._vision_varlen = _flash_varlen(device)
-        logger.info(
-            "TopK-Embed text path: %s; vision attention: %s",
-            self._kernels.names if self._kernels else "row per input (padded)",
-            "flash_attn varlen" if self._vision_varlen is not None else "sdpa, padded per image",
-        )
         # Rotary tables are rebuilt in float32 at load; the weights were trained against bf16 ones.
         for module in self._model.modules():
             inv_freq = getattr(module, "inv_freq", None)
             if isinstance(inv_freq, torch.Tensor) and inv_freq.is_floating_point():
                 module.inv_freq = inv_freq.to(torch.bfloat16).to(self._dtype)
+        kernels = resolve_kernels(device, mode=self._packed)
+        self._packed_text = PackedTextModel(self._model.language_model, kernels) if kernels else None
+        self._vision_varlen = _flash_varlen(device)
+        logger.info(
+            "TopK-Embed text path: %s; vision attention: %s",
+            kernels.names if kernels else "row per input (padded)",
+            "flash_attn varlen" if self._vision_varlen is not None else "sdpa, padded per image",
+        )
         vision = config.vision_config
         rotary_dim = vision.hidden_size // vision.num_heads // 2
         inv_freq = 1.0 / (_VISION_ROPE_THETA ** (torch.arange(0, rotary_dim, 2, dtype=torch.float) / rotary_dim))
@@ -453,7 +455,7 @@ class TopkEmbedAdapter(BaseAdapter):
         tokens = 0
         for i in order:
             # ``order`` is ascending, so row i sets the padded width of the batch.
-            cost = tokens + lengths[i] if self._kernels is not None else (len(current) + 1) * lengths[i]
+            cost = tokens + lengths[i] if self._packed_text is not None else (len(current) + 1) * lengths[i]
             if current and cost > self._text_batch_tokens:
                 batches.append(current)
                 current, tokens = [], 0
@@ -488,7 +490,7 @@ class TopkEmbedAdapter(BaseAdapter):
         """Run rows through the backbone and head; one float32 ``[len, dim]`` CPU tensor per row."""
         assert self._model is not None
         assert self._head is not None
-        if self._kernels is not None:
+        if self._packed_text is not None:
             return self._forward_packed(rows, images=images, normalize=normalize)
         return self._forward_padded(rows, images=images, normalize=normalize)
 
@@ -526,11 +528,12 @@ class TopkEmbedAdapter(BaseAdapter):
     def _forward_packed(
         self, rows: list[torch.Tensor], *, images: list[_ImageRow] | None, normalize: bool
     ) -> list[torch.Tensor]:
-        assert self._kernels is not None
+        packed_text = self._packed_text
+        assert packed_text is not None
         device = self._device or "cpu"
         lengths = [len(row) for row in rows]
         input_ids = torch.cat(rows).unsqueeze(0).to(device)
-        cu_seqlens = torch.tensor([0, *itertools.accumulate(lengths)], dtype=torch.long, device=device)
+        packing = Packing.from_lengths(lengths, device)
         if images:
             position_ids = torch.cat([self._image_position_ids([row], len(row.input_ids)) for row in images], dim=2)
         else:
@@ -542,14 +545,7 @@ class TopkEmbedAdapter(BaseAdapter):
             if images:
                 image_hidden = self._vision_forward(images)
                 embeds[input_ids == self._image_token_id] = image_hidden.to(embeds.dtype)
-            hidden = text_forward(
-                self._model.language_model,
-                embeds,
-                position_ids.to(device),
-                cu_seqlens,
-                max(lengths),
-                self._kernels,
-            )
+            hidden = packed_text(embeds, position_ids.to(device), packing)
             vectors = self._project(hidden, normalize=normalize)[0]
         return list(vectors.split(lengths))
 
@@ -790,7 +786,7 @@ class TopkEmbedAdapter(BaseAdapter):
             pool, self._preprocess_pool = self._preprocess_pool, None
         if pool is not None:
             pool.shutdown(wait=False)
-        self._kernels = None
+        self._packed_text = None
         self._vision_varlen = None
         super().unload()
 

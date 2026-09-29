@@ -69,7 +69,7 @@ def case(request: pytest.FixtureRequest) -> tuple[dict[str, Any], TopkEmbedAdapt
     # On CPU the packed path runs its PyTorch reference kernels; on CUDA the fast ones.
     adapter._packed = packed
     adapter.load("cpu")
-    assert (adapter._kernels is not None) == packed
+    assert (adapter._packed_text is not None) == packed
     return golden, adapter
 
 
