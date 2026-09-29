@@ -11,6 +11,9 @@ Gateway: http://{{ include "sie-cluster.gateway.serviceName" . }}.{{ include "si
 {{- if and .Values.config.enabled (include "sie-cluster.config.generatesAdminToken" .) }}
 sie-config admin token: kubectl get secret -n {{ include "sie-cluster.namespace" . }} {{ include "sie-cluster.config.generatedAdminTokenSecretName" . }} -o jsonpath='{.data.{{ include "sie-cluster.config.adminTokenSecretKey" . | replace "." "\\." }}}' | base64 -d
 {{- end }}
+{{- if and .Values.config.enabled (include "sie-cluster.config.generatesReadToken" .) }}
+sie-config read token (reads only): kubectl get secret -n {{ include "sie-cluster.namespace" . }} {{ include "sie-cluster.config.generatedReadTokenSecretName" . }} -o jsonpath='{.data.{{ include "sie-cluster.config.readTokenSecretKey" . | replace "." "\\." }}}' | base64 -d
+{{- end }}
 {{- if $kubePrometheusStack.install }}
 Prometheus: enabled - kubectl port-forward -n {{ include "sie-cluster.kubePrometheusStack.namespace" . }} svc/{{ include "sie-cluster.kubePrometheusStack.prometheusServiceName" . }} 9090:{{ include "sie-cluster.kubePrometheusStack.prometheusServicePort" . }}
 {{- end }}

@@ -100,6 +100,14 @@ spec:
                   name: {{ . }}
                   key: {{ include "sie-cluster.config.adminTokenSecretKey" $ }}
             {{- end }}
+            {{- with include "sie-cluster.config.readTokenSecretName" . }}
+            # Read-scoped token that the gateway and worker sidecars present.
+            - name: SIE_CONFIG_READ_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ . }}
+                  key: {{ include "sie-cluster.config.readTokenSecretKey" $ }}
+            {{- end }}
             {{- if .Values.nats.enabled }}
             - name: SIE_NATS_URL
               value: {{ .Values.nats.url | default (printf "nats://%s-nats:4222" .Release.Name) | quote }}

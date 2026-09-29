@@ -23,11 +23,10 @@ AUTOSCALING_VALUES = {
     },
 }
 GENERATED_ADMIN_TOKEN_SECRET = "sie-sie-cluster-config-admin-token"
-CONFIG_CLIENTS = (
-    "sie-sie-cluster-config/config",
-    "sie-sie-cluster-gateway/gateway",
-    "sie-sie-cluster-worker-l4-default/worker-sidecar",
-)
+GENERATED_READ_TOKEN_SECRET = "sie-sie-cluster-config-read-token"
+CONFIG_SERVICE = "sie-sie-cluster-config/config"
+GATEWAY = "sie-sie-cluster-gateway/gateway"
+CONFIG_CONSUMERS = (GATEWAY, "sie-sie-cluster-worker-l4-default/worker-sidecar")
 L4_POOL = {"workers": {"pools": {"l4": {"enabled": True}}}}
 
 
@@ -248,46 +247,106 @@ def container_env(docs: list[dict], workload: str, container: str) -> dict[str, 
     return {env["name"]: env for env in spec.get("env", [])}
 
 
-def admin_token_refs(docs: list[dict]) -> dict[str, dict]:
-    refs = {}
+def env_entries(docs: list[dict], name: str) -> dict[str, dict]:
+    entries = {}
     for doc in docs:
         if doc["kind"] not in {"Deployment", "StatefulSet"}:
             continue
         for container in doc["spec"]["template"]["spec"]["containers"]:
             for env in container.get("env", []):
-                if env["name"] == "SIE_ADMIN_TOKEN":
-                    refs[f"{doc['metadata']['name']}/{container['name']}"] = env["valueFrom"]["secretKeyRef"]
-    return refs
+                if env["name"] == name:
+                    entries[f"{doc['metadata']['name']}/{container['name']}"] = env.get("valueFrom", {}).get(
+                        "secretKeyRef", env.get("value")
+                    )
+    return entries
 
 
-def admin_token_secrets(docs: list[dict]) -> list[dict]:
-    return [doc for doc in docs if doc["kind"] == "Secret" and doc["metadata"]["name"].endswith("-admin-token")]
+def token_secrets(docs: list[dict]) -> dict[str, dict]:
+    return {
+        doc["metadata"]["name"]: doc
+        for doc in docs
+        if doc["kind"] == "Secret" and doc["metadata"]["name"].endswith(("-admin-token", "-read-token"))
+    }
+
+
+def secret_token(secret: dict, key: str) -> str:
+    assert secret["metadata"]["annotations"] == {"helm.sh/resource-policy": "keep"}
+    token = base64.b64decode(secret["data"][key]).decode()
+    assert re.fullmatch(r"[A-Za-z0-9]{64}", token)
+    return token
+
+
+def assert_token_scopes(docs: list[dict], admin: dict, read: dict | str) -> None:
+    assert env_entries(docs, "SIE_ADMIN_TOKEN") == {CONFIG_SERVICE: admin}
+    assert env_entries(docs, "SIE_CONFIG_READ_TOKEN") == {CONFIG_SERVICE: read}
+    assert env_entries(docs, "SIE_CONFIG_SERVICE_TOKEN") == dict.fromkeys(CONFIG_CONSUMERS, read)
+
+
+GENERATED_ADMIN = {"name": GENERATED_ADMIN_TOKEN_SECRET, "key": "SIE_ADMIN_TOKEN"}
+GENERATED_READ = {"name": GENERATED_READ_TOKEN_SECRET, "key": "SIE_CONFIG_READ_TOKEN"}
+# Values as `helm upgrade --reuse-values` sees them from a release that predates
+# these keys: null removes the chart default.
+PREDATING_TOKEN_KEYS = {
+    "config": {
+        "auth": {
+            "generateAdminToken": None,
+            "readTokenSecretName": None,
+            "readTokenSecretKey": None,
+            "generateReadToken": None,
+        }
+    },
+    "gateway": {"auth": {"adminTokenSecretName": None, "adminTokenSecretKey": None}},
+}
 
 
 def test_chart_defaults_render_without_overrides(tmp_path: Path) -> None:
     docs = rendered_documents(tmp_path, {})
     gateway = container_env(docs, "sie-sie-cluster-gateway", "gateway")
     assert "SIE_PAYLOAD_STORE_URL" not in gateway
-    assert gateway["SIE_ADMIN_TOKEN"]["valueFrom"]["secretKeyRef"]["name"] == GENERATED_ADMIN_TOKEN_SECRET
+    assert "SIE_ADMIN_TOKEN" not in gateway
+    assert gateway["SIE_CONFIG_SERVICE_TOKEN"]["valueFrom"]["secretKeyRef"] == GENERATED_READ
     assert container_env(docs, "sie-sie-cluster-config", "config")["SIE_DEPLOYMENT_ENV"]["value"] == "production"
 
 
-@pytest.mark.parametrize("config", [{}, {"config": {"auth": {"generateAdminToken": None}}}])
-def test_generated_admin_token_is_wired_to_every_config_client(tmp_path: Path, config: dict) -> None:
-    docs = rendered_documents(tmp_path, {**L4_POOL, **config})
-    (secret,) = admin_token_secrets(docs)
-    assert secret["metadata"]["name"] == GENERATED_ADMIN_TOKEN_SECRET
-    assert secret["metadata"]["annotations"] == {"helm.sh/resource-policy": "keep"}
-    assert re.fullmatch(r"[A-Za-z0-9]{64}", base64.b64decode(secret["data"]["SIE_ADMIN_TOKEN"]).decode())
-    expected = {"name": GENERATED_ADMIN_TOKEN_SECRET, "key": "SIE_ADMIN_TOKEN"}
-    assert admin_token_refs(docs) == dict.fromkeys(CONFIG_CLIENTS, expected)
+@pytest.mark.parametrize("values", [{}, PREDATING_TOKEN_KEYS])
+def test_generated_tokens_are_wired_by_scope(tmp_path: Path, values: dict) -> None:
+    docs = rendered_documents(tmp_path, {**L4_POOL, **values})
+    secrets = token_secrets(docs)
+    assert set(secrets) == {GENERATED_ADMIN_TOKEN_SECRET, GENERATED_READ_TOKEN_SECRET}
+    admin = secret_token(secrets[GENERATED_ADMIN_TOKEN_SECRET], "SIE_ADMIN_TOKEN")
+    read = secret_token(secrets[GENERATED_READ_TOKEN_SECRET], "SIE_CONFIG_READ_TOKEN")
+    assert admin != read
+    assert_token_scopes(docs, GENERATED_ADMIN, GENERATED_READ)
 
 
 def test_operator_admin_token_secret_is_used_unchanged(tmp_path: Path) -> None:
     auth = {"adminTokenSecretName": "operator-admin", "adminTokenSecretKey": "token"}
     docs = rendered_documents(tmp_path, {**L4_POOL, "config": {"auth": auth}})
-    assert admin_token_secrets(docs) == []
-    assert admin_token_refs(docs) == dict.fromkeys(CONFIG_CLIENTS, {"name": "operator-admin", "key": "token"})
+    assert set(token_secrets(docs)) == {GENERATED_READ_TOKEN_SECRET}
+    assert_token_scopes(docs, {"name": "operator-admin", "key": "token"}, GENERATED_READ)
+
+
+def test_operator_read_token_secret_is_used_unchanged(tmp_path: Path) -> None:
+    auth = {
+        "adminTokenSecretName": "operator-admin",
+        "adminTokenSecretKey": "token",
+        "readTokenSecretName": "operator-read",
+        "readTokenSecretKey": "read",
+        "generateReadToken": False,
+    }
+    docs = rendered_documents(tmp_path, {**L4_POOL, "config": {"auth": auth}})
+    assert token_secrets(docs) == {}
+    assert_token_scopes(docs, {"name": "operator-admin", "key": "token"}, {"name": "operator-read", "key": "read"})
+
+
+def test_gateway_admin_token_is_wired_only_to_the_gateway(tmp_path: Path) -> None:
+    values = {**L4_POOL, "gateway": {"auth": {"mode": "token", "adminTokenSecretName": "gateway-admin"}}}
+    docs = rendered_documents(tmp_path, values)
+    assert env_entries(docs, "SIE_ADMIN_TOKEN") == {
+        CONFIG_SERVICE: GENERATED_ADMIN,
+        GATEWAY: {"name": "gateway-admin", "key": "SIE_ADMIN_TOKEN"},
+    }
+    assert env_entries(docs, "SIE_CONFIG_SERVICE_TOKEN") == dict.fromkeys(CONFIG_CONSUMERS, GENERATED_READ)
 
 
 @pytest.mark.parametrize("key", [None, "", " "])
@@ -295,6 +354,34 @@ def test_empty_admin_token_key_fails_the_render(tmp_path: Path, key: str | None)
     result = render_chart(tmp_path, {**L4_POOL, "config": {"auth": {"adminTokenSecretKey": key}}})
     assert result.returncode != 0
     assert "config.auth.adminTokenSecretKey is empty" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("values", "error"),
+    [
+        ({"config": {"auth": {"readTokenSecretKey": ""}}}, "config.auth.readTokenSecretKey is empty"),
+        ({"config": {"auth": {"readTokenSecretKey": " "}}}, "config.auth.readTokenSecretKey is empty"),
+        (
+            {"gateway": {"auth": {"adminTokenSecretName": "gateway-admin", "adminTokenSecretKey": ""}}},
+            "gateway.auth.adminTokenSecretKey is empty",
+        ),
+        (
+            {"gateway": {"auth": {"adminTokenSecretName": "gateway-admin", "adminTokenSecretKey": " "}}},
+            "gateway.auth.adminTokenSecretKey is empty",
+        ),
+    ],
+)
+def test_empty_token_key_fails_the_render(tmp_path: Path, values: dict, error: str) -> None:
+    result = render_chart(tmp_path, {**L4_POOL, **values})
+    assert result.returncode != 0
+    assert error in result.stderr
+
+
+@pytest.mark.parametrize("admin", [{}, {"adminTokenSecretName": "operator-admin"}])
+def test_admin_token_without_a_read_token_fails_the_render(tmp_path: Path, admin: dict) -> None:
+    result = render_chart(tmp_path, {**L4_POOL, "config": {"auth": {**admin, "generateReadToken": False}}})
+    assert result.returncode != 0
+    assert "sie-config has an admin token but no read token" in result.stderr
 
 
 @pytest.mark.parametrize("telemetry", [{}, {"deploymentEnv": "production"}, {"deploymentEnv": " Prod "}])
@@ -322,20 +409,23 @@ def test_non_production_config_service_may_opt_out_of_the_token(tmp_path: Path, 
         "telemetry": {"deploymentEnv": deployment_env},
     }
     docs = rendered_documents(tmp_path, values)
-    assert admin_token_secrets(docs) == []
-    assert admin_token_refs(docs) == {}
+    assert token_secrets(docs) == {}
+    assert env_entries(docs, "SIE_ADMIN_TOKEN") == {}
+    assert env_entries(docs, "SIE_CONFIG_READ_TOKEN") == {}
+    assert env_entries(docs, "SIE_CONFIG_SERVICE_TOKEN") == dict.fromkeys(CONFIG_CONSUMERS, "")
 
 
+@pytest.mark.parametrize("setting", ["admin", "read"])
 @pytest.mark.parametrize(
     ("token", "error"),
     [
-        ("", "Secret admin exists but has no SIE_ADMIN_TOKEN key"),
-        ("a" * 31, "Secret admin holds a SIE_ADMIN_TOKEN value shorter than 32 characters"),
+        ("", "Secret generated exists but has no TOKEN_KEY key. If config.auth.{setting}TokenSecretKey was renamed"),
+        ("a" * 31, "Secret generated holds a TOKEN_KEY value shorter than 32 characters"),
         ("a" * 32, None),
     ],
 )
-def test_reused_admin_token_must_exist_and_have_at_least_32_characters(
-    tmp_path: Path, token: str, error: str | None
+def test_reused_token_must_exist_and_have_at_least_32_characters(
+    tmp_path: Path, setting: str, token: str, error: str | None
 ) -> None:
     chart = tmp_path / "helper-check"
     (chart / "templates").mkdir(parents=True)
@@ -343,8 +433,9 @@ def test_reused_admin_token_must_exist_and_have_at_least_32_characters(
     shutil.copy(ROOT / helm.CHART_DIR / "templates" / "_helpers.tpl", chart / "templates" / "_helpers.tpl")
     data = base64.b64encode(token.encode()).decode()
     (chart / "templates" / "check.yaml").write_text(
-        '{{- include "sie-cluster.config.validateReusedAdminToken" '
-        f'(dict "name" "admin" "key" "SIE_ADMIN_TOKEN" "data" "{data}") }}}}\n',
+        '{{- include "sie-cluster.config.validateReusedToken" '
+        f'(dict "name" "generated" "key" "TOKEN_KEY" "data" "{data}" '
+        f'"keySetting" "config.auth.{setting}TokenSecretKey" "nameSetting" "config.auth.{setting}TokenSecretName") }}}}\n',
         encoding="utf-8",
     )
     result = subprocess.run(
@@ -358,4 +449,4 @@ def test_reused_admin_token_must_exist_and_have_at_least_32_characters(
         assert result.returncode == 0, result.stderr
     else:
         assert result.returncode != 0
-        assert error in result.stderr
+        assert error.format(setting=setting) in result.stderr

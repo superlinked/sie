@@ -260,6 +260,15 @@ spec:
                   name: {{ .Values.gateway.auth.tokenSecretName }}
                   key: {{ .Values.gateway.auth.tokenSecretKey }}
             {{- end }}
+            {{- with dig "adminTokenSecretName" "" (.Values.gateway.auth | default dict) }}
+            # Inbound admin token for POST, PUT, and DELETE under /v1/pools,
+            # /v1/admin, and /v1/configs. Separate from the sie-config tokens.
+            - name: SIE_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ . }}
+                  key: {{ include "sie-cluster.gateway.adminTokenSecretKey" $ }}
+            {{- end }}
             {{- if .Values.nats.enabled }}
             - name: SIE_NATS_URL
               value: {{ .Values.nats.url | default (printf "nats://%s-nats:4222" .Release.Name) | quote }}
@@ -300,16 +309,8 @@ spec:
             # packages/sie_gateway/docs/architecture-guide.md section 4.
             - name: SIE_CONFIG_SERVICE_URL
               value: {{ include "sie-cluster.config.internalUrl" . | quote }}
-            {{- with include "sie-cluster.config.adminTokenSecretName" . }}
-            # Shared admin secret. Gateway presents it as a bearer token on
-            # both GET /v1/configs/export (admin-auth) and
-            # GET /v1/configs/epoch. Both services read the same secret.
-            - name: SIE_ADMIN_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: {{ . }}
-                  key: {{ include "sie-cluster.config.adminTokenSecretKey" $ }}
-            {{- end }}
+            # Read-scoped sie-config token for the bootstrap and poll reads.
+            {{- include "sie-cluster.config.serviceTokenEnv" . | nindent 12 }}
             {{- end }}
             {{- if $payloadStoreUrl }}
             - name: SIE_PAYLOAD_STORE_URL
