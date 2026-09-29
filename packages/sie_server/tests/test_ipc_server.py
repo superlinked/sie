@@ -1926,6 +1926,30 @@ class TestBundleConfigView:
         assert accepted.unsupported_models == ["served/changed"]
 
     @pytest.mark.asyncio
+    async def test_rejected_per_model_options_are_reported_when_hashed_fields_change(self) -> None:
+        def request(epoch: int, model_config: str) -> ReplaceModelConfigsRequest:
+            return ReplaceModelConfigsRequest(
+                bundle_id="sglang",
+                epoch=epoch,
+                bundle_config_hash="",
+                models=[ReplaceModelConfigEntry(model_id="Qwen/Qwen3.6-27B", model_config=model_config)],
+            )
+
+        executor = QueueExecutor(ModelRegistry(models_dir=None))
+        served = await executor.replace_model_configs(request(7, _qwen_profile_variant_yaml()))
+
+        schema_only = await executor.replace_model_configs(
+            request(8, "unknown_field: 1\n" + _qwen_profile_variant_yaml())
+        )
+        assert schema_only.unsupported_models == []
+        assert schema_only.bundle_config_hash == served.bundle_config_hash
+
+        legacy_lora = await executor.replace_model_configs(request(9, _qwen_invalid_legacy_lora_yaml()))
+        assert legacy_lora.unsupported_models
+        assert all(model.startswith("Qwen/Qwen3.6-27B") for model in legacy_lora.unsupported_models)
+        assert legacy_lora.bundle_config_hash != served.bundle_config_hash
+
+    @pytest.mark.asyncio
     async def test_unsupported_models_roundtrip_over_ipc(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(ws_module, "_bundle_adapter_modules", lambda bundle_id: frozenset())
         executor = QueueExecutor(ModelRegistry(models_dir=None))
