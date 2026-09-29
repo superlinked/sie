@@ -330,11 +330,12 @@ render when it is empty or null.
 "true" when the chart generates the admin-token Secret: no
 config.auth.adminTokenSecretName, and config.auth.generateAdminToken is not
 false. An absent key counts as true, so `helm upgrade --reuse-values` from a
-release that predates the key keeps the default.
+release that predates the key keeps the default. An empty value also counts as
+true.
 */}}
 {{- define "sie-cluster.config.generatesAdminToken" -}}
 {{- $auth := .Values.config.auth | default dict -}}
-{{- if and (not $auth.adminTokenSecretName) (dig "generateAdminToken" true $auth) -}}
+{{- if and (not $auth.adminTokenSecretName) (ne (dig "generateAdminToken" true $auth | toString | trim | lower) "false") -}}
 true
 {{- end -}}
 {{- end }}
@@ -372,13 +373,13 @@ takes the default; an empty value fails the render.
 {{/*
 "true" when the chart generates the read-token Secret: sie-config has an admin
 token, config.auth.readTokenSecretName is empty, and
-config.auth.generateReadToken is not false. Absent keys take their defaults, so
-`helm upgrade --reuse-values` from a release that predates them generates the
-Secret.
+config.auth.generateReadToken is not false. Absent keys take their defaults,
+so `helm upgrade --reuse-values` from a release that predates them generates
+the Secret. An empty generateReadToken also counts as true.
 */}}
 {{- define "sie-cluster.config.generatesReadToken" -}}
 {{- $auth := .Values.config.auth | default dict -}}
-{{- if and (include "sie-cluster.config.adminTokenSecretName" .) (not (dig "readTokenSecretName" "" $auth)) (dig "generateReadToken" true $auth) -}}
+{{- if and (include "sie-cluster.config.adminTokenSecretName" .) (not (dig "readTokenSecretName" "" $auth)) (ne (dig "generateReadToken" true $auth | toString | trim | lower) "false") -}}
 true
 {{- end -}}
 {{- end }}

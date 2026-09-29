@@ -308,7 +308,10 @@ def test_chart_defaults_render_without_overrides(tmp_path: Path) -> None:
     assert container_env(docs, "sie-sie-cluster-config", "config")["SIE_DEPLOYMENT_ENV"]["value"] == "production"
 
 
-@pytest.mark.parametrize("values", [{}, PREDATING_TOKEN_KEYS])
+EMPTY_GENERATION_FLAGS = {"config": {"auth": {"generateAdminToken": "", "generateReadToken": " "}}}
+
+
+@pytest.mark.parametrize("values", [{}, PREDATING_TOKEN_KEYS, EMPTY_GENERATION_FLAGS])
 def test_generated_tokens_are_wired_by_scope(tmp_path: Path, values: dict) -> None:
     docs = rendered_documents(tmp_path, {**L4_POOL, **values})
     secrets = token_secrets(docs)
@@ -377,9 +380,10 @@ def test_empty_token_key_fails_the_render(tmp_path: Path, values: dict, error: s
     assert error in result.stderr
 
 
+@pytest.mark.parametrize("disabled", [False, "false", " False "])
 @pytest.mark.parametrize("admin", [{}, {"adminTokenSecretName": "operator-admin"}])
-def test_admin_token_without_a_read_token_fails_the_render(tmp_path: Path, admin: dict) -> None:
-    result = render_chart(tmp_path, {**L4_POOL, "config": {"auth": {**admin, "generateReadToken": False}}})
+def test_admin_token_without_a_read_token_fails_the_render(tmp_path: Path, admin: dict, disabled: object) -> None:
+    result = render_chart(tmp_path, {**L4_POOL, "config": {"auth": {**admin, "generateReadToken": disabled}}})
     assert result.returncode != 0
     assert "sie-config has an admin token but no read token" in result.stderr
 

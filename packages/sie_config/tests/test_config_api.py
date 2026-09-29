@@ -612,6 +612,7 @@ class TestConfigAPIEdgeCases:
         # armed by EITHER env signal (SIE_ENV managed / SIE_DEPLOYMENT_ENV Helm).
         monkeypatch.delenv("SIE_ADMIN_TOKEN", raising=False)
         monkeypatch.delenv("SIE_AUTH_TOKEN", raising=False)
+        monkeypatch.delenv("SIE_CONFIG_READ_TOKEN", raising=False)
         monkeypatch.delenv("SIE_ENV", raising=False)
         monkeypatch.delenv("SIE_DEPLOYMENT_ENV", raising=False)
         monkeypatch.setenv(env_var, "production")
@@ -639,6 +640,7 @@ class TestConfigAPIEdgeCases:
         # Self-host / dev (no prod env signal) keeps the open-localhost posture.
         monkeypatch.delenv("SIE_ADMIN_TOKEN", raising=False)
         monkeypatch.delenv("SIE_AUTH_TOKEN", raising=False)
+        monkeypatch.delenv("SIE_CONFIG_READ_TOKEN", raising=False)
         monkeypatch.delenv("SIE_ENV", raising=False)
         monkeypatch.delenv("SIE_DEPLOYMENT_ENV", raising=False)
         app = _create_test_app(self._bundles, self._models)
