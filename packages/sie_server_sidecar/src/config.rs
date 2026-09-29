@@ -158,57 +158,87 @@ impl std::fmt::Debug for WorkerConfig {
     /// Hand-written so the bearer tokens (`gateway_api_key`,
     /// `config_service_token`) print only as present or absent.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Destructured without `..` so a new field fails to compile until it is
+        // listed here, and so cannot be printed unredacted or silently omitted.
+        let WorkerConfig {
+            nats_url,
+            local_socket_path,
+            pool,
+            bundle,
+            ipc_socket_path,
+            ipc_socket_paths,
+            ipc_pool_size,
+            ipc_request_timeout_s,
+            model_ready_timeout_s,
+            payload_store_url,
+            gateway_url,
+            gateway_api_key,
+            pool_admission_enabled,
+            pool_admission_check_interval_ms,
+            pool_admission_pause_ms,
+            pool_admission_stale_after_ms,
+            probe_port,
+            worker_id,
+            ping_interval_ms,
+            ready_stale_mult,
+            machine_profile,
+            gpu_count,
+            bundle_config_hash,
+            config_service_url,
+            config_service_token,
+            config_poll_interval_ms,
+            config_full_export_interval_ms,
+            nats_config_trusted_producers,
+            health_publish_interval_ms,
+        } = self;
         f.debug_struct("WorkerConfig")
-            .field("nats_url", &self.nats_url)
-            .field("local_socket_path", &self.local_socket_path)
-            .field("pool", &self.pool)
-            .field("bundle", &self.bundle)
-            .field("ipc_socket_path", &self.ipc_socket_path)
-            .field("ipc_socket_paths", &self.ipc_socket_paths)
-            .field("ipc_pool_size", &self.ipc_pool_size)
-            .field("ipc_request_timeout_s", &self.ipc_request_timeout_s)
-            .field("model_ready_timeout_s", &self.model_ready_timeout_s)
-            .field("payload_store_url", &self.payload_store_url)
-            .field("gateway_url", &self.gateway_url)
+            .field("nats_url", nats_url)
+            .field("local_socket_path", local_socket_path)
+            .field("pool", pool)
+            .field("bundle", bundle)
+            .field("ipc_socket_path", ipc_socket_path)
+            .field("ipc_socket_paths", ipc_socket_paths)
+            .field("ipc_pool_size", ipc_pool_size)
+            .field("ipc_request_timeout_s", ipc_request_timeout_s)
+            .field("model_ready_timeout_s", model_ready_timeout_s)
+            .field("payload_store_url", payload_store_url)
+            .field("gateway_url", gateway_url)
             .field(
                 "gateway_api_key",
-                &self.gateway_api_key.as_ref().map(|_| "<redacted>"),
+                &gateway_api_key.as_ref().map(|_| "<redacted>"),
             )
-            .field("pool_admission_enabled", &self.pool_admission_enabled)
+            .field("pool_admission_enabled", pool_admission_enabled)
             .field(
                 "pool_admission_check_interval_ms",
-                &self.pool_admission_check_interval_ms,
+                pool_admission_check_interval_ms,
             )
-            .field("pool_admission_pause_ms", &self.pool_admission_pause_ms)
+            .field("pool_admission_pause_ms", pool_admission_pause_ms)
             .field(
                 "pool_admission_stale_after_ms",
-                &self.pool_admission_stale_after_ms,
+                pool_admission_stale_after_ms,
             )
-            .field("probe_port", &self.probe_port)
-            .field("worker_id", &self.worker_id)
-            .field("ping_interval_ms", &self.ping_interval_ms)
-            .field("ready_stale_mult", &self.ready_stale_mult)
-            .field("machine_profile", &self.machine_profile)
-            .field("gpu_count", &self.gpu_count)
-            .field("bundle_config_hash", &self.bundle_config_hash)
-            .field("config_service_url", &self.config_service_url)
+            .field("probe_port", probe_port)
+            .field("worker_id", worker_id)
+            .field("ping_interval_ms", ping_interval_ms)
+            .field("ready_stale_mult", ready_stale_mult)
+            .field("machine_profile", machine_profile)
+            .field("gpu_count", gpu_count)
+            .field("bundle_config_hash", bundle_config_hash)
+            .field("config_service_url", config_service_url)
             .field(
                 "config_service_token",
-                &self.config_service_token.as_ref().map(|_| "<redacted>"),
+                &config_service_token.as_ref().map(|_| "<redacted>"),
             )
-            .field("config_poll_interval_ms", &self.config_poll_interval_ms)
+            .field("config_poll_interval_ms", config_poll_interval_ms)
             .field(
                 "config_full_export_interval_ms",
-                &self.config_full_export_interval_ms,
+                config_full_export_interval_ms,
             )
             .field(
                 "nats_config_trusted_producers",
-                &self.nats_config_trusted_producers,
+                nats_config_trusted_producers,
             )
-            .field(
-                "health_publish_interval_ms",
-                &self.health_publish_interval_ms,
-            )
+            .field("health_publish_interval_ms", health_publish_interval_ms)
             .finish()
     }
 }

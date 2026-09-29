@@ -48,16 +48,23 @@ pub struct ReconcilerConfig {
 impl std::fmt::Debug for ReconcilerConfig {
     /// Hand-written so `admin_token` prints only as present or absent.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Destructured without `..` so a new field fails to compile until it is
+        // listed here, and so cannot be printed unredacted or silently omitted.
+        let ReconcilerConfig {
+            base_url,
+            admin_token,
+            bundle,
+            pool,
+            poll_interval,
+            full_export_interval,
+        } = self;
         f.debug_struct("ReconcilerConfig")
-            .field("base_url", &self.base_url)
-            .field(
-                "admin_token",
-                &self.admin_token.as_ref().map(|_| "<redacted>"),
-            )
-            .field("bundle", &self.bundle)
-            .field("pool", &self.pool)
-            .field("poll_interval", &self.poll_interval)
-            .field("full_export_interval", &self.full_export_interval)
+            .field("base_url", base_url)
+            .field("admin_token", &admin_token.as_ref().map(|_| "<redacted>"))
+            .field("bundle", bundle)
+            .field("pool", pool)
+            .field("poll_interval", poll_interval)
+            .field("full_export_interval", full_export_interval)
             .finish()
     }
 }
