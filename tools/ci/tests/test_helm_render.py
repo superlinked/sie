@@ -799,6 +799,12 @@ def test_mcp_edge_ingress_renders_with_tls_or_the_plaintext_opt_in(tmp_path: Pat
     assert len(mcp_edge_ingresses(documents)) == 1
 
 
+def test_mcp_edge_ingress_refuses_self_signed_mode_without_its_certificate(tmp_path: Path) -> None:
+    tls = {"enabled": True, "mode": "self-signed", "selfSigned": {"leaf": {"dnsNames": ["mcp.example.com"]}}}
+    stderr = render_error(tmp_path, {"mcpEdge": MCP_EDGE, "ingress": {"tlsConfig": tls}})
+    assert "nothing issues the MCP edge certificate" in stderr
+
+
 def test_mcp_edge_plaintext_opt_in_accepts_only_booleans(tmp_path: Path) -> None:
     mcp_edge = {**MCP_EDGE, "ingress": {**MCP_EDGE["ingress"], "allowPlaintext": "false"}}
     assert "mcpEdge.ingress.allowPlaintext must be a boolean" in render_error(tmp_path, {"mcpEdge": mcp_edge})

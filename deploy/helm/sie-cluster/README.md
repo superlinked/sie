@@ -1191,7 +1191,10 @@ Ingress), `ingress.tlsConfig.mode=disabled` as an explicit statement that TLS
 terminates upstream of the Ingress, or the explicit `ingress.allowPlaintext=true`.
 The MCP edge Ingress (`mcpEdge.ingress`) carries connector secrets and OAuth
 tokens and follows the same TLS rule, with `mcpEdge.ingress.allowPlaintext=true`
-as its explicit opt-in.
+as its explicit opt-in. Its certificate lives in its own Secret,
+`<release fullname>-mcp-tls`: `cert-manager` mode issues it, `byo` mode expects
+you to create it, and `self-signed` mode does not issue it, so the chart refuses
+`self-signed` with the MCP edge Ingress.
 
 Both opt-ins accept only a YAML boolean; a quoted `"false"` fails the render.
 `gateway.auth.mode` must be `none`, `static`, or `token` exactly as the gateway

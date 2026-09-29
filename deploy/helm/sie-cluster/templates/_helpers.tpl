@@ -991,6 +991,9 @@ terminates upstream) or the explicit mcpEdge.ingress.allowPlaintext opt-in.
 {{- if not (or $tls.enabled $upstreamTls $allowPlaintext) -}}
 {{- fail "Refusing to render the MCP edge Ingress without TLS: it carries connector secrets and OAuth tokens. Set ingress.tlsConfig.enabled=true, set ingress.tlsConfig.mode=disabled when TLS terminates upstream of the Ingress, or set mcpEdge.ingress.allowPlaintext=true to serve plain HTTP." -}}
 {{- end -}}
+{{- if and $tls.enabled (eq (toString $tls.mode) "self-signed") -}}
+{{- fail (printf "ingress.tlsConfig.mode=self-signed issues its certificate into %q for the gateway hosts only; nothing issues the MCP edge certificate (Secret %q) for mcpEdge.ingress.host. Use ingress.tlsConfig.mode=cert-manager, or mode=byo with that Secret created, or mode=disabled when TLS terminates upstream of the Ingress." (toString $tls.secretName) (printf "%s-tls" (include "sie-cluster.mcpEdge.serviceName" .))) -}}
+{{- end -}}
 {{- end }}
 
 {{/*
