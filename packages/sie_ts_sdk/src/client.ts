@@ -362,11 +362,23 @@ function urlOrigin(url: string): string | undefined {
   }
 }
 
-/** `SIE_API_KEY`, scoped to the origin named by `SIE_BASE_URL`. */
-function envApiKeyFor(baseUrl: string): string | undefined {
+/**
+ * `SIE_API_KEY`, scoped to the origin named by `SIE_BASE_URL`. Connection
+ * requests reuse the client's key, so a control-plane URL on another origin
+ * requires an explicit key.
+ */
+function envApiKeyFor(baseUrl: string, controlPlaneUrl: string | undefined): string | undefined {
   const apiKey = readEnv(SIE_API_KEY_ENV);
   const envOrigin = urlOrigin(readEnv(SIE_BASE_URL_ENV) ?? "");
-  return apiKey && envOrigin !== undefined && urlOrigin(baseUrl) === envOrigin ? apiKey : undefined;
+  if (!apiKey || envOrigin === undefined || urlOrigin(baseUrl) !== envOrigin) {
+    return undefined;
+  }
+  if (controlPlaneUrl !== undefined && urlOrigin(controlPlaneUrl) !== envOrigin) {
+    throw new TypeError(
+      `${SIE_API_KEY_ENV} is scoped to the ${SIE_BASE_URL_ENV} origin and is not sent to controlPlaneUrl on another origin; pass apiKey explicitly.`,
+    );
+  }
+  return apiKey;
 }
 
 const CONTENT_SAFE_MEDIA_TYPES = new Set([
@@ -1007,7 +1019,7 @@ export class SIEClient {
     // for the same MILLISECONDS value. `timeoutMs` wins if both are set.
     this.timeout = options.timeoutMs ?? options.timeout ?? DEFAULT_TIMEOUT;
     this.gpu = options.gpu;
-    this.apiKey = options.apiKey ?? envApiKeyFor(this.baseUrl);
+    this.apiKey = options.apiKey ?? envApiKeyFor(this.baseUrl, options.controlPlaneUrl);
     // BREAKING CHANGE (0.7): default flipped from `false` to `true` to match
     // the Python SDK (`wait_for_capacity=True`). Callers that relied on
     // fail-fast 503 PROVISIONING / connect-error behaviour must now pass

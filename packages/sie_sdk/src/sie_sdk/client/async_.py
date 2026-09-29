@@ -431,8 +431,9 @@ class SIEAsyncClient:
         api_key: Optional API key for authentication (sent as Bearer token).
             When omitted, the ``SIE_API_KEY`` environment variable is used only if
             ``base_url`` has the same origin as ``SIE_BASE_URL`` (including when
-            ``base_url`` itself comes from ``SIE_BASE_URL``); pass ``""`` to send
-            no credential.
+            ``base_url`` itself comes from ``SIE_BASE_URL``); with a
+            ``control_plane_url`` on another origin the key must be passed
+            explicitly. Pass ``""`` to send no credential.
         gpu: GPU type for requests (e.g., "l4", "a100-80gb"). Can be overridden per-call.
         options: Options dict for requests. Merged with per-call options (per-call wins).
         pool: Resource pool spec for isolated capacity. Created lazily on first request.
@@ -491,7 +492,7 @@ class SIEAsyncClient:
         read_timeout_s: float | None = None,
     ) -> None:
         base_url = resolve_base_url(base_url)
-        api_key = resolve_api_key(api_key, base_url)
+        api_key = resolve_api_key(api_key, base_url, control_plane_url)
         # Normalize base_url (remove trailing slash)
         validate_base_url(base_url)
         self._base_url = base_url.rstrip("/")

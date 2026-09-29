@@ -171,21 +171,29 @@ def _url_origin(url: str) -> tuple[str, str, int] | None:
     return scheme, parts.hostname.lower(), port or (443 if scheme == "https" else 80)
 
 
-def resolve_api_key(api_key: str | None, base_url: str) -> str | None:
+def resolve_api_key(api_key: str | None, base_url: str, control_plane_url: str | None = None) -> str | None:
     """Return ``api_key``, or ``SIE_API_KEY`` when it is omitted and ``base_url`` is the ``SIE_BASE_URL`` origin.
 
     An explicit value, including an empty string, always wins, so a caller can
     opt out of the environment credential. The environment key is scoped to
-    the origin named by ``SIE_BASE_URL``, so a client built for any other URL
-    never sends it.
+    the origin named by ``SIE_BASE_URL``: a client built for any other URL
+    does not select it, and a client whose ``control_plane_url`` names another
+    origin must pass its key explicitly, because connection requests reuse the
+    client's key.
     """
     if api_key is not None:
         return api_key
     env_api_key = os.environ.get(SIE_API_KEY_ENV, "").strip()
     env_origin = _url_origin(os.environ.get(SIE_BASE_URL_ENV, "").strip())
-    if env_api_key and env_origin is not None and _url_origin(base_url) == env_origin:
-        return env_api_key
-    return None
+    if not env_api_key or env_origin is None or _url_origin(base_url) != env_origin:
+        return None
+    if control_plane_url is not None and _url_origin(control_plane_url) != env_origin:
+        msg = (
+            f"{SIE_API_KEY_ENV} is scoped to the {SIE_BASE_URL_ENV} origin and is not sent to "
+            "control_plane_url on another origin; pass api_key explicitly"
+        )
+        raise ValueError(msg)
+    return env_api_key
 
 
 def url_origin_for_logging(url: str) -> str:

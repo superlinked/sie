@@ -80,6 +80,25 @@ describe("SIEClient environment fallbacks", () => {
     },
   );
 
+  it("requires an explicit key for a controlPlaneUrl on another origin", async () => {
+    vi.stubEnv("SIE_BASE_URL", "https://gateway.example.test");
+    vi.stubEnv("SIE_API_KEY", "env-key");
+
+    expect(
+      () => new SIEClient(undefined, { controlPlaneUrl: "https://control.example.test" }),
+    ).toThrow(/controlPlaneUrl/);
+    const sameOrigin = new SIEClient(undefined, {
+      controlPlaneUrl: "https://gateway.example.test/control",
+    });
+    expect(await encodeAuthorization(sameOrigin)).toBe("Bearer env-key");
+    mockFetch.mockReset();
+    const explicit = new SIEClient(undefined, {
+      apiKey: "explicit-key",
+      controlPlaneUrl: "https://control.example.test",
+    });
+    expect(await encodeAuthorization(explicit)).toBe("Bearer explicit-key");
+  });
+
   it("treats an unreadable environment as unset", () => {
     const original = globalThis.process.env;
     Object.defineProperty(globalThis.process, "env", {

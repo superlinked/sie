@@ -98,6 +98,38 @@ def test_sync_client_withholds_env_key_from_other_origins(
     assert "Authorization" not in sync_headers["headers"]
 
 
+def test_clients_require_an_explicit_key_for_a_cross_origin_control_plane(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SIE_BASE_URL", "https://gateway.example.com")
+    monkeypatch.setenv("SIE_API_KEY", "env-key")
+
+    with pytest.raises(ValueError, match="control_plane_url"):
+        SIEClient(control_plane_url="https://control.example.com")
+    with pytest.raises(ValueError, match="control_plane_url"):
+        SIEAsyncClient(control_plane_url="https://control.example.com")
+
+
+def test_sync_client_keeps_env_key_for_a_same_origin_control_plane(
+    monkeypatch: pytest.MonkeyPatch, sync_headers: dict[str, Any]
+) -> None:
+    monkeypatch.setenv("SIE_BASE_URL", "https://gateway.example.com")
+    monkeypatch.setenv("SIE_API_KEY", "env-key")
+
+    SIEClient(control_plane_url="https://gateway.example.com/control")
+
+    assert sync_headers["headers"]["Authorization"] == "Bearer env-key"
+
+
+def test_sync_client_explicit_key_may_go_to_a_cross_origin_control_plane(
+    monkeypatch: pytest.MonkeyPatch, sync_headers: dict[str, Any]
+) -> None:
+    monkeypatch.setenv("SIE_BASE_URL", "https://gateway.example.com")
+    monkeypatch.setenv("SIE_API_KEY", "env-key")
+
+    SIEClient(api_key="explicit-key", control_plane_url="https://control.example.com")
+
+    assert sync_headers["headers"]["Authorization"] == "Bearer explicit-key"
+
+
 def test_sync_client_empty_api_key_opts_out_of_env_key(
     monkeypatch: pytest.MonkeyPatch, sync_headers: dict[str, Any]
 ) -> None:
