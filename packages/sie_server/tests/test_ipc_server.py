@@ -1643,6 +1643,29 @@ profiles:
         assert all(registry.get_config(name) is config for name, config in previous.items())
 
     @pytest.mark.asyncio
+    async def test_replace_model_configs_retains_parsed_identity_when_export_id_is_empty(self) -> None:
+        registry = ModelRegistry(models_dir=None)
+        executor = QueueExecutor(registry)
+
+        def request(model_config: str) -> ReplaceModelConfigsRequest:
+            return ReplaceModelConfigsRequest(
+                bundle_id="sglang",
+                epoch=8,
+                bundle_config_hash="",
+                models=[ReplaceModelConfigEntry(model_id="", model_config=model_config)],
+            )
+
+        await executor.replace_model_configs(request(_qwen_profile_variant_yaml()))
+        previous = registry.get_configs_snapshot()
+        version = registry._config_version
+
+        resp = await executor.replace_model_configs(request(_qwen_invalid_legacy_lora_yaml()))
+
+        assert resp.applied_models == sorted(previous)
+        assert registry.get_configs_snapshot() == previous
+        assert registry._config_version == version
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("invalid_first", [False, True])
     @pytest.mark.parametrize(
         "invalid_config",

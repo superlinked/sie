@@ -524,8 +524,6 @@ def _parse_exported_model_config(entry: ReplaceModelConfigEntry) -> ModelConfig:
     if entry.model_id and model_config.sie_id != entry.model_id:
         msg = f"model_id mismatch: export={entry.model_id!r} config={model_config.sie_id!r}"
         raise ValueError(msg)
-    for expanded in expand_profile_variants([model_config]).values():
-        validate_no_legacy_scalar_lora_id(name=expanded.sie_id, config=expanded)
     return model_config
 
 
@@ -644,16 +642,21 @@ class QueueExecutor:
         configs: list[ModelConfig] = []
         rejected: set[str] = set()
         for entry in req.models:
+            model_id = entry.model_id
             try:
-                configs.append(_parse_exported_model_config(entry))
+                model_config = _parse_exported_model_config(entry)
+                model_id = model_config.sie_id
+                for expanded in expand_profile_variants([model_config]).values():
+                    validate_no_legacy_scalar_lora_id(name=expanded.sie_id, config=expanded)
+                configs.append(model_config)
             except (TypeError, ValueError, yaml.YAMLError) as exc:
                 logger.warning(
                     "Rejected exported model config %r for bundle %s; keeping its current config, if any: %s",
-                    entry.model_id,
+                    model_id,
                     req.bundle_id,
                     exc,
                 )
-                rejected.add(entry.model_id)
+                rejected.add(model_id)
 
         invalidated = await self._registry.replace_configs_async(configs, retained_models=rejected)
         for model_id in invalidated:
