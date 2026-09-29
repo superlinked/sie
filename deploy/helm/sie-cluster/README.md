@@ -930,11 +930,13 @@ kubectl get secret -n sie sie-cluster-config-admin-token \
 
 `telemetry.deploymentEnv` is also sie-config's deployment environment
 (`SIE_DEPLOYMENT_ENV`). With `production` (the default) or `prod`, sie-config
-refuses every `/v1/configs` request unless an admin token is configured, so the
-chart fails the render when `config.auth.generateAdminToken=false`,
-`config.auth.adminTokenSecretName` is empty, and `telemetry.deploymentEnv` is
-production. Any other value lets sie-config serve the API without a token,
-which leaves catalog writes open to anything that can reach the Service.
+refuses every `/v1/configs` request unless an admin token is configured. Any
+other value lets sie-config serve the API without a token, which leaves catalog
+writes open to anything that can reach the Service. With
+`config.auth.generateAdminToken=false` and `config.auth.adminTokenSecretName`
+empty, the chart therefore renders only when `telemetry.deploymentEnv` is
+`staging`, `development`, or `ci`, and fails the render for production and
+for any unrecognized value.
 
 The gateway reports `503` on `/readyz` until it has loaded its first complete
 catalog from sie-config, so a missing or mismatched token keeps new gateway

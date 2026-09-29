@@ -120,9 +120,10 @@ config:
     # without cluster access (`helm template`, GitOps controllers) cannot read
     # the existing Secret and produce a new token on every render; use
     # adminTokenSecretName there.
-    # Setting this to false with no adminTokenSecretName fails the render while
-    # telemetry.deploymentEnv is production, because sie-config would refuse
-    # every /v1/configs request.
+    # Setting this to false with no adminTokenSecretName fails the render
+    # unless telemetry.deploymentEnv is staging, development, or ci: in
+    # production sie-config would refuse every /v1/configs request, and any
+    # other value would leave the API unauthenticated.
     generateAdminToken: true
 
   # -- Liveness/readiness/startup probe timing. The httpGet path/port are

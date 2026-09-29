@@ -355,14 +355,19 @@ value, empty when the key is missing).
 {{- end }}
 
 {{/*
-Fail the render when sie-config would run in a production environment without
-an admin token: it would refuse every /v1/configs request, so the gateway and
-worker sidecars could never load the model catalog.
+Fail the render when sie-config would run without an admin token outside
+staging, development, or ci. In production ("prod" or "production") it would
+refuse every /v1/configs request, so the gateway and worker sidecars could never
+load the model catalog; any other value would leave the API unauthenticated.
 */}}
 {{- define "sie-cluster.config.validateAuth" -}}
+{{- if not (include "sie-cluster.config.adminTokenSecretName" .) -}}
 {{- $env := include "sie-cluster.config.deploymentEnv" . | trim | lower -}}
-{{- if and (has $env (list "prod" "production")) (not (include "sie-cluster.config.adminTokenSecretName" .)) -}}
+{{- if has $env (list "prod" "production") -}}
 {{- fail (printf "sie-config would run with telemetry.deploymentEnv=%q and no admin token (config.auth.generateAdminToken=false and config.auth.adminTokenSecretName is empty), so it would refuse every /v1/configs request and the gateway could not load the model catalog. Set config.auth.adminTokenSecretName to an existing Secret, or set config.auth.generateAdminToken=true so the chart generates one." $env) -}}
+{{- else if not (has $env (list "staging" "development" "ci")) -}}
+{{- fail (printf "sie-config would run with telemetry.deploymentEnv=%q and no admin token (config.auth.generateAdminToken=false and config.auth.adminTokenSecretName is empty), so it would serve /v1/configs without authentication. Running without a token is supported only for telemetry.deploymentEnv staging, development, or ci. Otherwise set config.auth.adminTokenSecretName to an existing Secret, or set config.auth.generateAdminToken=true so the chart generates one." $env) -}}
+{{- end -}}
 {{- end -}}
 {{- end }}
 

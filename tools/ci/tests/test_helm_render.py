@@ -298,11 +298,21 @@ def test_production_config_service_without_a_token_fails_the_render(tmp_path: Pa
     assert "or set config.auth.generateAdminToken=true so the chart generates one" in result.stderr
 
 
-def test_non_production_config_service_may_opt_out_of_the_token(tmp_path: Path) -> None:
+@pytest.mark.parametrize("deployment_env", ["prodcution", "test", " "])
+def test_unrecognized_environment_without_a_token_fails_the_render(tmp_path: Path, deployment_env: str) -> None:
+    values = {"config": {"auth": {"generateAdminToken": False}}, "telemetry": {"deploymentEnv": deployment_env}}
+    result = render_chart(tmp_path, values)
+    assert result.returncode != 0
+    assert "would serve /v1/configs without authentication" in result.stderr
+    assert "supported only for telemetry.deploymentEnv staging, development, or ci" in result.stderr
+
+
+@pytest.mark.parametrize("deployment_env", ["staging", "development", "ci", " CI "])
+def test_non_production_config_service_may_opt_out_of_the_token(tmp_path: Path, deployment_env: str) -> None:
     values = {
         **L4_POOL,
         "config": {"auth": {"generateAdminToken": False}},
-        "telemetry": {"deploymentEnv": "development"},
+        "telemetry": {"deploymentEnv": deployment_env},
     }
     docs = rendered_documents(tmp_path, values)
     assert admin_token_secrets(docs) == []
