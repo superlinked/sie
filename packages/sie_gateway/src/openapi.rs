@@ -2797,6 +2797,10 @@ pub struct ModelAckBundleStatus {
     pub total_eligible_workers: usize,
     pub acked_workers: Vec<String>,
     pub pending_workers: Vec<String>,
+    /// Workers that report the expected hash but cannot serve this model, for
+    /// example during a rollout that adds its adapter to the bundle.
+    #[serde(default)]
+    pub unsupported_workers: Vec<String>,
     pub acked: bool,
 }
 

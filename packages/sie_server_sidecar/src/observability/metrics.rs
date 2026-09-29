@@ -2305,6 +2305,7 @@ fn bounded_nats_reason(reason: &str) -> &'static str {
         "completed" => "completed",
         "retry" => "retry",
         "pool_not_assigned" => "pool_not_assigned",
+        "model_unsupported" => "model_unsupported",
         "first_delivery" => "first_delivery",
         "redelivery" => "redelivery",
         "metadata_unavailable" => "metadata_unavailable",

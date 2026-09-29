@@ -44,11 +44,23 @@ pub struct WorkerState {
     /// worker side (90/70 thresholds); the gateway just consumes the
     /// bool.
     pub saturated: bool,
+    /// Routable model ids covered by `bundle_config_hash` that this worker
+    /// reported it cannot serve. Empty for workers that predate the field.
+    pub unsupported_models: Vec<String>,
 }
 
 impl WorkerState {
     pub fn healthy(&self) -> bool {
         self.health == WorkerHealth::Healthy
+    }
+
+    /// Whether this worker can serve `model` under its advertised config.
+    /// A worker that sends no list serves every model its hash covers.
+    pub fn supports_model(&self, model: &str) -> bool {
+        !self
+            .unsupported_models
+            .iter()
+            .any(|unsupported| unsupported.eq_ignore_ascii_case(model))
     }
 
     /// Eligible for dispatch: healthy, with at least one ready slot, and not saturated.
@@ -95,6 +107,11 @@ pub struct WorkerInfo {
     pub healthy: bool,
     pub bundle: String,
     pub bundle_config_hash: String,
+    /// Models covered by `bundle_config_hash` that this worker cannot serve,
+    /// for example during a rollout that adds adapters to its bundle. The
+    /// gateway does not route these models to it. Omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unsupported_models: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -208,6 +225,12 @@ pub struct WorkerStatusMessage {
     /// unhealthy. Defaults to false for older workers.
     #[serde(default)]
     pub terminated: bool,
+    /// Routable model ids (`model` or `model:profile`) covered by
+    /// `bundle_config_hash` that the worker cannot serve. Absent from
+    /// workers that predate the field, which serve every model their hash
+    /// covers.
+    #[serde(default)]
+    pub unsupported_models: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -251,6 +274,7 @@ mod tests {
             last_heartbeat: Instant::now(),
             pool_name: String::new(),
             saturated: false,
+            unsupported_models: Vec::new(),
         }
     }
 
@@ -281,6 +305,83 @@ mod tests {
         let json = r#"{"ready": true, "saturated": true}"#;
         let msg: WorkerStatusMessage = serde_json::from_str(json).unwrap();
         assert!(msg.saturated);
+    }
+
+    #[test]
+    fn test_worker_status_message_matches_the_worker_status_wire_fixture() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../wire-fixtures/worker_status.json"))
+                .expect("worker_status fixture parses");
+        let example = &fixture["example"];
+        let msg: WorkerStatusMessage =
+            serde_json::from_value(example.clone()).expect("example parses");
+        assert_eq!(msg.name, example["name"]);
+        assert_eq!(msg.ready, example["ready"]);
+        assert_eq!(msg.terminated, example["terminated"]);
+        assert_eq!(msg.gpu_count, example["gpu_count"]);
+        assert_eq!(
+            msg.total_gpu_slots,
+            example["total_gpu_slots"].as_i64().map(|v| v as i32)
+        );
+        assert_eq!(
+            msg.ready_gpu_slots,
+            example["ready_gpu_slots"].as_i64().map(|v| v as i32)
+        );
+        assert_eq!(msg.machine_profile, example["machine_profile"]);
+        assert_eq!(msg.pool_name, example["pool_name"]);
+        assert_eq!(msg.bundle, example["bundle"]);
+        assert_eq!(msg.bundle_config_hash, example["bundle_config_hash"]);
+        assert_eq!(
+            serde_json::json!(msg.loaded_models),
+            example["loaded_models"]
+        );
+        assert_eq!(
+            msg.queue_depth,
+            example["queue_depth"].as_i64().map(|v| v as i32)
+        );
+        assert_eq!(msg.pending_cost, example["pending_cost"].as_i64());
+        assert_eq!(
+            msg.inflight_batches,
+            example["inflight_batches"].as_i64().map(|v| v as i32)
+        );
+        assert_eq!(msg.saturated, example["saturated"]);
+        assert_eq!(
+            serde_json::json!(msg.unsupported_models),
+            example["unsupported_models"]
+        );
+        let fields: Vec<&str> = fixture["fields"]
+            .as_array()
+            .expect("fields")
+            .iter()
+            .map(|field| field.as_str().expect("field name"))
+            .collect();
+        assert_eq!(
+            fields.len(),
+            example.as_object().expect("example object").len(),
+            "the example must carry every published field"
+        );
+
+        let mut older = example.clone();
+        for field in fixture["omitted_when_empty"]
+            .as_object()
+            .expect("omitted")
+            .keys()
+        {
+            older.as_object_mut().unwrap().remove(field);
+        }
+        let older: WorkerStatusMessage =
+            serde_json::from_value(older).expect("older worker parses");
+        assert!(older.unsupported_models.is_empty());
+    }
+
+    #[test]
+    fn test_worker_supports_model_ignores_ascii_case_and_defaults_to_all() {
+        let mut w = make_worker(WorkerHealth::Healthy, 0, 0);
+        assert!(w.supports_model("org/new"));
+        w.unsupported_models = vec!["Org/New".into(), "org/model:fast".into()];
+        assert!(!w.supports_model("org/new"));
+        assert!(!w.supports_model("org/model:fast"));
+        assert!(w.supports_model("org/model"));
     }
 
     #[test]

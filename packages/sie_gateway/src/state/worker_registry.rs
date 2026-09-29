@@ -77,6 +77,15 @@ pub struct QueueRoute {
     pub machine_profile: String,
 }
 
+/// Result of resolving a queue lane for one model.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct QueueRouteLookup {
+    pub route: Option<QueueRoute>,
+    /// A lane was passed over because a worker in it that reports the
+    /// expected hash cannot serve the model.
+    pub excluded_unsupported: bool,
+}
+
 /// Pre-computed snapshot of healthy workers, indexed by bundle.
 /// Rebuilt on every worker state change and swapped atomically via Arc.
 #[derive(Default)]
@@ -205,6 +214,7 @@ impl WorkerRegistry {
                     last_heartbeat: Instant::now(),
                     pool_name: String::new(),
                     saturated: false,
+                    unsupported_models: Vec::new(),
                 });
 
             let was_healthy = w.healthy();
@@ -223,6 +233,7 @@ impl WorkerRegistry {
                 msg.bundle.clone()
             };
             w.bundle_config_hash = msg.bundle_config_hash.clone();
+            w.unsupported_models = msg.unsupported_models.clone();
             w.machine_profile = msg.machine_profile.clone();
             w.pool_name = msg.pool_name.clone();
             w.models = msg.loaded_models.clone();
@@ -342,8 +353,9 @@ impl WorkerRegistry {
     }
 
     /// Dispatch-eligible workers for a `(model, pool, machine_profile, bundle)` —
-    /// healthy, not saturated, with `model` in `loaded_models`, a matching
-    /// bundle config hash, and the full queue lane matching. Pool /
+    /// healthy, not saturated, with `model` in `loaded_models` and not in
+    /// `unsupported_models`, a matching bundle config hash, and the full
+    /// queue lane matching. Pool /
     /// machine-profile / bundle matches are case-insensitive to mirror
     /// [`resolve_queue_route_matching`]. Used by the proxy to build
     /// per-request HRW snapshots.
@@ -404,6 +416,7 @@ impl WorkerRegistry {
                     && w.machine_profile.eq_ignore_ascii_case(machine_profile)
                     && bundle_config_hash_matches(&w.bundle_config_hash, bundle_config_hash)
                     && w.models.iter().any(|m| m.eq_ignore_ascii_case(model))
+                    && w.supports_model(model)
             })
             .cloned()
             .collect()
@@ -483,6 +496,7 @@ impl WorkerRegistry {
             bundle_config_hash,
             Some(admitted_worker_names),
         );
+        workers.retain(|w| w.supports_model(model));
         workers.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.url.cmp(&b.url)));
         let before = workers.len();
         workers.dedup_by(|a, b| a.name == b.name);
@@ -627,7 +641,8 @@ impl WorkerRegistry {
         gpu: &str,
         bundle_config_hash: &str,
     ) -> Option<String> {
-        self.resolve_queue_route_matching(bundle, gpu, None, bundle_config_hash)
+        self.resolve_queue_route_matching(bundle, gpu, None, bundle_config_hash, "")
+            .route
             .map(|route| route.pool_name)
     }
 
@@ -646,6 +661,7 @@ impl WorkerRegistry {
     }
 
     /// Resolve a concrete queue lane, constrained to a specific logical pool.
+    #[cfg(test)]
     pub async fn resolve_queue_route_in_pool(
         &self,
         bundle: &str,
@@ -653,7 +669,25 @@ impl WorkerRegistry {
         pool_name: &str,
         bundle_config_hash: &str,
     ) -> Option<QueueRoute> {
-        self.resolve_queue_route_matching(bundle, gpu, Some(pool_name), bundle_config_hash)
+        self.resolve_queue_route_matching(bundle, gpu, Some(pool_name), bundle_config_hash, "")
+            .route
+    }
+
+    /// Resolve a concrete queue lane for `model`, constrained to a logical pool.
+    ///
+    /// Every worker of a lane consumes the lane subject, so a lane is eligible
+    /// only when no worker in it that reports the expected hash lists `model`
+    /// in `unsupported_models`. Otherwise such a worker would receive the
+    /// model's items and NAK them, spending JetStream delivery attempts.
+    pub fn resolve_queue_route_for_model(
+        &self,
+        bundle: &str,
+        gpu: &str,
+        pool_name: &str,
+        bundle_config_hash: &str,
+        model: &str,
+    ) -> QueueRouteLookup {
+        self.resolve_queue_route_matching(bundle, gpu, Some(pool_name), bundle_config_hash, model)
     }
 
     fn resolve_queue_route_matching(
@@ -662,7 +696,8 @@ impl WorkerRegistry {
         gpu: &str,
         pool_name: Option<&str>,
         bundle_config_hash: &str,
-    ) -> Option<QueueRoute> {
+        model: &str,
+    ) -> QueueRouteLookup {
         let snap = self.snapshot.load();
 
         // `by_bundle` is keyed with `w.bundle.to_lowercase()` in
@@ -677,8 +712,12 @@ impl WorkerRegistry {
         let bundle_lower = bundle.to_lowercase();
 
         // Use pre-computed by_bundle index for efficient lock-free lookup
-        let candidates = snap.by_bundle.get(&bundle_lower)?;
+        let Some(candidates) = snap.by_bundle.get(&bundle_lower) else {
+            return QueueRouteLookup::default();
+        };
 
+        let mut eligible: Vec<&WorkerState> = Vec::new();
+        let mut unsupporting: Vec<&WorkerState> = Vec::new();
         for w in candidates {
             if w.pool_name.is_empty() {
                 continue;
@@ -697,12 +736,27 @@ impl WorkerRegistry {
             if !bundle_config_hash_matches(&w.bundle_config_hash, bundle_config_hash) {
                 continue;
             }
-            return Some(QueueRoute {
+            if model.is_empty() || w.supports_model(model) {
+                eligible.push(w);
+            } else {
+                unsupporting.push(w);
+            }
+        }
+        let same_lane = |a: &WorkerState, b: &WorkerState| {
+            a.pool_name.eq_ignore_ascii_case(&b.pool_name)
+                && a.machine_profile.eq_ignore_ascii_case(&b.machine_profile)
+        };
+        let route = eligible
+            .into_iter()
+            .find(|w| !unsupporting.iter().any(|u| same_lane(u, w)))
+            .map(|w| QueueRoute {
                 pool_name: normalize_pool_name(&w.pool_name),
                 machine_profile: w.machine_profile.clone(),
             });
+        QueueRouteLookup {
+            route,
+            excluded_unsupported: !unsupporting.is_empty(),
         }
-        None
     }
 
     pub async fn get_models(&self) -> HashMap<String, Vec<String>> {
@@ -783,6 +837,7 @@ impl WorkerRegistry {
                 healthy: w.healthy(),
                 bundle: w.bundle.clone(),
                 bundle_config_hash: w.bundle_config_hash.clone(),
+                unsupported_models: w.unsupported_models.clone(),
             });
 
             if w.healthy() {
@@ -877,6 +932,7 @@ mod tests {
             memory_total_bytes: None,
             saturated: false,
             terminated: false,
+            unsupported_models: Vec::new(),
         }
     }
 
@@ -1132,6 +1188,7 @@ mod tests {
             memory_total_bytes: Some(8000),
             saturated: false,
             terminated: false,
+            unsupported_models: Vec::new(),
         };
         reg.update_worker("http://w1:8080", msg).await;
 
@@ -1167,6 +1224,7 @@ mod tests {
             memory_total_bytes: None,
             saturated: false,
             terminated: false,
+            unsupported_models: Vec::new(),
         };
         reg.update_worker("http://w1:8080", msg).await;
 
@@ -1739,6 +1797,7 @@ mod tests {
             memory_total_bytes: None,
             saturated,
             terminated: false,
+            unsupported_models: Vec::new(),
         }
     }
 
@@ -2023,5 +2082,163 @@ mod tests {
         // Marking an already-unhealthy worker is a no-op (no double-fire).
         reg.mark_unhealthy("http://w:8080").await;
         assert_eq!(count.load(Ordering::SeqCst), 1);
+    }
+
+    // ── per-model support within one bundle config hash ────────────
+
+    /// Laya and GLiFormer route ids that an earlier default-bundle image
+    /// reports as unsupported once the control plane adds their adapters.
+    const ADDED_FAMILY_ROUTES: [&str; 5] = [
+        "convaiinnovations/laya",
+        "convaiinnovations/laya-multilingual",
+        "convaiinnovations/laya-typed-decisions",
+        "knowledgator/gliformer-base-v1",
+        "knowledgator/gliformer-large-v1",
+    ];
+
+    async fn lane_worker(
+        reg: &WorkerRegistry,
+        name: &str,
+        machine_profile: &str,
+        hash: &str,
+        loaded: &[&str],
+        unsupported: &[&str],
+    ) {
+        let mut msg = make_dispatch_msg(true, false, "default", loaded).await;
+        msg.name = name.into();
+        msg.machine_profile = machine_profile.into();
+        msg.bundle_config_hash = hash.into();
+        msg.unsupported_models = unsupported.iter().map(|m| (*m).into()).collect();
+        reg.update_worker(&format!("http://{name}:8080"), msg).await;
+    }
+
+    fn route(reg: &WorkerRegistry, gpu: &str, hash: &str, model: &str) -> QueueRouteLookup {
+        reg.resolve_queue_route_for_model("default", gpu, "default", hash, model)
+    }
+
+    #[tokio::test]
+    async fn test_earlier_image_keeps_other_models_routable_when_the_bundle_gains_adapters() {
+        let reg = registry();
+        lane_worker(&reg, "old-0", "l4", "h-083", &[], &ADDED_FAMILY_ROUTES).await;
+
+        for model in ["BAAI/bge-m3", "urchade/gliner_multi-v2.1"] {
+            let lookup = route(&reg, "", "h-083", model);
+            assert_eq!(
+                lookup.route.map(|r| r.machine_profile).as_deref(),
+                Some("l4"),
+                "{model} must stay routable on the earlier image"
+            );
+            assert!(!lookup.excluded_unsupported);
+        }
+        for model in ADDED_FAMILY_ROUTES {
+            let lookup = route(&reg, "", "h-083", model);
+            assert!(
+                lookup.route.is_none(),
+                "{model} must not reach the earlier image"
+            );
+            assert!(lookup.excluded_unsupported);
+        }
+        assert!(route(&reg, "", "h-083", "Convaiinnovations/LAYA")
+            .route
+            .is_none());
+
+        // The same worker before this change hashed with its image's adapter
+        // list, so it advertised a different hash and served nothing.
+        let before = registry();
+        lane_worker(&before, "old-0", "l4", "h-082-image-scope", &[], &[]).await;
+        assert!(route(&before, "", "h-083", "BAAI/bge-m3").route.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_mixed_lane_is_not_eligible_for_a_model_one_worker_cannot_serve() {
+        let reg = registry();
+        lane_worker(&reg, "old-0", "l4", "h1", &[], &["org/new-family"]).await;
+        lane_worker(&reg, "new-0", "l4", "h1", &[], &[]).await;
+        lane_worker(&reg, "new-1", "a100", "h1", &[], &[]).await;
+
+        let lookup = route(&reg, "", "h1", "org/new-family");
+        assert_eq!(
+            lookup.route.map(|r| r.machine_profile).as_deref(),
+            Some("a100")
+        );
+        assert!(lookup.excluded_unsupported);
+        assert!(route(&reg, "l4", "h1", "org/new-family").route.is_none());
+        assert!(route(&reg, "l4", "h1", "org/kept").route.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_workers_without_the_field_or_the_hash_do_not_block_a_model() {
+        let reg = registry();
+        // A worker that predates the field serves everything its hash covers.
+        lane_worker(&reg, "older", "l4", "h1", &[], &[]).await;
+        // A worker on another hash does not consume this hash's work.
+        lane_worker(&reg, "stale", "l4", "h0", &[], &["org/new-family"]).await;
+
+        let lookup = route(&reg, "l4", "h1", "org/new-family");
+        assert!(lookup.route.is_some());
+        assert!(!lookup.excluded_unsupported);
+    }
+
+    #[tokio::test]
+    async fn test_worker_direct_rings_exclude_workers_that_cannot_serve_the_model() {
+        let reg = registry();
+        lane_worker(
+            &reg,
+            "old-0",
+            "l4",
+            "h1",
+            &["org/new-family"],
+            &["org/new-family"],
+        )
+        .await;
+        lane_worker(&reg, "new-0", "l4", "h1", &["org/new-family"], &[]).await;
+
+        let direct: Vec<String> = reg
+            .dispatch_workers_for("org/new-family", "default", "l4", "default", "h1")
+            .into_iter()
+            .map(|w| w.name)
+            .collect();
+        assert_eq!(direct, ["new-0"]);
+
+        let admitted: HashSet<String> = ["old-0".to_string(), "new-0".to_string()].into();
+        let lazy = reg.lazy_lane_ring_snapshot_for_admitted(
+            "org/new-family",
+            "default",
+            "l4",
+            "default",
+            "h1",
+            &admitted,
+        );
+        assert_eq!(lazy.len(), 1);
+        let kept = reg.lazy_lane_ring_snapshot_for_admitted(
+            "org/kept", "default", "l4", "default", "h1", &admitted,
+        );
+        assert_eq!(kept.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_cluster_status_reports_unsupported_models() {
+        let reg = registry();
+        lane_worker(&reg, "old-0", "l4", "h1", &[], &["org/new-family"]).await;
+        lane_worker(&reg, "new-0", "l4", "h1", &[], &[]).await;
+
+        let status = reg.get_cluster_status().await;
+        let by_name: HashMap<_, _> = status
+            .workers
+            .iter()
+            .map(|w| (w.name.as_str(), w.unsupported_models.clone()))
+            .collect();
+        assert_eq!(by_name["old-0"], ["org/new-family"]);
+        assert!(by_name["new-0"].is_empty());
+        let json = serde_json::to_value(&status).unwrap();
+        let workers = json["workers"].as_array().unwrap();
+        assert_eq!(
+            workers
+                .iter()
+                .filter(|w| w.get("unsupported_models").is_some())
+                .count(),
+            1,
+            "the field is omitted for workers that serve every model"
+        );
     }
 }

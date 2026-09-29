@@ -1,0 +1,42 @@
+{
+  "description": "Worker status heartbeat that the worker sidecar publishes on sie.health.<worker_id> and the gateway reads as WorkerStatusMessage. The sidecar publishes exactly `fields`, leaving out an `omitted_when_empty` field whose value is empty. A reader treats every missing field as its default.",
+  "fields": [
+    "name",
+    "ready",
+    "terminated",
+    "gpu_count",
+    "total_gpu_slots",
+    "ready_gpu_slots",
+    "machine_profile",
+    "pool_name",
+    "bundle",
+    "bundle_config_hash",
+    "loaded_models",
+    "queue_depth",
+    "pending_cost",
+    "inflight_batches",
+    "saturated",
+    "unsupported_models"
+  ],
+  "omitted_when_empty": {
+    "unsupported_models": "Routable model ids (model or model:profile) covered by bundle_config_hash that this worker cannot serve. Workers that predate the field never send it and serve every model their hash covers, so a missing list means empty."
+  },
+  "example": {
+    "name": "worker-l4-0",
+    "ready": true,
+    "terminated": false,
+    "gpu_count": 1,
+    "total_gpu_slots": 1,
+    "ready_gpu_slots": 1,
+    "machine_profile": "l4",
+    "pool_name": "default",
+    "bundle": "default",
+    "bundle_config_hash": "5f1e0b1a3c6d8e2f4a7b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f",
+    "loaded_models": ["BAAI/bge-m3"],
+    "queue_depth": 2,
+    "pending_cost": 4096,
+    "inflight_batches": 1,
+    "saturated": false,
+    "unsupported_models": ["org/new-family", "org/model:new-profile"]
+  }
+}

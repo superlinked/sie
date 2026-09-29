@@ -20,7 +20,9 @@ use tokio::time::{sleep, Duration};
 use tracing::{debug, info, warn};
 
 use crate::backend::AdapterWorkerPool;
-use crate::health_publisher::{SharedBundleConfigHash, SharedLoadedModels};
+use crate::health_publisher::{
+    SharedBundleConfigHash, SharedLoadedModels, SharedUnsupportedModels,
+};
 use crate::ipc_client::IpcError;
 use crate::ipc_types::{
     ApplyModelConfigRequest, ReplaceModelConfigsRequest, ReplaceModelConfigsResponse,
@@ -43,6 +45,9 @@ pub const DEFAULT_TRUSTED_PRODUCERS: &[&str] = &["sie-config"];
 pub struct ConfigApplyState {
     epoch: AtomicU64,
     bundle_config_hash: SharedBundleConfigHash,
+    /// Routable model ids covered by `bundle_config_hash` that the backend
+    /// cannot serve. Committed together with the hash.
+    unsupported_models: SharedUnsupportedModels,
     loaded_models: SharedLoadedModels,
     /// Config mutation is exclusive while inference takes a shared guard.
     /// This binds each execution to one stable backend registry revision.
@@ -54,6 +59,7 @@ impl ConfigApplyState {
         Self {
             epoch: AtomicU64::new(0),
             bundle_config_hash: Arc::new(RwLock::new(initial_bundle_config_hash)),
+            unsupported_models: Arc::new(RwLock::new(Vec::new())),
             loaded_models: Arc::new(RwLock::new(Vec::new())),
             execution_barrier: AsyncRwLock::new(()),
         }
@@ -69,6 +75,25 @@ impl ConfigApplyState {
 
     pub fn loaded_models(&self) -> SharedLoadedModels {
         Arc::clone(&self.loaded_models)
+    }
+
+    pub fn unsupported_models(&self) -> SharedUnsupportedModels {
+        Arc::clone(&self.unsupported_models)
+    }
+
+    pub fn model_is_unsupported(&self, model_id: &str) -> bool {
+        self.unsupported_models
+            .read()
+            .expect("unsupported models lock poisoned")
+            .iter()
+            .any(|unsupported| unsupported.eq_ignore_ascii_case(model_id))
+    }
+
+    /// Whether this worker may execute `model_id` under `expected_hash`: the
+    /// hash is its current one and the model is not among those it reported
+    /// it cannot serve.
+    pub fn accepts_work(&self, expected_hash: &str, model_id: &str) -> bool {
+        self.accepts_bundle_config_hash(expected_hash) && !self.model_is_unsupported(model_id)
     }
 
     pub fn current_bundle_config_hash(&self) -> String {
@@ -119,6 +144,21 @@ impl ConfigApplyState {
         *guard = hash;
     }
 
+    fn set_applied_view(&self, hash: String, unsupported_models: Vec<String>) {
+        let mut unsupported: Vec<String> = unsupported_models
+            .into_iter()
+            .map(|model| model.trim().to_string())
+            .filter(|model| !model.is_empty())
+            .collect();
+        unsupported.sort();
+        unsupported.dedup();
+        *self
+            .unsupported_models
+            .write()
+            .expect("unsupported models lock poisoned") = unsupported;
+        self.set_bundle_hash(hash);
+    }
+
     pub fn set_loaded_models<I>(&self, models: I)
     where
         I: IntoIterator<Item = String>,
@@ -153,9 +193,14 @@ impl ConfigApplyState {
         guard.sort();
     }
 
-    fn mark_applied(&self, epoch: u64, bundle_config_hash: String) {
+    fn mark_applied(
+        &self,
+        epoch: u64,
+        bundle_config_hash: String,
+        unsupported_models: Vec<String>,
+    ) {
         if epoch == 0 {
-            self.set_bundle_hash(bundle_config_hash);
+            self.set_applied_view(bundle_config_hash, unsupported_models);
             return;
         }
 
@@ -166,7 +211,7 @@ impl ConfigApplyState {
                 .compare_exchange(current, epoch, Ordering::AcqRel, Ordering::Acquire)
             {
                 Ok(_) => {
-                    self.set_bundle_hash(bundle_config_hash);
+                    self.set_applied_view(bundle_config_hash, unsupported_models);
                     return;
                 }
                 Err(observed) => current = observed,
@@ -178,6 +223,7 @@ impl ConfigApplyState {
         &self,
         epoch: u64,
         bundle_config_hash: Option<String>,
+        unsupported_models: Vec<String>,
         force_epoch: bool,
     ) -> bool {
         if force_epoch {
@@ -190,7 +236,7 @@ impl ConfigApplyState {
             self.set_epoch_max(epoch);
         }
         if let Some(hash) = bundle_config_hash {
-            self.set_bundle_hash(hash);
+            self.set_applied_view(hash, unsupported_models);
         }
         true
     }
@@ -217,6 +263,10 @@ pub struct ConfigNotification {
     pub affected_bundles: Vec<String>,
     #[serde(default)]
     pub pool: Option<String>,
+    /// Adapter modules each bundle's hash was scoped by. Absent from older
+    /// control planes.
+    #[serde(default)]
+    pub bundle_adapters: HashMap<String, Vec<String>>,
 }
 
 fn env_bool(name: &str) -> bool {
@@ -695,6 +745,10 @@ async fn apply_notification(runtime: &SubscriberRuntime, notification: ConfigNot
         bundle_config_hash: notification_bundle_hash_for_pool(&notification, runtime.pool.as_str()),
         profiles_added: notification.profiles_added.clone(),
         model_config: notification.model_config.clone(),
+        bundle_adapters: notification
+            .bundle_adapters
+            .get(&notification.bundle_id)
+            .cloned(),
     };
 
     let resp = match apply_via_ipc_with_retry(
@@ -749,7 +803,7 @@ async fn apply_notification(runtime: &SubscriberRuntime, notification: ConfigNot
         return;
     };
 
-    state.mark_applied(notification.epoch, applied_hash);
+    state.mark_applied(notification.epoch, applied_hash, resp.unsupported_models);
     // Telemetry catalog overflow/mismatch is fail-open for serving and the
     // facade emits at most one process-local warning before collapsing the
     // affected pair to `other`. Activate it only after the trusted hash and
@@ -779,6 +833,7 @@ mod tests {
         model_id: &str,
     ) -> ConfigNotification {
         ConfigNotification {
+            bundle_adapters: HashMap::new(),
             producer_id: producer_id.to_string(),
             bundle_id: bundle_id.to_string(),
             epoch: 1,
@@ -790,6 +845,80 @@ mod tests {
             affected_bundles: vec![bundle_id.to_string()],
             pool: pool.map(ToString::to_string),
         }
+    }
+
+    /// Fake backend that records every request body and answers config
+    /// applies with `reply`.
+    fn spawn_recording_apply_server(
+        listener: UnixListener,
+        requests: Arc<Mutex<Vec<serde_json::Value>>>,
+        reply: serde_json::Value,
+    ) -> JoinHandle<()> {
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _addr)) = listener.accept().await else {
+                    break;
+                };
+                let requests = Arc::clone(&requests);
+                let reply = reply.clone();
+                tokio::spawn(async move {
+                    loop {
+                        let mut len_buf = [0_u8; 4];
+                        if stream.read_exact(&mut len_buf).await.is_err() {
+                            break;
+                        }
+                        let mut frame = vec![0_u8; u32::from_be_bytes(len_buf) as usize];
+                        if stream.read_exact(&mut frame).await.is_err() {
+                            break;
+                        }
+                        let raw: serde_json::Value =
+                            rmp_serde::from_slice(&frame).expect("decode request envelope");
+                        requests
+                            .lock()
+                            .await
+                            .push(raw.get("body").cloned().unwrap_or_default());
+                        let response = serde_json::json!({
+                            "version": crate::ipc_types::IPC_VERSION,
+                            "request_id": raw.get("request_id").cloned().unwrap_or_default(),
+                            "ok": true,
+                            "body": reply,
+                        });
+                        let bytes =
+                            rmp_serde::to_vec_named(&response).expect("encode response envelope");
+                        stream
+                            .write_all(&(bytes.len() as u32).to_be_bytes())
+                            .await
+                            .expect("write response length");
+                        stream.write_all(&bytes).await.expect("write response");
+                    }
+                });
+            }
+        })
+    }
+
+    async fn apply_against_fake_backend(
+        notification: ConfigNotification,
+        reply: serde_json::Value,
+    ) -> (Arc<ConfigApplyState>, serde_json::Value) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let socket_path = tmp.path().join("ipc.sock");
+        let listener = UnixListener::bind(&socket_path).expect("bind fake ipc socket");
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let server = spawn_recording_apply_server(listener, Arc::clone(&requests), reply);
+        let state = Arc::new(ConfigApplyState::new(String::new()));
+        let runtime = SubscriberRuntime {
+            bundle: "default".to_string(),
+            pool: "default".to_string(),
+            trusted_producers: vec!["sie-config".to_string()],
+            ipc: AdapterWorkerPool::new(&[socket_path], 1, 1, 1, Arc::new(RuntimeState::new())),
+            state: Arc::clone(&state),
+            telemetry: SidecarTelemetry::for_tests(&[]),
+            shutdown: Arc::new(Shutdown::new()),
+        };
+        apply_notification(&runtime, notification).await;
+        server.abort();
+        let request = requests.lock().await.first().cloned().expect("one apply");
+        (state, request)
     }
 
     fn spawn_conditional_apply_server(
@@ -876,6 +1005,7 @@ mod tests {
     #[test]
     fn notification_targets_bundle_requires_payload_bundle_match() {
         let mut notification = ConfigNotification {
+            bundle_adapters: HashMap::new(),
             producer_id: "sie-config".into(),
             bundle_id: "default".into(),
             epoch: 1,
@@ -896,6 +1026,7 @@ mod tests {
     #[test]
     fn notification_targets_pool_and_selects_pool_hash() {
         let notification = ConfigNotification {
+            bundle_adapters: HashMap::new(),
             producer_id: "sie-config".into(),
             bundle_id: "candle".into(),
             epoch: 1,
@@ -967,14 +1098,15 @@ mod tests {
     #[test]
     fn apply_state_tracks_epoch_monotonically_and_hash() {
         let state = ConfigApplyState::new("initial".into());
-        state.mark_applied(10, "h10".into());
-        state.mark_applied(7, "h7".into());
+        state.mark_applied(10, "h10".into(), Vec::new());
+        state.mark_applied(7, "h7".into(), vec!["late/model".into()]);
         assert_eq!(state.epoch(), 10);
         assert_eq!(
             state.bundle_config_hash().read().unwrap().as_str(),
             "h10",
             "stale apply results must not roll the advertised hash backward"
         );
+        assert!(!state.model_is_unsupported("late/model"));
     }
 
     #[test]
@@ -987,7 +1119,7 @@ mod tests {
     #[test]
     fn epoch_zero_apply_updates_hash_without_advancing_epoch() {
         let state = ConfigApplyState::new("initial".into());
-        state.mark_applied(0, "h0".into());
+        state.mark_applied(0, "h0".into(), Vec::new());
         assert_eq!(state.epoch(), 0);
         assert_eq!(state.bundle_config_hash().read().unwrap().as_str(), "h0");
     }
@@ -995,7 +1127,7 @@ mod tests {
     #[test]
     fn live_apply_can_clear_bundle_hash() {
         let state = ConfigApplyState::new("old".into());
-        state.mark_applied(4, String::new());
+        state.mark_applied(4, String::new(), Vec::new());
         assert_eq!(state.epoch(), 4);
         assert_eq!(state.bundle_config_hash().read().unwrap().as_str(), "");
     }
@@ -1003,7 +1135,7 @@ mod tests {
     #[test]
     fn export_reconcile_can_clear_bundle_hash() {
         let state = ConfigApplyState::new("old".into());
-        assert!(state.mark_export_reconciled(4, Some(String::new()), false));
+        assert!(state.mark_export_reconciled(4, Some(String::new()), Vec::new(), false));
         assert_eq!(state.epoch(), 4);
         assert_eq!(state.bundle_config_hash().read().unwrap().as_str(), "");
     }
@@ -1030,10 +1162,42 @@ mod tests {
         assert!(state.accepts_bundle_config_hash("h0"));
         assert!(!state.accepts_bundle_config_hash("h1"));
 
-        state.mark_applied(1, "h1".into());
+        state.mark_applied(1, "h1".into(), Vec::new());
         assert!(!state.accepts_bundle_config_hash("h0"));
         assert!(state.accepts_bundle_config_hash("h1"));
         assert!(!state.accepts_bundle_config_hash("missing"));
+    }
+
+    #[test]
+    fn unsupported_models_commit_with_the_hash_and_gate_work() {
+        let state = ConfigApplyState::new("h0".into());
+        assert!(state.accepts_work("h0", "org/new"));
+
+        state.mark_applied(
+            1,
+            "h1".into(),
+            vec![
+                " org/new ".into(),
+                "org/new".into(),
+                String::new(),
+                "org/other:fast".into(),
+            ],
+        );
+        assert_eq!(
+            state.unsupported_models().read().unwrap().as_slice(),
+            ["org/new".to_string(), "org/other:fast".to_string()]
+        );
+        assert!(!state.accepts_work("h1", "org/new"));
+        assert!(!state.accepts_work("h1", "ORG/New"));
+        assert!(!state.accepts_work("h1", "org/other:fast"));
+        assert!(state.accepts_work("h1", "org/other"));
+        assert!(state.accepts_work("", "org/kept"));
+        assert!(!state.accepts_work("h0", "org/kept"));
+
+        assert!(!state.mark_export_reconciled(0, Some("h-stale".into()), Vec::new(), false));
+        assert!(state.model_is_unsupported("org/new"));
+        assert!(state.mark_export_reconciled(2, Some("h2".into()), Vec::new(), false));
+        assert!(state.accepts_work("h2", "org/new"));
     }
 
     #[tokio::test]
@@ -1134,6 +1298,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn delta_forwards_the_control_plane_adapters_and_commits_unsupported_models() {
+        let mut delta = notification("sie-config", "default", None, "org/new-family");
+        delta.bundle_adapters = HashMap::from([
+            (
+                "default".to_string(),
+                vec!["pkg.old".to_string(), "pkg.new".to_string()],
+            ),
+            ("other".to_string(), vec!["pkg.other".to_string()]),
+        ]);
+        let (state, request) = apply_against_fake_backend(
+            delta,
+            serde_json::json!({
+                "applied": true,
+                "bundle_config_hash": "hash-1",
+                "config_version": 1_u64,
+                "unsupported_models": ["org/new-family"],
+            }),
+        )
+        .await;
+
+        assert_eq!(
+            request.get("bundle_adapters"),
+            Some(&serde_json::json!(["pkg.old", "pkg.new"]))
+        );
+        assert_eq!(state.current_bundle_config_hash(), "hash-1");
+        assert!(!state.accepts_work("hash-1", "org/new-family"));
+        assert!(state.accepts_work("hash-1", "org/kept"));
+    }
+
+    #[tokio::test]
+    async fn older_control_plane_and_backend_keep_the_previous_contract() {
+        let (state, request) = apply_against_fake_backend(
+            notification("sie-config", "default", None, "org/model"),
+            serde_json::json!({
+                "applied": true,
+                "bundle_config_hash": "hash-1",
+                "config_version": 1_u64,
+            }),
+        )
+        .await;
+
+        assert!(request.get("bundle_adapters").is_none());
+        assert_eq!(state.current_bundle_config_hash(), "hash-1");
+        assert!(state.unsupported_models().read().unwrap().is_empty());
+        assert!(state.accepts_work("hash-1", "org/model"));
+    }
+
+    #[test]
+    fn notification_without_bundle_adapters_parses() {
+        let parsed: ConfigNotification = serde_json::from_value(serde_json::json!({
+            "router_id": "sie-config",
+            "bundle_id": "default",
+            "epoch": 3,
+            "bundle_config_hash": "h",
+        }))
+        .expect("older notification parses");
+        assert!(parsed.bundle_adapters.is_empty());
+    }
+
+    #[tokio::test]
     async fn apply_via_ipc_does_not_eager_ensure_candle_model_ready() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let socket_path = tmp.path().join("ipc.sock");
@@ -1215,6 +1439,7 @@ mod tests {
                 bundle_config_hash: "hash".to_string(),
                 profiles_added: vec!["candle".to_string()],
                 model_config: "sie_id: topk-io/Iso-ModernColBERT\n".to_string(),
+                bundle_adapters: None,
             },
             "topk-io/Iso-ModernColBERT",
             7,

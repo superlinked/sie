@@ -61,6 +61,10 @@ struct ExportSnapshot {
     bundle_config_hashes: HashMap<String, String>,
     #[serde(default)]
     bundle_pool_config_hashes: HashMap<String, HashMap<String, String>>,
+    /// Adapter modules each bundle's hash was scoped by. Absent from older
+    /// control planes.
+    #[serde(default)]
+    bundle_adapters: HashMap<String, Vec<String>>,
     #[serde(default)]
     models: Vec<ExportedModel>,
 }
@@ -260,6 +264,7 @@ fn drift_reason(
 fn compute_export_signature(
     bundle: &str,
     bundle_config_hash: Option<&str>,
+    bundle_adapters: Option<&[String]>,
     models: &[ReplaceModelConfigEntry],
 ) -> blake3::Hash {
     fn update_len_prefixed(hasher: &mut blake3::Hasher, value: &str) {
@@ -270,6 +275,18 @@ fn compute_export_signature(
     let mut hasher = blake3::Hasher::new();
     update_len_prefixed(&mut hasher, bundle);
     update_len_prefixed(&mut hasher, bundle_config_hash.unwrap_or_default());
+    match bundle_adapters {
+        Some(adapters) => {
+            hasher.update(&[1]);
+            hasher.update(&(adapters.len() as u64).to_le_bytes());
+            for adapter in adapters {
+                update_len_prefixed(&mut hasher, adapter);
+            }
+        }
+        None => {
+            hasher.update(&[0]);
+        }
+    }
 
     let mut entries: Vec<(&str, &str)> = models
         .iter()
@@ -546,6 +563,7 @@ where
         ),
         None => snapshot.bundle_config_hashes.get(scope.bundle).cloned(),
     };
+    let bundle_adapters = snapshot.bundle_adapters.get(scope.bundle).cloned();
     for model in snapshot.models {
         if !model.targets_bundle(scope.bundle) || !model.targets_pool(&normalized_pool) {
             skipped += 1;
@@ -590,6 +608,7 @@ where
         Some(compute_export_signature(
             scope.bundle,
             control_plane_hash.as_deref(),
+            bundle_adapters.as_deref(),
             &exported_models,
         ))
     } else {
@@ -622,6 +641,7 @@ where
             epoch: snapshot.epoch,
             bundle_config_hash: control_plane_hash.clone().unwrap_or_default(),
             models: exported_models,
+            bundle_adapters,
         };
         let resp = match apply(req, snapshot.epoch).await {
             Ok(Some(resp)) => resp,
@@ -694,8 +714,12 @@ where
                 export_signature: None,
             };
         };
-        let state_updated =
-            state.mark_export_reconciled(snapshot.epoch, Some(applied_hash), options.force_epoch);
+        let state_updated = state.mark_export_reconciled(
+            snapshot.epoch,
+            Some(applied_hash),
+            resp.unsupported_models.clone(),
+            options.force_epoch,
+        );
         if state_updated {
             // Activate only the catalog belonging to the trusted, committed
             // worker state. Cardinality overflow remains fail-open for serving.
@@ -879,8 +903,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn export_reconcile_forwards_bundle_adapters_and_commits_unsupported_models() {
+        let adapters = vec!["pkg.old".to_string(), "pkg.new".to_string()];
+        let snapshot = ExportSnapshot {
+            bundle_adapters: HashMap::from([
+                ("default".to_string(), adapters.clone()),
+                ("vision".to_string(), vec!["pkg.vision".to_string()]),
+            ]),
+            epoch: 7,
+            bundle_config_hashes: HashMap::from([("default".to_string(), "hash-7".to_string())]),
+            bundle_pool_config_hashes: HashMap::new(),
+            models: vec![
+                exported_model("kept/model", &["default"]),
+                exported_model("new/model", &["default"]),
+            ],
+        };
+        let state = ConfigApplyState::new("old".into());
+        let requests = Arc::new(Mutex::new(Vec::new()));
+
+        let outcome = reconcile_export_snapshot(
+            snapshot,
+            scope("default", "default"),
+            &state,
+            &SidecarTelemetry::for_tests(&[]),
+            reconcile_options("test"),
+            {
+                let requests = Arc::clone(&requests);
+                move |req, _epoch| {
+                    let requests = Arc::clone(&requests);
+                    async move {
+                        requests.lock().await.push(req);
+                        Ok(Some(ReplaceModelConfigsResponse {
+                            unsupported_models: vec!["new/model".into()],
+                            applied: true,
+                            bundle_config_hash: "hash-7".into(),
+                            config_version: 7,
+                            applied_models: vec!["kept/model".into(), "new/model".into()],
+                            applied_profiles: vec!["default".into()],
+                        }))
+                    }
+                }
+            },
+        )
+        .await;
+
+        assert!(outcome.state_updated);
+        assert_eq!(
+            requests.lock().await[0].bundle_adapters.as_deref(),
+            Some(adapters.as_slice())
+        );
+        assert!(state.accepts_work("hash-7", "kept/model"));
+        assert!(!state.accepts_work("hash-7", "new/model"));
+    }
+
+    #[test]
+    fn export_signature_changes_with_the_bundle_adapters() {
+        let models = vec![ReplaceModelConfigEntry {
+            model_id: "m".into(),
+            model_config: "sie_id: m\n".into(),
+        }];
+        let without = compute_export_signature("default", Some("h"), None, &models);
+        let one = compute_export_signature("default", Some("h"), Some(&["a".to_string()]), &models);
+        let two = compute_export_signature(
+            "default",
+            Some("h"),
+            Some(&["a".to_string(), "b".to_string()]),
+            &models,
+        );
+        assert_ne!(without, one);
+        assert_ne!(one, two);
+        assert_eq!(
+            one,
+            compute_export_signature("default", Some("h"), Some(&["a".to_string()]), &models)
+        );
+    }
+
+    #[tokio::test]
     async fn export_reconcile_applies_target_bundle_and_updates_epoch_hash() {
         let snapshot = ExportSnapshot {
+            bundle_adapters: HashMap::new(),
             epoch: 7,
             bundle_config_hashes: HashMap::new(),
             bundle_pool_config_hashes: HashMap::new(),
@@ -906,6 +1007,7 @@ mod tests {
                     async move {
                         applied.lock().await.push(req);
                         Ok(Some(ReplaceModelConfigsResponse {
+                            unsupported_models: Vec::new(),
                             applied: true,
                             bundle_config_hash: "hash-7".into(),
                             config_version: 7,
@@ -951,6 +1053,7 @@ mod tests {
     #[tokio::test]
     async fn export_reconcile_filters_pool_and_uses_pool_hash() {
         let snapshot = ExportSnapshot {
+            bundle_adapters: HashMap::new(),
             epoch: 13,
             bundle_config_hashes: HashMap::from([(
                 "candle".to_string(),
@@ -985,6 +1088,7 @@ mod tests {
                     async move {
                         applied.lock().await.push(req);
                         Ok(Some(ReplaceModelConfigsResponse {
+                            unsupported_models: Vec::new(),
                             applied: true,
                             bundle_config_hash: "default-pool-hash".into(),
                             config_version: 13,
@@ -1018,6 +1122,7 @@ mod tests {
     #[tokio::test]
     async fn export_reconcile_partial_failure_does_not_advance_state() {
         let snapshot = ExportSnapshot {
+            bundle_adapters: HashMap::new(),
             epoch: 8,
             bundle_config_hashes: HashMap::new(),
             bundle_pool_config_hashes: HashMap::new(),
@@ -1040,6 +1145,7 @@ mod tests {
                     Err(IpcError::Server("apply failed".into()))
                 } else {
                     Ok(Some(ReplaceModelConfigsResponse {
+                        unsupported_models: Vec::new(),
                         applied: true,
                         bundle_config_hash: "hash-8".into(),
                         config_version: 8,
@@ -1068,6 +1174,7 @@ mod tests {
     #[tokio::test]
     async fn export_reconcile_rejected_replace_does_not_change_telemetry_catalog() {
         let snapshot = ExportSnapshot {
+            bundle_adapters: HashMap::new(),
             epoch: 8,
             bundle_config_hashes: HashMap::new(),
             bundle_pool_config_hashes: HashMap::new(),
@@ -1084,6 +1191,7 @@ mod tests {
             reconcile_options("test"),
             |_req, _epoch| async move {
                 Ok(Some(ReplaceModelConfigsResponse {
+                    unsupported_models: Vec::new(),
                     applied: false,
                     bundle_config_hash: "hash-8".into(),
                     config_version: 8,
@@ -1103,6 +1211,7 @@ mod tests {
     #[tokio::test]
     async fn export_reconcile_forced_epoch_rewind_only_after_success() {
         let snapshot = ExportSnapshot {
+            bundle_adapters: HashMap::new(),
             epoch: 3,
             bundle_config_hashes: HashMap::new(),
             bundle_pool_config_hashes: HashMap::new(),
@@ -1123,6 +1232,7 @@ mod tests {
             },
             |_req, _epoch| async move {
                 Ok(Some(ReplaceModelConfigsResponse {
+                    unsupported_models: Vec::new(),
                     applied: true,
                     bundle_config_hash: "hash-3".into(),
                     config_version: 3,
@@ -1146,6 +1256,7 @@ mod tests {
     #[tokio::test]
     async fn export_reconcile_rejects_control_plane_worker_hash_mismatch() {
         let snapshot = ExportSnapshot {
+            bundle_adapters: HashMap::new(),
             epoch: 11,
             bundle_config_hashes: HashMap::from([(
                 "default".to_string(),
@@ -1165,6 +1276,7 @@ mod tests {
             reconcile_options("test"),
             |_req, _epoch| async move {
                 Ok(Some(ReplaceModelConfigsResponse {
+                    unsupported_models: Vec::new(),
                     applied: true,
                     bundle_config_hash: "python-hash".into(),
                     config_version: 11,
@@ -1186,6 +1298,7 @@ mod tests {
     #[tokio::test]
     async fn export_reconcile_replaces_with_empty_bundle_snapshot() {
         let snapshot = ExportSnapshot {
+            bundle_adapters: HashMap::new(),
             epoch: 12,
             bundle_config_hashes: HashMap::from([("default".to_string(), String::new())]),
             bundle_pool_config_hashes: HashMap::new(),
@@ -1208,6 +1321,7 @@ mod tests {
                     async move {
                         replace_calls.lock().await.push(req);
                         Ok(Some(ReplaceModelConfigsResponse {
+                            unsupported_models: Vec::new(),
                             applied: true,
                             bundle_config_hash: String::new(),
                             config_version: 12,
@@ -1241,6 +1355,7 @@ mod tests {
 
         let initial = reconcile_export_snapshot(
             ExportSnapshot {
+                bundle_adapters: HashMap::new(),
                 epoch: 0,
                 bundle_config_hashes: HashMap::from([(
                     "default".to_string(),
@@ -1260,6 +1375,7 @@ mod tests {
                     async move {
                         replace_calls.lock().await.push(req);
                         Ok(Some(ReplaceModelConfigsResponse {
+                            unsupported_models: Vec::new(),
                             applied: true,
                             bundle_config_hash: "control-hash".into(),
                             config_version: 1,
@@ -1275,6 +1391,7 @@ mod tests {
 
         let unchanged = reconcile_export_snapshot(
             ExportSnapshot {
+                bundle_adapters: HashMap::new(),
                 epoch: 0,
                 bundle_config_hashes: HashMap::from([(
                     "default".to_string(),
@@ -1297,6 +1414,7 @@ mod tests {
                     async move {
                         replace_calls.lock().await.push(req);
                         Ok(Some(ReplaceModelConfigsResponse {
+                            unsupported_models: Vec::new(),
                             applied: true,
                             bundle_config_hash: "control-hash".into(),
                             config_version: 2,
@@ -1323,6 +1441,7 @@ mod tests {
 
         let initial = reconcile_export_snapshot(
             ExportSnapshot {
+                bundle_adapters: HashMap::new(),
                 epoch: 0,
                 bundle_config_hashes: HashMap::from([(
                     "default".to_string(),
@@ -1346,6 +1465,7 @@ mod tests {
                     async move {
                         replace_calls.lock().await.push(req);
                         Ok(Some(ReplaceModelConfigsResponse {
+                            unsupported_models: Vec::new(),
                             applied: true,
                             bundle_config_hash: "stable-routing-hash".into(),
                             config_version: 1,
@@ -1361,6 +1481,7 @@ mod tests {
 
         let changed = reconcile_export_snapshot(
             ExportSnapshot {
+                bundle_adapters: HashMap::new(),
                 epoch: 0,
                 bundle_config_hashes: HashMap::from([(
                     "default".to_string(),
@@ -1392,6 +1513,7 @@ mod tests {
                             .collect();
                         replace_calls.lock().await.push(req);
                         Ok(Some(ReplaceModelConfigsResponse {
+                            unsupported_models: Vec::new(),
                             applied: true,
                             bundle_config_hash: "stable-routing-hash".into(),
                             config_version: 2,

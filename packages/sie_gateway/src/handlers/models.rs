@@ -693,6 +693,7 @@ mod route_tests {
             pool_name: String::new(),
             saturated: false,
             terminated: false,
+            unsupported_models: Vec::new(),
         }
     }
 

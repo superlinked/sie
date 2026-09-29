@@ -205,6 +205,8 @@ async fn compute_model_status(
         let mut total_eligible = 0usize;
         let mut acked_workers: Vec<String> = Vec::new();
         let mut pending_workers: Vec<String> = Vec::new();
+        // Acked the hash but reported that they cannot serve this model.
+        let mut unsupported_workers: Vec<String> = Vec::new();
 
         for worker in workers.values() {
             // Exact bundle-name match. `compute_bundle_config_hash` hashes
@@ -224,13 +226,18 @@ async fn compute_model_status(
             }
             total_eligible += 1;
             if !expected.is_empty() && worker.bundle_config_hash == expected {
-                acked_workers.push(worker.name.clone());
+                if worker.supports_model(&model_info.name) {
+                    acked_workers.push(worker.name.clone());
+                } else {
+                    unsupported_workers.push(worker.name.clone());
+                }
             } else {
                 pending_workers.push(worker.name.clone());
             }
         }
 
-        let bundle_acked = total_eligible > 0 && pending_workers.is_empty();
+        let bundle_acked =
+            total_eligible > 0 && pending_workers.is_empty() && unsupported_workers.is_empty();
         if !bundle_acked {
             all_acked = false;
         }
@@ -242,6 +249,7 @@ async fn compute_model_status(
             "total_eligible_workers": total_eligible,
             "acked_workers": acked_workers,
             "pending_workers": pending_workers,
+            "unsupported_workers": unsupported_workers,
             "acked": bundle_acked,
         }));
     }
@@ -842,6 +850,7 @@ mod tests {
             pool_name: "default".into(),
             saturated: false,
             terminated: false,
+            unsupported_models: Vec::new(),
         }
     }
 
@@ -883,6 +892,58 @@ mod tests {
         assert_eq!(bundle["total_eligible_workers"], 1);
         assert_eq!(bundle["acked_workers"].as_array().unwrap().len(), 1);
         assert!(bundle["pending_workers"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_model_status_separates_workers_that_cannot_serve_the_model() {
+        let bundles_dir = tempfile::TempDir::new().unwrap();
+        let models_dir = tempfile::TempDir::new().unwrap();
+        let (app, state) = build_test_router_with_state(&bundles_dir, &models_dir).await;
+        seed_model(&state, "BAAI/bge-m3");
+        let expected_hash = state
+            .model_registry
+            .compute_bundle_config_hash_for_pool("default", "default");
+
+        let mut earlier = worker_msg("worker-earlier", "default", &expected_hash);
+        earlier.unsupported_models = vec!["BAAI/bge-m3".into()];
+        state
+            .registry
+            .update_worker("http://worker-earlier:8080", earlier)
+            .await;
+        state
+            .registry
+            .update_worker(
+                "http://worker-current:8080",
+                worker_msg("worker-current", "default", &expected_hash),
+            )
+            .await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/configs/models/BAAI/bge-m3/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&body_bytes(response).await).unwrap();
+        assert_eq!(parsed["all_bundles_acked"], false);
+        let bundle = &parsed["bundles"][0];
+        assert_eq!(bundle["total_eligible_workers"], 2);
+        assert_eq!(
+            bundle["acked_workers"],
+            serde_json::json!(["worker-current"])
+        );
+        assert_eq!(
+            bundle["unsupported_workers"],
+            serde_json::json!(["worker-earlier"])
+        );
+        assert!(bundle["pending_workers"].as_array().unwrap().is_empty());
+        assert_eq!(bundle["acked"], false);
     }
 
     #[tokio::test]

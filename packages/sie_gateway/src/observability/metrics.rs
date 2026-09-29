@@ -61,6 +61,8 @@ pub const QUEUE_EVENTS_METRIC_NAME: &str = "sie.gateway.queue.events";
 pub const QUEUE_LANE_ADMISSION_DECISIONS_METRIC_NAME: &str =
     "sie.gateway.queue.lane_admission.decisions";
 pub const PROVISIONING_RESPONSES_METRIC_NAME: &str = "sie.gateway.provisioning.responses";
+pub const ROUTING_UNSUPPORTED_MODEL_EXCLUSIONS_METRIC_NAME: &str =
+    "sie.gateway.routing.unsupported_model_exclusions";
 pub const GENERATION_EVENTS_METRIC_NAME: &str = "sie.gateway.generation.events";
 pub const GENERATION_TTFT_METRIC_NAME: &str = "sie.gateway.generation.ttft";
 pub const GENERATION_TPOT_METRIC_NAME: &str = "sie.gateway.generation.tpot";
@@ -820,6 +822,7 @@ struct GatewayTelemetry {
     queue_events: Counter<u64>,
     queue_lane_admission_decisions: Counter<u64>,
     provisioning_responses: Counter<u64>,
+    routing_unsupported_model_exclusions: Counter<u64>,
     generation_events: Counter<u64>,
     generation_ttft: Histogram<f64>,
     generation_tpot: Histogram<f64>,
@@ -1089,6 +1092,13 @@ impl GatewayTelemetry {
                 )
                 .with_unit("{response}")
                 .build(),
+            routing_unsupported_model_exclusions: meter
+                .u64_counter(ROUTING_UNSUPPORTED_MODEL_EXCLUSIONS_METRIC_NAME)
+                .with_description(
+                    "Count of queue-lane resolutions that passed over a lane because a worker in it cannot serve the requested model.",
+                )
+                .with_unit("{exclusion}")
+                .build(),
             generation_events: meter
                 .u64_counter(GENERATION_EVENTS_METRIC_NAME)
                 .with_description(
@@ -1332,6 +1342,10 @@ impl GatewayTelemetry {
                 KeyValue::new("outcome", outcome.as_str()),
             ],
         );
+    }
+
+    fn record_unsupported_model_route_exclusion(&self) {
+        self.routing_unsupported_model_exclusions.add(1, &[]);
     }
 
     fn record_provisioning_response(&self, surface: ProvisioningSurface, status: u16) {
@@ -1994,6 +2008,21 @@ pub fn record_queue_event(event: QueueEvent, outcome: QueueEventOutcome) {
     }
 }
 
+fn record_unsupported_model_route_exclusion_to(target: Option<&GatewayTelemetry>) -> bool {
+    let Some(target) = target else {
+        return false;
+    };
+    target.record_unsupported_model_route_exclusion();
+    true
+}
+
+/// Count one queue-lane resolution that passed over a lane because a worker
+/// in it reported that it cannot serve the requested model. The counter
+/// carries no attributes, so model ids never become metric dimensions.
+pub fn record_unsupported_model_route_exclusion() {
+    let _ = record_unsupported_model_route_exclusion_to(telemetry());
+}
+
 fn record_provisioning_response_to(
     target: Option<&GatewayTelemetry>,
     surface: ProvisioningSurface,
@@ -2228,6 +2257,36 @@ mod tests {
             .build();
         let telemetry = GatewayTelemetry::new(&provider.meter("sie-gateway-test"));
         (telemetry, exporter, provider)
+    }
+
+    #[test]
+    fn unsupported_model_route_exclusions_export_one_attribute_free_counter() {
+        assert!(!record_unsupported_model_route_exclusion_to(None));
+
+        let (telemetry, exporter, provider) = metric_points();
+        assert!(record_unsupported_model_route_exclusion_to(Some(
+            &telemetry
+        )));
+        assert!(record_unsupported_model_route_exclusion_to(Some(
+            &telemetry
+        )));
+
+        provider.force_flush().expect("force_flush");
+        let resource_metrics = exporter.get_finished_metrics().expect("finished metrics");
+        let metric = resource_metrics
+            .iter()
+            .flat_map(|resource| resource.scope_metrics())
+            .flat_map(|scope| scope.metrics())
+            .find(|metric| metric.name() == ROUTING_UNSUPPORTED_MODEL_EXCLUSIONS_METRIC_NAME)
+            .expect("exclusion counter exported");
+        assert_eq!(metric.unit(), "{exclusion}");
+        let AggregatedMetrics::U64(MetricData::Sum(sum)) = metric.data() else {
+            panic!("exclusion counter must be a u64 sum");
+        };
+        let points: Vec<_> = sum.data_points().collect();
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].value(), 2);
+        assert_eq!(points[0].attributes().count(), 0);
     }
 
     #[test]
