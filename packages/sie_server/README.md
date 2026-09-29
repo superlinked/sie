@@ -241,8 +241,9 @@ seconds, so a model records at most 16 graphs in quick succession, one after
 another, then about one every 2 seconds. If recording a graph runs out of
 memory, the request still gets its eager answer; the model drops its graphs and
 records nothing for a minute. If the new graph's first replay runs out of
-memory, the model drops its graphs and the request fails with that error, as an
-eager forward that runs out of memory does.
+memory, the model also drops its graphs and records nothing for a minute, but
+the request fails with that error, as an eager forward that runs out of memory
+does.
 
 Both limits are approximate. The free-memory check reads the device once,
 before recording, so a model loading at the same moment can still meet one
