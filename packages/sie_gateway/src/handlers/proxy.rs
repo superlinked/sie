@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn, Instrument};
 
+use crate::config::timeout_from_secs;
 use crate::endpoint::InferenceEndpoint;
 use crate::http_error::{
     code as err_code, embeddings_error, json_detail, json_detail_merge, json_openai_error,
@@ -2992,7 +2993,7 @@ async fn queue_mode_proxy(
 
     // Wait for results (use configured request_timeout instead of hardcoded 300s).
     // Preserve fractional env values instead of truncating them through `as u64`.
-    let timeout = Duration::from_secs_f64(state.config.request_timeout.max(0.001));
+    let timeout = timeout_from_secs(state.config.request_timeout.max(0.001));
     let timeout_secs = timeout.as_secs_f64();
     let wait_start = Instant::now();
     let wait_deadline = tokio::time::Instant::now() + timeout;
@@ -8908,9 +8909,9 @@ pub(crate) fn generation_timeout_config(
         enforce_first_chunk_invariant(first_chunk, overall, model, profile_name);
 
     GenerationTimeoutConfig {
-        first_chunk: Duration::from_secs_f64(first_chunk),
-        inter_chunk: Duration::from_secs_f64(inter_chunk),
-        overall: Duration::from_secs_f64(overall),
+        first_chunk: timeout_from_secs(first_chunk),
+        inter_chunk: timeout_from_secs(inter_chunk),
+        overall: timeout_from_secs(overall),
     }
 }
 
@@ -11039,13 +11040,20 @@ fn validate_generate_options_map(
         "overall_timeout_s",
     ] {
         if let Some(value) = options.get(key) {
-            let valid = value
+            let field = format!("options.{key}");
+            let Some(seconds) = value
                 .as_f64()
-                .is_some_and(|value| value.is_finite() && value > 0.0);
-            if !valid {
-                let field = format!("options.{key}");
+                .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
+            else {
                 return Err(sampler_bad_request(
                     format!("'{field}' must be a positive number"),
+                    &field,
+                    oai_code::INVALID_REQUEST,
+                ));
+            };
+            if Duration::try_from_secs_f64(seconds).is_err() {
+                return Err(sampler_bad_request(
+                    format!("'{field}' must be less than 2^64 seconds"),
                     &field,
                     oai_code::INVALID_REQUEST,
                 ));
@@ -18256,6 +18264,107 @@ mod tests {
         let (fc, ov) = enforce_first_chunk_invariant(60.0, 30.0, "m", "p");
         assert_eq!(fc, 30.0);
         assert_eq!(ov, 30.0);
+    }
+
+    const GENERATION_TIMEOUT_KEYS: [&str; 3] = [
+        "first_chunk_timeout_s",
+        "inter_chunk_timeout_s",
+        "overall_timeout_s",
+    ];
+
+    #[tokio::test]
+    async fn test_generation_timeout_options_beyond_duration_range_are_rejected() {
+        let state = admission_test_state(Arc::new(PoolManager::new(vec!["l4".to_string()])));
+        for key in GENERATION_TIMEOUT_KEYS {
+            for seconds in [1e300, 18_446_744_073_709_551_616.0] {
+                let body = serde_json::json!({
+                    "prompt": "hi",
+                    "max_new_tokens": 8,
+                    "options": {key: seconds},
+                });
+                let response = match work_params_from_json(&body, "generate") {
+                    Err(QueueParseError::PreBuilt(response)) => response,
+                    Err(_) => panic!("options.{key}={seconds:e} must fail as a prebuilt 400"),
+                    Ok(params) => {
+                        let config = generation_timeout_config(&state, "m", &params, 8);
+                        panic!("options.{key}={seconds:e} was accepted as {config:?}");
+                    }
+                };
+                assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+                let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+                    .await
+                    .unwrap();
+                let error: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(error["error"]["code"], "invalid_request");
+                assert_eq!(error["error"]["param"], format!("options.{key}"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_generation_timeout_options_beyond_instant_range_arm_deadlines() {
+        let state = admission_test_state(Arc::new(PoolManager::new(vec!["l4".to_string()])));
+        for seconds in [1e19, 18_446_744_073_709_549_568.0] {
+            let options: serde_json::Map<String, serde_json::Value> = GENERATION_TIMEOUT_KEYS
+                .iter()
+                .map(|key| (key.to_string(), serde_json::json!(seconds)))
+                .collect();
+            let body = serde_json::json!({"prompt": "hi", "max_new_tokens": 8, "options": options});
+            let Ok(params) = work_params_from_json(&body, "generate") else {
+                panic!("timeouts of {seconds:e} s fit a duration and must be accepted");
+            };
+            let config = generation_timeout_config(&state, "m", &params, 8);
+            let start = tokio::time::Instant::now();
+            for timeout in [config.first_chunk, config.inter_chunk, config.overall] {
+                assert!(start + timeout > start);
+                assert_eq!(timeout, crate::config::MAX_TIMEOUT);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_generation_timeout_profile_values_beyond_duration_range_saturate() {
+        use crate::types::model::{ModelConfig, ProfileConfig};
+
+        let mut state = admission_test_state(Arc::new(PoolManager::new(vec!["l4".to_string()])));
+        state.model_registry = Arc::new(empty_registry());
+        let runtime: serde_json::Map<String, serde_json::Value> = GENERATION_TIMEOUT_KEYS
+            .iter()
+            .map(|key| (key.to_string(), serde_json::json!(1e300)))
+            .collect();
+        let profile = ProfileConfig {
+            kv_budget_tokens: None,
+            max_output_tokens: None,
+            grammar_profile: None,
+            chat_template_kwargs: None,
+            adapter_path: Some("sie_server.adapters.sentence_transformer:Adapter".to_string()),
+            max_batch_tokens: None,
+            compute_precision: None,
+            adapter_options: Some(serde_json::json!({"runtime": runtime})),
+            extends: None,
+        };
+        state
+            .model_registry
+            .add_model_config(ModelConfig {
+                name: "org/slow".to_string(),
+                hf_revision: None,
+                adapter_module: None,
+                default_bundle: None,
+                pool: None,
+                profiles: std::collections::HashMap::from([("default".to_string(), profile)]),
+                inputs: None,
+                max_sequence_length: None,
+                tasks: None,
+            })
+            .unwrap();
+
+        let config =
+            generation_timeout_config(&state, "org/slow", &publisher::WorkParams::default(), 8);
+        let start = tokio::time::Instant::now();
+        for timeout in [config.first_chunk, config.inter_chunk, config.overall] {
+            assert!(start + timeout > start);
+            assert_eq!(timeout, crate::config::MAX_TIMEOUT);
+        }
     }
 
     // H7 contract (ADR-0003): generation streaming does NOT clamp

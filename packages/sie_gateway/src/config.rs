@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::env;
+use std::time::Duration;
 
 use serde::Deserialize;
 
@@ -442,6 +443,22 @@ fn env_finite_float(key: &str, fallback: f64) -> f64 {
         "{key} must be a finite floating point value"
     );
     value
+}
+
+/// The longest timeout the gateway arms: Tokio's own horizon for a deadline
+/// it cannot represent. Any `Instant` can be advanced by it without overflow.
+pub const MAX_TIMEOUT: Duration = Duration::from_secs(30 * 365 * 24 * 60 * 60);
+
+/// Converts seconds into a timeout: values that are not positive become zero,
+/// and larger values than [`MAX_TIMEOUT`] saturate to it.
+pub fn timeout_from_secs(seconds: f64) -> Duration {
+    if seconds > 0.0 {
+        Duration::try_from_secs_f64(seconds)
+            .unwrap_or(Duration::MAX)
+            .min(MAX_TIMEOUT)
+    } else {
+        Duration::ZERO
+    }
 }
 
 /// Read `SIE_STREAM_STORAGE`. An unset, empty, or unrecognized value keeps
@@ -1335,6 +1352,21 @@ mod tests {
         with_env(&[("SIE_GATEWAY_REQUEST_TIMEOUT", "NaN")], || {
             let _ = Config::load();
         });
+    }
+
+    #[test]
+    fn test_timeout_from_secs_saturates_instead_of_panicking() {
+        assert_eq!(timeout_from_secs(45.5), Duration::from_millis(45_500));
+        for seconds in [0.0, -1.0, f64::NAN, f64::NEG_INFINITY] {
+            assert_eq!(timeout_from_secs(seconds), Duration::ZERO, "{seconds}");
+        }
+        for seconds in [f64::INFINITY, 1e300, 1e19, 2.0 * MAX_TIMEOUT.as_secs_f64()] {
+            assert_eq!(timeout_from_secs(seconds), MAX_TIMEOUT, "{seconds}");
+        }
+        let now = std::time::Instant::now();
+        assert!(now + MAX_TIMEOUT > now);
+        let now = tokio::time::Instant::now();
+        assert!(now + MAX_TIMEOUT > now);
     }
 
     #[test]

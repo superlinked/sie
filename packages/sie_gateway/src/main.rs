@@ -520,7 +520,7 @@ async fn run_server(cfg: Config) -> Result<(), Box<dyn std::error::Error>> {
                             jetstream,
                             nats_manager.router_id().to_string(),
                             payload_store,
-                            Duration::from_secs_f64(config.request_timeout),
+                            config::timeout_from_secs(config.request_timeout),
                             config.max_stream_pending,
                             queue::publisher::WorkStreamConfig {
                                 max_age: Duration::from_secs(config.stream_max_age_s),
