@@ -236,9 +236,11 @@ to satisfy other allocations, so another model on the same GPU that needs
 memory in that window (about one forward) can run out of memory where it
 otherwise would not. Recording is kept rare to limit this: one recording at a
 time in the process, none while less than a tenth of the device's memory is
-free, and per model at most 16 recordings at once, then one per 2 seconds. If a
-recording itself runs out of memory, the request still gets its eager answer;
-the model drops its graphs and records nothing for a minute.
+free, and per model a budget of 16 recordings that refills at one every 2
+seconds, so a model records at most 16 graphs in quick succession, one after
+another, then about one every 2 seconds. If a recording itself runs out of
+memory, the request still gets its eager answer; the model drops its graphs and
+records nothing for a minute.
 
 Both limits are approximate. The free-memory check reads the device once,
 before recording, so a model loading at the same moment can still meet one
@@ -503,9 +505,10 @@ A graph is recorded the first time a request needs its shape (the dense
 adapter's warm-up records the smallest at load), and that request is answered
 by its first replay. Recording follows the rules of the GLiClass graphs above,
 and shares their process-wide limits: one recording at a time in the process,
-none while less than a tenth of the device's memory is free, at most 16
-recordings at once and then one per 2 seconds, and a model's graphs within
-4% of the device's memory (900 MB on an L4). A model's graphs, which share
+none while less than a tenth of the device's memory is free, a budget of 16
+recordings per model that refills at one every 2 seconds (16 in quick
+succession, one after another, then about one every 2 seconds), and a
+model's graphs within 4% of the device's memory (900 MB on an L4). A model's graphs, which share
 one memory pool and one output buffer, held 40 to 105 MB on an L4 once every
 shape its traffic needed was recorded. A recording that runs out of memory
 drops the model's graphs and pauses recording for a minute; a shape that
