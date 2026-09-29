@@ -475,6 +475,8 @@ class VarlenGraphRunner:
                 packed = self._replay(key, entry, token_ids, lengths)
             except Exception as exc:
                 if is_oom_error(exc):
+                    # Part of recording: pause as an out-of-memory recording does.
+                    self._recording_credit = 1 - _OOM_COOL_DOWN_SECONDS / _SECONDS_PER_RECORDING
                     raise
                 self._recording_failed(key, exc)
                 return None, "recording_failed"

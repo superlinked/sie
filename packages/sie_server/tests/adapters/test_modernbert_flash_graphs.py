@@ -488,6 +488,26 @@ class TestPolicy:
         assert _run(runner, [10]) == "graph"
         assert 100 not in {key[0] for key in runner._failed}
 
+    def test_out_of_memory_in_a_first_replay_drops_the_graphs_and_pauses(self) -> None:
+        runner = _Runner(_echo_encode, max_tokens=1024)
+        _run(runner, [10])
+        original = runner._replay
+
+        def out_of_memory(*args: Any) -> Any:
+            raise torch.OutOfMemoryError("CUDA out of memory")
+
+        runner._replay = out_of_memory  # ty: ignore[invalid-assignment]
+        with pytest.raises(torch.OutOfMemoryError):
+            _run(runner, [100])
+        runner._replay = original  # ty: ignore[invalid-assignment]
+        assert runner.graph_count == 0
+        assert runner.stats.drops == 1
+        assert runner.stats.recording_failures == 0
+        assert _run(runner, [100]) is None
+        assert runner.stats.eager == {"recording_paused": 1}
+        runner.now += 62.0
+        assert _run(runner, [100]) == "graph"
+
     def test_out_of_memory_in_a_forward_drops_the_graphs(self) -> None:
         runner = _Runner(_echo_encode, max_tokens=1024)
         _run(runner, [10])
