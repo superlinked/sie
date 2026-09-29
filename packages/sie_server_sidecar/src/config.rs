@@ -5,6 +5,70 @@
 
 use std::path::PathBuf;
 
+/// NATS user/password pair (`SIE_NATS_USER` / `SIE_NATS_PASSWORD`).
+#[derive(Clone, PartialEq, Eq)]
+pub struct NatsCredentials {
+    pub user: String,
+    pub password: String,
+}
+
+impl NatsCredentials {
+    /// `None` when neither value is set, an error when only one is.
+    pub fn from_parts(
+        user: Option<String>,
+        password: Option<String>,
+    ) -> Result<Option<Self>, String> {
+        let user = user.filter(|v| !v.is_empty());
+        let password = password.filter(|v| !v.is_empty());
+        match (user, password) {
+            (None, None) => Ok(None),
+            (Some(user), Some(password)) => Ok(Some(Self { user, password })),
+            _ => Err("SIE_NATS_USER and SIE_NATS_PASSWORD must be set together".to_string()),
+        }
+    }
+
+    /// Read `SIE_NATS_USER` / `SIE_NATS_PASSWORD`. They are environment-only
+    /// (no CLI flags), so the password never appears in a process listing or
+    /// in `--help`.
+    pub fn from_env() -> Result<Option<Self>, String> {
+        Self::from_parts(
+            std::env::var("SIE_NATS_USER").ok(),
+            std::env::var("SIE_NATS_PASSWORD").ok(),
+        )
+    }
+}
+
+impl std::fmt::Debug for NatsCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NatsCredentials")
+            .field("user", &self.user)
+            .field("password", &"<redacted>")
+            .finish()
+    }
+}
+
+/// `url` with any `user[:password]@` userinfo replaced by `<redacted>@`, for
+/// logs. The client ignores userinfo in `SIE_NATS_URL`.
+pub fn redact_url_userinfo(url: &str) -> String {
+    url.split(',')
+        .map(|server| {
+            let authority_start = server.find("://").map_or(0, |i| i + 3);
+            let authority_end = server[authority_start..]
+                .find(['/', '?', '#'])
+                .map_or(server.len(), |i| authority_start + i);
+            match server[authority_start..authority_end].rfind('@') {
+                Some(at) => format!(
+                    "{}<redacted>{}",
+                    &server[..authority_start],
+                    &server[authority_start + at..]
+                ),
+                None => server.to_string(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 #[derive(Clone)]
 pub struct WorkerConfig {
     /// NATS server URL (e.g. `nats://localhost:4222`). Required for the
@@ -12,6 +76,9 @@ pub struct WorkerConfig {
     /// local-ingest mode (`run_local()`, P2.10 §4.6) which never
     /// touches NATS.
     pub nats_url: Option<String>,
+
+    /// Credentials for the NATS connection; `None` connects without them.
+    pub nats_credentials: Option<NatsCredentials>,
 
     /// UDS path for the local-ingest listener (`SIE_SIDECAR_LOCAL_SOCKET`).
     /// Only read by `run_local()`; `None` on NATS deployments.
@@ -155,12 +222,14 @@ pub struct WorkerConfig {
 
 impl std::fmt::Debug for WorkerConfig {
     /// Hand-written so the bearer tokens (`gateway_api_key`,
-    /// `config_service_token`) print only as present or absent.
+    /// `config_service_token`) print only as present or absent, and the NATS
+    /// password and URL userinfo never print.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Destructured without `..` so a new field fails to compile until it is
         // listed here, and so cannot be printed unredacted or silently omitted.
         let WorkerConfig {
             nats_url,
+            nats_credentials,
             local_socket_path,
             pool,
             bundle,
@@ -191,7 +260,11 @@ impl std::fmt::Debug for WorkerConfig {
             health_publish_interval_ms,
         } = self;
         f.debug_struct("WorkerConfig")
-            .field("nats_url", nats_url)
+            .field(
+                "nats_url",
+                &nats_url.as_deref().map(redact_url_userinfo),
+            )
+            .field("nats_credentials", nats_credentials)
             .field("local_socket_path", local_socket_path)
             .field("pool", pool)
             .field("bundle", bundle)
@@ -303,6 +376,7 @@ mod tests {
     fn sample() -> WorkerConfig {
         WorkerConfig {
             nats_url: Some("nats://localhost:4222".into()),
+            nats_credentials: None,
             local_socket_path: None,
             pool: "l4".into(),
             bundle: "default".into(),
@@ -345,6 +419,54 @@ mod tests {
         assert!(rendered.contains("config_service_token: Some(\"<redacted>\")"));
         assert!(rendered.contains("gateway_api_key: Some(\"<redacted>\")"));
         assert!(rendered.contains("worker_id: \"worker-test\""));
+    }
+
+    #[test]
+    fn nats_credentials_require_user_and_password_together() {
+        assert_eq!(NatsCredentials::from_parts(None, None), Ok(None));
+        assert_eq!(
+            NatsCredentials::from_parts(Some(String::new()), Some(String::new())),
+            Ok(None)
+        );
+        assert_eq!(
+            NatsCredentials::from_parts(Some("sie-worker".into()), Some("pw".into())),
+            Ok(Some(NatsCredentials {
+                user: "sie-worker".into(),
+                password: "pw".into(),
+            }))
+        );
+        assert!(NatsCredentials::from_parts(Some("sie-worker".into()), None).is_err());
+        assert!(NatsCredentials::from_parts(None, Some("pw".into())).is_err());
+    }
+
+    #[test]
+    fn worker_config_debug_redacts_the_nats_password() {
+        let mut cfg = sample();
+        cfg.nats_credentials = Some(NatsCredentials {
+            user: "sie-worker".into(),
+            password: "nats-password-secret".into(),
+        });
+        cfg.nats_url = Some("nats://url-user:url-secret@nats:4222".into());
+        let dbg = format!("{cfg:?}");
+        assert!(!dbg.contains("nats-password-secret"), "{dbg}");
+        assert!(!dbg.contains("url-secret"), "{dbg}");
+        assert!(dbg.contains("sie-worker"), "{dbg}");
+    }
+
+    #[test]
+    fn redact_url_userinfo_hides_credentials_only() {
+        assert_eq!(
+            redact_url_userinfo("nats://nats-host:4222"),
+            "nats://nats-host:4222"
+        );
+        assert_eq!(
+            redact_url_userinfo("nats://user:secret@nats-host:4222"),
+            "nats://<redacted>@nats-host:4222"
+        );
+        assert_eq!(
+            redact_url_userinfo("tls://token@a:4222,nats://b:4222/x@y"),
+            "tls://<redacted>@a:4222,nats://b:4222/x@y"
+        );
     }
 
     #[test]

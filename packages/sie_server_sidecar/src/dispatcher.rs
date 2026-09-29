@@ -258,6 +258,7 @@ struct GenerateDeliveryLogContext {
     work_item_id: String,
     request_id: String,
     model_id: String,
+    reply_subject: String,
     delivery: DeliveryContext,
 }
 
@@ -1931,6 +1932,7 @@ impl Dispatcher {
             work_item_id: wi.work_item_id.clone(),
             request_id: wi.request_id.clone(),
             model_id: model_id.clone(),
+            reply_subject: wi.reply_subject.clone(),
             delivery,
         });
         let executed_bundle_config_hash: Arc<str> = Arc::from(wi.bundle_config_hash.clone());
@@ -4329,6 +4331,11 @@ async fn handle_generate_event(
 ) -> Result<(), DispatchError> {
     match event.kind.as_str() {
         "publish" => {
+            if event.reply_subject != delivery_log.reply_subject {
+                return Err(DispatchError::Ipc(IpcError::Server(
+                    "generation publish reply_subject mismatch".to_string(),
+                )));
+            }
             let payload =
                 stamp_generate_execution_hash(event.payload, executed_bundle_config_hash)?;
             publisher.publish_raw(&event.reply_subject, payload).await?;
@@ -6385,6 +6392,64 @@ mod tests {
 
     /// Far longer than any readiness deadline the tests use.
     const STALLED_PROBE: Duration = Duration::from_secs(1_000_000);
+
+    #[tokio::test]
+    async fn generation_publish_to_a_subject_other_than_the_work_item_reply_is_refused() {
+        let client = async_nats::ConnectOptions::new()
+            .retry_on_initial_connect()
+            .connect("nats://127.0.0.1:1")
+            .await
+            .expect("an offline client needs no server");
+        let telemetry = crate::observability::metrics::SidecarTelemetry::default();
+        let publisher = Arc::new(WorkPublisher::new(
+            client.clone(),
+            "worker-test",
+            telemetry.clone(),
+        ));
+        let message = Message {
+            message: async_nats::Message {
+                subject: "sie.work.test".into(),
+                reply: None,
+                payload: Default::default(),
+                headers: None,
+                status: None,
+                description: None,
+                length: 0,
+            },
+            context: async_nats::jetstream::new(client),
+        };
+        let delivery = DeliveryContext::from_message(&message);
+        let delivery_log = Arc::new(GenerateDeliveryLogContext {
+            work_item_id: "wi-1".to_string(),
+            request_id: "req-1".to_string(),
+            model_id: "model".to_string(),
+            reply_subject: "_INBOX.router.req-1".to_string(),
+            delivery,
+        });
+        for subject in ["$JS.API.STREAM.CREATE.X", "sie.config.models._all", ""] {
+            let result = handle_generate_event(
+                GenerateEvent {
+                    kind: "publish".to_string(),
+                    reply_subject: subject.to_string(),
+                    payload: Vec::new(),
+                    delay_ms: None,
+                    error: None,
+                },
+                Arc::clone(&publisher),
+                telemetry.clone(),
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(QueuedMessage::new(message.clone(), None)),
+                Arc::clone(&delivery_log),
+                "",
+            )
+            .await;
+            let error = result.expect_err(subject).to_string();
+            assert!(
+                error.contains("reply_subject mismatch"),
+                "{subject}: {error}"
+            );
+        }
+    }
 
     /// A NATS delivery whose ACK, NAK and progress calls fail: it has no
     /// reply subject and its client never reaches a server.

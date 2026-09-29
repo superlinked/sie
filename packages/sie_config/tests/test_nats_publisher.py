@@ -4,7 +4,7 @@ import logging
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from sie_config.nats_publisher import _ALL_SUBJECT, NatsPublisher
+from sie_config.nats_publisher import _ALL_SUBJECT, NatsPublisher, _redact_userinfo
 
 
 class TestNatsPublisherConnect:
@@ -93,6 +93,74 @@ class TestNatsPublisherConnect:
     async def test_disconnect_when_not_connected(self) -> None:
         publisher = NatsPublisher()
         await publisher.disconnect()
+
+
+class TestNatsPublisherCredentials:
+    @pytest.mark.asyncio
+    async def test_connect_sends_credentials_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        password = "nats-password-" + "value"
+        monkeypatch.setenv("SIE_NATS_USER", "sie-config")
+        monkeypatch.setenv("SIE_NATS_PASSWORD", password)
+        publisher = NatsPublisher(nats_url="nats://nats:4222")
+        client = AsyncMock()
+        client.is_connected = True
+        with patch("nats.connect", AsyncMock(return_value=client)) as connect:
+            await publisher.connect()
+            assert connect.call_args.args == ("nats://nats:4222",)
+            assert connect.call_args.kwargs["user"] == "sie-config"
+            assert connect.call_args.kwargs["password"] == password
+            assert publisher.connected
+            await publisher.disconnect()
+
+    @pytest.mark.asyncio
+    async def test_connect_without_credentials(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("SIE_NATS_USER", raising=False)
+        monkeypatch.delenv("SIE_NATS_PASSWORD", raising=False)
+        publisher = NatsPublisher(nats_url="nats://nats:4222")
+        client = AsyncMock()
+        client.is_connected = True
+        with patch("nats.connect", AsyncMock(return_value=client)) as connect:
+            await publisher.connect()
+            assert connect.call_args.kwargs["user"] is None
+            assert connect.call_args.kwargs["password"] is None
+            await publisher.disconnect()
+
+    @pytest.mark.parametrize("set_var", ["SIE_NATS_USER", "SIE_NATS_PASSWORD"])
+    def test_user_and_password_must_be_set_together(self, monkeypatch: pytest.MonkeyPatch, set_var: str) -> None:
+        monkeypatch.delenv("SIE_NATS_USER", raising=False)
+        monkeypatch.delenv("SIE_NATS_PASSWORD", raising=False)
+        monkeypatch.setenv(set_var, "value")
+        with pytest.raises(ValueError, match="must be set together"):
+            NatsPublisher(nats_url="nats://nats:4222")
+
+    @pytest.mark.asyncio
+    async def test_logs_do_not_contain_url_credentials(self, caplog: pytest.LogCaptureFixture) -> None:
+        publisher = NatsPublisher(nats_url="nats://url-user:url-secret@nats:4222")
+        client = AsyncMock()
+        client.is_connected = True
+        with caplog.at_level(logging.DEBUG):
+            with patch("nats.connect", side_effect=ConnectionRefusedError("refused")):
+                await publisher.connect()
+                await publisher.disconnect()
+            with patch("nats.connect", AsyncMock(return_value=client)):
+                await publisher.connect()
+                await publisher._handle_reconnect()
+                await publisher.disconnect()
+        assert "nats://<redacted>@nats:4222" in caplog.text
+        assert "url-secret" not in caplog.text
+        assert "url-user" not in caplog.text
+
+    @pytest.mark.parametrize(
+        ("url", "expected"),
+        [
+            ("nats://nats:4222", "nats://nats:4222"),
+            ("nats://user:secret@nats:4222", "nats://<redacted>@nats:4222"),
+            ("tls://token@a:4222,nats://b:4222/x@y", "tls://<redacted>@a:4222,nats://b:4222/x@y"),
+            ("user:p@ss@host", "<redacted>@host"),
+        ],
+    )
+    def test_redact_userinfo(self, url: str, expected: str) -> None:
+        assert _redact_userinfo(url) == expected
 
 
 class TestNatsPublisherPublish:

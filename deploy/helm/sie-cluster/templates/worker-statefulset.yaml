@@ -40,7 +40,7 @@ fast at render time.
      the gateway-deployment render guards exist to prevent. The sidecar's
      sie-config credential comes only from config.auth, so SIE_ADMIN_TOKEN and
      SIE_CONFIG_SERVICE_TOKEN are reserved too. */}}
-{{- $reservedSidecarEnv := concat $reservedOtelEnv (list "SIE_ADMIN_TOKEN" "SIE_BUNDLE" "SIE_CONFIG_SERVICE_TOKEN" "SIE_GPU_COUNT" "SIE_HEALTH_PUBLISH_ENABLED" "SIE_HEALTH_PUBLISH_INTERVAL_MS" "SIE_MACHINE_PROFILE" "SIE_OTEL_LANE" "SIE_POOL" "SIE_STREAM_MAX_AGE_S" "SIE_STREAM_REPLICAS" "SIE_STREAM_STORAGE" "SIE_WORKER_ID") -}}
+{{- $reservedSidecarEnv := concat $reservedOtelEnv (list "SIE_ADMIN_TOKEN" "SIE_BUNDLE" "SIE_CONFIG_SERVICE_TOKEN" "SIE_GPU_COUNT" "SIE_HEALTH_PUBLISH_ENABLED" "SIE_HEALTH_PUBLISH_INTERVAL_MS" "SIE_MACHINE_PROFILE" "SIE_NATS_PASSWORD" "SIE_NATS_USER" "SIE_OTEL_LANE" "SIE_POOL" "SIE_STREAM_MAX_AGE_S" "SIE_STREAM_REPLICAS" "SIE_STREAM_STORAGE" "SIE_WORKER_ID") -}}
 {{- include "sie-cluster.env.assertNoReserved" (dict "path" "workers.common.extraEnv" "entries" $root.Values.workers.common.extraEnv "reserved" $reservedWorkerEnv) -}}
 {{- include "sie-cluster.env.assertNoReserved" (dict "path" "workers.common.workerSidecar.extraEnv" "entries" $root.Values.workers.common.workerSidecar.extraEnv "reserved" $reservedSidecarEnv) -}}
 {{- range $poolName, $pool := .Values.workers.pools }}
@@ -535,6 +535,7 @@ spec:
             {{- if $root.Values.nats.enabled }}
             - name: SIE_NATS_URL
               value: {{ $root.Values.nats.url | default (printf "nats://%s:4222" ($root.Values.nats.serviceName | default (printf "%s-nats" $root.Release.Name))) | quote }}
+            {{- include "sie-cluster.nats.clientAuthEnv" (dict "root" $root "component" "worker") | nindent 12 }}
             {{- end }}
             {{- if $root.Values.config.enabled }}
             - name: SIE_NATS_CONFIG_TRUSTED_PRODUCERS

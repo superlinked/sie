@@ -111,6 +111,7 @@ spec:
             {{- if .Values.nats.enabled }}
             - name: SIE_NATS_URL
               value: {{ .Values.nats.url | default (printf "nats://%s-nats:4222" .Release.Name) | quote }}
+            {{- include "sie-cluster.nats.clientAuthEnv" (dict "root" . "component" "config") | nindent 12 }}
             {{- end }}
             {{- if .Values.config.configStore.enabled }}
             - name: SIE_CONFIG_STORE_DIR

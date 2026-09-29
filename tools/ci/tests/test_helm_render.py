@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import re
 import shutil
+import socket
 import subprocess
+import time
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -1044,3 +1048,319 @@ def test_worker_network_policy_rejects_prefix_zero_and_near_full_port_ranges(
         "workers": {"networkPolicy": {"enabled": True, "extraIngress": [rule]}, "pools": {"l4": {"enabled": True}}}
     }
     assert message in render_error(tmp_path, values)
+
+
+NATS_SERVER_CONFIG_FIXTURE = ROOT / "tools/ci/fixtures/sie-cluster-nats.conf"
+NATS_L4_POOL = {"workers": {"pools": {"l4": {"enabled": True}}}}
+NATS_CLIENTS = {
+    "config": ("sie-sie-cluster-config", "config"),
+    "gateway": ("sie-sie-cluster-gateway", "gateway"),
+    "worker": ("sie-sie-cluster-worker-l4-default", "worker-sidecar"),
+}
+
+
+def render_nats_chart(tmp_path: Path, values: dict, *extra: str) -> subprocess.CompletedProcess[str]:
+    values_file = tmp_path / "nats-values.yaml"
+    values_file.write_text(yaml.safe_dump(values), encoding="utf-8")
+    return subprocess.run(
+        [
+            "mise",
+            "exec",
+            "--",
+            "helm",
+            "template",
+            "sie",
+            str(helm.CHART_DIR),
+            "--namespace",
+            "sie",
+            *helm.validation_args([*extra, "-f", str(values_file)]),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def nats_documents(tmp_path: Path, values: dict, *extra: str) -> list[dict]:
+    result = render_nats_chart(tmp_path, values, *extra)
+    assert result.returncode == 0, result.stderr
+    return [doc for doc in yaml.safe_load_all(result.stdout) if doc]
+
+
+def workload_env(docs: list[dict], workload: str, container: str) -> dict[str, dict]:
+    (doc,) = [
+        doc for doc in docs if doc["kind"] in {"Deployment", "StatefulSet"} and doc["metadata"]["name"] == workload
+    ]
+    (spec,) = [spec for spec in doc["spec"]["template"]["spec"]["containers"] if spec["name"] == container]
+    return {env["name"]: env for env in spec.get("env", [])}
+
+
+def nats_server_config(docs: list[dict]) -> str:
+    (config_map,) = [doc for doc in docs if doc["kind"] == "ConfigMap" and doc["metadata"]["name"] == "sie-nats-config"]
+    return config_map["data"]["nats.conf"]
+
+
+def nats_auth_secrets(docs: list[dict]) -> dict[str, dict]:
+    return {
+        doc["metadata"]["name"]: doc
+        for doc in docs
+        if doc["kind"] == "Secret" and doc["metadata"]["name"].startswith("sie-nats-auth-")
+    }
+
+
+def nats_client_credentials(docs: list[dict]) -> dict[str, tuple[str, dict]]:
+    credentials = {}
+    for component, (workload, container) in NATS_CLIENTS.items():
+        env = workload_env(docs, workload, container)
+        if "SIE_NATS_PASSWORD" in env:
+            credentials[component] = (
+                env["SIE_NATS_USER"]["value"],
+                env["SIE_NATS_PASSWORD"]["valueFrom"]["secretKeyRef"],
+            )
+    return credentials
+
+
+def test_nats_server_config_fixture_matches_the_chart(tmp_path: Path) -> None:
+    docs = nats_documents(tmp_path, {})
+    assert nats_server_config(docs) == NATS_SERVER_CONFIG_FIXTURE.read_text(encoding="utf-8"), (
+        "tools/ci/fixtures/sie-cluster-nats.conf must equal the nats.conf the chart renders by default; "
+        "the gateway, sidecar, CPU-stack, and permission tests run nats-server with it"
+    )
+
+
+@pytest.mark.parametrize("auth", [{}, {"nats": {"auth": None}}, {"nats": {"auth": {"enabled": None}}}])
+def test_nats_authentication_is_on_by_default(tmp_path: Path, auth: dict) -> None:
+    docs = nats_documents(tmp_path, {**NATS_L4_POOL, **auth})
+    secrets = nats_auth_secrets(docs)
+    assert sorted(secrets) == ["sie-nats-auth-config", "sie-nats-auth-gateway", "sie-nats-auth-worker"]
+    for secret in secrets.values():
+        assert secret["metadata"]["annotations"] == {"helm.sh/resource-policy": "keep"}
+        assert re.fullmatch(r"[A-Za-z0-9]{48}", base64.b64decode(secret["data"]["password"]).decode())
+    assert nats_client_credentials(docs) == {
+        component: (f"sie-{component}", {"name": f"sie-nats-auth-{component}", "key": "password"})
+        for component in NATS_CLIENTS
+    }
+    worker = workload_env(docs, "sie-sie-cluster-worker-l4-default", "worker")
+    assert not {"SIE_NATS_URL", "SIE_NATS_USER", "SIE_NATS_PASSWORD"} & set(worker)
+    server_env = workload_env(docs, "sie-nats", "nats")
+    for component in NATS_CLIENTS:
+        assert server_env[f"SIE_NATS_AUTH_{component.upper()}_PASSWORD"]["valueFrom"]["secretKeyRef"] == {
+            "name": f"sie-nats-auth-{component}",
+            "key": "password",
+        }
+    config = nats_server_config(docs)
+    for component in NATS_CLIENTS:
+        assert f'"user": "sie-{component}"' in config
+        assert f'"password": $SIE_NATS_AUTH_{component.upper()}_PASSWORD' in config
+    assert "no_auth_user" not in config
+    assert not [doc for doc in docs if "nats-box" in doc["metadata"]["name"]]
+
+
+def test_nats_authentication_opt_out(tmp_path: Path) -> None:
+    docs = nats_documents(tmp_path, {**NATS_L4_POOL, "nats": {"auth": {"enabled": False}}})
+    assert nats_auth_secrets(docs) == {}
+    assert nats_client_credentials(docs) == {}
+    assert not [name for name in workload_env(docs, "sie-nats", "nats") if name.startswith("SIE_NATS")]
+    assert "authorization" not in nats_server_config(docs)
+
+
+def test_nats_operator_secrets_are_used_unchanged(tmp_path: Path) -> None:
+    existing = {"config": "ops-config", "gateway": "ops-gateway", "worker": "ops-worker"}
+    docs = nats_documents(tmp_path, {**NATS_L4_POOL, "nats": {"auth": {"existingSecrets": existing}}})
+    assert nats_auth_secrets(docs) == {}
+    assert nats_client_credentials(docs) == {
+        component: (f"sie-{component}", {"name": name, "key": "password"}) for component, name in existing.items()
+    }
+    server_env = workload_env(docs, "sie-nats", "nats")
+    for component, name in existing.items():
+        assert server_env[f"SIE_NATS_AUTH_{component.upper()}_PASSWORD"]["valueFrom"]["secretKeyRef"]["name"] == name
+
+
+def test_nats_cluster_routes_authenticate(tmp_path: Path) -> None:
+    docs = nats_documents(tmp_path, {}, "-f", str(ROOT / helm.CHART_DIR / "values-ha.yaml"))
+    assert "sie-nats-auth-route" in nats_auth_secrets(docs)
+    config = nats_server_config(docs)
+    assert '"password": $SIE_NATS_AUTH_ROUTE_PASSWORD' in config
+    assert '"routes": $SIE_NATS_ROUTES' in config
+    env_names = list(workload_env(docs, "sie-nats", "nats"))
+    assert env_names.index("SIE_NATS_AUTH_ROUTE_PASSWORD") < env_names.index("SIE_NATS_ROUTES")
+    routes = workload_env(docs, "sie-nats", "nats")["SIE_NATS_ROUTES"]["value"]
+    assert routes == (
+        "["
+        + ",".join(
+            f"nats://sie-route:$(SIE_NATS_AUTH_ROUTE_PASSWORD)@sie-nats-{i}.sie-nats-headless:6222" for i in range(3)
+        )
+        + "]"
+    )
+
+
+@pytest.mark.parametrize(
+    ("values", "extra"),
+    [
+        ({"nats": {"config": {"merge": {"sieNatsAuth": None}}}}, ()),
+        ({"nats": {"container": {"env": {"sieNatsAuth": None}}}}, ()),
+        (
+            {"nats": {"config": {"cluster": {"merge": {"sieNatsAuth": None}}}}},
+            ("-f", str(ROOT / helm.CHART_DIR / "values-ha.yaml")),
+        ),
+    ],
+)
+def test_nats_values_without_the_server_wiring_fail_the_render(
+    tmp_path: Path, values: dict, extra: tuple[str, ...]
+) -> None:
+    result = render_nats_chart(tmp_path, values, *extra)
+    assert result.returncode != 0
+    assert "lack the chart's server wiring" in result.stderr
+    assert "--reset-then-reuse-values" in result.stderr
+
+
+def test_external_nats_needs_operator_secrets(tmp_path: Path) -> None:
+    external = {"install": False, "url": "nats://external-nats:4222"}
+    result = render_nats_chart(tmp_path, {**NATS_L4_POOL, "nats": external})
+    assert result.returncode != 0
+    assert "needs nats.auth.existingSecrets.gateway" in result.stderr
+
+    existing = {"config": "ops-config", "gateway": "ops-gateway", "worker": "ops-worker"}
+    docs = nats_documents(tmp_path, {**NATS_L4_POOL, "nats": {**external, "auth": {"existingSecrets": existing}}})
+    assert nats_auth_secrets(docs) == {}
+    assert nats_client_credentials(docs) == {
+        component: (f"sie-{component}", {"name": name, "key": "password"}) for component, name in existing.items()
+    }
+
+    docs = nats_documents(tmp_path, {**NATS_L4_POOL, "nats": {**external, "auth": {"enabled": False}}})
+    assert nats_client_credentials(docs) == {}
+
+
+def test_nats_anonymous_upgrade_aid(tmp_path: Path) -> None:
+    docs = nats_documents(tmp_path, {"nats": {"auth": {"allowAnonymous": True}}})
+    config = nats_server_config(docs)
+    assert '"no_auth_user": "sie-anonymous"' in config
+    assert '"user": "sie-anonymous"' in config
+
+    external = {"install": False, "url": "nats://external-nats:4222", "auth": {"allowAnonymous": True}}
+    result = render_nats_chart(tmp_path, {"nats": external})
+    assert result.returncode != 0
+    assert "allowAnonymous applies only to the bundled NATS server" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("password", "error"),
+    [
+        ("", "Secret nats exists but has no password key"),
+        ("a" * 31, "shorter than 32 characters"),
+        ("a" * 31 + "$", "characters other than letters and digits"),
+        ("a" * 32, None),
+    ],
+)
+def test_reused_nats_password_must_be_32_letters_and_digits(tmp_path: Path, password: str, error: str | None) -> None:
+    chart = tmp_path / "helper-check"
+    (chart / "templates").mkdir(parents=True)
+    (chart / "Chart.yaml").write_text("apiVersion: v2\nname: helper-check\nversion: 0.1.0\n", encoding="utf-8")
+    shutil.copy(ROOT / helm.CHART_DIR / "templates" / "_nats-auth.tpl", chart / "templates" / "_nats-auth.tpl")
+    data = base64.b64encode(password.encode()).decode()
+    (chart / "templates" / "check.yaml").write_text(
+        f'{{{{- include "sie-cluster.nats.validateReusedPassword" (dict "name" "nats" "data" "{data}") }}}}\n',
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        ["mise", "exec", "--", "helm", "template", "check", str(chart)],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if error is None:
+        assert result.returncode == 0, result.stderr
+    else:
+        assert result.returncode != 0
+        assert error in result.stderr
+
+
+def _free_port() -> int:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+def _route_count(monitor_port: int) -> int:
+    with urllib.request.urlopen(f"http://127.0.0.1:{monitor_port}/routez", timeout=2) as response:
+        return len({route["remote_id"] for route in json.load(response).get("routes") or []})
+
+
+def test_rendered_nats_cluster_forms_only_with_route_credentials(tmp_path: Path) -> None:
+    binary = shutil.which("nats-server")
+    if binary is None:
+        pytest.skip("nats-server is not on PATH")
+    docs = nats_documents(tmp_path, {}, "-f", str(ROOT / helm.CHART_DIR / "values-ha.yaml"))
+    rendered = nats_server_config(docs)
+    assert rendered.count('"store_dir": "/data"') == 1
+    assert rendered.count('"port": 6222') == 1
+    route_password = "RoutePassword0123456789abcdefghijk"
+    cluster_ports = [_free_port() for _ in range(3)]
+    monitor_ports = [_free_port() for _ in range(3)]
+    routes = ",".join(f"nats://sie-route:{route_password}@127.0.0.1:{port}" for port in cluster_ports)
+    servers = []
+
+    def start(index: int, *args: str, env: dict[str, str]) -> subprocess.Popen[bytes]:
+        work = tmp_path / f"node-{index}"
+        work.mkdir()
+        if env:
+            config = work / "nats.conf"
+            node_config = rendered.replace('"store_dir": "/data"', f'"store_dir": {json.dumps(str(work / "js"))}')
+            node_config = node_config.replace('"port": 6222', f'"port": {cluster_ports[index]}')
+            config.write_text(node_config, encoding="utf-8")
+            args = ("-c", str(config), *args)
+        else:
+            args = ("-sd", str(work / "js"), *args)
+        server = subprocess.Popen(  # noqa: S603
+            [binary, *args, "-a", "127.0.0.1", "-p", str(_free_port()), "-P", str(work / "pid")],
+            env={**os.environ, **env},
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        servers.append(server)
+        return server
+
+    try:
+        for index in range(3):
+            start(
+                index,
+                "-m",
+                str(monitor_ports[index]),
+                env={
+                    "SERVER_NAME": f"node-{index}",
+                    "SIE_NATS_AUTH_CONFIG_PASSWORD": "c" * 32,
+                    "SIE_NATS_AUTH_GATEWAY_PASSWORD": "g" * 32,
+                    "SIE_NATS_AUTH_WORKER_PASSWORD": "w" * 32,
+                    "SIE_NATS_AUTH_ROUTE_PASSWORD": route_password,
+                    "SIE_NATS_ROUTES": f"[{routes}]",
+                },
+            )
+        deadline = time.monotonic() + 20
+        while True:
+            try:
+                if all(_route_count(port) == 2 for port in monitor_ports):
+                    break
+            except OSError:
+                pass
+            assert time.monotonic() < deadline, "the three rendered nodes did not route to each other"
+            time.sleep(0.2)
+
+        start(
+            3,
+            "--cluster_name",
+            "sie-nats",
+            "-cluster",
+            f"nats://127.0.0.1:{_free_port()}",
+            "-routes",
+            f"nats://127.0.0.1:{cluster_ports[0]}",
+            env={},
+        )
+        time.sleep(3)
+        assert _route_count(monitor_ports[0]) == 2, "a route without credentials joined the cluster"
+    finally:
+        for server in servers:
+            server.terminate()
+        for server in servers:
+            server.wait(timeout=10)

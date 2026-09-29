@@ -34,6 +34,8 @@
         "SIE_GATEWAY_STATIC_QUEUE_POOLS"
         "SIE_ADMIN_TOKEN"
         "SIE_CONFIG_SERVICE_TOKEN"
+        "SIE_NATS_PASSWORD"
+        "SIE_NATS_USER"
         "SIE_STREAM_MAX_AGE_S"
         "SIE_STREAM_REPLICAS"
         "SIE_STREAM_STORAGE") -}}
@@ -279,6 +281,7 @@ spec:
             {{- if .Values.nats.enabled }}
             - name: SIE_NATS_URL
               value: {{ .Values.nats.url | default (printf "nats://%s-nats:4222" .Release.Name) | quote }}
+            {{- include "sie-cluster.nats.clientAuthEnv" (dict "root" . "component" "gateway") | nindent 12 }}
             {{- if .Values.config.enabled }}
             # Allowlist of `producer_id` values trusted on `sie.config.models._all`.
             # `sie-config` publishes its POD_NAME, which is the Deployment name

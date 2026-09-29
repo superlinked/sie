@@ -89,7 +89,9 @@ Each `--flag` above has a matching `SIE_*` environment variable (see next sectio
 | `SIE_GATEWAY_K8S_SERVICE` | `sie-worker` | K8s service name |
 | `SIE_GATEWAY_K8S_PORT` | `8080` | K8s worker port |
 | `SIE_GATEWAY_HEALTH_MODE` | `ws` | Health mode: `ws` or `nats` |
-| `SIE_NATS_URL` | | NATS server URL. The process can start without it, but inference requests will return `503` until a usable client exists |
+| `SIE_NATS_URL` | | NATS server URL. The process can start without it, but inference requests will return `503` until a usable client exists. Credentials in the URL are not used; logs show the URL with any userinfo redacted |
+| `SIE_NATS_USER` | | NATS user (Helm sets `sie-gateway`). Set together with `SIE_NATS_PASSWORD`; setting only one fails startup |
+| `SIE_NATS_PASSWORD` | | NATS password of `SIE_NATS_USER`. Redacted in `Config` debug output |
 | `SIE_AUTH_MODE` | `none` | Auth mode for inbound requests: `none` disables, `token` (alias `static`) enforces. Unknown values fail-open-to-bypass; `main` logs a startup error naming the bad value |
 | `SIE_AUTH_TOKENS` | | CSV of valid bearer tokens for inference and pool/config read endpoints. If unset, the singular `SIE_AUTH_TOKEN` is used as a fallback. When auth is enabled and this list is empty, non-probe requests return `500` |
 | `SIE_AUTH_TOKEN` | | Singular alias for `SIE_AUTH_TOKENS` (fallback only; prefer the plural form) |

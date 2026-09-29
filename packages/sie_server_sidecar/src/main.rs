@@ -10,7 +10,7 @@ use anyhow::Context;
 use clap::Parser;
 use tracing::{error, info, warn};
 
-use sie_server_sidecar::config::WorkerConfig;
+use sie_server_sidecar::config::{NatsCredentials, WorkerConfig};
 use sie_server_sidecar::config_subscriber::trusted_producers_from_env;
 use sie_server_sidecar::dispatcher::default_max_concurrent_batches;
 use sie_server_sidecar::{run, run_local};
@@ -29,8 +29,9 @@ struct Cli {
     #[arg(long, env = "SIE_SIDECAR_LOCAL_SOCKET")]
     local_socket: Option<String>,
 
-    /// Required for `--ingest nats`; unused in local mode.
-    #[arg(long, env = "SIE_NATS_URL")]
+    /// Required for `--ingest nats`; unused in local mode. Credentials come
+    /// from `SIE_NATS_USER` / `SIE_NATS_PASSWORD`, never from the URL.
+    #[arg(long, env = "SIE_NATS_URL", hide_env_values = true)]
     nats_url: Option<String>,
 
     #[arg(long, env = "SIE_POOL")]
@@ -210,8 +211,10 @@ async fn main() -> anyhow::Result<()> {
              {CONFIG_SERVICE_TOKEN_ENV} to sie-config's read-scoped token (SIE_CONFIG_READ_TOKEN)"
         );
     }
+    let nats_credentials = NatsCredentials::from_env().map_err(anyhow::Error::msg)?;
     let config = WorkerConfig {
         nats_url: cli.nats_url,
+        nats_credentials,
         local_socket_path: cli.local_socket.map(Into::into),
         pool,
         bundle,

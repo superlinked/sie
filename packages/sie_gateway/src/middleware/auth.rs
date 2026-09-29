@@ -462,6 +462,8 @@ mod tests {
             k8s_port: 0,
             health_mode: String::new(),
             nats_url: String::new(),
+            nats_user: String::new(),
+            nats_password: String::new(),
             nats_config_trusted_producers: Vec::new(),
             auth_mode: mode.to_string(),
             auth_tokens: tokens.into_iter().map(String::from).collect(),

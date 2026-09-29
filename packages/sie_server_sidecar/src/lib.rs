@@ -351,8 +351,14 @@ pub async fn run(config: WorkerConfig) -> anyhow::Result<()> {
         .nats_url
         .as_deref()
         .context("SIE_NATS_URL is required for the NATS ingest mode")?;
-    let (nats_client, jetstream) = connect(nats_url).await.context("connect NATS")?;
-    info!(nats = %nats_url, "NATS connected");
+    let (nats_client, jetstream) = connect(nats_url, config.nats_credentials.as_ref())
+        .await
+        .context("connect NATS")?;
+    info!(
+        nats = %crate::config::redact_url_userinfo(nats_url),
+        user = config.nats_credentials.as_ref().map_or("", |c| c.user.as_str()),
+        "NATS connected"
+    );
     let consumer = ensure_stream_and_consumer(&jetstream, &config)
         .await
         .context("ensure NATS stream/consumer")?;

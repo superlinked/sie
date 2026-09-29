@@ -183,6 +183,32 @@ tombstone filters that redelivery. Static inference already sent over backend
 IPC is not preempted; the gateway has removed its collector and drops the late
 result.
 
+### Connection and permissions
+
+The sidecar connects with the credentials in `SIE_NATS_USER` and
+`SIE_NATS_PASSWORD`, which are read from the environment only (there are no
+CLI flags for them, and `--help` hides the value of `SIE_NATS_URL`). Setting
+only one of the two fails startup. Credentials in `SIE_NATS_URL` are not used,
+and logs redact any userinfo in it. In the Helm chart only the sidecar
+container of a worker pod receives the worker credentials, not the container
+that runs model code.
+
+The client uses the inbox prefix `_INBOX_WORKER` for its JetStream API replies
+and pull deliveries. The chart's `sie-worker` user may subscribe to that
+prefix, to `sie.config.models.*`, and to the three cancel subject trees, and
+may publish results into the gateway's `_INBOX` subjects, heartbeats on
+`sie.health.>`, acknowledgements on `$JS.ACK.>`, and the JetStream API calls
+above: stream info, create, and update (the sidecar creates its
+direct-dispatch stream and reconciles the pool stream), and consumer list,
+info, create, delete, and pull. It cannot publish work, config deltas, or
+cancels, read the gateway's inboxes, or delete or purge streams. The full
+matrix is in the chart README ("NATS authentication").
+
+On the generation path the sidecar publishes a backend `publish` event only
+when its reply subject equals the work item's `reply_subject`. The backend
+runs model code, so it must not choose where the sidecar's NATS user
+publishes.
+
 Source: [`nats_consumer.rs`](../src/nats_consumer.rs),
 [`subject.rs`](../src/subject.rs), and the gateway
 [queue publisher](../../sie_gateway/src/queue/publisher.rs).
@@ -464,8 +490,12 @@ The sidecar subscribes to bundle-scoped config deltas:
 sie.config.models.{bundle}
 ```
 
-Each notification is checked for trusted producer, bundle, epoch, and payload
-size. Accepted deltas are forwarded to the colocated backend through
+A notification with a reply subject or any `Nats-` header is dropped first:
+`sie-config` publishes plain core messages, and such a delivery can only come
+from the NATS server acting for a user that manages JetStream streams or
+consumers (for example a stream's republish setting), past that user's publish
+permissions. Each remaining notification is checked for trusted producer,
+bundle, epoch, and payload size. Accepted deltas are forwarded to the colocated backend through
 `ApplyModelConfig`, together with the notification's `bundle_adapters` list for
 this bundle when `sie-config` sends one. The backend returns the applied bundle
 config hash and `unsupported_models`, the routable ids that hash covers but the

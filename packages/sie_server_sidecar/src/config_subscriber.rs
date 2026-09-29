@@ -419,6 +419,29 @@ fn notification_is_stale(epoch: u64, current_epoch: u64) -> bool {
     epoch < current_epoch || (epoch == current_epoch && epoch != 0)
 }
 
+/// Why `msg` did not come from a plain client publish, or `None` when it did.
+///
+/// sie-config publishes config notifications with neither a reply subject nor
+/// headers. A NATS user that may manage JetStream streams or consumers can make
+/// the server itself deliver stored bytes to any subject, past that user's
+/// publish permissions: stream republish and direct-get replies carry
+/// `Nats-Stream`/`Nats-Sequence` headers, and consumer deliveries carry a
+/// `$JS.ACK` reply subject. Dropping those keeps config writes limited to the
+/// NATS users allowed to publish on the subject.
+pub(crate) fn server_originated(msg: &async_nats::Message) -> Option<&'static str> {
+    if msg.reply.is_some() {
+        return Some("reply subject set");
+    }
+    let has_server_header = msg.headers.as_ref().is_some_and(|headers| {
+        headers.iter().any(|(name, _)| {
+            let name: &str = name.as_ref();
+            name.get(..5)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("nats-"))
+        })
+    });
+    has_server_header.then_some("JetStream header present")
+}
+
 fn record_delta(
     telemetry: &SidecarTelemetry,
     kind: &str,
@@ -551,6 +574,15 @@ pub fn spawn(
                             subscribe_delay = next_retry_delay(subscribe_delay);
                             break;
                         };
+                        if let Some(reason) = server_originated(&msg) {
+                            warn!(
+                                subject = %subject,
+                                reason,
+                                "worker-config: dropping notification that was not published directly by a client"
+                            );
+                            record_delta(&runtime.telemetry, "unknown", "rejected_untrusted", None);
+                            continue;
+                        }
                         let notification: ConfigNotification = match serde_json::from_slice(&msg.payload) {
                             Ok(n) => n,
                             Err(e) => {
@@ -851,6 +883,48 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::UnixListener;
     use tokio::sync::Mutex;
+
+    fn config_message(
+        reply: Option<&str>,
+        headers: Option<async_nats::HeaderMap>,
+    ) -> async_nats::Message {
+        async_nats::Message {
+            subject: "sie.config.models.default".into(),
+            reply: reply.map(Into::into),
+            payload: Default::default(),
+            headers,
+            status: None,
+            description: None,
+            length: 0,
+        }
+    }
+
+    #[test]
+    fn server_originated_accepts_only_plain_client_publishes() {
+        assert_eq!(server_originated(&config_message(None, None)), None);
+
+        let mut app_headers = async_nats::HeaderMap::new();
+        app_headers.insert("traceparent", "00-abc-def-01");
+        assert_eq!(
+            server_originated(&config_message(None, Some(app_headers))),
+            None
+        );
+
+        assert!(server_originated(&config_message(
+            Some("$JS.ACK.WORK_x.pushc.1.1.1.1.0"),
+            None
+        ))
+        .is_some());
+
+        for name in ["Nats-Stream", "nats-sequence", "NATS-SUBJECT"] {
+            let mut headers = async_nats::HeaderMap::new();
+            headers.insert(name, "WORK_x");
+            assert!(
+                server_originated(&config_message(None, Some(headers))).is_some(),
+                "{name}"
+            );
+        }
+    }
 
     fn notification(
         producer_id: &str,

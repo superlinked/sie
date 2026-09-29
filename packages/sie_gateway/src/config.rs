@@ -111,6 +111,10 @@ pub struct Config {
 
     // NATS
     pub nats_url: String,
+    /// NATS user and password (`SIE_NATS_USER` / `SIE_NATS_PASSWORD`). Both
+    /// empty connects without credentials; see `nats_credentials`.
+    pub nats_user: String,
+    pub nats_password: String,
     /// Trusted-producer allowlist for `sie.config.models._all`. Defaults
     /// to `["sie-config"]`. Incoming `ConfigNotification`s whose
     /// `producer_id` is not in this list are dropped (neither the epoch
@@ -236,6 +240,45 @@ pub struct Config {
     pub public_base_url: Option<String>,
 }
 
+/// NATS user/password pair presented on connect.
+#[derive(Clone, PartialEq, Eq)]
+pub struct NatsCredentials {
+    pub user: String,
+    pub password: String,
+}
+
+impl std::fmt::Debug for NatsCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NatsCredentials")
+            .field("user", &self.user)
+            .field("password", &redacted_secret(&self.password))
+            .finish()
+    }
+}
+
+/// `url` with any `user[:password]@` userinfo replaced by `<redacted>@`, for
+/// logs. NATS credentials belong in `SIE_NATS_USER` / `SIE_NATS_PASSWORD`;
+/// the client ignores userinfo in `SIE_NATS_URL`.
+pub fn redact_url_userinfo(url: &str) -> String {
+    url.split(',')
+        .map(|server| {
+            let authority_start = server.find("://").map_or(0, |i| i + 3);
+            let authority_end = server[authority_start..]
+                .find(['/', '?', '#'])
+                .map_or(server.len(), |i| authority_start + i);
+            match server[authority_start..authority_end].rfind('@') {
+                Some(at) => format!(
+                    "{}<redacted>{}",
+                    &server[..authority_start],
+                    &server[authority_start + at..]
+                ),
+                None => server.to_string(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 /// Render a secret string for `Debug` output: an empty value stays empty (so
 /// "unset" is still visible), any real value collapses to `<redacted>` so the
 /// credential never reaches logs.
@@ -254,7 +297,8 @@ impl std::fmt::Debug for Config {
     /// preserving present/absent (and count) so misconfig is still diagnosable.
     /// `config_modal_proxy_token` relies on `ModalProxyToken`'s own redacting
     /// `Debug`. `nats_url` / `payload_store_url` are connection URLs kept
-    /// visible on purpose (redacting them would hide the target host).
+    /// visible on purpose (redacting them would hide the target host);
+    /// `nats_url` drops any userinfo.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Config")
             .field("host", &self.host)
@@ -265,7 +309,10 @@ impl std::fmt::Debug for Config {
             .field("k8s_service", &self.k8s_service)
             .field("k8s_port", &self.k8s_port)
             .field("health_mode", &self.health_mode)
-            .field("nats_url", &self.nats_url)
+            .field("nats_url", &redact_url_userinfo(&self.nats_url))
+            .field("nats_user", &self.nats_user)
+            // Secret: the NATS password (SIE_NATS_PASSWORD).
+            .field("nats_password", &redacted_secret(&self.nats_password))
             .field(
                 "nats_config_trusted_producers",
                 &self.nats_config_trusted_producers,
@@ -762,6 +809,8 @@ impl Config {
             health_mode: env_default("SIE_GATEWAY_HEALTH_MODE", "ws"),
 
             nats_url: env::var("SIE_NATS_URL").unwrap_or_default(),
+            nats_user: env::var("SIE_NATS_USER").unwrap_or_default(),
+            nats_password: env::var("SIE_NATS_PASSWORD").unwrap_or_default(),
             nats_config_trusted_producers: {
                 // Explicit opt-in to the legacy "trust anyone" behavior.
                 if env_bool("SIE_NATS_CONFIG_TRUST_ANY_PRODUCER") {
@@ -955,6 +1004,20 @@ impl Config {
         self.audit_auth()
             .into_iter()
             .find_map(|(level, message)| matches!(level, AuditLevel::Error).then_some(message))
+    }
+
+    /// Credentials for the NATS connection: `None` when neither
+    /// `SIE_NATS_USER` nor `SIE_NATS_PASSWORD` is set, an error when only one
+    /// of them is.
+    pub fn nats_credentials(&self) -> Result<Option<NatsCredentials>, String> {
+        match (self.nats_user.is_empty(), self.nats_password.is_empty()) {
+            (true, true) => Ok(None),
+            (false, false) => Ok(Some(NatsCredentials {
+                user: self.nats_user.clone(),
+                password: self.nats_password.clone(),
+            })),
+            _ => Err("SIE_NATS_USER and SIE_NATS_PASSWORD must be set together".to_string()),
+        }
     }
 
     /// Report NATS config-delta producer-trust soundness. Mirrors the
@@ -1941,7 +2004,9 @@ mod tests {
                 ("SIE_CONFIG_SERVICE_TOKEN", "config-read-secret"),
                 ("SIE_MODAL_PROXY_TOKEN_ID", "wk-id-secret"),
                 ("SIE_MODAL_PROXY_TOKEN_SECRET", "ws-value-secret"),
-                ("SIE_NATS_URL", "nats://nats-host:4222"),
+                ("SIE_NATS_URL", "nats://url-user:url-secret@nats-host:4222"),
+                ("SIE_NATS_USER", "sie-gateway"),
+                ("SIE_NATS_PASSWORD", "nats-password-secret"),
             ],
             || {
                 let cfg = Config::load();
@@ -1962,6 +2027,9 @@ mod tests {
                     "tok-secret-2", // auth_tokens
                     "wk-id-secret",
                     "ws-value-secret", // config_modal_proxy_token
+                    "nats-password-secret",
+                    "url-secret",
+                    "url-user",
                 ] {
                     assert!(
                         !dbg.contains(leaked),
@@ -1977,8 +2045,64 @@ mod tests {
                     dbg.contains("nats-host"),
                     "non-secret nats_url must stay visible: {dbg}"
                 );
+                assert!(
+                    dbg.contains("sie-gateway"),
+                    "non-secret nats_user must stay visible: {dbg}"
+                );
+                let credentials = cfg.nats_credentials().unwrap().unwrap();
+                assert!(!format!("{credentials:?}").contains("nats-password-secret"));
             },
         );
+    }
+
+    #[test]
+    fn nats_credentials_require_user_and_password_together() {
+        without_env(&["SIE_NATS_USER", "SIE_NATS_PASSWORD"], || {
+            assert_eq!(Config::load().nats_credentials(), Ok(None));
+        });
+        with_env(
+            &[
+                ("SIE_NATS_USER", "sie-gateway"),
+                ("SIE_NATS_PASSWORD", "pw"),
+            ],
+            || {
+                assert_eq!(
+                    Config::load().nats_credentials(),
+                    Ok(Some(NatsCredentials {
+                        user: "sie-gateway".to_string(),
+                        password: "pw".to_string(),
+                    }))
+                );
+            },
+        );
+        for (user, password) in [("sie-gateway", ""), ("", "pw")] {
+            with_env(
+                &[("SIE_NATS_USER", user), ("SIE_NATS_PASSWORD", password)],
+                || {
+                    assert!(
+                        Config::load().nats_credentials().is_err(),
+                        "user={user:?} password={password:?}"
+                    );
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn redact_url_userinfo_hides_credentials_only() {
+        assert_eq!(
+            redact_url_userinfo("nats://nats-host:4222"),
+            "nats://nats-host:4222"
+        );
+        assert_eq!(
+            redact_url_userinfo("nats://user:secret@nats-host:4222"),
+            "nats://<redacted>@nats-host:4222"
+        );
+        assert_eq!(
+            redact_url_userinfo("tls://token@a:4222,nats://b:4222/x@y"),
+            "tls://<redacted>@a:4222,nats://b:4222/x@y"
+        );
+        assert_eq!(redact_url_userinfo("user:p@ss@host"), "<redacted>@host");
     }
 
     // ── audit_auth ─────────────────────────────────────────────────
@@ -1999,6 +2123,8 @@ mod tests {
             k8s_port: 0,
             health_mode: String::new(),
             nats_url: String::new(),
+            nats_user: String::new(),
+            nats_password: String::new(),
             nats_config_trusted_producers: Vec::new(),
             auth_mode: mode.to_string(),
             auth_tokens: tokens.into_iter().map(String::from).collect(),

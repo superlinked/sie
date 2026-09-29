@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import secrets
@@ -13,11 +14,13 @@ import urllib.request
 import uuid
 from pathlib import Path
 
+import nats
 from sie_sdk import SIEClient
 
 from tools.ci.live_sdk import smoke_python, wait_for_api
 
 SERVICES = ("sie-config", "sie-gateway", "sie-server-sidecar", "sie-mcp", "sie-server-rust-cpu")
+NATS_SERVER_CONFIG = Path(__file__).resolve().parent / "fixtures" / "sie-cluster-nats.conf"
 
 
 def docker(*args: str, check: bool = True) -> str:
@@ -126,6 +129,17 @@ def require_gateway_catalog(gateway_url: str, catalog: set[str]) -> None:
     print(f"Gateway loaded the {len(catalog)}-model sie-config catalog through the read token.")
 
 
+async def assert_nats_refuses_anonymous(url: str) -> None:
+    try:
+        client = await nats.connect(url, allow_reconnect=False, max_reconnect_attempts=0, connect_timeout=5)
+    except Exception as error:
+        if "authorization" not in str(error).lower():
+            raise
+        return
+    await client.close()
+    raise RuntimeError("NATS accepted an anonymous connection")
+
+
 def build_images(registry: str, revision: str) -> None:
     common = ["--registry", registry, "--version", "0.0.0", "--source-revision", revision]
     commands = [["build-server", "--platform", "cpu", "--bundle", "default", *common]]
@@ -154,11 +168,14 @@ def main() -> None:
             command: tuple[str, ...] = (),
             port: int | None = None,
             shared_ipc: bool = False,
+            volumes: tuple[str, ...] = (),
         ) -> str:
             container = f"{network}-{name}"
             args = ["run", "--detach", "--name", container, "--network", network, "--network-alias", name]
             if port is not None:
                 args += ["-p", f"127.0.0.1::{port}"]
+            for volume in volumes:
+                args += ["-v", volume]
             if shared_ipc:
                 args += ["--user", "0:0", "-v", f"{ipc}:/var/run/sie"]
             for key, value in (env or {}).items():
@@ -173,11 +190,30 @@ def main() -> None:
         def image(service: str) -> str:
             return f"{registry}/{service}:v0.0.0"
 
+        nats_passwords = {component: secrets.token_hex(24) for component in ("config", "gateway", "worker")}
+
+        def nats_client_env(component: str) -> dict[str, str]:
+            return {
+                "SIE_NATS_URL": "nats://nats:4222",
+                "SIE_NATS_USER": f"sie-{component}",
+                "SIE_NATS_PASSWORD": nats_passwords[component],
+            }
+
         try:
-            start("nats", "nats:2.11.8-alpine", command=("-js",))
+            nats_url = start(
+                "nats",
+                "nats:2.11.8-alpine",
+                env={
+                    "SERVER_NAME": "nats",
+                    **{f"SIE_NATS_AUTH_{name.upper()}_PASSWORD": value for name, value in nats_passwords.items()},
+                },
+                command=("-c", "/etc/nats/sie-cluster.conf", "-P", "/tmp/nats.pid"),
+                port=4222,
+                volumes=(f"{NATS_SERVER_CONFIG}:/etc/nats/sie-cluster.conf:ro",),
+            ).replace("http://", "nats://")
             read_token = secrets.token_urlsafe(32)
             config_env = {
-                "SIE_NATS_URL": "nats://nats:4222",
+                **nats_client_env("config"),
                 "SIE_DEPLOYMENT_ENV": "production",
                 "SIE_ADMIN_TOKEN": secrets.token_urlsafe(32),
                 "SIE_CONFIG_READ_TOKEN": read_token,
@@ -204,7 +240,7 @@ def main() -> None:
             )
             wait_for_api(worker_url)
             gateway_env = {
-                "SIE_NATS_URL": "nats://nats:4222",
+                **nats_client_env("gateway"),
                 "SIE_CONFIG_SERVICE_URL": "http://config:8080",
                 "SIE_CONFIG_SERVICE_TOKEN": read_token,
                 "SIE_GATEWAY_HEALTH_MODE": "nats",
@@ -227,7 +263,7 @@ def main() -> None:
                 port=9095,
                 env={
                     **worker_env,
-                    "SIE_NATS_URL": "nats://nats:4222",
+                    **nats_client_env("worker"),
                     "SIE_WORKER_ID": "cpu-smoke",
                     "SIE_GATEWAY_URL": "http://gateway:8080",
                     "SIE_CONFIG_SERVICE_URL": "http://config:8080",
@@ -240,6 +276,7 @@ def main() -> None:
             require_gateway_catalog(gateway_url, catalog)
             wait_for_api(gateway_url)
             smoke_python(gateway_url)
+            asyncio.run(assert_nats_refuses_anonymous(nats_url))
             mcp_url = start(
                 "mcp",
                 image("sie-mcp"),
@@ -260,7 +297,10 @@ def main() -> None:
             )
             wait_health(f"{rust_url}/healthz")
             docker("exec", f"{network}-worker", "python", "-c", IPC_SMOKE)
-            print("CPU gateway/config/worker/sidecar queue requests, MCP health and Rust worker IPC passed.")
+            print(
+                "CPU gateway/config/worker/sidecar queue requests over authenticated NATS, "
+                "MCP health and Rust worker IPC passed."
+            )
         finally:
             for container in reversed(containers):
                 (logs / f"{container}.log").write_text(docker("logs", container, check=False))

@@ -1447,12 +1447,44 @@ nats:
   # -- Override the NATS service name used to build the default SIE_NATS_URL.
   # Defaults to "<release>-nats" if not set.
   serviceName: ""
+  # -- NATS authentication. sie-config, the gateway, and the worker sidecars
+  # each connect as their own user (sie-config, sie-gateway, sie-worker), and
+  # the bundled server limits each user to the subjects it needs and refuses
+  # anonymous connections. See "NATS authentication" in the chart README for
+  # the permission matrix, password rotation, and the upgrade path.
+  auth:
+    # -- Authenticate every NATS connection. Set to false only to run without
+    # authentication (for example an external server without it).
+    enabled: true
+    # -- Also accept anonymous connections, with unrestricted permissions,
+    # on the bundled server. A temporary aid for upgrading an existing
+    # release: pods that predate authentication keep working until they are
+    # replaced. Set it back to false once every pod has restarted.
+    allowAnonymous: false
+    # -- Existing Secrets, each holding the component's NATS password under
+    # the key `password` (at least 32 letters and digits for the bundled
+    # server). An empty name makes the chart generate
+    # "<release>-nats-auth-<component>". Required for config, gateway, and
+    # worker when nats.install=false.
+    existingSecrets:
+      config: ""
+      gateway: ""
+      worker: ""
+      # Password of the cluster route user, used when
+      # nats.config.cluster.enabled=true on the bundled server.
+      route: ""
   # -- JetStream configuration for the work queue.
   # JetStream is required for inference (the gateway is queue-only).
   # It is NOT required for config distribution (plain NATS pub/sub).
   # NOTE: These keys are passed to the NATS sub-chart (nats/nats) which expects
   # config.jetstream.memoryStore.maxSize (not memStorage/size).
   config:
+    # Chart-owned: renders the NATS users and permissions from nats.auth.
+    # Keep the sieNatsAuth keys here, under cluster.merge, and under
+    # container.env when adding other settings next to them.
+    merge:
+      sieNatsAuth:
+        $tplYamlSpread: '{{ include "sie-cluster.nats.server.configMerge" . }}'
     # -- NATS server clustering. Off by default: a single NATS pod is the
     # shipped topology. A replicated work queue
     # (queueRouting.streamReplicas > 1) needs this enabled with
@@ -1460,6 +1492,9 @@ nats:
     cluster:
       enabled: false
       replicas: 3
+      merge:
+        sieNatsAuth:
+          $tplYamlSpread: '{{ include "sie-cluster.nats.server.clusterMerge" . }}'
     jetstream:
       # -- Enable JetStream for the NATS work queue.
       # Required when clusterRouting=queue (the default).
@@ -1485,6 +1520,14 @@ nats:
         pvc:
           enabled: true
           size: 10Gi
+  container:
+    env:
+      sieNatsAuth:
+        $tplYamlSpread: '{{ include "sie-cluster.nats.server.env" . }}'
+  # -- The nats-box debugging pod and its `helm test` pod connect without
+  # credentials, which the authenticated server refuses.
+  natsBox:
+    enabled: false
   # -- Prometheus NATS exporter sidecar.
   # Exposes NATS server internals (connections, JetStream streams/consumers) to Prometheus.
   promExporter:

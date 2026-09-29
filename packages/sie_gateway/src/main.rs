@@ -275,13 +275,16 @@ async fn run_server(cfg: Config) -> Result<(), Box<dyn std::error::Error>> {
     // Config persistence lives in sie-config now; the gateway is pure
     // consumer. It gets its authoritative snapshot via the background
     // bootstrap task and then tracks live changes through NATS deltas.
-    let nats_manager = Arc::new(NatsManager::new_with_trusted_producers(
-        router_id.clone(),
-        config.nats_url.clone(),
-        Arc::clone(&model_registry),
-        config_epoch.clone(),
-        config.nats_config_trusted_producers.clone(),
-    ));
+    let nats_manager = Arc::new(
+        NatsManager::new_with_trusted_producers(
+            router_id.clone(),
+            config.nats_url.clone(),
+            Arc::clone(&model_registry),
+            config_epoch.clone(),
+            config.nats_config_trusted_producers.clone(),
+        )
+        .with_credentials(config.nats_credentials()?),
+    );
     if !config.nats_config_trusted_producers.is_empty() {
         tracing::info!(
             audit = "nats_config",
