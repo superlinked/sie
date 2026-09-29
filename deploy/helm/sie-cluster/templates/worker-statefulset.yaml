@@ -239,6 +239,7 @@ spec:
       runtimeClassName: {{ $root.Values.workers.common.runtimeClassName | quote }}
       {{- end }}
       serviceAccountName: {{ include "sie-cluster.serviceAccountName" $root }}
+      automountServiceAccountToken: false
       terminationGracePeriodSeconds: 65
       securityContext:
         # SIE server runs as sie user (uid 1000, gid 1000)

@@ -1157,6 +1157,42 @@ def test_nats_authentication_is_on_by_default(tmp_path: Path, auth: dict) -> Non
     assert not [doc for doc in docs if "nats-box" in doc["metadata"]["name"]]
 
 
+KUBERNETES_WRITE_VERBS = {"create", "update", "patch", "delete", "deletecollection", "*"}
+
+
+def role_writes(role: dict, resource: str) -> bool:
+    return any(
+        {resource, "*"} & set(rule.get("resources", [])) and KUBERNETES_WRITE_VERBS & set(rule.get("verbs", []))
+        for rule in role.get("rules", [])
+    )
+
+
+def test_only_gateway_pods_hold_a_token_that_can_write_configmaps(tmp_path: Path) -> None:
+    docs = nats_documents(tmp_path, {**NATS_L4_POOL, "mcpEdge": {"enabled": True}})
+    roles = {doc["metadata"]["name"]: doc for doc in docs if doc["kind"] == "Role"}
+    assert not [name for name, role in roles.items() if role_writes(role, "secrets")]
+    writers = {
+        subject["name"]
+        for doc in docs
+        if doc["kind"] == "RoleBinding" and role_writes(roles[doc["roleRef"]["name"]], "configmaps")
+        for subject in doc["subjects"]
+        if subject["kind"] == "ServiceAccount"
+    }
+    assert writers == {"sie-server"}
+    pods = {
+        doc["metadata"]["name"]: doc["spec"]["template"]["spec"]
+        for doc in docs
+        if doc["kind"] in {"Deployment", "StatefulSet", "DaemonSet", "Job"}
+    }
+    assert {"sie-sie-cluster-config", "sie-sie-cluster-mcp", "sie-sie-cluster-worker-l4-default"} <= set(pods)
+    mounting = sorted(
+        name
+        for name, pod in pods.items()
+        if pod.get("serviceAccountName") in writers and pod.get("automountServiceAccountToken", True)
+    )
+    assert mounting == ["sie-sie-cluster-gateway"]
+
+
 def test_nats_authentication_opt_out(tmp_path: Path) -> None:
     docs = nats_documents(tmp_path, {**NATS_L4_POOL, "nats": {"auth": {"enabled": False}}})
     assert nats_auth_secrets(docs) == {}
