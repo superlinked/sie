@@ -106,6 +106,13 @@ from typing import Any, Literal
 
 import torch
 
+from sie_server.adapters._cuda_graphs import (
+    RECORDING_LOCK,
+    CudaGraphStats,
+    free_memory,
+    has_headroom,
+    memory_budget,
+)
 from sie_server.core.oom import is_oom_error
 
 logger = logging.getLogger(__name__)
@@ -130,15 +137,11 @@ _WIDE_ENCODER_HIDDEN_SIZE = 768
 # and while it runs the allocator cannot free cached memory for other models.
 _RECORDING_BURST = 16
 _SECONDS_PER_RECORDING = 2.0
-# Recording waits until at least this share of the device's memory is free.
-_RECORDING_HEADROOM = 0.1
 # After a recording runs out of memory, the runner records nothing for this long.
 _OOM_COOL_DOWN_SECONDS = 60.0
-# One recording at a time in the process, across every model's runner.
-_RECORDING_LOCK = threading.Lock()
-# Device memory a runner's graphs may hold (their recordings, relative-position
-# tables and buffers), as a share of the device's memory.
-_MEMORY_BUDGET_SHARE = 0.04
+# One recording at a time in the process, across every model's runner and
+# the ModernBERT varlen runner too (see ``sie_server.adapters._cuda_graphs``).
+_RECORDING_LOCK = RECORDING_LOCK
 # Shapes that may fail to record, for reasons other than memory, before the
 # runner turns graphs off for the process.
 _MAX_RECORDING_FAILURES = 3
@@ -215,29 +218,6 @@ def bucketed_shapes(max_length: int, max_tokens: int) -> frozenset[Key]:
     width = bucket_width(max_length)
     lengths = {min(max_length, width * step) for step in range(1, math.ceil(max_length / width) + 1)}
     return frozenset((batch, length) for length in lengths for batch in batch_buckets(length, max_tokens))
-
-
-@dataclass
-class CudaGraphStats:
-    """Counters of the forwards a runner was offered since the model loaded.
-
-    Each forward counts once: ``replayed`` (a recorded graph served it),
-    ``recorded`` (it recorded a graph and was answered by the first replay)
-    or under ``eager`` by why it ran eagerly. Requests that opt out of graphs
-    are not offered to the runner. ``recording_failures`` counts shapes that
-    failed to record for reasons other than memory; ``drops`` counts the times
-    every graph was dropped (out of memory, or ``exact`` mode over its budget).
-    """
-
-    replayed: int = 0
-    recorded: int = 0
-    eager: dict[str, int] = field(default_factory=dict)
-    recording_failures: int = 0
-    drops: int = 0
-
-    @property
-    def forwards(self) -> int:
-        return self.replayed + self.recorded + sum(self.eager.values())
 
 
 class _RecordingOutOfMemoryError(Exception):
@@ -603,17 +583,16 @@ class CudaGraphRunner:
     @staticmethod
     def _has_headroom(device: torch.device) -> bool:
         """Whether enough device memory is free to record without starving other models."""
-        free, total = torch.cuda.mem_get_info(device)
-        return free >= _RECORDING_HEADROOM * total
+        return has_headroom(device)
 
     @staticmethod
     def _memory_budget(device: torch.device) -> int:
         """Device memory this runner's graphs may hold."""
-        return int(_MEMORY_BUDGET_SHARE * torch.cuda.mem_get_info(device)[1])
+        return memory_budget(device)
 
     @staticmethod
     def _free_memory(device: torch.device) -> int:
-        return torch.cuda.mem_get_info(device)[0]
+        return free_memory(device)
 
     def _tensor_bytes(self) -> int:
         """Device memory of the tensors the graphs keep: tables, static inputs and the hidden states."""

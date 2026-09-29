@@ -378,6 +378,121 @@ space is read only in its last 4,096 characters, and reading stops there. An ite
 not fit whole with `options={"overflow_policy": "error"}`, returns a per-item
 `INPUT_TOO_LONG` error while the other items succeed.
 
+### ModernBERT CUDA graphs
+
+The ModernBERT flash-attention adapters, for dense embeddings
+(`modernbert_flash`), late interaction (`colbert_modernbert_flash`) and
+reranking (`modernbert_flash_cross_encoder`), run a packed, unpadded token
+stream through hundreds of small kernels per forward (about 500 for a
+22-layer encoder). At the sizes of a query
+or a few short documents, the host that launches those kernels is the
+bottleneck: on an L4, a one-query forward of `GTE-ModernColBERT-v1` keeps the
+GPU busy for about 2 ms of its 12. A CUDA graph records the launches of one
+shape once and replays them in one call. Graphs are an operator setting,
+fixed when the model loads:
+
+```yaml
+profiles:
+  default:
+    adapter_options:
+      loadtime:
+        cuda_graphs: bucketed
+```
+
+`off` (the default) runs every forward eagerly. With `bucketed`, a graph
+records the encoder (token embeddings, layers and final norm) for one packed
+shape: the token count padded up to 64, 128, 192, 256, 384, 512, 768, 1,024
+tokens and so on, a fixed number of sequence slots, and `max_seqlen` 512 (or
+the bucket, when a row is longer). Padding tokens belong to no sequence, so
+real rows attend only to their own tokens, as eagerly. The adapter's head
+(pooling, the late-interaction projection or the reranking head) runs
+eagerly on the real rows. Forwards past a token bound run eagerly: 2,048
+tokens for encoders up to 384 wide, 1,024 up to 768, 512 wider. Past that,
+the GPU rather than kernel launches bounds a forward, and padding to the
+bucket costs more than a graph saves. A model with LoRA adapters loaded runs
+eagerly, because its forward depends on which adapter is active.
+
+Speed on an NVIDIA L4 with 8 vCPUs, eager and graphs in one process with
+their requests interleaved (median latency, and items per second over the
+run). SciFact queries and abstracts; documents are cut at the profile's
+length (300 tokens for `GTE-ModernColBERT-v1`, 512 for
+`mxbai-edge-colbert-v0-32m`):
+
+| Model | 1 query | 8 queries | 1 document | Larger requests |
+|--|--|--|--|--|
+| `GTE-ModernColBERT-v1` | 18.1 → 2.6 ms | 360 → 1,857/s | 22.3 → 5.1 ms | within 2% |
+| `gte-modernbert-base` | 17.5 → 2.4 ms | 378 → 2,414/s | 21.4 → 4.3 ms | within 1% |
+| `mxbai-edge-colbert-v0-32m` | 9.2 → 1.1 ms | 658 → 3,345/s | 12.1 → 2.8 ms | within 2% |
+| `granite-embedding-small-english-r2` | 10.4 → 1.2 ms | 581 → 4,551/s | 14.0 → 2.4 ms | within 2% |
+| `gte-reranker-modernbert-base` | 1 pair: 17.3 → 4.3 ms | 8 short pairs: 351 → 1,307/s | | within 2% |
+
+"Larger requests" are 8 and 64 abstracts, 32 items of mixed lengths, and 8
+or 32 (query, abstract) pairs: about 2,000 to 16,000 packed tokens, mostly
+past the token bound. The eager side depends on the host's CPU: on another L4
+host with faster cores, a one-query `GTE-ModernColBERT-v1` forward took
+12.2 ms eagerly and 2.5 ms from a graph.
+
+Padding changes how many rows a matrix multiply sees, so outputs can move by
+floating-point rounding, as batching requests together does. We compared
+graphs with eager forwards on SciFact: the 300 test queries, 500 abstracts
+(every one relevant to those queries, and random others) and, for the
+reranker, 20 abstracts per query. Items were encoded one per request, on
+both paths, and the eager path was also run with 8 queries or 4 abstracts
+(3 pairs) per request, which is its own batching noise. Scores are query–
+document dot products for dense models and MaxSim for late interaction:
+
+| Model | Graphs: largest score change | Graphs: pairs reordered in a top 10 (largest eager margin of any reordered pair) | Eager batching: largest score change (largest margin of a reordered pair) |
+|--|--|--|--|
+| `GTE-ModernColBERT-v1` | none (bit-identical) | none | 0.013 (0.018) |
+| `mxbai-edge-colbert-v0-32m` | none (bit-identical) | none | 0.13 (0.23) |
+| `gte-modernbert-base` | 0.006 | 12 (0.008) | 0.008 (0.012) |
+| `granite-embedding-small-english-r2` | 0.004 | 16 (0.005) | 0.015 (0.014) |
+| `gte-reranker-modernbert-base` | 0.015 | 21 (0.006) | 0.025 (0.019) |
+| `modernbert-embed-base` | 0.004 | 10 (0.004) | 0.005 (0.006) |
+| `granite-embedding-97m-multilingual-r2` | 0.006 | 57 (0.008) | 0.015 (0.015) |
+| `Reason-ModernColBERT` | 0.007 | 1 (0.007) | 0.022 (0.021) |
+| `mLateOn` | 0.020 | 17 (0.029) | 0.037 (0.046) |
+| `Iso-ModernColBERT` | 0.047 | 19 (0.058) | 0.082 (0.100) |
+
+Graphs meet the rule a GLiClass speed-up ships under (see "When a speed-up
+ships enabled" above), read for scores instead of label probabilities: no
+score moves by more than 0.02 (for MaxSim, which sums over a query's tokens,
+0.02 per query token), and every pair that graphs reorder had an eager margin
+smaller than the eager path's own batching noise, the largest score change
+eager execution makes when the same items share a request with others. For
+embeddings, the rule reads on the retrieval order the vectors give, and the
+vectors stay as close to eager as eager batching keeps them (cosine at least
+0.9997 for the dense models). Retrieval quality on the
+full SciFact corpus (5,183 abstracts, nDCG@10, the same requests on both
+paths) did not change beyond that noise: `gte-modernbert-base` 0.7632 eager
+and 0.7644 with graphs, `GTE-ModernColBERT-v1` 0.7573 and 0.7558, and
+`gte-reranker-modernbert-base` reranking the top 20 of `gte-modernbert-base`
+0.7760 and 0.7767.
+
+The shipped profiles of every model on these adapters load with `bucketed`
+graphs: `GTE-ModernColBERT-v1`, `Reason-ModernColBERT`, `mLateOn`,
+`Iso-ModernColBERT`, `mxbai-edge-colbert-v0-32m`, `gte-modernbert-base`,
+`modernbert-embed-base`, `granite-embedding-small-english-r2`,
+`granite-embedding-97m-multilingual-r2` and `gte-reranker-modernbert-base`.
+To run one of them eagerly, set `cuda_graphs: off` in its profile. A Candle
+profile of these models sets its own load-time options, so it does not
+inherit the setting.
+
+A graph is recorded the first time a request needs its shape (the dense
+adapter's warm-up records the smallest at load), and that request is answered
+by its first replay. Recording follows the rules of the GLiClass graphs above,
+and shares their process-wide limits: one recording at a time in the process,
+none while less than a tenth of the device's memory is free, at most 16
+recordings at once and then one per 2 seconds, and a model's graphs within
+4% of the device's memory (900 MB on an L4). A model's graphs, which share
+one memory pool and one output buffer, held 40 to 105 MB on an L4 once every
+shape its traffic needed was recorded. A recording that runs out of memory
+drops the model's graphs and pauses recording for a minute; a shape that
+fails to record for another reason runs eagerly from then on, and after
+three such shapes the model runs eagerly for the rest of the process. Each
+model counts the forwards it replays, records and runs eagerly (by reason),
+and logs the counts every ten minutes while it serves requests.
+
 ## Configuration
 
 `sie-server` reads its config from `SIE_*` environment variables (Pydantic

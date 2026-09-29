@@ -24,7 +24,8 @@ profiles:
       # Standard HF ModernBERT safetensors checkpoint, not an open_clip-format
       # one: config.json claims architectures ["ModernBertModel"] / model_type
       # "modernbert", so no open_clip backend loadtime options apply.
-      loadtime: {}
+      loadtime:
+        cuda_graphs: bucketed
       runtime:
         # 1_Pooling/config.json claim: {"pooling_mode_cls_token": true}
         pooling: cls
