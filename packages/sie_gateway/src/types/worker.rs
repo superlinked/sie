@@ -51,7 +51,7 @@ pub struct WorkerState {
     pub unsupported_models: Arc<[String]>,
     /// The worker reported more than [`MAX_UNSUPPORTED_MODELS`] ids. It is
     /// then treated as unable to serve any model, because a dropped id would
-    /// otherwise read as supported.
+    /// otherwise read as supported, so its whole lane is routed no model.
     pub unsupported_overflow: bool,
 }
 
@@ -123,7 +123,8 @@ pub struct WorkerInfo {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unsupported_models: Vec<String>,
     /// The worker reported more unsupported models than the gateway accepts
-    /// (1024), so no model is routed to it. Omitted when false.
+    /// (1024), so no model is routed to its lane (pool and machine profile)
+    /// while it overflows. Omitted when false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unsupported_models_overflow: bool,
 }

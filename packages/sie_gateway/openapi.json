@@ -3981,7 +3981,7 @@
             "type": "array"
           },
           "unsupported_models_overflow": {
-            "description": "The worker reported more unsupported models than the gateway accepts\n(1024), so no model is routed to it. Omitted when false.",
+            "description": "The worker reported more unsupported models than the gateway accepts\n(1024), so no model is routed to its lane (pool and machine profile)\nwhile it overflows. Omitted when false.",
             "type": "boolean"
           },
           "url": {
