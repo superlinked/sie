@@ -114,6 +114,14 @@ have no 24-hour ceiling. First-content timing must not exceed phase duration.
 Cancellation and rejection leave structural status UNSET; their safe record
 carries the distinction.
 
+Log resource identity is restricted to string values. Malformed optional
+`service.instance.id` and `service.version` values are omitted; the collector
+still supplies the authoritative gateway service, environment, and region.
+Reconstruction removes duplicate keys, including nested values hidden behind a
+valid first value. Completion schema v1 retains only its own fields; schema v2
+requires integer HTTP status, string model/profile, and finite nonnegative
+duration before canonicalization and export.
+
 **Retention is sampled and best effort.** Lifecycle logs require a valid sampled
 span context and the enabled safe-log exporter. They follow the enclosing head
 sampling decision, even for errors. A parent-based 5% root sampler therefore

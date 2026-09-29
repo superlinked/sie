@@ -525,21 +525,25 @@ processors:
         - 'body != "inference.request.completed"'
         - 'attributes["operation"] != "encode" and attributes["operation"] != "score" and attributes["operation"] != "extract" and attributes["operation"] != "generate" and attributes["operation"] != "embeddings" and attributes["operation"] != "moderations" and attributes["operation"] != "other"'
         - 'attributes["outcome"] != "success" and attributes["outcome"] != "redirect" and attributes["outcome"] != "client_error" and attributes["outcome"] != "server_error" and attributes["outcome"] != "other"'
+        - 'not IsInt(attributes["http.status_code"])'
         - 'attributes["http.status_code"] < 100 or attributes["http.status_code"] > 599'
-        - 'attributes["event.schema.version"] == "2" and attributes["model"] == nil'
-        - 'attributes["event.schema.version"] == "2" and attributes["machine_profile"] == nil'
-        - 'attributes["event.schema.version"] == "2" and attributes["duration_ms"] == nil'
+        - 'attributes["event.schema.version"] == "2" and not IsString(attributes["model"])'
+        - 'attributes["event.schema.version"] == "2" and not IsString(attributes["machine_profile"])'
+        - 'attributes["event.schema.version"] == "2" and not IsDouble(attributes["duration_ms"]) and not IsInt(attributes["duration_ms"])'
+        - 'attributes["event.schema.version"] == "2" and (attributes["duration_ms"] != attributes["duration_ms"] or attributes["duration_ms"] < 0 or attributes["duration_ms"] - attributes["duration_ms"] != 0)'
         - 'attributes["event.schema.version"] == "2" and attributes["admission_outcome"] != "admitted" and attributes["admission_outcome"] != "unauthenticated" and attributes["admission_outcome"] != "forbidden" and attributes["admission_outcome"] != "auth_misconfigured" and attributes["admission_outcome"] != "region_mismatch" and attributes["admission_outcome"] != "license_excluded" and attributes["admission_outcome"] != "payload_too_large" and attributes["admission_outcome"] != "invalid_request" and attributes["admission_outcome"] != "insufficient_credits" and attributes["admission_outcome"] != "key_spend_limit_exceeded" and attributes["admission_outcome"] != "rate_limited"'
   transform/contract_logs:
     error_mode: propagate
     log_statements:
       - context: resource
         statements:
-          - set(cache["service.name"], attributes["service.name"])
-          - set(cache["service.instance.id"], attributes["service.instance.id"])
-          - set(cache["deployment.environment"], attributes["deployment.environment"])
-          - set(cache["cloud.region"], attributes["cloud.region"])
-          - set(cache["service.version"], attributes["service.version"])
+          # Validate each resource identity before rebuilding its unique scalar key.
+          - keep_keys(cache, [])
+          - set(cache["service.name"], attributes["service.name"]) where IsString(attributes["service.name"])
+          - set(cache["service.instance.id"], attributes["service.instance.id"]) where IsString(attributes["service.instance.id"])
+          - set(cache["deployment.environment"], attributes["deployment.environment"]) where IsString(attributes["deployment.environment"])
+          - set(cache["cloud.region"], attributes["cloud.region"]) where IsString(attributes["cloud.region"])
+          - set(cache["service.version"], attributes["service.version"]) where IsString(attributes["service.version"])
           - keep_keys(attributes, [])
           - set(attributes["service.name"], cache["service.name"]) where cache["service.name"] != nil
           - set(attributes["service.instance.id"], cache["service.instance.id"]) where cache["service.instance.id"] != nil
@@ -555,15 +559,16 @@ processors:
           - set(schema_url, "")
       - context: log
         statements:
+          - keep_keys(cache, [])
           - set(cache["event.name"], attributes["event.name"])
           - set(cache["event.schema.version"], attributes["event.schema.version"])
           - set(cache["operation"], attributes["operation"])
           - set(cache["outcome"], attributes["outcome"])
           - set(cache["http.status_code"], attributes["http.status_code"])
-          - set(cache["model"], attributes["model"])
-          - set(cache["machine_profile"], attributes["machine_profile"])
-          - set(cache["duration_ms"], attributes["duration_ms"])
-          - set(cache["admission_outcome"], attributes["admission_outcome"])
+          - set(cache["model"], attributes["model"]) where attributes["event.schema.version"] == "2"
+          - set(cache["machine_profile"], attributes["machine_profile"]) where attributes["event.schema.version"] == "2"
+          - set(cache["duration_ms"], attributes["duration_ms"]) where attributes["event.schema.version"] == "2"
+          - set(cache["admission_outcome"], attributes["admission_outcome"]) where attributes["event.schema.version"] == "2"
           - keep_keys(attributes, [])
           - set(attributes["event.name"], cache["event.name"]) where cache["event.name"] != nil
           - set(attributes["event.schema.version"], cache["event.schema.version"]) where cache["event.schema.version"] != nil
@@ -614,11 +619,13 @@ processors:
     log_statements:
       - context: resource
         statements:
-          - set(cache["service.name"], attributes["service.name"])
-          - set(cache["service.instance.id"], attributes["service.instance.id"])
-          - set(cache["deployment.environment"], attributes["deployment.environment"])
-          - set(cache["cloud.region"], attributes["cloud.region"])
-          - set(cache["service.version"], attributes["service.version"])
+          # Validate each resource identity before rebuilding its unique scalar key.
+          - keep_keys(cache, [])
+          - set(cache["service.name"], attributes["service.name"]) where IsString(attributes["service.name"])
+          - set(cache["service.instance.id"], attributes["service.instance.id"]) where IsString(attributes["service.instance.id"])
+          - set(cache["deployment.environment"], attributes["deployment.environment"]) where IsString(attributes["deployment.environment"])
+          - set(cache["cloud.region"], attributes["cloud.region"]) where IsString(attributes["cloud.region"])
+          - set(cache["service.version"], attributes["service.version"]) where IsString(attributes["service.version"])
           - keep_keys(attributes, [])
           - set(attributes["service.name"], cache["service.name"]) where cache["service.name"] != nil
           - set(attributes["service.instance.id"], cache["service.instance.id"]) where cache["service.instance.id"] != nil
