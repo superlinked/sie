@@ -982,6 +982,7 @@ mod tests {
             "generated_at": "2026-04-17T00:00:00Z",
             "bundle_config_hashes": {"default": "control-plane-hash"},
             "bundle_pool_config_hashes": {"default": {"default": "control-plane-pool-hash"}},
+            "bundle_adapters": {"default": ["sie_server.adapters.sentence_transformer"]},
             "models": [
                 {
                     "model_id": "test/model",

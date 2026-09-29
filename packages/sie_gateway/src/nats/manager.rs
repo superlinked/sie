@@ -856,6 +856,7 @@ profiles:
             "bundle_config_hash": "x",
             "model_id": "unknown/model",
             "future_field_we_dont_know_about": 42,
+            "bundle_adapters": {"default": ["sie_server.adapters.sentence_transformer"]},
             "model_config": ""
         }"#;
         let parsed: ConfigNotification = serde_json::from_str(json).unwrap();
