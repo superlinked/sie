@@ -20,9 +20,11 @@ type WorkerAssignment = (String, String, String, String, String);
 /// static Helm queue pools are operator-owned and never bounded here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PoolLimits {
-    /// Largest accepted `minimum_worker_count` (per-pool warm floor) and
-    /// per-profile `gpus` requirement. It also caps how many assigned workers
-    /// per machine profile a stored pool keeps warm through its active lease.
+    /// Largest number of workers an API pool may keep warm: bounds the warm
+    /// floor summed over the pool's machine profiles (`minimum_worker_count`
+    /// applies to each profile) and the `gpus` requirement summed over
+    /// profiles, and caps what a stored pool exports through its warm floor
+    /// and active lease.
     pub max_minimum_worker_count: u32,
     /// Largest accepted `ttl_seconds`; also caps the effective lease of any
     /// stored pool, including pools restored from Kubernetes.
@@ -50,9 +52,13 @@ pub enum PoolLimitError {
         requested: u32,
         max: u32,
     },
-    GpuRequirement {
-        profile: String,
-        requested: u32,
+    WarmFloorTotal {
+        minimum_worker_count: u32,
+        profiles: usize,
+        max: u32,
+    },
+    GpuRequirementTotal {
+        requested: u64,
         max: u32,
     },
     Ttl {
@@ -71,13 +77,17 @@ impl std::fmt::Display for PoolLimitError {
                 f,
                 "minimum_worker_count {requested} exceeds the gateway limit of {max} (SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT)"
             ),
-            PoolLimitError::GpuRequirement {
-                profile,
-                requested,
+            PoolLimitError::WarmFloorTotal {
+                minimum_worker_count,
+                profiles,
                 max,
             } => write!(
                 f,
-                "gpus requirement {requested} for machine profile '{profile}' exceeds the gateway limit of {max} (SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT)"
+                "minimum_worker_count {minimum_worker_count} applies to each of the pool's {profiles} machine profiles, which exceeds the gateway limit of {max} warm workers per pool (SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT)"
+            ),
+            PoolLimitError::GpuRequirementTotal { requested, max } => write!(
+                f,
+                "gpus requirements total {requested} across machine profiles, which exceeds the gateway limit of {max} per pool (SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT)"
             ),
             PoolLimitError::Ttl { requested, max } => write!(
                 f,
@@ -380,10 +390,11 @@ impl PoolManager {
     }
 
     /// Assigned workers an API pool keeps warm through its active lease: per
-    /// machine profile, at most the pool's requirement for that profile and at
-    /// most `max_minimum_worker_count`. Assignment order is deterministic, so
-    /// every replica exports the same workers.
+    /// machine profile, at most the pool's requirement for that profile, and
+    /// at most `max_minimum_worker_count` in total. Assignment order is
+    /// deterministic, so every replica exports the same workers.
     fn leased_workers(&self, pool: &Pool) -> Vec<AssignedWorker> {
+        let mut total_left = self.limits.max_minimum_worker_count;
         let mut remaining: HashMap<String, u32> = HashMap::new();
         for (profile, required) in &pool.spec.gpus {
             let allowed = (*required).min(self.limits.max_minimum_worker_count);
@@ -395,8 +406,9 @@ impl PoolManager {
             .iter()
             .filter(
                 |worker| match remaining.get_mut(&worker.gpu.to_ascii_lowercase()) {
-                    Some(left) if *left > 0 => {
+                    Some(left) if *left > 0 && total_left > 0 => {
                         *left -= 1;
+                        total_left -= 1;
                         true
                     }
                     _ => false,
@@ -419,15 +431,22 @@ impl PoolManager {
                 max,
             });
         }
-        let mut over_limit: Vec<(&String, &u32)> = gpus
-            .iter()
-            .filter(|(_, required)| **required > max)
-            .collect();
-        over_limit.sort();
-        if let Some((profile, requested)) = over_limit.first() {
-            return Err(PoolLimitError::GpuRequirement {
-                profile: (*profile).clone(),
-                requested: **requested,
+        let profiles = gpus
+            .keys()
+            .map(|profile| profile.to_ascii_lowercase())
+            .collect::<HashSet<_>>()
+            .len();
+        if u64::from(minimum_worker_count) * profiles as u64 > u64::from(max) {
+            return Err(PoolLimitError::WarmFloorTotal {
+                minimum_worker_count,
+                profiles,
+                max,
+            });
+        }
+        let required: u64 = gpus.values().map(|count| u64::from(*count)).sum();
+        if required > u64::from(max) {
+            return Err(PoolLimitError::GpuRequirementTotal {
+                requested: required,
                 max,
             });
         }
@@ -935,9 +954,12 @@ impl PoolManager {
             .map(|(key, pool)| {
                 let mut snapshot = CapacityPoolSnapshot::from_pool(pool);
                 if is_api_pool(key, &static_pool_names) {
+                    let lanes = u32::try_from(snapshot.machine_profiles.len())
+                        .unwrap_or(u32::MAX)
+                        .max(1);
                     snapshot.minimum_worker_count = snapshot
                         .minimum_worker_count
-                        .min(self.limits.max_minimum_worker_count);
+                        .min(self.limits.max_minimum_worker_count / lanes);
                     snapshot.assigned_workers = self.leased_workers(pool);
                 }
                 snapshot
@@ -2925,13 +2947,80 @@ mod tests {
 
         assert_eq!(
             limit_error(error),
-            PoolLimitError::GpuRequirement {
-                profile: "l4-spot".to_string(),
+            PoolLimitError::GpuRequirementTotal {
                 requested: 6,
                 max: 4
             }
         );
         assert!(pm.get_pool("eval").await.is_none());
+    }
+
+    fn profile_manager(profiles: usize) -> PoolManager {
+        PoolManager::new((0..profiles).map(|index| format!("gpu-{index}")).collect())
+    }
+
+    fn zero_requirements(profiles: usize) -> HashMap<String, u32> {
+        (0..profiles)
+            .map(|index| (format!("gpu-{index}"), 0))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn test_warm_floor_budget_counts_every_machine_profile() {
+        let pm = profile_manager(20);
+
+        let error = pm
+            .create_pool("fanout", zero_requirements(20), None, None, 4, vec![])
+            .await
+            .expect_err("a floor fanned out over 20 profiles exceeds the budget");
+        assert_eq!(
+            limit_error(error),
+            PoolLimitError::WarmFloorTotal {
+                minimum_worker_count: 4,
+                profiles: 20,
+                max: 4
+            }
+        );
+        pm.create_pool("two-lanes", zero_requirements(2), None, None, 2, vec![])
+            .await
+            .expect("2 profiles x floor 2 fits the budget of 4");
+    }
+
+    #[tokio::test]
+    async fn test_gpu_requirement_budget_is_summed_across_profiles() {
+        let pm = profile_manager(3);
+        let gpus: HashMap<String, u32> = (0..3).map(|index| (format!("gpu-{index}"), 2)).collect();
+
+        let error = pm
+            .create_pool("wide", gpus, None, None, 0, vec![])
+            .await
+            .expect_err("2 + 2 + 2 exceeds the budget of 4");
+        assert_eq!(
+            limit_error(error),
+            PoolLimitError::GpuRequirementTotal {
+                requested: 6,
+                max: 4
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stored_pool_warm_floor_and_lease_fit_the_pool_budget() {
+        let pm = PoolManager::new(Vec::new());
+        let mut pool = remote_pool("legacy", None, 4);
+        pool.spec.gpus = (0..8).map(|index| (format!("gpu-{index}"), 4)).collect();
+        pool.status.assigned_workers = (0..8)
+            .flat_map(|index| assigned(4, &format!("gpu-{index}")))
+            .collect();
+        pm.apply_remote_pool(pool).await;
+
+        let (snapshot,) = {
+            let snapshots = pm.capacity_pools().await;
+            assert_eq!(snapshots.len(), 1);
+            (snapshots.into_iter().next().unwrap(),)
+        };
+        assert_eq!(snapshot.minimum_worker_count, 0);
+        assert_eq!(snapshot.assigned_workers.len(), 4);
     }
 
     #[tokio::test]
@@ -2958,7 +3047,7 @@ mod tests {
 
         assert!(matches!(
             limit_error(error),
-            PoolLimitError::GpuRequirement { .. }
+            PoolLimitError::GpuRequirementTotal { .. }
         ));
         assert_eq!(
             pm.get_pool("eval").await.unwrap().spec.gpus.get("l4-spot"),

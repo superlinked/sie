@@ -491,7 +491,20 @@ pub fn pool_limits_from_env() -> PoolLimits {
             "SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT",
             defaults.max_minimum_worker_count,
         ),
-        max_ttl_seconds: env_pool_limit("SIE_GATEWAY_POOL_MAX_TTL_S", defaults.max_ttl_seconds),
+        max_ttl_seconds: match env_pool_limit(
+            "SIE_GATEWAY_POOL_MAX_TTL_S",
+            defaults.max_ttl_seconds,
+        ) {
+            0 => {
+                tracing::warn!(
+                    env = "SIE_GATEWAY_POOL_MAX_TTL_S",
+                    default = defaults.max_ttl_seconds,
+                    "ignoring a zero pool TTL limit, which would expire every pool at once; using the default"
+                );
+                defaults.max_ttl_seconds
+            }
+            ttl => ttl,
+        },
         max_pools: env_pool_limit("SIE_GATEWAY_MAX_POOLS", defaults.max_pools),
     }
 }
@@ -1164,6 +1177,24 @@ mod tests {
                         max_pools: PoolLimits::default().max_pools,
                     }
                 );
+            },
+        );
+    }
+
+    #[test]
+    fn test_pool_limits_ignore_a_zero_ttl_limit_but_keep_zero_pools() {
+        with_env(
+            &[
+                ("SIE_GATEWAY_POOL_MAX_TTL_S", "0"),
+                ("SIE_GATEWAY_MAX_POOLS", "0"),
+            ],
+            || {
+                let limits = pool_limits_from_env();
+                assert_eq!(
+                    limits.max_ttl_seconds,
+                    PoolLimits::default().max_ttl_seconds
+                );
+                assert_eq!(limits.max_pools, 0);
             },
         );
     }

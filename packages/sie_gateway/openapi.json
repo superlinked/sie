@@ -1037,14 +1037,14 @@
               "minimum": 0,
               "type": "integer"
             },
-            "description": "Required workers per machine profile. A requirement above the gateway\nlimit (`SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT`, default 4) is\nrejected.",
+            "description": "Required workers per machine profile. Requirements summing to more\nthan the gateway limit (`SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT`,\ndefault 4) are rejected.",
             "propertyNames": {
               "type": "string"
             },
             "type": "object"
           },
           "minimum_worker_count": {
-            "description": "Per-pool warm floor (minimum machines kept warm via KEDA). Default 0\nkeeps scale-from-zero. Values above the gateway limit\n(`SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT`, default 4) are rejected.\nSee `PoolSpec::minimum_worker_count`.",
+            "description": "Per-pool warm floor (minimum machines kept warm via KEDA). Default 0\nkeeps scale-from-zero. It applies to each of the pool's machine\nprofiles; a floor whose total across profiles exceeds the gateway limit\n(`SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT`, default 4) is rejected.\nSee `PoolSpec::minimum_worker_count`.",
             "format": "int32",
             "minimum": 0,
             "type": "integer"

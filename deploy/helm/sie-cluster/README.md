@@ -1208,9 +1208,9 @@ is the configuration write authority and accepts unauthenticated writes unless
 an admin token is configured.
 
 Independently of auth, the gateway bounds API-created pools: the warm floor
-(`minimum_worker_count`) and the per-profile `gpus` requirement (default cap 4
-each), the number of assigned workers per machine profile a pool keeps warm
-through its active lease (its requirement), the lease TTL (default cap 3600 s), and the
+(`minimum_worker_count`, which applies to each of the pool's machine profiles)
+and the `gpus` requirement may each add up to at most 4 workers per pool by
+default, and a pool's active lease keeps at most its requirement warm, the lease TTL (default cap 3600 s), and the
 number of live pools (default cap 64, counted by each gateway replica). Tune
 them with `SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT`,
 `SIE_GATEWAY_POOL_MAX_TTL_S`, and `SIE_GATEWAY_MAX_POOLS` in `gateway.extraEnv`.

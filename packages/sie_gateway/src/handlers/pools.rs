@@ -23,9 +23,9 @@ pub struct CreatePoolRequest {
     /// `queueRouting.staticQueuePools` for dedicated capacity.
     #[serde(default)]
     pub queue_pool: Option<String>,
-    /// Required workers per machine profile. A requirement above the gateway
-    /// limit (`SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT`, default 4) is
-    /// rejected.
+    /// Required workers per machine profile. Requirements summing to more
+    /// than the gateway limit (`SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT`,
+    /// default 4) are rejected.
     #[serde(default)]
     pub gpus: HashMap<String, u32>,
     #[serde(default)]
@@ -37,8 +37,9 @@ pub struct CreatePoolRequest {
     #[serde(default)]
     pub ttl_seconds: Option<u64>,
     /// Per-pool warm floor (minimum machines kept warm via KEDA). Default 0
-    /// keeps scale-from-zero. Values above the gateway limit
-    /// (`SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT`, default 4) are rejected.
+    /// keeps scale-from-zero. It applies to each of the pool's machine
+    /// profiles; a floor whose total across profiles exceeds the gateway limit
+    /// (`SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT`, default 4) is rejected.
     /// See `PoolSpec::minimum_worker_count`.
     #[serde(default)]
     pub minimum_worker_count: u32,
@@ -467,8 +468,12 @@ mod tests {
                 requested: 10,
                 max: 4,
             },
-            PoolLimitError::GpuRequirement {
-                profile: "l4".to_string(),
+            PoolLimitError::WarmFloorTotal {
+                minimum_worker_count: 4,
+                profiles: 3,
+                max: 4,
+            },
+            PoolLimitError::GpuRequirementTotal {
                 requested: 6,
                 max: 4,
             },
