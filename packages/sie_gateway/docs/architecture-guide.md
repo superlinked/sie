@@ -96,7 +96,7 @@ Ordering guarantees:
 - The epoch is bumped strictly inside the lock, after a successful persist and registry apply. Two concurrent writers cannot lose an epoch bump.
 - NATS publish happens inside the lock, so the `(bundle_id, epoch)` pairs reach the wire in strict monotonic order per bundle.
 - No-op replays (every profile already present, no `created_profiles`) skip disk, epoch-bump, and NATS publish entirely. The response still returns normally, reporting `existing_profiles_skipped` with an empty `created_profiles`.
-- `GET /v1/configs/export` also takes the same lock (under read auth, `_check_read_auth`), so every exported snapshot is a real serialization point: `(epoch, models)` always corresponds to a state that existed between two writes.
+- `GET /v1/configs/export` also takes the same lock, after a per-app single-flight gate that lets one export build at a time, so a write waits behind at most one build however many exports are queued. The lock makes every exported snapshot a real serialization point: `(epoch, models)` always corresponds to a state that existed between two writes.
 
 NATS publish behavior:
 
@@ -509,7 +509,7 @@ Gateway (`sie-gateway`):
 
 - `SIE_BUNDLES_DIR`, `SIE_MODELS_DIR` — optional filesystem seed paths. Unset by default; only set by the `gateway.embeddedConfigs` / `gateway.configMap` Helm overlays which mount a ConfigMap at `/configs/{bundles,models}`. When unset, the registry's filesystem reload finds nothing and `state::config_bootstrap` fills both bundle and model state from `sie-config`.
 - `SIE_CONFIG_SERVICE_URL` — base URL of `sie-config`. When set, `/readyz` returns `503` until the first complete export is applied. If unset, the bootstrap and poller tasks no-op and the gateway runs with whatever the (optional) filesystem seed loaded — typically empty in the default deploy, which means **no models will be served**. This is intended for local single-process tests only.
-- `SIE_CONFIG_SERVICE_TOKEN` — bearer token the gateway-as-client presents on its `sie-config` reads (`GET /v1/configs/bundles`, `/bundles/{id}`, `/export`, `/epoch`). It should be `sie-config`'s read-scoped token (`SIE_CONFIG_READ_TOKEN` there), which the chart generates and wires in. When the variable is set it decides, and a blank value sends no `Authorization` header (so `sie-config` must either be unauthenticated or the gateway will fail with `401`/`403`). When it is unset, the gateway falls back to `SIE_ADMIN_TOKEN` and logs a deprecation warning at startup; it logs the same warning when the two are equal. `sie-config` accepts one read token at a time and every component reads it at start, so a rotation restarts `sie-config` first and then the gateways and worker sidecars; until they restart, they receive `403` on config reads.
+- `SIE_CONFIG_SERVICE_TOKEN` — bearer token the gateway-as-client presents on its `sie-config` reads (`GET /v1/configs/bundles`, `/bundles/{id}`, `/export`, `/epoch`). It should be `sie-config`'s read-scoped token (`SIE_CONFIG_READ_TOKEN` there), which the chart generates and always wires in (empty when the chart runs no `sie-config`). When the variable is set it decides, and a blank value sends no `Authorization` header (so `sie-config` must either be unauthenticated or the gateway will fail with `401`/`403`). When it is unset, the gateway falls back to `SIE_ADMIN_TOKEN` and, when `SIE_CONFIG_SERVICE_URL` is set, logs a deprecation warning at startup; it logs the same warning when the two are equal. `sie-config` accepts one read token at a time and every component reads it at start, so a rotation restarts `sie-config` first and then the gateways and worker sidecars; until they restart, they receive `403` on config reads.
 - `SIE_ADMIN_TOKEN` — the token that `AuthLayer` requires for admin-gated mutations on the gateway itself (`POST/PUT/DELETE` on `/v1/configs/*`, `/v1/admin/*`, `/v1/pools/*`). If empty and the matching inbound request targets an admin path, the middleware fails closed with `403`. It is not sent to `sie-config` unless `SIE_CONFIG_SERVICE_TOKEN` is unset (the deprecated fallback above). The chart wires it only from `gateway.auth.adminTokenSecretName`, never from the `sie-config` admin token.
 - `SIE_AUTH_TOKEN` / `SIE_AUTH_TOKENS` — tokens accepted by the gateway's own inference API (`/v1/encode`, `/v1/score`, `/v1/extract`) and for read-side pool/config routes. Not used for outbound calls to `sie-config`. When `SIE_AUTH_MODE` enables auth but this list is empty, every non-probe request returns `500`.
 - `SIE_AUTH_MODE` — `token` (alias: `static`) enforces auth; `none` (default) disables it. Typos are fail-open-to-bypass by design; `audit_auth` logs a startup error naming the bad value so operators see it in `kubectl logs`.
@@ -522,7 +522,7 @@ Config service (`sie-config`):
 
 - `SIE_ADMIN_TOKEN` — write-auth, and also accepted on every read. Without it, writes are rejected if a read-scoped token (`SIE_CONFIG_READ_TOKEN` or `SIE_AUTH_TOKEN`) is set (a read token cannot implicitly grant write access). If no token is set, reads and writes are accepted unauthenticated — dev/local only; production always sets `SIE_ADMIN_TOKEN`.
 - `SIE_CONFIG_READ_TOKEN` — read-auth for the gateways and worker sidecars, which present it as `SIE_CONFIG_SERVICE_TOKEN`. Accepted on every read route, including `GET /v1/configs/export`, and never on a write.
-- `SIE_AUTH_TOKEN` — read-auth (the inference token), with the same scope as `SIE_CONFIG_READ_TOKEN`. Optional; the chart does not set it.
+- `SIE_AUTH_TOKEN` — read-auth (the inference token) on every read route except `GET /v1/configs/export`, which holds the write lock and accepts only `SIE_CONFIG_READ_TOKEN` or `SIE_ADMIN_TOKEN`. Optional; the chart does not set it.
 - `SIE_NATS_URL` — NATS broker URL. Publisher degrades gracefully if unreachable; mutations are blocked with `503` while the publisher is configured but disconnected.
 - `SIE_CONFIG_STORE_DIR` — base directory for the on-disk config store. When the Helm `config.configStore.enabled` flag is true, this is set to the mounted PVC path and `SIE_CONFIG_RESTORE=true` enables startup replay from the store into the in-memory registry.
 - `SIE_BUNDLES_DIR`, `SIE_MODELS_DIR` — bundle and model source directories. **`sie-config` is the source of truth**: it reads these at startup, validates writes against them, and re-serves the bundle list at `GET /v1/configs/bundles` for the gateway's bootstrap. Defaults via `sharedPaths.{bundlesDir,modelsDir}` (`/app/bundles`, `/app/models`) and image-baked.
@@ -582,7 +582,7 @@ Config reads (read auth: `SIE_CONFIG_READ_TOKEN`, `SIE_AUTH_TOKEN`, or `SIE_ADMI
 - `GET /v1/configs/bundles/{bundle_id}`
 - `POST /v1/configs/resolve`
 - `GET /v1/configs/epoch`
-- `GET /v1/configs/export`
+- `GET /v1/configs/export` — `SIE_CONFIG_READ_TOKEN` or `SIE_ADMIN_TOKEN` only
 
 `sie-config` does not serve `GET /v1/configs/models/{id}/status`. That endpoint is gateway-only by design (no worker registry on `sie-config`).
 
