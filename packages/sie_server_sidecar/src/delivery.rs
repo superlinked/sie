@@ -136,13 +136,13 @@ impl Delivery {
 
     /// True when this delivery holds a pull-loop admission permit.
     pub(crate) fn holds_admission_permit(&self) -> bool {
-        matches!(self, Self::Nats(_, Some(_)))
+        matches!(self, Self::Nats(_, Some(_), _))
     }
 
     /// Give the pull-loop admission permit back and hold `permit` until
     /// settlement instead. A no-op when no admission permit is held.
     pub(crate) fn exchange_admission_permit(&mut self, permit: OwnedSemaphorePermit) {
-        if let Self::Nats(_, held @ Some(_)) = self {
+        if let Self::Nats(_, held @ Some(_), _) = self {
             *held = Some(permit);
         }
     }
@@ -329,7 +329,7 @@ mod tests {
         let admitted = std::sync::Arc::clone(&admission)
             .try_acquire_owned()
             .unwrap();
-        let mut delivery = Delivery::Nats(offline_message().await, Some(admitted));
+        let mut delivery = Delivery::Nats(offline_message().await, Some(admitted), None);
         assert!(delivery.holds_admission_permit());
 
         delivery
@@ -344,7 +344,7 @@ mod tests {
     #[tokio::test]
     async fn a_delivery_without_an_admission_permit_takes_no_parked_permit() {
         let parked = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
-        let mut delivery = Delivery::Nats(offline_message().await, None);
+        let mut delivery = Delivery::Nats(offline_message().await, None, None);
         assert!(!delivery.holds_admission_permit());
 
         delivery

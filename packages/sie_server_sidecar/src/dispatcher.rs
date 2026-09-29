@@ -6183,7 +6183,7 @@ mod tests {
             },
             context: async_nats::jetstream::new(client),
         };
-        Delivery::Nats(message, None)
+        Delivery::Nats(message, None, None)
     }
 
     #[tokio::test(start_paused = true)]
