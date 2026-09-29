@@ -14,7 +14,11 @@ import yaml
 from sie_sdk._msgpack import packb as pack_msgpack
 
 from sie_server.adapters.errors import InputTooLongError
-from sie_server.api.ws import compute_bundle_config_hash_cached
+from sie_server.api.ws import (
+    BundleConfigView,
+    BundleMetadataUnavailableError,
+    compute_bundle_config_view,
+)
 from sie_server.config.model import ModelConfig
 from sie_server.core.encode_pipeline import EncodePipeline, resolve_encode_output_types
 from sie_server.core.extract_cost import (
@@ -510,6 +514,17 @@ def _wrap_encode_output(output: dict, config: Any) -> dict:
     return wrapped
 
 
+def _rejected_entry_mapping(entry: ReplaceModelConfigEntry, model_id: str) -> dict[str, Any] | None:
+    """Return a rejected export entry as a mapping for hashing, if it names ``model_id``."""
+    try:
+        raw = yaml.safe_load(entry.model_config) if entry.model_config.strip() else None
+    except yaml.YAMLError:
+        return None
+    if not isinstance(raw, dict) or raw.get("sie_id", model_id) != model_id:
+        return None
+    return raw
+
+
 def _parse_exported_model_config(entry: ReplaceModelConfigEntry) -> ModelConfig:
     if not entry.model_config.strip():
         msg = "model_config is required"
@@ -571,6 +586,13 @@ class QueueExecutor:
         # :meth:`invalidate_model_descriptor` when a model is unloaded
         # or hot-reloaded.
         self._descriptor_cache: dict[str, ModelDescriptor] = {}
+        # Per bundle: the control-plane adapter list the latest config arrived
+        # with, and the raw entries of the latest export this worker's schema
+        # rejected. Both feed ``bundle_config_view``.
+        self._control_plane_adapters: dict[str, frozenset[str]] = {}
+        self._rejected_configs: dict[str, dict[str, dict[str, Any]]] = {}
+        self._view_state_version = 0
+        self._view_cache: dict[str, tuple[tuple[int, int], BundleConfigView]] = {}
 
     @property
     def registry(self) -> ModelRegistry:
@@ -590,6 +612,36 @@ class QueueExecutor:
         """
         self._descriptor_cache.pop(model_id, None)
 
+    def bundle_config_view(self, bundle_id: str) -> BundleConfigView:
+        """Return the advertised hash and unsupported model ids for ``bundle_id``."""
+        key = (int(getattr(self._registry, "_config_version", 0)), self._view_state_version)
+        cached = self._view_cache.get(bundle_id)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        try:
+            view = compute_bundle_config_view(
+                self._registry,
+                bundle_id,
+                control_plane_adapters=self._control_plane_adapters.get(bundle_id),
+                rejected_configs=self._rejected_configs.get(bundle_id),
+            )
+        except BundleMetadataUnavailableError:
+            logger.exception(
+                "Unable to load bundle metadata for %s; returning empty bundle_config_hash to avoid widened hash scope",
+                bundle_id,
+            )
+            return BundleConfigView("", [])
+        self._view_cache[bundle_id] = (key, view)
+        return view
+
+    def _record_control_plane_adapters(self, bundle_id: str, adapters: list[str] | None) -> None:
+        if adapters is None:
+            return
+        scope = frozenset(adapter for adapter in adapters if adapter)
+        if self._control_plane_adapters.get(bundle_id) != scope:
+            self._control_plane_adapters[bundle_id] = scope
+            self._view_state_version += 1
+
     async def apply_model_config(self, req: ApplyModelConfigRequest) -> ApplyModelConfigResponse:
         """Validate and add a bundle-scoped config delta to the local registry."""
         if not req.bundle_id:
@@ -598,6 +650,7 @@ class QueueExecutor:
         if not req.model_config.strip():
             msg = "model_config is required"
             raise ValueError(msg)
+        self._record_control_plane_adapters(req.bundle_id, req.bundle_adapters)
 
         raw = yaml.safe_load(req.model_config)
         if not isinstance(raw, dict):
@@ -612,18 +665,21 @@ class QueueExecutor:
         updated_model_ids = await self._registry.add_config_async(model_config)
         for model_id in updated_model_ids:
             self.invalidate_model_descriptor(model_id)
-        bundle_hash = compute_bundle_config_hash_cached(self._registry, req.bundle_id)
+        if self._rejected_configs.get(req.bundle_id, {}).pop(model_config.sie_id, None) is not None:
+            self._view_state_version += 1
+        view = self.bundle_config_view(req.bundle_id)
         return ApplyModelConfigResponse(
             applied=True,
-            bundle_config_hash=bundle_hash,
+            bundle_config_hash=view.bundle_config_hash,
             config_version=int(getattr(self._registry, "_config_version", 0)),
+            unsupported_models=view.unsupported_models,
         )
 
     def compute_bundle_config_hash(self, bundle_id: str) -> str:
         """Return the local registry hash for ``bundle_id``."""
         if not bundle_id:
             return ""
-        return compute_bundle_config_hash_cached(self._registry, bundle_id)
+        return self.bundle_config_view(bundle_id).bundle_config_hash
 
     async def replace_model_configs(self, req: ReplaceModelConfigsRequest) -> ReplaceModelConfigsResponse:
         """Replace the bundle-scoped registry view from a full export snapshot.
@@ -632,16 +688,20 @@ class QueueExecutor:
         that model keeps its current registry entries, if any. An invalid entry
         without an identifiable model, duplicate valid model IDs, and cross-model
         pool conflicts reject the whole snapshot before any registry mutation.
-        The returned hash covers what the registry
-        then holds; the sidecar advertises it only when it equals the
-        control-plane hash.
+        The returned hash covers the received entries, scoped by the
+        control-plane adapter list when the request carries one; a rejected
+        model whose retained config differs in hashed fields is reported in
+        ``unsupported_models``. The sidecar advertises the hash only when it
+        equals the control-plane hash.
         """
         if not req.bundle_id:
             msg = "bundle_id is required"
             raise ValueError(msg)
+        self._record_control_plane_adapters(req.bundle_id, req.bundle_adapters)
 
         configs: list[ModelConfig] = []
         rejected: set[str] = set()
+        rejected_configs: dict[str, dict[str, Any]] = {}
         for entry in req.models:
             model_id = entry.model_id
             try:
@@ -661,11 +721,18 @@ class QueueExecutor:
                     exc,
                 )
                 rejected.add(model_id)
+                if (raw := _rejected_entry_mapping(entry, model_id)) is not None:
+                    rejected_configs[model_id] = raw
 
         invalidated = await self._registry.replace_configs_async(configs, retained_models=rejected)
         for model_id in invalidated:
             self.invalidate_model_descriptor(model_id)
-        bundle_hash = compute_bundle_config_hash_cached(self._registry, req.bundle_id)
+        accepted_ids = {config.sie_id for config in configs}
+        self._rejected_configs[req.bundle_id] = {
+            model_id: raw for model_id, raw in rejected_configs.items() if model_id not in accepted_ids
+        }
+        self._view_state_version += 1
+        view = self.bundle_config_view(req.bundle_id)
         applied_configs = self._registry.get_configs_snapshot(req.bundle_id)
         applied_models = sorted(applied_configs)
         applied_profiles = sorted(
@@ -676,10 +743,11 @@ class QueueExecutor:
         )
         return ReplaceModelConfigsResponse(
             applied=True,
-            bundle_config_hash=bundle_hash,
+            bundle_config_hash=view.bundle_config_hash,
             config_version=int(getattr(self._registry, "_config_version", 0)),
             applied_models=applied_models,
             applied_profiles=applied_profiles,
+            unsupported_models=view.unsupported_models,
         )
 
     async def set_pinned_models(self, req: SetPinnedModelsRequest) -> SetPinnedModelsResponse:

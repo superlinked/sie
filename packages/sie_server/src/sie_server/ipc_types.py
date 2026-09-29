@@ -181,12 +181,18 @@ class ApplyModelConfigRequest(msgspec.Struct):
     bundle_config_hash: str
     model_config: str
     profiles_added: list[str] = msgspec.field(default_factory=list)
+    # Adapter modules of the control-plane bundle definition that
+    # ``bundle_config_hash`` was scoped by. ``None`` when the control plane
+    # did not send one; the worker then uses its image's bundle file.
+    bundle_adapters: list[str] | None = None
 
 
 class ApplyModelConfigResponse(msgspec.Struct):
     applied: bool
     bundle_config_hash: str
     config_version: int = 0
+    # Routable model ids in the bundle scope this worker cannot serve.
+    unsupported_models: list[str] = msgspec.field(default_factory=list)
 
 
 class ReplaceModelConfigEntry(msgspec.Struct):
@@ -199,6 +205,7 @@ class ReplaceModelConfigsRequest(msgspec.Struct):
     epoch: int
     bundle_config_hash: str
     models: list[ReplaceModelConfigEntry]
+    bundle_adapters: list[str] | None = None
 
 
 class ReplaceModelConfigsResponse(msgspec.Struct):
@@ -207,6 +214,7 @@ class ReplaceModelConfigsResponse(msgspec.Struct):
     config_version: int = 0
     applied_models: list[str] = msgspec.field(default_factory=list)
     applied_profiles: list[str] = msgspec.field(default_factory=list)
+    unsupported_models: list[str] = msgspec.field(default_factory=list)
 
 
 # -----------------------------------------------------------------------------

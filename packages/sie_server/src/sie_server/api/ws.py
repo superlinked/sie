@@ -8,9 +8,9 @@ import logging
 import os
 import time
 import weakref
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, cast
 
 import orjson
 import yaml
@@ -298,7 +298,7 @@ def _resolved_profile_for_hash(config: object, profile_name: str, seen: set[str]
     return resolved
 
 
-def _is_synthetic_profile_variant(config: ServerModelConfig, configs: dict[str, ServerModelConfig]) -> bool:
+def _is_synthetic_profile_variant(config: ServerModelConfig, configs: Mapping[str, ServerModelConfig]) -> bool:
     source = config.synthetic_profile_variant_source
     if source is None:
         return False
@@ -327,35 +327,27 @@ def _profile_config_for_hash(config: ServerModelConfig, profile_name: str) -> di
     return _resolved_profile_for_hash(config, profile_name)
 
 
-def _compute_bundle_config_hash(registry: ModelRegistry, bundle_id: str) -> str:
-    """Compute SHA-256 hash of model configs assigned to this worker's bundle.
+_ProfileHashes = dict[str, dict[str, object | None]]
+_HashEntry = tuple[str | None, _ProfileHashes]
 
-    The hash covers serialized model configs (sie_id + profiles) for models
-    routable to the given bundle. Bundle metadata is excluded (immutable at
-    runtime).
 
-    Args:
-        registry: The model registry.
-        bundle_id: The bundle identifier to scope configs to.
+class BundleConfigView(NamedTuple):
+    """What a worker advertises for one bundle after a config apply."""
 
-    Returns:
-        Hex-encoded SHA-256 hash string, or empty string if no configs.
-    """
-    configs = registry.get_configs_snapshot(bundle_id)
-    if not configs:
-        return ""
+    bundle_config_hash: str
+    unsupported_models: list[str]
 
-    # Deterministic serialization matching gateway's compute_bundle_config_hash:
-    # both sides hash [{"sie_id": name, "profiles": [{name, config}]}]
-    # where config contains resolved routable fields: adapter_path,
-    # max_batch_tokens, compute_precision, adapter_options.
-    bundle_adapters = _bundle_adapter_modules(bundle_id)
-    items_by_model: dict[str, dict[str, dict[str, object | None]]] = {}
+
+def _registry_hash_entries(
+    configs: Mapping[str, ServerModelConfig],
+    scope: frozenset[str],
+) -> dict[str, _HashEntry]:
+    items_by_model: dict[str, _ProfileHashes] = {}
     revisions_by_model: dict[str, str | None] = {}
     for config in sorted(configs.values(), key=lambda c: c.sie_id):
         if _is_synthetic_profile_variant(config, configs):
             continue
-        if not _model_has_bundle_adapter(config, bundle_adapters):
+        if not _model_has_bundle_adapter(config, scope):
             continue
 
         base_id = config.sie_id
@@ -367,29 +359,143 @@ def _compute_bundle_config_hash(registry: ModelRegistry, bundle_id: str) -> str:
 
         profiles_for_model = items_by_model.setdefault(base_id, {})
         for pname in sorted(profile_name_map):
-            if not _profile_matches_bundle(config, pname, bundle_adapters):
+            if not _profile_matches_bundle(config, pname, scope):
                 continue
             profiles_for_model[profile_name_map[pname]] = _profile_config_for_hash(config, pname)
 
-    items = []
-    for model_id in sorted(items_by_model):
-        profiles = items_by_model[model_id]
-        if not profiles:
-            continue
-        profiles_for_hash = [{"name": pname, "config": profiles[pname]} for pname in sorted(profiles)]
-        items.append(
-            {
-                "sie_id": model_id,
-                "revision": revisions_by_model[model_id],
-                "profiles": profiles_for_hash,
-            }
-        )
+    return {
+        model_id: (revisions_by_model[model_id], profiles) for model_id, profiles in items_by_model.items() if profiles
+    }
 
+
+def _received_hash_entry(
+    model_id: str,
+    raw: Mapping[str, Any],
+    scope: frozenset[str],
+) -> tuple[_HashEntry | None, list[tuple[str, str | None]]] | None:
+    """Project a received raw config the same way as a parsed one.
+
+    Returns the hash entry (``None`` when no profile is in scope) and the
+    routable id and adapter module of every profile, or ``None`` when the raw
+    config cannot be projected.
+    """
+    profiles_raw = raw.get("profiles")
+    if not isinstance(profiles_raw, Mapping) or not profiles_raw:
+        return None
+    profiles: _ProfileHashes = {}
+    routes: list[tuple[str, str | None]] = []
+    try:
+        for pname in sorted(str(name) for name in profiles_raw):
+            resolved = _resolved_profile_for_hash(raw, pname)
+            adapter_path = resolved.get("adapter_path")
+            module = _adapter_module(adapter_path) if isinstance(adapter_path, str) else None
+            routes.append((model_id if pname == "default" else f"{model_id}:{pname}", module))
+            if module is not None and module in scope:
+                profiles[pname] = resolved
+    except (TypeError, ValueError, AttributeError):
+        return None
+    revision = raw.get("hf_revision")
+    entry = (revision if isinstance(revision, str) else None, profiles) if profiles else None
+    return entry, routes
+
+
+def _serialize_hash_entries(entries: Mapping[str, _HashEntry]) -> str:
+    # Deterministic serialization matching gateway's compute_bundle_config_hash:
+    # both sides hash [{"sie_id": name, "profiles": [{name, config}]}]
+    # where config contains resolved routable fields: adapter_path,
+    # max_batch_tokens, compute_precision, adapter_options.
+    items = [
+        {
+            "sie_id": model_id,
+            "revision": entries[model_id][0],
+            "profiles": [
+                {"name": pname, "config": entries[model_id][1][pname]} for pname in sorted(entries[model_id][1])
+            ],
+        }
+        for model_id in sorted(entries)
+    ]
     if not items:
         return ""
-
     serialized = orjson.dumps(items, option=orjson.OPT_SORT_KEYS)
     return hashlib.sha256(serialized).hexdigest()
+
+
+def compute_bundle_config_view(
+    registry: ModelRegistry,
+    bundle_id: str,
+    *,
+    control_plane_adapters: Collection[str] | None = None,
+    rejected_configs: Mapping[str, Mapping[str, Any]] | None = None,
+) -> BundleConfigView:
+    """Compute the bundle config hash and the unsupported model ids for a bundle.
+
+    The hash is scoped by ``control_plane_adapters``, the adapter list of the
+    control-plane bundle definition the configs arrived with, so it identifies
+    the config the worker received. Without one, the adapter list in this
+    image's bundle file is used. For a model whose latest received entry this
+    worker's schema rejected, the received entry is hashed.
+
+    ``unsupported_models`` lists the routable ids (``model`` or
+    ``model:profile``) in that scope that this worker cannot serve: the adapter
+    module is not in this image's bundle file, or the entry was rejected and the
+    registry holds no config with the same hashed fields.
+
+    Raises:
+        BundleMetadataUnavailableError: This image's bundle file is missing.
+    """
+    configs = registry.get_configs_snapshot(bundle_id)
+    rejected = rejected_configs or {}
+    if not configs and not rejected:
+        return BundleConfigView("", [])
+
+    image_adapters = _bundle_adapter_modules(bundle_id)
+    scope = frozenset(control_plane_adapters) if control_plane_adapters is not None else image_adapters
+    entries = _registry_hash_entries(configs, scope)
+    unsupported: set[str] = set()
+    replaced: set[str] = set()
+    for model_id, raw in rejected.items():
+        received = _received_hash_entry(model_id, raw, scope)
+        if received is None:
+            continue
+        received_entry, received_routes = received
+        if entries.get(model_id) == received_entry:
+            continue
+        replaced.add(model_id)
+        if received_entry is None:
+            entries.pop(model_id, None)
+        else:
+            entries[model_id] = received_entry
+        unsupported.update(route for route, module in received_routes if module is not None and module in scope)
+
+    for name, config in configs.items():
+        if _config_base_name(name, config) in replaced:
+            continue
+        module = _adapter_module(config.resolve_profile("default").adapter_path)
+        if module is not None and module in scope and module not in image_adapters:
+            unsupported.add(name)
+
+    return BundleConfigView(_serialize_hash_entries(entries), sorted(unsupported))
+
+
+def _config_base_name(name: str, config: ServerModelConfig) -> str:
+    source = config.synthetic_profile_variant_source
+    return source[0] if source is not None else name
+
+
+def _compute_bundle_config_hash(registry: ModelRegistry, bundle_id: str) -> str:
+    """Compute SHA-256 hash of model configs assigned to this worker's bundle.
+
+    The hash covers serialized model configs (sie_id + profiles) for models
+    routable to the given bundle, scoped by this image's bundle file.
+
+    Args:
+        registry: The model registry.
+        bundle_id: The bundle identifier to scope configs to.
+
+    Returns:
+        Hex-encoded SHA-256 hash string, or empty string if no configs.
+    """
+    return compute_bundle_config_view(registry, bundle_id).bundle_config_hash
 
 
 # Cache of bundle config hashes. Populated by _compute_bundle_config_hash
