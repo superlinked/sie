@@ -52,7 +52,9 @@ therefore kept rare and short:
 - at most one recording at a time in the process, across all models; a
   forward that finds another recording in progress runs eagerly;
 - no recording while less than a tenth of the device's memory is free;
-- a runner records at most 16 graphs at once, then one per 2 seconds.
+- a runner has a budget of 16 recordings that refills at one every 2
+  seconds: it records at most 16 graphs in quick succession, one after
+  another, then about one every 2 seconds.
 
 The forward that records a graph is answered by its first replay.
 
@@ -132,9 +134,10 @@ _EXACT_RECORD_AT = 2
 # about twice the GPU time per token, so their graphs hold half as many.
 _MAX_GRAPH_TOKENS = 2048
 _WIDE_ENCODER_HIDDEN_SIZE = 768
-# A runner may record this many graphs at once, then one per this many
-# seconds, however its forwards repeat: recording costs a forward's launches,
-# and while it runs the allocator cannot free cached memory for other models.
+# A runner's recording budget: this many recordings, refilled at one per this
+# many seconds, however its forwards repeat. Recordings still run one at a time
+# (``_RECORDING_LOCK``): recording costs a forward's launches, and while it runs
+# the allocator cannot free cached memory for other models.
 _RECORDING_BURST = 16
 _SECONDS_PER_RECORDING = 2.0
 # After a recording runs out of memory, the runner records nothing for this long.

@@ -96,12 +96,6 @@
      Supported schemes: s3:// (AWS), gs:// (GCP), abfs:// + abfss:// (Azure
      Data Lake Storage Gen2 / Blob via the hierarchical namespace). */}}
 {{- $payloadStoreUrl := include "sie-cluster.payloadStoreUrl" . }}
-{{- /* Payload store is required for work items >1MB in queue mode. If it is
-     enabled (default) but no URL resolves, fail loudly rather than silently
-     dropping >1MB requests at runtime. Opt out with payloadStore.enabled=false. */}}
-{{- if and (eq $routing "queue") .Values.payloadStore.enabled (not $payloadStoreUrl) }}
-  {{- fail "payloadStore.enabled=true but no payload-store URL resolved. Work items >1MB will fail without it. Set payloadStore.url to the terraform `payload_store_url` output (or workers.common.clusterCache.url for the shared bucket), or set payloadStore.enabled=false to disable. See deploy/helm/sie-cluster/README.md" }}
-{{- end }}
 {{- if $payloadStoreUrl }}
   {{- if not (or (hasPrefix "s3://" $payloadStoreUrl) (hasPrefix "gs://" $payloadStoreUrl) (hasPrefix "abfs://" $payloadStoreUrl) (hasPrefix "abfss://" $payloadStoreUrl) (hasPrefix "oss://" $payloadStoreUrl)) }}
     {{- fail (printf "payloadStore.url must be an object-store URL (s3://bucket/prefix, gs://bucket/prefix, abfs(s)://container@account.dfs.core.windows.net/prefix, or oss://bucket/prefix), not a local path; got %q" $payloadStoreUrl) }}
@@ -306,15 +300,15 @@ spec:
             # packages/sie_gateway/docs/architecture-guide.md section 4.
             - name: SIE_CONFIG_SERVICE_URL
               value: {{ include "sie-cluster.config.internalUrl" . | quote }}
-            {{- if .Values.config.auth.adminTokenSecretName }}
+            {{- with include "sie-cluster.config.adminTokenSecretName" . }}
             # Shared admin secret. Gateway presents it as a bearer token on
             # both GET /v1/configs/export (admin-auth) and
             # GET /v1/configs/epoch. Both services read the same secret.
             - name: SIE_ADMIN_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.config.auth.adminTokenSecretName }}
-                  key: {{ .Values.config.auth.adminTokenSecretKey }}
+                  name: {{ . }}
+                  key: {{ include "sie-cluster.config.adminTokenSecretKey" $ }}
             {{- end }}
             {{- end }}
             {{- if $payloadStoreUrl }}

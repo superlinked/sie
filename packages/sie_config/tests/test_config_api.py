@@ -621,6 +621,16 @@ class TestConfigAPIEdgeCases:
         assert client.get("/v1/configs/models").status_code == 403
         assert client.post("/v1/configs/models", content=yaml_body).status_code == 403
 
+    def test_non_ascii_token_is_rejected_not_an_error(self, monkeypatch) -> None:
+        monkeypatch.setenv("SIE_ADMIN_TOKEN", "admin-secret")
+        monkeypatch.setenv("SIE_AUTH_TOKEN", "read-only")
+        app = _create_test_app(self._bundles, self._models)
+        client = TestClient(app)
+        headers = {"Authorization": "Bearer caf\u00e9".encode()}
+        yaml_body = "sie_id: test/model\nprofiles:\n  default:\n    adapter_path: sie_server.adapters.bert_flash:B\n    max_batch_tokens: 1\n"
+        assert client.get("/v1/configs/models", headers=headers).status_code == 403
+        assert client.post("/v1/configs/models", content=yaml_body, headers=headers).status_code == 403
+
     def test_dev_without_any_token_stays_open(self, monkeypatch) -> None:
         # Self-host / dev (no prod env signal) keeps the open-localhost posture.
         monkeypatch.delenv("SIE_ADMIN_TOKEN", raising=False)

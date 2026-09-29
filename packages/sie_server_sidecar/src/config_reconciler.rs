@@ -35,7 +35,7 @@ pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(30);
 pub const DEFAULT_FULL_EXPORT_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const DEFAULT_MODEL_POOL: &str = "default";
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ReconcilerConfig {
     pub base_url: String,
     pub admin_token: Option<String>,
@@ -43,6 +43,30 @@ pub struct ReconcilerConfig {
     pub pool: String,
     pub poll_interval: Duration,
     pub full_export_interval: Option<Duration>,
+}
+
+impl std::fmt::Debug for ReconcilerConfig {
+    /// Hand-written so `admin_token` prints only as present or absent.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Destructured without `..` so a new field fails to compile until it is
+        // listed here, and so cannot be printed unredacted or silently omitted.
+        let ReconcilerConfig {
+            base_url,
+            admin_token,
+            bundle,
+            pool,
+            poll_interval,
+            full_export_interval,
+        } = self;
+        f.debug_struct("ReconcilerConfig")
+            .field("base_url", base_url)
+            .field("admin_token", &admin_token.as_ref().map(|_| "<redacted>"))
+            .field("bundle", bundle)
+            .field("pool", pool)
+            .field("poll_interval", poll_interval)
+            .field("full_export_interval", full_export_interval)
+            .finish()
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -772,6 +796,22 @@ mod tests {
     use std::sync::Arc;
 
     use tokio::sync::Mutex;
+
+    #[test]
+    fn reconciler_config_debug_redacts_admin_token() {
+        let config = ReconcilerConfig {
+            base_url: "http://sie-config:8080".into(),
+            admin_token: Some("config-admin-value".into()),
+            bundle: "default".into(),
+            pool: "default".into(),
+            poll_interval: DEFAULT_POLL_INTERVAL,
+            full_export_interval: Some(DEFAULT_FULL_EXPORT_INTERVAL),
+        };
+        let rendered = format!("{config:?}");
+        assert!(!rendered.contains("config-admin-value"));
+        assert!(rendered.contains("admin_token: Some(\"<redacted>\")"));
+        assert!(rendered.contains("base_url: \"http://sie-config:8080\""));
+    }
 
     fn exported_model_with_yaml(model_id: &str, bundles: &[&str], raw_yaml: &str) -> ExportedModel {
         ExportedModel {

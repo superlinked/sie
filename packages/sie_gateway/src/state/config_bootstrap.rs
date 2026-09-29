@@ -28,21 +28,25 @@
 //!
 //! Failure handling:
 //!
-//! - The gateway does **not** block startup on a successful bootstrap. It
-//!   serves traffic immediately using whatever the filesystem seed produced.
+//! - The gateway does **not** block listener startup on a successful
+//!   bootstrap. It binds immediately and serves whatever the filesystem seed
+//!   produced.
 //! - A background task retries `GET /v1/configs/export` with exponential
 //!   backoff (capped) until it succeeds. Every successful fetch is applied
 //!   into the shared `ModelRegistry` and stored as the current `ConfigEpoch`.
 //! - While bootstrap has not yet succeeded, API-added models from
-//!   `sie-config` are missing. `GET /readyz` is process readiness only: once
-//!   the gateway listener is serving it returns **200** + plain text `ok`, even
-//!   with zero workers, so the first inference request can reach the gateway and
+//!   `sie-config` are missing. When `SIE_CONFIG_SERVICE_URL` is set,
+//!   `GET /readyz` returns **503** until the first complete snapshot is
+//!   applied (`ConfigEpoch::is_bootstrapped`), so a replica that cannot read
+//!   its catalog is kept out of rotation instead of serving a partial one.
+//!   After that it returns **200** + plain text `ok` for the life of the
+//!   process, even while `sie-config` is later unreachable, and regardless of
+//!   worker health, so the first inference request can reach the gateway and
 //!   trigger scale-from-zero via a surface-specific provisioning response.
-//!   Bootstrap catch-up is visible separately via
-//!   `GET /v1/configs/models/{id}/status` (`config_epoch` on that payload), the
-//!   canonical `sie.gateway.config.applied_epoch` /
-//!   `sie.gateway.config.bootstrap.degraded` telemetry, and gateway logs — not
-//!   via `/readyz` flipping on export completion.
+//!   Later catch-up is visible via `GET /v1/configs/models/{id}/status`
+//!   (`config_epoch` on that payload), the canonical
+//!   `sie.gateway.config.applied_epoch` /
+//!   `sie.gateway.config.bootstrap.degraded` telemetry, and gateway logs.
 //! - `state::config_poller` runs in parallel, periodically reconciling
 //!   against `GET /v1/configs/epoch` so any missed NATS deltas after the
 //!   initial bootstrap are caught within one poll interval.
@@ -700,6 +704,7 @@ pub async fn bootstrap_once(
     let bundles_hash_changed = bundles_hash.store(outcome.bundles_hash.clone());
     let bundle_config_hashes_hash_changed =
         bundle_config_hashes_hash.store(outcome.bundle_config_hashes_hash.clone());
+    config_epoch.mark_bootstrapped();
     info!(
         epoch = outcome.epoch,
         applied = outcome.applied,
@@ -1298,6 +1303,7 @@ mod tests {
         )
         .await;
         assert!(outcome.is_err(), "stale in-flight export must be retried");
+        assert!(!epoch.is_bootstrapped());
         assert_eq!(epoch.get(), 2);
         assert!(registry.get_model_info("test/new-model").is_some());
     }
@@ -1829,6 +1835,60 @@ mod tests {
         // believe the registry is caught up despite the failure.
         assert_eq!(bundles_hash.get(), "");
         assert_eq!(bundle_config_hashes_hash.get(), "");
+        assert!(!epoch.is_bootstrapped());
+    }
+
+    #[tokio::test]
+    async fn bootstrap_once_marks_bootstrapped_only_after_a_complete_snapshot() {
+        let refusing = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("{\"detail\":\"refused\"}"))
+            .mount(&refusing)
+            .await;
+        let (registry, _tmp) = make_registry();
+        let epoch = ConfigEpoch::new();
+        let bundles_hash = BundlesHash::new();
+        let bundle_config_hashes_hash = BundleConfigHashesHash::new();
+        let refusing_client = BootstrapClient::new(refusing.uri(), None).unwrap();
+        let attempt = || {
+            bootstrap_once(
+                &refusing_client,
+                registry.as_ref(),
+                &epoch,
+                &bundles_hash,
+                &bundle_config_hashes_hash,
+            )
+        };
+        assert!(attempt().await.is_err());
+        assert!(!epoch.is_bootstrapped());
+
+        let healthy = MockServer::start().await;
+        mount_default_bundles(&healthy).await;
+        mount_default_epoch(&healthy, 3, "deadbeef").await;
+        Mock::given(method("GET"))
+            .and(path("/v1/configs/export"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "snapshot_version": 1,
+                "epoch": 3,
+                "generated_at": "2026-04-17T00:00:00Z",
+                "models": [],
+            })))
+            .mount(&healthy)
+            .await;
+        let healthy_client = BootstrapClient::new(healthy.uri(), None).unwrap();
+        bootstrap_once(
+            &healthy_client,
+            registry.as_ref(),
+            &epoch,
+            &bundles_hash,
+            &bundle_config_hashes_hash,
+        )
+        .await
+        .unwrap();
+        assert!(epoch.is_bootstrapped());
+
+        assert!(attempt().await.is_err());
+        assert!(epoch.is_bootstrapped());
     }
 
     /// Two-phase fetch: list endpoint enumerates IDs, per-bundle endpoint

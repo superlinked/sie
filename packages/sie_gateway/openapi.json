@@ -4167,7 +4167,7 @@
     },
     "/readyz": {
       "get": {
-        "description": "Process readiness only. Always returns 200 once the gateway is serving requests; never returns 503. Worker readiness is reported by GET /health and by inference responses with retryable provisioning signals from a workerless gateway. This contract supports KEDA scale-from-zero.",
+        "description": "Gateway readiness. When a config service URL is configured, returns 503 until this replica has applied its first complete configuration snapshot, and 200 from then on, including while the config service is later unreachable. Without a config service URL it returns 200 once the gateway is serving requests. Readiness never depends on worker health: worker readiness is reported by GET /health and by inference responses with retryable provisioning signals from a workerless gateway. This contract supports KEDA scale-from-zero.",
         "operationId": "readyz",
         "responses": {
           "200": {
@@ -4178,7 +4178,17 @@
                 }
               }
             },
-            "description": "Gateway process is ready"
+            "description": "Gateway is ready"
+          },
+          "503": {
+            "content": {
+              "text/plain; charset=utf-8": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The first configuration snapshot has not been applied yet"
           }
         },
         "security": [],

@@ -10,6 +10,12 @@ helm install sie-cluster oci://ghcr.io/superlinked/charts/sie-cluster \
   --create-namespace
 ```
 
+With the defaults, the chart generates the sie-config admin token (see
+[sie-config admin token](#sie-config-admin-token)) and installs without a
+payload store, so work items larger than 1MB fail until one is configured (see
+[Payload store](#payload-store)). All worker pools are disabled by default;
+enable the pools you need (see [Configuration](#configuration)).
+
 ## Local validation
 
 Prepare dependencies from the checked-in `Chart.yaml` and `Chart.lock`, then
@@ -175,7 +181,7 @@ needed.
 
 Work items larger than 1MB (for example images or long documents) are too big to put on the NATS queue inline, so the gateway offloads the payload to object storage and enqueues only a reference; workers fetch it back. **This is required for >1MB requests**: without a payload store the gateway cannot enqueue them and the request fails.
 
-It is therefore **enabled by default** (`payloadStore.enabled=true`) and is **decoupled from the optional cluster cache** above. When the payload store is enabled, the chart resolves a store URL and **fails the install if none is found**, so a missing payload store surfaces at deploy time instead of silently failing >1MB requests at runtime.
+It is therefore **enabled by default** (`payloadStore.enabled=true`) and is **decoupled from the optional cluster cache** above. When the payload store is enabled, the chart resolves a store URL. If none resolves, as with the chart defaults, the chart installs without a payload store and the release notes print a warning; >1MB requests then fail until a URL is configured.
 
 URL resolution, in order:
 
@@ -189,13 +195,13 @@ helm upgrade --install sie-cluster . \
   --set payloadStore.url=$(terraform output -raw payload_store_url)
 ```
 
-To run without large-payload support (for example a local/dev cluster), opt out:
+To run without large-payload support (for example a local/dev cluster) and without the warning, opt out:
 
 ```bash
 helm upgrade --install sie-cluster . --set payloadStore.enabled=false
 ```
 
-> **Upgrade note:** the payload store is on by default. An existing queue-mode install with *no* payload store and *no* cluster cache will fail on upgrade until it either sets a URL (above) or `payloadStore.enabled=false`. Installs that already set `workers.common.clusterCache.url` keep working; the payload store derives its URL from it.
+> **Upgrade note:** installs that already set `payloadStore.url` or `workers.common.clusterCache.url` render the same payload store as before. An install with neither no longer fails to render; it installs without a payload store and prints the warning above.
 
 ### Alibaba Cloud ACK OSS and RRSA
 
@@ -887,6 +893,141 @@ Run these once per cluster after the upgrade settles. Leftover
 ScaledObjects will keep trying to scale deleted StatefulSets and spam
 KEDA logs; leftover PDBs will block node drains.
 
+## sie-config admin token
+
+sie-config serves the model catalog on `/v1/configs/*`, and one admin token
+authorizes every read and write on that API. The gateway presents it to load
+and refresh its catalog, worker sidecars present it to reconcile missed config
+updates, and admin tooling presents it for writes. All three read it from the
+same Secret.
+
+- **Generated (default).** With `config.auth.adminTokenSecretName` empty and
+  `config.auth.generateAdminToken=true`, the chart creates the Secret
+  `<fullname>-config-admin-token` (`sie-cluster-config-admin-token` for the
+  Quick Start release) holding a random 64-character token under
+  `config.auth.adminTokenSecretKey` (`SIE_ADMIN_TOKEN`). An absent
+  `generateAdminToken` key, as after `helm upgrade --reuse-values` from an
+  older release, counts as `true`. Upgrades read the existing Secret and keep
+  its token; the render fails if the Secret has no value under that key or the
+  value is shorter than 32 characters. The
+  Secret carries `helm.sh/resource-policy: keep`, so `helm uninstall` leaves it
+  in place; delete it manually when it is no longer needed.
+- **Operator-managed.** Set `config.auth.adminTokenSecretName` (and
+  `config.auth.adminTokenSecretKey` if the key differs) to an existing Secret.
+  The chart uses it unchanged and creates no Secret. Use this mode with
+  renderers that cannot read the cluster, such as `helm template` or GitOps
+  controllers (see [GitOps and `helm template`](#gitops-and-helm-template)).
+
+`config.auth.mode` is not read by any template and is kept only so existing
+values files stay valid; the two settings above decide the token.
+
+Read the generated token for admin tooling:
+
+```bash
+kubectl get secret -n sie sie-cluster-config-admin-token \
+  -o jsonpath='{.data.SIE_ADMIN_TOKEN}' | base64 -d
+```
+
+`telemetry.deploymentEnv` is also sie-config's deployment environment
+(`SIE_DEPLOYMENT_ENV`). With `production` (the default) or `prod`, sie-config
+refuses every `/v1/configs` request unless an admin token is configured. Any
+other value lets sie-config serve the API without a token, which leaves catalog
+writes open to anything that can reach the Service. With
+`config.auth.generateAdminToken=false` and `config.auth.adminTokenSecretName`
+empty, the chart therefore renders only when `telemetry.deploymentEnv` is
+`staging`, `development`, or `ci`, and fails the render for production and
+for any unrecognized value.
+
+The gateway reports `503` on `/readyz` until it has loaded its first complete
+catalog from sie-config, so a missing or mismatched token keeps new gateway
+pods out of the Service and fails `helm install --wait` instead of serving a
+partial catalog. Once a gateway pod has loaded its catalog, it stays ready
+through later sie-config outages. The gate proves that the gateway reached
+sie-config and, when sie-config requires a token, authenticated. It accepts
+whatever complete catalog sie-config serves and does not validate the
+catalog's contents.
+
+> **Upgrade note:** upgrading an install without
+> `config.auth.adminTokenSecretName` creates the Secret and adds
+> `SIE_ADMIN_TOKEN` to sie-config, the gateway, and the worker sidecars, so
+> those pods roll. sie-config then requires the token for every `/v1/configs`
+> request, including on installs with a non-production
+> `telemetry.deploymentEnv` that previously served the API without one. Update
+> admin tooling to send the token. To keep an unauthenticated sie-config
+> instead, set `config.auth.generateAdminToken=false`; the chart renders that
+> only when `telemetry.deploymentEnv` is `staging`, `development`, or `ci`. An
+> install that uses another name (for example `dev`, `test`, `qa`, or
+> `preprod`) fails the render with that setting and must either keep the token
+> or switch to one of those names. Because the auth posture is keyed off the
+> telemetry value, switching the name also changes the anonymous-telemetry
+> environment tag and, unless `observability.otel.resource.deploymentEnvironment`
+> is set explicitly, the OTel `deployment.environment` label on dashboards.
+
+### Who holds the token
+
+The token is available to sie-config, every gateway pod, every worker sidecar,
+and anyone who can read Secrets in the release namespace. Limit Secret read
+access in that namespace accordingly.
+
+With `gateway.auth.mode` set to `token` or `static`, the gateway also accepts
+this token on its admin routes: `POST`, `PUT`, and `DELETE` requests under
+`/v1/pools`, `/v1/admin`, and `/v1/configs`, which include pool create, renew,
+and delete and `POST /v1/configs/resolve`. Before the chart generated a token,
+those routes answered `403` (`Admin token not configured`) unless an operator
+set `config.auth.adminTokenSecretName`; now the generated token unlocks them.
+
+### Rotating the token
+
+sie-config accepts one admin token at a time, and every component reads the
+token at container start. To rotate it, update the Secret, restart sie-config
+first, and then restart the gateway and the worker StatefulSets. Until a
+gateway or worker sidecar restarts, sie-config answers its old token with
+`403`: a running gateway keeps serving its current catalog and still receives
+live NATS config deltas, but its epoch poll and export catch-up fail; a new
+gateway pod stays at `503`; and worker sidecars cannot reconcile missed updates.
+
+Helm stores the rendered Secret, including the token, in every release
+revision. A `helm rollback` to a revision from before a rotation restores the
+old token, so rotate again after such a rollback. Anyone who can read Secrets
+in the release namespace can also read earlier tokens from the release
+history.
+
+### GitOps and `helm template`
+
+`helm template`, and GitOps controllers that render the chart the same way
+(for example Argo CD), cannot read the cluster. The chart's lookup of the
+existing Secret finds nothing, so every render carries a new random token.
+Applying each render replaces the token in the Secret, and pods pick up
+different tokens as they restart: worker sidecars get `403` when they
+reconcile, new gateway pods stay at `503`, and every component fails once
+sie-config restarts with a token the others do not hold.
+
+- **Recommended:** create the Secret outside the chart, for example with an
+  external secret manager, and set `config.auth.adminTokenSecretName`.
+- **Argo CD with a generated token:** have Argo CD keep the live token by
+  ignoring the Secret's data both when diffing and when syncing:
+
+  ```yaml
+  spec:
+    ignoreDifferences:
+      - kind: Secret
+        name: sie-cluster-config-admin-token
+        namespace: sie
+        jsonPointers:
+          - /data
+    syncPolicy:
+      syncOptions:
+        - RespectIgnoreDifferences=true
+  ```
+
+  `RespectIgnoreDifferences=true` makes Argo CD apply `ignoreDifferences`
+  during sync, not only in the diff. It takes effect only once the Secret
+  exists, so the first sync creates the Secret with the token from that render
+  and later syncs keep it.
+
+Do not commit `helm template` output to a repository: the rendered Secret
+contains the generated token.
+
 ## Ingress
 
 Enable the Ingress with `ingress.enabled=true` and route traffic to the gateway by
@@ -1220,6 +1361,10 @@ telemetry:
 > `staging | development | ci`. The chart default is `production`, so every
 > non-production values overlay must opt out explicitly to keep its signals out
 > of production dashboards.
+
+`telemetry.deploymentEnv` is not only a dashboard tag: it is also passed to
+sie-config as `SIE_DEPLOYMENT_ENV` and decides whether sie-config may serve its
+API without an admin token. See [sie-config admin token](#sie-config-admin-token).
 
 ## Observability
 

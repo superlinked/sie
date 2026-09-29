@@ -15,7 +15,7 @@ use sie_server_sidecar::config_subscriber::trusted_producers_from_env;
 use sie_server_sidecar::dispatcher::default_max_concurrent_batches;
 use sie_server_sidecar::{run, run_local};
 
-#[derive(Parser, Debug)]
+#[derive(Parser)]
 #[command(author, version, about = "SIE server sidecar", long_about = None)]
 struct Cli {
     /// Work-ingest mode: `nats` (default; JetStream pull consumer) or
@@ -78,7 +78,7 @@ struct Cli {
     gateway_url: Option<String>,
 
     /// Bearer token for gateway pool-status reads.
-    #[arg(long, env = "SIE_GATEWAY_API_KEY")]
+    #[arg(long, env = "SIE_GATEWAY_API_KEY", hide_env_values = true)]
     gateway_api_key: Option<String>,
 
     /// Enable/disable the worker-side pool admission gate.
@@ -144,7 +144,7 @@ struct Cli {
 
     /// Bearer token for sie-config export reads. Defaults from the shared
     /// SIE_ADMIN_TOKEN secret in Helm when config auth is enabled.
-    #[arg(long, env = "SIE_ADMIN_TOKEN")]
+    #[arg(long, env = "SIE_ADMIN_TOKEN", hide_env_values = true)]
     config_service_token: Option<String>,
 
     /// Worker-side config epoch poll interval in milliseconds.
@@ -402,7 +402,31 @@ mod tests {
     use super::validate_lane_segment;
     use super::validate_model_ready_liveness_budget;
     use super::validate_unique_ipc_socket_paths;
+    use super::Cli;
     use super::IngestMode;
+    use clap::CommandFactory;
+
+    #[test]
+    fn secret_env_args_hide_their_values() {
+        let command = Cli::command();
+        let secret_args: Vec<_> = command
+            .get_arguments()
+            .filter_map(|arg| {
+                let env = arg.get_env()?.to_str()?.to_string();
+                ["TOKEN", "KEY", "SECRET", "PASSWORD"]
+                    .iter()
+                    .any(|marker| env.contains(marker))
+                    .then_some((env, arg.is_hide_env_values_set()))
+            })
+            .collect();
+        assert_eq!(
+            secret_args,
+            vec![
+                ("SIE_GATEWAY_API_KEY".to_string(), true),
+                ("SIE_ADMIN_TOKEN".to_string(), true),
+            ]
+        );
+    }
 
     #[test]
     fn ingest_mode_nats_requires_nats_url() {

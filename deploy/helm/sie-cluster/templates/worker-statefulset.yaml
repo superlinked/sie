@@ -544,12 +544,12 @@ spec:
             # /v1/configs/export through adapter IPC.
             - name: SIE_CONFIG_SERVICE_URL
               value: {{ include "sie-cluster.config.internalUrl" $root | quote }}
-            {{- if $root.Values.config.auth.adminTokenSecretName }}
+            {{- with include "sie-cluster.config.adminTokenSecretName" $root }}
             - name: SIE_ADMIN_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: {{ $root.Values.config.auth.adminTokenSecretName }}
-                  key: {{ $root.Values.config.auth.adminTokenSecretKey }}
+                  name: {{ . }}
+                  key: {{ include "sie-cluster.config.adminTokenSecretKey" $root }}
             {{- end }}
             {{- if $configReconcile.pollIntervalMs }}
             - name: SIE_WORKER_CONFIG_POLL_INTERVAL_MS

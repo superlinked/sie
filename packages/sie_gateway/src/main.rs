@@ -484,7 +484,8 @@ async fn run_server(cfg: Config) -> Result<(), Box<dyn std::error::Error>> {
     // Bootstrap + catch-up loop. The gateway does NOT block startup on
     // sie-config availability: it serves filesystem-seed traffic immediately
     // while a background task retries the export fetch with exponential
-    // backoff. Once that first fetch succeeds, the epoch poller keeps the
+    // backoff; /readyz reports 503 until that first fetch succeeds. Once that
+    // first fetch succeeds, the epoch poller keeps the
     // local registry in sync by periodically checking sie-config's latest
     // epoch and triggering a re-export on drift (closes the NATS Core
     // pub/sub delta-loss gap).

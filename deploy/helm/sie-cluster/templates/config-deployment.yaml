@@ -1,5 +1,6 @@
 {{- if .Values.config.enabled }}
 {{- include "sie-cluster.validateNats" . }}
+{{- include "sie-cluster.config.validateAuth" . }}
 {{- if hasKey .Values.config.podAnnotations "checksum/otel-resource" -}}
 {{- fail "config.podAnnotations must not override chart-owned annotation checksum/otel-resource" -}}
 {{- end -}}
@@ -89,15 +90,15 @@ spec:
             # Deployment-env signal (mirrors the worker). Arms the config service's
             # fail-closed guard: in a production env WITHOUT an admin/inference token
             # it refuses to serve unauthenticated, rather than exposing an open
-            # (writable) catalog. Self-host dev sets a non-prod value to stay open.
+            # (writable) catalog.
             - name: SIE_DEPLOYMENT_ENV
-              value: {{ if and .Values.telemetry .Values.telemetry.deploymentEnv }}{{ .Values.telemetry.deploymentEnv | quote }}{{ else }}"production"{{ end }}
-            {{- if .Values.config.auth.adminTokenSecretName }}
+              value: {{ include "sie-cluster.config.deploymentEnv" . | quote }}
+            {{- with include "sie-cluster.config.adminTokenSecretName" . }}
             - name: SIE_ADMIN_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.config.auth.adminTokenSecretName }}
-                  key: {{ .Values.config.auth.adminTokenSecretKey }}
+                  name: {{ . }}
+                  key: {{ include "sie-cluster.config.adminTokenSecretKey" $ }}
             {{- end }}
             {{- if .Values.nats.enabled }}
             - name: SIE_NATS_URL

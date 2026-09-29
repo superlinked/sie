@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import subprocess
 import tempfile
 import time
@@ -11,6 +12,8 @@ import urllib.error
 import urllib.request
 import uuid
 from pathlib import Path
+
+from sie_sdk import SIEClient
 
 from tools.ci.live_sdk import smoke_python, wait_for_api
 
@@ -50,6 +53,37 @@ def wait_health(url: str, timeout: float = 180) -> None:
             pass
         time.sleep(1)
     raise RuntimeError(f"Container health did not become ready: {url}")
+
+
+def config_models(config_url: str, token: str | None = None) -> set[str]:
+    request = urllib.request.Request(f"{config_url}/v1/configs/models")
+    if token is not None:
+        request.add_header("Authorization", f"Bearer {token}")
+    with urllib.request.urlopen(request, timeout=10) as response:
+        return {model["model_id"] for model in json.load(response)["models"]}
+
+
+def require_authenticated_catalog(config_url: str, token: str) -> set[str]:
+    try:
+        config_models(config_url)
+    except urllib.error.HTTPError as error:
+        if error.code != 401:
+            raise RuntimeError(f"sie-config answered an unauthenticated catalog read with {error.code}") from error
+    else:
+        raise RuntimeError("sie-config served its catalog without the admin token")
+    catalog = config_models(config_url, token)
+    if not catalog:
+        raise RuntimeError("sie-config returned an empty model catalog")
+    return catalog
+
+
+def require_gateway_catalog(gateway_url: str, catalog: set[str]) -> None:
+    with SIEClient(gateway_url, timeout_s=30) as client:
+        listed = {model["name"] for model in client.list_models()}
+    missing = sorted(catalog - listed)
+    if missing:
+        raise RuntimeError(f"Gateway is missing {len(missing)} sie-config catalog models, for example {missing[:5]}")
+    print(f"Gateway loaded the {len(catalog)}-model sie-config catalog through the admin token.")
 
 
 def build_images(registry: str, revision: str) -> None:
@@ -101,8 +135,15 @@ def main() -> None:
 
         try:
             start("nats", "nats:2.11.8-alpine", command=("-js",))
-            config_url = start("config", image("sie-config"), env={"SIE_NATS_URL": "nats://nats:4222"}, port=8080)
-            wait_health(f"{config_url}/healthz")
+            admin_token = secrets.token_urlsafe(32)
+            config_env = {
+                "SIE_NATS_URL": "nats://nats:4222",
+                "SIE_DEPLOYMENT_ENV": "production",
+                "SIE_ADMIN_TOKEN": admin_token,
+            }
+            config_url = start("config", image("sie-config"), env=config_env, port=8080)
+            wait_health(f"{config_url}/readyz")
+            catalog = require_authenticated_catalog(config_url, admin_token)
             worker_env = {
                 "SIE_POOL": "default",
                 "SIE_BUNDLE": "fake",
@@ -124,6 +165,7 @@ def main() -> None:
             gateway_env = {
                 "SIE_NATS_URL": "nats://nats:4222",
                 "SIE_CONFIG_SERVICE_URL": "http://config:8080",
+                "SIE_ADMIN_TOKEN": admin_token,
                 "SIE_GATEWAY_HEALTH_MODE": "nats",
                 "SIE_GATEWAY_ENABLE_POOLS": "1",
                 "SIE_GATEWAY_REQUEST_TIMEOUT": "60",
@@ -147,9 +189,13 @@ def main() -> None:
                     "SIE_NATS_URL": "nats://nats:4222",
                     "SIE_WORKER_ID": "cpu-smoke",
                     "SIE_GATEWAY_URL": "http://gateway:8080",
+                    "SIE_CONFIG_SERVICE_URL": "http://config:8080",
+                    "SIE_ADMIN_TOKEN": admin_token,
                 },
             )
             wait_health(f"{sidecar_url}/readyz")
+            wait_health(f"{gateway_url}/readyz")
+            require_gateway_catalog(gateway_url, catalog)
             wait_for_api(gateway_url)
             smoke_python(gateway_url)
             mcp_url = start(

@@ -71,6 +71,24 @@ is already higher. An item refused because its document pushes the labels out
 of the window returns a per-item `INPUT_TOO_LONG` error and counts nothing. A
 request that sends no instruction or examples is counted exactly as before.
 
+The models that read the labels before the document (`prompt_first` in the
+checkpoint's config: every shipped GLiClass model except `gliclass-small-v1.0`,
+`gliclass-base-v1.0` and `gliclass-large-v1.0`) cut the document to the room
+the label prompt and instruction leave, and count only the part of the document
+they read, as `truncate_text` would. When the labels leave fewer than 8 tokens
+for the document (a margin for tokenization at the boundary), each item returns
+a per-item `INPUT_TOO_LONG` error and counts nothing, rather than being scored
+with little or none of its document. With `overflow_policy` `truncate_text` or
+`error`, the document is cut to that room or checked against it instead, and a
+request whose labels leave no room at all is refused with `INPUT_TOO_LONG`, as
+before.
+
+With `options={"overflow_policy": "error"}`, an item whose document does not
+fit whole next to the labels returns a per-item `INPUT_TOO_LONG` error and
+counts nothing, while the other items succeed. Concurrent requests that share
+labels and options are batched into one model call, so an over-long document
+fails only its own item, never another request's.
+
 The instruction and each example text may be at most 2,048 characters, and
 together with the example labels at most 8,192 characters. Up to 32 examples
 are accepted, and they must leave room for the document in the model window.
@@ -226,9 +244,13 @@ to satisfy other allocations, so another model on the same GPU that needs
 memory in that window (about one forward) can run out of memory where it
 otherwise would not. Recording is kept rare to limit this: one recording at a
 time in the process, none while less than a tenth of the device's memory is
-free, and per model at most 16 recordings at once, then one per 2 seconds. If a
-recording itself runs out of memory, the request still gets its eager answer;
-the model drops its graphs and records nothing for a minute.
+free, and per model a budget of 16 recordings that refills at one every 2
+seconds, so a model records at most 16 graphs in quick succession, one after
+another, then about one every 2 seconds. If recording a graph runs out of
+memory, the request still gets its eager answer; the model drops its graphs and
+records nothing for a minute. If the new graph's first replay runs out of
+memory, the model drops its graphs and the request fails with that error, as an
+eager forward that runs out of memory does.
 
 Both limits are approximate. The free-memory check reads the device once,
 before recording, so a model loading at the same moment can still meet one
@@ -493,9 +515,10 @@ A graph is recorded the first time a request needs its shape (the dense
 adapter's warm-up records the smallest at load), and that request is answered
 by its first replay. Recording follows the rules of the GLiClass graphs above,
 and shares their process-wide limits: one recording at a time in the process,
-none while less than a tenth of the device's memory is free, at most 16
-recordings at once and then one per 2 seconds, and a model's graphs within
-4% of the device's memory (900 MB on an L4). A model's graphs, which share
+none while less than a tenth of the device's memory is free, a budget of 16
+recordings per model that refills at one every 2 seconds (16 in quick
+succession, one after another, then about one every 2 seconds), and a
+model's graphs within 4% of the device's memory (900 MB on an L4). A model's graphs, which share
 one memory pool and one output buffer, held 40 to 105 MB on an L4 once every
 shape its traffic needed was recorded. A recording that runs out of memory
 drops the model's graphs and pauses recording for a minute; a shape that

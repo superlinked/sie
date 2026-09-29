@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct WorkerConfig {
     /// NATS server URL (e.g. `nats://localhost:4222`). Required for the
     /// default NATS ingest (`run()`); `None` is valid only for the
@@ -154,6 +154,95 @@ pub struct WorkerConfig {
     pub health_publish_interval_ms: u64,
 }
 
+impl std::fmt::Debug for WorkerConfig {
+    /// Hand-written so the bearer tokens (`gateway_api_key`,
+    /// `config_service_token`) print only as present or absent.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Destructured without `..` so a new field fails to compile until it is
+        // listed here, and so cannot be printed unredacted or silently omitted.
+        let WorkerConfig {
+            nats_url,
+            local_socket_path,
+            pool,
+            bundle,
+            ipc_socket_path,
+            ipc_socket_paths,
+            ipc_pool_size,
+            ipc_request_timeout_s,
+            model_ready_timeout_s,
+            payload_store_url,
+            gateway_url,
+            gateway_api_key,
+            pool_admission_enabled,
+            pool_admission_check_interval_ms,
+            pool_admission_pause_ms,
+            pool_admission_stale_after_ms,
+            probe_port,
+            worker_id,
+            ping_interval_ms,
+            ready_stale_mult,
+            machine_profile,
+            gpu_count,
+            bundle_config_hash,
+            config_service_url,
+            config_service_token,
+            config_poll_interval_ms,
+            config_full_export_interval_ms,
+            nats_config_trusted_producers,
+            health_publish_interval_ms,
+        } = self;
+        f.debug_struct("WorkerConfig")
+            .field("nats_url", nats_url)
+            .field("local_socket_path", local_socket_path)
+            .field("pool", pool)
+            .field("bundle", bundle)
+            .field("ipc_socket_path", ipc_socket_path)
+            .field("ipc_socket_paths", ipc_socket_paths)
+            .field("ipc_pool_size", ipc_pool_size)
+            .field("ipc_request_timeout_s", ipc_request_timeout_s)
+            .field("model_ready_timeout_s", model_ready_timeout_s)
+            .field("payload_store_url", payload_store_url)
+            .field("gateway_url", gateway_url)
+            .field(
+                "gateway_api_key",
+                &gateway_api_key.as_ref().map(|_| "<redacted>"),
+            )
+            .field("pool_admission_enabled", pool_admission_enabled)
+            .field(
+                "pool_admission_check_interval_ms",
+                pool_admission_check_interval_ms,
+            )
+            .field("pool_admission_pause_ms", pool_admission_pause_ms)
+            .field(
+                "pool_admission_stale_after_ms",
+                pool_admission_stale_after_ms,
+            )
+            .field("probe_port", probe_port)
+            .field("worker_id", worker_id)
+            .field("ping_interval_ms", ping_interval_ms)
+            .field("ready_stale_mult", ready_stale_mult)
+            .field("machine_profile", machine_profile)
+            .field("gpu_count", gpu_count)
+            .field("bundle_config_hash", bundle_config_hash)
+            .field("config_service_url", config_service_url)
+            .field(
+                "config_service_token",
+                &config_service_token.as_ref().map(|_| "<redacted>"),
+            )
+            .field("config_poll_interval_ms", config_poll_interval_ms)
+            .field(
+                "config_full_export_interval_ms",
+                config_full_export_interval_ms,
+            )
+            .field(
+                "nats_config_trusted_producers",
+                nats_config_trusted_producers,
+            )
+            .field("health_publish_interval_ms", health_publish_interval_ms)
+            .finish()
+    }
+}
+
 impl WorkerConfig {
     pub fn stream_name(&self) -> String {
         format!("WORK_POOL_{}", self.pool)
@@ -244,6 +333,19 @@ mod tests {
             nats_config_trusted_producers: vec!["sie-config".into()],
             health_publish_interval_ms: 5_000,
         }
+    }
+
+    #[test]
+    fn debug_redacts_bearer_tokens() {
+        let mut c = sample();
+        c.gateway_api_key = Some("gateway-bearer-value".into());
+        c.config_service_token = Some("config-admin-value".into());
+        let rendered = format!("{c:?}");
+        assert!(!rendered.contains("gateway-bearer-value"));
+        assert!(!rendered.contains("config-admin-value"));
+        assert!(rendered.contains("config_service_token: Some(\"<redacted>\")"));
+        assert!(rendered.contains("gateway_api_key: Some(\"<redacted>\")"));
+        assert!(rendered.contains("worker_id: \"worker-test\""));
     }
 
     #[test]

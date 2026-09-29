@@ -299,6 +299,91 @@ correct on overlays.
 {{- end }}
 
 {{/*
+Deployment environment passed to sie-config as SIE_DEPLOYMENT_ENV. sie-config
+refuses unauthenticated /v1/configs requests when it is "prod" or "production".
+*/}}
+{{- define "sie-cluster.config.deploymentEnv" -}}
+{{- if and .Values.telemetry .Values.telemetry.deploymentEnv -}}
+{{- .Values.telemetry.deploymentEnv | toString -}}
+{{- else -}}
+production
+{{- end -}}
+{{- end }}
+
+{{/*
+Data key of the admin-token Secret (config.auth.adminTokenSecretKey). Fails the
+render when it is empty or null.
+*/}}
+{{- define "sie-cluster.config.adminTokenSecretKey" -}}
+{{- $key := default "" .Values.config.auth.adminTokenSecretKey | toString | trim -}}
+{{- if not $key -}}
+{{- fail "config.auth.adminTokenSecretKey is empty. Set it to the Secret key that holds the sie-config admin token (the chart default is SIE_ADMIN_TOKEN)." -}}
+{{- end -}}
+{{- $key -}}
+{{- end }}
+
+{{- define "sie-cluster.config.generatedAdminTokenSecretName" -}}
+{{- printf "%s-admin-token" (include "sie-cluster.config.serviceName" .) -}}
+{{- end }}
+
+{{/*
+"true" when the chart generates the admin-token Secret: no
+config.auth.adminTokenSecretName, and config.auth.generateAdminToken is not
+false. An absent key counts as true, so `helm upgrade --reuse-values` from a
+release that predates the key keeps the default.
+*/}}
+{{- define "sie-cluster.config.generatesAdminToken" -}}
+{{- $auth := .Values.config.auth | default dict -}}
+{{- if and (not $auth.adminTokenSecretName) (dig "generateAdminToken" true $auth) -}}
+true
+{{- end -}}
+{{- end }}
+
+{{/*
+Secret holding the sie-config admin token that sie-config, the gateway, and
+worker sidecars share: config.auth.adminTokenSecretName when set, otherwise the
+chart-generated Secret, otherwise empty (no token).
+*/}}
+{{- define "sie-cluster.config.adminTokenSecretName" -}}
+{{- if .Values.config.auth.adminTokenSecretName -}}
+{{- .Values.config.auth.adminTokenSecretName -}}
+{{- else if include "sie-cluster.config.generatesAdminToken" . -}}
+{{- include "sie-cluster.config.generatedAdminTokenSecretName" . -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Fail when an existing admin-token Secret has no value under the configured key,
+or a value shorter than 32 characters, instead of replacing the token that
+running pods hold. Args (dict): name (Secret), key (data key), data (base64
+value, empty when the key is missing).
+*/}}
+{{- define "sie-cluster.config.validateReusedAdminToken" -}}
+{{- if not .data -}}
+{{- fail (printf "Secret %s exists but has no %s key. If config.auth.adminTokenSecretKey was renamed, set it back to the key the Secret holds. If the Secret was created by hand, set config.auth.adminTokenSecretName to it so the chart uses it unchanged. Otherwise restore the key, or delete the Secret so the chart generates a new token, then restart sie-config, the gateway, and the workers." .name .key) -}}
+{{- else if lt (len (b64dec .data)) 32 -}}
+{{- fail (printf "Secret %s holds a %s value shorter than 32 characters. Replace it with a random value of at least 32 characters, or delete the Secret so the chart generates a new token, then restart sie-config, the gateway, and the workers." .name .key) -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Fail the render when sie-config would run without an admin token outside
+staging, development, or ci. In production ("prod" or "production") it would
+refuse every /v1/configs request, so the gateway and worker sidecars could never
+load the model catalog; any other value would leave the API unauthenticated.
+*/}}
+{{- define "sie-cluster.config.validateAuth" -}}
+{{- if not (include "sie-cluster.config.adminTokenSecretName" .) -}}
+{{- $env := include "sie-cluster.config.deploymentEnv" . | trim | lower -}}
+{{- if has $env (list "prod" "production") -}}
+{{- fail (printf "sie-config would run with telemetry.deploymentEnv=%q and no admin token (config.auth.generateAdminToken=false and config.auth.adminTokenSecretName is empty), so it would refuse every /v1/configs request and the gateway could not load the model catalog. Set config.auth.adminTokenSecretName to an existing Secret, or set config.auth.generateAdminToken=true so the chart generates one." $env) -}}
+{{- else if not (has $env (list "staging" "development" "ci")) -}}
+{{- fail (printf "sie-config would run with telemetry.deploymentEnv=%q and no admin token (config.auth.generateAdminToken=false and config.auth.adminTokenSecretName is empty), so it would serve /v1/configs without authentication. Running without a token is supported only for telemetry.deploymentEnv staging, development, or ci. Otherwise set config.auth.adminTokenSecretName to an existing Secret, or set config.auth.generateAdminToken=true so the chart generates one." $env) -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
 Worker StatefulSet name for a pool
 */}}
 {{- define "sie-cluster.worker.name" -}}
