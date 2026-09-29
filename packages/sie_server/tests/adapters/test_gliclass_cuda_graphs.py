@@ -34,10 +34,17 @@ from sie_server.types.inputs import InvalidInputError
 
 _MODELS_DIR = Path(__file__).resolve().parents[2] / "models"
 # The shipped profiles that load with graphs: DeBERTa-v3 models whose bucketed
-# scores changed no top label against eager execution (see the server README).
+# scores moved no probability by more than 0.02 against eager execution and
+# changed a top label only where eager's top two were closer than eager's own
+# batching noise (see "GLiClass CUDA graphs" in the server README).
 _BUCKETED_BY_DEFAULT = {
+    "knowledgator/gliclass-small-v1.0",
     "knowledgator/gliclass-base-v1.0",
     "knowledgator/gliclass-large-v1.0",
+    "knowledgator/gliclass-base-v3.0",
+    "knowledgator/gliclass-large-v3.0",
+    "knowledgator/gliclass-instruct-base-v1.0",
+    "knowledgator/gliclass-instruct-large-v1.0",
     "knowledgator/opir-multitask-large-v1.0",
 }
 

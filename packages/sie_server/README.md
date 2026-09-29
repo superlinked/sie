@@ -103,37 +103,66 @@ loaded with graphs. It cannot turn graphs on: any other value is refused.
 
 Padding is masked, and padded rows are dropped before scoring, but a longer
 sequence or a larger batch rounds fp16 sums differently, the same kind of
-change batching requests together makes. We compared `bucketed` with eager
-execution on the 384 CVE descriptions from `examples/typed-decisions`, three
-questions each, asked one at a time, as separate groups and as joint groups,
-plus 65 long documents. Each input was sent three times (long documents
-twice), so that graphs were recorded and then replayed: 11,538 answers per
-model. The three models that ship with graphs were measured again with padded
-batches, adding the same questions over 3- and 5-item requests (18,450
-answers). A small change can still flip a near tie between the top two
-labels:
+change batching requests together makes. A small change can flip a near tie
+between the top two labels, and eager execution flips some near ties too,
+depending on which inputs share its batch.
 
-| Model | Largest probability change | Top label changed | Shipped profile |
-|--|--|--|--|
-| `gliclass-small-v1.0` | 0.0039 | 3 answers | `off` |
-| `gliclass-base-v1.0` | 0.0068 | none | `bucketed` |
-| `gliclass-large-v1.0` | 0.0063 | none | `bucketed` |
-| `gliclass-base-v3.0` | 0.0054 | 3 | `off` |
-| `gliclass-large-v3.0` | 0.0093 | 3 | `off` |
-| `gliclass-instruct-base-v1.0` | 0.0076 | 12 | `off` |
-| `gliclass-instruct-large-v1.0` | 0.0098 | 18 | `off` |
-| `opir-multitask-large-v1.0` | 0.0190 | none | `bucketed` |
-| `gliclass-multilang-mini` (100 descriptions, no joint groups: 2,016 answers) | 0.0227 | 3 | `off` |
+**When a speed-up ships enabled.** A shipped GLiClass profile enables a
+speed-up that changes scores, such as `bucketed` graphs, only when both hold
+against eager execution on the evaluation sets below:
+
+1. no probability moves by more than 0.02;
+2. every answer whose top label changes had an eager top-two margin smaller
+   than eager's own regrouping noise, δ_eager: the largest probability change
+   eager execution makes on the same inputs when they share a batch with other
+   inputs.
+
+A top label that changes under the second condition was a near tie that eager
+fp16 execution already flips under batching.
+
+**Evaluation sets.** The main set is the 384 CVE descriptions from
+`examples/typed-decisions`, three questions each, asked one at a time, as
+separate groups and as joint groups, plus 65 long documents: 4,041 answers per
+model. The instruction set asks the same descriptions the three questions with
+short labels and the question as the instruction: 1,152 answers. The rule
+applies to each set on its own. The eager reference sends one input per
+request. δ_eager is the largest change among four eager runs that batch each
+input with others: in pairs, and in groups of eight in dataset order and in two
+shuffled orders. `bucketed` sent the inputs one per request three times (long
+documents twice), so graphs were recorded and then replayed. Measured on an L4
+in fp16; each cell gives the main set, then the instruction set:
+
+| Model | Largest probability change | δ_eager | Top labels changed (largest eager margin) | Shipped profile |
+|--|--|--|--|--|
+| `gliclass-small-v1.0` | 0.0046 / 0.0034 | 0.0056 / 0.0039 | 2 (0.0000) / none | `bucketed` |
+| `gliclass-base-v1.0` | 0.0068 / 0.0056 | 0.0061 / 0.0061 | none / none | `bucketed` |
+| `gliclass-large-v1.0` | 0.0059 / 0.0088 | 0.0078 / 0.0107 | none / none | `bucketed` |
+| `gliclass-base-v3.0` | 0.0054 / 0.0054 | 0.0063 / 0.0054 | 1 (0.0005) / none | `bucketed` |
+| `gliclass-large-v3.0` | 0.0093 / 0.0107 | 0.0088 / 0.0122 | 2 (0.0020) / none | `bucketed` |
+| `gliclass-instruct-base-v1.0` | 0.0076 / 0.0063 | 0.0078 / 0.0063 | 4 (0.0056) / none | `bucketed` |
+| `gliclass-instruct-large-v1.0` | 0.0088 / 0.0039 | 0.0125 / 0.0054 | 7 (0.0017) / 1 (0.0006) | `bucketed` |
+| `opir-multitask-large-v1.0` | 0.0144 / 0.0146 | 0.0247 / 0.0225 | none / none | `bucketed` |
+| `opir-multitask-multilang-v1.0` | 0.0756 / 0.0093 | 0.0848 / 0.0122 | 15 (0.0260) / none | `off` |
+| `gliclass-multilang-mini` | 0.0347 / 0.0479 | 0.0317 / 0.0376 | 5 (0.0056) / 3 (0.0618) | `off` |
+
+A top label that changed did so in every pass; the table counts each answer
+once.
+
+Requests of several items pad their batch as well (3 items to 4, 5 to 8). Asked
+in 3- and 5-item requests and compared with eager execution of the same
+requests, the eight models that ship with graphs moved no probability by more
+than 0.0190 (`opir-multitask-large-v1.0`) and 0.0093 for every other model,
+and every top label that changed had an eager margin below the model's
+δ_eager.
 
 `exact` changed nothing. A forward whose batch size is already a bucket (one
 item, for example) scores exactly as it did before batches were padded.
 
-The shipped profiles load with `bucketed` graphs only where no top label
-changed: `gliclass-base-v1.0`, `gliclass-large-v1.0` and
-`opir-multitask-large-v1.0`. Their probabilities can differ from eager
-execution by up to the amounts above. To run one of them eagerly, set
-`cuda_graphs: off` in its profile, or send `options={"cuda_graphs": "off"}` with
-a request. The other models load with `off`.
+The DeBERTa-v3 models meet the rule and their shipped profiles load with
+`bucketed` graphs. The two mDeBERTa models, `gliclass-multilang-mini` and
+`opir-multitask-multilang-v1.0`, moved probabilities by more than 0.02 and
+load with `off`. To run a model eagerly, set `cuda_graphs: off` in its
+profile, or send `options={"cuda_graphs": "off"}` with a request.
 
 Graphs apply on CUDA to the DeBERTa-based GLiClass models: the v1.0 models,
 `gliclass-base-v3.0` and `gliclass-large-v3.0`, the base and large instruct
