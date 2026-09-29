@@ -1034,6 +1034,16 @@ class ModelRegistry:
         with self._lock:
             return self._bundles.get(bundle)
 
+    def get_bundle_adapters(self, bundle_ids: list[str] | None = None) -> dict[str, list[str]]:
+        """Return the adapter-module list of each requested known bundle.
+
+        These are the lists ``compute_bundle_config_hash`` scopes by, so a worker
+        that hashes the configs it received with them reproduces this hash.
+        """
+        with self._lock:
+            names = list(self._bundles) if bundle_ids is None else bundle_ids
+            return {name: list(self._bundles[name].adapters) for name in names if name in self._bundles}
+
     def get_models_for_bundle(self, bundle: str) -> list[str]:
         """Get all models that can be served by a bundle.
 

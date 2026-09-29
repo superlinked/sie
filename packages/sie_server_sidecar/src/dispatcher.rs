@@ -717,6 +717,12 @@ impl Dispatcher {
         Fut: std::future::Future<Output = Result<(), String>>,
     {
         let model_id = wi.model_id.clone();
+        if self.model_is_unsupported(&model_id) {
+            return Err(GenerateDispatchError::new(
+                "BUNDLE_CONFIG_MISMATCH",
+                "worker configuration cannot serve this model",
+            ));
+        }
         match self.backend.ensure_model_ready(&model_id).await {
             Ok(response) => match response.state {
                 ReadinessState::Ready => {}
@@ -756,7 +762,7 @@ impl Dispatcher {
 
         let _execution_guard = if let Some(state) = self.config_apply_state.as_ref() {
             let guard = state.lock_execution().await;
-            if !state.accepts_bundle_config_hash(&wi.bundle_config_hash) {
+            if !state.accepts_work(&wi.bundle_config_hash, &wi.model_id) {
                 return Err(GenerateDispatchError::new(
                     "BUNDLE_CONFIG_MISMATCH",
                     "worker configuration changed before generation execution",
@@ -889,6 +895,12 @@ impl Dispatcher {
                     format!("generation cancel IPC failed: {error}"),
                 )
             })
+    }
+
+    fn model_is_unsupported(&self, model_id: &str) -> bool {
+        self.config_apply_state
+            .as_ref()
+            .is_some_and(|state| state.model_is_unsupported(model_id))
     }
 
     fn current_bundle_config_hash(&self) -> Option<String> {
@@ -1126,6 +1138,8 @@ fn classify_cancellation(
         .then_some(WorkCancellation::BatchDirect)
 }
 
+/// First work item this worker must not execute under its current config: an
+/// unknown bundle config hash, or a model the worker reported it cannot serve.
 fn unknown_bundle_config_hash<'a>(
     items: impl IntoIterator<Item = &'a WorkItem>,
     state: Option<&ConfigApplyState>,
@@ -1134,7 +1148,7 @@ fn unknown_bundle_config_hash<'a>(
     let mut first_unknown: Option<&'a str> = None;
     let mut count = 0usize;
     for wi in items {
-        if !state.accepts_bundle_config_hash(&wi.bundle_config_hash) {
+        if !state.accepts_work(&wi.bundle_config_hash, &wi.model_id) {
             count += 1;
             if first_unknown.is_none() {
                 first_unknown = Some(wi.bundle_config_hash.as_str());
@@ -1258,6 +1272,22 @@ impl Dispatcher {
                             "WorkItem.model_id disagrees with subject — trusting subject",
                         );
                         wi.model_id = subject_model;
+                    }
+                    if self.model_is_unsupported(&wi.model_id) {
+                        debug!(
+                            work_item_id = %wi.work_item_id,
+                            request_id = %wi.request_id,
+                            model = %wi.model_id,
+                            "worker cannot serve this model under its current config — NAKing for redelivery"
+                        );
+                        nak_one_with_reason(
+                            &delivery,
+                            base_delay_ms,
+                            &self.runtime_state.telemetry,
+                            "model_unsupported",
+                        )
+                        .await;
+                        continue;
                     }
                     if wi.operation != "generate" {
                         self.hold_progress_lease(&wi, &mut delivery);
@@ -1400,6 +1430,21 @@ impl Dispatcher {
             "generate delivery received"
         );
 
+        if self.model_is_unsupported(&model_id) {
+            info!(
+                work_item_id = %wi.work_item_id,
+                model = %model_id,
+                "worker cannot serve this model under its current config — NAKing before readiness"
+            );
+            nak_msg_with_reason(
+                &msg,
+                base_delay_ms,
+                &self.runtime_state.telemetry,
+                "model_unsupported",
+            )
+            .await;
+            return;
+        }
         let readiness_resp = match self.backend.ensure_model_ready(&model_id).await {
             Ok(r) => r,
             Err(e) => {
@@ -1794,7 +1839,7 @@ impl Dispatcher {
         // a queued A request can never execute after the worker advances to B.
         let _execution_guard = if let Some(state) = self.config_apply_state.as_ref() {
             let guard = state.lock_execution().await;
-            if !state.accepts_bundle_config_hash(&wi.bundle_config_hash) {
+            if !state.accepts_work(&wi.bundle_config_hash, &model_id) {
                 info!(
                     model = %model_id,
                     expected_hash = %wi.bundle_config_hash,
@@ -2019,14 +2064,33 @@ impl Dispatcher {
     /// `EnsureModelReady` for `items`. A parked group's call is bounded by its
     /// readiness deadline and progress-ACKs the group while it is pending, so
     /// a slow call neither outlives the deadline nor lets JetStream redeliver
-    /// the group. `None` when the group was NAKed instead: the deadline passed
-    /// first, a progress ACK failed, or shutdown requested redelivery.
+    /// the group. `None` when the group was NAKed instead: the worker lists the
+    /// model in `unsupported_models` (a config commit can add it after
+    /// intake), the deadline passed first, a progress ACK failed, or shutdown
+    /// requested redelivery.
     async fn ensure_model_ready_by(
         &self,
         model_id: &str,
         items: &[(WorkItem, Delivery)],
         ready_deadline: Option<tokio::time::Instant>,
     ) -> Option<Result<crate::ipc_types::EnsureModelReadyResponse, BackendError>> {
+        if self.model_is_unsupported(model_id) {
+            info!(
+                model = %model_id,
+                group_size = items.len(),
+                "worker cannot serve this model under its current config — NAKing group before readiness"
+            );
+            for (_, delivery) in items {
+                nak_one_with_reason(
+                    delivery,
+                    base_nak_delay_ms(),
+                    &self.runtime_state.telemetry,
+                    "model_unsupported",
+                )
+                .await;
+            }
+            return None;
+        }
         let readiness = self.backend.ensure_model_ready(model_id);
         let Some(deadline) = ready_deadline else {
             return Some(readiness.await);
@@ -4672,6 +4736,15 @@ async fn nak_msg(
     delay_ms: u64,
     telemetry: &crate::observability::metrics::SidecarTelemetry,
 ) {
+    nak_msg_with_reason(msg, delay_ms, telemetry, "retry").await;
+}
+
+async fn nak_msg_with_reason(
+    msg: &Message,
+    delay_ms: u64,
+    telemetry: &crate::observability::metrics::SidecarTelemetry,
+    reason: &str,
+) {
     let delay = std::time::Duration::from_millis(delay_ms);
     let result = msg
         .ack_with(async_nats::jetstream::AckKind::Nak(Some(delay)))
@@ -4679,7 +4752,7 @@ async fn nak_msg(
     telemetry.nats_operation(
         "nak",
         if result.is_ok() { "success" } else { "error" },
-        "retry",
+        reason,
         1,
     );
     match result {
@@ -6147,6 +6220,108 @@ mod tests {
         assert!(backend.encoded_models().is_empty());
     }
 
+    fn dispatcher_listing_unsupported(
+        backend: SharedBackend,
+        unsupported: &[&str],
+    ) -> (Arc<Dispatcher>, Arc<ConfigApplyState>) {
+        let state = Arc::new(ConfigApplyState::new(String::new()));
+        assert!(state.mark_export_reconciled(
+            1,
+            Some("hash-1".into()),
+            unsupported.iter().map(|m| (*m).to_string()).collect(),
+            false
+        ));
+        let runtime_state = Arc::new(RuntimeState::new());
+        let dispatcher = Arc::new(Dispatcher::new(
+            backend,
+            adapter_pool_with_runtime_state(Arc::clone(&runtime_state)),
+            Arc::new(crate::payload_store::LocalPayloadStore::new(
+                None::<PathBuf>,
+            )),
+            None,
+            "worker-test".into(),
+            runtime_state,
+            Arc::new(Mutex::new(LatencyTracker::new(200, 10))),
+            TokenizerRegistry::empty(),
+            None,
+            None,
+            Some(Arc::clone(&state)),
+            None,
+            BatchCancelState::default(),
+            RequestCancelState::new(Duration::from_secs(60)),
+        ));
+        (dispatcher, state)
+    }
+
+    #[tokio::test]
+    async fn readiness_rechecks_a_model_listed_after_intake() {
+        let backend = LoadingModelBackend::new("org/new-family");
+        let (dispatcher, state) = dispatcher_listing_unsupported(backend.clone(), &[]);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let items = local_group("new-req", "org/new-family", 0..2, &tx);
+
+        assert!(state.mark_export_reconciled(
+            2,
+            Some("hash-2".into()),
+            vec!["org/new-family".into()],
+            false
+        ));
+        let readiness = dispatcher
+            .ensure_model_ready_by("org/new-family", &items, None)
+            .await;
+
+        assert!(readiness.is_none());
+        assert_eq!(backend.probes.load(Ordering::SeqCst), 0);
+        assert_eq!(retried_slots(&mut rx), [0, 1]);
+    }
+
+    #[tokio::test]
+    async fn unsupported_model_group_is_naked_before_readiness_or_backend_ipc() {
+        let backend = LoadingModelBackend::new("org/new-family");
+        let state = Arc::new(ConfigApplyState::new(String::new()));
+        assert!(state.mark_export_reconciled(
+            1,
+            Some("hash-1".into()),
+            vec!["org/new-family".into()],
+            false
+        ));
+        let runtime_state = Arc::new(RuntimeState::new());
+        let dispatcher = Arc::new(Dispatcher::new(
+            backend.clone(),
+            adapter_pool_with_runtime_state(Arc::clone(&runtime_state)),
+            Arc::new(crate::payload_store::LocalPayloadStore::new(
+                None::<PathBuf>,
+            )),
+            None,
+            "worker-test".into(),
+            runtime_state,
+            Arc::new(Mutex::new(LatencyTracker::new(200, 10))),
+            TokenizerRegistry::empty(),
+            None,
+            None,
+            Some(state),
+            None,
+            BatchCancelState::default(),
+            RequestCancelState::new(Duration::from_secs(60)),
+        ));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut items = local_group("new-req", "org/new-family", 0..2, &tx);
+        items.extend(local_group("kept-req", "org/kept", 5..6, &tx));
+        for (wi, _) in &mut items {
+            wi.bundle_config_hash = "hash-1".into();
+        }
+
+        dispatcher.dispatch_decoded(items, 3, Instant::now()).await;
+        dispatcher
+            .join_parked_groups(crate::nats_consumer::redelivery_envelope() * 2)
+            .await;
+
+        let retried = retried_slots(&mut rx);
+        assert!(retried.contains(&0) && retried.contains(&1));
+        assert_eq!(backend.probes.load(Ordering::SeqCst), 0);
+        assert_eq!(backend.encoded_models(), ["org/kept"]);
+    }
+
     fn retried_slots(
         rx: &mut tokio::sync::mpsc::UnboundedReceiver<crate::delivery::LocalDeliveryEvent>,
     ) -> Vec<usize> {
@@ -6780,6 +6955,23 @@ mod tests {
     }
 
     #[test]
+    fn unknown_bundle_config_hash_flags_models_the_worker_cannot_serve() {
+        let state = ConfigApplyState::new(String::new());
+        assert!(state.mark_export_reconciled(1, Some("hash-1".into()), vec!["B".into()], false));
+
+        let mut served = wi("r1", 0, "A", "encode");
+        served.bundle_config_hash = "hash-1".into();
+        assert!(unknown_bundle_config_hash([&served], Some(&state)).is_none());
+
+        let mut unsupported = wi("r1", 1, "B", "encode");
+        unsupported.bundle_config_hash = "hash-1".into();
+        assert_eq!(
+            unknown_bundle_config_hash([&served, &unsupported], Some(&state)),
+            Some(("hash-1", 1))
+        );
+    }
+
+    #[test]
     fn reply_subject_is_safe_rules() {
         assert!(reply_subject_is_safe(""));
         assert!(reply_subject_is_safe("_INBOX.ab"));
@@ -6861,7 +7053,7 @@ mod tests {
             .expect("dispatcher.rs must have a production section");
         let record = concat!("record_work_item_ages", "(");
         let barrier = concat!("unknown_bundle_config_hash", "(");
-        let accepts = concat!("accepts_bundle_config_hash", "(");
+        let accepts = concat!("accepts_work", "(");
 
         // Pair each barrier with the next recording site and require that the
         // barrier comes first. Five of the six sites sit behind a barrier; the

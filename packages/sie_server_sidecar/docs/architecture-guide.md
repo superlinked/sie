@@ -446,8 +446,9 @@ cover the finite domain of every sidecar stream so valid labels do not enter
 `otel.metric.overflow`.
 
 Readiness state is shared with the NATS health publisher. The health publisher
-emits worker identity, bundle, machine profile, readiness, and the current
-bundle config hash. It also mirrors the latest `loaded_models` list reported by
+emits worker identity, bundle, machine profile, readiness, the current
+bundle config hash, and, when non-empty, the `unsupported_models` committed
+with that hash. It also mirrors the latest `loaded_models` list reported by
 the backend IPC heartbeat so gateway pool/model gauges reflect live residency in
 NATS health mode.
 
@@ -465,15 +466,23 @@ sie.config.models.{bundle}
 
 Each notification is checked for trusted producer, bundle, epoch, and payload
 size. Accepted deltas are forwarded to the colocated backend through
-`ApplyModelConfig`. The backend returns the applied bundle config hash. The
-sidecar stores that hash in `ConfigApplyState` only when it exactly matches a
-non-empty control-plane hash. A mismatch or missing backend proof does not
+`ApplyModelConfig`, together with the notification's `bundle_adapters` list for
+this bundle when `sie-config` sends one. The backend returns the applied bundle
+config hash and `unsupported_models`, the routable ids that hash covers but the
+backend cannot serve. The sidecar stores the hash and the list together in
+`ConfigApplyState` only when the hash exactly matches a non-empty control-plane
+hash. Before anything is committed, the sidecar adopts the backend's IPC `Ping`
+hash, which never replaces a committed pair. `Ping` carries no list, so its hash
+must imply full support: the Python worker scopes it by its image's bundle file,
+and the Candle worker returns a hash it echoed only after applying every entry.
+A mismatch or missing backend proof does not
 advance the epoch, advertised hash, or loaded-model state, leaving the worker
 quarantined from hash-bound work until reconciliation succeeds.
 
 When `SIE_CONFIG_SERVICE_URL` is configured, the export reconciler fetches
 `/v1/configs/epoch` and `/v1/configs/export` from `sie-config`. Bundle-relevant
-exports are sent to the backend through `ReplaceModelConfigs`.
+exports are sent to the backend through `ReplaceModelConfigs`, with the
+export's `bundle_adapters` list for this bundle.
 
 Export reconciliation skips unchanged periodic exports. Exports older than the
 local epoch are skipped unless the reconciler is handling an epoch-rewind
@@ -486,7 +495,12 @@ expected bundle config hash for the resolved pool and bundle. Config mutation
 takes an exclusive execution barrier and backend inference takes a shared
 barrier. Immediately before execution the dispatcher requires an exact match
 with the worker's current hash; old hashes are NAKed rather than executed
-against newer weights. Successful non-streaming results echo that stable
+against newer weights. Work for a model in the current `unsupported_models`
+list is NAKed at intake, again immediately before each readiness probe, and at
+that barrier, before backend IPC, so the dispatcher never asks the backend to
+load or run such a model. The backend's own eager load of pinned models does
+not consult the list. These NAKs are counted with reason `model_unsupported`.
+Successful non-streaming results echo that stable
 execution hash so the gateway can bind response provenance to the exact worker
 execution. Empty hashes remain accepted only for legacy, non-attested traffic.
 

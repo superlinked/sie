@@ -28,6 +28,11 @@
 //!   gate on the local [`Readiness`] state so the heartbeat agrees
 //!   with `/readyz`.
 //!
+//! * `unsupported_models` — routable model ids covered by
+//!   `bundle_config_hash` that this worker cannot serve (for example a model
+//!   whose adapter module its image lacks). The gateway does not route those
+//!   models to this worker. Omitted when empty, which is the steady state.
+//!
 //! `loaded_models` and the GPU memory fields are mostly informational, but
 //! the gateway also uses `loaded_models` as the per-model dispatch readiness
 //! signal. Backends that need explicit residency, such as Candle, must only
@@ -52,6 +57,7 @@ use crate::shutdown::Shutdown;
 
 pub type SharedBundleConfigHash = Arc<RwLock<String>>;
 pub type SharedLoadedModels = Arc<RwLock<Vec<String>>>;
+pub type SharedUnsupportedModels = Arc<RwLock<Vec<String>>>;
 
 /// Default subject prefix used by the gateway. Workers always
 /// publish to `sie.health.<worker_id>` because the gateway's
@@ -101,6 +107,9 @@ pub struct HealthPublisherConfig {
     /// model registry epoch. Updated by the config subscriber after a
     /// successful backend config apply.
     pub bundle_config_hash: SharedBundleConfigHash,
+    /// Models covered by `bundle_config_hash` that the backend cannot serve.
+    /// Committed together with the hash by the config subscriber.
+    pub unsupported_models: SharedUnsupportedModels,
     /// Models the colocated backend reports as loaded. Updated by the IPC
     /// heartbeat, not by config apply.
     pub loaded_models: SharedLoadedModels,
@@ -147,6 +156,8 @@ struct WorkerStatusPayload<'a> {
     pending_cost: i64,
     inflight_batches: i32,
     saturated: bool,
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    unsupported_models: &'a [String],
 }
 
 fn encode_payload(
@@ -169,6 +180,12 @@ fn encode_payload(
         Some(guard) => guard.as_slice(),
         None => &[],
     };
+    // Read under the hash guard taken above: the config subscriber writes the
+    // hash and this list under the same order, so the pair is consistent.
+    let unsupported_models = config
+        .unsupported_models
+        .read()
+        .expect("unsupported models lock poisoned");
     let configured_slots = config.gpu_count.max(1);
     let total_gpu_slots = clamp_i64_to_i32(
         config
@@ -217,6 +234,7 @@ fn encode_payload(
         pending_cost,
         inflight_batches,
         saturated,
+        unsupported_models: unsupported_models.as_slice(),
     };
     serde_json::to_vec(&payload)
 }
@@ -395,6 +413,7 @@ mod tests {
             machine_profile: "l4".into(),
             gpu_count: 1,
             bundle_config_hash: Arc::new(RwLock::new("hash-abc".into())),
+            unsupported_models: Arc::new(RwLock::new(Vec::new())),
             loaded_models: Arc::new(RwLock::new(Vec::new())),
             runtime_state: Arc::new(RuntimeState::new()),
             interval: DEFAULT_PUBLISH_INTERVAL,
@@ -434,6 +453,7 @@ mod tests {
                 inflight_batches: 0,
                 saturated: false,
                 loaded_models: &[],
+                unsupported_models: &[],
             };
             serde_json::to_value(&payload).unwrap()
         };
@@ -479,6 +499,7 @@ mod tests {
                 inflight_batches: 0,
                 saturated: false,
                 loaded_models: &[],
+                unsupported_models: &[],
             };
             serde_json::to_value(&payload).unwrap()
         };
@@ -497,6 +518,52 @@ mod tests {
         assert_eq!(
             json["loaded_models"],
             serde_json::json!(["model/a", "model/b"])
+        );
+    }
+
+    #[test]
+    fn payload_fields_match_the_worker_status_wire_fixture() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../wire-fixtures/worker_status.json"))
+                .expect("worker_status fixture parses");
+        let fields: std::collections::BTreeSet<String> = fixture["fields"]
+            .as_array()
+            .expect("fields")
+            .iter()
+            .map(|field| field.as_str().expect("field name").to_string())
+            .collect();
+        let omitted_when_empty: std::collections::BTreeSet<String> = fixture["omitted_when_empty"]
+            .as_object()
+            .expect("omitted_when_empty")
+            .keys()
+            .cloned()
+            .collect();
+        let keys = |json: &serde_json::Value| -> std::collections::BTreeSet<String> {
+            json.as_object()
+                .expect("payload object")
+                .keys()
+                .cloned()
+                .collect()
+        };
+
+        let c = cfg();
+        let steady: serde_json::Value =
+            serde_json::from_slice(&encode_payload(&c, true, false).unwrap()).unwrap();
+        assert_eq!(
+            keys(&steady),
+            fields.difference(&omitted_when_empty).cloned().collect()
+        );
+
+        let unsupported: Vec<String> =
+            serde_json::from_value(fixture["example"]["unsupported_models"].clone())
+                .expect("example unsupported_models");
+        *c.unsupported_models.write().unwrap() = unsupported;
+        let partial: serde_json::Value =
+            serde_json::from_slice(&encode_payload(&c, true, false).unwrap()).unwrap();
+        assert_eq!(keys(&partial), fields);
+        assert_eq!(
+            partial["unsupported_models"],
+            fixture["example"]["unsupported_models"]
         );
     }
 

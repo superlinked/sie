@@ -554,6 +554,7 @@ pub async fn run(config: WorkerConfig) -> anyhow::Result<()> {
             machine_profile: config.machine_profile.clone(),
             gpu_count: config.gpu_count,
             bundle_config_hash: config_apply_state.bundle_config_hash(),
+            unsupported_models: config_apply_state.unsupported_models(),
             loaded_models: Arc::clone(&loaded_models),
             runtime_state: Arc::clone(&runtime_state),
             interval: Duration::from_millis(config.health_publish_interval_ms),
@@ -1392,11 +1393,7 @@ fn spawn_heartbeat(
                         .filter(|resp| resp.ready)
                         .collect();
                     if let Some(resp) = (ready_children > 0).then(|| successful_ready.first()).flatten() {
-                        if config_apply_state.current_bundle_config_hash().is_empty()
-                            && !resp.bundle_config_hash.is_empty()
-                        {
-                            config_apply_state.set_bundle_hash(resp.bundle_config_hash.clone());
-                        }
+                        config_apply_state.adopt_backend_hash_if_unset(&resp.bundle_config_hash);
                         let mut merged_loaded_models = Vec::new();
                         for resp in &successful_ready {
                             merged_loaded_models.extend(resp.loaded_models.iter().cloned());

@@ -315,6 +315,7 @@ mod tests {
             memory_total_bytes: None,
             saturated: false,
             terminated: false,
+            unsupported_models: Vec::new(),
         }
     }
 

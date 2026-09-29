@@ -155,6 +155,7 @@ class TestNatsPublisherPublish:
             "epoch",
             "bundle_config_hash",
             "bundle_pool_config_hashes",
+            "bundle_adapters",
             "model_id",
             "profiles_added",
             "model_config",
@@ -172,6 +173,7 @@ class TestNatsPublisherPublish:
             assert payload["affected_bundles"] == ["default", "sglang"]
             assert payload["pool"] == "default"
             assert payload["bundle_pool_config_hashes"] == {}
+            assert payload["bundle_adapters"] == {}
 
     @pytest.mark.asyncio
     async def test_publish_bundle_subject_carries_its_own_hash(self) -> None:
@@ -226,6 +228,27 @@ class TestNatsPublisherPublish:
         assert payload["pool"] == "customer-a"
         assert payload["bundle_config_hash"] == "global-hash"
         assert payload["bundle_pool_config_hashes"]["candle"]["customer-a"] == "tenant-hash"
+
+    @pytest.mark.asyncio
+    async def test_publish_payload_carries_the_bundle_adapters_the_hashes_used(self) -> None:
+        publisher = NatsPublisher()
+        mock_nc = AsyncMock()
+        mock_nc.is_connected = True
+        publisher._nc = mock_nc
+        publisher._connected = True
+        adapters = {"default": ["sie_server.adapters.bert_flash", "sie_server.adapters.laya.adapter"]}
+        await publisher.publish_config_notification(
+            model_id="org/model",
+            profiles_added=["default"],
+            affected_bundles=["default"],
+            bundle_config_hashes={"default": "hash"},
+            epoch=9,
+            model_config_yaml="yaml",
+            bundle_adapters=adapters,
+        )
+
+        for call in mock_nc.publish.call_args_list:
+            assert json.loads(call.args[1].decode())["bundle_adapters"] == adapters
 
     @pytest.mark.asyncio
     async def test_publish_all_payload_matches_paired_bundle_payload(self) -> None:

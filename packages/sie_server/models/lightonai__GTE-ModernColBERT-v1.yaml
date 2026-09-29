@@ -35,6 +35,7 @@ profiles:
         query_prefix: '[Q] '
         doc_prefix: '[D] '
         doc_punctuation_skiplist: true
+        cuda_graphs: bucketed
       runtime:
         # Published MTEB recipe at the revision used by the governed targets.
         query_max_length: 48

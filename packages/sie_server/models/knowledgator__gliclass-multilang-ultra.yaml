@@ -1,6 +1,6 @@
-sie_id: knowledgator/gliclass-base-v1.0
-hf_id: knowledgator/gliclass-base-v1.0
-hf_revision: aa3ac24a77860a033c9e9a3aa90d5872722cb7bf
+sie_id: knowledgator/gliclass-multilang-ultra
+hf_id: knowledgator/gliclass-multilang-ultra
+hf_revision: 33c3ffec64056b0d37173d2dd90b885ac29b72c3
 inputs:
   text: true
   image: false
@@ -19,8 +19,11 @@ profiles:
     adapter_options:
       loadtime:
         classification_type: single-label
-        # Replay forwards as CUDA graphs over bucketed lengths; "off" runs them eagerly.
-        # See "GLiClass CUDA graphs" in packages/sie_server/README.md.
-        cuda_graphs: bucketed
       runtime:
+        threshold: 0.0
+  multi-label:
+    extends: default
+    adapter_options:
+      runtime:
+        classification_type: multi-label
         threshold: 0.0

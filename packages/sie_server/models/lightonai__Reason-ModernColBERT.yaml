@@ -32,6 +32,7 @@ profiles:
         query_max_length: 32
         skip_special_tokens: false
         doc_punctuation_skiplist: false
+        cuda_graphs: bucketed
       runtime: {}
   muvera:
     extends: default

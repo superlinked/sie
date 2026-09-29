@@ -44,6 +44,7 @@ profiles:
         skip_special_tokens: false
         # The pinned recipe declares skiplist_words: [].
         doc_punctuation_skiplist: false
+        cuda_graphs: bucketed
       # No serving-time truncation override: preserve the pinned 8192-token
       # query/document recipe.
       runtime: {}

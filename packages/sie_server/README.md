@@ -55,6 +55,12 @@ request timeouts still apply. Other adapters are unaffected.
 
 ### GLiClass usage
 
+The shipped GLiClass and Opir profiles read a 1,024-token window
+(`max_sequence_length`) that holds the label prompt, the instruction and
+examples, and the document. That is the default window of the gliclass
+pipeline and of its training script. The encoders use relative (DeBERTa) or
+rotary (ModernBERT) positions, so the window is not a position-table limit.
+
 For GLiClass classification, `usage.input_tokens` counts each item's document
 tokens plus the instruction and few-shot example texts sent with the request,
 because the model encodes that text again for every item. Label names,
@@ -69,7 +75,7 @@ The instruction and each example text may be at most 2,048 characters, and
 together with the example labels at most 8,192 characters. Up to 32 examples
 are accepted, and they must leave room for the document in the model window.
 Label names are refused when their total length exceeds 16 characters per
-token of the window (8,192 characters for a 512-token model), more than any
+token of the window (16,384 characters for a 1,024-token model), more than any
 label prompt can fit.
 
 ### GLiClass CUDA graphs
@@ -96,7 +102,7 @@ labels, so one graph serves every label count.
 |--|--|--|
 | `off` (default) | none | eager |
 | `exact` | each (batch size, sequence length) seen twice; the 64 most recently used are kept | bit-identical to eager |
-| `bucketed` | sequence lengths padded up to a multiple of 32 tokens (64 on 1,024-token models), batch sizes up to a power of two: a fixed set of shapes, all kept | padding moves fp16 probabilities (see below) |
+| `bucketed` | sequence lengths padded up to a multiple of 64 tokens at a 1,024-token window (32 at 512), batch sizes up to a power of two: a fixed set of shapes, all kept | padding moves fp16 probabilities (see below) |
 
 A request can send `options={"cuda_graphs": "off"}` to run eagerly on a model
 loaded with graphs. It cannot turn graphs on: any other value is refused.
@@ -130,20 +136,21 @@ request. δ_eager is the largest change among four eager runs that batch each
 input with others: in pairs, and in groups of eight in dataset order and in two
 shuffled orders. `bucketed` sent the inputs one per request three times (long
 documents twice), so graphs were recorded and then replayed. Measured on an L4
-in fp16; each cell gives the main set, then the instruction set:
+in fp16 at each model's 1,024-token window; each cell gives the main set, then
+the instruction set:
 
 | Model | Largest probability change | δ_eager | Top labels changed (largest eager margin) | Shipped profile |
 |--|--|--|--|--|
-| `gliclass-small-v1.0` | 0.0046 / 0.0034 | 0.0056 / 0.0039 | 2 (0.0000) / none | `bucketed` |
-| `gliclass-base-v1.0` | 0.0068 / 0.0056 | 0.0061 / 0.0061 | none / none | `bucketed` |
+| `gliclass-small-v1.0` | 0.0059 / 0.0034 | 0.0066 / 0.0039 | 2 (0.0000) / none | `bucketed` |
+| `gliclass-base-v1.0` | 0.0054 / 0.0056 | 0.0061 / 0.0061 | none / none | `bucketed` |
 | `gliclass-large-v1.0` | 0.0059 / 0.0088 | 0.0078 / 0.0107 | none / none | `bucketed` |
-| `gliclass-base-v3.0` | 0.0054 / 0.0054 | 0.0063 / 0.0054 | 1 (0.0005) / none | `bucketed` |
+| `gliclass-base-v3.0` | 0.0054 / 0.0034 | 0.0063 / 0.0054 | 1 (0.0005) / none | `bucketed` |
 | `gliclass-large-v3.0` | 0.0093 / 0.0107 | 0.0088 / 0.0122 | 2 (0.0020) / none | `bucketed` |
-| `gliclass-instruct-base-v1.0` | 0.0076 / 0.0063 | 0.0078 / 0.0063 | 4 (0.0056) / none | `bucketed` |
+| `gliclass-instruct-base-v1.0` | 0.0066 / 0.0063 | 0.0095 / 0.0063 | 4 (0.0056) / none | `bucketed` |
 | `gliclass-instruct-large-v1.0` | 0.0088 / 0.0039 | 0.0125 / 0.0054 | 7 (0.0017) / 1 (0.0006) | `bucketed` |
 | `opir-multitask-large-v1.0` | 0.0144 / 0.0146 | 0.0247 / 0.0225 | none / none | `bucketed` |
 | `opir-multitask-multilang-v1.0` | 0.0756 / 0.0093 | 0.0848 / 0.0122 | 15 (0.0260) / none | `off` |
-| `gliclass-multilang-mini` | 0.0347 / 0.0479 | 0.0317 / 0.0376 | 5 (0.0056) / 3 (0.0618) | `off` |
+| `gliclass-multilang-mini` | 0.0347 / 0.0479 | 0.0537 / 0.0376 | 6 (0.0056) / 3 (0.0618) | `off` |
 
 A top label that changed did so in every pass; the table counts each answer
 once.
@@ -151,7 +158,7 @@ once.
 Requests of several items pad their batch as well (3 items to 4, 5 to 8). Asked
 in 3- and 5-item requests and compared with eager execution of the same
 requests, the eight models that ship with graphs moved no probability by more
-than 0.0190 (`opir-multitask-large-v1.0`) and 0.0093 for every other model,
+than 0.0190 (`opir-multitask-large-v1.0`) and 0.0115 for every other model,
 and every top label that changed had an eager margin below the model's
 δ_eager.
 
@@ -178,9 +185,9 @@ length), or 1,024 for encoders wider than 768 such as DeBERTa-v3-large.
 Larger forwards are bound by the GPU rather than by kernel launches and run
 eagerly: on an L4, a `gliclass-large-v1.0` forward stops gaining from a graph
 at about 1,000 tokens, a `gliclass-base-v1.0` forward at about 2,000. In
-`bucketed` mode that leaves a fixed set of shapes, 52 for
-`gliclass-large-v1.0`, 71 for `gliclass-base-v1.0` and 33 for
-`opir-multitask-large-v1.0`, and the model keeps a graph for every one. Once
+`bucketed` mode at the 1,024-token window that leaves a fixed set of shapes,
+33 for the DeBERTa-v3-large models and 52 for the base and small ones (52 and
+71 at a 512-token window), and the model keeps a graph for every one. Once
 they are recorded, every forward under the token bound replays a graph,
 whatever mix of label counts, batch sizes and lengths the traffic has, and no
 request's shapes push out another's.
@@ -199,14 +206,18 @@ another model. A model's graphs share one memory pool and write their output
 into one shared buffer, and the driver keeps a copy of each graph: about 7 MB
 for the `gliclass-large-v1.0` encoder. The runner adds up the device memory
 its graphs hold (what each recording took, plus the tables and buffers they
-read) against 4% of the device's memory (900 MB on an L4). On an L4, all of a
-model's `bucketed` shapes took 720 MB for `gliclass-large-v1.0`, 630 MB for
-`gliclass-base-v1.0` and 677 MB for `opir-multitask-large-v1.0`, plus about
+read) against 4% of the device's memory (900 MB on an L4). On an L4, at the
+1,024-token window, all of a model's `bucketed` shapes took 551 to 571 MB for
+the large GLiClass models, 677 MB for `opir-multitask-large-v1.0`, 761 to
+767 MB for the base models and 653 MB for `gliclass-small-v1.0`, plus about
 150 MB cached on the recording stream (its cuBLAS workspace and one warm-up
-row). On a smaller GPU, where the shapes do not all fit, recording stops at the
-budget and the graphs already recorded keep replaying; the other shapes run
-eagerly. In `exact` mode, whose shapes are unbounded, a model past its budget
-drops every graph, returns their memory to the device and records again.
+row). Recorded while serving mixed traffic, the same shapes can take more, and
+at the 1,024-token window the budget can fill with one to three shapes left
+unrecorded; those shapes run eagerly. On a smaller GPU, where the shapes do not
+all fit, recording stops at the budget and the graphs already recorded keep
+replaying; the other shapes run eagerly. In `exact` mode, whose shapes are
+unbounded, a model past its budget drops every graph, returns their memory to
+the device and records again.
 Graphs are also released when the model unloads, and when one of its forwards
 runs out of memory.
 
@@ -377,6 +388,121 @@ read from its newest turn back; a run of more than 4,096 characters without a
 space is read only in its last 4,096 characters, and reading stops there. An item none of whose words fits, or that does
 not fit whole with `options={"overflow_policy": "error"}`, returns a per-item
 `INPUT_TOO_LONG` error while the other items succeed.
+
+### ModernBERT CUDA graphs
+
+The ModernBERT flash-attention adapters, for dense embeddings
+(`modernbert_flash`), late interaction (`colbert_modernbert_flash`) and
+reranking (`modernbert_flash_cross_encoder`), run a packed, unpadded token
+stream through hundreds of small kernels per forward (about 500 for a
+22-layer encoder). At the sizes of a query
+or a few short documents, the host that launches those kernels is the
+bottleneck: on an L4, a one-query forward of `GTE-ModernColBERT-v1` keeps the
+GPU busy for about 2 ms of its 12. A CUDA graph records the launches of one
+shape once and replays them in one call. Graphs are an operator setting,
+fixed when the model loads:
+
+```yaml
+profiles:
+  default:
+    adapter_options:
+      loadtime:
+        cuda_graphs: bucketed
+```
+
+`off` (the default) runs every forward eagerly. With `bucketed`, a graph
+records the encoder (token embeddings, layers and final norm) for one packed
+shape: the token count padded up to 64, 128, 192, 256, 384, 512, 768, 1,024
+tokens and so on, a fixed number of sequence slots, and `max_seqlen` 512 (or
+the bucket, when a row is longer). Padding tokens belong to no sequence, so
+real rows attend only to their own tokens, as eagerly. The adapter's head
+(pooling, the late-interaction projection or the reranking head) runs
+eagerly on the real rows. Forwards past a token bound run eagerly: 2,048
+tokens for encoders up to 384 wide, 1,024 up to 768, 512 wider. Past that,
+the GPU rather than kernel launches bounds a forward, and padding to the
+bucket costs more than a graph saves. A model with LoRA adapters loaded runs
+eagerly, because its forward depends on which adapter is active.
+
+Speed on an NVIDIA L4 with 8 vCPUs, eager and graphs in one process with
+their requests interleaved (median latency, and items per second over the
+run). SciFact queries and abstracts; documents are cut at the profile's
+length (300 tokens for `GTE-ModernColBERT-v1`, 512 for
+`mxbai-edge-colbert-v0-32m`):
+
+| Model | 1 query | 8 queries | 1 document | Larger requests |
+|--|--|--|--|--|
+| `GTE-ModernColBERT-v1` | 18.1 → 2.6 ms | 360 → 1,857/s | 22.3 → 5.1 ms | within 2% |
+| `gte-modernbert-base` | 17.5 → 2.4 ms | 378 → 2,414/s | 21.4 → 4.3 ms | within 1% |
+| `mxbai-edge-colbert-v0-32m` | 9.2 → 1.1 ms | 658 → 3,345/s | 12.1 → 2.8 ms | within 2% |
+| `granite-embedding-small-english-r2` | 10.4 → 1.2 ms | 581 → 4,551/s | 14.0 → 2.4 ms | within 2% |
+| `gte-reranker-modernbert-base` | 1 pair: 17.3 → 4.3 ms | 8 short pairs: 351 → 1,307/s | | within 2% |
+
+"Larger requests" are 8 and 64 abstracts, 32 items of mixed lengths, and 8
+or 32 (query, abstract) pairs: about 2,000 to 16,000 packed tokens, mostly
+past the token bound. The eager side depends on the host's CPU: on another L4
+host with faster cores, a one-query `GTE-ModernColBERT-v1` forward took
+12.2 ms eagerly and 2.5 ms from a graph.
+
+Padding changes how many rows a matrix multiply sees, so outputs can move by
+floating-point rounding, as batching requests together does. We compared
+graphs with eager forwards on SciFact: the 300 test queries, 500 abstracts
+(every one relevant to those queries, and random others) and, for the
+reranker, 20 abstracts per query. Items were encoded one per request, on
+both paths, and the eager path was also run with 8 queries or 4 abstracts
+(3 pairs) per request, which is its own batching noise. Scores are query–
+document dot products for dense models and MaxSim for late interaction:
+
+| Model | Graphs: largest score change | Graphs: pairs reordered in a top 10 (largest eager margin of any reordered pair) | Eager batching: largest score change (largest margin of a reordered pair) |
+|--|--|--|--|
+| `GTE-ModernColBERT-v1` | none (bit-identical) | none | 0.013 (0.018) |
+| `mxbai-edge-colbert-v0-32m` | none (bit-identical) | none | 0.13 (0.23) |
+| `gte-modernbert-base` | 0.006 | 12 (0.008) | 0.008 (0.012) |
+| `granite-embedding-small-english-r2` | 0.004 | 16 (0.005) | 0.015 (0.014) |
+| `gte-reranker-modernbert-base` | 0.015 | 21 (0.006) | 0.025 (0.019) |
+| `modernbert-embed-base` | 0.004 | 10 (0.004) | 0.005 (0.006) |
+| `granite-embedding-97m-multilingual-r2` | 0.006 | 57 (0.008) | 0.015 (0.015) |
+| `Reason-ModernColBERT` | 0.007 | 1 (0.007) | 0.022 (0.021) |
+| `mLateOn` | 0.020 | 17 (0.029) | 0.037 (0.046) |
+| `Iso-ModernColBERT` | 0.047 | 19 (0.058) | 0.082 (0.100) |
+
+Graphs meet the rule a GLiClass speed-up ships under (see "When a speed-up
+ships enabled" above), read for scores instead of label probabilities: no
+score moves by more than 0.02 (for MaxSim, which sums over a query's tokens,
+0.02 per query token), and every pair that graphs reorder had an eager margin
+smaller than the eager path's own batching noise, the largest score change
+eager execution makes when the same items share a request with others. For
+embeddings, the rule reads on the retrieval order the vectors give, and the
+vectors stay as close to eager as eager batching keeps them (cosine at least
+0.9997 for the dense models). Retrieval quality on the
+full SciFact corpus (5,183 abstracts, nDCG@10, the same requests on both
+paths) did not change beyond that noise: `gte-modernbert-base` 0.7632 eager
+and 0.7644 with graphs, `GTE-ModernColBERT-v1` 0.7573 and 0.7558, and
+`gte-reranker-modernbert-base` reranking the top 20 of `gte-modernbert-base`
+0.7760 and 0.7767.
+
+The shipped profiles of every model on these adapters load with `bucketed`
+graphs: `GTE-ModernColBERT-v1`, `Reason-ModernColBERT`, `mLateOn`,
+`Iso-ModernColBERT`, `mxbai-edge-colbert-v0-32m`, `gte-modernbert-base`,
+`modernbert-embed-base`, `granite-embedding-small-english-r2`,
+`granite-embedding-97m-multilingual-r2` and `gte-reranker-modernbert-base`.
+To run one of them eagerly, set `cuda_graphs: off` in its profile. A Candle
+profile of these models sets its own load-time options, so it does not
+inherit the setting.
+
+A graph is recorded the first time a request needs its shape (the dense
+adapter's warm-up records the smallest at load), and that request is answered
+by its first replay. Recording follows the rules of the GLiClass graphs above,
+and shares their process-wide limits: one recording at a time in the process,
+none while less than a tenth of the device's memory is free, at most 16
+recordings at once and then one per 2 seconds, and a model's graphs within
+4% of the device's memory (900 MB on an L4). A model's graphs, which share
+one memory pool and one output buffer, held 40 to 105 MB on an L4 once every
+shape its traffic needed was recorded. A recording that runs out of memory
+drops the model's graphs and pauses recording for a minute; a shape that
+fails to record for another reason runs eagerly from then on, and after
+three such shapes the model runs eagerly for the rest of the process. Each
+model counts the forwards it replays, records and runs eagerly (by reason),
+and logs the counts every ten minutes while it serves requests.
 
 ## Configuration
 

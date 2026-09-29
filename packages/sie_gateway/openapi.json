@@ -2185,6 +2185,13 @@
           "total_eligible_workers": {
             "minimum": 0,
             "type": "integer"
+          },
+          "unsupported_workers": {
+            "description": "Workers that report the expected hash but cannot serve this model, for\nexample during a rollout that adds its adapter to the bundle.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           }
         },
         "required": [
@@ -3965,6 +3972,17 @@
           "ready_gpu_slots": {
             "format": "int32",
             "type": "integer"
+          },
+          "unsupported_models": {
+            "description": "Models covered by `bundle_config_hash` that this worker cannot serve,\nfor example during a rollout that adds adapters to its bundle. The\ngateway does not route these models to it. Omitted when empty.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "unsupported_models_overflow": {
+            "description": "The worker reported more unsupported models than the gateway accepts\n(1024), so no model is routed to its lane (pool, machine profile,\nbundle) while it overflows. Omitted when false.",
+            "type": "boolean"
           },
           "url": {
             "type": "string"

@@ -240,6 +240,7 @@ class NatsPublisher:
         model_config_yaml: str,
         model_pool: str = "default",
         bundle_pool_config_hashes: dict[str, dict[str, str]] | None = None,
+        bundle_adapters: dict[str, list[str]] | None = None,
     ) -> None:
         """Publish config change notifications to NATS.
 
@@ -254,7 +255,8 @@ class NatsPublisher:
         set of fields that ``sie_gateway`` and worker sidecars expect
         (``router_id``, ``bundle_id``, ``epoch``, ``bundle_config_hash``,
         ``model_id``, ``profiles_added``, ``model_config``,
-        ``affected_bundles``, ``pool``, ``bundle_pool_config_hashes``).
+        ``affected_bundles``, ``pool``, ``bundle_pool_config_hashes``,
+        ``bundle_adapters``).
         See ``packages/sie_gateway/src/nats/manager.rs::ConfigNotification``.
 
         Args:
@@ -266,6 +268,7 @@ class NatsPublisher:
             model_config_yaml: Full model config YAML content.
             model_pool: Canonical pool assignment for the changed model.
             bundle_pool_config_hashes: Nested bundle_id -> pool -> hash map.
+            bundle_adapters: bundle_id -> adapter modules the hashes were scoped by.
 
         Raises:
             RuntimeError: If NATS is not connected.
@@ -294,6 +297,7 @@ class NatsPublisher:
         nc = cast("nats.NATS", self._nc)
         normalized_pool = model_pool.strip().lower() or "default"
         pool_hashes = bundle_pool_config_hashes or {}
+        adapters_by_bundle = bundle_adapters or {}
 
         # Publish each bundle delta individually, collecting failures
         # rather than short-circuiting on the first exception. If we
@@ -315,6 +319,7 @@ class NatsPublisher:
                 "affected_bundles": affected_bundles,
                 "pool": normalized_pool,
                 "bundle_pool_config_hashes": pool_hashes,
+                "bundle_adapters": adapters_by_bundle,
             }
             encoded = orjson.dumps(payload)
 

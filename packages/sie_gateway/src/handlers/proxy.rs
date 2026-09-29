@@ -645,6 +645,7 @@ async fn apply_model_pool_default(
 ///   `X-SIE-MACHINE-PROFILE`. Before the fix this branch only fired when
 ///   `gpu` was non-empty, which turned a normal cold start into a queue
 ///   timeout for default-routing clients.
+#[cfg(test)]
 async fn resolve_effective_pool(
     registry: &WorkerRegistry,
     pool_manager: Option<&PoolManager>,
@@ -653,6 +654,38 @@ async fn resolve_effective_pool(
     pool_name: &str,
     bundle_config_hash: &str,
 ) -> PoolLookup {
+    resolve_effective_pool_for_model(
+        registry,
+        pool_manager,
+        bundle,
+        gpu,
+        pool_name,
+        bundle_config_hash,
+        "",
+    )
+    .await
+}
+
+/// [`resolve_effective_pool`] for one model: a lane in which a worker that
+/// reports the expected hash cannot serve `model` is not eligible (see
+/// [`WorkerRegistry::resolve_queue_route_for_model`]).
+async fn resolve_effective_pool_for_model(
+    registry: &WorkerRegistry,
+    pool_manager: Option<&PoolManager>,
+    bundle: &str,
+    gpu: &str,
+    pool_name: &str,
+    bundle_config_hash: &str,
+    model: &str,
+) -> PoolLookup {
+    let resolve_route = |gpu: &str, pool: &str| {
+        let lookup =
+            registry.resolve_queue_route_for_model(bundle, gpu, pool, bundle_config_hash, model);
+        if lookup.excluded_unsupported {
+            telemetry::record_unsupported_model_route_exclusion();
+        }
+        lookup.route
+    };
     if !pool_name.is_empty() {
         let normalized_pool = normalize_pool_name(pool_name);
         let Some(queue_pool) = queue_pool_for_request(pool_manager, pool_name).await else {
@@ -676,9 +709,7 @@ async fn resolve_effective_pool(
             } else {
                 ""
             };
-            let route = registry
-                .resolve_queue_route_in_pool(bundle, lookup_gpu, &queue_pool, bundle_config_hash)
-                .await;
+            let route = resolve_route(lookup_gpu, &queue_pool);
             let pending_demand_profiles = if route.is_none() {
                 profiles
             } else {
@@ -700,9 +731,7 @@ async fn resolve_effective_pool(
         let configured_profile = profiles
             .into_iter()
             .find(|profile| profile.eq_ignore_ascii_case(gpu));
-        let route = registry
-            .resolve_queue_route_in_pool(bundle, gpu, &queue_pool, bundle_config_hash)
-            .await;
+        let route = resolve_route(gpu, &queue_pool);
         let exact_gpu_match = route.is_some();
         return PoolLookup {
             resolution: match route {
@@ -722,9 +751,7 @@ async fn resolve_effective_pool(
 
     // Primary lookup. Folds the "was the exact tuple routable?"
     // question into the same registry load we use to pick a pool.
-    let primary = registry
-        .resolve_queue_route_in_pool(bundle, gpu, DEFAULT_POOL_NAME, bundle_config_hash)
-        .await;
+    let primary = resolve_route(gpu, DEFAULT_POOL_NAME);
     let exact_gpu_match = !gpu.is_empty() && primary.is_some();
 
     let resolution = match primary {
@@ -2366,13 +2393,14 @@ async fn proxy_request_inner(
     // it holds the caller's GPU preference when no exact-tuple worker was
     // registered, or, for a cold gpu-agnostic request, every machine profile
     // the pool can provision so each candidate lane can scale from zero.
-    let lookup = resolve_effective_pool(
+    let lookup = resolve_effective_pool_for_model(
         &state.registry,
         Some(&state.pool_manager),
         &bundle,
         &gpu,
         &pool_name,
         &bundle_config_hash,
+        &dispatch_model,
     )
     .await;
     let demand_pool = lookup.demand_pool.clone();
@@ -6852,13 +6880,14 @@ async fn resolve_generation_route(
             .map(|info| info.engine)
             .unwrap_or_else(|| crate::types::bundle::DEFAULT_ENGINE.to_string()),
     };
-    let lookup = resolve_effective_pool(
+    let lookup = resolve_effective_pool_for_model(
         &state.registry,
         Some(&state.pool_manager),
         &bundle,
         &gpu,
         &pool_name,
         &bundle_config_hash,
+        dispatch_model,
     )
     .await;
     let demand_pool = lookup.demand_pool.clone();
@@ -16944,6 +16973,7 @@ mod tests {
                     memory_total_bytes: None,
                     saturated: false,
                     terminated: false,
+                    unsupported_models: Vec::new(),
                 },
             )
             .await;
@@ -20954,6 +20984,7 @@ mod tests {
             memory_total_bytes: None,
             saturated: false,
             terminated: false,
+            unsupported_models: Vec::new(),
         }
     }
 
@@ -21373,6 +21404,33 @@ mod tests {
         let out = resolve_effective_pool(&reg, None, "default", "l4-spot", "", "new-hash").await;
         assert_eq!(out.resolution, PoolResolution::Provisioning);
         assert!(!out.exact_gpu_match);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_effective_pool_provisions_a_model_its_lane_cannot_serve() {
+        let reg = pool_registry();
+        let mut earlier = worker_msg("default", "l4-spot", "default");
+        earlier.bundle_config_hash = "h1".into();
+        earlier.unsupported_models = vec!["org/new-family".into()];
+        reg.update_worker("http://w1:8080", earlier).await;
+
+        let served =
+            resolve_effective_pool_for_model(&reg, None, "default", "", "", "h1", "BAAI/bge-m3")
+                .await;
+        assert!(matches!(served.resolution, PoolResolution::Route(_)));
+
+        let excluded = resolve_effective_pool_for_model(
+            &reg,
+            None,
+            "default",
+            "l4-spot",
+            "",
+            "h1",
+            "org/new-family",
+        )
+        .await;
+        assert_eq!(excluded.resolution, PoolResolution::Provisioning);
+        assert!(!excluded.exact_gpu_match);
     }
 
     #[tokio::test]
