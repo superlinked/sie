@@ -19,7 +19,7 @@ profiles:
     adapter_options:
       loadtime:
         classification_type: single-label
-        modernbert_flash: true
+        modernbert_flash: single-label
       runtime:
         threshold: 0.0
   multi-label:

@@ -35,14 +35,17 @@ forward (768 wide) 1.27x at 2,048 and 0.96x at 2,560, and the 384-wide edge
 models 1.3x at about 3,650 tokens and 0.81x at 5,700 on 22 layers.
 
 Operators enable it per model, at load, with
-``adapter_options.loadtime.modernbert_flash: true``. It applies to uni-encoder
+``adapter_options.loadtime.modernbert_flash: true``, or ``single-label`` to
+keep multi-label requests on the gliclass forward. It applies to uni-encoder
 models whose encoder is a ModernBERT (mmBERT included) with float16 or bfloat16
 weights, on a CUDA device with flash-attn; anything else runs the gliclass
 forward as before, and the load logs why. So does a model that scores
 intermediate encoder layers (``squeeze_layers`` or ``encoder_layer_id``),
 which no published checkpoint does. A forward whose inputs the runner does not
 recognise (other input tensors, rows that are not right-padded) runs the
-gliclass forward too.
+gliclass forward too. When the flash path raises anything but an out-of-memory
+error, the adapter answers that forward with the gliclass forward and, if that
+succeeds, logs the failure and turns the flash path off for the model.
 """
 
 from __future__ import annotations

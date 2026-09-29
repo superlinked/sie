@@ -230,13 +230,18 @@ profiles:
         modernbert_flash: true
 ```
 
-It applies to float16 and bfloat16 weights on CUDA GPUs with flash-attn
+`modernbert_flash: single-label` limits it to single-label requests; a
+request with `"classification_type": "multi-label"` then runs the gliclass
+forward. It applies to float16 and bfloat16 weights on CUDA GPUs with flash-attn
 (Ampere or newer). On CPU, MPS, older GPUs or without flash-attn, the model
 runs the gliclass forward as before, and the load logs why. DeBERTa-based
-models ignore the setting. The shipped profiles enable it for
-`gliclass-multilang-edge`, `gliclass-modern-base-v3.0` and
-`gliclass-modern-large-v3.0`, the models whose scores met the margin rule
-below; the other four keep the gliclass forward.
+models ignore the setting. If the flash path fails with an error other than
+running out of memory, the gliclass forward answers that request, and the
+model logs the error and stays on the gliclass forward until it is reloaded.
+The shipped profiles enable it where the scores
+met the margin rule below: for every request on `gliclass-modern-base-v3.0`,
+and for single-label requests on `gliclass-multilang-edge` and
+`gliclass-modern-large-v3.0`. The other four models keep the gliclass forward.
 
 On a GPU with flash-attn, the gliclass forward already runs the Hugging Face
 ModernBERT flash-attention path. That path unpads and repads every batch,
@@ -285,13 +290,26 @@ same kinds of requests.
 
 | Model | Largest probability change | Top label changed | Largest margin of a changed answer | Batching noise | Shipped profile |
 |--|--|--|--|--|--|
-| `gliclass-multilang-edge` | 0.015 | 18 | 0.0046 | 0.016 | `modernbert_flash: true` |
-| `gliclass-modern-base-v3.0` | 0.010 | 22 | 0.0029 | 0.0061 | `modernbert_flash: true` |
-| `gliclass-modern-large-v3.0` | 0.015 | 4 | 0.0039 | 0.014 | `modernbert_flash: true` |
+| `gliclass-multilang-edge` | 0.015 | 18 | 0.0046 | 0.016 | on (single-label) |
+| `gliclass-modern-base-v3.0` | 0.010 | 22 | 0.0029 | 0.0061 | on |
+| `gliclass-modern-large-v3.0` | 0.015 | 4 | 0.0039 | 0.014 | on (single-label) |
 | `gliclass-edge-v3.0` | 0.016 | 24 | 0.0098 | 0.0066 | off (2 answers over the noise) |
 | `gliclass-instruct-edge-v1.0` | 0.012 | 5 | 0.0077 | 0.0062 | off (1 answer over the noise) |
 | `opir-edge-v1.0` | 0.018 | 12 | 0.019 | 0.011 | off |
 | `opir-edge-multilang-v1.0` | 0.037 | 30 | 0.028 | 0.032 | off |
+
+Multi-label scores (independent sigmoids) were checked the same way, with the
+rule read for the 0.5 threshold at which a multi-label group selects its
+labels: (i) no score moves by more than 0.02, and (ii) every score that
+crosses 0.5 was closer to 0.5 than the gliclass forward's own batching noise.
+Each request kind was sent one item at a time and eight at a time, 59,220
+scores per model:
+
+| Model | Largest score change | Scores crossing 0.5 (largest distance from 0.5) | Batching noise | Multi-label |
+|--|--|--|--|--|
+| `gliclass-modern-base-v3.0` | 0.0088 | 18 (0.0020) | 0.0059 | flash |
+| `gliclass-modern-large-v3.0` | 0.024 (joint groups) | 23 (0.0044) | 0.039 | gliclass forward |
+| `gliclass-multilang-edge` | 0.039 (few-shot examples) | 18 (0.0073) | 0.032 | gliclass forward |
 
 Usage and per-item errors were identical in every answer. Against the same
 checkpoints in float32, the flash path is as accurate as the gliclass forward:

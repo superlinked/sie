@@ -27,16 +27,17 @@ from sie_server.core.loader import _build_adapter_kwargs, load_model_configs, re
 from sie_server.types.inputs import Item
 from tokenizers import Tokenizer, models, pre_tokenizers, processors
 from torch.nn import functional
-from transformers import DebertaV2Config, ModernBertConfig, PreTrainedTokenizerFast
+from transformers import DebertaV2Config, ModernBertConfig, ModernBertModel, PreTrainedTokenizerFast
 
 _MODELS_DIR = Path(__file__).resolve().parents[2] / "models"
-# The shipped profiles that load with the flash encoder: the ModernBERT and
-# mmBERT GLiClass models whose flash scores met the margin rule against the
-# gliclass forward (see the server README).
-_FLASH_BY_DEFAULT = {
-    "knowledgator/gliclass-modern-base-v3.0",
-    "knowledgator/gliclass-modern-large-v3.0",
-    "knowledgator/gliclass-multilang-edge",
+# The shipped profiles that load with the flash encoder, and for which requests:
+# the ModernBERT and mmBERT GLiClass models whose flash scores met the margin
+# rule against the gliclass forward, single-label only where multi-label
+# scores did not (see the server README).
+_FLASH_BY_DEFAULT: dict[str, bool | str] = {
+    "knowledgator/gliclass-modern-base-v3.0": True,
+    "knowledgator/gliclass-modern-large-v3.0": "single-label",
+    "knowledgator/gliclass-multilang-edge": "single-label",
 }
 
 _MAX_LENGTH = 64
@@ -128,6 +129,9 @@ def _reference_varlen(
 
 @pytest.fixture
 def reference_flash(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Hugging Face's ModernBERT module probes for flash-attn when it is first
+    # imported; the module-scope ``ModernBertModel`` import has already done
+    # that, so the stand-in below is never probed.
     module = types.ModuleType("flash_attn")
     module.flash_attn_varlen_func = _reference_varlen  # ty: ignore[unresolved-attribute]
     monkeypatch.setitem(sys.modules, "flash_attn", module)
@@ -215,6 +219,7 @@ class _Rig:
     def __init__(self, layout: str, *, device: str = "cpu", dtype: torch.dtype = torch.float32) -> None:
         tokenizer = _tokenizer()
         self.model = _model(tokenizer, **_LAYOUTS[layout]).to(device, dtype=dtype)
+        assert isinstance(self.model.model.encoder_model, ModernBertModel)
         pipe = ZeroShotClassificationPipeline(
             self.model,
             tokenizer,
@@ -352,6 +357,63 @@ def test_wider_encoders_hand_smaller_forwards_to_the_gliclass_forward(hidden_siz
     assert token_bound(hidden_size) == tokens
 
 
+def _fail_flash(rig: _Rig, monkeypatch: pytest.MonkeyPatch, error: Exception) -> list[int]:
+    """Make the rig's flash encoder raise ``error``; returns a list counting its calls."""
+    calls: list[int] = []
+
+    def failing(inputs: Any, max_num_classes: int | None) -> torch.Tensor:
+        calls.append(1)
+        raise error
+
+    monkeypatch.setattr(rig.runner, "run", failing)
+    return calls
+
+
+def test_a_failing_flash_encoder_is_answered_by_the_gliclass_forward_and_turned_off(
+    reference_flash: None, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    rig = _Rig("edge")
+    calls = _fail_flash(rig, monkeypatch, RuntimeError("an unexpected flash-attn error"))
+    items = [Item(text=text) for text in _TEXTS[:4]]
+
+    with caplog.at_level(logging.ERROR, logger="sie_server.adapters.gliclass"):
+        output = rig.flash.extract(items, labels=_LABELS)
+
+    assert _answers(output) == _answers(rig.eager.extract(items, labels=_LABELS))
+    assert rig.flash._flash is None
+    assert "an unexpected flash-attn error" in caplog.text
+    assert "gliclass forward from now on" in caplog.text
+    # Later requests run the gliclass forward without trying the flash encoder again.
+    rig.flash.extract(items, labels=_LABELS)
+    assert calls == [1]
+
+
+def test_a_flash_encoder_out_of_memory_error_propagates_and_keeps_the_encoder(
+    reference_flash: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rig = _Rig("edge")
+    _fail_flash(rig, monkeypatch, RuntimeError("CUDA out of memory. Tried to allocate 2.00 GiB"))
+
+    with pytest.raises(RuntimeError, match="out of memory"):
+        rig.flash.extract([Item(text=_TEXTS[0])], labels=_LABELS)
+    assert rig.flash._flash is rig.runner
+
+
+def test_an_error_the_gliclass_forward_also_raises_propagates_and_keeps_the_encoder(
+    reference_flash: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rig = _Rig("edge")
+    _fail_flash(rig, monkeypatch, RuntimeError("flash-attn rejected the input"))
+
+    def failing_forward(*args: Any, **kwargs: Any) -> Any:
+        raise ValueError("the input is at fault")
+
+    monkeypatch.setattr(rig.model, "forward", failing_forward)
+    with pytest.raises(ValueError, match="the input is at fault"):
+        rig.flash.extract([Item(text=_TEXTS[0])], labels=_LABELS)
+    assert rig.flash._flash is rig.runner
+
+
 def _supported_model() -> GLiClassModel:
     return _model(_tokenizer(), **_LAYOUTS["edge"]).half()
 
@@ -435,10 +497,34 @@ def test_off_cuda_the_option_logs_why_it_does_not_apply(caplog: pytest.LogCaptur
     assert "CUDA" in caplog.text
 
 
-@pytest.mark.parametrize("value", ["true", 1, None])
-def test_modernbert_flash_must_be_a_boolean(value: object) -> None:
+@pytest.mark.parametrize("value", ["true", "multi-label", 1, 0, None])
+def test_modernbert_flash_must_be_a_boolean_or_single_label(value: object) -> None:
     with pytest.raises(ValueError, match="modernbert_flash"):
         GLiClassAdapter("tiny", modernbert_flash=value)  # ty: ignore[invalid-argument-type]
+
+
+@pytest.mark.parametrize(
+    "request_kwargs",
+    [
+        {"labels": _LABELS, "options": {"classification_type": "multi-label"}},
+        {"options": {"classification_type": "multi-label", "label_groups": _GROUPS}},
+        {"options": {"classification_type": "multi-label", "label_groups": _GROUPS, "group_encoding": "joint"}},
+    ],
+    ids=["labels", "separate", "joint"],
+)
+def test_single_label_mode_runs_multi_label_requests_on_the_gliclass_forward(
+    reference_flash: None, request_kwargs: dict[str, Any]
+) -> None:
+    rig = _Rig("edge")
+    rig.flash._flash_types = GLiClassAdapter("tiny", modernbert_flash="single-label")._flash_types
+    items = [Item(text=text) for text in _TEXTS[:4]]
+
+    multi = rig.flash.extract(items, **request_kwargs)
+    assert rig.runner.stats.flash == 0
+    assert _answers(multi) == _answers(rig.eager.extract(items, **request_kwargs))
+
+    rig.flash.extract(items, labels=_LABELS)
+    assert rig.runner.stats.flash > 0
 
 
 def test_unloading_drops_the_runner(reference_flash: None) -> None:
@@ -450,19 +536,18 @@ def test_unloading_drops_the_runner(reference_flash: None) -> None:
 def test_the_modernbert_gliclass_models_ship_with_the_flash_encoder() -> None:
     configs = load_model_configs(_MODELS_DIR)
     # Named profiles (``model:profile``) inherit the default profile's load-time options.
-    enabled = {
-        name.split(":")[0]
+    modes = {
+        name.split(":")[0]: config.resolve_profile("default").loadtime.get("modernbert_flash", False)
         for name, config in configs.items()
         if config.resolve_profile("default").adapter_path.endswith(":GLiClassAdapter")
-        and config.resolve_profile("default").loadtime.get("modernbert_flash", False)
     }
 
-    assert enabled == _FLASH_BY_DEFAULT
-    for name in _FLASH_BY_DEFAULT:
+    assert {name: mode for name, mode in modes.items() if mode is not False} == _FLASH_BY_DEFAULT
+    for name, mode in _FLASH_BY_DEFAULT.items():
         loadtime = configs[name].resolve_profile("default").loadtime
         reject_unknown_loadtime_options(GLiClassAdapter, loadtime, model_name=name)
         adapter = GLiClassAdapter(**_build_adapter_kwargs(configs[name], "float16"))
-        assert adapter._modernbert_flash is True
+        assert adapter._modernbert_flash == mode
 
 
 def _has_flash_attn() -> bool:
