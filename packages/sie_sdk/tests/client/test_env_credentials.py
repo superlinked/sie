@@ -119,6 +119,20 @@ def test_sync_client_keeps_env_key_for_a_same_origin_control_plane(
     assert sync_headers["headers"]["Authorization"] == "Bearer env-key"
 
 
+@pytest.mark.asyncio
+async def test_clients_treat_an_empty_control_plane_url_as_none(
+    monkeypatch: pytest.MonkeyPatch, sync_headers: dict[str, Any]
+) -> None:
+    monkeypatch.setenv("SIE_BASE_URL", "https://gateway.example.com")
+    monkeypatch.setenv("SIE_API_KEY", "env-key")
+
+    SIEClient(control_plane_url="")
+    async_kwargs = await _async_session_kwargs(SIEAsyncClient(control_plane_url=""))
+
+    assert sync_headers["headers"]["Authorization"] == "Bearer env-key"
+    assert async_kwargs["headers"]["Authorization"] == "Bearer env-key"
+
+
 def test_sync_client_explicit_key_may_go_to_a_cross_origin_control_plane(
     monkeypatch: pytest.MonkeyPatch, sync_headers: dict[str, Any]
 ) -> None:

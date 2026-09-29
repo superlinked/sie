@@ -187,7 +187,7 @@ def resolve_api_key(api_key: str | None, base_url: str, control_plane_url: str |
     env_origin = _url_origin(os.environ.get(SIE_BASE_URL_ENV, "").strip())
     if not env_api_key or env_origin is None or _url_origin(base_url) != env_origin:
         return None
-    if control_plane_url is not None and _url_origin(control_plane_url) != env_origin:
+    if control_plane_url and _url_origin(control_plane_url) != env_origin:
         msg = (
             f"{SIE_API_KEY_ENV} is scoped to the {SIE_BASE_URL_ENV} origin and is not sent to "
             "control_plane_url on another origin; pass api_key explicitly"

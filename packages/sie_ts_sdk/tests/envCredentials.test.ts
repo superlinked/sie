@@ -99,6 +99,15 @@ describe("SIEClient environment fallbacks", () => {
     expect(await encodeAuthorization(explicit)).toBe("Bearer explicit-key");
   });
 
+  it("treats an empty controlPlaneUrl as no control plane", async () => {
+    vi.stubEnv("SIE_BASE_URL", "https://gateway.example.test");
+    vi.stubEnv("SIE_API_KEY", "env-key");
+
+    const client = new SIEClient(undefined, { controlPlaneUrl: "" });
+
+    expect(await encodeAuthorization(client)).toBe("Bearer env-key");
+  });
+
   it("treats an unreadable environment as unset", () => {
     const original = globalThis.process.env;
     Object.defineProperty(globalThis.process, "env", {

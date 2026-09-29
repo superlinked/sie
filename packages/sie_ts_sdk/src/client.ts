@@ -373,7 +373,7 @@ function envApiKeyFor(baseUrl: string, controlPlaneUrl: string | undefined): str
   if (!apiKey || envOrigin === undefined || urlOrigin(baseUrl) !== envOrigin) {
     return undefined;
   }
-  if (controlPlaneUrl !== undefined && urlOrigin(controlPlaneUrl) !== envOrigin) {
+  if (controlPlaneUrl && urlOrigin(controlPlaneUrl) !== envOrigin) {
     throw new TypeError(
       `${SIE_API_KEY_ENV} is scoped to the ${SIE_BASE_URL_ENV} origin and is not sent to controlPlaneUrl on another origin; pass apiKey explicitly.`,
     );
