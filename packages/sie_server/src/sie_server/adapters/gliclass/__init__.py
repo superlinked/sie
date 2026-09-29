@@ -588,17 +588,18 @@ class GLiClassAdapter(BaseAdapter):
         tokenizer = self._load_tokenizer(shared_kwargs)
 
         # Bound the tokenizer's max length so any internal tokenization in the
-        # gliclass library auto-truncates to the model's actual capacity.
+        # gliclass library auto-truncates to the configured window.
         if self._max_seq_length is not None:
             tokenizer.model_max_length = self._max_seq_length
 
         # Pass max_length explicitly so the pipe's
         # ``tokenizer(..., truncation=True, max_length=self.max_length)`` calls
-        # cap inputs at the model's position-embedding limit. Without this the
-        # library defaults to 1024, which exceeds the 512-token capacity of the
-        # current GLiClass models and causes argmax-on-empty-tensor crashes for
-        # long inputs. The classification type only matters to the pipeline's
-        # own ``__call__``, which the adapter does not use.
+        # cap inputs at the configured window (``max_sequence_length``) rather
+        # than the library default. The GLiClass encoders use relative (DeBERTa)
+        # or rotary (ModernBERT) positions, so the window is the length the
+        # model was trained on, not a position-table size. The classification
+        # type only matters to the pipeline's own ``__call__``, which the
+        # adapter does not use.
         pipeline_kwargs: dict[str, Any] = {
             "model": model,
             "tokenizer": tokenizer,

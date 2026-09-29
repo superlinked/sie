@@ -249,8 +249,8 @@ class TestShapes:
 
     @pytest.mark.parametrize(
         ("max_length", "hidden_size", "count"),
-        [(512, 1024, 52), (512, 768, 71), (1024, 1024, 33)],
-        ids=["gliclass-large", "gliclass-base", "opir-multitask-large"],
+        [(1024, 1024, 33), (1024, 768, 52), (512, 1024, 52), (512, 768, 71)],
+        ids=["large-1024", "base-1024", "large-512", "base-512"],
     )
     def test_every_bucketed_forward_maps_into_a_small_fixed_set(
         self, max_length: int, hidden_size: int, count: int

@@ -55,6 +55,12 @@ request timeouts still apply. Other adapters are unaffected.
 
 ### GLiClass usage
 
+The shipped GLiClass and Opir profiles read a 1,024-token window
+(`max_sequence_length`) that holds the label prompt, the instruction and
+examples, and the document. That is the default window of the gliclass
+pipeline and of its training script. The encoders use relative (DeBERTa) or
+rotary (ModernBERT) positions, so the window is not a position-table limit.
+
 For GLiClass classification, `usage.input_tokens` counts each item's document
 tokens plus the instruction and few-shot example texts sent with the request,
 because the model encodes that text again for every item. Label names,
@@ -69,7 +75,7 @@ The instruction and each example text may be at most 2,048 characters, and
 together with the example labels at most 8,192 characters. Up to 32 examples
 are accepted, and they must leave room for the document in the model window.
 Label names are refused when their total length exceeds 16 characters per
-token of the window (8,192 characters for a 512-token model), more than any
+token of the window (16,384 characters for a 1,024-token model), more than any
 label prompt can fit.
 
 ### GLiClass CUDA graphs
@@ -96,7 +102,7 @@ labels, so one graph serves every label count.
 |--|--|--|
 | `off` (default) | none | eager |
 | `exact` | each (batch size, sequence length) seen twice; the 64 most recently used are kept | bit-identical to eager |
-| `bucketed` | sequence lengths padded up to a multiple of 32 tokens (64 on 1,024-token models), batch sizes up to a power of two: a fixed set of shapes, all kept | padding moves fp16 probabilities (see below) |
+| `bucketed` | sequence lengths padded up to a multiple of 64 tokens at a 1,024-token window (32 at 512), batch sizes up to a power of two: a fixed set of shapes, all kept | padding moves fp16 probabilities (see below) |
 
 A request can send `options={"cuda_graphs": "off"}` to run eagerly on a model
 loaded with graphs. It cannot turn graphs on: any other value is refused.
@@ -130,20 +136,21 @@ request. δ_eager is the largest change among four eager runs that batch each
 input with others: in pairs, and in groups of eight in dataset order and in two
 shuffled orders. `bucketed` sent the inputs one per request three times (long
 documents twice), so graphs were recorded and then replayed. Measured on an L4
-in fp16; each cell gives the main set, then the instruction set:
+in fp16 at each model's 1,024-token window; each cell gives the main set, then
+the instruction set:
 
 | Model | Largest probability change | δ_eager | Top labels changed (largest eager margin) | Shipped profile |
 |--|--|--|--|--|
-| `gliclass-small-v1.0` | 0.0046 / 0.0034 | 0.0056 / 0.0039 | 2 (0.0000) / none | `bucketed` |
-| `gliclass-base-v1.0` | 0.0068 / 0.0056 | 0.0061 / 0.0061 | none / none | `bucketed` |
+| `gliclass-small-v1.0` | 0.0059 / 0.0034 | 0.0066 / 0.0039 | 2 (0.0000) / none | `bucketed` |
+| `gliclass-base-v1.0` | 0.0054 / 0.0056 | 0.0061 / 0.0061 | none / none | `bucketed` |
 | `gliclass-large-v1.0` | 0.0059 / 0.0088 | 0.0078 / 0.0107 | none / none | `bucketed` |
-| `gliclass-base-v3.0` | 0.0054 / 0.0054 | 0.0063 / 0.0054 | 1 (0.0005) / none | `bucketed` |
+| `gliclass-base-v3.0` | 0.0054 / 0.0034 | 0.0063 / 0.0054 | 1 (0.0005) / none | `bucketed` |
 | `gliclass-large-v3.0` | 0.0093 / 0.0107 | 0.0088 / 0.0122 | 2 (0.0020) / none | `bucketed` |
-| `gliclass-instruct-base-v1.0` | 0.0076 / 0.0063 | 0.0078 / 0.0063 | 4 (0.0056) / none | `bucketed` |
+| `gliclass-instruct-base-v1.0` | 0.0066 / 0.0063 | 0.0095 / 0.0063 | 4 (0.0056) / none | `bucketed` |
 | `gliclass-instruct-large-v1.0` | 0.0088 / 0.0039 | 0.0125 / 0.0054 | 7 (0.0017) / 1 (0.0006) | `bucketed` |
 | `opir-multitask-large-v1.0` | 0.0144 / 0.0146 | 0.0247 / 0.0225 | none / none | `bucketed` |
 | `opir-multitask-multilang-v1.0` | 0.0756 / 0.0093 | 0.0848 / 0.0122 | 15 (0.0260) / none | `off` |
-| `gliclass-multilang-mini` | 0.0347 / 0.0479 | 0.0317 / 0.0376 | 5 (0.0056) / 3 (0.0618) | `off` |
+| `gliclass-multilang-mini` | 0.0347 / 0.0479 | 0.0537 / 0.0376 | 6 (0.0056) / 3 (0.0618) | `off` |
 
 A top label that changed did so in every pass; the table counts each answer
 once.
@@ -151,7 +158,7 @@ once.
 Requests of several items pad their batch as well (3 items to 4, 5 to 8). Asked
 in 3- and 5-item requests and compared with eager execution of the same
 requests, the eight models that ship with graphs moved no probability by more
-than 0.0190 (`opir-multitask-large-v1.0`) and 0.0093 for every other model,
+than 0.0190 (`opir-multitask-large-v1.0`) and 0.0115 for every other model,
 and every top label that changed had an eager margin below the model's
 δ_eager.
 
@@ -178,9 +185,9 @@ length), or 1,024 for encoders wider than 768 such as DeBERTa-v3-large.
 Larger forwards are bound by the GPU rather than by kernel launches and run
 eagerly: on an L4, a `gliclass-large-v1.0` forward stops gaining from a graph
 at about 1,000 tokens, a `gliclass-base-v1.0` forward at about 2,000. In
-`bucketed` mode that leaves a fixed set of shapes, 52 for
-`gliclass-large-v1.0`, 71 for `gliclass-base-v1.0` and 33 for
-`opir-multitask-large-v1.0`, and the model keeps a graph for every one. Once
+`bucketed` mode at the 1,024-token window that leaves a fixed set of shapes,
+33 for the DeBERTa-v3-large models and 52 for the base and small ones (52 and
+71 at a 512-token window), and the model keeps a graph for every one. Once
 they are recorded, every forward under the token bound replays a graph,
 whatever mix of label counts, batch sizes and lengths the traffic has, and no
 request's shapes push out another's.
@@ -199,14 +206,18 @@ another model. A model's graphs share one memory pool and write their output
 into one shared buffer, and the driver keeps a copy of each graph: about 7 MB
 for the `gliclass-large-v1.0` encoder. The runner adds up the device memory
 its graphs hold (what each recording took, plus the tables and buffers they
-read) against 4% of the device's memory (900 MB on an L4). On an L4, all of a
-model's `bucketed` shapes took 720 MB for `gliclass-large-v1.0`, 630 MB for
-`gliclass-base-v1.0` and 677 MB for `opir-multitask-large-v1.0`, plus about
+read) against 4% of the device's memory (900 MB on an L4). On an L4, at the
+1,024-token window, all of a model's `bucketed` shapes took 551 to 571 MB for
+the large GLiClass models, 677 MB for `opir-multitask-large-v1.0`, 761 to
+767 MB for the base models and 653 MB for `gliclass-small-v1.0`, plus about
 150 MB cached on the recording stream (its cuBLAS workspace and one warm-up
-row). On a smaller GPU, where the shapes do not all fit, recording stops at the
-budget and the graphs already recorded keep replaying; the other shapes run
-eagerly. In `exact` mode, whose shapes are unbounded, a model past its budget
-drops every graph, returns their memory to the device and records again.
+row). Recorded while serving mixed traffic, the same shapes can take more, and
+at the 1,024-token window the budget can fill with one to three shapes left
+unrecorded; those shapes run eagerly. On a smaller GPU, where the shapes do not
+all fit, recording stops at the budget and the graphs already recorded keep
+replaying; the other shapes run eagerly. In `exact` mode, whose shapes are
+unbounded, a model past its budget drops every graph, returns their memory to
+the device and records again.
 Graphs are also released when the model unloads, and when one of its forwards
 runs out of memory.
 
