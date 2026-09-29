@@ -18,6 +18,10 @@ neither ``trust_remote_code`` nor sentence-transformers 6:
   image's merged patches after ``smart_resize`` to at most ``image_token_budget``
   of them; only those patch tokens are scored.
 
+On CUDA with flash-linear-attention installed, each batch runs packed (see
+``packed.py``): one sequence, no padding, variable-length kernels, as the
+reference pipeline runs. Otherwise every input is its own right-padded row.
+
 Numerics follow the reference stack (transformers 5.9): rotary tables built from
 bf16 ``inv_freq``, vision rotary phases in the weight dtype, pixel normalisation in
 the weight dtype, and bidirectional full-attention layers. The vision tower is run
@@ -27,10 +31,12 @@ transformers release builds the vision rotary table (5.17 changed it).
 
 from __future__ import annotations
 
+import itertools
 import json
 import logging
 import math
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -44,6 +50,7 @@ from sie_server.adapters._multivector import maxsim_scores_batched
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ComputePrecision
 from sie_server.adapters._utils import grouped_score_pairs, validate_output_types
+from sie_server.adapters.topk_embed.packed import PackedKernels, resolve_kernels, text_forward
 from sie_server.core.inference_output import EncodeOutput
 from sie_server.core.postprocessor import MuveraConfig, MuveraPostprocessor
 from sie_server.types.inputs import InvalidInputError, decode_image
@@ -86,6 +93,8 @@ _REMOTE_CODE_CONFIG_KEYS = ("architectures", "auto_map", "model_type", "transfor
 _IMAGE_MESSAGE = [{"role": "user", "content": [{"type": "image"}]}]
 # theta of transformers 5.9's Qwen3_5VisionRotaryEmbedding, the table the checkpoints were trained on.
 _VISION_ROPE_THETA = 10000.0
+# Threads decoding, resizing and patchifying the pages of one request.
+_PREPROCESS_WORKERS = 4
 
 
 @dataclass
@@ -122,6 +131,7 @@ class TopkEmbedAdapter(BaseAdapter):
         image_batch_size: int = 4,
         muvera_config: dict[str, Any] | None = None,
         attn_implementation: str | None = None,
+        packed: bool | None = None,
     ) -> None:
         """Initialize the adapter.
 
@@ -140,8 +150,12 @@ class TopkEmbedAdapter(BaseAdapter):
             text_batch_tokens: Padded tokens per text forward pass.
             image_batch_size: Images per vision forward pass.
             muvera_config: Optional MUVERA configuration (passed to postprocessor).
-            attn_implementation: Attention kernel for the full-attention layers
-                (``sdpa`` when unset).
+            attn_implementation: Attention kernel for the full-attention layers of
+                the row-per-input path (``sdpa`` when unset).
+            packed: Run each batch as one packed sequence with variable-length
+                kernels. ``None`` packs on CUDA when flash-linear-attention is
+                installed; ``True`` always packs (PyTorch reference kernels where
+                the fast ones are missing); ``False`` never packs.
         """
         self._model_name_or_path = str(model_name_or_path)
         self._compute_precision = compute_precision
@@ -155,6 +169,11 @@ class TopkEmbedAdapter(BaseAdapter):
         self._image_batch_size = max(1, int(image_batch_size))
         self._muvera_config = muvera_config
         self._attn_implementation = attn_implementation
+        self._packed = packed
+        self._kernels: PackedKernels | None = None
+        self._vision_varlen: Any = None
+        self._preprocess_pool: ThreadPoolExecutor | None = None
+        self._preprocess_pool_lock = threading.Lock()
 
         self._model: Any = None
         self._head: Any = None
@@ -237,6 +256,13 @@ class TopkEmbedAdapter(BaseAdapter):
         for layer in self._model.language_model.layers:
             if hasattr(layer, "self_attn"):
                 layer.self_attn.is_causal = False
+        self._kernels = resolve_kernels(device, mode=self._packed)
+        self._vision_varlen = _flash_varlen(device)
+        logger.info(
+            "TopK-Embed text path: %s; vision attention: %s",
+            self._kernels.names if self._kernels else "row per input (padded)",
+            "flash_attn varlen" if self._vision_varlen is not None else "sdpa, padded per image",
+        )
         # Rotary tables are rebuilt in float32 at load; the weights were trained against bf16 ones.
         for module in self._model.modules():
             inv_freq = getattr(module, "inv_freq", None)
@@ -410,38 +436,44 @@ class TopkEmbedAdapter(BaseAdapter):
 
         vectors: list[np.ndarray | None] = [None] * len(rows)
         for batch in self._plan_text_batches([len(row) for row in rows]):
-            hidden = self._forward([rows[i] for i in batch], normalize=normalize)
-            for position, i in enumerate(batch):
-                vectors[i] = hidden[position, : len(rows[i])][keeps[i]].numpy()
+            outputs = self._forward([rows[i] for i in batch], normalize=normalize)
+            for output, i in zip(outputs, batch, strict=True):
+                vectors[i] = output[keeps[i]].numpy()
         return [vector for vector in vectors if vector is not None], [len(row) for row in rows]
 
     def _plan_text_batches(self, lengths: list[int]) -> list[list[int]]:
-        """Group rows by length so each padded batch stays within ``text_batch_tokens``."""
+        """Group rows by length so each batch stays within ``text_batch_tokens``.
+
+        A padded batch costs its row count times its longest row; a packed batch
+        costs the sum of its rows.
+        """
         order = sorted(range(len(lengths)), key=lambda i: lengths[i])
         batches: list[list[int]] = []
         current: list[int] = []
+        tokens = 0
         for i in order:
             # ``order`` is ascending, so row i sets the padded width of the batch.
-            if current and (len(current) + 1) * lengths[i] > self._text_batch_tokens:
+            cost = tokens + lengths[i] if self._kernels is not None else (len(current) + 1) * lengths[i]
+            if current and cost > self._text_batch_tokens:
                 batches.append(current)
-                current = []
+                current, tokens = [], 0
             current.append(i)
+            tokens += lengths[i]
         if current:
             batches.append(current)
         return batches
 
     def _encode_images(self, images: list[PILImage.Image], *, normalize: bool) -> list[np.ndarray]:
-        rows = [self._image_row(image) for image in images]
+        rows = self._image_rows(images)
         order = sorted(range(len(rows)), key=lambda i: len(rows[i].input_ids))
         vectors: list[np.ndarray | None] = [None] * len(rows)
         for start in range(0, len(order), self._image_batch_size):
             batch = order[start : start + self._image_batch_size]
-            hidden = self._forward(
+            outputs = self._forward(
                 [rows[i].input_ids for i in batch], images=[rows[i] for i in batch], normalize=normalize
             )
-            for position, i in enumerate(batch):
-                ids = rows[i].input_ids
-                vectors[i] = hidden[position, : len(ids)][ids == self._image_token_id].numpy()
+            for output, i in zip(outputs, batch, strict=True):
+                vectors[i] = output[rows[i].input_ids == self._image_token_id].numpy()
             if self._device and str(self._device).startswith("cuda"):
                 torch.cuda.empty_cache()
         return [vector for vector in vectors if vector is not None]
@@ -452,10 +484,17 @@ class TopkEmbedAdapter(BaseAdapter):
 
     def _forward(
         self, rows: list[torch.Tensor], *, images: list[_ImageRow] | None = None, normalize: bool
-    ) -> torch.Tensor:
-        """Run right-padded rows through the backbone and head; returns float32 [batch, len, dim] on CPU."""
+    ) -> list[torch.Tensor]:
+        """Run rows through the backbone and head; one float32 ``[len, dim]`` CPU tensor per row."""
         assert self._model is not None
         assert self._head is not None
+        if self._kernels is not None:
+            return self._forward_packed(rows, images=images, normalize=normalize)
+        return self._forward_padded(rows, images=images, normalize=normalize)
+
+    def _forward_padded(
+        self, rows: list[torch.Tensor], *, images: list[_ImageRow] | None, normalize: bool
+    ) -> list[torch.Tensor]:
         device = self._device or "cpu"
         width = max(len(row) for row in rows)
         pad_id = self._tokenizer.pad_token_id
@@ -481,11 +520,46 @@ class TopkEmbedAdapter(BaseAdapter):
                 position_ids=position_ids,
                 use_cache=False,
             ).last_hidden_state
-            vectors = self._head(hidden).float()
-            vectors = vectors[..., : self._multivector_dim]
-            if normalize:
-                vectors = F.normalize(vectors, p=2, dim=-1)
-            return vectors.cpu()
+            vectors = self._project(hidden, normalize=normalize)
+        return [vectors[i, : len(row)] for i, row in enumerate(rows)]
+
+    def _forward_packed(
+        self, rows: list[torch.Tensor], *, images: list[_ImageRow] | None, normalize: bool
+    ) -> list[torch.Tensor]:
+        assert self._kernels is not None
+        device = self._device or "cpu"
+        lengths = [len(row) for row in rows]
+        input_ids = torch.cat(rows).unsqueeze(0).to(device)
+        cu_seqlens = torch.tensor([0, *itertools.accumulate(lengths)], dtype=torch.long, device=device)
+        if images:
+            position_ids = torch.cat([self._image_position_ids([row], len(row.input_ids)) for row in images], dim=2)
+        else:
+            # Text: every packed input restarts at position 0 on all three rotary axes.
+            position_ids = torch.cat([torch.arange(n) for n in lengths]).view(1, 1, -1).expand(3, 1, -1)
+
+        with self._forward_lock, torch.inference_mode():
+            embeds = self._model.get_input_embeddings()(input_ids)
+            if images:
+                image_hidden = self._vision_forward(images)
+                embeds[input_ids == self._image_token_id] = image_hidden.to(embeds.dtype)
+            hidden = text_forward(
+                self._model.language_model,
+                embeds,
+                position_ids.to(device),
+                cu_seqlens,
+                max(lengths),
+                self._kernels,
+            )
+            vectors = self._project(hidden, normalize=normalize)[0]
+        return list(vectors.split(lengths))
+
+    def _project(self, hidden: torch.Tensor, *, normalize: bool) -> torch.Tensor:
+        """Head, truncation to the token dim, then L2 normalization (float32, on CPU)."""
+        vectors = self._head(hidden).float()
+        vectors = vectors[..., : self._multivector_dim]
+        if normalize:
+            vectors = F.normalize(vectors, p=2, dim=-1)
+        return vectors.cpu()
 
     def _vision_forward(self, images: list[_ImageRow]) -> torch.Tensor:
         """The reference's packed vision tower: every image in one sequence, attention kept per image."""
@@ -513,20 +587,45 @@ class TopkEmbedAdapter(BaseAdapter):
 
         lengths = torch.tensor([math.prod(row.grid_thw) for row in images], dtype=torch.long)
         max_len = int(lengths.max())
-        seq_idx = torch.repeat_interleave(torch.arange(len(images)), lengths)
-        within = torch.arange(int(lengths.sum())) - torch.repeat_interleave(lengths.cumsum(0) - lengths, lengths)
-        pad_index = (seq_idx * max_len + within).to(device)
-        key_mask = (torch.arange(max_len) < lengths[:, None])[:, None, None, :].to(device)
+        if self._vision_varlen is not None:
+            cu_seqlens = torch.cat([torch.zeros(1, dtype=torch.long), lengths.cumsum(0)]).to(device, torch.int32)
+
+            def attention(attn: Any, normed: torch.Tensor) -> torch.Tensor:
+                return _vision_attention_varlen(
+                    attn, normed, cos, sin, cu_seqlens=cu_seqlens, max_len=max_len, varlen=self._vision_varlen
+                )
+
+        else:
+            seq_idx = torch.repeat_interleave(torch.arange(len(images)), lengths)
+            within = torch.arange(int(lengths.sum())) - torch.repeat_interleave(lengths.cumsum(0) - lengths, lengths)
+            pad_index = (seq_idx * max_len + within).to(device)
+            key_mask = (torch.arange(max_len) < lengths[:, None])[:, None, None, :].to(device)
+
+            def attention(attn: Any, normed: torch.Tensor) -> torch.Tensor:
+                return _vision_attention(
+                    attn, normed, cos, sin, pad_index=pad_index, key_mask=key_mask, max_len=max_len
+                )
+
         for block in visual.blocks:
-            hidden = hidden + _vision_attention(
-                block.attn, block.norm1(hidden), cos, sin, pad_index=pad_index, key_mask=key_mask, max_len=max_len
-            )
+            hidden = hidden + attention(block.attn, block.norm1(hidden))
             hidden = hidden + block.mlp(block.norm2(hidden))
         return visual.merger(hidden)
 
     # ------------------------------------------------------------------
     # Image preprocessing (topk_embed_st.py in the model repo)
     # ------------------------------------------------------------------
+
+    def _image_rows(self, images: list[PILImage.Image]) -> list[_ImageRow]:
+        """Preprocess the pages of a request in parallel (decode, resize, patchify)."""
+        if len(images) == 1:
+            return [self._image_row(images[0])]
+        with self._preprocess_pool_lock:
+            if self._preprocess_pool is None:
+                self._preprocess_pool = ThreadPoolExecutor(
+                    max_workers=_PREPROCESS_WORKERS, thread_name_prefix="topk-embed-preprocess"
+                )
+            pool = self._preprocess_pool
+        return list(pool.map(self._image_row, images))
 
     def _image_row(self, image: PILImage.Image) -> _ImageRow:
         from torchvision.transforms.v2 import InterpolationMode
@@ -686,6 +785,15 @@ class TopkEmbedAdapter(BaseAdapter):
     def _metering_max_length(self) -> int | None:
         return self._doc_max_length
 
+    def unload(self) -> None:
+        with self._preprocess_pool_lock:
+            pool, self._preprocess_pool = self._preprocess_pool, None
+        if pool is not None:
+            pool.shutdown(wait=False)
+        self._kernels = None
+        self._vision_varlen = None
+        super().unload()
+
     def get_postprocessors(self) -> dict[str, Any]:
         """Return the configured MUVERA multivector-to-dense postprocessor."""
         config = MuveraConfig(**self._muvera_config) if self._muvera_config else MuveraConfig()
@@ -715,6 +823,44 @@ def smart_resize(height: int, width: int, *, factor: int, min_pixels: int, max_p
         h_bar = math.ceil(height * beta / factor) * factor
         w_bar = math.ceil(width * beta / factor) * factor
     return h_bar, w_bar
+
+
+def _flash_varlen(device: str) -> Any:
+    """FlashAttention's variable-length kernel on CUDA, when installed."""
+    if not str(device).startswith("cuda"):
+        return None
+    try:
+        from flash_attn import flash_attn_varlen_func  # ty: ignore[unresolved-import]
+    except ImportError:
+        return None
+    return flash_attn_varlen_func
+
+
+def _vision_attention_varlen(
+    attn: Any,
+    hidden: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    *,
+    cu_seqlens: torch.Tensor,
+    max_len: int,
+    varlen: Any,
+) -> torch.Tensor:
+    """One vision attention layer over packed patches with FlashAttention's varlen kernel."""
+    seq_length = hidden.shape[0]
+    query, key, value = attn.qkv(hidden).reshape(seq_length, 3, attn.num_heads, -1).permute(1, 0, 2, 3).unbind(0)
+    query, key = _apply_rotary_pos_emb_vision(query, key, cos, sin)
+    out = varlen(
+        query.contiguous(),
+        key.contiguous(),
+        value.contiguous(),
+        cu_seqlens,
+        cu_seqlens,
+        max_len,
+        max_len,
+        causal=False,
+    )
+    return attn.proj(out.reshape(seq_length, -1))
 
 
 def _vision_attention(

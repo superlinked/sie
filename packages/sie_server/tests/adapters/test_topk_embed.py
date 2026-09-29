@@ -102,8 +102,12 @@ def _png(color: str = "white", size: tuple[int, int] = (64, 64)) -> ImageInput:
 
 @pytest.fixture
 def adapter() -> TopkEmbedAdapter:
+    return make_adapter()
+
+
+def make_adapter(**kwargs: Any) -> TopkEmbedAdapter:
     """An adapter in the state ``load()`` leaves it, around stand-in modules."""
-    adapter = TopkEmbedAdapter("topk-io/topk-embed-v1-xsmall", revision=REV, max_seq_length=64)
+    adapter = TopkEmbedAdapter("topk-io/topk-embed-v1-xsmall", revision=REV, max_seq_length=64, **kwargs)
     torch.manual_seed(1)
     adapter._model = FakeBackbone()
     adapter._head = torch.nn.Linear(HIDDEN, HEAD_WIDTH, bias=False)

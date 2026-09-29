@@ -7,8 +7,8 @@ That stack packs a batch into one sequence and needs CUDA-only kernels
 (flash-linear-attention, compiled flex attention); the CPU goldens swap only those
 kernels for reference implementations with the same math (``generated_with``).
 
-The adapter runs one right-padded row per input on stock ``transformers.models.qwen3_5``
-classes. Token ids, token counts and scoring masks must match exactly. Vectors are
+The adapter runs on stock ``transformers.models.qwen3_5`` classes, either one
+right-padded row per input or one packed sequence per batch (both are tested). Token ids, token counts and scoring masks must match exactly. Vectors are
 compared through their projections onto fixed random unit directions, and MaxSim
 scores directly. The adapter's vision tower is TopK's, so page vectors differ only
 through the text tower's kernels (sdpa and the unpacked delta rule vs flex attention
@@ -53,15 +53,23 @@ def _golden(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-@pytest.fixture(scope="module", params=_GOLDENS, ids=[path.stem for path in _GOLDENS])
+@pytest.fixture(
+    scope="module",
+    params=[(path, packed) for path in _GOLDENS for packed in (False, True)],
+    ids=[f"{path.stem}-{'packed' if packed else 'padded'}" for path in _GOLDENS for packed in (False, True)],
+)
 def case(request: pytest.FixtureRequest) -> tuple[dict[str, Any], TopkEmbedAdapter]:
     pytest.importorskip("transformers.models.qwen3_5", reason="needs transformers >= 5.2 (the transformers5 bundle)")
-    golden = _golden(request.param)
+    path, packed = request.param
+    golden = _golden(path)
     config = load_model_configs(_MODELS_DIR)[golden["model"]]
     assert config.hf_revision == golden["revision"], "golden was generated for a different checkpoint revision"
     adapter = load_adapter(config, _MODELS_DIR, device="cpu")
-    adapter.load("cpu")
     assert isinstance(adapter, TopkEmbedAdapter)
+    # On CPU the packed path runs its PyTorch reference kernels; on CUDA the fast ones.
+    adapter._packed = packed
+    adapter.load("cpu")
+    assert (adapter._kernels is not None) == packed
     return golden, adapter
 
 
