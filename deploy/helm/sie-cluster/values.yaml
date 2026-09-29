@@ -841,10 +841,12 @@ workers:
           cpu: "2"
           memory: "2Gi"
 
-  # -- Ingress NetworkPolicy for worker pods. When enabled, only this release's
-  # gateway pods may open connections to the worker HTTP ports (the worker API
+  # -- Ingress NetworkPolicy for worker pods. When enabled, this policy admits
+  # only this release's gateway pods to the worker HTTP ports (the worker API
   # has no authentication of its own); kubelet probes and in-pod sidecar
   # traffic are unaffected. Requires a CNI that enforces NetworkPolicy.
+  # NetworkPolicies are additive: any other policy that selects worker pods
+  # and admits more sources widens access, so check for overlapping policies.
   # Disabled by default; values-ha.yaml enables it.
   networkPolicy:
     enabled: false

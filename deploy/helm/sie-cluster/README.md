@@ -1137,6 +1137,10 @@ ingress:
     enabled: true
 ```
 
+With the default `byo` TLS mode, create the `kubernetes.io/tls` Secret named by
+`ingress.tlsConfig.secretName` (default `sie-tls`) before installing, or use the
+`cert-manager` or `self-signed` mode described in [TLS / HTTPS](#tls--https).
+
 The singular `ingress.host` is the backward-compatible single-host shorthand; it is
 ignored whenever `ingress.hosts` is non-empty. With neither set the chart renders a
 host-less catch-all Ingress. All hosts share the single `ingress.tlsConfig.secretName`
@@ -1178,12 +1182,17 @@ the number of live pools (default cap 64). Tune them with
 
 Worker pods serve an HTTP API without authentication of their own; the gateway
 is the only in-chart caller. `workers.networkPolicy.enabled=true` renders an
-ingress `NetworkPolicy` that admits connections to every worker HTTP port only
-from this release's gateway pods. Kubelet probes and traffic between containers
+ingress `NetworkPolicy` whose only default rule admits this release's gateway
+pods to every worker HTTP port. Kubelet probes and traffic between containers
 of the same pod are unaffected. It requires a CNI that enforces NetworkPolicy.
-It is off by default and on in `values-ha.yaml`. Add
+NetworkPolicies are additive: if another policy selects the worker pods and
+admits more sources, those sources keep access, so it restricts worker ingress
+only when no other policy grants broader access. Check for overlapping policies
+in the namespace. It is off by default and on in `values-ha.yaml`. Add
 `workers.networkPolicy.extraIngress` rules for any caller outside the chart that
-must reach workers directly:
+must reach workers directly, and list the worker ports (`workers.common.port`,
+plus one port per additional child container on multi-GPU pools) so the rule
+does not open every port on the worker pods:
 
 ```yaml
 workers:
@@ -1194,6 +1203,9 @@ workers:
           - namespaceSelector:
               matchLabels:
                 kubernetes.io/metadata.name: benchmarks
+        ports:
+          - port: 8080
+            protocol: TCP
 ```
 
 ## TLS / HTTPS
