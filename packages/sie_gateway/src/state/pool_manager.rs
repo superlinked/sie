@@ -394,20 +394,19 @@ impl PoolManager {
     /// out. Equal to the requirements for every pool the API accepts; smaller
     /// only for a pool stored before the budget existed.
     fn capped_requirements(&self, pool: &Pool) -> HashMap<String, u32> {
-        let mut requirements: Vec<(String, u32)> = pool
-            .spec
-            .gpus
-            .iter()
-            .map(|(profile, required)| (profile.to_ascii_lowercase(), *required))
-            .collect();
+        let mut merged: HashMap<String, u32> = HashMap::new();
+        for (profile, required) in &pool.spec.gpus {
+            let entry = merged.entry(profile.to_ascii_lowercase()).or_insert(0);
+            *entry = entry.saturating_add(*required);
+        }
+        let mut requirements: Vec<(String, u32)> = merged.into_iter().collect();
         requirements.sort();
         let mut left = self.limits.max_minimum_worker_count;
         let mut capped = HashMap::new();
         for (profile, required) in requirements {
             let allotted = required.min(left);
             left -= allotted;
-            let entry = capped.entry(profile).or_insert(0);
-            *entry = (*entry).max(allotted);
+            capped.insert(profile, allotted);
         }
         capped
     }
@@ -1110,8 +1109,12 @@ impl PoolManager {
             .map(|(gpu, cap)| (gpu.to_lowercase(), *cap))
             .collect();
 
+        let mut seen_profiles: HashSet<String> = HashSet::new();
         for (gpu_type, required_count) in &pool.spec.gpus {
             let gpu_lower = gpu_type.to_lowercase();
+            if capped_requirements.is_some() && !seen_profiles.insert(gpu_lower.clone()) {
+                continue;
+            }
             let available = workers_by_gpu.get_mut(&gpu_lower);
             let available_count = available.as_ref().map(|workers| workers.len()).unwrap_or(0);
             let required = capped_requirements
@@ -3063,6 +3066,31 @@ mod tests {
             vec!["gpu-0", "gpu-1", "gpu-2", "gpu-3"]
         );
         assert_eq!(snapshot.assigned_workers.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn test_stored_pool_case_variant_profiles_share_one_allotment() {
+        let pm = PoolManager::new(vec!["l4-spot".to_string()]);
+        let mut pool = remote_pool("legacy", None, 0);
+        pool.spec.gpus = HashMap::from([("L4-SPOT".to_string(), 2), ("l4-spot".to_string(), 2)]);
+        pm.apply_remote_pool(pool).await;
+        let four: Vec<_> = (0..4)
+            .map(|index| {
+                worker(
+                    &format!("worker-{index}"),
+                    &format!("http://worker-{index}:8080"),
+                    "l4-spot",
+                    "default",
+                )
+            })
+            .collect();
+
+        assert!(pm.assign_workers("legacy", &four).await);
+        assert_eq!(
+            pm.get_pool("legacy").await.unwrap().status.state,
+            PoolState::Active
+        );
+        assert_eq!(leased_counts(&pm).await.get("legacy"), Some(&4));
     }
 
     #[tokio::test]
