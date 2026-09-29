@@ -15,9 +15,14 @@ tasks:
       dim: 2048
   score: null
   extract: null
-# Document cap (sentence_bert_config.json document_length). The adapter caps
-# queries at query_length (1024) and each image at 1280 merged patches.
-max_sequence_length: 8192
+# Document cap. The checkpoint allows 8192 tokens (sentence_bert_config.json
+# document_length), but on the cluster path one item's result must serialize
+# under 16 MiB (sidecar MAX_CHUNKED_RESULT_BYTES, gateway per-item limit): at
+# 2048 float16 numbers a token that is 4096 tokens, so 4000 keeps each document
+# at 15.6 MiB with room for the envelope. float32 responses take twice as much.
+# The adapter caps queries at query_length (1024) and each image at 1280 merged
+# patches (5 MiB).
+max_sequence_length: 4000
 profiles:
   default:
     max_batch_tokens: 8192

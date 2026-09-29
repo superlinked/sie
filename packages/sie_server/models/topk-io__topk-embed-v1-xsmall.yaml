@@ -15,9 +15,14 @@ tasks:
       dim: 1024
   score: null
   extract: null
-# Document cap (sentence_bert_config.json document_length). The adapter caps
-# queries at query_length (1024) and each image at 1280 merged patches.
-max_sequence_length: 8192
+# Document cap. The checkpoint allows 8192 tokens (sentence_bert_config.json
+# document_length), but on the cluster path one item's result must serialize
+# under 16 MiB (sidecar MAX_CHUNKED_RESULT_BYTES, gateway per-item limit): at
+# 1024 float16 numbers a token that is 8192 tokens before the envelope, so 8000
+# keeps each document at 15.6 MiB. float32 responses take twice as much. The
+# adapter caps queries at query_length (1024) and each image at 1280 merged
+# patches (2.5 MiB).
+max_sequence_length: 8000
 profiles:
   default:
     max_batch_tokens: 16384
@@ -28,7 +33,7 @@ profiles:
         # CUDA graphs for small text batches (queries) on the packed CUDA path;
         # anything else runs eagerly. See adapters/topk_embed/graphs.py.
         cuda_graphs: bucketed
-        # Tokens per packed forward: 8192 beat 16384 and 32768 by 5 to 10% on an
+        # Tokens per packed forward: 8192 beat 16384 and 32768 by 5 to 17% on an
         # L40S at every document length (the server's batches still take 16384).
         text_batch_tokens: 8192
         muvera_config:

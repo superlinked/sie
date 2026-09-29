@@ -10,6 +10,7 @@ pipeline on the real checkpoints lives in ``test_topk_embed_parity.py``.
 from __future__ import annotations
 
 import io
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
@@ -17,6 +18,7 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 import torch
+import yaml
 from PIL import Image
 from sie_server.adapters.topk_embed.adapter import TopkEmbedAdapter, _ImageRow, smart_resize
 from sie_server.types.inputs import ImageInput, InvalidInputError, Item
@@ -381,3 +383,17 @@ class TestMetering:
         postprocessors = adapter.get_postprocessors()
         assert set(postprocessors) == {"muvera"}
         assert postprocessors["muvera"].token_dim == HEAD_WIDTH
+
+
+# On the cluster path one item's serialized result is chunked only up to 16 MiB (the sidecar's
+# MAX_CHUNKED_RESULT_BYTES and the gateway's per-item limit); past it the item fails.
+_CLUSTER_ITEM_RESULT_BYTES = 16 * 1024 * 1024
+_MODELS_DIR = Path(__file__).resolve().parents[2] / "models"
+
+
+@pytest.mark.parametrize("model", ["topk-io__topk-embed-v1-xsmall", "topk-io__topk-embed-v1-small"])
+def test_a_longest_document_fits_one_cluster_result(model: str) -> None:
+    config = yaml.safe_load((_MODELS_DIR / f"{model}.yaml").read_text(encoding="utf-8"))
+    dim = config["tasks"]["encode"]["multivector"]["dim"]
+    vectors = config["max_sequence_length"] * dim * 2  # float16, the default response
+    assert vectors + 256 * 1024 <= _CLUSTER_ITEM_RESULT_BYTES  # room for the result envelope
