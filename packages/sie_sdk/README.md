@@ -149,7 +149,10 @@ instruction or examples, each row's count is capped at the model window minus
 that row's label prompt, unless the document count alone is already higher.
 An item whose document pushes the labels out of the window, in any of its rows,
 comes back with an `INPUT_TOO_LONG` error in its `error` field and is not
-billed. The other items still succeed.
+billed. The other items still succeed. Models that read the labels before
+the document count only the part of the document they read, and a row whose
+labels leave no room for the document fails its item the same way, instead of
+being scored without the document.
 
 On a CUDA server, the operator can load the DeBERTa-based GLiClass models with
 CUDA graphs, which cut the CPU time spent launching kernels. With `bucketed`

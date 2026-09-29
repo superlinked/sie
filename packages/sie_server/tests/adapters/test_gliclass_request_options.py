@@ -820,6 +820,25 @@ class TestSeparateGroupEncoding:
         }
         assert output.input_token_counts == [(7 + 2) + (5 + 2)]
 
+    def test_a_group_whose_labels_leave_no_room_fails_every_item(self) -> None:
+        # Labels-first model keeping 7 content tokens: the urgency row's label
+        # prompt (5 tokens) leaves room for the document, the topic row's
+        # (7 tokens: 3 markers, 3 labels and SEP) leaves none.
+        adapter, pipe = _group_adapter(max_length=9)
+
+        output = adapter.extract(
+            [Item(text="Charged twice, fix today"), Item(text="Dark mode someday?")], options=_group_options()
+        )
+
+        assert pipe.prepare_calls == []
+        assert output.errors is not None
+        for error in output.errors:
+            assert error is not None
+            assert error.code == "INPUT_TOO_LONG"
+            assert "no room for the document" in error.message
+        assert output.data == [{}, {}]
+        assert output.input_token_counts == [0, 0]
+
     def test_an_item_whose_labels_miss_any_row_fails_alone(self) -> None:
         # Text-first model keeping 10 content tokens: the six-word document leaves
         # room for both urgency markers but pushes the third topic marker out.
@@ -1168,6 +1187,73 @@ class TestFlatLabelOverflow:
         with pytest.raises(InputTooLongError):
             adapter.extract([Item(text="The app crashes")], labels=list(_LABELS))
 
+    # The label prompt is 9 tokens (3 markers, 5 label words and SEP) with its
+    # last marker at index 5. At max_length 11 the window keeps 9 tokens: every
+    # marker fits, and nothing is left for the document.
+    @pytest.mark.parametrize(("max_length", "refused"), [(11, True), (12, False)])
+    def test_labels_first_items_are_refused_when_the_labels_leave_no_room_for_the_document(
+        self, max_length: int, refused: bool
+    ) -> None:
+        adapter, pipe = self._adapter(prompt_first=True, max_length=max_length)
+        items = [Item(text="The app crashes"), Item(text="Charged twice")]
+
+        output = adapter.extract(items, labels=list(_LABELS))
+
+        if not refused:
+            assert output.errors is None
+            assert [call["texts"] for call in pipe.prepare_calls] == [["The app crashes", "Charged twice"]]
+            # The model reads one token of each document: usage counts that token and CLS/SEP.
+            assert output.input_token_counts == [3, 3]
+            return
+        assert pipe.prepare_calls == []
+        assert output.errors is not None
+        for error in output.errors:
+            assert error is not None
+            assert error.code == "INPUT_TOO_LONG"
+            assert "no room for the document" in error.message
+        assert output.classifications == [[], []]
+        assert output.input_token_counts == [0, 0]
+
+    @pytest.mark.parametrize(("words", "refused"), [(3, False), (4, True)])
+    def test_documents_first_items_at_the_same_window_keep_their_document(self, words: int, refused: bool) -> None:
+        # The document comes first, so it is read in full; an item is refused
+        # only when its document pushes the last marker (index 5) out: 3 + 5 < 9.
+        adapter, pipe = self._adapter(prompt_first=False, max_length=11)
+        text = " ".join(["word"] * words)
+
+        output = adapter.extract([Item(text=text)], labels=list(_LABELS))
+
+        if not refused:
+            assert output.errors is None
+            assert [call["texts"] for call in pipe.prepare_calls] == [[text]]
+            return
+        assert pipe.prepare_calls == []
+        assert output.errors is not None
+        assert output.errors[0] is not None
+        assert output.errors[0].code == "INPUT_TOO_LONG"
+        assert "pushes the labels out" in output.errors[0].message
+        assert output.input_token_counts == [0]
+
+    def test_truncate_text_still_refuses_labels_that_leave_no_room_for_the_document(self) -> None:
+        adapter, _ = self._adapter(prompt_first=True, max_length=11)
+
+        with pytest.raises(InputTooLongError, match="exceeds max_sequence_length"):
+            adapter.extract(
+                [Item(text="The app crashes")], labels=list(_LABELS), options={"overflow_policy": "truncate_text"}
+            )
+
+    def test_truncate_text_cuts_the_document_to_the_room_the_labels_leave(self) -> None:
+        adapter, pipe = self._adapter(prompt_first=True, max_length=12)
+
+        output = adapter.extract(
+            [Item(text="The app crashes")], labels=list(_LABELS), options={"overflow_policy": "truncate_text"}
+        )
+
+        assert output.errors is None
+        assert len(pipe.prepare_calls) == 1
+        assert len(pipe.prepare_calls[0]["texts"][0].split()) == 1
+        assert output.input_token_counts == [1 + 2]
+
     def test_a_marker_inside_the_document_is_not_an_overflow(self) -> None:
         adapter, _ = self._adapter(prompt_first=False)
 
@@ -1209,8 +1295,17 @@ class TestFlatLabelOverflow:
         output = adapter.extract([Item(text=text)], labels=list(_LABELS), instruction="one two three")
 
         # label prompt = 3 markers + 5 label words + SEP = 9 tokens; cap = 40 - 9 = 31.
-        # The document count alone is 32 (30 words + CLS/SEP), so it stands.
-        assert output.input_token_counts == [32]
+        # The model reads 38 - 9 - 3 = 26 of the 30 document words after the labels
+        # and instruction, so it counts 26 + 3 + CLS/SEP = 31, what a truncate_text
+        # request counts.
+        assert output.input_token_counts == [31]
+        truncated = adapter.extract(
+            [Item(text=text)],
+            labels=list(_LABELS),
+            instruction="one two three",
+            options={"overflow_policy": "truncate_text"},
+        )
+        assert truncated.input_token_counts == [31]
         short = adapter.extract([Item(text="doc doc")], labels=list(_LABELS), instruction="one two three")
         assert short.input_token_counts == [4 + 3]
 

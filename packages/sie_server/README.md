@@ -71,6 +71,16 @@ is already higher. An item refused because its document pushes the labels out
 of the window returns a per-item `INPUT_TOO_LONG` error and counts nothing. A
 request that sends no instruction or examples is counted exactly as before.
 
+The models that read the labels before the document (`prompt_first` in the
+checkpoint's config: every shipped GLiClass model except `gliclass-small-v1.0`,
+`gliclass-base-v1.0` and `gliclass-large-v1.0`) cut the document to the room
+the label prompt and instruction leave, and count only the part of the document
+they read, as `truncate_text` would. When the labels leave no room for any of
+the document, each item returns a per-item `INPUT_TOO_LONG` error and counts
+nothing, rather than being scored without its document. With `overflow_policy`
+`truncate_text` or `error`, such a request is refused with `INPUT_TOO_LONG`, as
+before.
+
 The instruction and each example text may be at most 2,048 characters, and
 together with the example labels at most 8,192 characters. Up to 32 examples
 are accepted, and they must leave room for the document in the model window.

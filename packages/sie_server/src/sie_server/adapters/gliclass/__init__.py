@@ -153,6 +153,14 @@ _ERR_ITEM_LABELS_TRUNCATED = (
     "The document pushes the labels out of the gliclass model's max sequence length. "
     "Shorten the document, or send options.overflow_policy='truncate_text'."
 )
+# Models that read the labels first (``prompt_first``) cut the document to the
+# room the label prompt and instruction leave. An item is refused unless its
+# document keeps at least this many tokens, rather than scored without it.
+_MIN_DOCUMENT_TOKENS = 1
+_ERR_ITEM_NO_ROOM_FOR_DOCUMENT = (
+    "The labels leave no room for the document in the gliclass model's max sequence length, "
+    "so the model would not read it. Send fewer or shorter labels."
+)
 _ERR_ITEM_DOCUMENT_TOO_SPARSE = (
     "The part of the document the gliclass model reads spans more than {limit} characters, too many to "
     "encode once per label group. Shorten the document, send fewer groups, or send "
@@ -169,7 +177,10 @@ class _RequestLayout:
     last marker sits at ``last_marker``. ``context_tokens`` counts the
     billable instruction and example texts. ``overhead_tokens`` is everything
     a row encodes besides its document and special tokens: the label prompt,
-    the instruction and the formatted examples.
+    the instruction and the formatted examples. ``document_room`` is the most
+    document tokens the model reads: the window for a model that reads the
+    document first, and for one that reads the labels first the window minus
+    the label prompt and instruction that precede the document.
     """
 
     prompt_first: bool
@@ -178,12 +189,7 @@ class _RequestLayout:
     last_marker: int
     context_tokens: int
     overhead_tokens: int
-
-    def labels_fit(self, document_tokens: int) -> bool:
-        """Whether every label marker survives truncation next to this document."""
-        if self.prompt_first:
-            return self.last_marker < self.window
-        return document_tokens + self.last_marker < self.window
+    document_room: int
 
 
 @dataclass
@@ -835,9 +841,10 @@ class GLiClassAdapter(BaseAdapter):
             texts, normalized_labels, overflow_policy, prompt=prompt, examples=examples, tokens=tokens
         )
         layout = self._request_layout(normalized_labels, prompt, examples, tokens)
-        fits = self._items_fit(texts, layout, normalized_labels, prompt, examples, tokens=tokens)
+        failures = self._item_failures(texts, layout, normalized_labels, prompt, examples, tokens=tokens)
+        fits = [failure is None for failure in failures]
         input_token_counts = self._input_token_counts(texts, prompt, examples, layout, fits, tokens=tokens)
-        errors = self._item_errors(fits)
+        errors = self._item_errors(failures)
         kept = [index for index, ok in enumerate(fits) if ok]
         kept_texts = [texts[index] for index in kept]
 
@@ -1194,10 +1201,12 @@ class GLiClassAdapter(BaseAdapter):
 
         Each row is what a request with ``labels`` set to the group's labels
         encodes: its overflow policy, window check and metering apply per
-        row. An item whose labels do not fit in one of its rows fails with
-        ``INPUT_TOO_LONG``, is billed nothing and is not checked against the
-        remaining groups; the other items still run. ``texts`` holds each
-        document's readable prefix, or None for one whose readable part
+        row. An item whose labels do not fit in one of its rows, or whose
+        row leaves no room for its document, fails with ``INPUT_TOO_LONG``,
+        is billed nothing and is not checked against the remaining groups;
+        the other items still run. A group whose labels cannot fit the
+        window refuses the request whatever the documents. ``texts`` holds
+        each document's readable prefix, or None for one whose readable part
         exceeds the per-group character bound.
 
         The first group's context is tokenized and checked alone, so a
@@ -1212,9 +1221,9 @@ class GLiClassAdapter(BaseAdapter):
         item_rows: list[list[str]] = [[] for _ in range(item_count)]
         item_lengths: list[list[int]] | None = [[] for _ in range(item_count)]
         for group, (_, group_labels) in enumerate(label_groups):
+            # Once every item has failed, the remaining groups still run their
+            # request checks (overflow policy, label window) on no rows.
             alive = [index for index, failure in enumerate(failures) if failure is None]
-            if not alive:
-                break
             if group == 1:
                 self._contexts(
                     tokens,
@@ -1235,7 +1244,7 @@ class GLiClassAdapter(BaseAdapter):
                 indices=alive,
             )
             layout = self._request_layout(group_labels, prompt, row_examples, tokens)
-            row_fits = self._items_fit(row_texts, layout, group_labels, prompt, row_examples, tokens=tokens)
+            row_failures = self._item_failures(row_texts, layout, group_labels, prompt, row_examples, tokens=tokens)
             row_counts = self._input_token_counts(
                 row_texts, prompt, row_examples, layout, [True] * len(alive), tokens=tokens
             )
@@ -1245,8 +1254,8 @@ class GLiClassAdapter(BaseAdapter):
             if row_lengths is None:
                 item_lengths = None
             for position, index in enumerate(alive):
-                if not row_fits[position]:
-                    failures[index] = _ERR_ITEM_LABELS_TRUNCATED
+                if row_failures[position] is not None:
+                    failures[index] = row_failures[position]
                     continue
                 item_rows[index].append(row_texts[position])
                 if counts is not None and row_counts is not None:
@@ -1825,16 +1834,18 @@ class GLiClassAdapter(BaseAdapter):
                 "GLiClass instruction, examples and labels leave no room for the document in the "
                 f"model's {window}-token window; shorten the instruction or send fewer examples"
             )
+        prompt_first = bool(getattr(config, "prompt_first", False))
         return _RequestLayout(
-            prompt_first=bool(getattr(config, "prompt_first", False)),
+            prompt_first=prompt_first,
             window=window,
             label_tokens=len(label_ids),
             last_marker=markers[-1],
             context_tokens=prompt_tokens + example_text_tokens,
             overhead_tokens=len(label_ids) + prompt_tokens + examples_tokens,
+            document_room=window - len(label_ids) - prompt_tokens if prompt_first else window,
         )
 
-    def _items_fit(
+    def _item_failures(
         self,
         texts: list[str],
         layout: _RequestLayout | None,
@@ -1843,29 +1854,42 @@ class GLiClassAdapter(BaseAdapter):
         examples: list[dict[str, Any]] | None,
         *,
         tokens: _RequestTokens | None = None,
-    ) -> list[bool]:
-        """Whether each item's label markers survive truncation.
+    ) -> list[str | None]:
+        """Why each item cannot be scored as sent (an ``INPUT_TOO_LONG`` message), or None.
 
-        Documents are tokenized once, on their own. Tokenizing a document next
-        to the label prompt can differ from that by a token or two (a trailing
-        space before a marker, for example), so items within a few tokens of
-        the window edge are checked exactly on their fused encoding. Counting
-        up to that margin past the window means a document that fills the
-        window by itself is refused without the exact check.
+        A model that reads the labels first keeps every label and cuts the
+        document to the room left after the label prompt and instruction.
+        When that room is under ``_MIN_DOCUMENT_TOKENS``, the model would read
+        none of the document, so every item is refused. Otherwise a longer
+        document is cut, as ``truncate_text`` would cut it.
+
+        A model that reads the document first keeps the document and loses
+        the labels past the window, so an item is refused when its document
+        pushes a label marker out. Documents are tokenized once, on their own.
+        Tokenizing a document next to the label prompt can differ from that by
+        a token or two (a trailing space before a marker, for example), so
+        items within a few tokens of the window edge are checked exactly on
+        their fused encoding. Counting up to that margin past the window means
+        a document that fills the window by itself is refused without the
+        exact check.
         """
-        if layout is None or layout.prompt_first or self._tokenizer is None:
-            return [True] * len(texts)
+        if layout is None or self._tokenizer is None:
+            return [None] * len(texts)
+        if layout.prompt_first:
+            failure = None if layout.document_room >= _MIN_DOCUMENT_TOKENS else _ERR_ITEM_NO_ROOM_FOR_DOCUMENT
+            return [failure] * len(texts)
         tokens = tokens or _RequestTokens(self._tokenizer)
-        fits: list[bool] = []
+        failures: list[str | None] = []
         for text, ids in zip(texts, tokens.cut(texts, layout.window + _FIT_MARGIN_TOKENS), strict=True):
             estimate = len(ids) + layout.last_marker
             if estimate < layout.window - _FIT_MARGIN_TOKENS:
-                fits.append(True)
+                fits = True
             elif estimate >= layout.window + _FIT_MARGIN_TOKENS:
-                fits.append(False)
+                fits = False
             else:
-                fits.append(self._labels_survive(text, list(ids[: layout.window]), labels, prompt, examples))
-        return fits
+                fits = self._labels_survive(text, list(ids[: layout.window]), labels, prompt, examples)
+            failures.append(None if fits else _ERR_ITEM_LABELS_TRUNCATED)
+        return failures
 
     def _labels_survive(
         self,
@@ -1887,17 +1911,17 @@ class GLiClassAdapter(BaseAdapter):
         return ids.count(marker) >= text_ids.count(marker) + len(labels)
 
     @staticmethod
-    def _item_errors(fits: list[bool]) -> list[ExtractItemError | None] | None:
-        """Per-item INPUT_TOO_LONG for items whose labels would be cut off.
+    def _item_errors(failures: list[str | None]) -> list[ExtractItemError | None] | None:
+        """Per-item INPUT_TOO_LONG for items that cannot be scored as sent (see ``_item_failures``).
 
         Reporting these per item keeps one oversized document from failing
         every request batched with it.
         """
-        if all(fits):
+        if all(failure is None for failure in failures):
             return None
         return [
-            None if ok else ExtractItemError(code=ErrorCode.INPUT_TOO_LONG.value, message=_ERR_ITEM_LABELS_TRUNCATED)
-            for ok in fits
+            None if failure is None else ExtractItemError(code=ErrorCode.INPUT_TOO_LONG.value, message=failure)
+            for failure in failures
         ]
 
     def _input_token_counts(
@@ -1918,12 +1942,19 @@ class GLiClassAdapter(BaseAdapter):
         pipeline's marker tokens are not billed. With an instruction or
         examples, a row's total is capped at the model window minus the
         label prompt, the most free-form text it can encode, unless the
-        document count alone is already higher. Items refused because their
-        labels would be cut off are billed nothing.
+        document count alone is already higher. A document counts at most
+        the tokens of it the model reads (``document_room``), so a model that
+        reads the labels first counts what its window keeps after them, as
+        ``truncate_text`` would. Items refused because their labels would be
+        cut off, or because the labels leave no room for the document, are
+        billed nothing.
         """
         counts = self._doc_input_token_counts(texts, tokens)
         if counts is None:
             return None
+        if layout is not None:
+            readable = max(layout.document_room, 0) + self._special_count
+            counts = [min(count, readable) for count in counts]
         if prompt or examples:
             if layout is not None:
                 context_tokens = layout.context_tokens
