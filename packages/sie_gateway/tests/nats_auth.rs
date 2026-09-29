@@ -21,13 +21,20 @@ use sie_gateway::queue::publisher::{WorkPublisher, WorkStreamConfig};
 use sie_gateway::state::config_epoch::ConfigEpoch;
 use sie_gateway::state::model_registry::ModelRegistry;
 
-const CONFIG_PASSWORD: &str = "ConfigPassword0123456789abcdefghij";
-const GATEWAY_PASSWORD: &str = "GatewayPassword0123456789abcdefghi";
-const WORKER_PASSWORD: &str = "WorkerPassword0123456789abcdefghij";
+struct Passwords {
+    config: String,
+    gateway: String,
+    worker: String,
+}
+
+fn random_password() -> String {
+    uuid::Uuid::new_v4().simple().to_string()
+}
 
 struct NatsServer {
     child: Child,
     url: String,
+    passwords: Passwords,
     _dir: tempfile::TempDir,
 }
 
@@ -65,6 +72,11 @@ async fn start_nats() -> Option<NatsServer> {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/ci/fixtures/sie-cluster-nats.conf");
     let dir = tempfile::tempdir().expect("tempdir");
     let port = free_port();
+    let passwords = Passwords {
+        config: random_password(),
+        gateway: random_password(),
+        worker: random_password(),
+    };
     let child = Command::new(binary)
         .arg("-c")
         .arg(&config)
@@ -75,9 +87,9 @@ async fn start_nats() -> Option<NatsServer> {
         .arg("-P")
         .arg(dir.path().join("nats.pid"))
         .env("SERVER_NAME", "sie-gateway-auth-test")
-        .env("SIE_NATS_AUTH_CONFIG_PASSWORD", CONFIG_PASSWORD)
-        .env("SIE_NATS_AUTH_GATEWAY_PASSWORD", GATEWAY_PASSWORD)
-        .env("SIE_NATS_AUTH_WORKER_PASSWORD", WORKER_PASSWORD)
+        .env("SIE_NATS_AUTH_CONFIG_PASSWORD", &passwords.config)
+        .env("SIE_NATS_AUTH_GATEWAY_PASSWORD", &passwords.gateway)
+        .env("SIE_NATS_AUTH_WORKER_PASSWORD", &passwords.worker)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -85,6 +97,7 @@ async fn start_nats() -> Option<NatsServer> {
     let server = NatsServer {
         child,
         url: format!("nats://127.0.0.1:{port}"),
+        passwords,
         _dir: dir,
     };
     for _ in 0..200 {
@@ -104,11 +117,11 @@ async fn connect_as(url: &str, user: &str, password: &str) -> async_nats::Client
         .unwrap_or_else(|e| panic!("connect as {user}: {e}"))
 }
 
-async fn connect_worker(url: &str) -> async_nats::Client {
+async fn connect_worker(nats: &NatsServer) -> async_nats::Client {
     async_nats::ConnectOptions::new()
-        .user_and_password("sie-worker".to_string(), WORKER_PASSWORD.to_string())
+        .user_and_password("sie-worker".to_string(), nats.passwords.worker.clone())
         .custom_inbox_prefix("_INBOX_WORKER")
-        .connect(url)
+        .connect(&nats.url)
         .await
         .expect("connect as sie-worker")
 }
@@ -144,7 +157,7 @@ async fn anonymous_and_wrong_password_connections_are_refused() {
         .await
         .is_err());
     assert!(async_nats::ConnectOptions::new()
-        .user_and_password("sie-gateway".into(), WORKER_PASSWORD.into())
+        .user_and_password("sie-gateway".into(), nats.passwords.worker.clone())
         .connect(&nats.url)
         .await
         .is_err());
@@ -167,7 +180,7 @@ async fn gateway_takes_config_deltas_only_from_the_sie_config_user() {
         )
         .with_credentials(Some(NatsCredentials {
             user: "sie-gateway".to_string(),
-            password: GATEWAY_PASSWORD.to_string(),
+            password: nats.passwords.gateway.clone(),
         })),
     );
     manager.connect().await.expect("gateway connect");
@@ -181,7 +194,7 @@ async fn gateway_takes_config_deltas_only_from_the_sie_config_user() {
     manager.start_subscription().await;
     client.flush().await.expect("gateway flush");
 
-    let config = connect_as(&nats.url, "sie-config", CONFIG_PASSWORD).await;
+    let config = connect_as(&nats.url, "sie-config", &nats.passwords.config).await;
     config
         .publish("sie.config.models._all", epoch_bump(5))
         .await
@@ -192,14 +205,14 @@ async fn gateway_takes_config_deltas_only_from_the_sie_config_user() {
         "the gateway applies a delta from sie-config"
     );
 
-    let observer = connect_as(&nats.url, "sie-gateway", GATEWAY_PASSWORD).await;
+    let observer = connect_as(&nats.url, "sie-gateway", &nats.passwords.gateway).await;
     let mut seen = observer
         .subscribe("sie.config.models._all")
         .await
         .expect("subscribe");
     observer.flush().await.expect("observer flush");
 
-    let worker = connect_worker(&nats.url).await;
+    let worker = connect_worker(&nats).await;
     worker
         .publish("sie.config.models._all", epoch_bump(7))
         .await
@@ -250,7 +263,7 @@ async fn gateway_user_manages_work_streams_but_cannot_delete_them() {
     let Some(nats) = start_nats().await else {
         return;
     };
-    let gateway = connect_as(&nats.url, "sie-gateway", GATEWAY_PASSWORD).await;
+    let gateway = connect_as(&nats.url, "sie-gateway", &nats.passwords.gateway).await;
     let publisher = WorkPublisher::new(
         jetstream::new(gateway.clone()),
         "gateway-auth-test".to_string(),

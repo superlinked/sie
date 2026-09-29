@@ -2075,14 +2075,14 @@ mod tests {
                 );
             },
         );
-        for (user, password) in [("sie-gateway", ""), ("", "pw")] {
+        for (case, user, password) in [
+            ("user only", "sie-gateway", ""),
+            ("password only", "", "pw"),
+        ] {
             with_env(
                 &[("SIE_NATS_USER", user), ("SIE_NATS_PASSWORD", password)],
                 || {
-                    assert!(
-                        Config::load().nats_credentials().is_err(),
-                        "user={user:?} password={password:?}"
-                    );
+                    assert!(Config::load().nats_credentials().is_err(), "{case}");
                 },
             );
         }

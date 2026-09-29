@@ -16,13 +16,20 @@ use futures_util::StreamExt;
 use sie_server_sidecar::config::{NatsCredentials, WorkerConfig};
 use sie_server_sidecar::nats_consumer;
 
-const CONFIG_PASSWORD: &str = "ConfigPassword0123456789abcdefghij";
-const GATEWAY_PASSWORD: &str = "GatewayPassword0123456789abcdefghi";
-const WORKER_PASSWORD: &str = "WorkerPassword0123456789abcdefghij";
+struct Passwords {
+    config: String,
+    gateway: String,
+    worker: String,
+}
+
+fn random_password() -> String {
+    uuid::Uuid::new_v4().simple().to_string()
+}
 
 struct NatsServer {
     child: Child,
     url: String,
+    passwords: Passwords,
     _dir: tempfile::TempDir,
 }
 
@@ -60,6 +67,11 @@ async fn start_nats() -> Option<NatsServer> {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/ci/fixtures/sie-cluster-nats.conf");
     let dir = tempfile::tempdir().expect("tempdir");
     let port = free_port();
+    let passwords = Passwords {
+        config: random_password(),
+        gateway: random_password(),
+        worker: random_password(),
+    };
     let child = Command::new(binary)
         .arg("-c")
         .arg(&config)
@@ -70,9 +82,9 @@ async fn start_nats() -> Option<NatsServer> {
         .arg("-P")
         .arg(dir.path().join("nats.pid"))
         .env("SERVER_NAME", "sie-sidecar-auth-test")
-        .env("SIE_NATS_AUTH_CONFIG_PASSWORD", CONFIG_PASSWORD)
-        .env("SIE_NATS_AUTH_GATEWAY_PASSWORD", GATEWAY_PASSWORD)
-        .env("SIE_NATS_AUTH_WORKER_PASSWORD", WORKER_PASSWORD)
+        .env("SIE_NATS_AUTH_CONFIG_PASSWORD", &passwords.config)
+        .env("SIE_NATS_AUTH_GATEWAY_PASSWORD", &passwords.gateway)
+        .env("SIE_NATS_AUTH_WORKER_PASSWORD", &passwords.worker)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -80,6 +92,7 @@ async fn start_nats() -> Option<NatsServer> {
     let server = NatsServer {
         child,
         url: format!("nats://127.0.0.1:{port}"),
+        passwords,
         _dir: dir,
     };
     for _ in 0..200 {
@@ -99,17 +112,17 @@ async fn connect_as(url: &str, user: &str, password: &str) -> async_nats::Client
         .unwrap_or_else(|e| panic!("connect as {user}: {e}"))
 }
 
-fn worker_credentials() -> NatsCredentials {
+fn worker_credentials(nats: &NatsServer) -> NatsCredentials {
     NatsCredentials {
         user: "sie-worker".to_string(),
-        password: WORKER_PASSWORD.to_string(),
+        password: nats.passwords.worker.clone(),
     }
 }
 
-fn worker_config(url: &str) -> WorkerConfig {
+fn worker_config(nats: &NatsServer) -> WorkerConfig {
     WorkerConfig {
-        nats_url: Some(url.to_string()),
-        nats_credentials: Some(worker_credentials()),
+        nats_url: Some(nats.url.clone()),
+        nats_credentials: Some(worker_credentials(nats)),
         local_socket_path: None,
         pool: "authpool".into(),
         bundle: "default".into(),
@@ -152,7 +165,7 @@ async fn worker_user_consumes_work_and_returns_results() {
     let Some(nats) = start_nats().await else {
         return;
     };
-    let config = worker_config(&nats.url);
+    let config = worker_config(&nats);
     let (worker, js) = nats_consumer::connect(&nats.url, config.nats_credentials.as_ref())
         .await
         .expect("connect as sie-worker");
@@ -163,7 +176,7 @@ async fn worker_user_consumes_work_and_returns_results() {
         .await
         .expect("the worker user provisions its direct-dispatch stream and consumer");
 
-    let gateway = connect_as(&nats.url, "sie-gateway", GATEWAY_PASSWORD).await;
+    let gateway = connect_as(&nats.url, "sie-gateway", &nats.passwords.gateway).await;
     let mut results = gateway
         .subscribe("_INBOX.gateway-auth-test.>")
         .await
@@ -202,7 +215,7 @@ async fn worker_user_is_refused_outside_its_subjects() {
     let Some(nats) = start_nats().await else {
         return;
     };
-    let config = worker_config(&nats.url);
+    let config = worker_config(&nats);
     let (worker, js) = nats_consumer::connect(&nats.url, config.nats_credentials.as_ref())
         .await
         .expect("connect as sie-worker");
@@ -210,7 +223,7 @@ async fn worker_user_is_refused_outside_its_subjects() {
         .await
         .expect("pool stream");
 
-    let gateway = connect_as(&nats.url, "sie-gateway", GATEWAY_PASSWORD).await;
+    let gateway = connect_as(&nats.url, "sie-gateway", &nats.passwords.gateway).await;
     let mut config_deltas = gateway
         .subscribe("sie.config.models._all")
         .await
@@ -234,7 +247,7 @@ async fn worker_user_is_refused_outside_its_subjects() {
         .publish("cancel.gateway-auth-test.req-1", "".into())
         .await
         .expect("publish is sent");
-    let other_worker = nats_consumer::connect(&nats.url, Some(&worker_credentials()))
+    let other_worker = nats_consumer::connect(&nats.url, Some(&worker_credentials(&nats)))
         .await
         .expect("second worker")
         .0;
@@ -274,16 +287,26 @@ async fn worker_user_is_refused_outside_its_subjects() {
 
 #[test]
 fn help_does_not_print_nats_secrets() {
+    let url_password = random_password();
+    let password = random_password();
     let output = Command::new(env!("CARGO_BIN_EXE_sie-server-sidecar"))
         .arg("--help")
-        .env("SIE_NATS_URL", "nats://url-user:url-secret@nats:4222")
+        .env(
+            "SIE_NATS_URL",
+            format!("nats://url-user:{url_password}@nats:4222"),
+        )
         .env("SIE_NATS_USER", "sie-worker")
-        .env("SIE_NATS_PASSWORD", "nats-password-secret")
+        .env("SIE_NATS_PASSWORD", &password)
         .output()
         .expect("run --help");
     assert!(output.status.success());
     let help = String::from_utf8_lossy(&output.stdout);
-    for secret in ["url-secret", "nats-password-secret"] {
-        assert!(!help.contains(secret), "--help printed {secret}: {help}");
-    }
+    assert!(
+        !help.contains(&url_password),
+        "--help printed the URL password"
+    );
+    assert!(
+        !help.contains(&password),
+        "--help printed SIE_NATS_PASSWORD"
+    );
 }
