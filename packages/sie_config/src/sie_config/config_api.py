@@ -411,6 +411,11 @@ def _extract_bearer_token(header: str) -> str:
     return value
 
 
+def _token_matches(presented: str, expected: str) -> bool:
+    """Constant-time comparison that also accepts non-ASCII header values."""
+    return hmac.compare_digest(presented.encode(), expected.encode())
+
+
 def _check_read_auth(request: Request) -> None:
     """Validate read auth (inference token or admin token)."""
     auth_token = os.environ.get("SIE_AUTH_TOKEN")
@@ -422,8 +427,8 @@ def _check_read_auth(request: Request) -> None:
     token = _extract_bearer_token(request.headers.get("Authorization", ""))
     if not token:
         raise HTTPException(status_code=401, detail="Missing Authorization header")
-    token_match = (auth_token is not None and hmac.compare_digest(token, auth_token)) or (
-        admin_token is not None and hmac.compare_digest(token, admin_token)
+    token_match = (auth_token is not None and _token_matches(token, auth_token)) or (
+        admin_token is not None and _token_matches(token, admin_token)
     )
     if not token_match:
         raise HTTPException(status_code=403, detail="Invalid token")
@@ -446,7 +451,7 @@ def _check_write_auth(request: Request) -> None:
     token = _extract_bearer_token(request.headers.get("Authorization", ""))
     if not token:
         raise HTTPException(status_code=401, detail="Missing Authorization header")
-    if not hmac.compare_digest(token, admin_token):
+    if not _token_matches(token, admin_token):
         raise HTTPException(status_code=403, detail="Admin token required for config mutations")
 
 
