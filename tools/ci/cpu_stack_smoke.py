@@ -55,26 +55,53 @@ def wait_health(url: str, timeout: float = 180) -> None:
     raise RuntimeError(f"Container health did not become ready: {url}")
 
 
-def config_models(config_url: str, token: str | None = None) -> set[str]:
+def config_models(config_url: str, token: str) -> set[str]:
     request = urllib.request.Request(f"{config_url}/v1/configs/models")
-    if token is not None:
-        request.add_header("Authorization", f"Bearer {token}")
+    request.add_header("Authorization", f"Bearer {token}")
     with urllib.request.urlopen(request, timeout=10) as response:
         return {model["model_id"] for model in json.load(response)["models"]}
 
 
-def require_authenticated_catalog(config_url: str, token: str) -> set[str]:
+def config_status(config_url: str, path: str, token: str | None = None, body: bytes | None = None) -> int:
+    request = urllib.request.Request(f"{config_url}{path}", data=body, method="GET" if body is None else "POST")
+    if token is not None:
+        request.add_header("Authorization", f"Bearer {token}")
     try:
-        config_models(config_url)
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return response.status
     except urllib.error.HTTPError as error:
-        if error.code != 401:
-            raise RuntimeError(f"sie-config answered an unauthenticated catalog read with {error.code}") from error
-    else:
-        raise RuntimeError("sie-config served its catalog without the admin token")
-    catalog = config_models(config_url, token)
+        return error.code
+
+
+def require_read_scoped_catalog(config_url: str, read_token: str) -> set[str]:
+    write = b"sie_id: ci/read-token-probe\nprofiles:\n  default:\n    adapter_path: a:B\n    max_batch_tokens: 1\n"
+    checks = {
+        "unauthenticated catalog read": (config_status(config_url, "/v1/configs/models"), 401),
+        "read-token epoch": (config_status(config_url, "/v1/configs/epoch", read_token), 200),
+        "read-token export": (config_status(config_url, "/v1/configs/export", read_token), 200),
+        "read-token write": (config_status(config_url, "/v1/configs/models", read_token, write), 403),
+    }
+    wrong = {name: status for name, (status, expected) in checks.items() if status != expected}
+    if wrong:
+        raise RuntimeError(f"sie-config read-token scope is wrong: {wrong}")
+    catalog = config_models(config_url, read_token)
     if not catalog:
         raise RuntimeError("sie-config returned an empty model catalog")
+    print("sie-config serves the epoch, export and catalog to the read token and refuses its write.")
     return catalog
+
+
+def require_sidecar_export_reconcile(container: str, timeout: float = 120) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        logs = docker("logs", container, check=False)
+        if "worker-config: startup export reconcile failed" in logs:
+            raise RuntimeError("Worker sidecar could not fetch the sie-config export with the read token")
+        if "worker-config: startup export reconcile" in logs:
+            print("Worker sidecar fetched the sie-config export with the read token.")
+            return
+        time.sleep(2)
+    raise RuntimeError("Worker sidecar did not report its startup export reconcile")
 
 
 def require_gateway_catalog(gateway_url: str, catalog: set[str]) -> None:
@@ -83,7 +110,7 @@ def require_gateway_catalog(gateway_url: str, catalog: set[str]) -> None:
     missing = sorted(catalog - listed)
     if missing:
         raise RuntimeError(f"Gateway is missing {len(missing)} sie-config catalog models, for example {missing[:5]}")
-    print(f"Gateway loaded the {len(catalog)}-model sie-config catalog through the admin token.")
+    print(f"Gateway loaded the {len(catalog)}-model sie-config catalog through the read token.")
 
 
 def build_images(registry: str, revision: str) -> None:
@@ -135,15 +162,16 @@ def main() -> None:
 
         try:
             start("nats", "nats:2.11.8-alpine", command=("-js",))
-            admin_token = secrets.token_urlsafe(32)
+            read_token = secrets.token_urlsafe(32)
             config_env = {
                 "SIE_NATS_URL": "nats://nats:4222",
                 "SIE_DEPLOYMENT_ENV": "production",
-                "SIE_ADMIN_TOKEN": admin_token,
+                "SIE_ADMIN_TOKEN": secrets.token_urlsafe(32),
+                "SIE_CONFIG_READ_TOKEN": read_token,
             }
             config_url = start("config", image("sie-config"), env=config_env, port=8080)
             wait_health(f"{config_url}/readyz")
-            catalog = require_authenticated_catalog(config_url, admin_token)
+            catalog = require_read_scoped_catalog(config_url, read_token)
             worker_env = {
                 "SIE_POOL": "default",
                 "SIE_BUNDLE": "fake",
@@ -165,7 +193,7 @@ def main() -> None:
             gateway_env = {
                 "SIE_NATS_URL": "nats://nats:4222",
                 "SIE_CONFIG_SERVICE_URL": "http://config:8080",
-                "SIE_ADMIN_TOKEN": admin_token,
+                "SIE_CONFIG_SERVICE_TOKEN": read_token,
                 "SIE_GATEWAY_HEALTH_MODE": "nats",
                 "SIE_GATEWAY_ENABLE_POOLS": "1",
                 "SIE_GATEWAY_REQUEST_TIMEOUT": "60",
@@ -190,10 +218,11 @@ def main() -> None:
                     "SIE_WORKER_ID": "cpu-smoke",
                     "SIE_GATEWAY_URL": "http://gateway:8080",
                     "SIE_CONFIG_SERVICE_URL": "http://config:8080",
-                    "SIE_ADMIN_TOKEN": admin_token,
+                    "SIE_CONFIG_SERVICE_TOKEN": read_token,
                 },
             )
             wait_health(f"{sidecar_url}/readyz")
+            require_sidecar_export_reconcile(f"{network}-sidecar")
             wait_health(f"{gateway_url}/readyz")
             require_gateway_catalog(gateway_url, catalog)
             wait_for_api(gateway_url)

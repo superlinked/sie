@@ -484,6 +484,12 @@ When `SIE_CONFIG_SERVICE_URL` is configured, the export reconciler fetches
 exports are sent to the backend through `ReplaceModelConfigs`, with the
 export's `bundle_adapters` list for this bundle.
 
+The reconciler authenticates with `SIE_CONFIG_SERVICE_TOKEN`
+(`--config-service-token`), `sie-config`'s read-scoped `SIE_CONFIG_READ_TOKEN`,
+which cannot write configs. When the variable is set it decides, and a blank
+value sends no token. When it is unset, the sidecar falls back to
+`SIE_ADMIN_TOKEN` and logs a deprecation warning at startup.
+
 Export reconciliation skips unchanged periodic exports. Exports older than the
 local epoch are skipped unless the reconciler is handling an epoch-rewind
 recovery. Partial or rejected replacements do not update the advertised bundle
