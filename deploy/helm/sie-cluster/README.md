@@ -1207,12 +1207,19 @@ termination through your provider's load-balancer annotations in
 is the configuration write authority and accepts unauthenticated writes unless
 an admin token is configured.
 
-Independently of auth, the gateway bounds API-created pools: the warm floor
-(`minimum_worker_count`, which applies to each of the pool's machine profiles)
-and the `gpus` requirement may each add up to at most 4 workers per pool by
-default, and a pool's active lease keeps at most its requirement warm, the lease TTL (default cap 3600 s), and the
-number of live pools (default cap 64, counted by each gateway replica). Tune
-them with `SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT`,
+Independently of auth, the gateway bounds API-created pools:
+
+- the warm floor (`minimum_worker_count`, which applies to each of the pool's
+  machine profiles) and the `gpus` requirement may each add up to at most 4
+  workers per pool by default, and a pool's active lease keeps at most its
+  requirement warm;
+- the lease TTL is capped at 3600 s by default;
+- live API-created pools are capped at 64 by default. Each gateway replica
+  checks the pools it knows, including ones replicated from other replicas,
+  so concurrent creates on different replicas can briefly exceed the cap; it
+  is not a strict cluster-wide limit.
+
+Tune them with `SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT`,
 `SIE_GATEWAY_POOL_MAX_TTL_S`, and `SIE_GATEWAY_MAX_POOLS` in `gateway.extraEnv`.
 
 > **Upgrade note (breaking):** `values-aws.yaml`, `values-gke.yaml`, and
