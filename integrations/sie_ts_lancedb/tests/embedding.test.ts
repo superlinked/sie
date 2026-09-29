@@ -258,4 +258,46 @@ describe("SIEReranker", () => {
     const reranker = new SIEReranker(options);
     expect(reranker).toBeInstanceOf(SIEReranker);
   });
+
+  it("rerankHybrid maps the server's item ids back to their rows", async () => {
+    const { SIEClient } = await import("@superlinked/sie-sdk");
+    const arrow = await import("apache-arrow");
+    const relevance: Record<string, number> = { "Doc A": 0.25, "Doc B": 0.75, "Doc C": 0.5 };
+    // Mirrors the SIE server: entries sorted by relevance, each `itemId`
+    // echoing the item's `id` or `item-<index>` without one.
+    const mockScore = vi.fn(
+      async (model: string, _query: unknown, items: { id?: string; text?: string }[]) => ({
+        model,
+        scores: items
+          .map((item, index) => ({
+            itemId: item.id ?? `item-${index}`,
+            score: relevance[item.text ?? ""] ?? 0,
+          }))
+          .sort((a, b) => b.score - a.score)
+          .map((entry, rank) => ({ ...entry, rank })),
+      }),
+    );
+    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+      asConstructor({
+        score: mockScore,
+        close: vi.fn(),
+      }),
+    );
+    const vecResults = arrow.tableFromArrays({ text: ["Doc A", "Doc B"], _rowid: [0, 1] })
+      .batches[0];
+    const ftsResults = arrow.tableFromArrays({ text: ["Doc B", "Doc C"], _rowid: [1, 2] })
+      .batches[0];
+    if (!vecResults || !ftsResults) {
+      throw new Error("Failed to build result batches");
+    }
+
+    const reranker = new SIEReranker();
+    const batch = await reranker.rerankHybrid("query", vecResults, ftsResults);
+
+    const rows = Array.from({ length: batch.numRows }, (_, i) => [
+      batch.getChild("text")?.get(i),
+      batch.getChild("_relevance_score")?.get(i),
+    ]);
+    expect(Object.fromEntries(rows)).toEqual(relevance);
+  });
 });

@@ -7,9 +7,14 @@ Fixtures are automatically available to all tests under integrations/.
 from __future__ import annotations
 
 import os
+import re
+import threading
+from collections.abc import Iterator
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from unittest.mock import NonCallableMagicMock, create_autospec
 
+import msgpack
 import numpy as np
 import pytest
 from sie_sdk import SIEAsyncClient, SIEClient
@@ -88,6 +93,16 @@ def _create_mock_encode_result(
         result["multivector"] = rng.standard_normal((num_tokens, DEFAULT_MULTIVECTOR_TOKEN_DIM)).astype(np.float32)
 
     return result
+
+
+def _server_item_id(item: Any, index: int) -> str:
+    """Return the ``item_id`` the SIE server reports for a scored item.
+
+    The server echoes an item's ``id`` and reports ``item-<index>`` for an item
+    sent without one.
+    """
+    item_id = item.get("id") if isinstance(item, dict) else None
+    return item_id if item_id is not None else f"item-{index}"
 
 
 def _create_mock_score_result(query: str, items: list[dict]) -> list[dict[str, Any]]:
@@ -207,10 +222,7 @@ def mock_sie_client() -> NonCallableMagicMock:
         ...}`` envelope with ranked entries under ``scores`` (not a bare list).
         """
         query_text = _get_text(query)
-        item_dicts = [
-            {"id": i.get("id", str(idx)) if isinstance(i, dict) else str(idx), "text": _get_text(i)}
-            for idx, i in enumerate(items)
-        ]
+        item_dicts = [{"id": _server_item_id(i, idx), "text": _get_text(i)} for idx, i in enumerate(items)]
         return {
             "model": _model,
             "scores": _create_mock_score_result(query_text, item_dicts),
@@ -269,10 +281,7 @@ def mock_sie_async_client() -> NonCallableMagicMock:
 
     async def mock_score(_model: str, query: Any, items: list[Any], **kwargs: Any) -> dict[str, Any]:
         query_text = _get_text(query)
-        item_dicts = [
-            {"id": i.get("id", str(idx)) if isinstance(i, dict) else str(idx), "text": _get_text(i)}
-            for idx, i in enumerate(items)
-        ]
+        item_dicts = [{"id": _server_item_id(i, idx), "text": _get_text(i)} for idx, i in enumerate(items)]
         return {
             "model": _model,
             "scores": _create_mock_score_result(query_text, item_dicts),
@@ -291,6 +300,82 @@ def mock_sie_async_client() -> NonCallableMagicMock:
     client.base_url = "http://localhost:8080"
 
     return client
+
+
+def _query_word_overlap(query: str, text: str) -> float:
+    """Count the distinct query words that appear in ``text``."""
+    query_words = set(re.findall(r"[a-z0-9]+", query.lower()))
+    return float(len(query_words & set(re.findall(r"[a-z0-9]+", text.lower()))))
+
+
+class _ScoreStubServer:
+    """Local HTTP server that answers ``POST /v1/score/{model}`` in the SIE server's wire format.
+
+    An item's score is the number of distinct query words it contains. Entries
+    are sorted by descending score, ranked from 0, and carry the ``item_id`` the
+    SIE server reports (see ``_server_item_id``). Decoded request bodies are
+    recorded in ``requests``.
+    """
+
+    def __init__(self) -> None:
+        self.requests: list[dict[str, Any]] = []
+        stub = self
+
+        class _Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_POST(self) -> None:
+                body = msgpack.unpackb(self.rfile.read(int(self.headers.get("Content-Length") or 0)), raw=False)
+                stub.requests.append(body)
+                reply = msgpack.packb(
+                    {"model": self.path.removeprefix("/v1/score/"), "scores": _stub_score_entries(body)},
+                    use_bin_type=True,
+                )
+                self.send_response(200)
+                self.send_header("Content-Type", "application/msgpack")
+                self.send_header("Content-Length", str(len(reply)))
+                self.end_headers()
+                self.wfile.write(reply)
+
+            def log_message(self, *_args: Any) -> None:
+                return None
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+        self._server.daemon_threads = True
+        self._thread = threading.Thread(target=self._server.serve_forever, args=(0.01,), daemon=True)
+        self._thread.start()
+
+    @property
+    def url(self) -> str:
+        host, port = self._server.server_address[:2]
+        return f"http://{host!s}:{port}"
+
+    def close(self) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+
+
+def _stub_score_entries(body: dict[str, Any]) -> list[dict[str, Any]]:
+    query = body["query"].get("text") or ""
+    scored = sorted(
+        (
+            (_server_item_id(item, index), _query_word_overlap(query, item.get("text") or ""))
+            for index, item in enumerate(body["items"])
+        ),
+        key=lambda pair: pair[1],
+        reverse=True,
+    )
+    return [{"item_id": item_id, "score": score, "rank": rank} for rank, (item_id, score) in enumerate(scored)]
+
+
+@pytest.fixture
+def score_stub_server() -> Iterator[_ScoreStubServer]:
+    """A running ``_ScoreStubServer``; point a real ``SIEClient`` at its ``url``."""
+    server = _ScoreStubServer()
+    try:
+        yield server
+    finally:
+        server.close()
 
 
 @pytest.fixture

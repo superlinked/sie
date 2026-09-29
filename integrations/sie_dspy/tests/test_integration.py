@@ -97,7 +97,9 @@ class TestRAGPipeline:
 
         assert len(result.passages) == 2
         assert len(result.scores) == 2
-        # Top results should be about ML/neural networks
+        assert result.scores == sorted(result.scores, reverse=True)
+        assert result.passages[0] == "Neural networks learn through backpropagation algorithms."
+        assert not {retrieved_passages[0], retrieved_passages[2]} & set(result.passages)
 
 
 class TestProgramOptimization:
@@ -195,6 +197,8 @@ class TestResearchWorkflows:
             k=2,
         )
         assert len(reranked.passages) == 2
+        assert reranked.scores == sorted(reranked.scores, reverse=True)
+        assert reranked.passages[0] == papers[0]
 
         # Step 3: Extract key information
         extractor = SIEExtractor(
@@ -276,3 +280,5 @@ class TestModuleComposition:
 
         assert len(result.passages) == 2
         assert len(result.scores) == 2
+        assert result.scores == sorted(result.scores, reverse=True)
+        assert result.passages[0] == "TensorFlow and PyTorch are deep learning frameworks."

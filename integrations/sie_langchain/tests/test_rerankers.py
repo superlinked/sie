@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from typing import Any
 
 import pytest
 from langchain_core.documents import Document
@@ -37,6 +38,15 @@ _MALFORMED_ENVELOPE = {
         {"item_id": True, "score": 0.98, "rank": 6},
     ],
 }
+
+_STUB_QUERY = "vector similarity search"
+_STUB_DOCUMENTS = [
+    "The weather today is sunny with clear skies.",
+    "Python is a popular programming language.",
+    "Nearest neighbor search uses distance metrics.",
+    "Vector similarity search finds similar embeddings.",
+]
+_STUB_RANKING = [_STUB_DOCUMENTS[i] for i in (3, 2, 0, 1)]
 
 
 class TestSIEReranker:
@@ -87,6 +97,16 @@ class TestSIEReranker:
         by_content = {d.page_content: d.metadata["relevance_score"] for d in result}
         assert by_content == {"doc-1": 0.8, "doc-0": 0.0, "doc-2": 0.0}
         assert result[0].page_content == "doc-1"
+
+    def test_compress_documents_ranks_through_sie_client(self, score_stub_server: Any) -> None:
+        """Scores returned by a real ``SIEClient.score()`` call rank the matching document first."""
+        reranker = SIEReranker(base_url=score_stub_server.url, model="test-reranker")
+        documents = [Document(page_content=text) for text in _STUB_DOCUMENTS]
+
+        result = reranker.compress_documents(documents, _STUB_QUERY)
+
+        assert [d.page_content for d in result] == _STUB_RANKING
+        assert [d.metadata["relevance_score"] for d in result] == [3.0, 1.0, 0.0, 0.0]
 
     def test_compress_documents_empty(self, mock_sie_client: object) -> None:
         """Test reranking empty list returns empty."""
@@ -143,6 +163,20 @@ class TestSIERerankerAsync:
         assert len(result) > 0
         for doc in result:
             assert "relevance_score" in doc.metadata
+
+    @pytest.mark.asyncio
+    async def test_acompress_documents_ranks_through_sie_client(self, score_stub_server: Any) -> None:
+        """Scores returned by a real ``SIEAsyncClient.score()`` call rank the matching document first."""
+        reranker = SIEReranker(base_url=score_stub_server.url, model="test-reranker")
+        documents = [Document(page_content=text) for text in _STUB_DOCUMENTS]
+
+        try:
+            result = await reranker.acompress_documents(documents, _STUB_QUERY)
+        finally:
+            await reranker.async_client.close()
+
+        assert [d.page_content for d in result] == _STUB_RANKING
+        assert [d.metadata["relevance_score"] for d in result] == [3.0, 1.0, 0.0, 0.0]
 
     @pytest.mark.asyncio
     async def test_acompress_documents_empty(self, mock_sie_async_client: object) -> None:

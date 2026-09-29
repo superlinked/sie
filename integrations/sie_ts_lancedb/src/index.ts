@@ -286,14 +286,16 @@ export class SIEReranker {
     }
 
     // Score with SIE
-    const items = texts.map((text) => ({ text }));
+    const items = texts.map((text, idx) => ({ id: String(idx), text }));
     const scoreResult: ScoreResult = await this.client.score(this.model, { text: query }, items);
 
-    // Build score array indexed by input position
+    // Build score array indexed by input position; each entry's itemId echoes
+    // the id sent for its row.
+    const positions = new Map(items.map((item, idx) => [item.id, idx]));
     const scores = new Float32Array(texts.length);
     for (const entry of scoreResult.scores) {
-      const idx = typeof entry.itemId === "string" ? Number.parseInt(entry.itemId) : entry.itemId;
-      if (idx < scores.length) {
+      const idx = positions.get(entry.itemId);
+      if (idx !== undefined) {
         scores[idx] = entry.score;
       }
     }

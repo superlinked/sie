@@ -24,10 +24,11 @@ def _raise_for_item_error(result: Any) -> None:
 def _scores_by_index(results: Mapping[str, Any], count: int) -> list[float]:
     """Map ScoreResult entries back to input positions by item_id.
 
-    Parses each entry's ``item_id`` defensively: a missing, non-integer,
-    negative, or out-of-range id is skipped (that passage keeps its 0.0
-    default) so a malformed entry can neither crash the rerank nor mis-assign a
-    score to the wrong passage.
+    Each input is sent with ``id=str(position)``, which the server echoes as
+    the entry's ``item_id``. Only an exact echo of a sent id is used: an entry
+    whose ``item_id`` is missing, not a string, or not a sent id is skipped
+    (that passage keeps its 0.0 default), so a malformed entry can neither
+    crash the rerank nor mis-assign a score to the wrong passage.
 
     Args:
         results: ScoreResult envelope from ``SIEClient.score()``.
@@ -36,25 +37,12 @@ def _scores_by_index(results: Mapping[str, Any], count: int) -> list[float]:
     Returns:
         Scores indexed by input position (0.0 for any unscored/invalid item).
     """
+    positions = {str(index): index for index in range(count)}
     scores = [0.0] * count
     for entry in results.get("scores", []):
-        item_id = entry.get("item_id", entry.get("index"))
-        # Accept only a genuine integer or an integer string. Reject bool (an int
-        # subclass, int(True) == 1), float (int(1.5) == 1), and non-integer
-        # strings, so a malformed id cannot silently overwrite the wrong position.
-        if isinstance(item_id, bool):
-            continue
-        if isinstance(item_id, int):
-            idx = item_id
-        elif isinstance(item_id, str):
-            try:
-                idx = int(item_id)
-            except ValueError:
-                continue
-        else:
-            continue
-        if 0 <= idx < count:
-            scores[idx] = float(entry.get("score", 0.0))
+        item_id = entry.get("item_id")
+        if isinstance(item_id, str) and item_id in positions:
+            scores[positions[item_id]] = float(entry.get("score", 0.0))
     return scores
 
 
@@ -177,17 +165,17 @@ class SIEReranker(dspy.Module):
         from sie_sdk.types import Item
 
         query_item = Item(text=query)
-        passage_items = [Item(text=p) for p in passages]
+        passage_items = [Item(text=p, id=str(idx)) for idx, p in enumerate(passages)]
 
         results = self.client.score(self._model, query_item, passage_items)
 
         # ``results`` is a ScoreResult envelope; ranked entries are under
-        # ``results["scores"]`` (each a ScoreEntry keyed by ``item_id`` = input
-        # position, plus ``score``). Map scores back to input order by item_id
-        # rather than zipping positionally — the entries are sorted by relevance,
-        # not by input order. ``results["request"]`` (request id) and
-        # ``results["usage"]`` (token usage) are also available but intentionally
-        # not surfaced here.
+        # ``results["scores"]`` (each a ScoreEntry whose ``item_id`` echoes the
+        # input position sent as the item ``id``, plus ``score``). Map scores
+        # back to input order by item_id rather than zipping positionally — the
+        # entries are sorted by relevance, not by input order.
+        # ``results["request"]`` (request id) and ``results["usage"]`` (token
+        # usage) are also available but intentionally not surfaced here.
         score_by_index = _scores_by_index(results, len(passages))
 
         # Build scored passages

@@ -146,16 +146,19 @@ export class SIEReranker extends BaseDocumentCompressor {
     }
 
     const queryItem = { text: query };
-    const docItems = documents.map((doc) => ({ text: doc.pageContent }));
+    const docItems = documents.map((doc, idx) => ({ id: String(idx), text: doc.pageContent }));
 
     const result = await this.client.score(this.model, queryItem, docItems);
 
     // Map score entries back to documents with relevance_score in metadata.
-    // ScoreResult.scores are already sorted by score descending.
+    // ScoreResult.scores are already sorted by score descending, and each
+    // entry's itemId echoes the id sent for its document.
+    const positions = new Map(docItems.map((item, idx) => [item.id, idx]));
     const reranked: DocumentInterface[] = [];
     for (const entry of result.scores) {
-      const idx = Number.parseInt(entry.itemId, 10);
-      const doc = documents[idx];
+      const idx = positions.get(entry.itemId);
+      positions.delete(entry.itemId);
+      const doc = idx === undefined ? undefined : documents[idx];
       if (doc) {
         reranked.push({
           pageContent: doc.pageContent,

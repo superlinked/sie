@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from typing import Any
 
 from haystack import Document
 from sie_haystack import SIERanker
@@ -94,6 +95,21 @@ class TestSIERanker:
         by_content = {d.content: d.meta["score"] for d in ranked}
         assert by_content == {"doc-1": 0.8, "doc-0": 0.0, "doc-2": 0.0}
         assert ranked[0].content == "doc-1"
+
+    def test_run_ranks_through_sie_client(self, score_stub_server: Any) -> None:
+        """Scores returned by a real ``SIEClient.score()`` call rank the matching document first."""
+        documents = [
+            Document(content="The weather today is sunny with clear skies."),
+            Document(content="Python is a popular programming language."),
+            Document(content="Nearest neighbor search uses distance metrics."),
+            Document(content="Vector similarity search finds similar embeddings."),
+        ]
+        ranker = SIERanker(base_url=score_stub_server.url, model="test-reranker")
+
+        ranked = ranker.run(query="vector similarity search", documents=documents)["documents"]
+
+        assert [d.content for d in ranked] == [documents[i].content for i in (3, 2, 0, 1)]
+        assert [d.meta["score"] for d in ranked] == [3.0, 1.0, 0.0, 0.0]
 
     def test_run_empty_list(self, mock_sie_client: object) -> None:
         """Test that run handles empty document list."""
