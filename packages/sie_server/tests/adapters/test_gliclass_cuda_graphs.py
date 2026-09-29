@@ -552,6 +552,27 @@ class TestRecordingPolicy:
         assert runner.stats.recording_failures == 0
         assert not cuda_graphs_module._RECORDING_LOCK.locked()
 
+    def test_a_first_replay_that_runs_out_of_memory_drops_graphs_and_pauses_recording(self) -> None:
+        runner = _Runner()
+        runner.run(_inputs(1, 100), 4, "bucketed")
+        runner.replay_error = torch.cuda.OutOfMemoryError("CUDA out of memory")
+
+        with pytest.raises(torch.cuda.OutOfMemoryError):
+            runner.run(_inputs(1, 200), 4, "bucketed")
+
+        runner.replay_error = None
+        assert runner.graph_count == 0
+        assert not runner.disabled
+        assert runner.stats.drops == 1
+        assert runner.stats.recording_failures == 0  # memory is not the shape's fault
+        # Recording pauses for a minute, as after a recording that runs out of memory.
+        runner.now += 59.0
+        assert runner.run(_inputs(1, 300), 4, "bucketed") is None
+        assert runner.stats.eager["recording_paused"] == 1
+        runner.now += 2.0
+        assert runner.run(_inputs(1, 300), 4, "bucketed") is not None
+        assert runner.recorded[-1] == (1, 320)
+
     def test_running_out_of_memory_while_recording_pauses_recording(self) -> None:
         runner = _Runner()
         runner.run(_inputs(1, 100), 4, "bucketed")
