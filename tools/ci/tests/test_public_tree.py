@@ -57,6 +57,17 @@ def test_bootstrap_uses_root_locks_even_in_ci() -> None:
     assert not (REPOSITORY_ROOT / "packages/sie_ts_sdk/pnpm-lock.yaml").exists()
 
 
+def test_root_workspace_uses_the_mise_uv_resolver() -> None:
+    mise_config = tomllib.loads((REPOSITORY_ROOT / "mise.toml").read_text())
+    manifest = tomllib.loads((REPOSITORY_ROOT / "pyproject.toml").read_text())
+    lock = tomllib.loads((REPOSITORY_ROOT / "uv.lock").read_text())
+    uv_version = mise_config["tools"]["uv"]
+    assert f"uv=={uv_version}" in manifest["dependency-groups"]["dev"]
+    locked_uv = [package for package in lock["package"] if package["name"] == "uv"]
+    assert len(locked_uv) == 1
+    assert locked_uv[0]["version"] == uv_version
+
+
 def test_bootstrap_installs_canonical_rust_components() -> None:
     mise_config = tomllib.loads((REPOSITORY_ROOT / "mise.toml").read_text())
     assert mise_config["tools"]["rust"]["components"] == ["rustfmt", "clippy", "llvm-tools"]
