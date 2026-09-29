@@ -172,7 +172,6 @@ class TopkEmbedAdapter(BaseAdapter):
         self._attn_implementation = attn_implementation
         self._packed = packed
         self._packed_text: PackedTextModel | None = None
-        self._vision_varlen: Any = None
         self._preprocess_pool: ThreadPoolExecutor | None = None
         self._preprocess_pool_lock = threading.Lock()
 
@@ -264,12 +263,7 @@ class TopkEmbedAdapter(BaseAdapter):
                 module.inv_freq = inv_freq.to(torch.bfloat16).to(self._dtype)
         kernels = resolve_kernels(device, mode=self._packed)
         self._packed_text = PackedTextModel(self._model.language_model, kernels) if kernels else None
-        self._vision_varlen = _flash_varlen(device)
-        logger.info(
-            "TopK-Embed text path: %s; vision attention: %s",
-            kernels.names if kernels else "row per input (padded)",
-            "flash_attn varlen" if self._vision_varlen is not None else "sdpa, padded per image",
-        )
+        logger.info("TopK-Embed text path: %s", kernels.names if kernels else "row per input (padded)")
         vision = config.vision_config
         rotary_dim = vision.hidden_size // vision.num_heads // 2
         inv_freq = 1.0 / (_VISION_ROPE_THETA ** (torch.arange(0, rotary_dim, 2, dtype=torch.float) / rotary_dim))
@@ -581,29 +575,21 @@ class TopkEmbedAdapter(BaseAdapter):
         emb = torch.cat((freqs, freqs), dim=-1)
         cos, sin = emb.cos(), emb.sin()
 
+        # Attention stays within each image: images are padded to the longest and padded keys
+        # masked, the reference's own sdpa call. Page vectors are sensitive to the attention
+        # kernel's rounding: FlashAttention's varlen kernel, exact enough on its own, moved some
+        # page tokens far from the reference on an L4 (worst cosine 0.28); this call matches it.
         lengths = torch.tensor([math.prod(row.grid_thw) for row in images], dtype=torch.long)
         max_len = int(lengths.max())
-        if self._vision_varlen is not None:
-            cu_seqlens = torch.cat([torch.zeros(1, dtype=torch.long), lengths.cumsum(0)]).to(device, torch.int32)
-
-            def attention(attn: Any, normed: torch.Tensor) -> torch.Tensor:
-                return _vision_attention_varlen(
-                    attn, normed, cos, sin, cu_seqlens=cu_seqlens, max_len=max_len, varlen=self._vision_varlen
-                )
-
-        else:
-            seq_idx = torch.repeat_interleave(torch.arange(len(images)), lengths)
-            within = torch.arange(int(lengths.sum())) - torch.repeat_interleave(lengths.cumsum(0) - lengths, lengths)
-            pad_index = (seq_idx * max_len + within).to(device)
-            key_mask = (torch.arange(max_len) < lengths[:, None])[:, None, None, :].to(device)
-
-            def attention(attn: Any, normed: torch.Tensor) -> torch.Tensor:
-                return _vision_attention(
-                    attn, normed, cos, sin, pad_index=pad_index, key_mask=key_mask, max_len=max_len
-                )
-
+        seq_idx = torch.repeat_interleave(torch.arange(len(images)), lengths)
+        within = torch.arange(int(lengths.sum())) - torch.repeat_interleave(lengths.cumsum(0) - lengths, lengths)
+        pad_index = (seq_idx * max_len + within).to(device)
+        key_mask = (torch.arange(max_len) < lengths[:, None])[:, None, None, :].to(device)
         for block in visual.blocks:
-            hidden = hidden + attention(block.attn, block.norm1(hidden))
+            attended = _vision_attention(
+                block.attn, block.norm1(hidden), cos, sin, pad_index=pad_index, key_mask=key_mask, max_len=max_len
+            )
+            hidden = hidden + attended
             hidden = hidden + block.mlp(block.norm2(hidden))
         return visual.merger(hidden)
 
@@ -787,7 +773,6 @@ class TopkEmbedAdapter(BaseAdapter):
         if pool is not None:
             pool.shutdown(wait=False)
         self._packed_text = None
-        self._vision_varlen = None
         super().unload()
 
     def get_postprocessors(self) -> dict[str, Any]:
@@ -819,44 +804,6 @@ def smart_resize(height: int, width: int, *, factor: int, min_pixels: int, max_p
         h_bar = math.ceil(height * beta / factor) * factor
         w_bar = math.ceil(width * beta / factor) * factor
     return h_bar, w_bar
-
-
-def _flash_varlen(device: str) -> Any:
-    """FlashAttention's variable-length kernel on CUDA, when installed."""
-    if not str(device).startswith("cuda"):
-        return None
-    try:
-        from flash_attn import flash_attn_varlen_func  # ty: ignore[unresolved-import]
-    except ImportError:
-        return None
-    return flash_attn_varlen_func
-
-
-def _vision_attention_varlen(
-    attn: Any,
-    hidden: torch.Tensor,
-    cos: torch.Tensor,
-    sin: torch.Tensor,
-    *,
-    cu_seqlens: torch.Tensor,
-    max_len: int,
-    varlen: Any,
-) -> torch.Tensor:
-    """One vision attention layer over packed patches with FlashAttention's varlen kernel."""
-    seq_length = hidden.shape[0]
-    query, key, value = attn.qkv(hidden).reshape(seq_length, 3, attn.num_heads, -1).permute(1, 0, 2, 3).unbind(0)
-    query, key = _apply_rotary_pos_emb_vision(query, key, cos, sin)
-    out = varlen(
-        query.contiguous(),
-        key.contiguous(),
-        value.contiguous(),
-        cu_seqlens,
-        cu_seqlens,
-        max_len,
-        max_len,
-        causal=False,
-    )
-    return attn.proj(out.reshape(seq_length, -1))
 
 
 def _vision_attention(
