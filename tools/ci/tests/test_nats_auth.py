@@ -207,6 +207,21 @@ def test_sie_config_client_authenticates_with_its_environment(nats_url: str, mon
     _run(scenario())
 
 
+def test_sie_config_client_ignores_url_credentials(nats_url: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("SIE_NATS_USER", raising=False)
+    monkeypatch.delenv("SIE_NATS_PASSWORD", raising=False)
+    monkeypatch.setenv("SIE_NATS_STARTUP_CONNECT_TIMEOUT_SEC", "2")
+    url_with_credentials = nats_url.replace("nats://", f"nats://sie-config:{PASSWORDS['config']}@")
+
+    async def scenario() -> None:
+        publisher = NatsPublisher(nats_url=url_with_credentials)
+        await publisher.connect()
+        assert not publisher.connected
+        await publisher.disconnect()
+
+    _run(scenario())
+
+
 def test_gateway_permissions(nats_url: str) -> None:
     async def scenario() -> None:
         gateway = await _connect(nats_url, "gateway")

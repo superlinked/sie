@@ -4,7 +4,7 @@ import logging
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from sie_config.nats_publisher import _ALL_SUBJECT, NatsPublisher, _redact_userinfo
+from sie_config.nats_publisher import _ALL_SUBJECT, NatsPublisher, _redact_userinfo, _replace_userinfo
 
 
 class TestNatsPublisherConnect:
@@ -161,6 +161,30 @@ class TestNatsPublisherCredentials:
     )
     def test_redact_userinfo(self, url: str, expected: str) -> None:
         assert _redact_userinfo(url) == expected
+
+    @pytest.mark.parametrize(
+        ("url", "expected"),
+        [
+            ("nats://nats:4222", "nats://nats:4222"),
+            ("nats://user:secret@nats:4222", "nats://nats:4222"),
+            ("tls://token@a:4222,nats://b:4222/x@y", "tls://a:4222,nats://b:4222/x@y"),
+            ("user:p@ss@host", "host"),
+        ],
+    )
+    def test_remove_userinfo(self, url: str, expected: str) -> None:
+        assert _replace_userinfo(url, None) == expected
+
+    @pytest.mark.asyncio
+    async def test_connect_does_not_pass_url_credentials(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("SIE_NATS_USER", raising=False)
+        monkeypatch.delenv("SIE_NATS_PASSWORD", raising=False)
+        publisher = NatsPublisher(nats_url="nats://url-user:url-secret@nats:4222")
+        client = AsyncMock()
+        client.is_connected = True
+        with patch("nats.connect", AsyncMock(return_value=client)) as connect:
+            await publisher.connect()
+            assert connect.call_args.args == ("nats://nats:4222",)
+            await publisher.disconnect()
 
 
 class TestNatsPublisherPublish:
