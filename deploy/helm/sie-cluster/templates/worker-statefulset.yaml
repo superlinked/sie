@@ -37,8 +37,10 @@ fast at render time.
      reason as on the gateway: both create the work streams, first creator
      wins, so the chart renders one value onto both. An extraEnv override
      here would move only the workers and silently reintroduce the divergence
-     the gateway-deployment render guards exist to prevent. */}}
-{{- $reservedSidecarEnv := concat $reservedOtelEnv (list "SIE_BUNDLE" "SIE_GPU_COUNT" "SIE_HEALTH_PUBLISH_ENABLED" "SIE_HEALTH_PUBLISH_INTERVAL_MS" "SIE_MACHINE_PROFILE" "SIE_OTEL_LANE" "SIE_POOL" "SIE_STREAM_MAX_AGE_S" "SIE_STREAM_REPLICAS" "SIE_STREAM_STORAGE" "SIE_WORKER_ID") -}}
+     the gateway-deployment render guards exist to prevent. The sidecar's
+     sie-config credential comes only from config.auth, so SIE_ADMIN_TOKEN and
+     SIE_CONFIG_SERVICE_TOKEN are reserved too. */}}
+{{- $reservedSidecarEnv := concat $reservedOtelEnv (list "SIE_ADMIN_TOKEN" "SIE_BUNDLE" "SIE_CONFIG_SERVICE_TOKEN" "SIE_GPU_COUNT" "SIE_HEALTH_PUBLISH_ENABLED" "SIE_HEALTH_PUBLISH_INTERVAL_MS" "SIE_MACHINE_PROFILE" "SIE_OTEL_LANE" "SIE_POOL" "SIE_STREAM_MAX_AGE_S" "SIE_STREAM_REPLICAS" "SIE_STREAM_STORAGE" "SIE_WORKER_ID") -}}
 {{- include "sie-cluster.env.assertNoReserved" (dict "path" "workers.common.extraEnv" "entries" $root.Values.workers.common.extraEnv "reserved" $reservedWorkerEnv) -}}
 {{- include "sie-cluster.env.assertNoReserved" (dict "path" "workers.common.workerSidecar.extraEnv" "entries" $root.Values.workers.common.workerSidecar.extraEnv "reserved" $reservedSidecarEnv) -}}
 {{- range $poolName, $pool := .Values.workers.pools }}

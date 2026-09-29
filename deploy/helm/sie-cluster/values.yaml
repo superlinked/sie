@@ -128,9 +128,9 @@ config:
     # other value would leave the API unauthenticated.
     generateAdminToken: true
     # -- Existing Secret with the read token value (key: readTokenSecretKey).
-    # When set, it is used unchanged and no Secret is generated. Pointing it at
-    # the admin token's Secret and key gives the gateway and worker sidecars
-    # write access to the catalog again; keep the two tokens distinct.
+    # When set, it is used unchanged and no Secret is generated. It must not
+    # name the admin token's Secret and key (the render fails), because the
+    # gateway and worker sidecars would then hold the write credential.
     readTokenSecretName: ""
     readTokenSecretKey: "SIE_CONFIG_READ_TOKEN"
     # -- When readTokenSecretName is empty and sie-config has an admin token,
@@ -316,8 +316,8 @@ gateway:
     # -- Existing Secret with the gateway admin token (key:
     # adminTokenSecretKey). With mode token or static, the gateway requires it
     # on POST, PUT, and DELETE under /v1/pools, /v1/admin, and /v1/configs;
-    # when empty, those requests get 403. It is separate from the sie-config
-    # tokens.
+    # when empty, those requests get 403. It must not name the Secret and key
+    # of either sie-config token (the render fails).
     adminTokenSecretName: ""
     adminTokenSecretKey: "SIE_ADMIN_TOKEN"
 

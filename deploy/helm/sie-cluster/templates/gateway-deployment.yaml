@@ -17,7 +17,11 @@
      work streams and whoever gets there first wins, so the chart renders one
      value onto both. An extraEnv override would move only the gateway and
      silently reintroduce exactly the divergence the render guards below
-     exist to prevent. Fail the render instead. */}}
+     exist to prevent. Fail the render instead.
+
+     SIE_ADMIN_TOKEN and SIE_CONFIG_SERVICE_TOKEN come only from
+     gateway.auth.adminTokenSecretName and config.auth, where the render
+     guards keep the gateway admin token and the sie-config tokens apart. */}}
 {{- $reservedGatewayEnv := concat
       (include "sie-cluster.otel.reservedEnvNames" . | fromJsonArray)
       (list
@@ -27,6 +31,8 @@
         "SIE_GATEWAY_HEALTH_MODE"
         "SIE_GATEWAY_MACHINE_PROFILES"
         "SIE_GATEWAY_STATIC_QUEUE_POOLS"
+        "SIE_ADMIN_TOKEN"
+        "SIE_CONFIG_SERVICE_TOKEN"
         "SIE_STREAM_MAX_AGE_S"
         "SIE_STREAM_REPLICAS"
         "SIE_STREAM_STORAGE") -}}
@@ -309,9 +315,10 @@ spec:
             # packages/sie_gateway/docs/architecture-guide.md section 4.
             - name: SIE_CONFIG_SERVICE_URL
               value: {{ include "sie-cluster.config.internalUrl" . | quote }}
-            # Read-scoped sie-config token for the bootstrap and poll reads.
-            {{- include "sie-cluster.config.serviceTokenEnv" . | nindent 12 }}
             {{- end }}
+            # Read-scoped sie-config token for the bootstrap and poll reads. Always
+            # set, empty without one, so the gateway never presents SIE_ADMIN_TOKEN.
+            {{- include "sie-cluster.config.serviceTokenEnv" . | nindent 12 }}
             {{- if $payloadStoreUrl }}
             - name: SIE_PAYLOAD_STORE_URL
               value: {{ $payloadStoreUrl | quote }}

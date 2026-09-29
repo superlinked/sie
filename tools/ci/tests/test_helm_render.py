@@ -352,6 +352,118 @@ def test_gateway_admin_token_is_wired_only_to_the_gateway(tmp_path: Path) -> Non
     assert env_entries(docs, "SIE_CONFIG_SERVICE_TOKEN") == dict.fromkeys(CONFIG_CONSUMERS, GENERATED_READ)
 
 
+def test_gateway_without_sie_config_sends_no_config_credential(tmp_path: Path) -> None:
+    values = {
+        "config": {"enabled": False},
+        "gateway": {"embeddedConfigs": {"enabled": True}, "auth": {"adminTokenSecretName": "gateway-admin"}},
+    }
+    gateway = container_env(rendered_documents(tmp_path, values), "sie-sie-cluster-gateway", "gateway")
+    assert "SIE_CONFIG_SERVICE_URL" not in gateway
+    assert gateway["SIE_CONFIG_SERVICE_TOKEN"] == {"name": "SIE_CONFIG_SERVICE_TOKEN", "value": ""}
+    assert gateway["SIE_ADMIN_TOKEN"]["valueFrom"]["secretKeyRef"] == {
+        "name": "gateway-admin",
+        "key": "SIE_ADMIN_TOKEN",
+    }
+
+
+@pytest.mark.parametrize(
+    ("values", "error"),
+    [
+        (
+            {
+                "config": {
+                    "auth": {
+                        "readTokenSecretName": GENERATED_ADMIN_TOKEN_SECRET,
+                        "readTokenSecretKey": "SIE_ADMIN_TOKEN",
+                    }
+                }
+            },
+            "config.auth.readTokenSecretName and readTokenSecretKey point at the sie-config admin token",
+        ),
+        (
+            {
+                "config": {
+                    "auth": {
+                        "adminTokenSecretName": "shared",
+                        "adminTokenSecretKey": "token",
+                        "readTokenSecretName": "shared",
+                        "readTokenSecretKey": "token",
+                    }
+                }
+            },
+            "config.auth.readTokenSecretName and readTokenSecretKey point at the sie-config admin token",
+        ),
+        (
+            {"gateway": {"auth": {"adminTokenSecretName": GENERATED_ADMIN_TOKEN_SECRET}}},
+            "gateway.auth.adminTokenSecretName and adminTokenSecretKey point at the sie-config admin token",
+        ),
+        (
+            {
+                "gateway": {
+                    "auth": {
+                        "adminTokenSecretName": GENERATED_READ_TOKEN_SECRET,
+                        "adminTokenSecretKey": "SIE_CONFIG_READ_TOKEN",
+                    }
+                }
+            },
+            "gateway.auth.adminTokenSecretName and adminTokenSecretKey point at the sie-config read token",
+        ),
+    ],
+)
+def test_shared_token_secrets_fail_the_render(tmp_path: Path, values: dict, error: str) -> None:
+    result = render_chart(tmp_path, {**L4_POOL, **values})
+    assert result.returncode != 0
+    assert error in result.stderr
+
+
+def test_tokens_in_one_secret_under_different_keys_render(tmp_path: Path) -> None:
+    auth = {
+        "adminTokenSecretName": "sie-tokens",
+        "adminTokenSecretKey": "admin",
+        "readTokenSecretName": "sie-tokens",
+        "readTokenSecretKey": "read",
+    }
+    values = {**L4_POOL, "config": {"auth": auth}, "gateway": {"auth": {"adminTokenSecretName": "sie-tokens"}}}
+    docs = rendered_documents(tmp_path, values)
+    assert env_entries(docs, "SIE_ADMIN_TOKEN") == {
+        CONFIG_SERVICE: {"name": "sie-tokens", "key": "admin"},
+        GATEWAY: {"name": "sie-tokens", "key": "SIE_ADMIN_TOKEN"},
+    }
+    read = {"name": "sie-tokens", "key": "read"}
+    assert env_entries(docs, "SIE_CONFIG_READ_TOKEN") == {CONFIG_SERVICE: read}
+    assert env_entries(docs, "SIE_CONFIG_SERVICE_TOKEN") == dict.fromkeys(CONFIG_CONSUMERS, read)
+
+
+@pytest.mark.parametrize("name", ["SIE_ADMIN_TOKEN", "SIE_CONFIG_SERVICE_TOKEN"])
+@pytest.mark.parametrize(
+    ("path", "values"),
+    [
+        ("gateway.extraEnv", lambda entry: {"gateway": {"extraEnv": [entry]}}),
+        (
+            "workers.common.workerSidecar.extraEnv",
+            lambda entry: {"workers": {"common": {"workerSidecar": {"extraEnv": [entry]}}}},
+        ),
+    ],
+)
+def test_config_credentials_cannot_be_overridden_through_extra_env(
+    tmp_path: Path, name: str, path: str, values
+) -> None:
+    rendered = values({"name": name, "value": "override"})
+    result = render_chart(
+        tmp_path, {**L4_POOL, **rendered, "workers": {**L4_POOL["workers"], **rendered.get("workers", {})}}
+    )
+    assert result.returncode != 0
+    assert f"{path} must not override chart-owned variable {name}" in result.stderr
+
+
+def test_production_without_an_admin_token_names_the_read_only_effect(tmp_path: Path) -> None:
+    auth = {"generateAdminToken": False, "readTokenSecretName": "operator-read"}
+    result = render_chart(tmp_path, {"config": {"auth": auth}})
+    assert result.returncode != 0
+    assert "so it would refuse every config write and serve only reads that present the read token" in result.stderr
+    assert "refuse every /v1/configs request" not in result.stderr
+
+
 @pytest.mark.parametrize("key", [None, "", " "])
 def test_empty_admin_token_key_fails_the_render(tmp_path: Path, key: str | None) -> None:
     result = render_chart(tmp_path, {**L4_POOL, "config": {"auth": {"adminTokenSecretKey": key}}})
