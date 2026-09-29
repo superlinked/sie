@@ -1158,6 +1158,18 @@ fn unknown_bundle_config_hash<'a>(
     first_unknown.map(|hash| (hash, count))
 }
 
+/// Telemetry reason for NAKing `model_id` work that a config barrier refused.
+/// A model the worker reports it cannot serve is `model_unsupported`, as it is
+/// at intake and before readiness; any other refusal is an old bundle hash
+/// (`retry`).
+fn barrier_nak_reason(state: Option<&ConfigApplyState>, model_id: &str) -> &'static str {
+    if state.is_some_and(|state| state.model_is_unsupported(model_id)) {
+        "model_unsupported"
+    } else {
+        "retry"
+    }
+}
+
 impl Dispatcher {
     /// Process a full fetched batch.
     ///
@@ -1840,13 +1852,16 @@ impl Dispatcher {
         let _execution_guard = if let Some(state) = self.config_apply_state.as_ref() {
             let guard = state.lock_execution().await;
             if !state.accepts_work(&wi.bundle_config_hash, &model_id) {
+                let reason = barrier_nak_reason(Some(state), &model_id);
                 info!(
                     model = %model_id,
                     expected_hash = %wi.bundle_config_hash,
                     local_hash = %state.current_bundle_config_hash(),
-                    "generate bundle config hash changed before execution — NAKing"
+                    reason,
+                    "generate work refused at the config barrier before execution — NAKing"
                 );
-                nak_msg(&msg, base_delay_ms, &self.runtime_state.telemetry).await;
+                nak_msg_with_reason(&msg, base_delay_ms, &self.runtime_state.telemetry, reason)
+                    .await;
                 return;
             }
             Some(guard)
@@ -2163,9 +2178,15 @@ impl Dispatcher {
                 group_size,
                 local_hash = %local_hash,
                 expected_hash,
-                "request bundle config hash is unknown locally — NAKing group"
+                "request bundle config hash is unknown locally, or the model is unsupported — NAKing group"
             );
-            nak_all(&items, base_delay_ms, &self.runtime_state.telemetry).await;
+            nak_all_at_barrier(
+                &items,
+                base_delay_ms,
+                &self.runtime_state.telemetry,
+                self.config_apply_state.as_deref(),
+            )
+            .await;
             return Ok(());
         }
         let readiness_resp = loop {
@@ -2513,16 +2534,17 @@ impl Dispatcher {
                     expected_hash,
                     unknown_hash_count,
                     local_hash = %state.current_bundle_config_hash(),
-                    "encode bundle config hash changed before execution — NAKing"
+                    "encode work refused at the config barrier before execution — NAKing"
                 );
                 let msgs_only: Vec<(WorkItem, Delivery)> = resolved
                     .into_iter()
                     .map(|(wi, delivery, _, _, _)| (wi, delivery))
                     .collect();
-                nak_all(
+                nak_all_at_barrier(
                     &msgs_only,
                     base_nak_delay_ms(),
                     &self.runtime_state.telemetry,
+                    Some(state),
                 )
                 .await;
                 return Ok(());
@@ -2681,16 +2703,17 @@ impl Dispatcher {
                     expected_hash,
                     unknown_hash_count,
                     local_hash = %state.current_bundle_config_hash(),
-                    "score bundle config hash changed before execution — NAKing"
+                    "score work refused at the config barrier before execution — NAKing"
                 );
                 let msgs_only: Vec<(WorkItem, Delivery)> = prepared
                     .into_iter()
                     .map(|(wi, delivery, _, _, _)| (wi, delivery))
                     .collect();
-                nak_all(
+                nak_all_at_barrier(
                     &msgs_only,
                     base_nak_delay_ms(),
                     &self.runtime_state.telemetry,
+                    Some(state),
                 )
                 .await;
                 return Ok(());
@@ -2876,16 +2899,17 @@ impl Dispatcher {
                     expected_hash,
                     unknown_hash_count,
                     local_hash = %state.current_bundle_config_hash(),
-                    "extract bundle config hash changed before execution — NAKing"
+                    "extract work refused at the config barrier before execution — NAKing"
                 );
                 let msgs_only: Vec<(WorkItem, Delivery)> = resolved
                     .into_iter()
                     .map(|(wi, delivery, _, _, _)| (wi, delivery))
                     .collect();
-                nak_all(
+                nak_all_at_barrier(
                     &msgs_only,
                     base_nak_delay_ms(),
                     &self.runtime_state.telemetry,
+                    Some(state),
                 )
                 .await;
                 return Ok(());
@@ -4641,6 +4665,29 @@ async fn nak_all(
     debug!(count = items.len(), delay_ms, "NAKed group");
 }
 
+/// NAK work a config barrier refused, each item counted with its own reason
+/// ([`barrier_nak_reason`]).
+async fn nak_all_at_barrier(
+    items: &[(WorkItem, Delivery)],
+    delay_ms: u64,
+    telemetry: &crate::observability::metrics::SidecarTelemetry,
+    state: Option<&ConfigApplyState>,
+) {
+    for (wi, d) in items {
+        nak_one_with_reason(
+            d,
+            delay_ms,
+            telemetry,
+            barrier_nak_reason(state, &wi.model_id),
+        )
+        .await;
+    }
+    debug!(
+        count = items.len(),
+        delay_ms, "NAKed group at a config barrier"
+    );
+}
+
 async fn nak_one(
     delivery: &Delivery,
     delay_ms: u64,
@@ -5130,17 +5177,18 @@ async fn process_scheduler_batch(
                 expected_hash,
                 unknown_hash_count,
                 local_hash = %state.current_bundle_config_hash(),
-                "scheduler bundle config hash changed before execution — NAKing batch"
+                "scheduler work refused at the config barrier before execution — NAKing batch"
             );
             let msgs_only: Vec<(WorkItem, Delivery)> = batch
                 .metadata
                 .into_iter()
                 .map(|meta| (meta.wi, meta.delivery))
                 .collect();
-            nak_all(
+            nak_all_at_barrier(
                 &msgs_only,
                 base_nak_delay_ms(),
                 &dispatcher.runtime_state.telemetry,
+                Some(state),
             )
             .await;
             return;
@@ -6952,6 +7000,54 @@ mod tests {
         let items = [first, accepted, second];
         let unknown = unknown_bundle_config_hash(items.iter(), Some(&state));
         assert_eq!(unknown, Some(("missing-a", 2)));
+    }
+
+    #[test]
+    fn barrier_naks_count_unsupported_models_as_model_unsupported() {
+        let state = ConfigApplyState::new(String::new());
+        assert!(state.mark_export_reconciled(1, Some("hash-1".into()), vec!["B".into()], false));
+
+        assert_eq!(barrier_nak_reason(Some(&state), "B"), "model_unsupported");
+        assert_eq!(barrier_nak_reason(Some(&state), "b"), "model_unsupported");
+        // A supported model refused at the barrier carries an old bundle hash.
+        assert_eq!(barrier_nak_reason(Some(&state), "A"), "retry");
+        assert_eq!(barrier_nak_reason(None, "B"), "retry");
+    }
+
+    /// The architecture guide counts NAKs for a model in `unsupported_models`
+    /// as `model_unsupported` at intake, before readiness and at the config
+    /// execution barrier. A barrier that NAKs through the plain `retry`
+    /// helpers would count a model that turned unsupported after intake as a
+    /// retry. Checked structurally, like the barrier ordering above, so a
+    /// future barrier that NAKs the old way fails here.
+    #[test]
+    fn config_execution_barriers_nak_with_their_reason() {
+        let source = include_str!("dispatcher.rs");
+        let production = source
+            .split("\nmod tests {")
+            .next()
+            .expect("dispatcher.rs must have a production section");
+        let barrier = concat!("lock_execution", "().await");
+        let mut naking = 0;
+        for (site, _) in production.match_indices(barrier) {
+            let rest = &production[site..];
+            let refusal = &rest[..rest.find("Some(guard)").expect("a barrier keeps its guard")];
+            if !refusal.contains("nak") {
+                continue; // local-ingest generate answers with an error, not a NAK
+            }
+            naking += 1;
+            assert!(
+                !refusal.contains(concat!("nak_all", "("))
+                    && !refusal.contains(concat!("nak_msg", "(")),
+                "the barrier at byte {site} NAKs with the plain retry reason"
+            );
+            assert!(
+                refusal.contains("nak_all_at_barrier") || refusal.contains("barrier_nak_reason"),
+                "the barrier at byte {site} does not attribute its NAK reason"
+            );
+        }
+        // Generate, encode, score, extract and the scheduler batch.
+        assert_eq!(naking, 5, "expected five NAKing config execution barriers");
     }
 
     #[test]
