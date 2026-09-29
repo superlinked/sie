@@ -43,10 +43,18 @@ fn max_deliver() -> i64 {
         .unwrap_or(DEFAULT_MAX_DELIVER)
 }
 
+/// Longest redelivery envelope, so that it can always be added to an `Instant`.
+const MAX_REDELIVERY_ENVELOPE: Duration = Duration::from_secs(30 * 365 * 24 * 60 * 60);
+
 /// How long JetStream keeps redelivering an unacknowledged work message
 /// before it dead-letters it: `max_deliver` rounds of the ACK wait.
 pub(crate) fn redelivery_envelope() -> Duration {
-    Duration::from_secs(ACK_WAIT_SECS.saturating_mul(max_deliver() as u64))
+    redelivery_envelope_for(max_deliver())
+}
+
+fn redelivery_envelope_for(max_deliver: i64) -> Duration {
+    Duration::from_secs(ACK_WAIT_SECS.saturating_mul(max_deliver as u64))
+        .min(MAX_REDELIVERY_ENVELOPE)
 }
 
 /// The larger of the durable work lifetime and configured retry envelope is the
@@ -867,6 +875,18 @@ mod tests {
             canonical_stream_subjects(observed, "sie.work.default.*.*.*"),
             None
         );
+    }
+
+    #[test]
+    fn redelivery_envelope_can_always_be_added_to_an_instant() {
+        assert_eq!(
+            redelivery_envelope_for(DEFAULT_MAX_DELIVER),
+            Duration::from_secs(600)
+        );
+        let envelope = redelivery_envelope_for(i64::MAX);
+        let now = tokio::time::Instant::now();
+        assert!(now + envelope > now);
+        assert_eq!(envelope, MAX_REDELIVERY_ENVELOPE);
     }
 
     #[test]
