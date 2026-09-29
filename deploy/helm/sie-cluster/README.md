@@ -905,16 +905,20 @@ same Secret.
   `config.auth.generateAdminToken=true`, the chart creates the Secret
   `<fullname>-config-admin-token` (`sie-cluster-config-admin-token` for the
   Quick Start release) holding a random 64-character token under
-  `config.auth.adminTokenSecretKey` (`SIE_ADMIN_TOKEN`). Upgrades read the
-  existing Secret and keep its token. The Secret carries
-  `helm.sh/resource-policy: keep`, so `helm uninstall` leaves it in place;
-  delete it manually when it is no longer needed.
+  `config.auth.adminTokenSecretKey` (`SIE_ADMIN_TOKEN`). An absent
+  `generateAdminToken` key, as after `helm upgrade --reuse-values` from an
+  older release, counts as `true`. Upgrades read the existing Secret and keep
+  its token; the render fails if that token is shorter than 32 characters. The
+  Secret carries `helm.sh/resource-policy: keep`, so `helm uninstall` leaves it
+  in place; delete it manually when it is no longer needed.
 - **Operator-managed.** Set `config.auth.adminTokenSecretName` (and
   `config.auth.adminTokenSecretKey` if the key differs) to an existing Secret.
   The chart uses it unchanged and creates no Secret. Use this mode with
   renderers that cannot read the cluster, such as `helm template` or GitOps
-  controllers: they cannot see the generated Secret and would produce a new
-  token on every render.
+  controllers (see [GitOps and `helm template`](#gitops-and-helm-template)).
+
+`config.auth.mode` is not read by any template and is kept only so existing
+values files stay valid; the two settings above decide the token.
 
 Read the generated token for admin tooling:
 
@@ -935,10 +939,9 @@ The gateway reports `503` on `/readyz` until it has loaded its first complete
 catalog from sie-config, so a missing or mismatched token keeps new gateway
 pods out of the Service and fails `helm install --wait` instead of serving a
 partial catalog. Once a gateway pod has loaded its catalog, it stays ready
-through later sie-config outages.
-
-sie-config, the gateway, and worker sidecars read the token at container start.
-After rotating it in the Secret, restart all three.
+through later sie-config outages. The gate proves that the gateway reached
+sie-config and authenticated; it accepts whatever complete catalog sie-config
+serves and does not validate the catalog's contents.
 
 > **Upgrade note:** upgrading an install without
 > `config.auth.adminTokenSecretName` creates the Secret and adds
@@ -948,6 +951,65 @@ After rotating it in the Secret, restart all three.
 > `telemetry.deploymentEnv` that previously served the API without one. Update
 > admin tooling to send the token, or set `config.auth.generateAdminToken=false`
 > to keep the previous behavior in a non-production environment.
+
+### Who holds the token
+
+The token is available to sie-config, every gateway pod, every worker sidecar,
+and anyone who can read Secrets in the release namespace. Limit Secret read
+access in that namespace accordingly.
+
+With `gateway.auth.mode` set to `token` or `static`, the gateway also accepts
+this token on its admin routes: `POST`, `PUT`, and `DELETE` requests under
+`/v1/pools`, `/v1/admin`, and `/v1/configs`, which include pool create, renew,
+and delete and `POST /v1/configs/resolve`. Before the chart generated a token,
+those routes answered `403` (`Admin token not configured`) unless an operator
+set `config.auth.adminTokenSecretName`; now the generated token unlocks them.
+
+### Rotating the token
+
+sie-config accepts one admin token at a time, and every component reads the
+token at container start. To rotate it, update the Secret, restart sie-config
+first, and then restart the gateway and the worker StatefulSets. Until a
+gateway or worker sidecar restarts, sie-config answers its old token with
+`403`: a running gateway keeps serving its current catalog but misses config
+updates, a new gateway pod stays at `503`, and worker sidecars cannot
+reconcile missed updates.
+
+### GitOps and `helm template`
+
+`helm template`, and GitOps controllers that render the chart the same way
+(for example Argo CD), cannot read the cluster. The chart's lookup of the
+existing Secret finds nothing, so every render carries a new random token.
+Applying each render replaces the token in the Secret, and pods pick up
+different tokens as they restart: worker sidecars get `403` when they
+reconcile, new gateway pods stay at `503`, and every component fails once
+sie-config restarts with a token the others do not hold.
+
+- **Recommended:** create the Secret outside the chart, for example with an
+  external secret manager, and set `config.auth.adminTokenSecretName`.
+- **Argo CD with a generated token:** have Argo CD keep the live token by
+  ignoring the Secret's data both when diffing and when syncing:
+
+  ```yaml
+  spec:
+    ignoreDifferences:
+      - kind: Secret
+        name: sie-cluster-config-admin-token
+        namespace: sie
+        jsonPointers:
+          - /data
+    syncPolicy:
+      syncOptions:
+        - RespectIgnoreDifferences=true
+  ```
+
+  `RespectIgnoreDifferences=true` makes Argo CD apply `ignoreDifferences`
+  during sync, not only in the diff. It takes effect only once the Secret
+  exists, so the first sync creates the Secret with the token from that render
+  and later syncs keep it.
+
+Do not commit `helm template` output to a repository: the rendered Secret
+contains the generated token.
 
 ## Ingress
 

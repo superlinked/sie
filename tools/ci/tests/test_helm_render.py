@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -271,8 +272,9 @@ def test_chart_defaults_render_without_overrides(tmp_path: Path) -> None:
     assert container_env(docs, "sie-sie-cluster-config", "config")["SIE_DEPLOYMENT_ENV"]["value"] == "production"
 
 
-def test_generated_admin_token_is_wired_to_every_config_client(tmp_path: Path) -> None:
-    docs = rendered_documents(tmp_path, L4_POOL)
+@pytest.mark.parametrize("config", [{}, {"config": {"auth": {"generateAdminToken": None}}}])
+def test_generated_admin_token_is_wired_to_every_config_client(tmp_path: Path, config: dict) -> None:
+    docs = rendered_documents(tmp_path, {**L4_POOL, **config})
     (secret,) = admin_token_secrets(docs)
     assert secret["metadata"]["name"] == GENERATED_ADMIN_TOKEN_SECRET
     assert secret["metadata"]["annotations"] == {"helm.sh/resource-policy": "keep"}
@@ -292,7 +294,8 @@ def test_operator_admin_token_secret_is_used_unchanged(tmp_path: Path) -> None:
 def test_production_config_service_without_a_token_fails_the_render(tmp_path: Path, telemetry: dict) -> None:
     result = render_chart(tmp_path, {"config": {"auth": {"generateAdminToken": False}}, "telemetry": telemetry})
     assert result.returncode != 0
-    assert "and no admin token, so it would refuse every /v1/configs request" in result.stderr
+    assert "no admin token (config.auth.generateAdminToken=false" in result.stderr
+    assert "or set config.auth.generateAdminToken=true so the chart generates one" in result.stderr
 
 
 def test_non_production_config_service_may_opt_out_of_the_token(tmp_path: Path) -> None:
@@ -304,3 +307,27 @@ def test_non_production_config_service_may_opt_out_of_the_token(tmp_path: Path) 
     docs = rendered_documents(tmp_path, values)
     assert admin_token_secrets(docs) == []
     assert admin_token_refs(docs) == {}
+
+
+@pytest.mark.parametrize(("token", "accepted"), [("a" * 31, False), ("a" * 32, True)])
+def test_reused_admin_token_must_have_at_least_32_characters(tmp_path: Path, token: str, accepted: bool) -> None:
+    chart = tmp_path / "helper-check"
+    (chart / "templates").mkdir(parents=True)
+    (chart / "Chart.yaml").write_text("apiVersion: v2\nname: helper-check\nversion: 0.1.0\n", encoding="utf-8")
+    shutil.copy(ROOT / helm.CHART_DIR / "templates" / "_helpers.tpl", chart / "templates" / "_helpers.tpl")
+    data = base64.b64encode(token.encode()).decode()
+    (chart / "templates" / "check.yaml").write_text(
+        '{{- include "sie-cluster.config.validateReusedAdminToken" '
+        f'(dict "name" "admin" "key" "SIE_ADMIN_TOKEN" "data" "{data}") }}}}\n',
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        ["mise", "exec", "--", "helm", "template", "check", str(chart)],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert (result.returncode == 0) is accepted, result.stderr
+    if not accepted:
+        assert "Secret admin holds a SIE_ADMIN_TOKEN value shorter than 32 characters" in result.stderr

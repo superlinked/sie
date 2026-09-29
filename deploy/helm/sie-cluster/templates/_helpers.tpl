@@ -315,16 +315,38 @@ production
 {{- end }}
 
 {{/*
+"true" when the chart generates the admin-token Secret: no
+config.auth.adminTokenSecretName, and config.auth.generateAdminToken is not
+false. An absent key counts as true, so `helm upgrade --reuse-values` from a
+release that predates the key keeps the default.
+*/}}
+{{- define "sie-cluster.config.generatesAdminToken" -}}
+{{- $auth := .Values.config.auth | default dict -}}
+{{- if and (not $auth.adminTokenSecretName) (dig "generateAdminToken" true $auth) -}}
+true
+{{- end -}}
+{{- end }}
+
+{{/*
 Secret holding the sie-config admin token that sie-config, the gateway, and
 worker sidecars share: config.auth.adminTokenSecretName when set, otherwise the
-chart-generated Secret when config.auth.generateAdminToken is true, otherwise
-empty (no token).
+chart-generated Secret, otherwise empty (no token).
 */}}
 {{- define "sie-cluster.config.adminTokenSecretName" -}}
 {{- if .Values.config.auth.adminTokenSecretName -}}
 {{- .Values.config.auth.adminTokenSecretName -}}
-{{- else if .Values.config.auth.generateAdminToken -}}
+{{- else if include "sie-cluster.config.generatesAdminToken" . -}}
 {{- include "sie-cluster.config.generatedAdminTokenSecretName" . -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Fail when the token reused from an existing admin-token Secret is shorter than
+32 characters. Args (dict): name (Secret), key (data key), data (base64 value).
+*/}}
+{{- define "sie-cluster.config.validateReusedAdminToken" -}}
+{{- if lt (len (b64dec .data)) 32 -}}
+{{- fail (printf "Secret %s holds a %s value shorter than 32 characters. Replace it with a random value of at least 32 characters, or delete the Secret so the chart generates a new token, then restart sie-config, the gateway, and the workers." .name .key) -}}
 {{- end -}}
 {{- end }}
 
@@ -336,7 +358,7 @@ worker sidecars could never load the model catalog.
 {{- define "sie-cluster.config.validateAuth" -}}
 {{- $env := include "sie-cluster.config.deploymentEnv" . | trim | lower -}}
 {{- if and (has $env (list "prod" "production")) (not (include "sie-cluster.config.adminTokenSecretName" .)) -}}
-{{- fail (printf "sie-config would run with telemetry.deploymentEnv=%q and no admin token, so it would refuse every /v1/configs request and the gateway could not load the model catalog. Set config.auth.adminTokenSecretName to an existing Secret, or leave config.auth.generateAdminToken=true (the default) so the chart generates one." $env) -}}
+{{- fail (printf "sie-config would run with telemetry.deploymentEnv=%q and no admin token (config.auth.generateAdminToken=false and config.auth.adminTokenSecretName is empty), so it would refuse every /v1/configs request and the gateway could not load the model catalog. Set config.auth.adminTokenSecretName to an existing Secret, or set config.auth.generateAdminToken=true so the chart generates one." $env) -}}
 {{- end -}}
 {{- end }}
 
