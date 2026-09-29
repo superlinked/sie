@@ -128,6 +128,12 @@ def test_a_repeated_key_is_rejected_rather_than_silently_replaced(tmp_path: Path
         load_upstreams(write(tmp_path, body))
 
 
+@pytest.mark.parametrize("body", ["upstreams: {[]: {}}\n", "upstreams: {{a: 1}: {}}\n", "? [a]\n: 1\n"])
+def test_an_unhashable_key_is_invalid_yaml_not_a_crash(tmp_path: Path, body: str) -> None:
+    with pytest.raises(UpstreamConfigError, match="not valid YAML"):
+        load_upstreams(write(tmp_path, body))
+
+
 def test_unreadable_or_malformed_files_are_rejected(tmp_path: Path) -> None:
     with pytest.raises(UpstreamConfigError, match="could not be read"):
         load_upstreams(tmp_path / "missing.yaml")
