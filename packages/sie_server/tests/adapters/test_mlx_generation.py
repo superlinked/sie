@@ -11,7 +11,7 @@ from __future__ import annotations
 import socket
 from pathlib import Path
 from typing import Any, Self
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from sie_server.adapters._generation_base import GenerationUnsupportedFieldError, collect_generation
@@ -21,6 +21,7 @@ from sie_server.adapters.sglang.generation import (
     SGLangGenerationAdapter,
     _translate_to_mlx_kwargs,
 )
+from sie_server.core.load_errors import EngineExitedError
 from sie_server.types.grammar import GrammarSpec
 
 
@@ -45,6 +46,27 @@ def test_capabilities(adapter: MLXGenerationAdapter) -> None:
     caps = adapter.capabilities
     assert caps.inputs == ["text"]
     assert caps.outputs == ["tokens"]
+
+
+@pytest.mark.parametrize("exit_code", [0, 1, -9])
+def test_exited_child_is_reported_and_rejected(adapter: MLXGenerationAdapter, exit_code: int) -> None:
+    adapter._process = MagicMock(poll=MagicMock(return_value=exit_code))
+    assert adapter.engine_exit_code() == exit_code
+    with pytest.raises(EngineExitedError, match=f"process exited with code {exit_code}"):
+        adapter._check_loaded()
+
+
+def test_running_child_remains_loaded(adapter: MLXGenerationAdapter) -> None:
+    adapter._process = MagicMock(poll=MagicMock(return_value=None))
+    assert adapter.engine_exit_code() is None
+    adapter._check_loaded()
+
+
+def test_unloaded_adapter_has_no_engine_exit_code() -> None:
+    adapter = MLXGenerationAdapter(model_name_or_path="Qwen/Qwen3.5-4B")
+    assert adapter.engine_exit_code() is None
+    with pytest.raises(RuntimeError, match="not loaded"):
+        adapter._check_loaded()
 
 
 # -- Device swap + kwarg translation -----------------------------------------
