@@ -23,16 +23,41 @@ _NULL_BRANCH = {"type": "null"}
 _UNKNOWN_FIELD_MESSAGE = "Unknown field: the worker model config schema does not define it."
 
 
+# Only these JSON Schema keywords contain schemas. Values under const, enum,
+# default, and examples are literal data, even when they contain a required key.
+_SCHEMA_MAP_KEYWORDS = {"$defs", "definitions", "properties", "patternProperties", "dependentSchemas"}
+_SCHEMA_LIST_KEYWORDS = {"allOf", "anyOf", "oneOf", "prefixItems"}
+_SCHEMA_KEYWORDS = {
+    "additionalProperties",
+    "unevaluatedProperties",
+    "propertyNames",
+    "items",
+    "contains",
+    "unevaluatedItems",
+    "not",
+    "if",
+    "then",
+    "else",
+    "contentSchema",
+}
+
+
 def _without_required(node: Any) -> Any:
-    if isinstance(node, dict):
-        return {
-            key: _without_required(value)
-            for key, value in node.items()
-            if not (key == "required" and isinstance(value, list))
-        }
-    if isinstance(node, list):
-        return [_without_required(item) for item in node]
-    return node
+    if not isinstance(node, dict):
+        return node
+    partial = {}
+    for key, value in node.items():
+        if key == "required" and isinstance(value, list):
+            continue
+        if key in _SCHEMA_MAP_KEYWORDS and isinstance(value, dict):
+            partial[key] = {name: _without_required(schema) for name, schema in value.items()}
+        elif key in _SCHEMA_LIST_KEYWORDS and isinstance(value, list):
+            partial[key] = [_without_required(schema) for schema in value]
+        elif key in _SCHEMA_KEYWORDS:
+            partial[key] = _without_required(value)
+        else:
+            partial[key] = value
+    return partial
 
 
 @cache

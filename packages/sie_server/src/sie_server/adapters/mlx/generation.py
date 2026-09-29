@@ -49,7 +49,7 @@ from sie_server.adapters._generation_base import (
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_NOT_LOADED
 from sie_server.adapters.mlx import _server
-from sie_server.core.load_errors import EngineStartupError, ModelConfigurationError
+from sie_server.core.load_errors import EngineExitedError, EngineStartupError, ModelConfigurationError
 from sie_server.types.inputs import ImageInput, VideoInput
 
 logger = logging.getLogger(__name__)
@@ -330,6 +330,17 @@ class MLXGenerationAdapter(GenerationAdapter):
     def _check_loaded(self) -> None:
         if self._server_url is None:
             raise RuntimeError(ERR_NOT_LOADED)
+        exit_code = self.engine_exit_code()
+        if exit_code is not None:
+            msg = (
+                f"MLX engine for {self._served_model_name!r} is not running "
+                f"(process exited with code {exit_code}). The model must be reloaded."
+            )
+            raise EngineExitedError(msg)
+
+    def engine_exit_code(self) -> int | None:
+        """Report an exited child to the registry's recovery loop."""
+        return None if self._process is None else self._process.poll()
 
     def preflight_generate(self, parameters: Mapping[str, Any], *, stream: bool) -> None:
         """Reject controls that ``mlx_lm.server`` cannot honour before dispatch."""

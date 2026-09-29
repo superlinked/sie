@@ -22,7 +22,9 @@ from sie_server.core.extract_cost import (
     build_extract_prepared_items,
     output_schema_shape_error,
 )
+from sie_server.core.loader import expand_profile_variants
 from sie_server.core.oom import is_oom_error
+from sie_server.core.pool_isolation import validate_no_legacy_scalar_lora_id
 from sie_server.core.prepared import AudioPayload, AudioPreparedItem
 from sie_server.core.registry import ModelRegistry
 from sie_server.core.runtime_options import merge_runtime_options, merge_runtime_options_with_profile
@@ -522,6 +524,8 @@ def _parse_exported_model_config(entry: ReplaceModelConfigEntry) -> ModelConfig:
     if entry.model_id and model_config.sie_id != entry.model_id:
         msg = f"model_id mismatch: export={entry.model_id!r} config={model_config.sie_id!r}"
         raise ValueError(msg)
+    for expanded in expand_profile_variants([model_config]).values():
+        validate_no_legacy_scalar_lora_id(name=expanded.sie_id, config=expanded)
     return model_config
 
 
@@ -626,9 +630,11 @@ class QueueExecutor:
     async def replace_model_configs(self, req: ReplaceModelConfigsRequest) -> ReplaceModelConfigsResponse:
         """Replace the bundle-scoped registry view from a full export snapshot.
 
-        An entry the model-config schema rejects is logged, and that model keeps
-        its current registry entries, if any. The returned hash covers what the
-        registry then holds; the sidecar advertises it only when it equals the
+        An entry with an invalid schema or per-model options is logged, and
+        that model keeps its current registry entries, if any. Duplicate valid
+        model IDs and cross-model pool conflicts reject the whole snapshot
+        before any registry mutation. The returned hash covers what the registry
+        then holds; the sidecar advertises it only when it equals the
         control-plane hash.
         """
         if not req.bundle_id:
