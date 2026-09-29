@@ -205,6 +205,53 @@ def test_load_rejects_unsupported_compute_type_before_translator_construction(
     assert module.translator_kwargs is None
 
 
+@pytest.mark.parametrize(
+    ("declared", "expected"),
+    [
+        ("bfloat16", "float32"),
+        ("float16", "float32"),
+        ("int8_bfloat16", "int8_float32"),
+        ("int8_float16", "int8_float32"),
+        ("float32", "float32"),
+    ],
+)
+def test_load_on_cpu_computes_16_bit_artifacts_in_the_supported_32_bit_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, declared: str, expected: str
+) -> None:
+    adapter = CTranslate2GenerationAdapter(artifact_path=tmp_path, ct2_compute_type=declared)
+    module = _FakeCTranslate2()
+    monkeypatch.setattr(
+        "sie_server.adapters.ctranslate2.generation.importlib.import_module",
+        lambda _name: module,
+    )
+    monkeypatch.setattr(
+        "sie_server.adapters.ctranslate2.generation.AutoTokenizer.from_pretrained",
+        lambda _path, **_kwargs: _FakeTokenizer(),
+    )
+
+    adapter.load("cpu")
+
+    assert module.translator_kwargs is not None
+    assert module.translator_kwargs["device"] == "cpu"
+    assert module.translator_kwargs["compute_type"] == expected
+
+
+def test_load_on_cpu_still_rejects_a_compute_type_without_a_float32_counterpart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = CTranslate2GenerationAdapter(artifact_path=tmp_path, ct2_compute_type="int16")
+    module = _FakeCTranslate2()
+    monkeypatch.setattr(
+        "sie_server.adapters.ctranslate2.generation.importlib.import_module",
+        lambda _name: module,
+    )
+
+    with pytest.raises(ValueError, match="not supported on cpu"):
+        adapter.load("cpu")
+
+    assert module.translator_kwargs is None
+
+
 def test_preflight_evidence_streams_and_reports_usage_with_exact_greedy_kwargs(tmp_path: Path) -> None:
     adapter, translator, module, tokenizer = _adapter(tmp_path)
     parameters = {

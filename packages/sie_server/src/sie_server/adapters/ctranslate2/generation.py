@@ -59,6 +59,14 @@ _COMPUTE_TYPES = frozenset(
     }
 )
 _AUTOMATIC_COMPUTE_TYPES = frozenset({"default", "auto"})
+# CTranslate2's CPU backend has no 16-bit float kernels. A 16-bit artifact still
+# loads there: CTranslate2 widens its weights to float32 at load time.
+_CPU_COMPUTE_TYPE_FALLBACKS = {
+    "bfloat16": "float32",
+    "float16": "float32",
+    "int8_bfloat16": "int8_float32",
+    "int8_float16": "int8_float32",
+}
 _EXPECTED_CTRANSLATE2_VERSION = "4.8.1"
 
 logger = logging.getLogger(__name__)
@@ -207,11 +215,16 @@ class CTranslate2GenerationAdapter(GenerationAdapter):
         if version != _EXPECTED_CTRANSLATE2_VERSION:
             raise RuntimeError(f"CTranslate2 {_EXPECTED_CTRANSLATE2_VERSION} is required, found {version or 'unknown'}")
         supported = set(ctranslate2.get_supported_compute_types(device_type, device_index))
-        if self._ct2_compute_type not in _AUTOMATIC_COMPUTE_TYPES and self._ct2_compute_type not in supported:
-            available = ", ".join(sorted(supported)) or "none"
-            raise ValueError(
-                f"ct2_compute_type={self._ct2_compute_type!r} is not supported on {device}; supported: {available}"
-            )
+        compute_type = self._ct2_compute_type
+        if compute_type not in _AUTOMATIC_COMPUTE_TYPES and compute_type not in supported:
+            fallback = _CPU_COMPUTE_TYPE_FALLBACKS.get(compute_type) if device_type == "cpu" else None
+            if fallback is None or fallback not in supported:
+                available = ", ".join(sorted(supported)) or "none"
+                raise ValueError(
+                    f"ct2_compute_type={compute_type!r} is not supported on {device}; supported: {available}"
+                )
+            logger.info("CTranslate2 has no %s kernels on CPU; computing in %s", compute_type, fallback)
+            compute_type = fallback
 
         try:
             tokenizer = AutoTokenizer.from_pretrained(
@@ -223,7 +236,7 @@ class CTranslate2GenerationAdapter(GenerationAdapter):
                 str(self._artifact_path),
                 device=device_type,
                 device_index=device_index,
-                compute_type=self._ct2_compute_type,
+                compute_type=compute_type,
                 inter_threads=1,
                 max_queued_batches=1,
             )
