@@ -407,20 +407,25 @@ mod tests {
     use clap::CommandFactory;
 
     #[test]
-    fn help_hides_secret_env_values() {
-        unsafe {
-            std::env::set_var("SIE_ADMIN_TOKEN", "admin-token-in-env");
-            std::env::set_var("SIE_GATEWAY_API_KEY", "gateway-key-in-env");
-        }
-        let help = Cli::command().render_long_help().to_string();
-        unsafe {
-            std::env::remove_var("SIE_ADMIN_TOKEN");
-            std::env::remove_var("SIE_GATEWAY_API_KEY");
-        }
-        assert!(help.contains("SIE_ADMIN_TOKEN"));
-        assert!(help.contains("SIE_GATEWAY_API_KEY"));
-        assert!(!help.contains("admin-token-in-env"));
-        assert!(!help.contains("gateway-key-in-env"));
+    fn secret_env_args_hide_their_values() {
+        let command = Cli::command();
+        let secret_args: Vec<_> = command
+            .get_arguments()
+            .filter_map(|arg| {
+                let env = arg.get_env()?.to_str()?.to_string();
+                ["TOKEN", "KEY", "SECRET", "PASSWORD"]
+                    .iter()
+                    .any(|marker| env.contains(marker))
+                    .then_some((env, arg.is_hide_env_values_set()))
+            })
+            .collect();
+        assert_eq!(
+            secret_args,
+            vec![
+                ("SIE_GATEWAY_API_KEY".to_string(), true),
+                ("SIE_ADMIN_TOKEN".to_string(), true),
+            ]
+        );
     }
 
     #[test]
