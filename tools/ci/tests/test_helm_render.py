@@ -435,7 +435,8 @@ def test_reused_token_must_exist_and_have_at_least_32_characters(
     (chart / "templates" / "check.yaml").write_text(
         '{{- include "sie-cluster.config.validateReusedToken" '
         f'(dict "name" "generated" "key" "TOKEN_KEY" "data" "{data}" '
-        f'"keySetting" "config.auth.{setting}TokenSecretKey" "nameSetting" "config.auth.{setting}TokenSecretName") }}}}\n',
+        f'"keySetting" "config.auth.{setting}TokenSecretKey" '
+        f'"nameSetting" "config.auth.{setting}TokenSecretName") }}}}\n',
         encoding="utf-8",
     )
     result = subprocess.run(
