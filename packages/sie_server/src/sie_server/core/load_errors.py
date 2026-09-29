@@ -205,9 +205,10 @@ def classify_load_error(exc: BaseException, *, attempts: int = 1) -> LoadFailure
     rule decides the class, so a typed wrapper such as ``GatedModelError``
     or ``ModelLoadTimeoutError`` wins over what it wraps, while an untyped
     wrapper such as huggingface_hub's ``LocalEntryNotFoundError`` is
-    classified by the error it wraps. When no link matches, a ``ValueError``
-    anywhere in the chain is a permanent ``CONFIG`` error and anything else
-    is ``UNKNOWN``.
+    classified by the error it wraps. When no link matches, an outermost
+    ``ValueError`` is a permanent ``CONFIG`` error and anything else is
+    ``UNKNOWN``; a ``ValueError`` nested under another error does not make
+    the failure permanent.
 
     Args:
         exc: The exception captured by ``_load_model_background``.
@@ -216,12 +217,9 @@ def classify_load_error(exc: BaseException, *, attempts: int = 1) -> LoadFailure
     Returns:
         Classification with the canonical class and cooldown.
     """
-    chain = list(_exception_chain(exc))
-    error_class = next((c for c in map(_classify_link, chain) if c is not None), None)
+    error_class = next((c for c in map(_classify_link, _exception_chain(exc)) if c is not None), None)
     if error_class is None:
-        error_class = (
-            LoadErrorClass.CONFIG if any(isinstance(link, ValueError) for link in chain) else LoadErrorClass.UNKNOWN
-        )
+        error_class = LoadErrorClass.CONFIG if isinstance(exc, ValueError) else LoadErrorClass.UNKNOWN
     return LoadFailureClassification(error_class=error_class, cooldown_s=cooldown_for(error_class, attempts))
 
 

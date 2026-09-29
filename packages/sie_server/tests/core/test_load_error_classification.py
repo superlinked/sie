@@ -217,6 +217,11 @@ CHAINED_CASES: list[tuple[str, BaseException, LoadErrorClass]] = [
         LoadErrorClass.NETWORK,
     ),
     (
+        "a nested validation error does not make an unrecognised failure permanent",
+        _caused_by(RuntimeError("weights could not be read"), ValueError("invalid literal")),
+        LoadErrorClass.UNKNOWN,
+    ),
+    (
         "implicit context",
         _raised_while_handling(RuntimeError("download failed"), OSError(errno.ENOSPC, "No space left on device")),
         LoadErrorClass.STORAGE,
