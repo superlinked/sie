@@ -14,7 +14,7 @@ Only used on CUDA with Triton importable; anything else keeps the PyTorch chain.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import torch
 
@@ -36,10 +36,12 @@ def _next_power_of_2(n: int) -> int:
 
 def rotate(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
     """Rotate ``x`` (``[tokens, heads, dim]``) by ``cos``/``sin`` (``[tokens, dim]``); same dtype out."""
-    kernel = _kernel
-    if kernel is None:
+    if _kernel is None:
         msg = "the fused vision rotary kernel needs Triton"
         raise RuntimeError(msg)
+    # A Triton kernel takes plain ints for its constexpr parameters, and compiler options
+    # such as enable_fp_fusion, at launch; type checkers read its Python signature instead.
+    kernel = cast("Any", _kernel)
     tokens, heads, dim = x.shape
     if x.stride(-1) != 1:
         x = x.contiguous()
