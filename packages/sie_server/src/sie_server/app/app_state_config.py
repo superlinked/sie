@@ -4,6 +4,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from sie_server.config.upstreams import UPSTREAMS_FILE_ENV
+
 # Environment variable names for configuration
 ENV_DEVICE = "SIE_DEVICE"
 ENV_DEVICES = "SIE_DEVICES"
@@ -12,6 +14,7 @@ ENV_MODEL_FILTER = "SIE_MODEL_FILTER"
 ENV_PRELOAD_MODELS = "SIE_PRELOAD_MODELS"
 ENV_PINNED_MODELS = "SIE_PINNED_MODELS"
 ENV_POOL = "SIE_POOL"
+ENV_UPSTREAMS_FILE = UPSTREAMS_FILE_ENV
 
 
 @dataclass
@@ -42,6 +45,9 @@ class AppStateConfig:
 
     pool_name: str | None = None
     """Optional worker pool identity used by ModelRegistry pool-isolation checks."""
+
+    upstreams_file: str | None = None
+    """Optional YAML file of operator-defined upstreams for remote profiles."""
 
     def __post_init__(self) -> None:
         """Keep scalar and concrete device settings in the same device family."""
@@ -107,6 +113,11 @@ class AppStateConfig:
         elif ENV_POOL in os.environ:
             del os.environ[ENV_POOL]
 
+        if self.upstreams_file:
+            os.environ[ENV_UPSTREAMS_FILE] = self.upstreams_file
+        elif ENV_UPSTREAMS_FILE in os.environ:
+            del os.environ[ENV_UPSTREAMS_FILE]
+
     @classmethod
     def from_env_vars(cls) -> AppStateConfig:
         """Deserialize configuration from environment variables."""
@@ -124,6 +135,7 @@ class AppStateConfig:
         pinned_str = os.environ.get(ENV_PINNED_MODELS)
         pinned_models = [m.strip() for m in pinned_str.split(",") if m.strip()] if pinned_str else None
         pool_name = os.environ.get(ENV_POOL) or None
+        upstreams_file = os.environ.get(ENV_UPSTREAMS_FILE) or None
 
         return cls(
             models_dir=models_dir,
@@ -133,4 +145,5 @@ class AppStateConfig:
             preload_models=preload_models,
             pinned_models=pinned_models,
             pool_name=pool_name,
+            upstreams_file=upstreams_file,
         )

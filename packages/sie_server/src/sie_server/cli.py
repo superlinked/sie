@@ -51,6 +51,7 @@ from sie_server.app.app_state_config import (
     AppStateConfig,
 )
 from sie_server.config.model import ModelConfig
+from sie_server.config.upstreams import UPSTREAMS_FILE_ENV, UpstreamConfigError, load_upstreams
 from sie_server.core.deps import collect_bundle_deps
 from sie_server.core.loader import load_model_configs
 from sie_server.core.logging import configure_logging, is_valid_log_level, valid_log_levels
@@ -350,6 +351,14 @@ def serve(
     ] = "info",
     preload: str | None = typer.Option(None, "--preload", help="Comma-separated model names to preload at startup"),
     json_logs: bool = typer.Option(False, "--json-logs", help="Enable structured JSON logging (for Loki)"),
+    upstreams_file: Annotated[
+        str | None,
+        typer.Option(
+            "--upstreams-file",
+            envvar=UPSTREAMS_FILE_ENV,
+            help="YAML file of upstreams for remote profiles. Credentials are named environment variables.",
+        ),
+    ] = None,
 ) -> None:
     """Start the SIE inference server."""
     from sie_sdk.storage import is_cloud_path
@@ -646,6 +655,21 @@ def serve(
                 raise typer.Exit(1)
         typer.echo(f"Pinned (from env): {len(pinned_models)} models will be kept resident")
 
+    if upstreams_file:
+        # Same split as --log-level: a typed flag fails fast, a value from the
+        # environment (Helm) warns and loads no upstream rather than crash-loop.
+        # With no upstream loaded, nothing is sent outside this deployment.
+        try:
+            upstreams = load_upstreams(upstreams_file)
+        except UpstreamConfigError as exc:
+            if _came_from_command_line("upstreams_file"):
+                typer.echo(f"Error: {exc}", err=True)
+                raise typer.Exit(1) from None
+            typer.echo(f"Warning: {exc}. No upstream is loaded.", err=True)
+            upstreams_file = None
+        else:
+            typer.echo(f"Upstreams: {', '.join(sorted(upstreams)) or 'none defined'}")
+
     config = AppStateConfig(
         models_dir=models_dir_resolved,
         device=resolved_device,
@@ -654,6 +678,7 @@ def serve(
         preload_models=preload_models,
         pinned_models=pinned_models,
         pool_name=pool_name,
+        upstreams_file=upstreams_file,
     )
 
     uvicorn_log = "debug" if verbose else log_level.strip().lower()

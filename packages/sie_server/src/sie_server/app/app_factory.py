@@ -25,6 +25,7 @@ from sie_server.api.ws import init_server_start_time
 from sie_server.api.ws import router as ws_router
 from sie_server.app.app_state_config import AppStateConfig
 from sie_server.config.engine import EngineConfig
+from sie_server.config.upstreams import load_upstreams
 from sie_server.core.memory import MemoryConfig
 from sie_server.core.readiness import mark_not_ready, mark_ready, register_liveness_probe
 from sie_server.core.registry import ModelRegistry
@@ -84,6 +85,8 @@ class AppFactory:
         )
         # Add graceful shutdown middleware (for spot instance preemption)
         app.add_middleware(ShutdownMiddleware, shutdown_state=shutdown_state)
+
+        app.state.upstreams = load_upstreams(config.upstreams_file) if config.upstreams_file else {}
 
         # Setup OpenTelemetry tracing (no-op unless the flag and endpoint are set)
         setup_tracing(app)
