@@ -2064,15 +2064,16 @@ impl Dispatcher {
     /// `EnsureModelReady` for `items`. A parked group's call is bounded by its
     /// readiness deadline and progress-ACKs the group while it is pending, so
     /// a slow call neither outlives the deadline nor lets JetStream redeliver
-    /// the group. `None` when the group was NAKed instead: the deadline passed
-    /// first, a progress ACK failed, or shutdown requested redelivery.
+    /// the group. `None` when the group was NAKed instead: the worker lists the
+    /// model in `unsupported_models` (a config commit can add it after
+    /// intake), the deadline passed first, a progress ACK failed, or shutdown
+    /// requested redelivery.
     async fn ensure_model_ready_by(
         &self,
         model_id: &str,
         items: &[(WorkItem, Delivery)],
         ready_deadline: Option<tokio::time::Instant>,
     ) -> Option<Result<crate::ipc_types::EnsureModelReadyResponse, BackendError>> {
-        // A config commit between intake and readiness can list this model.
         if self.model_is_unsupported(model_id) {
             info!(
                 model = %model_id,
