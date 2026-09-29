@@ -80,3 +80,28 @@ def test_rotation_matches_flash_attn_bit_for_bit() -> None:
                 wide, positions.long(), torch.cat([cos, cos], -1)[:, :32], torch.cat([sin, sin], -1)[:, :32]
             )
             assert torch.equal(wide, want)
+
+
+@pytest.mark.gpu_hw
+def test_strided_positions_and_rows_outside_the_tables() -> None:
+    """Positions are read at their stride; a position outside the tables leaves its token unrotated."""
+    if not torch.cuda.is_available():
+        pytest.skip("requires CUDA")
+    torch.manual_seed(0)
+    qkv = torch.randn(4, 3, 2, 8, device="cuda", dtype=torch.float16)
+    cos = torch.rand(16, 4, device="cuda", dtype=torch.float16)
+    sin = torch.rand(16, 4, device="cuda", dtype=torch.float16)
+    strided = torch.tensor([3, 99, 0, 99, 7, 99, 15, 99], device="cuda", dtype=torch.int32)[::2]
+    got, want = qkv.clone(), qkv.clone()
+    rotate_packed_qkv_(got, strided, cos, sin)
+    rotate_packed_qkv_(want, strided.contiguous(), cos, sin)
+    assert torch.equal(got, want)
+    assert not torch.equal(got, qkv)
+
+    outside = torch.tensor([2, -1, 16, 5], device="cuda", dtype=torch.int32)
+    rotated = qkv.clone()
+    rotate_packed_qkv_(rotated, outside, cos, sin)
+    assert torch.equal(rotated[1:3], qkv[1:3])
+    reference = qkv.clone()
+    rotate_packed_qkv_(reference, torch.tensor([2, 0, 0, 5], device="cuda", dtype=torch.int32), cos, sin)
+    assert torch.equal(rotated[[0, 3]], reference[[0, 3]])
