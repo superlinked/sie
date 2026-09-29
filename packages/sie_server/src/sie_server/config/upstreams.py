@@ -32,6 +32,25 @@ class UpstreamConfigError(ValueError):
     """An upstreams file or an upstream definition is invalid."""
 
 
+class _DuplicateKeyError(yaml.YAMLError):
+    def __init__(self, line: int) -> None:
+        super().__init__(f"duplicate key on line {line}")
+        self.line = line
+
+
+class _UniqueKeyLoader(yaml.SafeLoader):
+    """A safe loader that refuses a repeated mapping key instead of keeping the last one."""
+
+    def construct_mapping(self, node: yaml.MappingNode, deep: bool = False) -> dict[object, object]:
+        seen: set[object] = set()
+        for key_node, _ in node.value:
+            key = self.construct_object(key_node, deep=deep)
+            if key in seen:
+                raise _DuplicateKeyError(key_node.start_mark.line + 1)
+            seen.add(key)
+        return super().construct_mapping(node, deep=deep)
+
+
 class UpstreamCredentialError(RuntimeError):
     """The environment variable holding an upstream's credential is not set."""
 
@@ -148,7 +167,9 @@ def load_upstreams(path: str | Path) -> dict[str, Upstream]:
     except OSError as exc:
         raise UpstreamConfigError(f"upstreams file {path} could not be read: {exc.strerror}") from None
     try:
-        raw = yaml.safe_load(text)
+        raw = yaml.load(text, Loader=_UniqueKeyLoader)  # noqa: S506 - a SafeLoader subclass
+    except _DuplicateKeyError as exc:
+        raise UpstreamConfigError(f"upstreams file {path} repeats a key on line {exc.line}") from None
     except yaml.YAMLError:
         raise UpstreamConfigError(f"upstreams file {path} is not valid YAML") from None
     if raw is None:

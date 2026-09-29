@@ -111,6 +111,23 @@ def test_invalid_definitions_are_rejected(tmp_path: Path, body: str) -> None:
         load_upstreams(write(tmp_path, body))
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        "upstreams:\n  team:\n    kind: sie\n    base_url: https://a.example\n"
+        + RATE_CAP
+        + "  team:\n    kind: sie\n    base_url: https://b.example\n"
+        + RATE_CAP,
+        "upstreams:\n  team:\n    kind: sie\n    base_url: https://a.example\n"
+        "    base_url: https://b.example\n" + RATE_CAP,
+    ],
+    ids=["repeated-upstream", "repeated-field"],
+)
+def test_a_repeated_key_is_rejected_rather_than_silently_replaced(tmp_path: Path, body: str) -> None:
+    with pytest.raises(UpstreamConfigError, match="repeats a key on line"):
+        load_upstreams(write(tmp_path, body))
+
+
 def test_unreadable_or_malformed_files_are_rejected(tmp_path: Path) -> None:
     with pytest.raises(UpstreamConfigError, match="could not be read"):
         load_upstreams(tmp_path / "missing.yaml")
