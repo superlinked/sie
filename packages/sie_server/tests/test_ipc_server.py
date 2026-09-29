@@ -1865,7 +1865,45 @@ class TestBundleConfigView:
 
         assert resp.bundle_config_hash == control_plane_hash
         assert laya.model_id in resp.unsupported_models
-        assert executor.compute_bundle_config_hash("default") == control_plane_hash
+
+    @pytest.mark.asyncio
+    async def test_ping_after_a_sidecar_restart_never_reports_the_scoped_hash_without_its_list(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        entries, adapters, control_plane_hash = _default_bundle_export()
+        _earlier_image(monkeypatch, adapters)
+        registry = ModelRegistry(models_dir=None)
+        executor = QueueExecutor(registry)
+        applied = await executor.replace_model_configs(
+            ReplaceModelConfigsRequest(
+                bundle_id="default",
+                epoch=1,
+                bundle_config_hash=control_plane_hash,
+                models=entries,
+                bundle_adapters=adapters,
+            )
+        )
+        assert applied.bundle_config_hash == control_plane_hash
+        assert applied.unsupported_models
+
+        # A restarted sidecar has no committed state and adopts the Ping hash,
+        # which carries no unsupported models.
+        sock = _short_sock_path()
+        srv = IpcServer(sock, executor, worker_id="worker-test", stale_after_ms=10_000, bundle_id="default")
+        await srv.start()
+        try:
+            client = await _Client.connect(sock)
+            try:
+                ping = await client.rpc("Ping", {"timestamp_ms": 1.0})
+            finally:
+                await client.close()
+        finally:
+            await srv.stop(drain_timeout_s=1.0)
+
+        assert ping["ok"] is True
+        assert "unsupported_models" not in ping["body"]
+        assert ping["body"]["bundle_config_hash"] != control_plane_hash
+        assert ping["body"]["bundle_config_hash"] == compute_bundle_config_hash_cached(registry, "default")
 
     @pytest.mark.asyncio
     async def test_rejected_entries_keep_the_hash_and_are_reported_unless_their_hashed_fields_match(self) -> None:

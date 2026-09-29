@@ -1393,11 +1393,7 @@ fn spawn_heartbeat(
                         .filter(|resp| resp.ready)
                         .collect();
                     if let Some(resp) = (ready_children > 0).then(|| successful_ready.first()).flatten() {
-                        if config_apply_state.current_bundle_config_hash().is_empty()
-                            && !resp.bundle_config_hash.is_empty()
-                        {
-                            config_apply_state.set_bundle_hash(resp.bundle_config_hash.clone());
-                        }
+                        config_apply_state.adopt_backend_hash_if_unset(&resp.bundle_config_hash);
                         let mut merged_loaded_models = Vec::new();
                         for resp in &successful_ready {
                             merged_loaded_models.extend(resp.loaded_models.iter().cloned());

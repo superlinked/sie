@@ -17,6 +17,7 @@ from sie_server.adapters.errors import InputTooLongError
 from sie_server.api.ws import (
     BundleConfigView,
     BundleMetadataUnavailableError,
+    compute_bundle_config_hash_cached,
     compute_bundle_config_view,
 )
 from sie_server.config.model import ModelConfig
@@ -676,10 +677,16 @@ class QueueExecutor:
         )
 
     def compute_bundle_config_hash(self, bundle_id: str) -> str:
-        """Return the local registry hash for ``bundle_id``."""
+        """Return the registry hash for ``bundle_id``, scoped by this image's bundle file.
+
+        ``Ping`` reports this hash without ``unsupported_models``, and a sidecar
+        with no committed state advertises it. A hash that travels without that
+        list must imply that this image serves every model it covers, so it is
+        never scoped by the control-plane adapter list.
+        """
         if not bundle_id:
             return ""
-        return self.bundle_config_view(bundle_id).bundle_config_hash
+        return compute_bundle_config_hash_cached(self._registry, bundle_id)
 
     async def replace_model_configs(self, req: ReplaceModelConfigsRequest) -> ReplaceModelConfigsResponse:
         """Replace the bundle-scoped registry view from a full export snapshot.

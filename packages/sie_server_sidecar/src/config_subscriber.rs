@@ -136,12 +136,31 @@ impl ConfigApplyState {
         self.epoch.store(epoch, Ordering::Release);
     }
 
-    pub fn set_bundle_hash(&self, hash: String) {
+    #[cfg(test)]
+    pub(crate) fn set_bundle_hash(&self, hash: String) {
         let mut guard = self
             .bundle_config_hash
             .write()
             .expect("bundle config hash lock poisoned");
         *guard = hash;
+    }
+
+    /// Adopt the backend's `Ping` hash while no hash has been committed. That
+    /// hash is scoped by the backend image and carries no
+    /// `unsupported_models`, so it must never replace a committed pair.
+    pub fn adopt_backend_hash_if_unset(&self, hash: &str) -> bool {
+        if hash.is_empty() {
+            return false;
+        }
+        let mut guard = self
+            .bundle_config_hash
+            .write()
+            .expect("bundle config hash lock poisoned");
+        if !guard.is_empty() {
+            return false;
+        }
+        *guard = hash.to_string();
+        true
     }
 
     /// Commit a hash and its unsupported models as one pair. Lock order is
@@ -1173,6 +1192,19 @@ mod tests {
         assert!(!state.accepts_bundle_config_hash("h0"));
         assert!(state.accepts_bundle_config_hash("h1"));
         assert!(!state.accepts_bundle_config_hash("missing"));
+    }
+
+    #[test]
+    fn backend_ping_hash_is_adopted_only_while_nothing_is_committed() {
+        let state = ConfigApplyState::new(String::new());
+        assert!(!state.adopt_backend_hash_if_unset(""));
+        assert!(state.adopt_backend_hash_if_unset("image-scoped"));
+        assert_eq!(state.current_bundle_config_hash(), "image-scoped");
+
+        state.mark_applied(1, "control-plane".into(), vec!["org/new".into()]);
+        assert!(!state.adopt_backend_hash_if_unset("image-scoped"));
+        assert_eq!(state.current_bundle_config_hash(), "control-plane");
+        assert!(state.model_is_unsupported("org/new"));
     }
 
     #[test]
