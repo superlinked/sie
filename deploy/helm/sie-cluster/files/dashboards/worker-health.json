@@ -178,7 +178,7 @@
       "gridPos": { "h": 10, "w": 12, "x": 0, "y": 38 },
       "id": 70,
       "title": "Sidecar Config, NATS, Payload, IPC, and Drain Health",
-      "description": "Config convergence, NATS/payload outcomes, delivery attempts, IPC acquisition, payload size, and bounded shutdown-drain signals from the realtime sidecar.",
+      "description": "Config convergence, NATS/payload outcomes, work-item deadlines, delivery attempts, IPC acquisition, payload size, and bounded shutdown-drain signals from the realtime sidecar.",
       "type": "timeseries",
       "fieldConfig": { "defaults": { "unit": "short" } },
       "options": {
@@ -236,6 +236,11 @@
           "expr": "histogram_quantile(0.95, sum by (le, outcome, lane) (rate(sie_worker_shutdown_drain_duration_seconds_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker-sidecar\"}[5m])))",
           "legendFormat": "shutdown drain p95 {{outcome}} / {{lane}}",
           "refId": "J"
+        },
+        {
+          "expr": "sum by (operation, action, lane) (rate(sie_worker_work_item_deadline_exceeded_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker-sidecar\"}[5m]))",
+          "legendFormat": "deadline {{operation}} / {{action}} / {{lane}}",
+          "refId": "K"
         }
       ]
     },

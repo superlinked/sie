@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 from pathlib import Path
@@ -152,3 +153,49 @@ def test_scaledobject_cleanup_hook_events(tmp_path: Path, values: dict, expected
 
     assert sorted(kind for kind, _ in hooks) == ["Job", "Role", "RoleBinding", "ServiceAccount"]
     assert all(events == expected for events in hooks.values()), hooks
+
+
+def test_dashboards_cover_public_prometheus_metrics(tmp_path: Path) -> None:
+    result = render_template(tmp_path, {"dashboards": {"enabled": True}}, "templates/dashboard-configmaps.yaml")
+    assert result.returncode == 0, result.stderr
+    dashboards = [
+        json.loads(payload)
+        for doc in yaml.safe_load_all(result.stdout)
+        if doc and doc["kind"] == "ConfigMap"
+        for filename, payload in doc.get("data", {}).items()
+        if filename.endswith(".json")
+    ]
+    assert dashboards
+    expressions = [
+        target["expr"]
+        for dashboard in dashboards
+        for panel in dashboard.get("panels", [])
+        for target in panel.get("targets", [])
+        if "expr" in target
+    ]
+    contract = yaml.safe_load((ROOT / "telemetry/contract.yaml").read_text())
+    queried_names = set(re.findall(r"\bsie_[A-Za-z0-9_:]+", "\n".join(expressions)))
+    missing = sorted(
+        metric["prometheus_name"]
+        for metric in contract["metrics"]
+        if "prometheus" in metric["export"]
+        and not queried_names
+        & {
+            metric["prometheus_name"] + suffix
+            for suffix in (("_bucket", "_sum", "_count") if metric["type"] == "histogram" else ("",))
+        }
+    )
+    assert not missing, f"Grafana queries missing public Prometheus metrics: {missing}"
+    deadline = next(
+        metric for metric in contract["metrics"] if metric["name"] == "sie.worker.work_item.deadline_exceeded"
+    )
+    (expression,) = [expression for expression in expressions if deadline["prometheus_name"] in expression]
+    grouping = re.search(r"sum by \(([^)]+)\)", expression)
+    assert grouping is not None
+    assert set(grouping.group(1).replace(" ", "").split(",")) == set(contract["attribute_sets"][deadline["attributes"]])
+    assert "rate(" in expression
+    assert 'producer_service="sie-worker-sidecar"' in expression
+    assert all(
+        selector in expression
+        for selector in ('namespace="$namespace"', 'service="$collector"', 'endpoint="prometheus"')
+    )
