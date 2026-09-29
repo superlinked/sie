@@ -813,3 +813,24 @@ def test_worker_network_policy_rejects_rules_without_from_or_ports(tmp_path: Pat
         "workers": {"networkPolicy": {"enabled": True, "extraIngress": [rule]}, "pools": {"l4": {"enabled": True}}}
     }
     assert "workers.networkPolicy.extraIngress[0] needs a non-empty from and ports" in render_error(tmp_path, values)
+
+
+@pytest.mark.parametrize(
+    ("rule", "message"),
+    [
+        ({"from": [{}], "ports": [{"port": 8080}]}, "extraIngress[0].from[0] admits every source"),
+        (
+            {"from": [{"namespaceSelector": {}}], "ports": [{"port": 8080}]},
+            "extraIngress[0].from[0] admits every source",
+        ),
+        (
+            {"from": [{"namespaceSelector": {"matchLabels": {"team": "bench"}}}], "ports": [{"protocol": "TCP"}]},
+            "extraIngress[0].ports[0] admits every port",
+        ),
+    ],
+)
+def test_worker_network_policy_rejects_wildcard_peers_and_ports(tmp_path: Path, rule: dict, message: str) -> None:
+    values = {
+        "workers": {"networkPolicy": {"enabled": True, "extraIngress": [rule]}, "pools": {"l4": {"enabled": True}}}
+    }
+    assert message in render_error(tmp_path, values)
