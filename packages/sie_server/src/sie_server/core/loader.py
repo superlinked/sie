@@ -764,8 +764,9 @@ def _build_adapter_kwargs(
     # Determine model path: weights_path takes precedence over hf_id.
     # package_backed adapters (e.g., Docling) carry their own weights via the
     # installed package and intentionally have neither hf_id nor weights_path.
+    # remote_backed models are served by an upstream and have no weights at all.
     model_name_or_path: str | Path | None
-    if config.package_backed:
+    if config.package_backed or config.remote_backed:
         model_name_or_path = None
     elif config.weights_path is not None:
         model_name_or_path = config.weights_path

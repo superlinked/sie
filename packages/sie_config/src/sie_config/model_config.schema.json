@@ -606,6 +606,11 @@
       "title": "Package Backed",
       "type": "boolean"
     },
+    "remote_backed": {
+      "default": false,
+      "title": "Remote Backed",
+      "type": "boolean"
+    },
     "pool": {
       "anyOf": [
         {

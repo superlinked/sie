@@ -27,6 +27,7 @@ adapters:
 - sie_server.adapters.qwen2_flash_cross_encoder.adapter
 - sie_server.adapters.qwen3_vl_embedding
 - sie_server.adapters.qwen3_vl_reranker.adapter
+- sie_server.adapters.remote.sie
 - sie_server.adapters.rope_flash
 - sie_server.adapters.sentence_transformer
 - sie_server.adapters.siglip.adapter

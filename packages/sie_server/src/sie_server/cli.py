@@ -51,7 +51,7 @@ from sie_server.app.app_state_config import (
     AppStateConfig,
 )
 from sie_server.config.model import ModelConfig
-from sie_server.config.upstreams import UPSTREAMS_FILE_ENV, UpstreamConfigError, load_upstreams
+from sie_server.config.upstreams import REMOTE_SERVING_ENV, UPSTREAMS_FILE_ENV, UpstreamConfigError, load_upstreams
 from sie_server.core.deps import collect_bundle_deps
 from sie_server.core.loader import load_model_configs
 from sie_server.core.logging import configure_logging, is_valid_log_level, valid_log_levels
@@ -359,6 +359,14 @@ def serve(
             help="YAML file of upstreams for remote profiles. Credentials are named environment variables.",
         ),
     ] = None,
+    remote_serving: Annotated[
+        bool,
+        typer.Option(
+            "--remote-serving/--no-remote-serving",
+            envvar=REMOTE_SERVING_ENV,
+            help="Global switch for remote profiles. Off refuses every remote profile and sends nothing upstream.",
+        ),
+    ] = True,
 ) -> None:
     """Start the SIE inference server."""
     from sie_sdk.storage import is_cloud_path
@@ -679,7 +687,10 @@ def serve(
         pinned_models=pinned_models,
         pool_name=pool_name,
         upstreams_file=upstreams_file,
+        remote_serving=remote_serving,
     )
+    if upstreams_file and not remote_serving:
+        typer.echo("Remote serving: off. Every remote profile is refused.")
 
     uvicorn_log = "debug" if verbose else log_level.strip().lower()
     if uvicorn_log not in ("critical", "error", "warning", "info", "debug", "trace"):

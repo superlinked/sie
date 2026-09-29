@@ -573,6 +573,15 @@ class ProfileConfig(BaseModel):
         return validate_chat_template_kwargs(value)
 
 
+REMOTE_ADAPTER_MODULE_PREFIX = "sie_server.adapters.remote."
+REMOTE_PROFILE_LOADTIME_KEYS = frozenset({"upstream", "upstream_model"})
+
+
+def is_remote_adapter_path(adapter_path: str | None) -> bool:
+    """Whether ``adapter_path`` names a remote adapter, which forwards to an upstream."""
+    return bool(adapter_path) and adapter_path.startswith(REMOTE_ADAPTER_MODULE_PREFIX)
+
+
 class ResolvedProfile(BaseModel):
     model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
 
@@ -769,6 +778,7 @@ class ModelConfig(BaseModel):
     hf_tokenizer_dependencies: dict[str, str] = Field(default_factory=dict)
     weights_path: Path | None = None
     package_backed: bool = False
+    remote_backed: bool = False
     pool: str | None = None
     inputs: InputModalities = InputModalities()
     tasks: Tasks
@@ -802,6 +812,14 @@ class ModelConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_weight_source(self) -> "ModelConfig":
+        if self.remote_backed:
+            if self.package_backed or self.hf_id is not None or self.weights_path is not None:
+                msg = "'remote_backed' models must not set 'hf_id', 'weights_path', or 'package_backed'"
+                raise ValueError(msg)
+            if self.hf_revision is not None:
+                msg = "'remote_backed' models must not set 'hf_revision'"
+                raise ValueError(msg)
+            return self
         if self.package_backed:
             if self.hf_id is not None or self.weights_path is not None or self.hf_revision is not None:
                 msg = "'package_backed' models must not set 'hf_id', 'weights_path', or 'hf_revision'"
@@ -810,6 +828,33 @@ class ModelConfig(BaseModel):
         if self.hf_id is None and self.weights_path is None:
             msg = "At least one of 'hf_id', 'weights_path', or 'package_backed' must be set"
             raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def validate_remote_profiles(self) -> "ModelConfig":
+        """A remote profile names an upstream. It can never define one."""
+        for name, profile in self.profiles.items():
+            parent = self.profiles.get(profile.extends) if profile.extends is not None else None
+            adapter_path = profile.adapter_path or (parent.adapter_path if parent is not None else None)
+            loadtime = profile.adapter_options.loadtime or (
+                parent.adapter_options.loadtime if parent is not None else {}
+            )
+            if not is_remote_adapter_path(adapter_path):
+                if self.remote_backed:
+                    msg = f"Profile '{name}' of a 'remote_backed' model must use a remote adapter"
+                    raise ValueError(msg)
+                continue
+            unsupported = sorted(set(loadtime) - REMOTE_PROFILE_LOADTIME_KEYS)
+            if unsupported:
+                msg = (
+                    f"Remote profile '{name}' may only name an upstream and its model; "
+                    f"unsupported load-time options: {', '.join(unsupported)}"
+                )
+                raise ValueError(msg)
+            missing = [key for key in sorted(REMOTE_PROFILE_LOADTIME_KEYS) if not loadtime.get(key)]
+            if missing:
+                msg = f"Remote profile '{name}' must set load-time options: {', '.join(missing)}"
+                raise ValueError(msg)
         return self
 
     def lora_revisions(self) -> dict[str, str | None]:

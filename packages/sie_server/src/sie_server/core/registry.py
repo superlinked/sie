@@ -30,6 +30,7 @@ from sie_server.adapters.base import ModelAdapter
 from sie_server.config.device_groups import resolve_device_group, validate_tensor_parallel_size
 from sie_server.config.engine import EngineConfig
 from sie_server.config.model import ModelConfig
+from sie_server.config.upstreams import validate_profile_upstreams
 from sie_server.core.disk_cache import DiskCacheConfig, ModelDiskCacheManager
 from sie_server.core.hot_reload import HotReloader
 from sie_server.core.load_errors import (
@@ -575,6 +576,7 @@ class ModelRegistry:
         # and is not affected by this check.
         for name, config in self._configs.items():
             validate_no_legacy_scalar_lora_id(name=name, config=config)
+            validate_profile_upstreams(config)
 
         self._config_version += 1
 
@@ -2372,6 +2374,7 @@ class ModelRegistry:
         # hard invariant) so it fires regardless of ``self._pool_name``.
         # Multi-LoRA generation (``loadtime.lora_paths``) is unaffected.
         validate_no_legacy_scalar_lora_id(name=config.sie_id, config=config)
+        validate_profile_upstreams(config)
 
     def _apply_config_entry(self, config: ModelConfig, model_dir: Path | None = None) -> None:
         base_id = (
