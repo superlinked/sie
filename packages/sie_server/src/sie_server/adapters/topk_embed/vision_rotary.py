@@ -14,15 +14,25 @@ Only used on CUDA with Triton importable; anything else keeps the PyTorch chain.
 
 from __future__ import annotations
 
-from typing import Any, cast
+from typing import Any
 
 import torch
 
-_kernel: Any
-try:
-    from sie_server.adapters.topk_embed._vision_rotary_kernel import rotate_kernel as _kernel
-except ImportError:  # CPU-only installs: no Triton
-    _kernel = None
+
+def _load_kernel() -> Any:
+    """The jitted kernel, or ``None`` on CPU-only installs (no Triton).
+
+    Typed ``Any``: a Triton kernel takes plain ints for its constexpr parameters, and compiler
+    options such as ``enable_fp_fusion``, at launch, which its Python signature does not describe.
+    """
+    try:
+        from sie_server.adapters.topk_embed._vision_rotary_kernel import rotate_kernel
+    except ImportError:  # CPU-only installs: no Triton
+        return None
+    return rotate_kernel
+
+
+_kernel: Any = _load_kernel()
 
 
 def available(tensor: torch.Tensor) -> bool:
@@ -36,12 +46,10 @@ def _next_power_of_2(n: int) -> int:
 
 def rotate(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
     """Rotate ``x`` (``[tokens, heads, dim]``) by ``cos``/``sin`` (``[tokens, dim]``); same dtype out."""
-    if _kernel is None:
+    kernel = _kernel
+    if kernel is None:
         msg = "the fused vision rotary kernel needs Triton"
         raise RuntimeError(msg)
-    # A Triton kernel takes plain ints for its constexpr parameters, and compiler options
-    # such as enable_fp_fusion, at launch; type checkers read its Python signature instead.
-    kernel = cast("Any", _kernel)
     tokens, heads, dim = x.shape
     if x.stride(-1) != 1:
         x = x.contiguous()
