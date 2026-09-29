@@ -886,15 +886,62 @@ and token, and refuses every request when token auth has no token.
 {{- if not $tokenSource -}}
 {{- fail (printf "gateway auth mode %q needs tokens: set gateway.auth.tokenSecretName to a Secret holding comma-separated tokens, or the gateway refuses every request." $auth.mode) -}}
 {{- end -}}
+{{- else if dig "auth" "tokenSecretName" "" $gateway -}}
+{{- fail "gateway.auth.tokenSecretName is set but gateway auth mode is none: the gateway treats tokens without token auth as a misconfiguration and refuses every request with 500. Set gateway.auth.mode=static to enforce the tokens, or clear gateway.auth.tokenSecretName." -}}
 {{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Validation: the oauth2-proxy edge (auth.enabled) is enforced only by the
+ingress-nginx controller (spec.controller k8s.io/ingress-nginx), which honours
+the nginx.ingress.kubernetes.io/auth-* annotations. With cluster access the
+chart looks up the IngressClass named by ingress.className, or the default
+IngressClass when it is empty. An offline render (helm template) cannot see
+IngressClasses and cannot tell ingress-nginx from other controllers that also
+use the class name nginx, so it accepts only ingress.className=nginx.
+*/}}
+{{- define "sie-cluster.validateOauth2EdgeController" -}}
+{{- $className := toString (default "" .Values.ingress.className) -}}
+{{- $classes := lookup "networking.k8s.io/v1" "IngressClass" "" "" -}}
+{{- $items := list -}}
+{{- if $classes -}}
+{{- $items = default (list) $classes.items -}}
+{{- end -}}
+{{- if $items -}}
+{{- $selected := dict -}}
+{{- range $class := $items -}}
+{{- $metadata := default (dict) $class.metadata -}}
+{{- $annotations := default (dict) $metadata.annotations -}}
+{{- if $className -}}
+{{- if eq (toString $metadata.name) $className -}}
+{{- $selected = $class -}}
+{{- end -}}
+{{- else if eq (toString (index $annotations "ingressclass.kubernetes.io/is-default-class")) "true" -}}
+{{- $selected = $class -}}
+{{- end -}}
+{{- end -}}
+{{- if not $selected -}}
+{{- if $className -}}
+{{- fail (printf "auth.enabled=true needs the ingress-nginx IngressClass for the gateway Ingress, but no IngressClass named %q exists in the cluster." $className) -}}
+{{- end -}}
+{{- fail "auth.enabled=true needs the ingress-nginx IngressClass for the gateway Ingress, but ingress.className is empty and no IngressClass is marked as the cluster default." -}}
+{{- end -}}
+{{- $controller := toString (dig "spec" "controller" "" $selected) -}}
+{{- if ne $controller "k8s.io/ingress-nginx" -}}
+{{- fail (printf "auth.enabled=true puts the oauth2-proxy edge in front of the gateway through ingress-nginx auth annotations, but IngressClass %q uses controller %q, which does not honour them (the NGINX Inc controller, nginx.org/ingress-controller, ignores them too), so the gateway would be published without that check. Use an ingress-nginx IngressClass (controller k8s.io/ingress-nginx), or enable gateway auth (gateway.auth.mode=static) and set auth.enabled=false." (toString (dig "metadata" "name" "" $selected)) $controller) -}}
+{{- end -}}
+{{- else if ne $className "nginx" -}}
+{{- fail (printf "auth.enabled=true puts the oauth2-proxy edge in front of the gateway through ingress-nginx auth annotations. This render cannot inspect IngressClasses (for example helm template), so it accepts only ingress.className=nginx and cannot verify the controller behind %q. Use ingress.className=nginx with ingress-nginx, install with cluster access so the chart can check the IngressClass controller, or enable gateway auth (gateway.auth.mode=static) and set auth.enabled=false." $className) -}}
 {{- end -}}
 {{- end }}
 
 {{/*
 Validation: a gateway Ingress needs authentication and TLS.
 Authentication is gateway token auth, the oauth2-proxy edge (auth.enabled,
-enforced through ingress-nginx annotations, so only with className nginx), or
-the explicit ingress.allowUnauthenticated opt-in. A hostname is not access
+enforced through ingress-nginx annotations; see
+sie-cluster.validateOauth2EdgeController), or the explicit
+ingress.allowUnauthenticated opt-in. A hostname is not access
 control. TLS is ingress.tlsConfig.enabled with at least one host (the chart
 renders no TLS block without one), ingress.tlsConfig.mode=disabled as an
 explicit statement that TLS terminates upstream, or the explicit
@@ -904,23 +951,36 @@ ingress.allowPlaintext opt-in.
 {{- if .Values.ingress.enabled -}}
 {{- $allowUnauthenticated := include "sie-cluster.optIn" (dict "value" .Values.ingress.allowUnauthenticated "path" "ingress.allowUnauthenticated") -}}
 {{- $allowPlaintext := include "sie-cluster.optIn" (dict "value" .Values.ingress.allowPlaintext "path" "ingress.allowPlaintext") -}}
-{{- $className := toString (default "" .Values.ingress.className) -}}
 {{- $edgeAuth := dig "enabled" false (default (dict) .Values.auth) -}}
-{{- if and $edgeAuth (ne $className "nginx") -}}
-{{- fail (printf "auth.enabled=true puts the oauth2-proxy edge in front of the gateway through ingress-nginx auth annotations, which ingress.className=%q does not honour, so the gateway would be published without that check. Use ingress.className=nginx with ingress-nginx, or enable gateway auth (gateway.auth.mode=static) and set auth.enabled=false." $className) -}}
+{{- if $edgeAuth -}}
+{{- include "sie-cluster.validateOauth2EdgeController" . -}}
 {{- end -}}
 {{- $gatewayAuth := include "sie-cluster.gateway.authenticates" . -}}
 {{- if not (or $gatewayAuth $edgeAuth $allowUnauthenticated) -}}
 {{- $auth := include "sie-cluster.gateway.effectiveAuthMode" . | fromJson -}}
-{{- fail (printf "Refusing to render the gateway Ingress: nothing authenticates its requests (effective SIE_AUTH_MODE=%q, auth.enabled=false), so it would publish the inference and pool APIs to anyone who can reach the ingress controller. A hostname or TLS is not access control. Enable gateway auth (gateway.auth.mode=static with gateway.auth.tokenSecretName) or the oauth2-proxy edge (auth.enabled=true with ingress.className=nginx), or set ingress.allowUnauthenticated=true to publish it without authentication." $auth.mode) -}}
+{{- fail (printf "Refusing to render the gateway Ingress: nothing authenticates its requests (effective SIE_AUTH_MODE=%q, auth.enabled=false), so it would publish the inference and pool APIs to anyone who can reach the ingress controller. A hostname or TLS is not access control. Enable gateway auth (gateway.auth.mode=static with gateway.auth.tokenSecretName) or the oauth2-proxy edge (auth.enabled=true with ingress-nginx), or set ingress.allowUnauthenticated=true to publish it without authentication." $auth.mode) -}}
 {{- end -}}
 {{- $hosts := include "sie-cluster.ingress.hosts" . | fromJsonArray -}}
 {{- $tls := include "sie-cluster.ingressTlsConfig" . | fromYaml -}}
 {{- $upstreamTls := eq (toString (default "byo" $tls.mode)) "disabled" -}}
 {{- $ingressTls := and $tls.enabled (gt (len $hosts) 0) -}}
 {{- if not (or $upstreamTls $ingressTls $allowPlaintext) -}}
-{{- fail "Refusing to render the gateway Ingress without TLS: tokens and session cookies would cross the network in plaintext. Set ingress.hosts with ingress.tlsConfig.enabled=true (the Ingress carries TLS only for named hosts), set ingress.tlsConfig.mode=disabled when TLS terminates upstream of the Ingress, or set ingress.allowPlaintext=true to serve plain HTTP." -}}
+{{- fail "Refusing to render the gateway Ingress without TLS: tokens and session cookies would cross the network in plaintext. Set ingress.hosts with ingress.tlsConfig.enabled=true (the Ingress carries TLS only for named hosts, so an IP-only self-signed certificate is not supported for the gateway Ingress), set ingress.tlsConfig.mode=disabled when TLS terminates upstream of the Ingress, or set ingress.allowPlaintext=true to serve plain HTTP." -}}
 {{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Validation: the MCP edge Ingress carries connector secrets and OAuth tokens,
+so it needs TLS (ingress.tlsConfig.enabled, or mode=disabled when TLS
+terminates upstream) or the explicit mcpEdge.ingress.allowPlaintext opt-in.
+*/}}
+{{- define "sie-cluster.validateMcpEdgeIngressTls" -}}
+{{- $tls := include "sie-cluster.ingressTlsConfig" . | fromYaml -}}
+{{- $upstreamTls := eq (toString (default "byo" $tls.mode)) "disabled" -}}
+{{- $allowPlaintext := include "sie-cluster.optIn" (dict "value" (dig "ingress" "allowPlaintext" nil (default (dict) .Values.mcpEdge)) "path" "mcpEdge.ingress.allowPlaintext") -}}
+{{- if not (or $tls.enabled $upstreamTls $allowPlaintext) -}}
+{{- fail "Refusing to render the MCP edge Ingress without TLS: it carries connector secrets and OAuth tokens. Set ingress.tlsConfig.enabled=true, set ingress.tlsConfig.mode=disabled when TLS terminates upstream of the Ingress, or set mcpEdge.ingress.allowPlaintext=true to serve plain HTTP." -}}
 {{- end -}}
 {{- end }}
 
@@ -928,7 +988,8 @@ ingress.allowPlaintext opt-in.
 Validation: a gateway Service of type LoadBalancer or NodePort is reachable
 from outside the cluster on most managed Kubernetes platforms, so it needs
 gateway token auth or the explicit gateway.service.allowUnauthenticated
-opt-in. sie-config accepts unauthenticated writes unless an admin token is
+opt-in, and, because the gateway serves plain HTTP, the explicit
+gateway.service.allowPlaintext acknowledgement. sie-config accepts unauthenticated writes unless an admin token is
 configured (outside a production deployment environment), so its Service
 stays ClusterIP.
 */}}
@@ -938,6 +999,10 @@ stays ClusterIP.
 {{- $allowUnauthenticated := include "sie-cluster.optIn" (dict "value" (dig "service" "allowUnauthenticated" nil (default (dict) .Values.gateway)) "path" "gateway.service.allowUnauthenticated") -}}
 {{- if not (or (include "sie-cluster.gateway.authenticates" .) $allowUnauthenticated) -}}
 {{- fail (printf "Refusing to render gateway.service.type=%s without gateway auth: the Service is reachable from outside the cluster on most managed platforms and would publish the inference and pool APIs. Enable gateway auth (gateway.auth.mode=static with gateway.auth.tokenSecretName), or set gateway.service.allowUnauthenticated=true." $serviceType) -}}
+{{- end -}}
+{{- $allowPlaintext := include "sie-cluster.optIn" (dict "value" (dig "service" "allowPlaintext" nil (default (dict) .Values.gateway)) "path" "gateway.service.allowPlaintext") -}}
+{{- if not $allowPlaintext -}}
+{{- fail (printf "Refusing to render gateway.service.type=%s without an explicit TLS decision: the gateway serves plain HTTP, so tokens would cross the network in cleartext unless the load balancer terminates TLS. Prefer an Ingress with TLS, or configure TLS termination through provider annotations in gateway.service.annotations and set gateway.service.allowPlaintext=true to acknowledge that the gateway itself serves HTTP." $serviceType) -}}
 {{- end -}}
 {{- end -}}
 {{- $config := default (dict) .Values.config -}}

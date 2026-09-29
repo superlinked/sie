@@ -1164,38 +1164,53 @@ hold:
   `gateway.auth.tokenSecretName` naming a Secret of comma-separated tokens.
   SDK clients pass one as `api_key`/`apiKey`, or read it from `SIE_API_KEY`
   when their base URL comes from `SIE_BASE_URL`;
-- the oauth2-proxy edge is enabled (`auth.enabled=true`). It works through
-  ingress-nginx `auth-url` annotations, so the chart accepts it only with
-  `ingress.className=nginx`. Its default `auth.oauth2Proxy.emailDomain: "*"`
-  admits any account the configured OIDC issuer authenticates; narrow it for
-  a shared issuer;
+- the oauth2-proxy edge is enabled (`auth.enabled=true`). It works through the
+  `nginx.ingress.kubernetes.io/auth-*` annotations, which only the ingress-nginx
+  controller honours; the NGINX Inc controller (`nginx.org/ingress-controller`)
+  ignores them even when its class is also named `nginx`. With cluster access
+  (`helm install`/`upgrade`), the chart looks up the IngressClass named by
+  `ingress.className`, or the default IngressClass when it is empty, and
+  requires `spec.controller: k8s.io/ingress-nginx`. An offline render
+  (`helm template`, including GitOps tools that render that way) cannot see
+  IngressClasses, so it accepts only `ingress.className=nginx` and cannot tell
+  the two controllers apart; use gateway token auth there if the class name
+  differs. The default `auth.oauth2Proxy.emailDomain: "*"` admits any account
+  the configured OIDC issuer authenticates; narrow it for a shared issuer;
 - `ingress.allowUnauthenticated=true` explicitly accepts an unauthenticated
   Ingress, for example behind a private ingress controller.
 
 The Ingress also needs TLS, so tokens and session cookies do not cross the
 network in cleartext: `ingress.tlsConfig.enabled=true` with at least one host
-(the Ingress carries TLS only for named hosts), `ingress.tlsConfig.mode=disabled`
-as an explicit statement that TLS terminates upstream of the Ingress, or the
-explicit `ingress.allowPlaintext=true`.
+(the Ingress carries TLS only for named hosts, so an IP-only self-signed
+certificate from `selfSigned.leaf.ipAddresses` is not supported for the gateway
+Ingress), `ingress.tlsConfig.mode=disabled` as an explicit statement that TLS
+terminates upstream of the Ingress, or the explicit `ingress.allowPlaintext=true`.
+The MCP edge Ingress (`mcpEdge.ingress`) carries connector secrets and OAuth
+tokens and follows the same TLS rule, with `mcpEdge.ingress.allowPlaintext=true`
+as its explicit opt-in.
 
 Both opt-ins accept only a YAML boolean; a quoted `"false"` fails the render.
 `gateway.auth.mode` must be `none`, `static`, or `token` exactly as the gateway
 reads it, and token auth without `gateway.auth.tokenSecretName` (or a
 `SIE_AUTH_TOKEN(S)` entry in `gateway.extraEnv`) fails the render because the
-gateway would refuse every request. A `gateway.extraEnv` entry that overrides
+gateway would refuse every request. `gateway.auth.tokenSecretName` with auth
+mode `none` fails for the same reason. A `gateway.extraEnv` entry that overrides
 `SIE_AUTH_MODE` takes precedence over `gateway.auth.mode`.
 
 The same authentication requirement applies to `gateway.service.type:
 LoadBalancer` or `NodePort`, which are reachable from outside the cluster on
 most managed platforms; `gateway.service.allowUnauthenticated=true` is the
-explicit opt-in there. `config.service.type` must stay `ClusterIP`: sie-config
+explicit opt-in there. Because the gateway itself serves plain HTTP, those
+Service types also need `gateway.service.allowPlaintext=true`: configure TLS
+termination through your provider's load-balancer annotations in
+`gateway.service.annotations` where available, or prefer an Ingress with TLS. `config.service.type` must stay `ClusterIP`: sie-config
 is the configuration write authority and accepts unauthenticated writes unless
 an admin token is configured.
 
 Independently of auth, the gateway bounds API-created pools: the warm floor
-(`minimum_worker_count`, default cap 4), the number of assigned workers per
-machine profile a pool keeps warm through its active lease (its GPU
-requirement, at most the same cap), the lease TTL (default cap 3600 s), and the
+(`minimum_worker_count`) and the per-profile `gpus` requirement (default cap 4
+each), the number of assigned workers per machine profile a pool keeps warm
+through its active lease (its requirement), the lease TTL (default cap 3600 s), and the
 number of live pools (default cap 64, counted by each gateway replica). Tune
 them with `SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT`,
 `SIE_GATEWAY_POOL_MAX_TTL_S`, and `SIE_GATEWAY_MAX_POOLS` in `gateway.extraEnv`.
@@ -1225,7 +1240,10 @@ in the namespace. It is off by default and on in `values-ha.yaml`. Add
 `workers.networkPolicy.extraIngress` rules for any caller outside the chart that
 must reach workers directly, and list the worker ports (`workers.common.port`,
 plus one port per additional child container on multi-GPU pools) so the rule
-does not open every port on the worker pods:
+does not open every port on the worker pods. The chart rejects rules that admit
+every source (an empty peer, an unscoped selector, or an `ipBlock` of
+`0.0.0.0/0` or `::/0`) or every port (a port entry without `port`, or the full
+1-65535 range); disable the policy instead to open the worker API to everything:
 
 ```yaml
 workers:

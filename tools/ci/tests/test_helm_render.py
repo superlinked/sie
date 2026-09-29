@@ -686,10 +686,12 @@ def test_ingress_opt_ins_accept_only_booleans(tmp_path: Path, field: str, value:
     assert f"ingress.{field} must be a boolean" in stderr
 
 
-@pytest.mark.parametrize("class_name", ["alb", "traefik", ""])
-def test_oauth2_edge_is_refused_outside_ingress_nginx(tmp_path: Path, class_name: str) -> None:
+@pytest.mark.parametrize("class_name", ["alb", "traefik", "nginx-internal", ""])
+def test_offline_render_credits_the_oauth2_edge_only_for_class_nginx(tmp_path: Path, class_name: str) -> None:
     values = ingress_values({"className": class_name, **SCOPED_TLS}, auth=OAUTH2_EDGE)
-    assert "does not honour" in render_error(tmp_path, values)
+    stderr = render_error(tmp_path, values)
+    assert "cannot inspect IngressClasses" in stderr
+    assert "accepts only ingress.className=nginx" in stderr
 
 
 def test_oauth2_edge_on_ingress_nginx_counts_as_authentication(tmp_path: Path) -> None:
@@ -732,15 +734,74 @@ def test_gateway_token_auth_needs_a_token_source(tmp_path: Path, mode: str) -> N
 
 @pytest.mark.parametrize("service_type", ["LoadBalancer", "NodePort"])
 def test_external_gateway_service_requires_auth_or_opt_in(tmp_path: Path, service_type: str) -> None:
-    stderr = render_error(tmp_path, {"gateway": {"service": {"type": service_type}}})
+    stderr = render_error(tmp_path, {"gateway": {"service": {"type": service_type, "allowPlaintext": True}}})
     assert f"Refusing to render gateway.service.type={service_type} without gateway auth" in stderr
-    rendered_documents(tmp_path, {"gateway": {**GATEWAY_AUTH, "service": {"type": service_type}}})
-    rendered_documents(tmp_path, {"gateway": {"service": {"type": service_type, "allowUnauthenticated": True}}})
+    service = {"type": service_type, "allowPlaintext": True}
+    rendered_documents(tmp_path, {"gateway": {**GATEWAY_AUTH, "service": service}})
+    rendered_documents(tmp_path, {"gateway": {"service": {**service, "allowUnauthenticated": True}}})
 
 
-def test_gateway_service_opt_in_accepts_only_booleans(tmp_path: Path) -> None:
-    values = {"gateway": {"service": {"type": "LoadBalancer", "allowUnauthenticated": "false"}}}
-    assert "gateway.service.allowUnauthenticated must be a boolean" in render_error(tmp_path, values)
+@pytest.mark.parametrize("service_type", ["LoadBalancer", "NodePort"])
+def test_external_gateway_service_requires_a_plaintext_acknowledgement(tmp_path: Path, service_type: str) -> None:
+    stderr = render_error(tmp_path, {"gateway": {**GATEWAY_AUTH, "service": {"type": service_type}}})
+    assert f"Refusing to render gateway.service.type={service_type} without an explicit TLS decision" in stderr
+    assert "gateway.service.allowPlaintext=true" in stderr
+
+
+@pytest.mark.parametrize("field", ["allowUnauthenticated", "allowPlaintext"])
+def test_gateway_service_opt_ins_accept_only_booleans(tmp_path: Path, field: str) -> None:
+    service = {"type": "LoadBalancer", "allowUnauthenticated": True, "allowPlaintext": True, field: "false"}
+    assert f"gateway.service.{field} must be a boolean" in render_error(tmp_path, {"gateway": {"service": service}})
+
+
+def test_token_secret_without_token_auth_fails(tmp_path: Path) -> None:
+    stderr = render_error(tmp_path, {"gateway": {"auth": {"mode": "none", "tokenSecretName": "sie-gateway-auth"}}})
+    assert "gateway.auth.tokenSecretName is set but gateway auth mode is none" in stderr
+
+
+def test_ip_only_self_signed_certificate_is_not_ingress_tls(tmp_path: Path) -> None:
+    ingress = {
+        "tlsConfig": {"enabled": True, "mode": "self-signed", "selfSigned": {"leaf": {"ipAddresses": ["10.0.0.10"]}}}
+    }
+    stderr = render_error(tmp_path, ingress_values(ingress, gateway=GATEWAY_AUTH))
+    assert TLS_GUARD in stderr
+    assert "IP-only self-signed certificate is not supported" in stderr
+
+
+MCP_EDGE = {"enabled": True, "ingress": {"enabled": True, "host": "mcp.example.com"}}
+
+
+def mcp_edge_ingresses(documents: list[dict]) -> list[dict]:
+    return [
+        doc
+        for doc in documents
+        if doc["kind"] == "Ingress" and doc["metadata"]["labels"].get("app.kubernetes.io/component") == "mcp-edge"
+    ]
+
+
+def test_mcp_edge_ingress_without_tls_fails(tmp_path: Path) -> None:
+    stderr = render_error(tmp_path, {"mcpEdge": MCP_EDGE})
+    assert "Refusing to render the MCP edge Ingress without TLS" in stderr
+    assert "mcpEdge.ingress.allowPlaintext=true" in stderr
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"ingress": {"tlsConfig": {"enabled": True, "mode": "byo"}}},
+        {"ingress": {"tlsConfig": {"enabled": False, "mode": "disabled"}}},
+        {"mcpEdge": {"ingress": {"allowPlaintext": True}}},
+    ],
+)
+def test_mcp_edge_ingress_renders_with_tls_or_the_plaintext_opt_in(tmp_path: Path, values: dict) -> None:
+    mcp_edge = {**MCP_EDGE, "ingress": {**MCP_EDGE["ingress"], **values.get("mcpEdge", {}).get("ingress", {})}}
+    documents = rendered_documents(tmp_path, {**values, "mcpEdge": mcp_edge})
+    assert len(mcp_edge_ingresses(documents)) == 1
+
+
+def test_mcp_edge_plaintext_opt_in_accepts_only_booleans(tmp_path: Path) -> None:
+    mcp_edge = {**MCP_EDGE, "ingress": {**MCP_EDGE["ingress"], "allowPlaintext": "false"}}
+    assert "mcpEdge.ingress.allowPlaintext must be a boolean" in render_error(tmp_path, {"mcpEdge": mcp_edge})
 
 
 @pytest.mark.parametrize("service_type", ["LoadBalancer", "NodePort"])
@@ -834,3 +895,33 @@ def test_worker_network_policy_rejects_wildcard_peers_and_ports(tmp_path: Path, 
         "workers": {"networkPolicy": {"enabled": True, "extraIngress": [rule]}, "pools": {"l4": {"enabled": True}}}
     }
     assert message in render_error(tmp_path, values)
+
+
+@pytest.mark.parametrize(
+    ("rule", "message"),
+    [
+        ({"from": [{"ipBlock": {"cidr": "0.0.0.0/0"}}], "ports": [{"port": 8080}]}, "admits every address"),
+        ({"from": [{"ipBlock": {"cidr": "::/0"}}], "ports": [{"port": 8080}]}, "admits every address"),
+        (
+            {"from": [{"ipBlock": {"cidr": "10.0.0.0/8"}}], "ports": [{"port": 1, "endPort": 65535}]},
+            "covers every port",
+        ),
+    ],
+)
+def test_worker_network_policy_rejects_full_range_sources_and_ports(tmp_path: Path, rule: dict, message: str) -> None:
+    values = {
+        "workers": {"networkPolicy": {"enabled": True, "extraIngress": [rule]}, "pools": {"l4": {"enabled": True}}}
+    }
+    assert message in render_error(tmp_path, values)
+
+
+def test_worker_network_policy_accepts_a_scoped_ip_block_and_port_range(tmp_path: Path) -> None:
+    rule = {
+        "from": [{"ipBlock": {"cidr": "10.0.0.0/8"}}],
+        "ports": [{"port": 8080, "endPort": 8081, "protocol": "TCP"}],
+    }
+    values = {
+        "workers": {"networkPolicy": {"enabled": True, "extraIngress": [rule]}, "pools": {"l4": {"enabled": True}}}
+    }
+    (policy,) = worker_network_policies(rendered_documents(tmp_path, values))
+    assert policy["spec"]["ingress"][1] == rule

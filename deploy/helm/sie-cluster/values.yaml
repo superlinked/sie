@@ -275,6 +275,11 @@ gateway:
     # -- Allow a LoadBalancer or NodePort gateway Service without gateway auth
     # (a boolean).
     allowUnauthenticated: false
+    # -- Acknowledge that a LoadBalancer or NodePort gateway Service serves
+    # plain HTTP (a boolean). Required for those types; configure TLS
+    # termination through provider annotations above when the load balancer
+    # supports it, or prefer an Ingress with TLS.
+    allowPlaintext: false
 
   # -- Block the gateway pod on sie-config readiness before it starts the
   # cold-start bootstrap. Prevents the rolling-upgrade race where the
@@ -857,8 +862,11 @@ workers:
   networkPolicy:
     enabled: false
     # -- Additional NetworkPolicy ingress rules for callers outside this chart
-    # that must reach workers directly. Each entry needs a non-empty `from` and
-    # `ports` so a rule cannot admit every source or every port.
+    # that must reach workers directly. Each entry needs a non-empty `from`
+    # (scoped selectors or an ipBlock narrower than 0.0.0.0/0 and ::/0) and
+    # `ports` (each with a port, not the full 1-65535 range), so a rule cannot
+    # admit every source or every port. Disable the policy instead to open the
+    # worker API to everything.
     extraIngress: []
 
   # -- Worker pools (one StatefulSet per enabled queuePool/machineProfile/bundle lane)
@@ -2208,6 +2216,11 @@ mcpEdge:
     # gateway ingress (/ -> gateway). Reuses the chart's nginx + cert-manager.
     enabled: false
     host: ""
+    # -- Serve the MCP edge Ingress without TLS (a boolean). The chart refuses
+    # it by default because it carries connector secrets and OAuth tokens;
+    # ingress.tlsConfig.enabled, or mode=disabled when TLS terminates
+    # upstream, satisfies the check.
+    allowPlaintext: false
   resources:
     requests:
       cpu: "100m"
