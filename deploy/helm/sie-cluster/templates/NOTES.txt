@@ -9,11 +9,18 @@ SIE Cluster {{ .Chart.Version }} deployed to namespace {{ include "sie-cluster.n
 
 Gateway: http://{{ include "sie-cluster.gateway.serviceName" . }}.{{ include "sie-cluster.namespace" . }}.svc:{{ .Values.gateway.service.port }}
 {{- if include "sie-cluster.nats.authEnabled" . }}
-NATS:    authenticated; sie-config, the gateway, and the worker sidecars each connect as their own user.
 {{- if and .Values.nats.install (dig "auth" "allowAnonymous" false .Values.nats) }}
+NATS:    ANONYMOUS ACCESS IS ON
 
-WARNING: nats.auth.allowAnonymous=true. The NATS server also accepts anonymous connections with
-unrestricted permissions. Upgrade again without it once every pod has restarted.
+*****************************************************************************************************
+WARNING: nats.auth.allowAnonymous=true. The NATS server accepts anonymous connections with
+unrestricted permissions: any pod that can reach NATS can read queued work and publish model
+configuration to the gateway and the workers. This setting is only for the first step of the
+upgrade. Once every pod has restarted, run helm upgrade again with
+--set nats.auth.allowAnonymous=false. --reuse-values and --reset-then-reuse-values keep it on.
+*****************************************************************************************************
+{{- else }}
+NATS:    authenticated; sie-config, the gateway, and the worker sidecars each connect as their own user.
 {{- end }}
 {{- else if .Values.nats.enabled }}
 

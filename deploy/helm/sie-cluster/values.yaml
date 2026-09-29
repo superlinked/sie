@@ -1459,7 +1459,9 @@ nats:
     # -- Also accept anonymous connections, with unrestricted permissions,
     # on the bundled server. A temporary aid for upgrading an existing
     # release: pods that predate authentication keep working until they are
-    # replaced. Set it back to false once every pod has restarted.
+    # replaced. Once every pod has restarted, upgrade again with
+    # `--set nats.auth.allowAnonymous=false`; `--reuse-values` and
+    # `--reset-then-reuse-values` keep it on.
     allowAnonymous: false
     # -- Existing Secrets, each holding the component's NATS password under
     # the key `password`. For the bundled server it must be letters and digits
