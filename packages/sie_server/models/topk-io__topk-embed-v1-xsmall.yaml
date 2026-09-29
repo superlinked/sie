@@ -25,6 +25,9 @@ profiles:
     adapter_path: sie_server.adapters.topk_embed.adapter:TopkEmbedAdapter
     adapter_options:
       loadtime:
+        # CUDA graphs for small text batches (queries) on the packed CUDA path;
+        # anything else runs eagerly. See adapters/topk_embed/graphs.py.
+        cuda_graphs: bucketed
         muvera_config:
           num_repetitions: 40
           num_simhash_projections: 6

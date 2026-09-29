@@ -170,50 +170,55 @@ class TestReferenceKernels:
         assert torch.equal(out, (F.silu(gate.float()) * up.float()).to(torch.bfloat16))
 
 
+def tiny_qwen3_5_text_model() -> Any:
+    """A random 4-layer Qwen3.5 text model: three Gated DeltaNet layers, then full attention.
+
+    Norm weights are randomized (zero-centred RMSNorms around 0, the Gated DeltaNet
+    norm around 1), and there are more value heads than key heads, so the
+    grouped-value repeat runs too. Skips without transformers >= 5.2.
+    """
+    pytest.importorskip("transformers.models.qwen3_5", reason="needs transformers >= 5.2 (the transformers5 bundle)")
+    from transformers.models.qwen3_5 import (  # ty: ignore[unresolved-import]
+        Qwen3_5TextConfig,
+        Qwen3_5TextModel,
+    )
+
+    torch.manual_seed(7)
+    config = Qwen3_5TextConfig(
+        vocab_size=32,
+        hidden_size=64,
+        intermediate_size=96,
+        num_hidden_layers=4,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=32,
+        linear_num_key_heads=2,
+        linear_num_value_heads=4,
+        linear_key_head_dim=16,
+        linear_value_head_dim=16,
+        max_position_embeddings=256,
+    )
+    config.is_causal = False
+    config.use_cache = False
+    model = Qwen3_5TextModel(config).eval()
+    with torch.no_grad():
+        for name, parameter in model.named_parameters():
+            if name.endswith("linear_attn.norm.weight"):
+                parameter.normal_(1.0, 0.2)
+            elif "norm" in name:
+                parameter.normal_(0.0, 0.2)
+    for layer in model.layers:
+        if hasattr(layer, "self_attn"):
+            layer.self_attn.is_causal = False
+    return model
+
+
 class TestPackedTextModel:
     """The packed forward (reference kernels) against the stock text model run one input at a time."""
 
     @pytest.fixture(scope="class")
     def model(self) -> Any:
-        pytest.importorskip(
-            "transformers.models.qwen3_5", reason="needs transformers >= 5.2 (the transformers5 bundle)"
-        )
-        from transformers.models.qwen3_5 import (  # ty: ignore[unresolved-import]
-            Qwen3_5TextConfig,
-            Qwen3_5TextModel,
-        )
-
-        torch.manual_seed(7)
-        config = Qwen3_5TextConfig(
-            vocab_size=32,
-            hidden_size=64,
-            intermediate_size=96,
-            num_hidden_layers=4,
-            num_attention_heads=4,
-            num_key_value_heads=2,
-            head_dim=32,
-            # More value heads than key heads, so the grouped-value repeat runs too.
-            linear_num_key_heads=2,
-            linear_num_value_heads=4,
-            linear_key_head_dim=16,
-            linear_value_head_dim=16,
-            max_position_embeddings=256,
-        )
-        config.is_causal = False
-        config.use_cache = False
-        model = Qwen3_5TextModel(config).eval()
-        with torch.no_grad():
-            for name, parameter in model.named_parameters():
-                # Non-trivial norm weights: zero-centred RMSNorms get a spread around 0,
-                # the Gated DeltaNet norm (plain weight) around 1.
-                if name.endswith("linear_attn.norm.weight"):
-                    parameter.normal_(1.0, 0.2)
-                elif "norm" in name:
-                    parameter.normal_(0.0, 0.2)
-        for layer in model.layers:
-            if hasattr(layer, "self_attn"):
-                layer.self_attn.is_causal = False
-        return model
+        return tiny_qwen3_5_text_model()
 
     def test_matches_the_stock_model_per_input(self, model: Any) -> None:
         assert [

@@ -51,8 +51,10 @@ from sie_server.adapters._multivector import maxsim_scores_batched
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ComputePrecision
 from sie_server.adapters._utils import grouped_score_pairs, validate_output_types
+from sie_server.adapters.topk_embed.graphs import GRAPH_MODES, GraphMode, GraphRunner, default_max_tokens
 from sie_server.adapters.topk_embed.packed import PackedTextModel, Packing, resolve_kernels
 from sie_server.core.inference_output import EncodeOutput
+from sie_server.core.oom import is_oom_error
 from sie_server.core.postprocessor import MuveraConfig, MuveraPostprocessor
 from sie_server.types.inputs import InvalidInputError, decode_image
 
@@ -133,6 +135,8 @@ class TopkEmbedAdapter(BaseAdapter):
         muvera_config: dict[str, Any] | None = None,
         attn_implementation: str | None = None,
         packed: bool | None = None,
+        cuda_graphs: str | bool = "off",
+        cuda_graph_tokens: int | None = None,
     ) -> None:
         """Initialize the adapter.
 
@@ -157,6 +161,12 @@ class TopkEmbedAdapter(BaseAdapter):
                 kernels. ``None`` packs on CUDA when flash-linear-attention is
                 installed; ``True`` always packs (PyTorch reference kernels where
                 the fast ones are missing); ``False`` never packs.
+            cuda_graphs: CUDA graphs for small text batches on the packed CUDA path
+                (see ``graphs.py``): ``"off"`` or ``"bucketed"``. An operator setting,
+                fixed at load.
+            cuda_graph_tokens: Most tokens (rows times padded length) one graph holds.
+                Defaults to 2,048 at a hidden size of 768, proportionally fewer for
+                wider models.
         """
         self._model_name_or_path = str(model_name_or_path)
         self._compute_precision = compute_precision
@@ -172,6 +182,13 @@ class TopkEmbedAdapter(BaseAdapter):
         self._attn_implementation = attn_implementation
         self._packed = packed
         self._packed_text: PackedTextModel | None = None
+        mode = "off" if cuda_graphs is False else cuda_graphs
+        if mode not in GRAPH_MODES:
+            msg = f"cuda_graphs must be one of {', '.join(GRAPH_MODES)}, got {cuda_graphs!r}"
+            raise ValueError(msg)
+        self._cuda_graphs = cast("GraphMode", mode)
+        self._cuda_graph_tokens = cuda_graph_tokens
+        self._graphs: GraphRunner | None = None
         self._preprocess_pool: ThreadPoolExecutor | None = None
         self._preprocess_pool_lock = threading.Lock()
 
@@ -311,6 +328,30 @@ class TopkEmbedAdapter(BaseAdapter):
         self._image_prefix = torch.tensor(ids[:split], dtype=torch.long)
         self._image_suffix = torch.tensor(ids[split + 1 :], dtype=torch.long)
         self._grid_cache.clear()
+        self._graphs = self._graph_runner(device)
+
+    def _graph_runner(self, device: str) -> GraphRunner | None:
+        """The CUDA graph runner for small text batches, when configured and possible."""
+        if self._cuda_graphs == "off":
+            return None
+        text = self._packed_text
+        if not str(device).startswith("cuda"):
+            reason = "they need a CUDA device"
+        elif text is None or text.kernels.names.get("delta_rule") != "fla chunk":
+            reason = "they need the packed path with flash-linear-attention"
+        else:
+            embed = self._model.get_input_embeddings()
+            max_tokens = int(self._cuda_graph_tokens or default_max_tokens(int(embed.weight.shape[1])))
+            logger.info("TopK-Embed CUDA graphs: bucketed, up to %d tokens per graph", max_tokens)
+            return GraphRunner(
+                text,
+                embed,
+                pad_token_id=int(self._tokenizer.pad_token_id),
+                max_tokens=max_tokens,
+                name=self._model_name_or_path,
+            )
+        logger.info("TopK-Embed CUDA graphs off: %s", reason)
+        return None
 
     def _resolve_compute_dtype(self) -> torch.dtype:
         # Honoured on every device: the reference runs bf16 on CPU too.
@@ -484,9 +525,17 @@ class TopkEmbedAdapter(BaseAdapter):
         """Run rows through the backbone and head; one float32 ``[len, dim]`` CPU tensor per row."""
         assert self._model is not None
         assert self._head is not None
-        if self._packed_text is not None:
-            return self._forward_packed(rows, images=images, normalize=normalize)
-        return self._forward_padded(rows, images=images, normalize=normalize)
+        try:
+            if self._packed_text is not None:
+                return self._forward_packed(rows, images=images, normalize=normalize)
+            return self._forward_padded(rows, images=images, normalize=normalize)
+        except Exception as exc:
+            if self._graphs is not None and is_oom_error(exc):
+                # Give the graphs' memory back before the worker's out-of-memory recovery retries.
+                with self._forward_lock:
+                    self._graphs.clear()
+                torch.cuda.empty_cache()
+            raise
 
     def _forward_padded(
         self, rows: list[torch.Tensor], *, images: list[_ImageRow] | None, normalize: bool
@@ -524,6 +573,13 @@ class TopkEmbedAdapter(BaseAdapter):
     ) -> list[torch.Tensor]:
         packed_text = self._packed_text
         assert packed_text is not None
+        if not images and self._graphs is not None:
+            with self._forward_lock, torch.inference_mode():
+                hidden = self._graphs.run(rows)
+                if hidden is not None:
+                    # Rows come back right-padded to the graph's length.
+                    vectors = self._project(hidden, normalize=normalize)
+                    return [vectors[i, : len(row)] for i, row in enumerate(rows)]
         device = self._device or "cpu"
         lengths = [len(row) for row in rows]
         input_ids = torch.cat(rows).unsqueeze(0).to(device)
@@ -772,6 +828,9 @@ class TopkEmbedAdapter(BaseAdapter):
             pool, self._preprocess_pool = self._preprocess_pool, None
         if pool is not None:
             pool.shutdown(wait=False)
+        if self._graphs is not None:
+            self._graphs.clear()
+        self._graphs = None
         self._packed_text = None
         super().unload()
 

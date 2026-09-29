@@ -20,7 +20,10 @@ kernel mixes positions. They back the CPU tests and are never chosen automatical
 
 ``PackedTextModel`` reuses the loaded ``transformers.models.qwen3_5`` modules'
 weights and mirrors their forward passes, minus the KV cache and padding masks
-that a packed, cache-free encoder does not need.
+that a packed, cache-free encoder does not need. It also runs a fixed-size
+layout, right-padded rows (``Padded``), which is what a CUDA graph records
+(``graphs.py``): the Gated DeltaNet layers read each row left to right, so the
+padding after an input never reaches it, and attention masks the padded keys.
 """
 
 from __future__ import annotations
@@ -69,18 +72,29 @@ class Packing:
 
 
 @dataclass(frozen=True)
+class Padded:
+    """Inputs as rows of one length, each right-padded: ``mask`` is ``[B, L]``, True on real tokens."""
+
+    mask: torch.Tensor
+
+
+Layout = Packing | Padded
+
+
+@dataclass(frozen=True)
 class PackedKernels:
     """The kernels the packed forward needs.
 
-    Sequence mixers, which see the packing:
+    Sequence mixers, which see the packing (``packing=None``: every row of the
+    batch is one input, as in the ``Padded`` layout):
 
     * ``delta_rule(q, k, v, *, a, beta, a_log, dt_bias, packing)`` returns
-      ``[1, T, HV, V]``. The decay is ``-exp(a_log) * softplus(a + dt_bias)`` in
+      ``[B, T, HV, V]``. The decay is ``-exp(a_log) * softplus(a + dt_bias)`` in
       float32, as the stock layer computes it.
-    * ``causal_conv(x, weight, bias, activation, packing)`` maps ``[1, T, D]`` to
-      ``[1, T, D]``.
+    * ``causal_conv(x, weight, bias, activation, packing)`` maps ``[B, T, D]`` to
+      ``[B, T, D]``.
     * ``attention(q, k, v, packing, scale)`` takes ``[T, H, d]`` queries and
-      ``[T, H_kv, d]`` keys and values (bidirectional).
+      ``[T, H_kv, d]`` keys and values of a packed batch (bidirectional).
 
     Per-token ops, computed in float32 and returned in the input dtype:
 
@@ -149,7 +163,7 @@ def _fast_kernels() -> PackedKernels | None:
         beta: torch.Tensor,
         a_log: torch.Tensor,
         dt_bias: torch.Tensor,
-        packing: Packing,
+        packing: Packing | None,
     ) -> torch.Tensor:
         out, _ = chunk_gated_delta_rule(
             q,
@@ -163,22 +177,18 @@ def _fast_kernels() -> PackedKernels | None:
             use_gate_in_kernel=True,
             A_log=a_log,
             dt_bias=dt_bias,
-            cu_seqlens=packing.cu_seqlens,
-            cu_seqlens_cpu=packing.cu_seqlens_cpu,
+            **_offsets(packing),
         )
         return out
 
     def causal_conv(
-        x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None, activation: str | None, packing: Packing
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        bias: torch.Tensor | None,
+        activation: str | None,
+        packing: Packing | None,
     ) -> torch.Tensor:
-        out, _ = causal_conv1d(
-            x=x,
-            weight=weight,
-            bias=bias,
-            activation=activation,
-            cu_seqlens=packing.cu_seqlens,
-            cu_seqlens_cpu=packing.cu_seqlens_cpu,
-        )
+        out, _ = causal_conv1d(x=x, weight=weight, bias=bias, activation=activation, **_offsets(packing))
         return out
 
     def fused_rms_norm(
@@ -215,6 +225,13 @@ def _fast_kernels() -> PackedKernels | None:
     )
 
 
+def _offsets(packing: Packing | None) -> dict[str, torch.Tensor]:
+    """Fla's variable-length arguments for ``packing``; none for fixed rows."""
+    if packing is None:
+        return {}
+    return {"cu_seqlens": packing.cu_seqlens, "cu_seqlens_cpu": packing.cu_seqlens_cpu}
+
+
 # ---------------------------------------------------------------------------
 # Reference kernels (PyTorch)
 # ---------------------------------------------------------------------------
@@ -229,13 +246,14 @@ def reference_delta_rule(
     beta: torch.Tensor,
     a_log: torch.Tensor,
     dt_bias: torch.Tensor,
-    packing: Packing,
+    packing: Packing | None,
 ) -> torch.Tensor:
-    """The PyTorch chunked delta rule from transformers, run per packed sequence."""
+    """The PyTorch chunked delta rule from transformers, run per packed sequence (or per row)."""
     from transformers.models.qwen3_5 import modeling_qwen3_5  # ty: ignore[unresolved-import]
 
     rule = inspect.unwrap(modeling_qwen3_5.torch_chunk_gated_delta_rule)
     g = -a_log.float().exp() * F.softplus(a.float() + dt_bias)
+    spans = packing.segments() if packing is not None else [(0, q.shape[1])]
     outs = [
         rule(
             q[:, s:e],
@@ -247,18 +265,19 @@ def reference_delta_rule(
             output_final_state=False,
             use_qk_l2norm_in_kernel=True,
         )[0]
-        for s, e in packing.segments()
+        for s, e in spans
     ]
     return torch.cat(outs, dim=1)
 
 
 def reference_causal_conv(
-    x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None, activation: str | None, packing: Packing
+    x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None, activation: str | None, packing: Packing | None
 ) -> torch.Tensor:
-    """Depthwise causal conv per packed sequence: left-pad by ``width - 1``, then activate."""
+    """Depthwise causal conv per packed sequence (or per row): left-pad by ``width - 1``, then activate."""
     width = weight.shape[-1]
     outs = []
-    for s, e in packing.segments():
+    spans = packing.segments() if packing is not None else [(0, x.shape[1])]
+    for s, e in spans:
         seq = F.pad(x[:, s:e].transpose(1, 2), (width - 1, 0))
         out = F.conv1d(seq, weight.unsqueeze(1), bias, groups=x.shape[-1])
         outs.append(F.silu(out) if activation in ("silu", "swish") else out)
@@ -280,6 +299,21 @@ def reference_attention(
         )
         outs.append(out[0].transpose(0, 1))
     return torch.cat(outs, dim=0)
+
+
+def padded_attention(
+    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, mask: torch.Tensor, scale: float
+) -> torch.Tensor:
+    """Bidirectional attention over right-padded rows (``[B, H, L, d]``); padded keys are masked.
+
+    Keys and values repeat to the query heads rather than using sdpa's grouped-query
+    mode, which not every sdpa backend takes together with a mask.
+    """
+    repeats = q.shape[1] // k.shape[1]
+    if repeats > 1:
+        k = k.repeat_interleave(repeats, dim=1)
+        v = v.repeat_interleave(repeats, dim=1)
+    return F.scaled_dot_product_attention(q, k, v, attn_mask=mask[:, None, None, :], scale=scale)
 
 
 def reference_rms_norm(
@@ -331,20 +365,22 @@ class PackedTextModel:
                 norms += [layer.self_attn.q_norm, layer.self_attn.k_norm]
         self._scales = {norm: 1.0 + norm.weight.detach().float() for norm in norms}
 
-    def __call__(self, embeds: torch.Tensor, position_ids: torch.Tensor, packing: Packing) -> torch.Tensor:
-        """Final hidden states ``[1, T, H]`` for ``embeds`` ``[1, T, H]``.
+    def __call__(self, embeds: torch.Tensor, position_ids: torch.Tensor, layout: Layout) -> torch.Tensor:
+        """Final hidden states ``[B, T, H]`` for ``embeds`` ``[B, T, H]``.
 
-        ``position_ids`` are ``[3, 1, T]`` (temporal, height, width), restarting per
-        packed input.
+        With ``Packing``, ``B`` is 1 and the inputs are packed along ``T``; with
+        ``Padded``, each of the ``B`` rows is one right-padded input. ``position_ids``
+        are ``[3, B, T]`` (temporal, height, width), restarting per input.
         """
         position_embeddings = self.model.rotary_emb(embeds, position_ids)
+        packing = layout if isinstance(layout, Packing) else None
         hidden, residual = embeds, None
         for layer in self.layers:
             normed, residual = self._norm(layer.input_layernorm, hidden, residual)
             if hasattr(layer, "linear_attn"):
                 hidden = self._gated_delta_net(layer.linear_attn, normed, packing)
             else:
-                hidden = self._attention(layer.self_attn, normed, position_embeddings, packing)
+                hidden = self._attention(layer.self_attn, normed, position_embeddings, layout)
             normed, residual = self._norm(layer.post_attention_layernorm, hidden, residual)
             hidden = self._mlp(layer.mlp, normed)
         return self._norm(self.model.norm, hidden, residual)[0]
@@ -354,7 +390,7 @@ class PackedTextModel:
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return self.kernels.rms_norm(x, self._scales[norm], norm.eps, residual)
 
-    def _gated_delta_net(self, attn: Any, hidden: torch.Tensor, packing: Packing) -> torch.Tensor:
+    def _gated_delta_net(self, attn: Any, hidden: torch.Tensor, packing: Packing | None) -> torch.Tensor:
         """``Qwen3_5GatedDeltaNet.forward`` without the cache."""
         batch, length, _ = hidden.shape
         mixed = attn.in_proj_qkv(hidden)
@@ -388,7 +424,7 @@ class PackedTextModel:
         attn: Any,
         hidden: torch.Tensor,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
-        packing: Packing,
+        layout: Layout,
     ) -> torch.Tensor:
         """``Qwen3_5Attention.forward`` (gated output, partial rotary), bidirectional per input."""
         from transformers.models.qwen3_5.modeling_qwen3_5 import apply_rotary_pos_emb  # ty: ignore[unresolved-import]
@@ -402,13 +438,16 @@ class PackedTextModel:
         value = attn.v_proj(hidden).view(hidden_shape).transpose(1, 2)
         cos, sin = position_embeddings
         query, key = apply_rotary_pos_emb(query, key, cos, sin)
-        out = self.kernels.attention(
-            query[0].transpose(0, 1).contiguous(),
-            key[0].transpose(0, 1).contiguous(),
-            value[0].transpose(0, 1).contiguous(),
-            packing,
-            attn.scaling,
-        )
+        if isinstance(layout, Packing):
+            out = self.kernels.attention(
+                query[0].transpose(0, 1).contiguous(),
+                key[0].transpose(0, 1).contiguous(),
+                value[0].transpose(0, 1).contiguous(),
+                layout,
+                attn.scaling,
+            )
+        else:
+            out = padded_attention(query, key, value, layout.mask, attn.scaling).transpose(1, 2)
         out = out.reshape(*input_shape, -1) * torch.sigmoid(gate)
         return attn.o_proj(out)
 

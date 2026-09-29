@@ -106,6 +106,7 @@ from typing import Any, Literal
 
 import torch
 
+from sie_server.core.cuda_graph_recording import RECORDING_LOCK
 from sie_server.core.oom import is_oom_error
 
 logger = logging.getLogger(__name__)
@@ -134,8 +135,9 @@ _SECONDS_PER_RECORDING = 2.0
 _RECORDING_HEADROOM = 0.1
 # After a recording runs out of memory, the runner records nothing for this long.
 _OOM_COOL_DOWN_SECONDS = 60.0
-# One recording at a time in the process, across every model's runner.
-_RECORDING_LOCK = threading.Lock()
+# One recording at a time in the process, across every model's runner (shared
+# with the other adapters that record graphs).
+_RECORDING_LOCK = RECORDING_LOCK
 # Device memory a runner's graphs may hold (their recordings, relative-position
 # tables and buffers), as a share of the device's memory.
 _MEMORY_BUDGET_SHARE = 0.04
