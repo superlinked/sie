@@ -141,8 +141,8 @@ models, the Opir multitask models and `gliclass-multilang-mini`. The
 ModernBERT-based models (the edge models, `gliclass-multilang-edge`, the Opir
 edge models and `gliclass-modern-{base,large}-v3.0`), CPU and MPS run without
 graphs with any value, and the load logs a warning. On CUDA, the
-ModernBERT-based models run their encoder on the flash-attention path below
-instead.
+ModernBERT-based models can run their encoder on the flash-attention path
+below instead.
 
 **Shapes.** A graph holds at most 2,048 tokens (batch size times padded
 length), or 1,024 for encoders wider than 768 such as DeBERTa-v3-large.
@@ -212,15 +212,15 @@ serves requests.
 The GLiClass models built on ModernBERT or mmBERT (`gliclass-edge-v3.0`,
 `gliclass-instruct-edge-v1.0`, `gliclass-multilang-edge`, `opir-edge-v1.0`,
 `opir-edge-multilang-v1.0`, `gliclass-modern-base-v3.0` and
-`gliclass-modern-large-v3.0`) run their encoder through the flash-attention
-layer stack that SIE's ModernBERT embedding, late-interaction, cross-encoder
-and Laya adapters share. The rows of a forward are packed into one token
-stream without padding, each row attends only to itself through
+`gliclass-modern-large-v3.0`) can run their encoder through the
+flash-attention layer stack that SIE's ModernBERT embedding, late-interaction,
+cross-encoder and Laya adapters share. The rows of a forward are packed into
+one token stream without padding, each row attends only to itself through
 `flash_attn_varlen_func`, and the RoPE tables are built once, at load. The
 gliclass scoring head (label-token features, pooling, projections and scorer)
 runs unchanged on the encoder output. Label groups, instructions, examples,
 overflow policies, usage and per-item errors behave as before. It is an
-operator setting, and the shipped profiles of these models enable it:
+operator setting:
 
 ```yaml
 profiles:
@@ -233,7 +233,10 @@ profiles:
 It applies to float16 and bfloat16 weights on CUDA GPUs with flash-attn
 (Ampere or newer). On CPU, MPS, older GPUs or without flash-attn, the model
 runs the gliclass forward as before, and the load logs why. DeBERTa-based
-models ignore the setting.
+models ignore the setting. The shipped profiles enable it for
+`gliclass-multilang-edge`, `gliclass-modern-base-v3.0` and
+`gliclass-modern-large-v3.0`, the models whose scores met the margin rule
+below; the other four keep the gliclass forward.
 
 On a GPU with flash-attn, the gliclass forward already runs the Hugging Face
 ModernBERT flash-attention path. That path unpads and repads every batch,
@@ -271,26 +274,30 @@ L4, from the gliclass forward to the flash path:
 the 384 CVE descriptions from `examples/typed-decisions`, three questions
 each: asked one at a time, with an instruction, with a few-shot example, as
 separate and as joint groups, and in requests of eight, plus 65 long documents
-under `truncate_text`. That is 7,497 answers per model. We also compared both
-paths with the same checkpoint in float32. The flash path is as close to
-float32 as the gliclass forward: over the seven models, the gliclass forward
-disagrees with float32 on the top label of 128 answers, the flash path on
-126. Where the two paths pick different top labels, the gliclass forward's top
-two labels were within 0.028 of each other, and within 0.010 outside the Opir
-edge models.
+under `truncate_text`. That is 7,497 answers per model. A shipped profile
+enables the flash path only when the model meets the margin rule against the
+gliclass forward: (i) no probability moves by more than 0.02, and (ii) every
+answer whose top label changes had a top-two margin, on the gliclass forward,
+smaller than the gliclass forward's own batching noise. The batching noise is
+the largest probability change the gliclass forward shows between an item sent
+alone and the same item in a request of eight with the same options, over the
+same kinds of requests.
 
-| Model | Largest probability change | Top label changed (largest margin) | Top label changed vs float32: gliclass forward / flash |
-|--|--|--|--|
-| `gliclass-edge-v3.0` | 0.016 | 24 (0.010) | 28 / 31 |
-| `gliclass-instruct-edge-v1.0` | 0.012 | 5 (0.008) | 4 / 3 |
-| `gliclass-multilang-edge` | 0.015 | 18 (0.005) | 18 / 10 |
-| `opir-edge-v1.0` | 0.018 | 12 (0.019) | 17 / 25 |
-| `opir-edge-multilang-v1.0` | 0.037 | 30 (0.028) | 33 / 29 |
-| `gliclass-modern-base-v3.0` | 0.010 | 22 (0.003) | 20 / 24 |
-| `gliclass-modern-large-v3.0` | 0.015 | 4 (0.004) | 8 / 4 |
+| Model | Largest probability change | Top label changed | Largest margin of a changed answer | Batching noise | Shipped profile |
+|--|--|--|--|--|--|
+| `gliclass-multilang-edge` | 0.015 | 18 | 0.0046 | 0.016 | `modernbert_flash: true` |
+| `gliclass-modern-base-v3.0` | 0.010 | 22 | 0.0029 | 0.0061 | `modernbert_flash: true` |
+| `gliclass-modern-large-v3.0` | 0.015 | 4 | 0.0039 | 0.014 | `modernbert_flash: true` |
+| `gliclass-edge-v3.0` | 0.016 | 24 | 0.0098 | 0.0066 | off (2 answers over the noise) |
+| `gliclass-instruct-edge-v1.0` | 0.012 | 5 | 0.0077 | 0.0062 | off (1 answer over the noise) |
+| `opir-edge-v1.0` | 0.018 | 12 | 0.019 | 0.011 | off |
+| `opir-edge-multilang-v1.0` | 0.037 | 30 | 0.028 | 0.032 | off |
 
-Usage and per-item errors were identical in every answer. To run one of these
-models on the gliclass forward, set `modernbert_flash: false` in its profile.
+Usage and per-item errors were identical in every answer. Against the same
+checkpoints in float32, the flash path is as accurate as the gliclass forward:
+over the seven models, the gliclass forward's top label differs from float32
+in 128 answers, the flash path's in 126. To run a model on the other path, set
+`modernbert_flash` in its profile.
 
 ### GLiNER2.5-Decide usage and limits
 

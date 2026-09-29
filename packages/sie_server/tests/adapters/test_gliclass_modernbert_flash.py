@@ -30,16 +30,13 @@ from torch.nn import functional
 from transformers import DebertaV2Config, ModernBertConfig, PreTrainedTokenizerFast
 
 _MODELS_DIR = Path(__file__).resolve().parents[2] / "models"
-# The shipped profiles that load with the flash encoder: every GLiClass model
-# with a ModernBERT or mmBERT encoder (see the server README).
+# The shipped profiles that load with the flash encoder: the ModernBERT and
+# mmBERT GLiClass models whose flash scores met the margin rule against the
+# gliclass forward (see the server README).
 _FLASH_BY_DEFAULT = {
-    "knowledgator/gliclass-edge-v3.0",
-    "knowledgator/gliclass-instruct-edge-v1.0",
     "knowledgator/gliclass-modern-base-v3.0",
     "knowledgator/gliclass-modern-large-v3.0",
     "knowledgator/gliclass-multilang-edge",
-    "knowledgator/opir-edge-multilang-v1.0",
-    "knowledgator/opir-edge-v1.0",
 }
 
 _MAX_LENGTH = 64
