@@ -21,6 +21,7 @@ import json
 import os
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -86,9 +87,9 @@ def main() -> int:
     target = args.output / "qwen3-embedding-4b"
     # Write all four files to a staging directory and swap it in only once both phases succeed, so a failed run
     # never leaves corpus vectors from one run beside question vectors from another.
-    staging = args.output / "qwen3-embedding-4b.partial"
-    shutil.rmtree(staging, ignore_errors=True)
-    staging.mkdir(parents=True)
+    args.output.mkdir(parents=True, exist_ok=True)
+    # A fresh staging directory per invocation, so two runs never write into the same one.
+    staging = Path(tempfile.mkdtemp(prefix="qwen3-embedding-4b.", dir=args.output))
     corpus_vectors = encode(client, passages, is_query=False)
     question_vectors = encode(client, [{"id": q["id"], "text": q["question"]} for q in questions], is_query=True)
     np.save(staging / "corpus.npy", corpus_vectors)
