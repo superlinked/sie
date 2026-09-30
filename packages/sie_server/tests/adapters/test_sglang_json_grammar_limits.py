@@ -52,6 +52,91 @@ def test_bound_json_number_rules_bounds_only_the_shared_number_rules() -> None:
         assert rules[name] == original[name], name
 
 
+def test_bound_json_number_rules_bounds_the_injected_definition_rules() -> None:
+    sitecustomize = _load_sitecustomize()
+    ebnf = (
+        "root ::= ((defs_SieBoundedJsonInteger defs_SieBoundedJsonNumber))\n"
+        'defs_SieBoundedJsonInteger ::= (("0") | (defs_SieBoundedJsonInteger_1 [1-9] [0-9]*))\n'
+        "defs_SieBoundedJsonNumber ::= ((defs_SieBoundedJsonNumber_1 defs_SieBoundedJsonNumber_7))\n"
+    )
+
+    rules = dict(line.split(" ::= ", 1) for line in sitecustomize.bound_json_number_rules(ebnf, 5).splitlines())
+
+    assert rules["defs_SieBoundedJsonInteger"] == '(("0") | ("-"? [1-9] [0-9]{0,4}))'
+    assert rules["defs_SieBoundedJsonNumber"].startswith('(("-"? ("0" | [1-9] [0-9]{0,4}) ("." [0-9]{1,5})?')
+
+
+_INT = {"$ref": "#/$defs/SieBoundedJsonInteger"}
+_NUM = {"$ref": "#/$defs/SieBoundedJsonNumber"}
+_DEFS = {"SieBoundedJsonInteger": {"type": "integer"}, "SieBoundedJsonNumber": {"type": "number"}}
+
+
+def test_bound_json_schema_numbers_references_every_unbounded_numeric_schema() -> None:
+    sitecustomize = _load_sitecustomize()
+    schema = {
+        "type": "object",
+        "properties": {
+            "year": {"type": ["integer", "null"], "description": "four digits"},
+            "price": {"type": "number", "description": "USD"},
+            "tags": {"type": "array", "items": {"type": "number"}},
+            "either": {"anyOf": [{"$ref": "#/$defs/Count"}, {"type": "string"}]},
+        },
+        "$defs": {"Count": {"type": "integer", "title": "count"}},
+    }
+    original = json.loads(json.dumps(schema))
+
+    bounded = sitecustomize.bound_json_schema_numbers(schema, 19)
+
+    assert schema == original
+    assert bounded["properties"]["year"] == {"anyOf": [_INT, {"type": "null", "description": "four digits"}]}
+    assert bounded["properties"]["price"] == _NUM
+    assert bounded["properties"]["tags"] == {"type": "array", "items": _NUM}
+    assert bounded["properties"]["either"] == schema["properties"]["either"]
+    assert bounded["$defs"] == {"Count": _INT} | _DEFS
+
+
+@pytest.mark.parametrize(
+    ("numeric", "expected"),
+    [
+        ({"type": "integer", "minimum": 0}, {"type": "integer", "minimum": 0, "maximum": 2**63 - 1}),
+        (
+            {"type": "integer", "exclusiveMaximum": 10},
+            {"type": "integer", "exclusiveMaximum": 10, "minimum": -(2**63 - 1)},
+        ),
+        ({"type": "number", "minimum": 0}, {"type": "number", "minimum": 0, "maximum": 1e15}),
+        ({"type": "number", "exclusiveMinimum": 0}, {"type": "number", "exclusiveMinimum": 0, "maximum": 1e15}),
+        ({"type": "number", "maximum": 100}, {"type": "number", "maximum": 100}),
+        ({"type": "integer", "minimum": 1, "maximum": 5}, {"type": "integer", "minimum": 1, "maximum": 5}),
+        ({"type": "number", "enum": [1.5, 2.5]}, {"type": "number", "enum": [1.5, 2.5]}),
+        ({"type": "integer", "const": 3}, {"type": "integer", "const": 3}),
+        ({"type": "string", "pattern": "^[0-9]+$"}, {"type": "string", "pattern": "^[0-9]+$"}),
+    ],
+)
+def test_bound_json_schema_numbers_handles_bounded_and_finite_schemas(numeric: dict, expected: dict) -> None:
+    sitecustomize = _load_sitecustomize()
+
+    bounded = sitecustomize.bound_json_schema_numbers({"type": "object", "properties": {"v": numeric}}, 19)
+
+    assert bounded == {"type": "object", "properties": {"v": expected}}
+
+
+def test_bound_json_schema_numbers_integer_bound_follows_the_digit_limit() -> None:
+    sitecustomize = _load_sitecustomize()
+
+    bounded = sitecustomize.bound_json_schema_numbers({"type": "integer", "minimum": 0}, 4)
+
+    assert bounded == {"type": "integer", "minimum": 0, "maximum": 9999}
+
+
+def test_bound_json_schema_numbers_rewrites_a_numeric_root() -> None:
+    sitecustomize = _load_sitecustomize()
+
+    assert sitecustomize.bound_json_schema_numbers({"type": "number"}, 19) == _NUM | {
+        "$defs": {"SieBoundedJsonNumber": {"type": "number"}}
+    }
+    assert sitecustomize.bound_json_schema_numbers(True, 19) is True
+
+
 def test_bound_json_number_rules_leaves_a_grammar_without_numbers_alone() -> None:
     sitecustomize = _load_sitecustomize()
     ebnf = 'root ::= (("{" "\\"a\\"" ": " basic_string "}"))\nbasic_string ::= (("\\"" [a-z]* "\\""))\n'
