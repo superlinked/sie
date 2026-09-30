@@ -1,0 +1,9 @@
+{
+	"name": "superlinked-sie-doc-field-extraction-omni-example",
+	"private": true,
+	"type": "module",
+	"description": "OmniAI's JSON accuracy for the recorded field-extraction run",
+	"dependencies": {
+		"json-diff": "1.0.6"
+	}
+}
