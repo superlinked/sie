@@ -79,6 +79,22 @@ async def test_a_missing_credential_stops_the_request_before_it_is_sent(monkeypa
     assert recorder.requests == []
 
 
+async def test_a_malformed_credential_is_refused_before_anything_is_sent(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setenv("TEAM_SIE_KEY", f"{CANARY} extra")
+    recorder = Recorder(httpx.Response(200, json={}))
+    caplog.set_level(logging.DEBUG)
+
+    async with upstream_client(make_upstream(), transport=httpx.MockTransport(recorder)) as client:
+        with pytest.raises(UpstreamCredentialError) as raised:
+            await client.get("/v1/models")
+
+    assert recorder.requests == []
+    assert CANARY not in str(raised.value)
+    assert CANARY not in caplog.text
+
+
 async def test_an_upstream_without_a_credential_sends_no_authorization() -> None:
     recorder = Recorder(httpx.Response(200, json={}))
     upstream = make_upstream(api_key_secret=None, base_url="http://127.0.0.1:8080")
