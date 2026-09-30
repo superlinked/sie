@@ -14,13 +14,16 @@ inputs:
   # Qwen documents native video understanding, but video is not yet wired
   # through the SIE generation request surface.
   video: false
-# Every profile reads an image at up to 3,211,264 pixels (3,136 visual tokens,
-# one per merged 32x32 patch), the resolution a dense form or statement needs:
-# at the family's 1,003,520 a full page came back with misread names and digits.
-# The worker reserves that bound per image (``image_token_budget``). Every
-# profile also compiles JSON-schema grammars without free whitespace, so
-# greedy decoding cannot pad a reply with indentation or run to the output cap
-# in spaces.
+# A request with ONE image reads it at up to 3,211,264 pixels (3,136 visual
+# tokens, one per merged 32x32 patch), the resolution a dense form or statement
+# needs: at the family's 1,003,520 a full page came back with misread names and
+# digits. SIE_SGLANG_SINGLE_IMAGE_MAX_PIXELS raises the bound for single-image
+# requests only; a request with two or more images keeps --mm-process-config's
+# 1,003,520 per image, so multi-image requests fit the 8K window exactly as
+# before. The worker reserves the matching bound per request. Every profile
+# also compiles JSON-schema grammars without free whitespace, so greedy
+# decoding cannot pad a reply with indentation or run to the output cap in
+# spaces.
 tasks:
   generate:
     # Keep the bare route conservative. Native context is exposed only through
@@ -60,6 +63,8 @@ profiles:
     kv_budget_tokens: 8192
     adapter_options:
       loadtime:
+        extra_env:
+          SIE_SGLANG_SINGLE_IMAGE_MAX_PIXELS: "3211264"
         mem_fraction_static: 0.85
         served_model_name: Qwen/Qwen3.8-27B-FP8
         disable_cuda_graph: true
@@ -70,7 +75,7 @@ profiles:
           enabled: false
         extra_launch_args:
           - "--mm-process-config"
-          - '{"image":{"min_pixels":65536,"max_pixels":3211264}}'
+          - '{"image":{"min_pixels":65536,"max_pixels":1003520}}'
           - "--constrained-json-disable-any-whitespace"
           - "--kv-cache-dtype"
           - "bfloat16"
@@ -118,6 +123,7 @@ profiles:
         grammar_backend: xgrammar
         tool_call_parser: qwen3_coder
         extra_env:
+          SIE_SGLANG_SINGLE_IMAGE_MAX_PIXELS: "3211264"
           SGLANG_JIT_DEEPGEMM_FAST_WARMUP: "1"
         speculative:
           enabled: true
@@ -127,7 +133,7 @@ profiles:
           num_draft_tokens: 4
         extra_launch_args:
           - "--mm-process-config"
-          - '{"image":{"min_pixels":65536,"max_pixels":3211264}}'
+          - '{"image":{"min_pixels":65536,"max_pixels":1003520}}'
           - "--constrained-json-disable-any-whitespace"
           - "--kv-cache-dtype"
           - "bfloat16"
@@ -168,12 +174,13 @@ profiles:
         grammar_backend: xgrammar
         tool_call_parser: qwen3_coder
         extra_env:
+          SIE_SGLANG_SINGLE_IMAGE_MAX_PIXELS: "3211264"
           SGLANG_JIT_DEEPGEMM_FAST_WARMUP: "1"
         speculative:
           enabled: false
         extra_launch_args:
           - "--mm-process-config"
-          - '{"image":{"min_pixels":65536,"max_pixels":3211264}}'
+          - '{"image":{"min_pixels":65536,"max_pixels":1003520}}'
           - "--constrained-json-disable-any-whitespace"
           - "--kv-cache-dtype"
           - "bfloat16"
@@ -217,12 +224,13 @@ profiles:
         grammar_backend: xgrammar
         tool_call_parser: qwen3_coder
         extra_env:
+          SIE_SGLANG_SINGLE_IMAGE_MAX_PIXELS: "3211264"
           SGLANG_JIT_DEEPGEMM_FAST_WARMUP: "1"
         speculative:
           enabled: false
         extra_launch_args:
           - "--mm-process-config"
-          - '{"image":{"min_pixels":65536,"max_pixels":3211264}}'
+          - '{"image":{"min_pixels":65536,"max_pixels":1003520}}'
           - "--constrained-json-disable-any-whitespace"
           - "--kv-cache-dtype"
           - "bfloat16"
@@ -282,12 +290,13 @@ profiles:
         reasoning_parser: qwen3
         tool_call_parser: qwen3_coder
         extra_env:
+          SIE_SGLANG_SINGLE_IMAGE_MAX_PIXELS: "3211264"
           SGLANG_JIT_DEEPGEMM_FAST_WARMUP: "1"
         speculative:
           enabled: false
         extra_launch_args:
           - "--mm-process-config"
-          - '{"image":{"min_pixels":65536,"max_pixels":3211264}}'
+          - '{"image":{"min_pixels":65536,"max_pixels":1003520}}'
           - "--constrained-json-disable-any-whitespace"
           - "--kv-cache-dtype"
           - "bfloat16"
@@ -345,6 +354,7 @@ profiles:
         grammar_backend: xgrammar
         tool_call_parser: qwen3_coder
         extra_env:
+          SIE_SGLANG_SINGLE_IMAGE_MAX_PIXELS: "3211264"
           SGLANG_JIT_DEEPGEMM_FAST_WARMUP: "1"
         speculative:
           enabled: true
@@ -354,7 +364,7 @@ profiles:
           num_draft_tokens: 4
         extra_launch_args:
           - "--mm-process-config"
-          - '{"image":{"min_pixels":65536,"max_pixels":3211264}}'
+          - '{"image":{"min_pixels":65536,"max_pixels":1003520}}'
           - "--constrained-json-disable-any-whitespace"
           - "--kv-cache-dtype"
           - "bfloat16"
@@ -395,12 +405,13 @@ profiles:
         grammar_backend: xgrammar
         tool_call_parser: qwen3_coder
         extra_env:
+          SIE_SGLANG_SINGLE_IMAGE_MAX_PIXELS: "3211264"
           SGLANG_JIT_DEEPGEMM_FAST_WARMUP: "1"
         speculative:
           enabled: false
         extra_launch_args:
           - "--mm-process-config"
-          - '{"image":{"min_pixels":65536,"max_pixels":3211264}}'
+          - '{"image":{"min_pixels":65536,"max_pixels":1003520}}'
           - "--constrained-json-disable-any-whitespace"
           - "--kv-cache-dtype"
           - "bfloat16"
@@ -441,6 +452,7 @@ profiles:
         grammar_backend: xgrammar
         tool_call_parser: qwen3_coder
         extra_env:
+          SIE_SGLANG_SINGLE_IMAGE_MAX_PIXELS: "3211264"
           SGLANG_JIT_DEEPGEMM_FAST_WARMUP: "1"
         speculative:
           enabled: true
@@ -450,7 +462,7 @@ profiles:
           num_draft_tokens: 4
         extra_launch_args:
           - "--mm-process-config"
-          - '{"image":{"min_pixels":65536,"max_pixels":3211264}}'
+          - '{"image":{"min_pixels":65536,"max_pixels":1003520}}'
           - "--constrained-json-disable-any-whitespace"
           - "--kv-cache-dtype"
           - "bfloat16"
@@ -489,12 +501,13 @@ profiles:
         grammar_backend: xgrammar
         tool_call_parser: qwen3_coder
         extra_env:
+          SIE_SGLANG_SINGLE_IMAGE_MAX_PIXELS: "3211264"
           SGLANG_JIT_DEEPGEMM_FAST_WARMUP: "1"
         speculative:
           enabled: false
         extra_launch_args:
           - "--mm-process-config"
-          - '{"image":{"min_pixels":65536,"max_pixels":3211264}}'
+          - '{"image":{"min_pixels":65536,"max_pixels":1003520}}'
           - "--constrained-json-disable-any-whitespace"
           - "--kv-cache-dtype"
           - "bfloat16"

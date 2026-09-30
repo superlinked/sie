@@ -6,6 +6,13 @@ Hugging Face processor. Upstream #18467 now passes them as ``images_kwargs``.
 This site hook runs only in the SGLang generation subprocess and can be removed
 when the shared bundle advances to a release containing that fix.
 
+The hook also applies ``SIE_SGLANG_SINGLE_IMAGE_MAX_PIXELS``: when set, a
+request that carries exactly one image is processed with that ``max_pixels``
+instead of ``--mm-process-config``'s, so one document page can be read at a
+higher resolution while a request with several images keeps the launch bound
+(and still fits the context window it fitted before). The raised bound is
+applied to a shallow per-call copy of the processor, never to the shared one.
+
 The same hook redacts multimodal load failures: SGLang raises
 ``Error while loading data {data}`` with the full inline payload, which its
 serving layer then logs with a traceback. The redacted error is a
@@ -16,6 +23,7 @@ into a 400 response; the adapter maps its fixed message to ``invalid_request``.
 from __future__ import annotations
 
 import builtins
+import copy
 import os
 import sys
 from collections.abc import Mapping, Sequence
@@ -26,6 +34,24 @@ from typing import Any
 _BASE_PROCESSOR_MODULE = "sglang.srt.multimodal.processors.base_processor"
 _CLASS_PATCH_MARKER = "_sie_mm_process_config_compat"
 _IMPORT_HOOK_MARKER = "_sie_mm_process_config_deferred_compat"
+SINGLE_IMAGE_MAX_PIXELS_ENV = "SIE_SGLANG_SINGLE_IMAGE_MAX_PIXELS"
+
+
+def _single_image_max_pixels() -> int | None:
+    """The raised per-image bound for single-image requests, or ``None``."""
+    raw = os.environ.get(SINGLE_IMAGE_MAX_PIXELS_ENV, "").strip()
+    if not raw.isdigit():
+        return None
+    value = int(raw)
+    return value if value > 0 else None
+
+
+def _image_count(images: Any) -> int:
+    if images is None:
+        return 0
+    if isinstance(images, (list, tuple)):
+        return len(images)
+    return 1
 
 
 def _patch_base_processor_module(module: ModuleType) -> None:
@@ -46,11 +72,17 @@ def _patch_base_processor_module(module: ModuleType) -> None:
         audios: Any = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
+        target = self
         image_config = getattr(self, "image_config", None)
+        single_max = _single_image_max_pixels()
+        if single_max is not None and _image_count(images) == 1 and isinstance(image_config, dict) and image_config:
+            target = copy.copy(self)
+            target.image_config = {**image_config, "max_pixels": single_max}
+            image_config = target.image_config
         if images and isinstance(image_config, dict) and image_config:
             kwargs.setdefault("images_kwargs", {}).update(image_config)
         return original_process(
-            self,
+            target,
             input_text,
             images=images,
             videos=videos,

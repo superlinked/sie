@@ -2475,6 +2475,60 @@ print("mm-process-config-ready")
     assert completed.stdout.strip() == "mm-process-config-ready"
 
 
+def test_mm_process_config_compat_raises_the_bound_for_single_image_requests_only(tmp_path: Path) -> None:
+    package_root = tmp_path / "site"
+    processors = package_root / "sglang" / "srt" / "multimodal" / "processors"
+    processors.mkdir(parents=True)
+    for package in (
+        package_root / "sglang",
+        package_root / "sglang" / "srt",
+        package_root / "sglang" / "srt" / "multimodal",
+        processors,
+    ):
+        (package / "__init__.py").write_text("", encoding="utf-8")
+    # The pinned SGLang release forwards image_config itself inside
+    # process_mm_data, after the hook runs; the fake does the same.
+    (processors / "base_processor.py").write_text(
+        """class BaseMultimodalProcessor:
+    def __init__(self):
+        self.image_config = {"min_pixels": 65536, "max_pixels": 1003520}
+
+    def process_mm_data(self, input_text, images=None, videos=None, audios=None, **kwargs):
+        if images and self.image_config:
+            kwargs.setdefault("images_kwargs", {}).update(self.image_config)
+        return kwargs
+""",
+        encoding="utf-8",
+    )
+    compat_dir = Path(__file__).resolve().parents[2] / "src/sie_server/adapters/sglang/_compat"
+    script = """import sitecustomize
+from sglang.srt.multimodal.processors.base_processor import BaseMultimodalProcessor
+
+processor = BaseMultimodalProcessor()
+one = processor.process_mm_data("x", images=[b"page"])
+two = processor.process_mm_data("x", images=[b"a", b"b"])
+assert one["images_kwargs"] == {"min_pixels": 65536, "max_pixels": 3211264}, one
+assert two["images_kwargs"] == {"min_pixels": 65536, "max_pixels": 1003520}, two
+assert processor.image_config == {"min_pixels": 65536, "max_pixels": 1003520}
+assert processor.process_mm_data("x", images=None) == {}
+print("single-image-bound-ready")
+"""
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join((str(compat_dir), str(package_root)))
+    env["SIE_SGLANG_MM_PROCESS_CONFIG_COMPAT"] = "1"
+    env["SIE_SGLANG_SINGLE_IMAGE_MAX_PIXELS"] = "3211264"
+    completed = subprocess.run(  # noqa: S603 - executes the fixed local interpreter
+        [sys.executable, "-c", script],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "single-image-bound-ready"
+
+
 def test_mm_process_config_compat_redacts_media_load_failures(tmp_path: Path) -> None:
     package_root = tmp_path / "fake-package"
     processors = package_root / "sglang" / "srt" / "multimodal" / "processors"

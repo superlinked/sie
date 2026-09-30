@@ -50,6 +50,9 @@ _DECLARED_IN_PINNED_ENGINE = frozenset(
         "--lora-paths",
         "--max-loras-per-batch",
         "--mem-fraction-static",
+        # Read, not emitted: generation.py derives the per-image token budget
+        # from the profile's own ``--mm-process-config``, which both engines parse.
+        "--mm-process-config",
         "--model-path",
         "--nccl-port",
         "--port",
@@ -93,6 +96,7 @@ _OLDER_ENGINE_ONLY = frozenset(
 _CU130_PROFILE_FLAGS = frozenset(
     {
         "--chunked-prefill-size",
+        "--constrained-json-disable-any-whitespace",
         "--cuda-graph-max-bs-decode",
         "--disable-overlap-schedule",
         "--enable-strict-thinking",

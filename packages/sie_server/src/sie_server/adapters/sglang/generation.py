@@ -662,12 +662,26 @@ class SGLangGenerationAdapter(GenerationAdapter):
 
     @property
     def image_token_budget(self) -> int | None:
-        """Return the most visual tokens one image can expand to on this launch.
+        """Return the most visual tokens ONE image of a single-image request can expand to.
 
-        Read from the profile's ``--mm-process-config`` ``image.max_pixels``: a
-        Qwen3.x vision encoder emits one token per merged 32x32 patch, so the
-        bound is ``ceil(max_pixels / 1024)``. ``None`` when the launch sets no
-        image bound, and the worker falls back to its family-wide estimate.
+        A Qwen3.x vision encoder emits one token per merged 32x32 patch, so the
+        bound is ``ceil(max_pixels / 1024)``. ``max_pixels`` is
+        ``SIE_SGLANG_SINGLE_IMAGE_MAX_PIXELS`` from the profile's ``extra_env``
+        when set (the compat hook applies it to single-image requests), else
+        the launch's ``--mm-process-config`` ``image.max_pixels``. ``None`` when
+        neither is set, and the worker falls back to its family-wide estimate.
+        """
+        single = str(self._extra_env.get("SIE_SGLANG_SINGLE_IMAGE_MAX_PIXELS", "")).strip()
+        if single.isdigit() and int(single) > 0:
+            return math.ceil(int(single) / _MERGED_PATCH_PIXELS)
+        return self.multi_image_token_budget
+
+    @property
+    def multi_image_token_budget(self) -> int | None:
+        """Return the most visual tokens each image of a multi-image request can expand to.
+
+        Read from the launch's ``--mm-process-config`` ``image.max_pixels``;
+        ``None`` when the launch sets no image bound.
         """
         args = self._extra_launch_args
         if "--mm-process-config" not in args:

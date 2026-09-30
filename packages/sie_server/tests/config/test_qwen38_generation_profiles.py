@@ -76,7 +76,7 @@ def test_qwen38_default_is_a_conservative_non_speculative_route() -> None:
     assert default.loadtime["disable_cuda_graph"] is True
     assert default.loadtime["speculative"] == {"enabled": False}
     assert default.loadtime["attention_backend"] == "flashinfer"
-    assert "extra_env" not in default.loadtime
+    assert default.loadtime["extra_env"] == {"SIE_SGLANG_SINGLE_IMAGE_MAX_PIXELS": "3211264"}
     default_args = default.loadtime["extra_launch_args"]
     assert default_args[default_args.index("--mamba-ssm-dtype") + 1] == "float32"
     # Qwen3 structured output is not constrained when thinking is disabled
@@ -158,7 +158,10 @@ def test_qwen38_hardware_launches_keep_fp8_weights_with_tuned_state_precision() 
         assert args[args.index("--page-size") + 1] == "64"
         assert args[args.index("--max-running-requests") + 1] == "1"
         assert args[args.index("--cuda-graph-max-bs-decode") + 1] == "1"
-        assert profile.loadtime["extra_env"] == {"SGLANG_JIT_DEEPGEMM_FAST_WARMUP": "1"}
+        assert profile.loadtime["extra_env"] == {
+            "SGLANG_JIT_DEEPGEMM_FAST_WARMUP": "1",
+            "SIE_SGLANG_SINGLE_IMAGE_MAX_PIXELS": "3211264",
+        }
 
     for profile_name in (
         "h100-256k",
@@ -267,26 +270,32 @@ def test_qwen38_h100_batch_grammar_requests_stay_on_the_batch_launch() -> None:
     )
 
 
-def test_qwen38_reads_pages_at_document_resolution_with_compact_json() -> None:
+def test_qwen38_reads_one_page_at_document_resolution_with_compact_json() -> None:
     import json
 
     from sie_server.adapters.sglang.generation import SGLangGenerationAdapter
-    from sie_server.processors.streaming import _vision_tokens_per_image
+    from sie_server.processors.streaming import _VISION_TOKENS_PER_IMAGE_ESTIMATE, _vision_tokens_for_images
 
     config = load_model_config(_MODEL_PATH)
+    assert config.tasks.generate is not None
+    window = config.tasks.generate.context_length
+    output_cap = config.tasks.generate.max_output_tokens
     for name in config.profiles:
-        args = config.resolve_profile(name).loadtime["extra_launch_args"]
+        loadtime = config.resolve_profile(name).loadtime
+        args = loadtime["extra_launch_args"]
+        # The launch bound, which every multi-image request keeps, is unchanged.
         assert args.count("--mm-process-config") == 1, name
         image = json.loads(args[args.index("--mm-process-config") + 1])["image"]
-        assert image == {"min_pixels": 65536, "max_pixels": 3211264}, name
+        assert image == {"min_pixels": 65536, "max_pixels": 1003520}, name
+        assert loadtime["extra_env"]["SIE_SGLANG_SINGLE_IMAGE_MAX_PIXELS"] == "3211264", name
         assert args.count("--constrained-json-disable-any-whitespace") == 1, name
 
         adapter = SGLangGenerationAdapter.__new__(SGLangGenerationAdapter)
         adapter._extra_launch_args = list(args)
-        assert adapter.image_token_budget == 3136, name
-        assert _vision_tokens_per_image(adapter) == 3136, name
+        adapter._extra_env = dict(loadtime["extra_env"])
+        assert _vision_tokens_for_images(adapter, 1) == 3136, name
+        for count in (2, 4, 16):
+            assert _vision_tokens_for_images(adapter, count) == count * _VISION_TOKENS_PER_IMAGE_ESTIMATE, name
 
-    # The bare route still fits one full-resolution page and the model's whole
-    # output cap in its 8K window.
-    assert config.tasks.generate is not None
-    assert 3136 + config.tasks.generate.max_output_tokens < config.tasks.generate.context_length
+    # The bare route still fits one full-resolution page and the whole output cap.
+    assert 3136 + output_cap < window
