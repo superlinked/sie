@@ -1,3 +1,4 @@
+{{- include "sie-cluster.validateGatewayAuth" . }}
 {{- /* Validate: at most one static overlay may be active. Zero overlays is the
      default; the gateway fetches bundles+models from sie-config at startup
      and has NO baked-in filesystem seed (see
@@ -17,7 +18,11 @@
      work streams and whoever gets there first wins, so the chart renders one
      value onto both. An extraEnv override would move only the gateway and
      silently reintroduce exactly the divergence the render guards below
-     exist to prevent. Fail the render instead. */}}
+     exist to prevent. Fail the render instead.
+
+     SIE_ADMIN_TOKEN and SIE_CONFIG_SERVICE_TOKEN come only from
+     gateway.auth.adminTokenSecretName and config.auth, where the render
+     guards keep the gateway admin token and the sie-config tokens apart. */}}
 {{- $reservedGatewayEnv := concat
       (include "sie-cluster.otel.reservedEnvNames" . | fromJsonArray)
       (list
@@ -27,6 +32,10 @@
         "SIE_GATEWAY_HEALTH_MODE"
         "SIE_GATEWAY_MACHINE_PROFILES"
         "SIE_GATEWAY_STATIC_QUEUE_POOLS"
+        "SIE_ADMIN_TOKEN"
+        "SIE_CONFIG_SERVICE_TOKEN"
+        "SIE_NATS_PASSWORD"
+        "SIE_NATS_USER"
         "SIE_STREAM_MAX_AGE_S"
         "SIE_STREAM_REPLICAS"
         "SIE_STREAM_STORAGE") -}}
@@ -96,12 +105,6 @@
      Supported schemes: s3:// (AWS), gs:// (GCP), abfs:// + abfss:// (Azure
      Data Lake Storage Gen2 / Blob via the hierarchical namespace). */}}
 {{- $payloadStoreUrl := include "sie-cluster.payloadStoreUrl" . }}
-{{- /* Payload store is required for work items >1MB in queue mode. If it is
-     enabled (default) but no URL resolves, fail loudly rather than silently
-     dropping >1MB requests at runtime. Opt out with payloadStore.enabled=false. */}}
-{{- if and (eq $routing "queue") .Values.payloadStore.enabled (not $payloadStoreUrl) }}
-  {{- fail "payloadStore.enabled=true but no payload-store URL resolved. Work items >1MB will fail without it. Set payloadStore.url to the terraform `payload_store_url` output (or workers.common.clusterCache.url for the shared bucket), or set payloadStore.enabled=false to disable. See deploy/helm/sie-cluster/README.md" }}
-{{- end }}
 {{- if $payloadStoreUrl }}
   {{- if not (or (hasPrefix "s3://" $payloadStoreUrl) (hasPrefix "gs://" $payloadStoreUrl) (hasPrefix "abfs://" $payloadStoreUrl) (hasPrefix "abfss://" $payloadStoreUrl) (hasPrefix "oss://" $payloadStoreUrl)) }}
     {{- fail (printf "payloadStore.url must be an object-store URL (s3://bucket/prefix, gs://bucket/prefix, abfs(s)://container@account.dfs.core.windows.net/prefix, or oss://bucket/prefix), not a local path; got %q" $payloadStoreUrl) }}
@@ -266,9 +269,19 @@ spec:
                   name: {{ .Values.gateway.auth.tokenSecretName }}
                   key: {{ .Values.gateway.auth.tokenSecretKey }}
             {{- end }}
+            {{- with dig "adminTokenSecretName" "" (.Values.gateway.auth | default dict) }}
+            # Inbound admin token for POST, PUT, and DELETE under /v1/pools,
+            # /v1/admin, and /v1/configs. Separate from the sie-config tokens.
+            - name: SIE_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ . }}
+                  key: {{ include "sie-cluster.gateway.adminTokenSecretKey" $ }}
+            {{- end }}
             {{- if .Values.nats.enabled }}
             - name: SIE_NATS_URL
               value: {{ .Values.nats.url | default (printf "nats://%s-nats:4222" .Release.Name) | quote }}
+            {{- include "sie-cluster.nats.clientAuthEnv" (dict "root" . "component" "gateway") | nindent 12 }}
             {{- if .Values.config.enabled }}
             # Allowlist of `producer_id` values trusted on `sie.config.models._all`.
             # `sie-config` publishes its POD_NAME, which is the Deployment name
@@ -306,17 +319,10 @@ spec:
             # packages/sie_gateway/docs/architecture-guide.md section 4.
             - name: SIE_CONFIG_SERVICE_URL
               value: {{ include "sie-cluster.config.internalUrl" . | quote }}
-            {{- if .Values.config.auth.adminTokenSecretName }}
-            # Shared admin secret. Gateway presents it as a bearer token on
-            # both GET /v1/configs/export (admin-auth) and
-            # GET /v1/configs/epoch. Both services read the same secret.
-            - name: SIE_ADMIN_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.config.auth.adminTokenSecretName }}
-                  key: {{ .Values.config.auth.adminTokenSecretKey }}
             {{- end }}
-            {{- end }}
+            # Read-scoped sie-config token for the bootstrap and poll reads. Always
+            # set, empty without one, so the gateway never presents SIE_ADMIN_TOKEN.
+            {{- include "sie-cluster.config.serviceTokenEnv" . | nindent 12 }}
             {{- if $payloadStoreUrl }}
             - name: SIE_PAYLOAD_STORE_URL
               value: {{ $payloadStoreUrl | quote }}

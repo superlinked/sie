@@ -96,3 +96,61 @@ def test_cpu_stack_task_wraps_one_harness_and_docker_flag_delegates():
     assert "exec mise run cpu-stack" in test_task
     assert 'ARGS+=("-m" "docker"' not in test_task
     assert "test_docker_integration.py" not in test_task
+
+
+def test_read_scoped_catalog_requires_reads_and_a_refused_write(monkeypatch):
+    statuses = {
+        ("/v1/configs/models", None): 401,
+        ("/v1/configs/epoch", "read"): 200,
+        ("/v1/configs/export", "read"): 200,
+        ("/v1/configs/models", "read"): 403,
+    }
+    monkeypatch.setattr(
+        cpu_stack_smoke, "config_status", lambda _url, path, token=None, body=None: statuses[(path, token)]
+    )
+    monkeypatch.setattr(cpu_stack_smoke, "config_models", lambda _url, _token: {"model"})
+    assert cpu_stack_smoke.require_read_scoped_catalog("http://config", "read") == {"model"}
+
+    statuses[("/v1/configs/models", "read")] = 201
+    with pytest.raises(RuntimeError, match="read-token write"):
+        cpu_stack_smoke.require_read_scoped_catalog("http://config", "read")
+
+
+@pytest.mark.parametrize(
+    ("logs", "latest"),
+    [
+        ("", None),
+        ("worker-config: startup export reconcile complete", "export reconcile complete"),
+        (
+            "worker-config: startup export reconcile failed; will retry\nworker-config: export reconcile complete",
+            "export reconcile complete",
+        ),
+        ("worker-config: startup export reconcile partial; will retry", "export reconcile partial"),
+        (
+            "worker-config: startup export reconcile complete\nworker-config: epoch poll failed",
+            "epoch poll failed",
+        ),
+    ],
+)
+def test_latest_reconcile_result_reads_the_last_outcome(logs, latest):
+    assert cpu_stack_smoke.latest_reconcile_result(logs) == latest
+
+
+def test_sidecar_export_reconcile_waits_for_a_complete_result(monkeypatch):
+    logs = iter(
+        [
+            "worker-config: startup export reconcile failed; will retry",
+            "worker-config: startup export reconcile failed; will retry\nworker-config: export reconcile complete",
+        ]
+    )
+    monkeypatch.setattr(cpu_stack_smoke, "docker", lambda *args, check=True: next(logs))
+    monkeypatch.setattr(cpu_stack_smoke.time, "sleep", lambda _seconds: None)
+    cpu_stack_smoke.require_sidecar_export_reconcile("sidecar", timeout=5)
+
+
+def test_sidecar_export_reconcile_rejects_a_result_that_never_completes(monkeypatch):
+    log = "worker-config: startup export reconcile partial; will retry"
+    monkeypatch.setattr(cpu_stack_smoke, "docker", lambda *args, check=True: log)
+    monkeypatch.setattr(cpu_stack_smoke.time, "sleep", lambda _seconds: None)
+    with pytest.raises(RuntimeError, match="latest: export reconcile partial"):
+        cpu_stack_smoke.require_sidecar_export_reconcile("sidecar", timeout=0.05)

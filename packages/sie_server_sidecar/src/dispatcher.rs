@@ -258,6 +258,7 @@ struct GenerateDeliveryLogContext {
     work_item_id: String,
     request_id: String,
     model_id: String,
+    reply_subject: String,
     delivery: DeliveryContext,
 }
 
@@ -362,6 +363,22 @@ fn caller_item_id_from_value(value: &MsgValue) -> Option<String> {
 /// True if `reply_subject` is acceptable for use on a `WorkItem`.
 /// Empty is allowed (fire-and-forget). Non-empty subjects must start
 /// with `_INBOX.` so malicious producers can't redirect results.
+/// The first `Nats-` header on a work delivery other than `Nats-Msg-Id`.
+///
+/// The gateway publishes work with at most `Nats-Msg-Id`. The NATS server adds
+/// other `Nats-` headers when it copies stored messages into a work stream on
+/// a user's behalf, past that user's publish permissions: a stream republish
+/// adds `Nats-Stream`, and a stream source adds `Nats-Stream-Source`.
+pub fn unexpected_work_header(headers: Option<&async_nats::HeaderMap>) -> Option<String> {
+    headers?.iter().find_map(|(name, _)| {
+        let name: &str = name.as_ref();
+        let nats_header = name
+            .get(..5)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("nats-"));
+        (nats_header && !name.eq_ignore_ascii_case("Nats-Msg-Id")).then(|| name.to_string())
+    })
+}
+
 pub(crate) fn reply_subject_is_safe(reply_subject: &str) -> bool {
     reply_subject.is_empty() || reply_subject.starts_with(INBOX_PREFIX)
 }
@@ -717,6 +734,12 @@ impl Dispatcher {
         Fut: std::future::Future<Output = Result<(), String>>,
     {
         let model_id = wi.model_id.clone();
+        if self.model_is_unsupported(&model_id) {
+            return Err(GenerateDispatchError::new(
+                "BUNDLE_CONFIG_MISMATCH",
+                "worker configuration cannot serve this model",
+            ));
+        }
         match self.backend.ensure_model_ready(&model_id).await {
             Ok(response) => match response.state {
                 ReadinessState::Ready => {}
@@ -756,7 +779,7 @@ impl Dispatcher {
 
         let _execution_guard = if let Some(state) = self.config_apply_state.as_ref() {
             let guard = state.lock_execution().await;
-            if !state.accepts_bundle_config_hash(&wi.bundle_config_hash) {
+            if !state.accepts_work(&wi.bundle_config_hash, &wi.model_id) {
                 return Err(GenerateDispatchError::new(
                     "BUNDLE_CONFIG_MISMATCH",
                     "worker configuration changed before generation execution",
@@ -889,6 +912,12 @@ impl Dispatcher {
                     format!("generation cancel IPC failed: {error}"),
                 )
             })
+    }
+
+    fn model_is_unsupported(&self, model_id: &str) -> bool {
+        self.config_apply_state
+            .as_ref()
+            .is_some_and(|state| state.model_is_unsupported(model_id))
     }
 
     fn current_bundle_config_hash(&self) -> Option<String> {
@@ -1126,6 +1155,8 @@ fn classify_cancellation(
         .then_some(WorkCancellation::BatchDirect)
 }
 
+/// First work item this worker must not execute under its current config: an
+/// unknown bundle config hash, or a model the worker reported it cannot serve.
 fn unknown_bundle_config_hash<'a>(
     items: impl IntoIterator<Item = &'a WorkItem>,
     state: Option<&ConfigApplyState>,
@@ -1134,7 +1165,7 @@ fn unknown_bundle_config_hash<'a>(
     let mut first_unknown: Option<&'a str> = None;
     let mut count = 0usize;
     for wi in items {
-        if !state.accepts_bundle_config_hash(&wi.bundle_config_hash) {
+        if !state.accepts_work(&wi.bundle_config_hash, &wi.model_id) {
             count += 1;
             if first_unknown.is_none() {
                 first_unknown = Some(wi.bundle_config_hash.as_str());
@@ -1142,6 +1173,18 @@ fn unknown_bundle_config_hash<'a>(
         }
     }
     first_unknown.map(|hash| (hash, count))
+}
+
+/// Telemetry reason for NAKing `model_id` work that a config barrier refused.
+/// A model the worker reports it cannot serve is `model_unsupported`, as it is
+/// at intake and before readiness; any other refusal is an old bundle hash
+/// (`retry`).
+fn barrier_nak_reason(state: Option<&ConfigApplyState>, model_id: &str) -> &'static str {
+    if state.is_some_and(|state| state.model_is_unsupported(model_id)) {
+        "model_unsupported"
+    } else {
+        "retry"
+    }
 }
 
 impl Dispatcher {
@@ -1181,6 +1224,22 @@ impl Dispatcher {
             self.runtime_state
                 .telemetry
                 .nats_received(msg.info().ok().map(|info| info.delivered as u64));
+            if let Some(header) = unexpected_work_header(msg.headers.as_ref()) {
+                warn!(
+                    subject = %msg.subject,
+                    header = %header,
+                    "rejecting work the NATS server copied from another stream — ACKing to drop",
+                );
+                if let Err(e) = ack(
+                    &Delivery::Nats(msg, admission_permit, None),
+                    &self.runtime_state.telemetry,
+                )
+                .await
+                {
+                    warn!(error = %e, "ack failed on drop");
+                }
+                continue;
+            }
             // Source of truth for routing is the NATS subject (JetStream
             // already used it to dispatch to this consumer). If the subject
             // doesn't yield a model_id, we can't trust the payload either,
@@ -1258,6 +1317,22 @@ impl Dispatcher {
                             "WorkItem.model_id disagrees with subject — trusting subject",
                         );
                         wi.model_id = subject_model;
+                    }
+                    if self.model_is_unsupported(&wi.model_id) {
+                        debug!(
+                            work_item_id = %wi.work_item_id,
+                            request_id = %wi.request_id,
+                            model = %wi.model_id,
+                            "worker cannot serve this model under its current config — NAKing for redelivery"
+                        );
+                        nak_one_with_reason(
+                            &delivery,
+                            base_delay_ms,
+                            &self.runtime_state.telemetry,
+                            "model_unsupported",
+                        )
+                        .await;
+                        continue;
                     }
                     if wi.operation != "generate" {
                         self.hold_progress_lease(&wi, &mut delivery);
@@ -1400,6 +1475,21 @@ impl Dispatcher {
             "generate delivery received"
         );
 
+        if self.model_is_unsupported(&model_id) {
+            info!(
+                work_item_id = %wi.work_item_id,
+                model = %model_id,
+                "worker cannot serve this model under its current config — NAKing before readiness"
+            );
+            nak_msg_with_reason(
+                &msg,
+                base_delay_ms,
+                &self.runtime_state.telemetry,
+                "model_unsupported",
+            )
+            .await;
+            return;
+        }
         let readiness_resp = match self.backend.ensure_model_ready(&model_id).await {
             Ok(r) => r,
             Err(e) => {
@@ -1794,14 +1884,17 @@ impl Dispatcher {
         // a queued A request can never execute after the worker advances to B.
         let _execution_guard = if let Some(state) = self.config_apply_state.as_ref() {
             let guard = state.lock_execution().await;
-            if !state.accepts_bundle_config_hash(&wi.bundle_config_hash) {
+            if !state.accepts_work(&wi.bundle_config_hash, &model_id) {
+                let reason = barrier_nak_reason(Some(state), &model_id);
                 info!(
                     model = %model_id,
                     expected_hash = %wi.bundle_config_hash,
                     local_hash = %state.current_bundle_config_hash(),
-                    "generate bundle config hash changed before execution — NAKing"
+                    reason,
+                    "generate work refused at the config barrier before execution — NAKing"
                 );
-                nak_msg(&msg, base_delay_ms, &self.runtime_state.telemetry).await;
+                nak_msg_with_reason(&msg, base_delay_ms, &self.runtime_state.telemetry, reason)
+                    .await;
                 return;
             }
             Some(guard)
@@ -1871,6 +1964,7 @@ impl Dispatcher {
             work_item_id: wi.work_item_id.clone(),
             request_id: wi.request_id.clone(),
             model_id: model_id.clone(),
+            reply_subject: wi.reply_subject.clone(),
             delivery,
         });
         let executed_bundle_config_hash: Arc<str> = Arc::from(wi.bundle_config_hash.clone());
@@ -2019,14 +2113,33 @@ impl Dispatcher {
     /// `EnsureModelReady` for `items`. A parked group's call is bounded by its
     /// readiness deadline and progress-ACKs the group while it is pending, so
     /// a slow call neither outlives the deadline nor lets JetStream redeliver
-    /// the group. `None` when the group was NAKed instead: the deadline passed
-    /// first, a progress ACK failed, or shutdown requested redelivery.
+    /// the group. `None` when the group was NAKed instead: the worker lists the
+    /// model in `unsupported_models` (a config commit can add it after
+    /// intake), the deadline passed first, a progress ACK failed, or shutdown
+    /// requested redelivery.
     async fn ensure_model_ready_by(
         &self,
         model_id: &str,
         items: &[(WorkItem, Delivery)],
         ready_deadline: Option<tokio::time::Instant>,
     ) -> Option<Result<crate::ipc_types::EnsureModelReadyResponse, BackendError>> {
+        if self.model_is_unsupported(model_id) {
+            info!(
+                model = %model_id,
+                group_size = items.len(),
+                "worker cannot serve this model under its current config — NAKing group before readiness"
+            );
+            for (_, delivery) in items {
+                nak_one_with_reason(
+                    delivery,
+                    base_nak_delay_ms(),
+                    &self.runtime_state.telemetry,
+                    "model_unsupported",
+                )
+                .await;
+            }
+            return None;
+        }
         let readiness = self.backend.ensure_model_ready(model_id);
         let Some(deadline) = ready_deadline else {
             return Some(readiness.await);
@@ -2099,9 +2212,15 @@ impl Dispatcher {
                 group_size,
                 local_hash = %local_hash,
                 expected_hash,
-                "request bundle config hash is unknown locally — NAKing group"
+                "request bundle config hash is unknown locally, or the model is unsupported — NAKing group"
             );
-            nak_all(&items, base_delay_ms, &self.runtime_state.telemetry).await;
+            nak_all_at_barrier(
+                &items,
+                base_delay_ms,
+                &self.runtime_state.telemetry,
+                self.config_apply_state.as_deref(),
+            )
+            .await;
             return Ok(());
         }
         let readiness_resp = loop {
@@ -2449,16 +2568,17 @@ impl Dispatcher {
                     expected_hash,
                     unknown_hash_count,
                     local_hash = %state.current_bundle_config_hash(),
-                    "encode bundle config hash changed before execution — NAKing"
+                    "encode work refused at the config barrier before execution — NAKing"
                 );
                 let msgs_only: Vec<(WorkItem, Delivery)> = resolved
                     .into_iter()
                     .map(|(wi, delivery, _, _, _)| (wi, delivery))
                     .collect();
-                nak_all(
+                nak_all_at_barrier(
                     &msgs_only,
                     base_nak_delay_ms(),
                     &self.runtime_state.telemetry,
+                    Some(state),
                 )
                 .await;
                 return Ok(());
@@ -2617,16 +2737,17 @@ impl Dispatcher {
                     expected_hash,
                     unknown_hash_count,
                     local_hash = %state.current_bundle_config_hash(),
-                    "score bundle config hash changed before execution — NAKing"
+                    "score work refused at the config barrier before execution — NAKing"
                 );
                 let msgs_only: Vec<(WorkItem, Delivery)> = prepared
                     .into_iter()
                     .map(|(wi, delivery, _, _, _)| (wi, delivery))
                     .collect();
-                nak_all(
+                nak_all_at_barrier(
                     &msgs_only,
                     base_nak_delay_ms(),
                     &self.runtime_state.telemetry,
+                    Some(state),
                 )
                 .await;
                 return Ok(());
@@ -2812,16 +2933,17 @@ impl Dispatcher {
                     expected_hash,
                     unknown_hash_count,
                     local_hash = %state.current_bundle_config_hash(),
-                    "extract bundle config hash changed before execution — NAKing"
+                    "extract work refused at the config barrier before execution — NAKing"
                 );
                 let msgs_only: Vec<(WorkItem, Delivery)> = resolved
                     .into_iter()
                     .map(|(wi, delivery, _, _, _)| (wi, delivery))
                     .collect();
-                nak_all(
+                nak_all_at_barrier(
                     &msgs_only,
                     base_nak_delay_ms(),
                     &self.runtime_state.telemetry,
+                    Some(state),
                 )
                 .await;
                 return Ok(());
@@ -4241,6 +4363,11 @@ async fn handle_generate_event(
 ) -> Result<(), DispatchError> {
     match event.kind.as_str() {
         "publish" => {
+            if event.reply_subject != delivery_log.reply_subject {
+                return Err(DispatchError::Ipc(IpcError::Server(
+                    "generation publish reply_subject mismatch".to_string(),
+                )));
+            }
             let payload =
                 stamp_generate_execution_hash(event.payload, executed_bundle_config_hash)?;
             publisher.publish_raw(&event.reply_subject, payload).await?;
@@ -4577,6 +4704,29 @@ async fn nak_all(
     debug!(count = items.len(), delay_ms, "NAKed group");
 }
 
+/// NAK work a config barrier refused, each item counted with its own reason
+/// ([`barrier_nak_reason`]).
+async fn nak_all_at_barrier(
+    items: &[(WorkItem, Delivery)],
+    delay_ms: u64,
+    telemetry: &crate::observability::metrics::SidecarTelemetry,
+    state: Option<&ConfigApplyState>,
+) {
+    for (wi, d) in items {
+        nak_one_with_reason(
+            d,
+            delay_ms,
+            telemetry,
+            barrier_nak_reason(state, &wi.model_id),
+        )
+        .await;
+    }
+    debug!(
+        count = items.len(),
+        delay_ms, "NAKed group at a config barrier"
+    );
+}
+
 async fn nak_one(
     delivery: &Delivery,
     delay_ms: u64,
@@ -4672,6 +4822,15 @@ async fn nak_msg(
     delay_ms: u64,
     telemetry: &crate::observability::metrics::SidecarTelemetry,
 ) {
+    nak_msg_with_reason(msg, delay_ms, telemetry, "retry").await;
+}
+
+async fn nak_msg_with_reason(
+    msg: &Message,
+    delay_ms: u64,
+    telemetry: &crate::observability::metrics::SidecarTelemetry,
+    reason: &str,
+) {
     let delay = std::time::Duration::from_millis(delay_ms);
     let result = msg
         .ack_with(async_nats::jetstream::AckKind::Nak(Some(delay)))
@@ -4679,7 +4838,7 @@ async fn nak_msg(
     telemetry.nats_operation(
         "nak",
         if result.is_ok() { "success" } else { "error" },
-        "retry",
+        reason,
         1,
     );
     match result {
@@ -5057,17 +5216,18 @@ async fn process_scheduler_batch(
                 expected_hash,
                 unknown_hash_count,
                 local_hash = %state.current_bundle_config_hash(),
-                "scheduler bundle config hash changed before execution — NAKing batch"
+                "scheduler work refused at the config barrier before execution — NAKing batch"
             );
             let msgs_only: Vec<(WorkItem, Delivery)> = batch
                 .metadata
                 .into_iter()
                 .map(|meta| (meta.wi, meta.delivery))
                 .collect();
-            nak_all(
+            nak_all_at_barrier(
                 &msgs_only,
                 base_nak_delay_ms(),
                 &dispatcher.runtime_state.telemetry,
+                Some(state),
             )
             .await;
             return;
@@ -6147,6 +6307,108 @@ mod tests {
         assert!(backend.encoded_models().is_empty());
     }
 
+    fn dispatcher_listing_unsupported(
+        backend: SharedBackend,
+        unsupported: &[&str],
+    ) -> (Arc<Dispatcher>, Arc<ConfigApplyState>) {
+        let state = Arc::new(ConfigApplyState::new(String::new()));
+        assert!(state.mark_export_reconciled(
+            1,
+            Some("hash-1".into()),
+            unsupported.iter().map(|m| (*m).to_string()).collect(),
+            false
+        ));
+        let runtime_state = Arc::new(RuntimeState::new());
+        let dispatcher = Arc::new(Dispatcher::new(
+            backend,
+            adapter_pool_with_runtime_state(Arc::clone(&runtime_state)),
+            Arc::new(crate::payload_store::LocalPayloadStore::new(
+                None::<PathBuf>,
+            )),
+            None,
+            "worker-test".into(),
+            runtime_state,
+            Arc::new(Mutex::new(LatencyTracker::new(200, 10))),
+            TokenizerRegistry::empty(),
+            None,
+            None,
+            Some(Arc::clone(&state)),
+            None,
+            BatchCancelState::default(),
+            RequestCancelState::new(Duration::from_secs(60)),
+        ));
+        (dispatcher, state)
+    }
+
+    #[tokio::test]
+    async fn readiness_rechecks_a_model_listed_after_intake() {
+        let backend = LoadingModelBackend::new("org/new-family");
+        let (dispatcher, state) = dispatcher_listing_unsupported(backend.clone(), &[]);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let items = local_group("new-req", "org/new-family", 0..2, &tx);
+
+        assert!(state.mark_export_reconciled(
+            2,
+            Some("hash-2".into()),
+            vec!["org/new-family".into()],
+            false
+        ));
+        let readiness = dispatcher
+            .ensure_model_ready_by("org/new-family", &items, None)
+            .await;
+
+        assert!(readiness.is_none());
+        assert_eq!(backend.probes.load(Ordering::SeqCst), 0);
+        assert_eq!(retried_slots(&mut rx), [0, 1]);
+    }
+
+    #[tokio::test]
+    async fn unsupported_model_group_is_naked_before_readiness_or_backend_ipc() {
+        let backend = LoadingModelBackend::new("org/new-family");
+        let state = Arc::new(ConfigApplyState::new(String::new()));
+        assert!(state.mark_export_reconciled(
+            1,
+            Some("hash-1".into()),
+            vec!["org/new-family".into()],
+            false
+        ));
+        let runtime_state = Arc::new(RuntimeState::new());
+        let dispatcher = Arc::new(Dispatcher::new(
+            backend.clone(),
+            adapter_pool_with_runtime_state(Arc::clone(&runtime_state)),
+            Arc::new(crate::payload_store::LocalPayloadStore::new(
+                None::<PathBuf>,
+            )),
+            None,
+            "worker-test".into(),
+            runtime_state,
+            Arc::new(Mutex::new(LatencyTracker::new(200, 10))),
+            TokenizerRegistry::empty(),
+            None,
+            None,
+            Some(state),
+            None,
+            BatchCancelState::default(),
+            RequestCancelState::new(Duration::from_secs(60)),
+        ));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut items = local_group("new-req", "org/new-family", 0..2, &tx);
+        items.extend(local_group("kept-req", "org/kept", 5..6, &tx));
+        for (wi, _) in &mut items {
+            wi.bundle_config_hash = "hash-1".into();
+        }
+
+        dispatcher.dispatch_decoded(items, 3, Instant::now()).await;
+        dispatcher
+            .join_parked_groups(crate::nats_consumer::redelivery_envelope() * 2)
+            .await;
+
+        let retried = retried_slots(&mut rx);
+        assert!(retried.contains(&0) && retried.contains(&1));
+        assert_eq!(backend.probes.load(Ordering::SeqCst), 0);
+        assert_eq!(backend.encoded_models(), ["org/kept"]);
+    }
+
     fn retried_slots(
         rx: &mut tokio::sync::mpsc::UnboundedReceiver<crate::delivery::LocalDeliveryEvent>,
     ) -> Vec<usize> {
@@ -6162,6 +6424,64 @@ mod tests {
 
     /// Far longer than any readiness deadline the tests use.
     const STALLED_PROBE: Duration = Duration::from_secs(1_000_000);
+
+    #[tokio::test]
+    async fn generation_publish_to_a_subject_other_than_the_work_item_reply_is_refused() {
+        let client = async_nats::ConnectOptions::new()
+            .retry_on_initial_connect()
+            .connect("nats://127.0.0.1:1")
+            .await
+            .expect("an offline client needs no server");
+        let telemetry = crate::observability::metrics::SidecarTelemetry::default();
+        let publisher = Arc::new(WorkPublisher::new(
+            client.clone(),
+            "worker-test",
+            telemetry.clone(),
+        ));
+        let message = Message {
+            message: async_nats::Message {
+                subject: "sie.work.test".into(),
+                reply: None,
+                payload: Default::default(),
+                headers: None,
+                status: None,
+                description: None,
+                length: 0,
+            },
+            context: async_nats::jetstream::new(client),
+        };
+        let delivery = DeliveryContext::from_message(&message);
+        let delivery_log = Arc::new(GenerateDeliveryLogContext {
+            work_item_id: "wi-1".to_string(),
+            request_id: "req-1".to_string(),
+            model_id: "model".to_string(),
+            reply_subject: "_INBOX.router.req-1".to_string(),
+            delivery,
+        });
+        for subject in ["$JS.API.STREAM.CREATE.X", "sie.config.models._all", ""] {
+            let result = handle_generate_event(
+                GenerateEvent {
+                    kind: "publish".to_string(),
+                    reply_subject: subject.to_string(),
+                    payload: Vec::new(),
+                    delay_ms: None,
+                    error: None,
+                },
+                Arc::clone(&publisher),
+                telemetry.clone(),
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(QueuedMessage::new(message.clone(), None)),
+                Arc::clone(&delivery_log),
+                "",
+            )
+            .await;
+            let error = result.expect_err(subject).to_string();
+            assert!(
+                error.contains("reply_subject mismatch"),
+                "{subject}: {error}"
+            );
+        }
+    }
 
     /// A NATS delivery whose ACK, NAK and progress calls fail: it has no
     /// reply subject and its client never reaches a server.
@@ -6780,6 +7100,89 @@ mod tests {
     }
 
     #[test]
+    fn barrier_naks_count_unsupported_models_as_model_unsupported() {
+        let state = ConfigApplyState::new(String::new());
+        assert!(state.mark_export_reconciled(1, Some("hash-1".into()), vec!["B".into()], false));
+
+        assert_eq!(barrier_nak_reason(Some(&state), "B"), "model_unsupported");
+        assert_eq!(barrier_nak_reason(Some(&state), "b"), "model_unsupported");
+        // A supported model refused at the barrier carries an old bundle hash.
+        assert_eq!(barrier_nak_reason(Some(&state), "A"), "retry");
+        assert_eq!(barrier_nak_reason(None, "B"), "retry");
+    }
+
+    /// The architecture guide counts NAKs for a model in `unsupported_models`
+    /// as `model_unsupported` at intake, before readiness and at the config
+    /// execution barrier. A barrier that NAKs through the plain `retry`
+    /// helpers would count a model that turned unsupported after intake as a
+    /// retry. Checked structurally, like the barrier ordering above, so a
+    /// future barrier that NAKs the old way fails here.
+    #[test]
+    fn config_execution_barriers_nak_with_their_reason() {
+        let source = include_str!("dispatcher.rs");
+        let production = source
+            .split("\nmod tests {")
+            .next()
+            .expect("dispatcher.rs must have a production section");
+        let barrier = concat!("lock_execution", "().await");
+        let mut naking = 0;
+        for (site, _) in production.match_indices(barrier) {
+            let rest = &production[site..];
+            let refusal = &rest[..rest.find("Some(guard)").expect("a barrier keeps its guard")];
+            if !refusal.contains("nak") {
+                continue; // local-ingest generate answers with an error, not a NAK
+            }
+            naking += 1;
+            assert!(
+                !refusal.contains(concat!("nak_all", "("))
+                    && !refusal.contains(concat!("nak_msg", "(")),
+                "the barrier at byte {site} NAKs with the plain retry reason"
+            );
+            assert!(
+                refusal.contains("nak_all_at_barrier") || refusal.contains("barrier_nak_reason"),
+                "the barrier at byte {site} does not attribute its NAK reason"
+            );
+        }
+        // Generate, encode, score, extract and the scheduler batch.
+        assert_eq!(naking, 5, "expected five NAKing config execution barriers");
+    }
+
+    #[test]
+    fn unknown_bundle_config_hash_flags_models_the_worker_cannot_serve() {
+        let state = ConfigApplyState::new(String::new());
+        assert!(state.mark_export_reconciled(1, Some("hash-1".into()), vec!["B".into()], false));
+
+        let mut served = wi("r1", 0, "A", "encode");
+        served.bundle_config_hash = "hash-1".into();
+        assert!(unknown_bundle_config_hash([&served], Some(&state)).is_none());
+
+        let mut unsupported = wi("r1", 1, "B", "encode");
+        unsupported.bundle_config_hash = "hash-1".into();
+        assert_eq!(
+            unknown_bundle_config_hash([&served, &unsupported], Some(&state)),
+            Some(("hash-1", 1))
+        );
+    }
+
+    #[test]
+    fn unexpected_work_header_allows_only_the_gateway_message_id() {
+        assert_eq!(unexpected_work_header(None), None);
+        let mut gateway = async_nats::HeaderMap::new();
+        gateway.insert("Nats-Msg-Id", "req-1");
+        gateway.insert("traceparent", "00-abc-def-01");
+        assert_eq!(unexpected_work_header(Some(&gateway)), None);
+        for name in ["Nats-Stream", "Nats-Stream-Source", "nats-subject"] {
+            let mut copied = async_nats::HeaderMap::new();
+            copied.insert(name, "x");
+            assert_eq!(
+                unexpected_work_header(Some(&copied)).as_deref(),
+                Some(name),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
     fn reply_subject_is_safe_rules() {
         assert!(reply_subject_is_safe(""));
         assert!(reply_subject_is_safe("_INBOX.ab"));
@@ -6861,7 +7264,7 @@ mod tests {
             .expect("dispatcher.rs must have a production section");
         let record = concat!("record_work_item_ages", "(");
         let barrier = concat!("unknown_bundle_config_hash", "(");
-        let accepts = concat!("accepts_bundle_config_hash", "(");
+        let accepts = concat!("accepts_work", "(");
 
         // Pair each barrier with the next recording site and require that the
         // barrier comes first. Five of the six sites sit behind a barrier; the

@@ -34,10 +34,17 @@ from sie_server.types.inputs import InvalidInputError
 
 _MODELS_DIR = Path(__file__).resolve().parents[2] / "models"
 # The shipped profiles that load with graphs: DeBERTa-v3 models whose bucketed
-# scores changed no top label against eager execution (see the server README).
+# scores moved no probability by more than 0.02 against eager execution and
+# changed a top label only where eager's top two were closer than eager's own
+# batching noise (see "GLiClass CUDA graphs" in the server README).
 _BUCKETED_BY_DEFAULT = {
+    "knowledgator/gliclass-small-v1.0",
     "knowledgator/gliclass-base-v1.0",
     "knowledgator/gliclass-large-v1.0",
+    "knowledgator/gliclass-base-v3.0",
+    "knowledgator/gliclass-large-v3.0",
+    "knowledgator/gliclass-instruct-base-v1.0",
+    "knowledgator/gliclass-instruct-large-v1.0",
     "knowledgator/opir-multitask-large-v1.0",
 }
 
@@ -242,8 +249,8 @@ class TestShapes:
 
     @pytest.mark.parametrize(
         ("max_length", "hidden_size", "count"),
-        [(512, 1024, 52), (512, 768, 71), (1024, 1024, 33)],
-        ids=["gliclass-large", "gliclass-base", "opir-multitask-large"],
+        [(1024, 1024, 33), (1024, 768, 52), (512, 1024, 52), (512, 768, 71)],
+        ids=["large-1024", "base-1024", "large-512", "base-512"],
     )
     def test_every_bucketed_forward_maps_into_a_small_fixed_set(
         self, max_length: int, hidden_size: int, count: int
@@ -544,6 +551,27 @@ class TestRecordingPolicy:
         assert (1, 224) not in runner._graphs
         assert runner.stats.recording_failures == 0
         assert not cuda_graphs_module._RECORDING_LOCK.locked()
+
+    def test_a_first_replay_that_runs_out_of_memory_drops_graphs_and_pauses_recording(self) -> None:
+        runner = _Runner()
+        runner.run(_inputs(1, 100), 4, "bucketed")
+        runner.replay_error = torch.cuda.OutOfMemoryError("CUDA out of memory")
+
+        with pytest.raises(torch.cuda.OutOfMemoryError):
+            runner.run(_inputs(1, 200), 4, "bucketed")
+
+        runner.replay_error = None
+        assert runner.graph_count == 0
+        assert not runner.disabled
+        assert runner.stats.drops == 1
+        assert runner.stats.recording_failures == 0  # memory is not the shape's fault
+        # Recording pauses for a minute, as after a recording that runs out of memory.
+        runner.now += 59.0
+        assert runner.run(_inputs(1, 300), 4, "bucketed") is None
+        assert runner.stats.eager["recording_paused"] == 1
+        runner.now += 2.0
+        assert runner.run(_inputs(1, 300), 4, "bucketed") is not None
+        assert runner.recorded[-1] == (1, 320)
 
     def test_running_out_of_memory_while_recording_pauses_recording(self) -> None:
         runner = _Runner()

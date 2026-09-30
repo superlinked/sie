@@ -26,8 +26,14 @@ profiles:
         normalize: true
         query_max_length: 32
         skip_special_tokens: false
-        doc_punctuation_skiplist: false
-      runtime: {}
+        query_prefix: '[Q] '
+        doc_prefix: '[D] '
+        doc_punctuation_skiplist: true
+        cuda_graphs: bucketed
+      runtime:
+        # The checkpoint's PyLate recipe (config_sentence_transformers.json).
+        query_max_length: 32
+        max_seq_length: 300
   candle:
     extends: default
     adapter_path: sie_server_rust.adapters.candle:CandleEmbeddingAdapter
@@ -48,8 +54,16 @@ profiles:
     extends: default
     adapter_options:
       runtime:
+        query_max_length: 32
+        max_seq_length: 300
         output_types:
         - dense
         output_similarity:
           dense: dot
         muvera: {}
+  long_context:
+    extends: default
+    adapter_options:
+      runtime:
+        query_max_length: 32
+        max_seq_length: 8192

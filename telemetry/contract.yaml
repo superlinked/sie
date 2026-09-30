@@ -304,7 +304,7 @@ cardinality_budgets:
       nats:
         metrics: [sie.worker.nats.operations]
         formula: nats_operation * binary_outcome * nats_reason
-        limit: 231
+        limit: 252
       nats_delivery:
         metrics: [sie.worker.nats.delivery.attempts]
         formula: delivery_redelivered
@@ -913,6 +913,7 @@ enums:
     - completed
     - retry
     - pool_not_assigned
+    - model_unsupported
     - first_delivery
     - redelivery
     - metadata_unavailable
@@ -1689,6 +1690,14 @@ metrics:
     unit: "{response}"
     attributes: gateway_provisioning
     prometheus_name: sie_gateway_provisioning_responses_total
+    export: [prometheus, otlp]
+  - name: sie.gateway.routing.unsupported_model_exclusions
+    owner: gateway
+    facade_event: gateway.unsupported_model_route_exclusion
+    type: counter
+    unit: "{exclusion}"
+    attributes: none
+    prometheus_name: sie_gateway_routing_unsupported_model_exclusions_total
     export: [prometheus, otlp]
   - name: sie.gateway.generation.events
     owner: gateway

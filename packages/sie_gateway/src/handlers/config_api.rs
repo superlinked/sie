@@ -190,6 +190,17 @@ async fn compute_model_status(
     // misreport, so `no_bundles` makes the distinction explicit and
     // `all_bundles_acked` stays false.
     let mut all_acked = !model_info.bundles.is_empty();
+    // The queried route and, for a base model, each of its profile routes.
+    let mut route_ids = vec![model_info.name.clone()];
+    if model_info.canonical_profile == "default" {
+        route_ids.extend(
+            model_info
+                .profile_names
+                .iter()
+                .filter(|profile| profile.as_str() != "default")
+                .map(|profile| format!("{}:{profile}", model_info.name)),
+        );
+    }
     let model_pool = model_info.pool.as_deref().unwrap_or("default");
     let pending_generation = state
         .work_publisher
@@ -205,6 +216,8 @@ async fn compute_model_status(
         let mut total_eligible = 0usize;
         let mut acked_workers: Vec<String> = Vec::new();
         let mut pending_workers: Vec<String> = Vec::new();
+        // Acked the hash but reported that they cannot serve this model.
+        let mut unsupported_workers: Vec<String> = Vec::new();
 
         for worker in workers.values() {
             // Exact bundle-name match. `compute_bundle_config_hash` hashes
@@ -224,13 +237,18 @@ async fn compute_model_status(
             }
             total_eligible += 1;
             if !expected.is_empty() && worker.bundle_config_hash == expected {
-                acked_workers.push(worker.name.clone());
+                if route_ids.iter().all(|route| worker.supports_model(route)) {
+                    acked_workers.push(worker.name.clone());
+                } else {
+                    unsupported_workers.push(worker.name.clone());
+                }
             } else {
                 pending_workers.push(worker.name.clone());
             }
         }
 
-        let bundle_acked = total_eligible > 0 && pending_workers.is_empty();
+        let bundle_acked =
+            total_eligible > 0 && pending_workers.is_empty() && unsupported_workers.is_empty();
         if !bundle_acked {
             all_acked = false;
         }
@@ -242,6 +260,7 @@ async fn compute_model_status(
             "total_eligible_workers": total_eligible,
             "acked_workers": acked_workers,
             "pending_workers": pending_workers,
+            "unsupported_workers": unsupported_workers,
             "acked": bundle_acked,
         }));
     }
@@ -457,6 +476,8 @@ mod tests {
             k8s_port: 8080,
             health_mode: "ws".to_string(),
             nats_url: String::new(),
+            nats_user: String::new(),
+            nats_password: String::new(),
             nats_config_trusted_producers: vec!["sie-config".to_string()],
             auth_mode: "none".to_string(),
             auth_tokens: Vec::new(),
@@ -733,23 +754,29 @@ mod tests {
 
     /// Helper: seed a model into the registry so status tests have a target.
     fn seed_model(state: &AppState, model_id: &str) {
+        seed_model_with_profiles(state, model_id, &["default"]);
+    }
+
+    fn seed_model_with_profiles(state: &AppState, model_id: &str, profile_names: &[&str]) {
         use crate::types::model::{ModelConfig, ProfileConfig};
 
         let mut profiles = HashMap::new();
-        profiles.insert(
-            "default".to_string(),
-            ProfileConfig {
-                kv_budget_tokens: None,
-                max_output_tokens: None,
-                grammar_profile: None,
-                chat_template_kwargs: None,
-                adapter_path: Some("module:Adapter".to_string()),
-                max_batch_tokens: Some(4096),
-                compute_precision: None,
-                adapter_options: None,
-                extends: None,
-            },
-        );
+        for profile_name in profile_names {
+            profiles.insert(
+                (*profile_name).to_string(),
+                ProfileConfig {
+                    kv_budget_tokens: None,
+                    max_output_tokens: None,
+                    grammar_profile: None,
+                    chat_template_kwargs: None,
+                    adapter_path: Some("module:Adapter".to_string()),
+                    max_batch_tokens: Some(4096),
+                    compute_precision: None,
+                    adapter_options: None,
+                    extends: None,
+                },
+            );
+        }
         state
             .model_registry
             .add_model_config(ModelConfig {
@@ -842,6 +869,7 @@ mod tests {
             pool_name: "default".into(),
             saturated: false,
             terminated: false,
+            unsupported_models: Vec::new(),
         }
     }
 
@@ -883,6 +911,97 @@ mod tests {
         assert_eq!(bundle["total_eligible_workers"], 1);
         assert_eq!(bundle["acked_workers"].as_array().unwrap().len(), 1);
         assert!(bundle["pending_workers"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_model_status_separates_workers_that_cannot_serve_the_model() {
+        let bundles_dir = tempfile::TempDir::new().unwrap();
+        let models_dir = tempfile::TempDir::new().unwrap();
+        let (app, state) = build_test_router_with_state(&bundles_dir, &models_dir).await;
+        seed_model(&state, "BAAI/bge-m3");
+        let expected_hash = state
+            .model_registry
+            .compute_bundle_config_hash_for_pool("default", "default");
+
+        let mut earlier = worker_msg("worker-earlier", "default", &expected_hash);
+        earlier.unsupported_models = vec!["BAAI/bge-m3".into()];
+        state
+            .registry
+            .update_worker("http://worker-earlier:8080", earlier)
+            .await;
+        state
+            .registry
+            .update_worker(
+                "http://worker-current:8080",
+                worker_msg("worker-current", "default", &expected_hash),
+            )
+            .await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/configs/models/BAAI/bge-m3/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&body_bytes(response).await).unwrap();
+        assert_eq!(parsed["all_bundles_acked"], false);
+        let bundle = &parsed["bundles"][0];
+        assert_eq!(bundle["total_eligible_workers"], 2);
+        assert_eq!(
+            bundle["acked_workers"],
+            serde_json::json!(["worker-current"])
+        );
+        assert_eq!(
+            bundle["unsupported_workers"],
+            serde_json::json!(["worker-earlier"])
+        );
+        assert!(bundle["pending_workers"].as_array().unwrap().is_empty());
+        assert_eq!(bundle["acked"], false);
+    }
+
+    #[tokio::test]
+    async fn test_model_status_counts_an_unsupported_profile_route() {
+        let bundles_dir = tempfile::TempDir::new().unwrap();
+        let models_dir = tempfile::TempDir::new().unwrap();
+        let (app, state) = build_test_router_with_state(&bundles_dir, &models_dir).await;
+        seed_model_with_profiles(&state, "BAAI/bge-m3", &["default", "fast"]);
+        let expected_hash = state
+            .model_registry
+            .compute_bundle_config_hash_for_pool("default", "default");
+
+        let mut earlier = worker_msg("worker-earlier", "default", &expected_hash);
+        earlier.unsupported_models = vec!["BAAI/bge-m3:fast".into()];
+        state
+            .registry
+            .update_worker("http://worker-earlier:8080", earlier)
+            .await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/configs/models/BAAI/bge-m3/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&body_bytes(response).await).unwrap();
+        let bundle = &parsed["bundles"][0];
+        assert!(bundle["acked_workers"].as_array().unwrap().is_empty());
+        assert_eq!(
+            bundle["unsupported_workers"],
+            serde_json::json!(["worker-earlier"])
+        );
+        assert_eq!(bundle["acked"], false);
     }
 
     #[tokio::test]

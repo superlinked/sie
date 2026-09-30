@@ -12,6 +12,7 @@ from starlette.responses import Response
 
 from sie_config import metrics as sie_metrics
 from sie_config.config_api import router as config_router
+from sie_config.config_api import warn_if_read_token_is_admin_token
 from sie_config.config_store import ConfigStore
 from sie_config.health import router as health_router
 from sie_config.managed_metrics import setup_managed_metrics
@@ -129,6 +130,7 @@ class AppFactory:
         async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             """Application lifespan manager."""
             logger.info("Starting SIE Config Service")
+            warn_if_read_token_is_admin_token()
 
             async with (
                 cls._model_registry(app),

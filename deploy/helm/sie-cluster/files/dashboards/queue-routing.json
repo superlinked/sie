@@ -1028,7 +1028,7 @@
       },
       "id": 70,
       "title": "Gateway Config, Queue, and Provisioning Event Rate",
-      "description": "Bounded gateway config operations, logical queue publishes/result waits, durability events, provisioning responses, and per-lane queue admission decisions. A lane_admission outcome of shed_shadow is the decision the per-lane check would have taken with SIE_GATEWAY_LANE_BACKPRESSURE_ENFORCE on; it never changes admission, so it is how the shadow period is read before the flag is flipped.",
+      "description": "Bounded gateway config operations, logical queue publishes/result waits, durability events, provisioning responses, unsupported-model lane exclusions, and per-lane queue admission decisions. An unsupported-model exclusion is a lane passed over because a worker in it reports that it cannot serve the requested model, for example during a rollout that adds adapters to its bundle. A lane_admission outcome of shed_shadow is the decision the per-lane check would have taken with SIE_GATEWAY_LANE_BACKPRESSURE_ENFORCE on; it never changes admission, so it is how the shadow period is read before the flag is flipped.",
       "type": "timeseries",
       "fieldConfig": {
         "defaults": {
@@ -1081,6 +1081,11 @@
           "expr": "sum by (pool, machine_profile, bundle, outcome) (rate(sie_gateway_queue_lane_admission_decisions_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\"}[$rate_window]))",
           "legendFormat": "lane admission {{pool}}/{{machine_profile}}/{{bundle}} / {{outcome}}",
           "refId": "F"
+        },
+        {
+          "expr": "sum(rate(sie_gateway_routing_unsupported_model_exclusions_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\"}[$rate_window]))",
+          "legendFormat": "unsupported-model lane exclusions",
+          "refId": "G"
         }
       ]
     },

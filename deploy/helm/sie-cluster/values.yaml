@@ -99,13 +99,50 @@ config:
   # -- Affinity rules
   affinity: {}
 
-  # -- Auth (admin token gates POST /v1/configs/*). Leave mode=none in test clusters.
+  # -- Auth. sie-config accepts two tokens on /v1/configs/*: the admin token
+  # authorizes every read and write and is wired only into sie-config (admin
+  # tooling reads it from its Secret); the read token authorizes reads only,
+  # including GET /v1/configs/export, and is the one the gateway and worker
+  # sidecars present to load the catalog.
   auth:
-    # -- Mode: none | static
+    # -- Unused: no template reads this key. It is kept so existing values
+    # files stay valid; adminTokenSecretName and generateAdminToken decide the
+    # token.
     mode: none
-    # -- Secret with the admin token value (key: SIE_ADMIN_TOKEN by default)
+    # -- Existing Secret with the admin token value (key: adminTokenSecretKey).
+    # When set, it is used unchanged and no Secret is generated.
     adminTokenSecretName: ""
     adminTokenSecretKey: "SIE_ADMIN_TOKEN"
+    # -- When adminTokenSecretName is empty, create `<fullname>-config-admin-token`
+    # with a random 64-character token. An absent key (for example after
+    # `helm upgrade --reuse-values` from an older release) counts as true. An
+    # existing Secret of that name keeps its token across upgrades (the render
+    # fails if the token is missing or shorter than 32 characters), and the
+    # Secret is kept on uninstall (helm.sh/resource-policy: keep). Renderers
+    # without cluster access (`helm template`, GitOps controllers) cannot read
+    # the existing Secret and produce a new token on every render; use
+    # adminTokenSecretName there.
+    # Setting this to false with no adminTokenSecretName fails the render
+    # unless telemetry.deploymentEnv is staging, development, or ci: in
+    # production sie-config would refuse every /v1/configs request, and any
+    # other value would leave the API unauthenticated.
+    generateAdminToken: true
+    # -- Existing Secret with the read token value (key: readTokenSecretKey).
+    # When set, it is used unchanged and no Secret is generated. It must not
+    # name the admin token's Secret and key (the render fails), because the
+    # gateway and worker sidecars would then hold the write credential.
+    readTokenSecretName: ""
+    readTokenSecretKey: "SIE_CONFIG_READ_TOKEN"
+    # -- When readTokenSecretName is empty and sie-config has an admin token,
+    # create `<fullname>-config-read-token` with a random 64-character token,
+    # with the same absent-key default, reuse check, keep policy, and
+    # `helm template` caveat as the admin token (use readTokenSecretName with
+    # GitOps). Setting this to false with no readTokenSecretName fails the
+    # render while sie-config has an admin token, because the gateway and
+    # worker sidecars would have no credential. Without an admin token
+    # (generateAdminToken=false in staging, development, or ci) no read token
+    # is generated and sie-config serves reads without one.
+    generateReadToken: true
 
   # -- Liveness/readiness/startup probe timing. The httpGet path/port are
   # contracts owned by the template (sie-config exposes /healthz and /readyz);
@@ -229,9 +266,20 @@ gateway:
 
   # -- Service configuration
   service:
+    # -- LoadBalancer or NodePort requires gateway auth (auth.mode=static) or
+    # allowUnauthenticated=true, because those Services are reachable from
+    # outside the cluster on most managed platforms.
     type: ClusterIP
     port: 8080
     annotations: {}
+    # -- Allow a LoadBalancer or NodePort gateway Service without gateway auth
+    # (a boolean).
+    allowUnauthenticated: false
+    # -- Acknowledge that a LoadBalancer or NodePort gateway Service serves
+    # plain HTTP (a boolean). Required for those types; configure TLS
+    # termination through provider annotations above when the load balancer
+    # supports it, or prefer an Ingress with TLS.
+    allowPlaintext: false
 
   # -- Block the gateway pod on sie-config readiness before it starts the
   # cold-start bootstrap. Prevents the rolling-upgrade race where the
@@ -268,13 +316,21 @@ gateway:
   # replicas Pending on the single- and two-node clusters the chart supports.
   affinity: {}
 
-  # -- Gateway auth (static token)
+  # -- Gateway auth (static token). The gateway does not receive the sie-config
+  # admin token; it holds only the sie-config read token (config.auth).
   auth:
     # -- Mode: none | static
     mode: none
     # -- Secret with comma-separated tokens
     tokenSecretName: ""
     tokenSecretKey: "SIE_AUTH_TOKEN"
+    # -- Existing Secret with the gateway admin token (key:
+    # adminTokenSecretKey). With mode token or static, the gateway requires it
+    # on POST, PUT, and DELETE under /v1/pools, /v1/admin, and /v1/configs;
+    # when empty, those requests get 403. It must not name the Secret and key
+    # of either sie-config token (the render fails).
+    adminTokenSecretName: ""
+    adminTokenSecretKey: "SIE_ADMIN_TOKEN"
 
   # -- Extra environment variables for the gateway pod.
   #
@@ -796,6 +852,23 @@ workers:
           cpu: "2"
           memory: "2Gi"
 
+  # -- Ingress NetworkPolicy for worker pods. When enabled, this policy admits
+  # only this release's gateway pods to the worker HTTP ports (the worker API
+  # has no authentication of its own); kubelet probes and in-pod sidecar
+  # traffic are unaffected. Requires a CNI that enforces NetworkPolicy.
+  # NetworkPolicies are additive: any other policy that selects worker pods
+  # and admits more sources widens access, so check for overlapping policies.
+  # Disabled by default; values-ha.yaml enables it.
+  networkPolicy:
+    enabled: false
+    # -- Additional NetworkPolicy ingress rules for callers outside this chart
+    # that must reach workers directly. Each entry needs a non-empty `from`
+    # (scoped selectors, or an ipBlock with a prefix length above /0) and
+    # `ports` (each with a port, and no range wider than 60000 ports). These
+    # checks catch mistakes, not every broad rule. Disable the policy instead
+    # to open the worker API to everything.
+    extraIngress: []
+
   # -- Worker pools (one StatefulSet per enabled queuePool/machineProfile/bundle lane)
   # Each map entry creates a WorkerGroup family: one StatefulSet + one
   # pre-pull DaemonSet per enabled bundle.
@@ -1100,6 +1173,18 @@ ingress:
   enabled: false
   className: nginx
   annotations: {}
+  # -- Allow the gateway Ingress while nothing authenticates requests (gateway
+  # auth mode none and auth.enabled=false). The chart refuses that render by
+  # default, whatever the hosts and TLS, because it publishes the inference API
+  # and the pool API, which keeps GPU workers warm, to anyone who can reach the
+  # ingress controller. Set true (a boolean) only when the controller is
+  # private or another layer in front of it authenticates every request.
+  allowUnauthenticated: false
+  # -- Allow the gateway Ingress without TLS. The chart refuses an Ingress that
+  # carries no TLS (tlsConfig.enabled with at least one host) unless
+  # tlsConfig.mode=disabled states that TLS terminates upstream. Set true (a
+  # boolean) to serve plain HTTP, which sends tokens and cookies in cleartext.
+  allowPlaintext: false
   # -- Hostnames served by the ingress. Each entry becomes an ingress rule and,
   # when tls.enabled, a SAN on the TLS cert (all hosts share tls.secretName).
   # Empty => host-less catch-all ingress.
@@ -1219,6 +1304,13 @@ auth:
   ingress:
     authResponseHeaders:
       - Authorization
+    # -- IngressClass spec.controller values whose controller honours the
+    # nginx.ingress.kubernetes.io/auth-* annotations the edge relies on. Add a
+    # second ingress-nginx controller's own controller string (for example
+    # k8s.io/internal-ingress-nginx) here. The NGINX Inc controller
+    # (nginx.org/ingress-controller) ignores these annotations; never list it.
+    acceptedControllers:
+      - k8s.io/ingress-nginx
 
 # -- Service account configuration
 # NAMING CONTRACT: The KSA name below ("sie-server") MUST match the name used in
@@ -1319,7 +1411,10 @@ telemetry:
   enabled: true
   # -- Override receiver endpoint (enterprise self-hosted collectors)
   url: ""
-  # -- Deployment environment: production | staging | development | ci
+  # -- Deployment environment: production | staging | development | ci.
+  # Also passed to sie-config as SIE_DEPLOYMENT_ENV. With production (or prod),
+  # sie-config refuses every /v1/configs request unless an admin token is
+  # configured (see config.auth); other values let it serve without one.
   deploymentEnv: production
 
 # -- Logging configuration. Gateway and sie-config receive ``SIE_LOG_LEVEL`` from
@@ -1352,12 +1447,47 @@ nats:
   # -- Override the NATS service name used to build the default SIE_NATS_URL.
   # Defaults to "<release>-nats" if not set.
   serviceName: ""
+  # -- NATS authentication. sie-config, the gateway, and the worker sidecars
+  # each connect as their own user (sie-config, sie-gateway, sie-worker), and
+  # the bundled server limits each user to the subjects it needs and refuses
+  # anonymous connections. See "NATS authentication" in the chart README for
+  # the permission matrix, password rotation, and the upgrade path.
+  auth:
+    # -- Authenticate every NATS connection. Set to false only to run without
+    # authentication (for example an external server without it).
+    enabled: true
+    # -- Also accept anonymous connections, with unrestricted permissions,
+    # on the bundled server. A temporary aid for upgrading an existing
+    # release: pods that predate authentication keep working until they are
+    # replaced. Once every pod has restarted, upgrade again with
+    # `--set nats.auth.allowAnonymous=false`; `--reuse-values` and
+    # `--reset-then-reuse-values` keep it on.
+    allowAnonymous: false
+    # -- Existing Secrets, each holding the component's NATS password under
+    # the key `password`. For the bundled server it must be letters and digits
+    # and start with a letter, because the server parses it as a
+    # configuration value. An empty name makes the chart generate
+    # "<release>-nats-auth-<component>". Required for config, gateway, and
+    # worker when nats.install=false.
+    existingSecrets:
+      config: ""
+      gateway: ""
+      worker: ""
+      # Password of the cluster route user, used when
+      # nats.config.cluster.enabled=true on the bundled server.
+      route: ""
   # -- JetStream configuration for the work queue.
   # JetStream is required for inference (the gateway is queue-only).
   # It is NOT required for config distribution (plain NATS pub/sub).
   # NOTE: These keys are passed to the NATS sub-chart (nats/nats) which expects
   # config.jetstream.memoryStore.maxSize (not memStorage/size).
   config:
+    # Chart-owned: renders the NATS users and permissions from nats.auth.
+    # Keep the sieNatsAuth keys here, under cluster.merge, and under
+    # container.env when adding other settings next to them.
+    merge:
+      sieNatsAuth:
+        $tplYamlSpread: '{{ include "sie-cluster.nats.server.configMerge" . }}'
     # -- NATS server clustering. Off by default: a single NATS pod is the
     # shipped topology. A replicated work queue
     # (queueRouting.streamReplicas > 1) needs this enabled with
@@ -1365,6 +1495,9 @@ nats:
     cluster:
       enabled: false
       replicas: 3
+      merge:
+        sieNatsAuth:
+          $tplYamlSpread: '{{ include "sie-cluster.nats.server.clusterMerge" . }}'
     jetstream:
       # -- Enable JetStream for the NATS work queue.
       # Required when clusterRouting=queue (the default).
@@ -1390,6 +1523,14 @@ nats:
         pvc:
           enabled: true
           size: 10Gi
+  container:
+    env:
+      sieNatsAuth:
+        $tplYamlSpread: '{{ include "sie-cluster.nats.server.env" . }}'
+  # -- The nats-box debugging pod and its `helm test` pod connect without
+  # credentials, which the authenticated server refuses.
+  natsBox:
+    enabled: false
   # -- Prometheus NATS exporter sidecar.
   # Exposes NATS server internals (connections, JetStream streams/consumers) to Prometheus.
   promExporter:
@@ -1533,9 +1674,10 @@ queueRouting:
 # payloads/*. The legacy GCP BYO path grants objectViewer bucket-wide;
 # operators own IAM scoping for other explicitly configured BYO storage.
 #
-# If enabled and clusterRouting=queue but no URL resolves, the chart FAILS the
-# install with guidance (see deploy/helm/sie-cluster/README.md). Set
-# payloadStore.enabled=false to opt out and accept that >1MB requests will fail.
+# If enabled but no URL resolves (the chart defaults), the chart installs
+# without a payload store and the release notes warn that >1MB requests will
+# fail until a URL is configured (see deploy/helm/sie-cluster/README.md). Set
+# payloadStore.enabled=false to opt out without the warning.
 payloadStore:
   # -- Enable the payload store. Default true: required for >1MB work items.
   enabled: true
@@ -2127,6 +2269,11 @@ mcpEdge:
     # gateway ingress (/ -> gateway). Reuses the chart's nginx + cert-manager.
     enabled: false
     host: ""
+    # -- Serve the MCP edge Ingress without TLS (a boolean). The chart refuses
+    # it by default because it carries connector secrets and OAuth tokens;
+    # ingress.tlsConfig.enabled, or mode=disabled when TLS terminates
+    # upstream, satisfies the check.
+    allowPlaintext: false
   resources:
     requests:
       cpu: "100m"

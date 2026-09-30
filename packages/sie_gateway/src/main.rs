@@ -209,7 +209,8 @@ async fn run_server(cfg: Config) -> Result<(), Box<dyn std::error::Error>> {
     let pools_enabled = config.enable_pools || config.use_kubernetes;
 
     // Set up pool manager (created early so on_worker_healthy callback can capture it)
-    let mut pm = PoolManager::new(config.configured_gpus.clone());
+    let mut pm = PoolManager::new(config.configured_gpus.clone())
+        .with_limits(config::pool_limits_from_env());
     let mut k8s_pool_backend: Option<Arc<state::k8s_pool_backend::K8sPoolBackend>> = None;
     if config.use_kubernetes && pools_enabled {
         match state::k8s_pool_backend::K8sPoolBackend::new(&config.k8s_namespace, &router_id).await
@@ -274,13 +275,16 @@ async fn run_server(cfg: Config) -> Result<(), Box<dyn std::error::Error>> {
     // Config persistence lives in sie-config now; the gateway is pure
     // consumer. It gets its authoritative snapshot via the background
     // bootstrap task and then tracks live changes through NATS deltas.
-    let nats_manager = Arc::new(NatsManager::new_with_trusted_producers(
-        router_id.clone(),
-        config.nats_url.clone(),
-        Arc::clone(&model_registry),
-        config_epoch.clone(),
-        config.nats_config_trusted_producers.clone(),
-    ));
+    let nats_manager = Arc::new(
+        NatsManager::new_with_trusted_producers(
+            router_id.clone(),
+            config.nats_url.clone(),
+            Arc::clone(&model_registry),
+            config_epoch.clone(),
+            config.nats_config_trusted_producers.clone(),
+        )
+        .with_credentials(config.nats_credentials()?),
+    );
     if !config.nats_config_trusted_producers.is_empty() {
         tracing::info!(
             audit = "nats_config",
@@ -484,7 +488,8 @@ async fn run_server(cfg: Config) -> Result<(), Box<dyn std::error::Error>> {
     // Bootstrap + catch-up loop. The gateway does NOT block startup on
     // sie-config availability: it serves filesystem-seed traffic immediately
     // while a background task retries the export fetch with exponential
-    // backoff. Once that first fetch succeeds, the epoch poller keeps the
+    // backoff; /readyz reports 503 until that first fetch succeeds. Once that
+    // first fetch succeeds, the epoch poller keeps the
     // local registry in sync by periodically checking sie-config's latest
     // epoch and triggering a re-export on drift (closes the NATS Core
     // pub/sub delta-loss gap).

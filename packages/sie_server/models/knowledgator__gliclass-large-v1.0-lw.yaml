@@ -1,0 +1,29 @@
+sie_id: knowledgator/gliclass-large-v1.0-lw
+hf_id: knowledgator/gliclass-large-v1.0-lw
+hf_revision: 49fbe372310aae9f9fe6e07b4dafe355047ad92d
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: null
+  extract: {}
+max_sequence_length: 1024  # the gliclass pipeline's default window, also used in training
+profiles:
+  default:
+    max_batch_tokens: 16384
+    compute_precision: null
+    adapter_path: sie_server.adapters.gliclass:GLiClassAdapter
+    adapter_options:
+      loadtime:
+        classification_type: single-label
+      runtime:
+        threshold: 0.0
+  multi-label:
+    extends: default
+    adapter_options:
+      runtime:
+        classification_type: multi-label
+        threshold: 0.0

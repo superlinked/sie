@@ -1,4 +1,5 @@
 {{- if .Values.ingress.enabled }}
+{{- include "sie-cluster.validateIngressExposure" . }}
 {{- $hosts := include "sie-cluster.ingress.hosts" . | fromJsonArray }}
 {{- $tls := include "sie-cluster.ingressTlsConfig" . | fromYaml }}
 apiVersion: networking.k8s.io/v1

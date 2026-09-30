@@ -89,11 +89,14 @@ Each `--flag` above has a matching `SIE_*` environment variable (see next sectio
 | `SIE_GATEWAY_K8S_SERVICE` | `sie-worker` | K8s service name |
 | `SIE_GATEWAY_K8S_PORT` | `8080` | K8s worker port |
 | `SIE_GATEWAY_HEALTH_MODE` | `ws` | Health mode: `ws` or `nats` |
-| `SIE_NATS_URL` | | NATS server URL. The process can start without it, but inference requests will return `503` until a usable client exists |
+| `SIE_NATS_URL` | | NATS server URL. The process can start without it, but inference requests will return `503` until a usable client exists. Credentials in the URL are not used; logs show the URL with any userinfo redacted |
+| `SIE_NATS_USER` | | NATS user (Helm sets `sie-gateway`). Set together with `SIE_NATS_PASSWORD`; setting only one fails startup |
+| `SIE_NATS_PASSWORD` | | NATS password of `SIE_NATS_USER`. Redacted in `Config` debug output |
 | `SIE_AUTH_MODE` | `none` | Auth mode for inbound requests: `none` disables, `token` (alias `static`) enforces. Unknown values fail-open-to-bypass; `main` logs a startup error naming the bad value |
 | `SIE_AUTH_TOKENS` | | CSV of valid bearer tokens for inference and pool/config read endpoints. If unset, the singular `SIE_AUTH_TOKEN` is used as a fallback. When auth is enabled and this list is empty, non-probe requests return `500` |
 | `SIE_AUTH_TOKEN` | | Singular alias for `SIE_AUTH_TOKENS` (fallback only; prefer the plural form) |
-| `SIE_ADMIN_TOKEN` | | Admin bearer token the gateway (1) presents **as a client** to `sie-config` on `GET /v1/configs/export` and `GET /v1/configs/epoch`, and (2) requires inbound for admin-gated mutations: `POST/PUT/DELETE` on `/v1/configs/*`, `/v1/admin/*`, `/v1/pools/*`. If empty and an inbound request targets one of those paths, the middleware fails closed with `403` |
+| `SIE_ADMIN_TOKEN` | | Admin bearer token the gateway requires inbound for admin-gated mutations: `POST/PUT/DELETE` on `/v1/configs/*`, `/v1/admin/*`, `/v1/pools/*`. If empty and an inbound request targets one of those paths, the middleware fails closed with `403`. Sent to `sie-config` only when `SIE_CONFIG_SERVICE_TOKEN` is unset (deprecated fallback) |
+| `SIE_CONFIG_SERVICE_TOKEN` | | Bearer token the gateway presents **as a client** on its `sie-config` reads (`/v1/configs/bundles`, `/export`, `/epoch`): `sie-config`'s read-scoped `SIE_CONFIG_READ_TOKEN`. When set, it decides and a blank value sends no token; when unset, the gateway falls back to `SIE_ADMIN_TOKEN` and logs a deprecation warning |
 | `SIE_AUTH_EXEMPT_OPERATIONAL` | `false` | When `true`, `/`, `/health`, and `/ws/*` are exempt from auth (they expose worker URLs, queue depth, GPU inventory). `/healthz` and `/readyz` are always exempt (K8s probes carry no creds). Default is fail-closed |
 | `SIE_NATS_CONFIG_TRUSTED_PRODUCERS` | `sie-config` | CSV allowlist of `producer_id` values trusted to publish on `sie.config.models._all`. Matches exact OR K8s pod-name prefix (`sie-config` also matches `sie-config-5f7b6d8c-kxwvr`). Untrusted notifications are dropped; the epoch poller still closes the gap |
 | `SIE_NATS_CONFIG_TRUST_ANY_PRODUCER` | `false` | Disable producer validation entirely (dev/local only). `main` emits a startup audit warning when on |
@@ -105,9 +108,12 @@ Each `--flag` above has a matching `SIE_*` environment variable (see next sectio
 | `SIE_GATEWAY_LANE_BACKPRESSURE_ENFORCE` | `false` | Act on the per-lane decision. Off = shadow mode: the decision is computed and recorded, and admission is governed by `SIE_GATEWAY_MAX_STREAM_PENDING` alone. On = a saturated lane gets a targeted 503 while other lanes on the same pool keep admitting |
 | `SIE_GATEWAY_DEFAULT_MAX_TOKENS` | `1024` | Output-token cap applied to `/v1/chat/completions` requests that omit both `max_completion_tokens` and `max_tokens`. OpenAI treats the field as optional, so the gateway defaults rather than rejecting — generic clients (Open WebUI) rely on this |
 | `SIE_GATEWAY_ENABLE_POOLS` | `false` | Enable pool management |
+| `SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT` | `4` | Largest number of workers one API-created pool may keep warm. `POST /v1/pools` rejects with `400 INVALID_REQUEST` a `minimum_worker_count` whose total across the pool's machine profiles (the floor applies to each profile) exceeds it, and `gpus` requirements summing to more than it. A pool stored before this budget existed is allotted it in machine-profile name order: it becomes Active once the allotted workers are available, its active lease keeps only those warm, and its warm floor is spread over its lanes (at least one worker each on as many lanes as the budget allows). Static Helm queue pools are exempt |
+| `SIE_GATEWAY_POOL_MAX_TTL_S` | `3600` | Largest `ttl_seconds` `POST /v1/pools` accepts; larger values get `400 INVALID_REQUEST`. The lease of any stored pool, including one restored from Kubernetes, expires no later than this many seconds after its last renewal. `0` is ignored with a warning |
+| `SIE_GATEWAY_MAX_POOLS` | `64` | Largest number of live API-created pools (the `default` pool and static Helm queue pools do not count). Creating one more gets `403 POOL_OPERATION_FORBIDDEN`; `0` disables API pool creation. Each replica checks the pools it knows, including ones replicated from other gateways, so concurrent creates on different replicas can briefly exceed it |
 | `SIE_GATEWAY_HOT_RELOAD` | `false` | Enable filesystem watcher for bundle/model directories |
 | `SIE_GATEWAY_WATCH_POLLING` | `false` | Use polling file-watcher instead of inotify/fsevents (alias: `SIE_GATEWAY_POLLING_WATCHER`). Useful on filesystems where native notifications are unreliable |
-| `SIE_CONFIG_SERVICE_URL` | unset | Base URL of `sie-config`. When set, the gateway runs a background `GET /v1/configs/export` bootstrap on startup and a 30 s `GET /v1/configs/epoch` drift poller. When unset, the bootstrap/poller tasks no-op and the gateway runs filesystem-seed-only |
+| `SIE_CONFIG_SERVICE_URL` | unset | Base URL of `sie-config`. When set, the gateway runs a background `GET /v1/configs/export` bootstrap on startup and a 30 s `GET /v1/configs/epoch` drift poller, and `/readyz` returns `503` until the first complete export is applied. When unset, the bootstrap/poller tasks no-op and the gateway runs filesystem-seed-only |
 | `SIE_MULTI_ROUTER` | `false` | Multi-gateway coordination flag (wire-compatible name retained) |
 | `SIE_GATEWAY_CONFIGURED_GPUS` | | CSV of canonical machine profiles used for validation and default pool display |
 | `SIE_GATEWAY_CONFIGURED_PHYSICAL_LANES` | `[]` | JSON array of exact queue/KEDA lanes, for example `[{"pool":"default","machineProfile":"cpu","bundle":"default"}]`. Queue routing fails closed when its resolved tuple is absent. Helm and the managed Modal gateway derive this catalog from their deployment manifests; standalone queue deployments must set it explicitly |
@@ -126,7 +132,7 @@ Each `--flag` above has a matching `SIE_*` environment variable (see next sectio
 |--------|------|-------------|
 | GET | `/` | HTML status page |
 | GET | `/healthz` | Liveness — **`200`**, **`text/plain`** body **`ok`** |
-| GET | `/readyz` | Readiness — **`200`** + **`ok`** once the gateway process is serving (**`text/plain`**); worker availability is exposed by `/health` |
+| GET | `/readyz` | Readiness — **`200`** + **`ok`** once the gateway process is serving and, when `SIE_CONFIG_SERVICE_URL` is set, has applied its first complete `sie-config` snapshot; **`503`** before that (**`text/plain`**). It does not flip back on later `sie-config` outages; worker availability is exposed by `/health` |
 | GET | `/health` | Cluster health JSON |
 | GET | `/openapi.json` | OpenAPI 3 contract for gateway-owned HTTP routes |
 | GET | `/ws/cluster-status` | WebSocket cluster status feed |

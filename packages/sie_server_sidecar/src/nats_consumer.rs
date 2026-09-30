@@ -18,7 +18,7 @@ use futures_util::TryStreamExt;
 use thiserror::Error;
 use tracing::{debug, info, warn};
 
-use crate::config::WorkerConfig;
+use crate::config::{NatsCredentials, WorkerConfig};
 use crate::subject::subjects_overlap;
 
 /// Default consumer parameters. Must match the gateway's stream creator
@@ -172,9 +172,34 @@ pub enum NatsSetupError {
     },
 }
 
+/// Inbox prefix of the sidecar's JetStream API replies and pull deliveries.
+/// It differs from the gateway's `_INBOX`, where workers publish results, so a
+/// NATS user can be allowed to publish results without reading gateway inboxes.
+pub const WORKER_INBOX_PREFIX: &str = "_INBOX_WORKER";
+
 /// Connect to NATS and return a JetStream context.
-pub async fn connect(nats_url: &str) -> Result<(async_nats::Client, JsContext), NatsSetupError> {
-    let client = async_nats::connect(nats_url)
+pub async fn connect(
+    nats_url: &str,
+    credentials: Option<&NatsCredentials>,
+) -> Result<(async_nats::Client, JsContext), NatsSetupError> {
+    let mut options = async_nats::ConnectOptions::new()
+        .custom_inbox_prefix(WORKER_INBOX_PREFIX)
+        .event_callback(|event| async move {
+            match event {
+                async_nats::Event::ServerError(error) => {
+                    warn!(error = %error, "NATS server error");
+                }
+                async_nats::Event::ClientError(error) => {
+                    warn!(error = %error, "NATS client error");
+                }
+                other => info!(event = %other, "NATS event"),
+            }
+        });
+    if let Some(credentials) = credentials {
+        options = options.user_and_password(credentials.user.clone(), credentials.password.clone());
+    }
+    let client = options
+        .connect(nats_url)
         .await
         .map_err(|source| NatsSetupError::Connect { source })?;
     let js = async_nats::jetstream::new(client.clone());
@@ -922,6 +947,7 @@ mod tests {
     fn config_produces_expected_names() {
         let cfg = WorkerConfig {
             nats_url: Some(String::new()),
+            nats_credentials: None,
             local_socket_path: None,
             pool: "default".into(),
             bundle: "b".into(),

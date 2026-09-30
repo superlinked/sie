@@ -17,6 +17,7 @@ import msgpack
 import msgspec
 import numpy as np
 import pytest
+import sie_server.api.ws as ws_module
 import sie_server.ipc_server as ipc_server_module
 import yaml
 from sie_config.model_registry import ModelRegistry as ConfigModelRegistry
@@ -1741,6 +1742,280 @@ profiles:
 
         assert resp.applied_models == ["Qwen/Qwen3.6-27B"]
         assert not registry.has_model("Qwen/Qwen3.6-27B:rtx-pro-6000")
+
+
+# -----------------------------------------------------------------------------
+# Bundle config view: control-plane hash scope and unsupported models
+# -----------------------------------------------------------------------------
+
+_ADAPTERS_ADDED_IN_LATER_IMAGE = frozenset(
+    {"sie_server.adapters.laya.adapter", "sie_server.adapters.gliformer.adapter"}
+)
+
+
+def _default_bundle_export() -> tuple[list[ReplaceModelConfigEntry], list[str], str]:
+    """Export the shipped catalog for the default bundle the way the sidecar forwards it."""
+    root = _repo_root()
+    config_registry = ConfigModelRegistry(root / "packages/sie_server/bundles", root / "packages/sie_server/models")
+    entries = [
+        ReplaceModelConfigEntry(
+            model_id=model_id,
+            model_config=yaml.safe_dump(config_registry.get_full_config(model_id), sort_keys=False),
+        )
+        for model_id in config_registry.list_models()
+        if "default" in config_registry.get_model_export_bundles(model_id)
+        and config_registry.get_model_pool_name(model_id) == "default"
+    ]
+    adapters = config_registry.get_bundle_adapters(["default"])["default"]
+    return entries, adapters, config_registry.compute_bundle_config_hash_for_pool("default", "default")
+
+
+def _route_ids_using(entries: list[ReplaceModelConfigEntry], modules: frozenset[str]) -> list[str]:
+    routes = []
+    for entry in entries:
+        for profile_name, profile in yaml.safe_load(entry.model_config)["profiles"].items():
+            adapter_path = profile.get("adapter_path") or ""
+            if adapter_path.split(":", maxsplit=1)[0] in modules:
+                routes.append(entry.model_id if profile_name == "default" else f"{entry.model_id}:{profile_name}")
+    return sorted(routes)
+
+
+def _earlier_image(monkeypatch: pytest.MonkeyPatch, adapters: list[str]) -> None:
+    earlier = frozenset(adapters) - _ADAPTERS_ADDED_IN_LATER_IMAGE
+    monkeypatch.setattr(ws_module, "_bundle_adapter_modules", lambda bundle_id: earlier)
+
+
+def _sentence_transformer_yaml(model_id: str, *, max_batch_tokens: int = 4096, profile_extra: str = "") -> str:
+    return f"""
+sie_id: {model_id}
+hf_id: sentence-transformers/all-MiniLM-L6-v2
+tasks:
+  encode:
+    dense:
+      dim: 384
+profiles:
+  default:
+    adapter_path: sie_server.adapters.sentence_transformer:Adapter
+    max_batch_tokens: {max_batch_tokens}
+{profile_extra}"""
+
+
+class TestBundleConfigView:
+    @pytest.mark.asyncio
+    async def test_earlier_image_keeps_the_control_plane_hash_when_the_bundle_gains_adapters(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        entries, adapters, control_plane_hash = _default_bundle_export()
+        added_routes = _route_ids_using(entries, _ADAPTERS_ADDED_IN_LATER_IMAGE)
+        assert frozenset(adapters) >= _ADAPTERS_ADDED_IN_LATER_IMAGE
+        assert added_routes
+        _earlier_image(monkeypatch, adapters)
+
+        def request(bundle_adapters: list[str] | None) -> ReplaceModelConfigsRequest:
+            return ReplaceModelConfigsRequest(
+                bundle_id="default",
+                epoch=1,
+                bundle_config_hash=control_plane_hash,
+                models=entries,
+                bundle_adapters=bundle_adapters,
+            )
+
+        image_scoped = await QueueExecutor(ModelRegistry(models_dir=None)).replace_model_configs(request(None))
+        assert image_scoped.bundle_config_hash != control_plane_hash
+        assert image_scoped.unsupported_models == []
+
+        resp = await QueueExecutor(ModelRegistry(models_dir=None)).replace_model_configs(request(adapters))
+        assert resp.bundle_config_hash == control_plane_hash
+        assert resp.unsupported_models == added_routes
+
+        monkeypatch.undo()
+        current = await QueueExecutor(ModelRegistry(models_dir=None)).replace_model_configs(request(adapters))
+        assert current.bundle_config_hash == control_plane_hash
+        assert current.unsupported_models == []
+
+    @pytest.mark.asyncio
+    async def test_delta_scope_follows_the_control_plane_and_reports_unsupported_models(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        entries, adapters, control_plane_hash = _default_bundle_export()
+        _earlier_image(monkeypatch, adapters)
+        executor = QueueExecutor(ModelRegistry(models_dir=None))
+        laya = next(entry for entry in entries if entry.model_id == "convaiinnovations/laya")
+        others = [entry for entry in entries if entry.model_id != laya.model_id]
+        await executor.replace_model_configs(
+            ReplaceModelConfigsRequest(
+                bundle_id="default",
+                epoch=1,
+                bundle_config_hash="",
+                models=others,
+                bundle_adapters=adapters,
+            )
+        )
+
+        resp = await executor.apply_model_config(
+            ApplyModelConfigRequest(
+                bundle_id="default",
+                model_id=laya.model_id,
+                epoch=2,
+                bundle_config_hash=control_plane_hash,
+                model_config=laya.model_config,
+                bundle_adapters=adapters,
+            )
+        )
+
+        assert resp.bundle_config_hash == control_plane_hash
+        assert laya.model_id in resp.unsupported_models
+
+    @pytest.mark.asyncio
+    async def test_ping_after_a_sidecar_restart_never_reports_the_scoped_hash_without_its_list(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        entries, adapters, control_plane_hash = _default_bundle_export()
+        _earlier_image(monkeypatch, adapters)
+        registry = ModelRegistry(models_dir=None)
+        executor = QueueExecutor(registry)
+        applied = await executor.replace_model_configs(
+            ReplaceModelConfigsRequest(
+                bundle_id="default",
+                epoch=1,
+                bundle_config_hash=control_plane_hash,
+                models=entries,
+                bundle_adapters=adapters,
+            )
+        )
+        assert applied.bundle_config_hash == control_plane_hash
+        assert applied.unsupported_models
+
+        # A restarted sidecar has no committed state and adopts the Ping hash,
+        # which carries no unsupported models.
+        sock = _short_sock_path()
+        srv = IpcServer(sock, executor, worker_id="worker-test", stale_after_ms=10_000, bundle_id="default")
+        await srv.start()
+        try:
+            client = await _Client.connect(sock)
+            try:
+                ping = await client.rpc("Ping", {"timestamp_ms": 1.0})
+            finally:
+                await client.close()
+        finally:
+            await srv.stop(drain_timeout_s=1.0)
+
+        assert ping["ok"] is True
+        assert "unsupported_models" not in ping["body"]
+        assert ping["body"]["bundle_config_hash"] != control_plane_hash
+        assert ping["body"]["bundle_config_hash"] == compute_bundle_config_hash_cached(registry, "default")
+
+    @pytest.mark.asyncio
+    async def test_rejected_entries_keep_the_hash_and_are_reported_unless_their_hashed_fields_match(self) -> None:
+        def request(epoch: int, entries: list[tuple[str, str]]) -> ReplaceModelConfigsRequest:
+            return ReplaceModelConfigsRequest(
+                bundle_id="default",
+                epoch=epoch,
+                bundle_config_hash="",
+                models=[ReplaceModelConfigEntry(model_id=mid, model_config=body) for mid, body in entries],
+                bundle_adapters=["sie_server.adapters.sentence_transformer"],
+            )
+
+        newer_field = "    newer_schema_field: 1"
+        executor = QueueExecutor(ModelRegistry(models_dir=None))
+        await executor.replace_model_configs(
+            request(7, [(mid, _sentence_transformer_yaml(mid)) for mid in ("served/same", "served/changed")])
+        )
+
+        resp = await executor.replace_model_configs(
+            request(
+                8,
+                [
+                    ("served/same", _sentence_transformer_yaml("served/same", profile_extra=newer_field)),
+                    (
+                        "served/changed",
+                        _sentence_transformer_yaml("served/changed", max_batch_tokens=8192, profile_extra=newer_field),
+                    ),
+                    ("added/model", _sentence_transformer_yaml("added/model", profile_extra=newer_field)),
+                ],
+            )
+        )
+
+        reference = await QueueExecutor(ModelRegistry(models_dir=None)).replace_model_configs(
+            request(
+                8,
+                [
+                    ("served/same", _sentence_transformer_yaml("served/same")),
+                    ("served/changed", _sentence_transformer_yaml("served/changed", max_batch_tokens=8192)),
+                    ("added/model", _sentence_transformer_yaml("added/model")),
+                ],
+            )
+        )
+        assert reference.bundle_config_hash
+        assert resp.bundle_config_hash == reference.bundle_config_hash
+        assert resp.unsupported_models == ["added/model", "served/changed"]
+        assert reference.unsupported_models == []
+
+        accepted = await executor.apply_model_config(
+            ApplyModelConfigRequest(
+                bundle_id="default",
+                model_id="added/model",
+                epoch=9,
+                bundle_config_hash="",
+                model_config=_sentence_transformer_yaml("added/model"),
+            )
+        )
+        assert accepted.bundle_config_hash == reference.bundle_config_hash
+        assert accepted.unsupported_models == ["served/changed"]
+
+    @pytest.mark.asyncio
+    async def test_rejected_per_model_options_are_reported_when_hashed_fields_change(self) -> None:
+        def request(epoch: int, model_config: str) -> ReplaceModelConfigsRequest:
+            return ReplaceModelConfigsRequest(
+                bundle_id="sglang",
+                epoch=epoch,
+                bundle_config_hash="",
+                models=[ReplaceModelConfigEntry(model_id="Qwen/Qwen3.6-27B", model_config=model_config)],
+            )
+
+        executor = QueueExecutor(ModelRegistry(models_dir=None))
+        served = await executor.replace_model_configs(request(7, _qwen_profile_variant_yaml()))
+
+        schema_only = await executor.replace_model_configs(
+            request(8, "unknown_field: 1\n" + _qwen_profile_variant_yaml())
+        )
+        assert schema_only.unsupported_models == []
+        assert schema_only.bundle_config_hash == served.bundle_config_hash
+
+        legacy_lora = await executor.replace_model_configs(request(9, _qwen_invalid_legacy_lora_yaml()))
+        assert legacy_lora.unsupported_models
+        assert all(model.startswith("Qwen/Qwen3.6-27B") for model in legacy_lora.unsupported_models)
+        assert legacy_lora.bundle_config_hash != served.bundle_config_hash
+
+    @pytest.mark.asyncio
+    async def test_unsupported_models_roundtrip_over_ipc(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(ws_module, "_bundle_adapter_modules", lambda bundle_id: frozenset())
+        executor = QueueExecutor(ModelRegistry(models_dir=None))
+        sock = _short_sock_path()
+        srv = IpcServer(sock, executor, worker_id="worker-test", stale_after_ms=10_000)
+        await srv.start()
+        try:
+            client = await _Client.connect(sock)
+            try:
+                resp = await client.rpc(
+                    "ApplyModelConfig",
+                    {
+                        "bundle_id": "default",
+                        "model_id": "new/model",
+                        "epoch": 3,
+                        "bundle_config_hash": "",
+                        "profiles_added": ["default"],
+                        "model_config": _sentence_transformer_yaml("new/model"),
+                        "bundle_adapters": ["sie_server.adapters.sentence_transformer"],
+                    },
+                )
+                assert resp["ok"] is True
+                assert resp["body"]["unsupported_models"] == ["new/model"]
+                assert resp["body"]["bundle_config_hash"]
+            finally:
+                await client.close()
+        finally:
+            await srv.stop(drain_timeout_s=1.0)
 
 
 # -----------------------------------------------------------------------------

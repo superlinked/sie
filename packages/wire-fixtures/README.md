@@ -29,6 +29,11 @@ executable.
   score, extract) and for generation, keyed by status, error code, and whether
   a usable `Retry-After` is present. It also pins how a `Retry-After` value is
   parsed (delay seconds or an HTTP date; a past date means retry now).
+- `worker_status.json` — the worker heartbeat the sidecar publishes on
+  `sie.health.<worker_id>`: the exact `fields` it sends, the
+  `omitted_when_empty` fields it leaves out when empty, and a fully populated
+  `example`. A reader treats a missing field as its default, which is how an
+  older worker's heartbeat without `unsupported_models` stays valid.
 
 ### Why `model_info.json` has two buckets
 
@@ -62,6 +67,11 @@ fixture set. Current consumers:
   against — match the fixtures), and
   `packages/sie_ts_sdk/tests/retryClassification.test.ts` (replays every
   `retry_classification.json` case through the client with a stubbed `fetch`).
+- Worker sidecar — `packages/sie_server_sidecar/src/health_publisher.rs`
+  (the published key set equals `fields`, minus `omitted_when_empty` when those
+  are empty) and gateway — `packages/sie_gateway/src/types/worker.rs` (the
+  `example` and an older heartbeat without the omitted fields both parse) load
+  `worker_status.json`.
 - Downstream gateways assert that the members they inject are exactly
   `settled_charge_fields`, so a gateway that starts publishing a third field
   cannot reach production before every consumer has declared it.

@@ -14,7 +14,15 @@ from sie_server.adapters._flash_pack import build_position_ids
 from sie_server.adapters._modernbert_flash import (
     modernbert_rope_cos_sin,
     modernbert_rope_theta,
+    parse_fused_rope,
     run_modernbert_flash_layers,
+)
+from sie_server.adapters._modernbert_flash_graphs import (
+    PackedForward,
+    VarlenGraphRunner,
+    graph_runner,
+    modernbert_encoder,
+    parse_graph_mode,
 )
 from sie_server.adapters._multivector import maxsim_scores_batched
 from sie_server.adapters._pylate_dense import apply_dense_chain, load_pylate_dense_chain
@@ -64,7 +72,7 @@ class ColBERTModernBERTFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
     spec = AdapterSpec(
         inputs=("text",),
         outputs=("multivector", "score"),
-        unload_fields=("_model", "_tokenizer", "_dense_chain"),
+        unload_fields=("_model", "_tokenizer", "_dense_chain", "_graphs"),
     )
 
     def __init__(
@@ -82,6 +90,8 @@ class ColBERTModernBERTFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
         doc_prefix: str = "",
         muvera_config: dict[str, Any] | None = None,
         revision: str | None = None,
+        cuda_graphs: str | bool = "off",
+        fused_rope: bool = False,
         **kwargs: Any,
     ) -> None:
         """Initialize the adapter.
@@ -103,9 +113,24 @@ class ColBERTModernBERTFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
             revision: Optional HuggingFace revision/branch/commit SHA to pin when
                 loading the tokenizer, model, and Dense-chain artifacts.
                 Forwarded to ``from_pretrained(..., revision=...)``.
+            cuda_graphs: "off" (the default) or "bucketed": whether forwards
+                replay the encoder as CUDA graphs (see
+                ``sie_server.adapters._modernbert_flash_graphs``). An operator
+                setting, fixed at load.
+            fused_rope: Whether queries and keys are rotated by one fused kernel
+                on CUDA (see ``run_modernbert_flash_layers``) instead of
+                PyTorch elementwise operations. An operator setting, fixed at
+                load; a model's profile enables it only where it is at least as
+                accurate against float32 (see the server README).
             **kwargs: Additional arguments (ignored).
+
+        Raises:
+            ValueError: If ``cuda_graphs`` is not "off" or "bucketed", or
+                ``fused_rope`` is not a boolean.
         """
         _ = kwargs
+        self._cuda_graphs = parse_graph_mode(cuda_graphs, adapter="ColBERTModernBERTFlashAdapter")
+        self._fused_rope = parse_fused_rope(fused_rope, adapter="ColBERTModernBERTFlashAdapter")
         self._model_name_or_path = str(model_name_or_path)
         self._revision = revision
         self._token_dim = token_dim
@@ -125,6 +150,8 @@ class ColBERTModernBERTFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
         self._device: str | None = None
         self._dense_chain: list[torch.Tensor] | None = None
         self._doc_skiplist_ids: set[int] = set()
+        # Replays the encoder as CUDA graphs, when the operator enabled them.
+        self._graphs: VarlenGraphRunner | None = None
 
     def load(self, device: str) -> None:
         """Load the model onto the specified device.
@@ -186,6 +213,28 @@ class ColBERTModernBERTFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
             self._model.config.hidden_size,
             self._token_dim,
             None if self._dense_chain is None else [tuple(w.shape) for w in self._dense_chain],
+        )
+        self._graphs = self._graph_runner(dtype)
+
+    def _graph_runner(self, dtype: torch.dtype) -> VarlenGraphRunner | None:
+        """The CUDA graph runner for the loaded model; None when graphs are off."""
+        if self._device is None or self._tokenizer is None:
+            return None
+        model = self._model
+        window = self._max_seq_length
+        positions = getattr(model.config, "max_position_embeddings", None)
+        if isinstance(positions, int) and positions > 0:
+            window = min(window, positions)
+        fused_rope = self._fused_rope
+        return graph_runner(
+            lambda: modernbert_encoder(model, window=window, dtype=dtype, fused_rope=fused_rope),
+            mode=self._cuda_graphs,
+            device=self._device,
+            hidden_size=model.config.hidden_size,
+            dtype=dtype,
+            window=window,
+            pad_token_id=self._tokenizer.pad_token_id,
+            name=self._model_name_or_path,
         )
 
     def _load_tokenizer(self) -> PreTrainedTokenizerFast:
@@ -286,23 +335,58 @@ class ColBERTModernBERTFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
             )
 
         encodings = self._tokenize_inputs(texts, max_length)
-
-        # Build packed representation
         seq_lengths = [enc["input_ids"].shape[1] for enc in encodings]
+
+        multivectors = self._encode_graphed(encodings, seq_lengths, is_query=is_query)
+        if multivectors is None:
+            multivectors = self._encode_eager(encodings, seq_lengths, is_query=is_query)
+
+        return EncodeOutput(
+            multivector=multivectors,
+            batch_size=len(items),
+            is_query=is_query,
+            multivector_token_dim=self._token_dim,
+            extra={"input_token_counts": [int(length) for length in seq_lengths]},
+        )
+
+    def _encode_graphed(
+        self, encodings: list[Any], seq_lengths: list[int], *, is_query: bool
+    ) -> list[np.ndarray] | None:
+        """Token vectors from a replayed CUDA graph; None when the forward runs eagerly.
+
+        A model with LoRA adapters loaded always runs eagerly: its forward
+        depends on which adapter is active.
+        """
+        if self._graphs is None or self._peft_model is not None:
+            return None
+        flat_ids = torch.cat([enc["input_ids"].squeeze(0) for enc in encodings]).numpy()
+
+        def head(packed: PackedForward) -> list[np.ndarray]:
+            return self._token_vectors(
+                packed.hidden, packed.cu_seqlens, seq_lengths, packed.input_ids.long(), is_query=is_query
+            )
+
+        with torch.inference_mode():
+            return self._graphs.run(flat_ids, seq_lengths, head)
+
+    def _encode_eager(self, encodings: list[Any], seq_lengths: list[int], *, is_query: bool) -> list[np.ndarray]:
+        """Token vectors from an eager forward over the packed rows."""
+        # Build packed representation
         total_tokens = sum(seq_lengths)
         max_seqlen = max(seq_lengths)
+        num_seqs = len(seq_lengths)
 
         # Pack input_ids
         input_ids_packed = torch.cat([enc["input_ids"].squeeze(0) for enc in encodings]).to(self._device)
 
         # Build cu_seqlens (cumulative sequence lengths)
-        cu_seqlens = torch.zeros(len(texts) + 1, dtype=torch.int32, device=self._device)
+        cu_seqlens = torch.zeros(num_seqs + 1, dtype=torch.int32, device=self._device)
         for i, length in enumerate(seq_lengths):
             cu_seqlens[i + 1] = cu_seqlens[i] + length
 
         with torch.inference_mode():
             # Build position IDs for RoPE
-            position_ids_packed = self._build_position_ids(cu_seqlens, len(texts))
+            position_ids_packed = self._build_position_ids(cu_seqlens, num_seqs)
 
             # Run embeddings
             hidden = self._run_embeddings(input_ids_packed)
@@ -328,29 +412,33 @@ class ColBERTModernBERTFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
             if hasattr(self._model, "final_norm"):
                 hidden = self._model.final_norm(hidden)
 
-            # Apply the trained pylate Dense chain (if the checkpoint ships one)
-            # then Matryoshka-truncate to token_dim; see #1680.
-            hidden = self._project(hidden)
+            return self._token_vectors(hidden, cu_seqlens, seq_lengths, input_ids_packed, is_query=is_query)
 
-            # L2 normalize
-            if self._normalize:
-                hidden = functional.normalize(hidden, p=2, dim=-1)
+    def _token_vectors(
+        self,
+        hidden: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        seq_lengths: list[int],
+        input_ids: torch.Tensor,
+        *,
+        is_query: bool,
+    ) -> list[np.ndarray]:
+        """Project, normalize and split final-normed packed hidden states into per-item token vectors."""
+        # Apply the trained pylate Dense chain (if the checkpoint ships one)
+        # then Matryoshka-truncate to token_dim; see #1680.
+        hidden = self._project(hidden)
 
-            # Split back into per-item results
-            multivectors = self._split_embeddings(
-                hidden,
-                cu_seqlens,
-                seq_lengths,
-                input_ids_packed,
-                is_query=is_query,
-            )
+        # L2 normalize
+        if self._normalize:
+            hidden = functional.normalize(hidden, p=2, dim=-1)
 
-        return EncodeOutput(
-            multivector=multivectors,
-            batch_size=len(items),
+        # Split back into per-item results
+        return self._split_embeddings(
+            hidden,
+            cu_seqlens,
+            seq_lengths,
+            input_ids,
             is_query=is_query,
-            multivector_token_dim=self._token_dim,
-            extra={"input_token_counts": [int(length) for length in seq_lengths]},
         )
 
     def _tokenize_inputs(self, texts: list[str], max_length: int) -> list[Any]:
@@ -573,6 +661,7 @@ class ColBERTModernBERTFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
             global_sin,
             local_cos,
             local_sin,
+            fused_rope=self._fused_rope,
         )
 
     def _split_embeddings(

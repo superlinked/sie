@@ -10,7 +10,7 @@ tasks:
   encode: null
   score: null
   extract: {}
-max_sequence_length: 512
+max_sequence_length: 1024  # the gliclass pipeline's default window, also used in training
 profiles:
   default:
     max_batch_tokens: 16384
@@ -19,6 +19,7 @@ profiles:
     adapter_options:
       loadtime:
         classification_type: single-label
+        modernbert_flash: single-label
       runtime:
         threshold: 0.0
   multi-label:

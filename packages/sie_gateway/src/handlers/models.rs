@@ -333,6 +333,8 @@ mod route_tests {
             k8s_port: 8080,
             health_mode: "ws".to_string(),
             nats_url: String::new(),
+            nats_user: String::new(),
+            nats_password: String::new(),
             nats_config_trusted_producers: vec!["sie-config".to_string()],
             auth_mode: "none".to_string(),
             auth_tokens: Vec::new(),
@@ -693,6 +695,7 @@ mod route_tests {
             pool_name: String::new(),
             saturated: false,
             terminated: false,
+            unsupported_models: Vec::new(),
         }
     }
 

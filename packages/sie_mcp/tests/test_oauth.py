@@ -140,6 +140,23 @@ def test_exchange_rejects_bad_verifier() -> None:
     assert exc.value.error == "invalid_grant"
 
 
+def test_exchange_rejects_non_ascii_challenge_as_invalid_grant() -> None:
+    store = AuthCodeStore()
+    redirect = "https://claude.ai/api/mcp/auth_callback"
+    code = store.issue(
+        secret="s3cret",  # noqa: S106
+        code_challenge="ch\u00e4llenge",
+        code_challenge_method="S256",
+        redirect_uri=redirect,
+        now=1000.0,
+    )
+    assert verify_pkce("verifier-1", "ch\u00e4llenge", "S256") is False
+    assert verify_pkce("verifier-1", "\ud800", "S256") is False
+    with pytest.raises(OAuthError) as exc:
+        exchange_authorization_code(store, code=code, code_verifier="verifier-1", redirect_uri=redirect, now=1001.0)
+    assert exc.value.error == "invalid_grant"
+
+
 def test_exchange_rejects_redirect_mismatch() -> None:
     store = AuthCodeStore()
     code = store.issue(

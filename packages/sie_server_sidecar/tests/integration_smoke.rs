@@ -3262,12 +3262,13 @@ async fn ensure_paths_reconcile_stream_discard_policy_to_new() {
     let nats = NatsHarness::start().await;
     eprintln!("nats: {} (port {})", nats.url, nats.port);
 
-    let (_client, js) = sie_server_sidecar::nats_consumer::connect(&nats.url)
+    let (_client, js) = sie_server_sidecar::nats_consumer::connect(&nats.url, None)
         .await
         .expect("connect JetStream");
 
     let config = sie_server_sidecar::config::WorkerConfig {
         nats_url: Some(nats.url.clone()),
+        nats_credentials: None,
         local_socket_path: None,
         pool: "discardsmoke".into(),
         bundle: "default".into(),

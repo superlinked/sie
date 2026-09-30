@@ -320,6 +320,11 @@ pub struct ApplyModelConfigRequest {
     #[serde(default)]
     pub profiles_added: Vec<String>,
     pub model_config: String,
+    /// Adapter modules of the control-plane bundle definition that
+    /// `bundle_config_hash` was scoped by. Absent when the control plane did
+    /// not send one; the worker then uses its image's bundle file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle_adapters: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -328,6 +333,11 @@ pub struct ApplyModelConfigResponse {
     pub bundle_config_hash: String,
     #[serde(default)]
     pub config_version: u64,
+    /// Routable model ids in the bundle scope the worker cannot serve.
+    /// Absent from workers that predate the field, which serve every model
+    /// their hash covers.
+    #[serde(default)]
+    pub unsupported_models: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -342,6 +352,8 @@ pub struct ReplaceModelConfigsRequest {
     pub epoch: u64,
     pub bundle_config_hash: String,
     pub models: Vec<ReplaceModelConfigEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle_adapters: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -354,6 +366,8 @@ pub struct ReplaceModelConfigsResponse {
     pub applied_models: Vec<String>,
     #[serde(default)]
     pub applied_profiles: Vec<String>,
+    #[serde(default)]
+    pub unsupported_models: Vec<String>,
 }
 
 // -----------------------------------------------------------------------------
