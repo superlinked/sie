@@ -112,8 +112,12 @@ def main() -> int:
             remote = entry["path"]
             if not photos and remote.startswith(f"{TASK}/photos/"):
                 continue
+            if not remote.startswith(f"{TASK}/"):
+                raise SystemExit(f"{remote}: the listing holds a path outside {TASK}/")
             relative = remote[len(TASK) + 1 :]
             target = staging / relative
+            if not target.resolve().is_relative_to(staging.resolve()):
+                raise SystemExit(f"{remote}: the listing holds a path that leaves the download directory")
             target.parent.mkdir(parents=True, exist_ok=True)
             body = get(f"{FILES}/{remote}")
             if entry.get("size") is not None and len(body) != entry["size"]:

@@ -33,7 +33,10 @@ EVIDENCE = HERE / "evidence"
 MODEL = "google/siglip-so400m-patch14-224"
 
 
-def dense(results: list) -> list[list[float]]:
+def dense(results: list, sent: int) -> list[list[float]]:
+    """One vector per item sent, in order; a short or long batch is a failure, not a misaligned file."""
+    if len(results) != sent:
+        raise SystemExit(f"sent {sent} items and got {len(results)} results back")
     return [list(np.asarray(item["dense"], dtype=np.float32)) for item in results]
 
 
@@ -54,12 +57,12 @@ def main() -> int:
     for start in range(0, len(catalogue), 8):
         rows = catalogue[start : start + 8]
         items = [{"images": [(photos / f"{r['image_id']}.jpg").read_bytes()]} for r in rows]
-        images += dense(client.encode(MODEL, items))
+        images += dense(client.encode(MODEL, items), len(items))
         print(f"  photos {start + len(rows)}/{len(catalogue)}", end="\r")
     texts: list[list[float]] = []
     for start in range(0, len(questions), 64):
         items = [{"text": q["text"]} for q in questions[start : start + 64]]
-        texts += dense(client.encode(MODEL, items))
+        texts += dense(client.encode(MODEL, items), len(items))
 
     args.out.mkdir(parents=True, exist_ok=True)
     np.save(args.out / "images.npy", np.asarray(images, dtype=np.float32))

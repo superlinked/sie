@@ -102,7 +102,7 @@ def main() -> int:
     ours = rank_ours(args.vectors, [r["image_id"] for r in catalogue], [q["id"] for q in questions])
     recorded = {qid: [image_id for image_id, _ in rows] for qid, rows in rankings[OURS].items()}
     recorded_run = args.vectors == EVIDENCE / "vectors" / "siglip-so400m-224"
-    differ = [qid for qid in ours if ours[qid][:1] != recorded[qid][:1]]
+    differ = [qid for qid in ours if ours[qid] != recorded[qid][:20]]
     if recorded_run and differ:
         print(f"{len(differ)} questions rank differently from the recording, e.g. {differ[:3]}", file=sys.stderr)
         return 1
