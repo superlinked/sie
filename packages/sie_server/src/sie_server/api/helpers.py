@@ -11,8 +11,8 @@ from fastapi import HTTPException, Request, status
 from fastapi.responses import JSONResponse
 
 from sie_server.adapters.errors import InputTooLongError
-from sie_server.adapters.remote.sie import SieUpstreamAdapter
 from sie_server.api.serialization import MsgPackResponse, _convert_for_json
+from sie_server.config.model import is_remote_adapter_path
 from sie_server.core.model_suggestions import suggestion_suffix
 from sie_server.core.oom import is_oom_error
 from sie_server.core.timing import RequestTiming
@@ -112,13 +112,14 @@ UPSTREAM_HEADER = "X-SIE-Upstream"
 
 
 def serving_disclosure_headers(registry: "ModelRegistry", model: str) -> dict[str, str]:
-    """Which side served an encode: ``local``, or ``remote`` with the upstream's name."""
-    try:
-        adapter = registry.get(model)
-    except KeyError:
-        return {SERVED_BY_HEADER: "local"}
-    if isinstance(adapter, SieUpstreamAdapter):
-        return {SERVED_BY_HEADER: "remote", UPSTREAM_HEADER: adapter.upstream_name}
+    """Which side serves ``model``: ``local``, or ``remote`` with the upstream's name.
+
+    Read from the model's config rather than the loaded adapter, so a concurrent
+    unload cannot change the answer after the request was served.
+    """
+    profile = registry.get_config(model).resolve_profile("default")
+    if is_remote_adapter_path(profile.adapter_path):
+        return {SERVED_BY_HEADER: "remote", UPSTREAM_HEADER: str(profile.loadtime["upstream"])}
     return {SERVED_BY_HEADER: "local"}
 
 
