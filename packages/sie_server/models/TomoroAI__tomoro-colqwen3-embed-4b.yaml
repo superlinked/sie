@@ -41,3 +41,23 @@ profiles:
         output_similarity:
           dense: dot
         muvera: {}
+  # Caps each page image at 768 visual tokens instead of 1,280. On ViDoRe v3
+  # computer_science (pages rendered at 150 dpi) it scored 0.771 nDCG@10
+  # against 0.764 for the default cap, and one H100 encodes about 1.5x as many
+  # pages per second. Queries are unaffected; each page returns up to 768
+  # vectors instead of 1,280, so the index is smaller too. A load-time change,
+  # so it is served as its own model id: TomoroAI/tomoro-colqwen3-embed-4b:compact.
+  compact:
+    extends: default
+    adapter_options:
+      loadtime:
+        muvera_config:
+          num_repetitions: 40
+          num_simhash_projections: 6
+          projection_dim: null
+          final_projection_dim: 10240
+        token_dim: 320
+        trust_remote_code: true
+        max_num_visual_tokens: 768
+      runtime:
+        normalize: true
