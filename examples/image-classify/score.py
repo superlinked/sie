@@ -42,9 +42,9 @@ TEMPLATES = {
 }
 VARIANTS = ("t0", "t1", "t2", "ensemble")
 
-# Prices for one million photos a month, each at its cheapest case (read 2026-09-30).
+# Real-time prices for one million photos a month (read 2026-09-30).
 SIE_USD_PER_1K_IMAGES = 0.0232  # google/siglip-so400m-patch14-384 on SIE Cloud
-LLM_USD_PER_1M = {  # standard (input, output) per million tokens; batch is half
+LLM_USD_PER_1M = {  # real-time list price (input, output) per million tokens
     "gpt-6-luna": (0.10, 0.50),
     "gpt-5.4-mini": (0.75, 4.50),
     "gpt-5.4-nano": (0.20, 1.25),
@@ -108,7 +108,7 @@ def llm_answers(name: str, vocab: dict[str, list[str]]) -> tuple[dict[str, dict[
     price_in, price_out = LLM_USD_PER_1M[name.split("@")[0]]
     tin = statistics.mean(r["tokens_in"] for r in rows)
     tout = statistics.mean(r["tokens_out"] for r in rows)
-    return out, (tin * price_in + tout * price_out) / 2  # batch, per million photos
+    return out, tin * price_in + tout * price_out  # real time, per million photos
 
 
 def rekognition_answers(maps: dict[str, dict[str, str]]) -> dict[str, dict[str, str | None]]:
@@ -172,7 +172,7 @@ def main() -> int:
         _, usd = llm_answers(priced, vocab)
         rows.append((scored, name, {k: pct(answers, test, k) for k in ("all", *FIELDS)}, usd))
 
-    print(f"{len(test)} test photos: share with the field right (%), and $ per million photos at the cheapest case\n")
+    print(f"{len(test)} test photos: share with the field right (%), and $ per million photos at real-time prices\n")
     print(f"{'':24s} {'all three':>9s} {'type':>6s} {'colour':>6s} {'material':>8s} {'$ / 1M':>8s}")
     for _, name, figures, usd in sorted(rows, key=lambda r: -r[2]["all"]):
         cost = "" if math.isnan(usd) else f"{usd:8.0f}"

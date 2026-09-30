@@ -38,15 +38,16 @@ page's `page-evidence.json`:
 
 | Arm | All three fields right | Type | Colour | Material | $ per million photos |
 |---|---|---|---|---|---|
-| GPT-6 Luna | 84.2% | 94.6% | 92.9% | 96.0% | $81 (Batch) |
-| GPT-5.4 mini | 77.7% | 91.4% | 89.8% | 93.2% | $325 (Batch) |
+| GPT-6 Luna | 84.2% | 94.6% | 92.9% | 96.0% | $162 |
+| GPT-5.4 mini | 77.7% | 91.4% | 89.8% | 93.2% | $650 |
 | **SIE SigLIP so400m-384** | **72.3%** | **95.8%** | 86.1% | 87.5% | **$24** |
-| Claude Haiku 4.5 | 71.2% | 90.6% | 86.3% | 90.4% | $1,079 (Batch) |
-| GPT-5.4 nano | 64.3% | 86.2% | 86.8% | 85.8% | $87 (Batch) |
+| Claude Haiku 4.5 | 71.2% | 90.6% | 86.3% | 90.4% | $2,158 |
+| GPT-5.4 nano | 64.3% | 86.2% | 86.8% | 85.8% | $174 |
 | AWS Rekognition | 26.8% | 82.0% | 40.0% | 77.5% | $1,750 |
 
-Prices are each service's cheapest case for one million photos a month: LLMs at their Batch rate on the tokens they
-actually used, Rekognition at its first-million tier with the image-properties charge its colour answer needs.
+Prices are real-time list prices for one million photos a month: LLMs on the tokens they actually used (each at the
+cheaper resolution within a point of its best), Rekognition at its first-million tier with the image-properties charge
+its colour answer needs.
 
 ## Tag your own photo
 

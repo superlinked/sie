@@ -28,7 +28,7 @@ HERE = Path(__file__).resolve().parent
 EVIDENCE = HERE / "evidence"
 
 DATASET = "superlinked/sie-task-evidence"
-REVISION = "6b1e8ad5d655b10486f5e8505cb8e340586e97ba"
+REVISION = "92feeb4cf95be8654a6f4a68ee06887bc195fbf7"
 TASK = "catalogue-tagging"
 
 API = f"https://huggingface.co/api/datasets/{DATASET}/tree/{REVISION}"
