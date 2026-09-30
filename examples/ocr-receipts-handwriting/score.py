@@ -175,6 +175,14 @@ def recorded() -> int:
 def rescore(run_dir: Path) -> int:
     references = {row["id"]: row for row in map(json.loads, (run_dir / "references.jsonl").read_text().splitlines())}
     outputs = {row["id"]: row for row in map(json.loads, (run_dir / "outputs.jsonl").read_text().splitlines())}
+    missing, unexpected = references.keys() - outputs.keys(), outputs.keys() - references.keys()
+    if missing or unexpected or not references:
+        print(
+            f"The run is incomplete: {len(missing)} photos have no output, {len(unexpected)} outputs have no reference."
+            " Re-run run.py.",
+            file=sys.stderr,
+        )
+        return 1
     totals: dict[str, list[int]] = {}
     for image_id, out in outputs.items():
         ref = references[image_id]

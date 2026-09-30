@@ -107,6 +107,8 @@ def main() -> int:
     group.add_argument("--all", action="store_true", help="read every photo in each set")
     parser.add_argument("-c", "--concurrency", type=int, default=8)
     args = parser.parse_args()
+    if args.images is not None and args.images < 1:
+        parser.error("--images must be at least 1")
     if not os.environ.get("SIE_API_KEY"):
         print("Set SIE_API_KEY first (https://superlinked.com/cloud).", file=sys.stderr)
         return 1
@@ -127,16 +129,29 @@ def main() -> int:
         return {"id": photo["id"], "text": text, "seconds": round(time.perf_counter() - sent, 3)}
 
     RUNS.mkdir(exist_ok=True)
-    outputs = []
-    with ThreadPoolExecutor(args.concurrency) as pool:
-        futures = [pool.submit(read, photo) for photo in photos]
-        for n, future in enumerate(as_completed(futures), 1):
-            outputs.append(future.result())
-            if n % 20 == 0 or n == len(photos):
-                print(f"{n}/{len(photos)}")
-    (RUNS / "outputs.jsonl").write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in outputs))
     references = [{"id": p["id"], "set": p["set"], "words": p["words"]} for p in photos]
     (RUNS / "references.jsonl").write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in references))
+    failures = 0
+    # Each result is written as it lands, so a failed request never discards the paid ones.
+    with (
+        open(RUNS / "outputs.jsonl", "w", encoding="utf-8") as out,
+        ThreadPoolExecutor(args.concurrency) as pool,
+    ):
+        futures = {pool.submit(read, photo): photo["id"] for photo in photos}
+        for n, future in enumerate(as_completed(futures), 1):
+            try:
+                row = future.result()
+            except Exception as exc:  # noqa: BLE001 -- reported, and the run exits non-zero
+                failures += 1
+                print(f"{futures[future]}: {exc!r}", file=sys.stderr)
+                continue
+            out.write(json.dumps(row, ensure_ascii=False) + "\n")
+            out.flush()
+            if n % 20 == 0 or n == len(photos):
+                print(f"{n}/{len(photos)}")
+    if failures:
+        print(f"{failures} of {len(photos)} requests failed; score.py --rescore will refuse the incomplete run.")
+        return 1
     print(f"Wrote {RUNS}. Now run: python3 score.py --rescore runs")
     return 0
 
