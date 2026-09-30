@@ -26,7 +26,8 @@ wider models (1,536 for the 0.8B model, 768 for the 2B). Past about that, the GP
 not kernel launches, bounds a forward.
 
 Recording follows the GLiClass runner's rules. One recording at a time in the
-process (``sie_server.core.cuda_graph_recording``); none while less than a tenth
+process (``sie_server.adapters._cuda_graphs``, shared with the GLiClass and ModernBERT
+runners); none while less than a tenth
 of the device's memory is free; at most 16 recordings at once, then one per 2
 seconds; the graphs' memory is held to 4% of the device's, past which the shapes
 not yet recorded run eagerly. A shape that fails to record runs eagerly from then
@@ -50,8 +51,8 @@ from typing import Any, Literal
 
 import torch
 
+from sie_server.adapters._cuda_graphs import MEMORY_BUDGET_SHARE, RECORDING_HEADROOM, RECORDING_LOCK
 from sie_server.adapters.topk_embed.packed import PackedTextModel, Padded
-from sie_server.core.cuda_graph_recording import RECORDING_LOCK
 from sie_server.core.oom import is_oom_error
 
 logger = logging.getLogger(__name__)
@@ -68,12 +69,8 @@ _LONG_LENGTH_STEP = 256
 # A runner may record this many graphs at once, then one per this many seconds.
 _RECORDING_BURST = 16
 _SECONDS_PER_RECORDING = 2.0
-# Recording waits until at least this share of the device's memory is free.
-_RECORDING_HEADROOM = 0.1
 # After a recording runs out of memory, the runner records nothing for this long.
 _OOM_COOL_DOWN_SECONDS = 60.0
-# Device memory a runner's graphs may hold, as a share of the device's memory.
-_MEMORY_BUDGET_SHARE = 0.04
 # Shapes that may fail to record, for reasons other than memory, before graphs turn off.
 _MAX_RECORDING_FAILURES = 3
 # A runner serving forwards logs its counters this often.
@@ -285,7 +282,7 @@ class GraphRunner:
             return "budget_full"
         if self._recording_credit < 1:
             return "recording_paused"
-        if self._free_memory() < _RECORDING_HEADROOM * self._total_memory():
+        if self._free_memory() < RECORDING_HEADROOM * self._total_memory():
             return "no_headroom"
         return None
 
@@ -294,7 +291,7 @@ class GraphRunner:
         self._graphs[key] = entry
         self._device_bytes += entry.device_bytes
         held = self.held_bytes
-        if held > _MEMORY_BUDGET_SHARE * self._total_memory():
+        if held > MEMORY_BUDGET_SHARE * self._total_memory():
             self._full = True
             logger.warning(
                 "TopK-Embed CUDA graphs for %s took %d MB, their memory budget, with %d graphs recorded; "

@@ -15,9 +15,9 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 import torch
+from sie_server.adapters._cuda_graphs import RECORDING_LOCK
 from sie_server.adapters.topk_embed import graphs, packed
 from sie_server.adapters.topk_embed.adapter import TopkEmbedAdapter
-from sie_server.core.cuda_graph_recording import RECORDING_LOCK
 from sie_server.types.inputs import Item
 
 from .test_topk_embed import HIDDEN, PAD_ID, _fake_vision, _png, make_adapter
