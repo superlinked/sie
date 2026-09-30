@@ -23,4 +23,6 @@ profiles:
           - safe
           - unsafe
         multi_label: false
+        # A text longer than one window is unsafe when any window of it is.
+        positive_label: unsafe
       runtime: {}
