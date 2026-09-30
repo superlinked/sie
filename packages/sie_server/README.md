@@ -495,7 +495,7 @@ document dot products for dense models and MaxSim for late interaction:
 | `granite-embedding-97m-multilingual-r2` | 0.006 | 57 (0.008) | 0.015 (0.015) |
 | `Reason-ModernColBERT` | 0.007 | 1 (0.007) | 0.022 (0.021) |
 | `mLateOn` | 0.020 | 17 (0.029) | 0.037 (0.046) |
-| `Iso-ModernColBERT` | 0.047 | 19 (0.058) | 0.082 (0.100) |
+| `Iso-ModernColBERT` | none (bit-identical) | none | 0.20 (0.21) |
 
 Graphs meet the rule a GLiClass speed-up ships under (see "When a speed-up
 ships enabled" above), read for scores instead of label probabilities: no
@@ -511,6 +511,36 @@ paths) did not change beyond that noise: `gte-modernbert-base` 0.7632 eager
 and 0.7644 with graphs, `GTE-ModernColBERT-v1` 0.7573 and 0.7558, and
 `gte-reranker-modernbert-base` reranking the top 20 of `gte-modernbert-base`
 0.7760 and 0.7767.
+
+The eager batching noise is largest for `mxbai-edge-colbert-v0-32m` and
+`Iso-ModernColBERT` because their profiles compute in bfloat16, whose
+significand is three bits shorter than float16's (the other late-interaction
+models compute in float16). With more packed rows, cuBLAS picks a different
+matrix-multiply kernel; in the forward we traced, the first outputs to differ,
+by one unit in the last place, were those of the first layer's attention output
+projection. A few document tokens amplify that rounding: punctuation, `[SEP]`
+or the `[D] ` marker, close to where the encoder turns a token into an attention
+sink. The token builds a large activation in one forward and not in the other,
+so its vector turns. Per-token cosine to the one-item forward went as low as
+0.82 for `Iso-ModernColBERT` on the abstracts above, while more than 99.8% of
+tokens stayed above 0.999 on a sample of mixed lengths. The reference
+implementation behaves the same way. PyLate in bfloat16 moves such tokens as
+much between a document encoded alone and in a batch; in float32 neither PyLate
+nor the Hugging Face forward moves them. In float32 on the CPU, this adapter's
+packed forward gives each item the same vectors alone and in any batch, equal
+to the Hugging Face forward (`tests/adapters/test_colbert_modernbert_flash_batch_invariance.py`).
+
+`Iso-ModernColBERT` serves the recipe its checkpoint publishes for PyLate, as
+`GTE-ModernColBERT-v1` does:
+
+- `[Q] ` and `[D] ` markers;
+- queries cut at 32 tokens and documents at 300 (its `long_context` profile
+  keeps 8,192);
+- the punctuation skiplist, which drops the document vectors that training
+  never scores.
+
+Its row above was measured with that recipe. With it, SciFact nDCG@10 rose from
+0.7326 to 0.7573 (PyLate: 0.7574 in bfloat16, 0.7584 in float32).
 
 The shipped profiles of every model on these adapters load with `bucketed`
 graphs: `GTE-ModernColBERT-v1`, `Reason-ModernColBERT`, `mLateOn`,
