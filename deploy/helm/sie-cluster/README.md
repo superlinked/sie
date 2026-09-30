@@ -904,7 +904,12 @@ to the subjects that component uses:
   and is trusted with the bus.
 - The NATS monitoring port (8222) stays unauthenticated. It shows connection
   and subscription metadata, including user names, but no message contents
-  or passwords. Restrict it with a NetworkPolicy where that matters.
+  or passwords. The chart ships no NetworkPolicy for the NATS pods, so
+  restrict that port with one where that matters. The client (4222) and
+  cluster route (6222) ports require credentials.
+- `workers.networkPolicy` restricts only ingress to the worker pods. The
+  worker sidecars open their NATS connections outward, so the policy does not
+  affect NATS.
 - The chart does not configure TLS on NATS. Passwords and messages cross the
   pod network in plaintext.
 - nats-box and the NATS `helm test` pod are disabled, because they would
