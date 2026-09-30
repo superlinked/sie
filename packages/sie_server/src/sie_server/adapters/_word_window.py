@@ -35,6 +35,7 @@ attention memory of a pass stays bounded for a batch of long rows too.
 
 from __future__ import annotations
 
+import json
 from collections import Counter, OrderedDict
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
@@ -285,6 +286,36 @@ def plan_forwards(
     return groups
 
 
+def prefix_space_for_split_words(tokenizer: Any) -> bool:
+    """Let a byte-level BPE tokenizer encode words that are already split.
+
+    ``gliner`` hands its tokenizer pre-split words (``is_split_into_words``).
+    RoBERTa-family fast tokenizers (RoBERTa, Longformer, GPT-2) refuse that
+    unless they were loaded with ``add_prefix_space=True``, which ``gliner``
+    does not pass, so a checkpoint on such an encoder (``numind/NuNER_Zero-4k``
+    on Longformer) failed every request. The tokenizer is switched in place,
+    as its own constructor would with the option set, so the tokens ``gliner``
+    added to it are kept.
+
+    Returns whether the tokenizer was changed.
+    """
+    if getattr(tokenizer, "add_prefix_space", None) is not False:
+        return False
+    backend = getattr(tokenizer, "backend_tokenizer", None)
+    if backend is None:
+        return False
+    from tokenizers import pre_tokenizers
+
+    state = json.loads(backend.pre_tokenizer.__getstate__())
+    if state.get("type") != "ByteLevel":
+        return False
+    state["add_prefix_space"] = True
+    state.pop("type")
+    backend.pre_tokenizer = pre_tokenizers.ByteLevel(**state)
+    tokenizer.add_prefix_space = True
+    return True
+
+
 def bound_gliner_words(model: Any) -> bool:
     """Make a loaded ``gliner`` model read the bounded window of each document.
 
@@ -303,6 +334,7 @@ def bound_gliner_words(model: Any) -> bool:
     encoder_config = getattr(model.config, "encoder_config", None)
     max_words = int(model.config.max_len)
     tokenizer = processor.transformer_tokenizer
+    prefix_space_for_split_words(tokenizer)
     processor.words_splitter = WindowedSplitter(
         processor.words_splitter,
         max_words=max_words,
