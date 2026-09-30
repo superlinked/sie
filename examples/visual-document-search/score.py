@@ -40,12 +40,20 @@ def ndcg10(ranked: list[str], grades: dict[str, int]) -> float:
     return dcg / idcg if idcg else 0.0
 
 
-def per_question(rankings: Path, arm: str) -> dict[str, dict[str, np.ndarray]] | None:
+def per_question(rankings: Path, arm: str, *, warn: bool = False) -> dict[str, dict[str, np.ndarray]] | None:
+    """Scores for an arm with rankings for all six datasets; None, with a warning if asked, for a partial arm."""
+    missing = [rankings / arm / f"{name}.json" for name in DATASETS if not (rankings / arm / f"{name}.json").exists()]
+    if missing:
+        if warn:
+            print(
+                f"Skipping {arm}: the full benchmark needs all six datasets; missing "
+                + ", ".join(str(path) for path in missing),
+                file=sys.stderr,
+            )
+        return None
     out = {}
     for name in DATASETS:
         path = rankings / arm / f"{name}.json"
-        if not path.exists():
-            return None
         ranking = json.loads(path.read_text())
         questions = json.loads((EVIDENCE / "questions" / f"{name}.json").read_text())
         ids = sorted(questions, key=int)
@@ -85,7 +93,7 @@ def main() -> int:
             arms[arm] = scores
     for extra in args.rankings:
         for arm_dir in sorted(p for p in extra.iterdir() if p.is_dir()):
-            scores = per_question(extra, arm_dir.name)
+            scores = per_question(extra, arm_dir.name, warn=True)
             if scores is not None:
                 arms[f"yours:{arm_dir.name}"] = scores
     n = sum(len(arms[LEAD][d]["ndcg10"]) for d in DATASETS)
