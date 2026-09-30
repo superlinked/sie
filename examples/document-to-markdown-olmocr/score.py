@@ -79,6 +79,15 @@ def rates(rows: list[dict]) -> dict[str, tuple[int, int]]:
     return out
 
 
+# Azure Document Intelligence and AWS Textract emit no LaTeX, so they score 0 on the two math files. The mean of the
+# other six is reported beside Overall as the comparison without equations.
+WITHOUT_MATH = ("baseline", "headers_footers", "long_tiny_text", "multi_column", "old_scans", "table_tests")
+
+
+def without_math(rates: dict[str, float]) -> float:
+    return sum(rates[f] for f in WITHOUT_MATH) / len(WITHOUT_MATH)
+
+
 def overall(by_file: dict[str, tuple[int, int]]) -> float:
     return sum(passed / total for passed, total in by_file.values()) / len(by_file)
 
@@ -87,7 +96,7 @@ def recorded() -> int:
     manifest = verified()
     rivals = json.loads((EVIDENCE / "rivals.json").read_text(encoding="utf-8"))
     print(f"olmOCR-Bench, {manifest['pages']} pages, {manifest['scorer']}, run {', '.join(manifest['run_dates'])}\n")
-    header = f"{'':44}" + "".join(f"{f[:10]:>11}" for f in FILES) + f"{'Overall':>9}"
+    header = f"{'':44}" + "".join(f"{f[:10]:>11}" for f in FILES) + f"{'Overall':>9}{'No math':>9}"
     print(header)
     problems = []
     results = {}
@@ -106,10 +115,14 @@ def recorded() -> int:
             problems.append(f"{arm}: Overall {score:.4f} per test, {summary['overall']:.4f} from the scorer")
         results[arm] = score
         cells = "".join(f"{100 * p / t:>11.1f}" for p, t in by_file.values())
-        print(f"{name[:43]:44}{cells}{100 * score:>9.1f}")
+        no_math = without_math({f: p / t for f, (p, t) in by_file.items()})
+        print(f"{name[:43]:44}{cells}{100 * score:>9.1f}{100 * no_math:>9.1f}")
     for row in rivals["systems"]:
         cells = "".join(f"{100 * row['score']['files'][f]:>11.1f}" for f in FILES)
-        print(f"{(row['name'] + ' (published)')[:43]:44}{cells}{100 * row['score']['overall']:>9.1f}")
+        no_math = without_math(row["score"]["files"])
+        print(
+            f"{(row['name'] + ' (published)')[:43]:44}{cells}{100 * row['score']['overall']:>9.1f}{100 * no_math:>9.1f}"
+        )
         results[row["id"]] = row["score"]["overall"]
 
     print("\n$ per 1,000 pages, cheapest public tier:")
