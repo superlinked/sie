@@ -8,7 +8,7 @@ that page's [SOURCES.md](https://superlinked.com/reference/redact/SOURCES.md).
 
 The study asks one question of each redaction option: how much of the personal
 data in a document does it leave readable? It sends 660 synthetic financial
-documents through five arms and counts, for each, the in-scope personal-data
+documents through six arms and counts, for each, the in-scope personal-data
 spans it masks completely. The metric was fixed before the first request on
 30 September 2026.
 
@@ -45,26 +45,30 @@ spans it masks completely. The metric was fixed before the first request on
 | Arm | Masked (of 1,792) | Coverage recall | 95% interval | States and countries excused | $ a month, 1M documents |
 | --- | --- | --- | --- | --- | --- |
 | SIE, two models composed | 1,591 | 88.8% | 86.7% to 90.9% | 90.5% | $32 |
-| Claude Haiku 4.5 | 1,490 | 83.1% | 80.8% to 85.2% | 92.6% | $725 |
-| GPT-6 Luna | 1,448 | 80.8% | 78.2% to 83.1% | 93.2% | $57 |
+| AWS Comprehend | 1,491 | 83.2% | 80.3% to 85.8% | 84.2% | $351 |
+| Claude Haiku 4.5 | 1,490 | 83.1% | 80.8% to 85.2% | 92.6% | $1,450 |
+| GPT-6 Luna | 1,448 | 80.8% | 78.2% to 83.1% | 93.2% | $113 |
 | OpenAI Privacy Filter | 1,214 | 67.7% | 64.3% to 71.0% | 69.8% | $23 (self-hosted, L4) |
 | Microsoft Presidio | 859 | 47.9% | 45.0% to 50.8% | 49.6% | $3 (self-hosted, CPU) |
-| AWS Comprehend | not measured | | | | $351 |
 
 SIE minus each arm, paired: Presidio +37.5 to +44.3 points, Privacy Filter
-+17.8 to +24.5, Claude Haiku 4.5 +2.8 to +8.6, GPT-6 Luna +5.3 to +11.0. With
-states and countries excused SIE stays well ahead of Presidio (+37.6 to +44.3)
-and Privacy Filter (+17.4 to +24.1), is level with Claude Haiku 4.5 (-4.5 to
-+0.3) and behind GPT-6 Luna (-4.9 to -0.4). SIE's lead over the two LLM prompts
-on the first figure is addresses whose state they left readable; the label list
-has no `state`. So this study makes no detection claim against an LLM prompt.
-It does say what they cost, and that redacting with an LLM API sends the
-unredacted text to that API.
++17.8 to +24.5, AWS Comprehend +2.7 to +8.6, Claude Haiku 4.5 +2.8 to +8.6,
+GPT-6 Luna +5.3 to +11.0. With states and countries excused SIE stays ahead of
+Presidio (+37.6 to +44.3), Privacy Filter (+17.4 to +24.1) and Comprehend
+(+3.5 to +9.3), is level with Claude Haiku 4.5 (-4.5 to +0.3) and behind GPT-6
+Luna (-4.9 to -0.4). SIE's lead over the two LLM prompts on the first figure is
+addresses whose state they left readable; the label list has no `state`. So
+this study makes no detection claim against an LLM prompt. It does say what
+they cost, and that redacting with an LLM API sends the unredacted text to that
+API.
 
-**AWS Comprehend, Azure AI Language and Google Cloud DLP were not measured.**
-The study had no access to them. Comprehend documents an entity type for 96.2%
-of the in-scope spans here (all but coordinates, employee IDs and customer
-IDs), so nothing here places it above or below SIE. Its row is price only.
+**Comprehend now measured.** `DetectPiiEntities` ran on the same 660 documents
+and was scored by the same code, with every returned entity masked whatever its
+type or score. The interval on SIE minus Comprehend stays above zero on both
+figures, so SIE masks more of this set than Comprehend does, at under a tenth
+of its price. Comprehend documents an entity type for 96.2% of the in-scope
+spans here; coordinates, employee IDs and customer IDs have none. Azure AI
+Language and Google Cloud DLP were not measured.
 
 Overlap precision is low for every arm (0.35 to 0.60) because Gretel annotates
 a subset of each document's personal data: a mask on an unannotated name or
@@ -77,6 +81,7 @@ email counts against it.
 | SIE | `urchade/gliner_multi_pii-v1` and `numind/NuNER_Zero` on `https://api.superlinked.com`, the same 36 labels, each span kept at score 0.6 or above, the two unioned. Then every other whole-word, case-sensitive mention of a three-letter or longer token from a returned `person` span is masked, in the caller's code. A document over 300 words is sent as 300-word windows with a 50-word overlap, each window's offset added back to its spans. |
 | OpenAI Privacy Filter | the `opf` package from [openai/privacy-filter](https://github.com/openai/privacy-filter) at `f7f00ca`, default checkpoint and decoding, every span masked, on one NVIDIA L4 |
 | Microsoft Presidio | `presidio-analyzer` 2.2.364 `AnalyzerEngine()` defaults with spaCy `en_core_web_lg` 3.8.0, every entity masked |
+| AWS Comprehend | `DetectPiiEntities` with `LanguageCode="en"` in us-east-1, one request per document, every returned entity masked whatever its type or score |
 | GPT-6 Luna | `reasoning_effort: "none"`, `temperature: 0`, strict JSON schema, the 36 labels in the prompt |
 | Claude Haiku 4.5 | no extended thinking, `temperature: 0`, JSON schema, the same prompt |
 
@@ -108,9 +113,11 @@ For 1,000,000 documents a month like these, list prices read on 30 September
   its cheapest tier, 3-unit minimum per request, units counted as characters
   over 100 with no rounding up.
 - **LLMs:** the tokens each provider reported for the run, at each vendor's
-  Batch API price, their cheapest: $0.05 and $0.25 (GPT-6 Luna) and $0.50 and
-  $2.50 (Claude Haiku 4.5) per million input and output tokens. At standard
-  prices they cost twice that: $113 and $1,450.
+  standard real-time list price: $0.10 and $0.50 (GPT-6 Luna) and $1 and $5
+  (Claude Haiku 4.5) per million input and output tokens. Every arm here
+  answers in real time, so every arm is priced in real time. Both vendors also
+  sell a Batch API at half these prices, with results returned asynchronously
+  instead of per request.
 - **Presidio and Privacy Filter** are free to download, so their price is the
   compute: Modal list price per second (L4 $0.000222, a core $0.0000131, a GiB
   $0.00000222), divided by 75% utilisation and times 1.75 for region, at the
@@ -130,7 +137,7 @@ python3 score.py
 
 `fetch.py` pulls the `redact/` folder of the public Hugging Face dataset
 [superlinked/sie-task-evidence](https://huggingface.co/datasets/superlinked/sie-task-evidence),
-pinned to one revision, about 4.4 MB. It checks every file against the id the
+pinned to one revision, about 4.9 MB. It checks every file against the id the
 dataset lists and against the SHA-256 in `manifest.json`, whose own digest is
 pinned in `fetch.py`. It holds:
 
@@ -138,7 +145,8 @@ pinned in `fetch.py`. It holds:
   and end in Unicode code points);
 - `rows/`: one recorded row per document per arm. The SIE rows hold the API
   responses (`whole`, and `windows` for documents over 300 words); the LLM rows
-  the raw JSON reply and token counts; Presidio and Privacy Filter their spans;
+  the raw JSON reply and token counts; Presidio, Privacy Filter and Comprehend
+  their spans, and Comprehend its billed units;
 - `results/`: the study's own results file, token counts, and the throughput
   and price per arm;
 - `manifest.json`: run date, endpoint, models, labels, prompt and arm settings.
@@ -154,6 +162,7 @@ the page. It takes about two seconds; `--no-bootstrap` skips the intervals.
 
 Arm                                                  Masked  Coverage  State excused  Precision  Exact F1
 SIE (GLiNER PII + NuNER Zero, composed)      1,591 of 1,792     88.8%          90.5%      0.346     0.396
+AWS Comprehend                               1,491 of 1,792     83.2%          84.2%      0.400     0.413
 Claude Haiku 4.5                             1,490 of 1,792     83.1%          92.6%      0.595     0.484
 GPT-6 Luna                                   1,448 of 1,792     80.8%          93.2%      0.590     0.474
 OpenAI Privacy Filter                        1,214 of 1,792     67.7%          69.8%      0.590     0.504
@@ -181,8 +190,9 @@ it left readable, and whether its spans match the recording.
 
 - **Nothing about your documents.** Gretel's documents are synthetic and
   financial. Measure on your own data before relying on any of these figures.
-- **Nothing about AWS Comprehend, Azure or Google Cloud DLP.** They were not
-  run.
+- **Nothing about Azure AI Language or Google Cloud DLP.** They were not run.
+- **Nothing about Comprehend's other settings.** It ran with `LanguageCode="en"`
+  and no score threshold; a caller who drops low-score entities masks less.
 - **No lead over an LLM prompt.** It depends on whether a readable state counts
   as a leak.
 - **Nothing about what stays readable.** Overlap precision is bounded by what
