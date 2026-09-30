@@ -11,6 +11,7 @@ from fastapi import HTTPException, Request, status
 from fastapi.responses import JSONResponse
 
 from sie_server.adapters.errors import InputTooLongError
+from sie_server.adapters.remote.sie import SieUpstreamAdapter
 from sie_server.api.serialization import MsgPackResponse, _convert_for_json
 from sie_server.core.model_suggestions import suggestion_suffix
 from sie_server.core.oom import is_oom_error
@@ -104,6 +105,21 @@ JSON_CONTENT_TYPE = "application/json"
 # Version negotiation headers
 SERVER_VERSION_HEADER = "X-SIE-Server-Version"
 SDK_VERSION_HEADER = "X-SIE-SDK-Version"
+
+# Remote-serving disclosure
+SERVED_BY_HEADER = "X-SIE-Served-By"
+UPSTREAM_HEADER = "X-SIE-Upstream"
+
+
+def serving_disclosure_headers(registry: "ModelRegistry", model: str) -> dict[str, str]:
+    """Which side served an encode: ``local``, or ``remote`` with the upstream's name."""
+    try:
+        adapter = registry.get(model)
+    except KeyError:
+        return {SERVED_BY_HEADER: "local"}
+    if isinstance(adapter, SieUpstreamAdapter):
+        return {SERVED_BY_HEADER: "remote", UPSTREAM_HEADER: adapter.upstream_name}
+    return {SERVED_BY_HEADER: "local"}
 
 
 def _get_server_version() -> str:

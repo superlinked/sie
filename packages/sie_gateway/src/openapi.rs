@@ -106,6 +106,7 @@ static OPENAPI_JSON: LazyLock<String> = LazyLock::new(|| {
         ModelCapabilitiesWire,
         ModelConfigStatusResponse,
         ModelInfoWire,
+        ModelRoutingWire,
         ModelsResponse,
         OpenAiModelObject,
         ModelNotFoundDetail,
@@ -2636,6 +2637,15 @@ pub struct ModelInfoWire {
     pub capabilities: Option<ModelCapabilitiesWire>,
     #[serde(default)]
     pub pending_generation: crate::queue::publisher::PendingGenerationSnapshot,
+    /// How the bare model name is served: the routing policy and the kind of
+    /// upstream a remote profile calls. A single SIE server emits it on every
+    /// entry.
+    //
+    // Maintainer note: the gateway does not emit it yet. It is declared here,
+    // the schema of record, so the SDKs can type it; emission arrives with
+    // cluster remote worker pools.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub routing: Option<ModelRoutingWire>,
     /// Short task-tier names that resolve to this model, for example
     /// ``["rerank-fast"]``. Send one anywhere a model id is accepted and it
     /// resolves to this entry, billed at this model's rate.
@@ -2655,6 +2665,17 @@ pub struct ModelInfoWire {
     // documentation type — nothing deserializes it — so requiring the field
     // cannot break parsing of an older payload.
     pub aliases: Vec<String>,
+}
+
+/// Routing summary on a ``GET /v1/models`` entry.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ModelRoutingWire {
+    /// ``remote_only``, ``fallback`` or ``threshold``. ``null`` means local
+    /// capacity only.
+    pub policy: Option<String>,
+    /// ``sie`` or ``openai``: the kind of upstream a remote profile calls.
+    /// ``null`` without one.
+    pub upstream_kind: Option<String>,
 }
 
 /// Capability summary surfaced on each entry of ``GET /v1/models``.

@@ -1,8 +1,10 @@
 from typing import TYPE_CHECKING, Any, Literal
 
 from fastapi import APIRouter, HTTPException, Request, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
+from sie_server.config.model import ModelConfig, is_remote_adapter_path
+from sie_server.config.upstreams import installed_upstreams
 from sie_server.core.model_suggestions import suggestion_suffix
 from sie_server.types.responses import ErrorCode
 
@@ -70,6 +72,16 @@ class ModelCapabilities(BaseModel):
     guard: bool = False
 
 
+class ModelRouting(BaseModel):
+    """How the bare model name is served."""
+
+    policy: Literal["remote_only", "fallback", "threshold"] | None = None
+    """``None`` means local capacity only."""
+
+    upstream_kind: Literal["sie", "openai"] | None = None
+    """Kind of the upstream a remote profile calls, ``None`` without one."""
+
+
 class ModelInfo(BaseModel):
     """Information about a model."""
 
@@ -100,6 +112,17 @@ class ModelInfo(BaseModel):
 
     capabilities: ModelCapabilities | None = None
     """Advertised generation capabilities, ``None`` for non-generate models."""
+
+    routing: ModelRouting = Field(default_factory=ModelRouting)
+    """Routing policy and upstream kind. Always present."""
+
+
+def _resolve_routing(config: ModelConfig) -> ModelRouting:
+    default = config.resolve_profile("default")
+    if not is_remote_adapter_path(default.adapter_path):
+        return ModelRouting()
+    upstream = installed_upstreams().get(default.loadtime.get("upstream", ""))
+    return ModelRouting(policy="remote_only", upstream_kind=upstream.kind.value if upstream is not None else None)
 
 
 def _resolve_state_and_error(
@@ -207,6 +230,7 @@ async def list_models(http_request: Request) -> ModelsListResponse:
                 profiles=profiles,
                 revision=getattr(config, "hf_revision", None),
                 capabilities=_resolve_capabilities(config),
+                routing=_resolve_routing(config),
             )
         )
 
@@ -261,4 +285,5 @@ async def get_model(model: str, http_request: Request) -> ModelInfo:
         profiles=profiles,
         revision=getattr(config, "hf_revision", None),
         capabilities=_resolve_capabilities(config),
+        routing=_resolve_routing(config),
     )

@@ -131,14 +131,35 @@ def test_a_remote_backed_model_returns_the_upstreams_vectors(tmp_path: Path, cap
 
         with TestClient(local_app(tmp_path, upstream_url)) as client:
             response = encode_when_loaded(client, "acme/remote-fake", "remote backends")
+            embeddings = client.post("/v1/embeddings", json={"model": "acme/remote-fake", "input": "remote backends"})
+            listed = client.get("/v1/models/acme/remote-fake")
 
     assert response.status_code == 200, response.text
     served = np.asarray(response.json()["items"][0]["dense"]["values"], dtype=np.float32)
     np.testing.assert_allclose(served, expected, rtol=1e-6)
-    assert seen_authorization == [f"Bearer {CANARY}"]
+    assert response.headers["x-sie-served-by"] == "remote"
+    assert response.headers["x-sie-upstream"] == "fake-sie"
+    assert embeddings.status_code == 200, embeddings.text
+    assert embeddings.headers["x-sie-served-by"] == "remote"
+    assert embeddings.headers["x-sie-upstream"] == "fake-sie"
+    assert listed.json()["routing"] == {"policy": "remote_only", "upstream_kind": "sie"}
+    assert seen_authorization == [f"Bearer {CANARY}", f"Bearer {CANARY}"]
     assert CANARY not in response.text
     assert CANARY not in str(response.headers)
     assert CANARY not in caplog.text
+
+
+def test_a_local_model_discloses_local_serving() -> None:
+    app = AppFactory.create_app(AppStateConfig(models_dir=str(MODELS_DIR), model_filter=["sie-fake"], device="cpu"))
+
+    with TestClient(app) as client:
+        response = encode_when_loaded(client, "sie-fake", "local")
+        listed = client.get("/v1/models/sie-fake")
+
+    assert response.status_code == 200, response.text
+    assert response.headers["x-sie-served-by"] == "local"
+    assert "x-sie-upstream" not in response.headers
+    assert listed.json()["routing"] == {"policy": None, "upstream_kind": None}
 
 
 def test_the_global_switch_refuses_remote_profiles_and_sends_nothing(tmp_path: Path) -> None:

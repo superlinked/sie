@@ -280,6 +280,17 @@ export interface PendingGeneration {
 }
 
 /**
+ * How the bare model name is served. Part of every `/v1/models` entry a
+ * server that supports remote backends emits.
+ */
+export interface ModelRouting {
+  /** `null` means local capacity only */
+  policy: "remote_only" | "fallback" | "threshold" | null;
+  /** Kind of the upstream a remote profile calls, `null` without one */
+  upstream_kind: "sie" | "openai" | null;
+}
+
+/**
  * Information about a model returned by listModels().
  *
  * Top-level keys are camelCased from the wire (see `WireModelInfo`); nested
@@ -319,6 +330,8 @@ export interface ModelInfo {
   capabilities?: ModelCapabilities | null;
   /** Gateway-only queue snapshot; absent when talking to a single server */
   pendingGeneration?: PendingGeneration;
+  /** Routing policy and upstream kind; absent from servers that predate remote backends */
+  routing?: ModelRouting;
   /**
    * Short task-tier names that resolve to this model, e.g. ["rerank-fast"].
    * Send one anywhere a model id is accepted. The gateway's internal routing
@@ -353,6 +366,7 @@ export interface WireModelInfo {
   profiles?: Record<string, ProfileInfo>;
   capabilities?: ModelCapabilities | null;
   pending_generation?: PendingGeneration;
+  routing?: ModelRouting;
   aliases?: string[];
 }
 
@@ -376,6 +390,7 @@ const MODEL_INFO_WIRE_FIELD_SET: Record<keyof WireModelInfo, true> = {
   pending_generation: true,
   profiles: true,
   revision: true,
+  routing: true,
   state: true,
 };
 

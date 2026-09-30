@@ -13,6 +13,7 @@ from sie_server.api.helpers import (
     RequestParser,
     ResponseBuilder,
     oom_retry_after_from_registry,
+    serving_disclosure_headers,
     validated_total,
 )
 from sie_server.api.options import resolve_runtime_options_with_profile
@@ -432,4 +433,5 @@ async def encode(
 
         # Build response headers and return
         headers = ResponseBuilder.build_headers(timing)
+        headers.update(serving_disclosure_headers(registry, model))
         return ResponseBuilder.build_response(response, accept, headers, convert_for_json=True)

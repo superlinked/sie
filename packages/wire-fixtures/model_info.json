@@ -25,6 +25,7 @@
     "pending_generation",
     "profiles",
     "revision",
+    "routing",
     "state"
   ],
   "excluded": {
@@ -37,6 +38,7 @@
     "excluded_scope": "The four excluded keys are merged in by GET /v1/models/{model} for vanilla OpenAI 'retrieve model' clients; on GET /v1/models they live in the sibling `data` array instead, never on a `models` entry.",
     "optionality": "Python marks every typed key optional (`total=False`). TypeScript requires `name`, `loaded`, `inputs` and `outputs` on both `ModelInfo` and `WireModelInfo`; its remaining keys are optional. `pending_generation` is gateway-only. `last_error`/`max_sequence_length`/`revision`/`capabilities` are the four the emitters can send as an explicit null, so the SDK types admit null on each. The fixture pins which keys are declarable, not which are always present.",
     "ts_renames": "The TS SDK camelCases three top-level keys \u2014 max_sequence_length -> maxSequenceLength, last_error -> lastError, pending_generation -> pendingGeneration \u2014 and leaves nested objects wire-shaped. Its consumer test checks the wire-side names listed here.",
-    "aliases": "Short task-tier names resolving to this model. Always emitted, empty when the model has none, so callers can distinguish 'no aliases' from an older gateway. Only catalog- or operator-declared names appear; the gateway's compiled-in routing defaults are not public API and are never listed."
+    "aliases": "Short task-tier names resolving to this model. Always emitted, empty when the model has none, so callers can distinguish 'no aliases' from an older gateway. Only catalog- or operator-declared names appear; the gateway's compiled-in routing defaults are not public API and are never listed.",
+    "routing": "How the bare model name is served: `policy` (`remote_only`, `fallback`, `threshold`, or null for local only) and `upstream_kind` (`sie`, `openai`, or null). The single server emits it on every entry. The gateway declares it and will emit it once cluster remote worker pools exist."
   }
 }

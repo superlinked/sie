@@ -74,6 +74,7 @@ const FULL_WIRE_ENTRY = {
   profiles: { default: { is_default: true }, fp8: { is_default: false } },
   capabilities: { grammar: ["json_schema"], tools: true, code: false, sql: false, guard: false },
   pending_generation: { total: 0, groups: [] },
+  routing: { policy: "remote_only", upstream_kind: "sie" },
   aliases: ["sparse-embeddings-best"],
   // OpenAI retrieve-model compat keys, merged in by the detail endpoint.
   id: "BAAI/bge-m3",
@@ -133,6 +134,7 @@ describe("getModel wire mapping", () => {
     expect(model.loaded).toBe(true);
     expect(model.state).toBe("loaded");
     expect(model.aliases).toEqual(FULL_WIRE_ENTRY.aliases);
+    expect(model.routing).toEqual(FULL_WIRE_ENTRY.routing);
     expect(model.lastError).toBeNull();
     expect(model.inputs).toEqual(FULL_WIRE_ENTRY.inputs);
     expect(model.outputs).toEqual(FULL_WIRE_ENTRY.outputs);

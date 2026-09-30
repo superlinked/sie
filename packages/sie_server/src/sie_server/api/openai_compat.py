@@ -23,7 +23,7 @@ import time
 from typing import TYPE_CHECKING, Annotated, Literal
 
 import numpy as np
-from fastapi import APIRouter, Header, HTTPException, Request, status
+from fastapi import APIRouter, Header, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic.json_schema import SkipJsonSchema
@@ -34,6 +34,7 @@ from sie_server.api.helpers import (
     check_sdk_version,
     oom_retry_after_from_registry,
     openai_error_response,
+    serving_disclosure_headers,
 )
 from sie_server.api.options import resolve_runtime_options_with_profile
 from sie_server.api.validation import validate_machine_profile_header
@@ -348,6 +349,7 @@ def _build_embeddings_response(
 async def create_embeddings(
     request: OpenAIEmbeddingRequest,
     http_request: Request,
+    response: Response,
     x_machine_profile: Annotated[str | None, Header(alias="X-SIE-MACHINE-PROFILE")] = None,
 ) -> OpenAIEmbeddingResponse | JSONResponse:
     """Create embeddings using OpenAI-compatible API.
@@ -368,7 +370,7 @@ async def create_embeddings(
         OpenAI-format embedding response with embeddings and usage info.
     """
     try:
-        return await _create_embeddings(request, http_request, x_machine_profile)
+        return await _create_embeddings(request, http_request, response, x_machine_profile)
     except HTTPException as exc:
         return openai_error_response(exc)
 
@@ -376,6 +378,7 @@ async def create_embeddings(
 async def _create_embeddings(
     request: OpenAIEmbeddingRequest,
     http_request: Request,
+    response: Response,
     x_machine_profile: str | None,
 ) -> OpenAIEmbeddingResponse:
     # Validate machine profile header
@@ -633,4 +636,5 @@ async def _create_embeddings(
                 postprocessing_s=timing.postprocessing_ms / 1000.0,
                 units=units,
             )
+        response.headers.update(serving_disclosure_headers(registry, model))
         return _build_embeddings_response(results, texts, model, encoding_format)

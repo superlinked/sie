@@ -345,6 +345,16 @@ class PendingGeneration(TypedDict, total=False):
     groups: list[PendingGenerationGroup]
 
 
+class ModelRouting(TypedDict):
+    """How the bare model name is served. Part of every ``/v1/models`` entry."""
+
+    policy: Literal["remote_only", "fallback", "threshold"] | None
+    """``None`` means local capacity only."""
+
+    upstream_kind: Literal["sie", "openai"] | None
+    """Kind of the upstream a remote profile calls, ``None`` without one."""
+
+
 class ModelInfo(TypedDict, total=False):
     """Information about a model returned by list_models().
 
@@ -383,6 +393,9 @@ class ModelInfo(TypedDict, total=False):
 
     pending_generation: PendingGeneration
     """Gateway-only queue snapshot; absent when talking to a single server."""
+
+    routing: ModelRouting
+    """Routing policy and upstream kind, e.g. ``policy="remote_only"`` for a model served by an upstream."""
 
     aliases: list[str]
     """Short task-tier names resolving to this model, e.g. ``["rerank-fast"]``.

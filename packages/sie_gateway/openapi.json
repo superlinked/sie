@@ -2425,6 +2425,17 @@
               "null"
             ]
           },
+          "routing": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ModelRoutingWire",
+                "description": "How the bare model name is served: the routing policy and the kind of\nupstream a remote profile calls. A single SIE server emits it on every\nentry."
+              }
+            ]
+          },
           "state": {
             "type": "string"
           }
@@ -2465,6 +2476,26 @@
         "required": [
           "detail"
         ],
+        "type": "object"
+      },
+      "ModelRoutingWire": {
+        "description": "Routing summary on a ``GET /v1/models`` entry.",
+        "properties": {
+          "policy": {
+            "description": "``remote_only``, ``fallback`` or ``threshold``. ``null`` means local\ncapacity only.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "upstream_kind": {
+            "description": "``sie`` or ``openai``: the kind of upstream a remote profile calls.\n``null`` without one.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
         "type": "object"
       },
       "ModelsResponse": {

@@ -1601,6 +1601,9 @@
                 "type": "null"
               }
             ]
+          },
+          "routing": {
+            "$ref": "#/components/schemas/ModelRouting"
           }
         },
         "type": "object",
@@ -1642,6 +1645,44 @@
         ],
         "title": "ModelLoadError",
         "description": "Diagnostic detail for a recorded load failure.\n\nSurfaced in :class:`ModelInfo` when the registry has a sticky\nfailure for the model. Attributes mirror the server-side\n:class:`sie_server.core.load_errors.LoadFailure`."
+      },
+      "ModelRouting": {
+        "properties": {
+          "policy": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "remote_only",
+                  "fallback",
+                  "threshold"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Policy"
+          },
+          "upstream_kind": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "sie",
+                  "openai"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Upstream Kind"
+          }
+        },
+        "type": "object",
+        "title": "ModelRouting",
+        "description": "How the bare model name is served."
       },
       "ModelsListResponse": {
         "properties": {
