@@ -136,24 +136,27 @@ def paired(a: dict, b: dict) -> dict:
 
 
 def usd_per_1m_chars(arm: dict, data: dict, rows_dir: Path, chars: int, tokens: dict) -> dict | None:
+    """Real-time price per million characters of the sample, and the results.json figure it must equal.
+
+    Every arm is priced at a rate a synchronous request pays. The LLMs are at their list price per token;
+    their batch tiers are not used. Comprehend is at its cheapest volume tier, which is a real-time rate.
+    """
     price = arm.get("price")
     if price is None:
         return None
     if price["unit"] == "sie_input_tokens":
         usd = tokens[arm["model"]] * price["usd_per_1m"] / 1e6
-        return {"list": usd / chars * 1e6, "cheapest": usd / chars * 1e6}
+        return {"realtime": usd / chars * 1e6, "published_key": "list"}
     if price["unit"] == "characters":
-        units = sum(-(-len(r["text"]) // 100) for rows in data.values() for r in rows)
-        return {"list": units * price["usd_per_100_chars"] / chars * 1e6,
-                "cheapest": price["cheapest_usd_per_100_chars"] / 100 * 1e6}  # fmt: skip
+        return {"realtime": price["cheapest_usd_per_100_chars"] / 100 * 1e6, "published_key": "cheapest"}
     tin = tout = 0
     for set_name in data:
         for record in load_jsonl(rows_dir / f"{set_name}.jsonl"):
             tin += record["tokens_in"]
             tout += record["tokens_out"]
     usd = (tin * price["usd_per_1m_in"] + tout * price["usd_per_1m_out"]) / 1e6
-    cheapest = usd * price.get("batch_factor", 1.0)
-    return {"list": usd / chars * 1e6, "cheapest": cheapest / chars * 1e6, "tokens_in": tin, "tokens_out": tout}
+    output_only = tout * price["usd_per_1m_out"] / 1e6
+    return {"realtime": usd / chars * 1e6, "published_key": "list", "output_only": output_only / chars * 1e6}
 
 
 def close(a: float, b: float) -> bool:
@@ -180,9 +183,10 @@ def main() -> int:
 
     arms = manifest["arms"]
     scored: dict[str, dict] = {}
+    costs: dict[str, dict | None] = {}
     mismatches = []
     print(f"{len(sets)} sets, {sum(len(v) for v in data.values())} sentences, {gold} gold entities\n")
-    print(f"{'arm':34} {'F1':>6} {'P':>6} {'R':>6} {'macro':>6} {'not in text':>11} {'$/1M chars':>11}")
+    print(f"{'arm':34} {'F1':>6} {'P':>6} {'R':>6} {'macro':>6} {'not in text':>11} {'$ per 1M chars, real-time':>26}")
     for arm in arms:
         rows_dir = EVIDENCE / "rows" / arm["id"]
         if args.rows is not None and arm["id"] == OURS:
@@ -199,9 +203,10 @@ def main() -> int:
         macro = sum(per_set.values()) / len(per_set)
         ungrounded = sum(x[3] for rows in c.values() for x in rows)
         cost = usd_per_1m_chars(arm, data, rows_dir, chars, tokens)
-        cost_text = f"{cost['cheapest']:.4f}" if cost else "-"
+        cost_text = f"{cost['realtime']:.4f}" if cost else "self-hosted"
+        costs[arm["id"]] = cost
         print(f"{arm['name']:34} {pooled['f1']:6.3f} {pooled['precision']:6.3f} {pooled['recall']:6.3f} "
-              f"{macro:6.3f} {ungrounded:11d} {cost_text:>11}")  # fmt: skip
+              f"{macro:6.3f} {ungrounded:11d} {cost_text:>26}")  # fmt: skip
         if args.rows is not None and arm["id"] == OURS:
             continue
         published = results["arms"][arm["study_arm"]]
@@ -214,9 +219,20 @@ def main() -> int:
                 f"{arm['name']} strings not in the text: {ungrounded}, published {published['ungrounded']}"
             )
         if cost is not None:
-            for key in ("list", "cheapest"):
-                if not close(cost[key], published["usd_per_1m_chars"][key]):
-                    mismatches.append(f"{arm['name']} ${key}/1M chars: {cost[key]}, published")
+            want = published["usd_per_1m_chars"][cost["published_key"]]
+            if not close(cost["realtime"], want):
+                mismatches.append(f"{arm['name']} $ per 1M chars: {cost['realtime']} here, {want} published")
+
+    base = costs[OURS]["realtime"]
+    print("\nReal-time price as a multiple of SIE GLiNER BioMed Large's:")
+    for arm in arms:
+        cost = costs[arm["id"]]
+        if arm["id"] == OURS or cost is None:
+            continue
+        line = f"  {arm['name']:32} {cost['realtime'] / base:7.1f}x"
+        if "output_only" in cost:
+            line += f"   output tokens alone {cost['output_only'] / base:.1f}x"
+        print(line)
 
     ours = scored[OURS]
     print(f"\nSIE GLiNER BioMed Large minus each arm, pooled F1 points, 95% interval ({BOOTSTRAP} paired resamples):")

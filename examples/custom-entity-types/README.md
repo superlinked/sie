@@ -23,22 +23,23 @@ as a false positive.
 The sample is 652 test sentences, 2,468 gold entities, about 350 per set, drawn
 with a fixed seed. The protocol was registered before the first request.
 
-| Arm | Exact-span F1 | Price per 1M characters, cheapest case |
+| Arm | Exact-span F1 | Price per 1M characters, real-time |
 |---|---|---|
 | SIE GLiNER BioMed Large | 65.7% | $0.030 |
 | SIE GLiNER Multi | 55.2% | $0.024 |
-| GPT-6 Luna | 66.1% | $0.167 |
-| GPT-6 Sol | 74.3% | $3.276 |
-| Claude Haiku 4.5 | 63.3% | $2.742 |
+| GPT-6 Luna | 66.1% | $0.335 |
+| GPT-6 Sol | 74.3% | $6.553 |
+| Claude Haiku 4.5 | 63.3% | $5.485 |
 | SIE Qwen3.8 27B | 54.3% | $1.342 |
 | AWS Comprehend | 39.0% | $0.250 |
 | spaCy en_core_web_trf | 35.0% | self-hosted |
 
-Prices are list prices on the tokens and characters each arm used, with the
-LLMs at their Batch API rate where one exists and Comprehend at its cheapest
-volume tier. GLiNER BioMed Large has no published SIE Cloud rate yet; it is
-priced at $0.15 per million input tokens, a proposed rate, and `score.py`
-reads it from `manifest.json`.
+Every price is one a synchronous request pays, on the tokens and characters
+each arm used: the LLMs at their list price per token, AWS Comprehend at its
+cheapest volume tier, SIE at its per-token rate. OpenAI and Anthropic also sell
+a batch tier; it is not used here. GLiNER BioMed Large has no published SIE
+Cloud rate yet, so it is priced at a proposed $0.15 per million input tokens,
+which `score.py` reads from `manifest.json`.
 
 GLiNER BioMed Large is a general GLiNER checkpoint despite its name: it won a
 screen of 19 GLiNER-family models on the sets' dev splits, at a threshold of 0.8
@@ -93,10 +94,20 @@ python3 score.py --rows run-output
 ## What result to expect
 
 `score.py` prints every arm's F1, precision, recall, macro average over the seven
-sets, the strings not found in the text and the price, then the paired
+sets, the strings not found in the text and the real-time price, then each
+arm's price as a multiple of SIE's (and, for the LLMs, what their output tokens
+alone cost), then the paired
 differences against SIE's GLiNER arm, and ends with:
 
 ```
+Real-time price as a multiple of SIE GLiNER BioMed Large's:
+  SIE GLiNER Multi                     0.8x
+  GPT-6 Luna                          11.2x   output tokens alone 6.5x
+  GPT-6 Sol                          218.8x   output tokens alone 125.6x
+  Claude Haiku 4.5                   183.1x   output tokens alone 78.6x
+  SIE Qwen3.8 27B                     44.8x   output tokens alone 37.6x
+  AWS Comprehend                       8.3x
+
 SIE GLiNER BioMed Large minus each arm, pooled F1 points, 95% interval (2000 paired resamples):
   SIE GLiNER Multi                  +10.5  [+8.0, +13.2]
   GPT-6 Luna                         -0.4  [-2.7, +2.0]
