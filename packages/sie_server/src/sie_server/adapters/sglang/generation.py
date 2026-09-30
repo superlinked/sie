@@ -62,6 +62,10 @@ from sie_server.types.inputs import ImageInput, VideoInput, media_bytes
 
 logger = logging.getLogger(__name__)
 
+# Pixels per visual token for the Qwen3.x vision encoders SGLang serves here: a
+# 16-pixel patch merged 2x2, so one token covers 32x32 pixels.
+_MERGED_PATCH_PIXELS = 32 * 32
+
 # HTTP timeout knobs for /generate. The worker-side admission/cancel layer is
 # the source of truth for total request lifetime, so the streaming read timeout
 # is disabled by default (``read=None`` — keep reading as long as bytes arrive).
@@ -655,6 +659,29 @@ class SGLangGenerationAdapter(GenerationAdapter):
     def reasoning_parser(self) -> str | None:
         """Return the child parser used to separate private reasoning output."""
         return self._reasoning_parser
+
+    @property
+    def image_token_budget(self) -> int | None:
+        """Return the most visual tokens one image can expand to on this launch.
+
+        Read from the profile's ``--mm-process-config`` ``image.max_pixels``: a
+        Qwen3.x vision encoder emits one token per merged 32x32 patch, so the
+        bound is ``ceil(max_pixels / 1024)``. ``None`` when the launch sets no
+        image bound, and the worker falls back to its family-wide estimate.
+        """
+        args = self._extra_launch_args
+        if "--mm-process-config" not in args:
+            return None
+        index = args.index("--mm-process-config")
+        if index + 1 >= len(args):
+            return None
+        try:
+            max_pixels = json.loads(args[index + 1]).get("image", {}).get("max_pixels")
+        except (json.JSONDecodeError, AttributeError):
+            return None
+        if not isinstance(max_pixels, int) or max_pixels <= 0:
+            return None
+        return math.ceil(max_pixels / _MERGED_PATCH_PIXELS)
 
     def _compat_pythonpath_entries(self) -> tuple[str, ...]:
         """Return trusted compatibility paths for the SGLang child.

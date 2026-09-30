@@ -286,12 +286,26 @@ _MAX_IMAGES_PER_REQUEST = 16
 # admission reservation. The chat template renders each image as a short
 # placeholder, but the vision encoder expands it into many tokens (Qwen-VL:
 # up to ~1280 at max_pixels). Exact counts need the image dimensions + the
-# model's vision tokenizer, which we don't have at this layer. Qwen SGLang
-# profiles cap preprocessing at 1280 visual tokens, so this value is both a
-# conservative reservation and a hard upper bound for the image-capable
-# generation family. Under-counting risks a context-window overflow and
-# admission over-admit.
+# model's vision tokenizer, which we don't have at this layer. Most Qwen SGLang
+# profiles cap preprocessing at 1280 visual tokens, so this value is the
+# family-wide floor. A profile that reads pages at a higher resolution declares
+# it through ``--mm-process-config`` and the adapter reports the larger bound
+# (``image_token_budget``); see ``_vision_tokens_per_image``. Under-counting
+# risks a context-window overflow and admission over-admit.
 _VISION_TOKENS_PER_IMAGE_ESTIMATE = 1280
+
+
+def _vision_tokens_per_image(adapter: object) -> int:
+    """Visual tokens to reserve per image for this adapter's launch.
+
+    Never below the family-wide estimate, so a profile that reads images at a
+    lower resolution keeps today's conservative reservation.
+    """
+    budget = getattr(adapter, "image_token_budget", None)
+    if isinstance(budget, int) and not isinstance(budget, bool) and budget > _VISION_TOKENS_PER_IMAGE_ESTIMATE:
+        return budget
+    return _VISION_TOKENS_PER_IMAGE_ESTIMATE
+
 
 # Hard ceiling on a single decoded image's bytes. Bounds worker memory on the
 # decode path even for the direct-queue caller that bypasses the gateway's
@@ -2041,7 +2055,7 @@ class StreamingProcessor:
         # Include the coarse per-image token estimate so vision requests
         # reserve KV budget proportional to their real (placeholder-expanded)
         # footprint instead of just the short placeholder text.
-        image_reserve = (len(request_images) if request_images else 0) * _VISION_TOKENS_PER_IMAGE_ESTIMATE
+        image_reserve = (len(request_images) if request_images else 0) * _vision_tokens_per_image(adapter)
         image_reserve += (len(request_videos) if request_videos else 0) * _VISION_TOKENS_PER_VIDEO_ESTIMATE
         reserve_tokens = estimate_tokens_from_chars(prompt_str) + params.max_new_tokens + image_reserve
         effective_budget = budget_override if budget_override is not None else self._kv_budget_tokens
@@ -3685,7 +3699,7 @@ class StreamingProcessor:
         # in ``prompt`` tokenizes to a handful of text tokens but expands to
         # many tokens at inference. Add a coarse per-image estimate so the
         # guard fires before SGLang overflows its context window.
-        image_tokens = num_images * _VISION_TOKENS_PER_IMAGE_ESTIMATE + num_videos * _VISION_TOKENS_PER_VIDEO_ESTIMATE
+        image_tokens = num_images * _vision_tokens_per_image(adapter) + num_videos * _VISION_TOKENS_PER_VIDEO_ESTIMATE
         input_tokens = prompt_tokens + image_tokens
         image_note = f" + ~image_tokens ({image_tokens})" if image_tokens else ""
         if adapter.context_length_accounting == "independent":

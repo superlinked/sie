@@ -265,3 +265,28 @@ def test_qwen38_h100_batch_grammar_requests_stay_on_the_batch_launch() -> None:
         resolve_grammar_serving_model(registry, f"{_MODEL_ID}:h100-256k-batch-no-spec")
         == f"{_MODEL_ID}:h100-256k-batch-no-spec"
     )
+
+
+def test_qwen38_reads_pages_at_document_resolution_with_compact_json() -> None:
+    import json
+
+    from sie_server.adapters.sglang.generation import SGLangGenerationAdapter
+    from sie_server.processors.streaming import _vision_tokens_per_image
+
+    config = load_model_config(_MODEL_PATH)
+    for name in config.profiles:
+        args = config.resolve_profile(name).loadtime["extra_launch_args"]
+        assert args.count("--mm-process-config") == 1, name
+        image = json.loads(args[args.index("--mm-process-config") + 1])["image"]
+        assert image == {"min_pixels": 65536, "max_pixels": 3211264}, name
+        assert args.count("--constrained-json-disable-any-whitespace") == 1, name
+
+        adapter = SGLangGenerationAdapter.__new__(SGLangGenerationAdapter)
+        adapter._extra_launch_args = list(args)
+        assert adapter.image_token_budget == 3136, name
+        assert _vision_tokens_per_image(adapter) == 3136, name
+
+    # The bare route still fits one full-resolution page and the model's whole
+    # output cap in its 8K window.
+    assert config.tasks.generate is not None
+    assert 3136 + config.tasks.generate.max_output_tokens < config.tasks.generate.context_length
