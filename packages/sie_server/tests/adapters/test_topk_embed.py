@@ -330,6 +330,14 @@ class TestImages:
         torch.testing.assert_close(weight.sum(0), torch.ones(24))
         assert adapter._grid_inputs((1, 4, 6))[0] is index
 
+    def test_the_grid_cache_is_bounded_and_keeps_the_most_recently_used(self, adapter: TopkEmbedAdapter) -> None:
+        with patch("sie_server.adapters.topk_embed.adapter._GRID_CACHE_SIZE", 2):
+            first = adapter._grid_inputs((1, 4, 6))[0]
+            adapter._grid_inputs((1, 4, 8))
+            assert adapter._grid_inputs((1, 4, 6))[0] is first  # a hit makes (1, 4, 6) the most recent
+            adapter._grid_inputs((1, 6, 6))  # evicts (1, 4, 8), the least recently used
+        assert list(adapter._grid_cache) == [(1, 4, 6), (1, 6, 6)]
+
 
 class TestSmartResize:
     def test_page_fits_the_default_budget(self) -> None:

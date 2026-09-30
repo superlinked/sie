@@ -39,6 +39,7 @@ import logging
 import math
 import threading
 import time
+from collections import OrderedDict
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -99,6 +100,9 @@ _REMOTE_CODE_CONFIG_KEYS = ("architectures", "auto_map", "model_type", "transfor
 _IMAGE_MESSAGE = [{"role": "user", "content": [{"type": "image"}]}]
 # theta of transformers 5.9's Qwen3_5VisionRotaryEmbedding, the table the checkpoints were trained on.
 _VISION_ROPE_THETA = 10000.0
+# Page grids whose vision position inputs stay cached (up to about 280 KB each):
+# pages of repeated sizes hit the cache, and the least recently used grid goes first.
+_GRID_CACHE_SIZE = 256
 # Threads decoding, resizing and patchifying the pages of one request.
 _PREPROCESS_WORKERS = 4
 # flash-linear-attention tunes some kernels again as a batch grows: its short convolution
@@ -245,7 +249,9 @@ class TopkEmbedAdapter(BaseAdapter):
         self._pixel_scale = 1.0
         self._pixel_bias = 0.0
         self._num_grid_per_side = 0
-        self._grid_cache: dict[tuple[int, int, int], tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
+        self._grid_cache: OrderedDict[tuple[int, int, int], tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = (
+            OrderedDict()
+        )
         # transformers' output recorder patches module forwards during each call;
         # serialize forwards so concurrent requests cannot race it.
         self._forward_lock = threading.Lock()
@@ -845,6 +851,7 @@ class TopkEmbedAdapter(BaseAdapter):
         """Bilinear position-embedding indices and weights, and rotary (row, col) per patch."""
         cached = self._grid_cache.get(thw)
         if cached is not None:
+            self._grid_cache.move_to_end(thw)
             return cached
         t, h, w = thw
         merge, side = self._merge_size, self._num_grid_per_side
@@ -882,6 +889,8 @@ class TopkEmbedAdapter(BaseAdapter):
             .reshape(-1)
         )
         entry = (index[:, perm], weight[:, perm].to(self._dtype), torch.stack((row, col), dim=-1).repeat(t, 1))
+        if len(self._grid_cache) >= _GRID_CACHE_SIZE:
+            self._grid_cache.popitem(last=False)
         self._grid_cache[thw] = entry
         return entry
 
