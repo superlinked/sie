@@ -60,7 +60,10 @@ def main() -> None:
     }
     texts = [p for field in prompts.values() for group in field for p in group]
 
-    client = SIEClient(api_key=os.environ["SIE_API_KEY"], base_url="https://api.superlinked.com")
+    api_key = os.environ.get("SIE_API_KEY")
+    if not api_key:
+        raise SystemExit("Set SIE_API_KEY to your SIE Cloud key (sk-sie-...). score.py needs no key.")
+    client = SIEClient(api_key=api_key, base_url="https://api.superlinked.com")
     image = {"data": args.photo.read_bytes(), "format": "png" if args.photo.suffix.lower() == ".png" else "jpeg"}
     vecs = client.encode(MODEL, [{"images": [image]}, *[{"text": t} for t in texts]])
     mat = np.array([v["dense"] for v in vecs], dtype=np.float64)

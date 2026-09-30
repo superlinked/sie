@@ -39,12 +39,16 @@ FILES = f"https://huggingface.co/datasets/{DATASET}/resolve/{REVISION}"
 # happened to arrive.
 REQUIRED = (
     "sets.json",
-    "dev.json",
-    "test.json",
     "page-evidence.json",
     "maps/rekognition-amendment1.json",
     "answers/rekognition.json.gz",
+    "answers/gpt-6-luna@1024.json.gz",
+    "answers/gpt-5.4-mini@1024.json.gz",
+    "answers/gpt-5.4-mini@512.json.gz",
+    "answers/claude-haiku-4-5@1024.json.gz",
+    "answers/gpt-5.4-nano@512.json.gz",
     "scores/sie-siglip-so400m-patch14-384.json.gz",
+    "scores/sie-siglip-so400m-patch14-224.json.gz",
 )
 
 
