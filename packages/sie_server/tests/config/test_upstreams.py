@@ -6,6 +6,7 @@ import logging
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 from sie_server.config.upstreams import (
     Upstream,
     UpstreamConfigError,
@@ -32,10 +33,10 @@ def test_a_valid_file_defines_both_kinds(tmp_path: Path) -> None:
         "  team-sie:\n"
         "    kind: sie\n"
         "    base_url: https://sie.example.internal/\n"
-        "    api_key_secret: TEAM_SIE_KEY\n" + RATE_CAP + "  local-openai:\n"
+        "    api_key_secret: TEAM_SIE_KEY\n"
+        "    proxy_url: http://proxy.example.internal:3128\n" + RATE_CAP + "  local-openai:\n"
         "    kind: openai\n"
-        "    base_url: http://127.0.0.1:8000/v1\n"
-        "    proxy_url: http://proxy.example.internal:3128\n" + RATE_CAP,
+        "    base_url: http://127.0.0.1:8000/v1\n" + RATE_CAP,
     )
 
     upstreams = load_upstreams(path)
@@ -45,7 +46,7 @@ def test_a_valid_file_defines_both_kinds(tmp_path: Path) -> None:
     assert upstreams["team-sie"].base_url == "https://sie.example.internal"
     assert upstreams["team-sie"].rate_cap.max_concurrency == 32
     assert upstreams["local-openai"].api_key_secret is None
-    assert upstreams["local-openai"].proxy_url == "http://proxy.example.internal:3128"
+    assert upstreams["team-sie"].proxy_url == "http://proxy.example.internal:3128"
 
 
 def test_an_empty_file_defines_no_upstream(tmp_path: Path) -> None:
@@ -80,11 +81,28 @@ def test_tls_or_loopback_urls_are_accepted(url: str) -> None:
         ("ftp://sie.example.internal", "http or https"),
         ("https:///v1", "name a host"),
         ("https://sie.example.internal:99999", "not a valid URL"),
+        ("https://sie.example.internal /v1", "printable ASCII"),
+        ("https://sie.example.internal/v1\t", "printable ASCII"),
+        ("https://h\u00e9.example", "punycode"),
+        ("http://[::1%25eth0]:8080", "percent-encode the host"),
+        ("https://sie%2eexample.internal", "percent-encode the host"),
     ],
 )
 def test_unsafe_urls_are_rejected(url: str, reason: str) -> None:
     with pytest.raises(UpstreamConfigError, match=reason):
         validate_upstream_url(url)
+
+
+def test_a_proxy_is_refused_for_a_plain_http_upstream() -> None:
+    with pytest.raises(ValidationError, match="proxy_url requires an https base_url"):
+        Upstream.model_validate(
+            {
+                "kind": "sie",
+                "base_url": "http://localhost:8080",
+                "proxy_url": "http://proxy.example:3128",
+                "rate_cap": {"requests_per_minute": 60, "max_concurrency": 4},
+            }
+        )
 
 
 def test_a_proxy_may_be_plain_http_but_never_carries_credentials() -> None:
@@ -178,6 +196,14 @@ def test_the_credential_is_read_by_reference_when_needed(monkeypatch: pytest.Mon
 
     with pytest.raises(UpstreamCredentialError, match="TEAM_SIE_KEY is not set"):
         upstream.api_key()
+
+    monkeypatch.setenv("TEAM_SIE_KEY", f"{CANARY}\n")
+    assert upstream.api_key() == CANARY, "the newline a secret file ends with is not part of the credential"
+
+    monkeypatch.setenv("TEAM_SIE_KEY", f"{CANARY}\r\ninjected: header")
+    with pytest.raises(UpstreamCredentialError, match="holds characters a credential cannot contain") as raised:
+        upstream.api_key()
+    assert CANARY not in str(raised.value)
 
     monkeypatch.setenv("TEAM_SIE_KEY", CANARY)
     assert upstream.api_key() == CANARY
