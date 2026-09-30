@@ -25,7 +25,13 @@ rustls = { version = "0.23", default-features = false, features = ["ring"] }
 tokio-tungstenite = "0.29"
 futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `preserve_order` keeps JSON object keys in the order the caller sent them.
+# Request bodies are parsed into `serde_json::Value` and re-serialised for the
+# worker, and a `json_schema` grammar's property order decides the order a
+# constrained decoder generates fields in (reason-before-answer schemas depend
+# on it). Hashes and generated files that must be canonical sort explicitly via
+# `canonical_json`.
+serde_json = { version = "1", features = ["preserve_order"] }
 serde_yaml = "0.9"
 clap = { version = "4", features = ["derive", "env"] }
 tracing = "0.1"

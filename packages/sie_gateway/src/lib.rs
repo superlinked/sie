@@ -11,6 +11,7 @@
 //! Everything here is a plain re-declaration of the binary's modules;
 //! no lib-only code lives in this file.
 
+pub mod canonical_json;
 pub mod config;
 pub mod discovery;
 pub mod endpoint;

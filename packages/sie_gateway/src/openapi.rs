@@ -16,6 +16,9 @@ static OPENAPI_DOC: LazyLock<utoipa::openapi::OpenApi> = LazyLock::new(|| {
 static OPENAPI_JSON: LazyLock<String> = LazyLock::new(|| {
     let mut value = serde_json::to_value(&*OPENAPI_DOC).expect("OpenAPI document should serialize");
     apply_gateway_openapi_overrides(&mut value);
+    // Keep the published spec's key order stable and sorted, independent of
+    // serde_json's `preserve_order` insertion order.
+    let value = crate::canonical_json::sorted(&value);
     serde_json::to_string_pretty(&value).expect("OpenAPI document should serialize") + "\n"
 });
 

@@ -2074,7 +2074,12 @@ impl ModelRegistry {
             return String::new();
         }
 
-        let serialized = serde_json::to_string(&items).unwrap_or_default();
+        // Sort every object's keys before hashing. The outer maps here are
+        // `BTreeMap`s, but `adapter_options` and nested values keep their
+        // source order under serde_json's `preserve_order`; the config
+        // service hashes with `sort_keys=True`, and the shared conformance
+        // vectors pin that canonical form.
+        let serialized = crate::canonical_json::to_sorted_string(&serde_json::Value::Array(items));
         let mut hasher = Sha256::new();
         hasher.update(serialized.as_bytes());
         let digest = hasher.finalize();
@@ -5832,6 +5837,68 @@ profiles:
                 .expect("changed expected hash")
         );
         assert_ne!(first, second);
+    }
+
+    /// serde_json keeps insertion order in this crate (`preserve_order`),
+    /// so the bundle config hash must sort keys itself. Writing the shared
+    /// conformance vector with every object's keys reversed must still
+    /// produce the cross-language expected hash.
+    #[test]
+    fn test_compute_bundle_config_hash_ignores_source_key_order() {
+        fn reverse_keys(value: &serde_json::Value) -> serde_json::Value {
+            match value {
+                serde_json::Value::Object(map) => {
+                    let mut out = serde_json::Map::new();
+                    for (key, child) in map.iter().rev() {
+                        out.insert(key.clone(), reverse_keys(child));
+                    }
+                    serde_json::Value::Object(out)
+                }
+                serde_json::Value::Array(items) => {
+                    serde_json::Value::Array(items.iter().map(reverse_keys).collect())
+                }
+                other => other.clone(),
+            }
+        }
+
+        let vector: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../conformance/bundle_config_hash/serving_artifact_expanded_profile_vector.json"
+        ))
+        .expect("valid shared serving-artifact hash vector");
+        let bundle_id = vector["bundle_id"].as_str().expect("bundle id");
+        let mut model = vector["model"].clone();
+        *model
+            .pointer_mut(
+                "/profiles/default/adapter_options/loadtime/serving_artifact/manifest_sha256",
+            )
+            .expect("manifest pointer") = vector["manifest_sha256"]["initial"].clone();
+        let expected = vector["expected_hash"]["initial"]
+            .as_str()
+            .expect("initial expected hash");
+
+        let mut hashes = Vec::new();
+        for model in [model.clone(), reverse_keys(&model)] {
+            let (_dir, bundles_dir, models_dir) = create_test_dirs();
+            fs::write(
+                bundles_dir.join(format!("{bundle_id}.yaml")),
+                serde_json::to_vec(&reverse_keys(&vector["bundle"])).expect("serialize bundle"),
+            )
+            .unwrap();
+            let encoded = serde_json::to_vec(&model).expect("serialize model vector");
+            fs::write(models_dir.join("derived.yaml"), &encoded).unwrap();
+            let registry = ModelRegistry::new(&bundles_dir, &models_dir, true);
+            hashes.push((
+                String::from_utf8(encoded).unwrap(),
+                registry.compute_bundle_config_hash(bundle_id),
+            ));
+        }
+
+        assert_ne!(
+            hashes[0].0, hashes[1].0,
+            "the reordered model file must differ byte-for-byte"
+        );
+        assert_eq!(hashes[0].1, expected);
+        assert_eq!(hashes[1].1, expected);
     }
 
     #[test]
