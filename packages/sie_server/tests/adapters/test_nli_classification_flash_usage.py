@@ -8,17 +8,20 @@ same tokenizer called on one pair at a time, so they never see padding.
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import torch
 from sie_server.adapters.nli_classification_flash import NLIClassificationFlashAdapter
-from sie_server.core.extract_cost import MAX_EXTRACT_LABELS
+from sie_server.core.extract_cost import MAX_EXTRACT_LABELS, adapter_extract_item_costs, build_extract_prepared_items
+from sie_server.core.loader import load_model_configs
 from sie_server.types.inputs import InvalidInputError, Item
 from tokenizers import Tokenizer, models, pre_tokenizers, processors
 from transformers import PreTrainedTokenizerFast
 
 _MAX_LENGTH = 32
+_MODELS_DIR = Path(__file__).resolve().parents[2] / "models"
 _TEMPLATE = "This text is about {}."
 _WORDS = [
     "this",
@@ -158,3 +161,49 @@ def test_flash_adapter_refuses_more_labels_than_the_extract_limit() -> None:
 
     with pytest.raises(InvalidInputError, match=f"at most {MAX_EXTRACT_LABELS} labels"):
         adapter.extract([Item(text="i was charged twice")], labels=_labels(MAX_EXTRACT_LABELS + 1))
+
+
+def test_batch_cost_counts_every_row_an_item_runs() -> None:
+    adapter = NLIClassificationFlashAdapter("test-model", hypothesis_template=_TEMPLATE, max_length=_MAX_LENGTH)
+    texts = ["i was charged twice", "the app crashes on startup"]
+    labels = ["bug", "billing", "feature request"]
+
+    costs = adapter.extract_item_costs([Item(text=text) for text in texts], labels=labels)
+
+    assert costs == [sum(len(text) + len(_TEMPLATE) + len(label) for label in labels) for text in texts]
+    custom = adapter.extract_item_costs(
+        [Item(text=texts[0])], labels=labels, options={"hypothesis_template": "It is {}"}
+    )
+    assert custom == [sum(len(texts[0]) + len("It is {}") + len(label) for label in labels)]
+
+
+def test_batch_cost_caps_each_row_at_the_window() -> None:
+    adapter = NLIClassificationFlashAdapter("test-model", max_length=_MAX_LENGTH)
+    long_text = "the app crashes on startup " * 200
+
+    (cost,) = adapter.extract_item_costs([Item(text=long_text)], labels=["bug", "billing"]) or [0]
+
+    assert cost == 2 * _MAX_LENGTH * 4
+
+
+def test_batch_cost_splits_many_label_items_the_character_count_would_pack() -> None:
+    config = load_model_configs(_MODELS_DIR)["MoritzLaurer/deberta-v3-large-zeroshot-v2.0"]
+    budget = config.profiles["default"].max_batch_tokens
+    adapter = NLIClassificationFlashAdapter("test-model")
+    items = [Item(text="I still have not received my new card, I ordered over a week ago.") for _ in range(16)]
+    labels = [f"intent number {index}" for index in range(77)]
+
+    default = build_extract_prepared_items(items)
+    paired = build_extract_prepared_items(items, item_costs=adapter_extract_item_costs(adapter, items, labels=labels))
+
+    assert sum(item.cost for item in default) <= budget
+    assert sum(item.cost for item in paired) > budget
+    assert paired[0].cost == 77 * default[0].cost + sum(len("This text is about {}.") + len(label) for label in labels)
+
+
+def test_batch_cost_defers_to_extract_for_requests_it_refuses() -> None:
+    adapter = NLIClassificationFlashAdapter("test-model")
+    items = [Item(text="i was charged twice")]
+
+    assert adapter.extract_item_costs(items, labels=None) is None
+    assert adapter.extract_item_costs(items, labels=_labels(MAX_EXTRACT_LABELS + 1)) is None

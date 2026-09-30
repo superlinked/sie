@@ -23,6 +23,8 @@ logger = logging.getLogger(__name__)
 
 _ERR_REQUIRES_LABELS = "Zero-shot classification requires labels parameter."
 _ERR_TOO_MANY_LABELS = f"Zero-shot classification requests may carry at most {MAX_EXTRACT_LABELS} labels"
+# Characters per token assumed when sizing a (text, hypothesis) row for batching.
+_COST_CHARS_PER_TOKEN = 4
 
 
 class NLIClassificationFlashAdapter(FlashBaseAdapter):
@@ -152,6 +154,37 @@ class NLIClassificationFlashAdapter(FlashBaseAdapter):
         if not item.text:
             raise ValueError(ERR_REQUIRES_TEXT.format(adapter_name="NLIClassificationFlashAdapter"))
         return item.text
+
+    def extract_item_costs(
+        self,
+        items: list[Item],
+        *,
+        labels: list[str] | None = None,
+        output_schema: dict[str, Any] | None = None,
+        instruction: str | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> list[int] | None:
+        """Batching cost per item: the characters of every (text, hypothesis) row it runs.
+
+        The model reads an item's text once per label, next to that label's
+        hypothesis, so the default per-item character count undercounts a
+        request by its label count and lets the batcher pack many-label items
+        into one oversized forward. Each row is capped at the characters the
+        window holds. Runs before batching and validation; best-effort, never
+        raises (malformed requests fail in extract()).
+        """
+        _ = output_schema, instruction
+        try:
+            if not labels or len(labels) > MAX_EXTRACT_LABELS:
+                return None
+            template = (options or {}).get("hypothesis_template", self._hypothesis_template)
+            if not isinstance(template, str):
+                template = self._hypothesis_template
+            limit = self._max_length * _COST_CHARS_PER_TOKEN
+            hypotheses = [len(template) + len(label) for label in labels if isinstance(label, str)]
+            return [sum(min(len(item.text or "") + chars, limit) for chars in hypotheses) for item in items]
+        except Exception:  # noqa: BLE001 -- a cost estimate must never fail a request
+            return None
 
     def extract(
         self,
