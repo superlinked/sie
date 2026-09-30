@@ -87,10 +87,14 @@ offsets, so every occurrence of a returned string is masked. Three of GPT-6
 Luna's 660 replies did not parse and count as no masks.
 
 The windows are there because each GLiNER-family model reads about 384 words
-per request, and the server this run was recorded against said nothing when it
-stopped ([#446](https://github.com/superlinked/sie/issues/446)). Each SIE model
-alone, one request per document with no floor: GLiNER PII 82.1%, NuNER Zero
-62.7%.
+per request, and the server this run was recorded against read only the first
+384 and said nothing when it stopped
+([#446](https://github.com/superlinked/sie/issues/446)). So the study split
+documents over 300 words in the client. A server with the fix for #446 reads a
+long document whole, in overlapping windows of its own; `run.py` still sends
+the client-side windows, so it reproduces the recorded requests. Each SIE
+model alone, one request per document with no floor: GLiNER PII 82.1%, NuNER
+Zero 62.7%.
 
 ### Price inputs
 
