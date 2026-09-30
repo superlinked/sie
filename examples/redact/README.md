@@ -45,8 +45,8 @@ spans it masks completely. The metric was fixed before the first request on
 | Arm | Masked (of 1,792) | Coverage recall | 95% interval | States and countries excused | $ a month, 1M documents |
 | --- | --- | --- | --- | --- | --- |
 | SIE, two models composed | 1,591 | 88.8% | 86.7% to 90.9% | 90.5% | $32 |
-| Claude Haiku 4.5 | 1,490 | 83.1% | 80.8% to 85.2% | 92.6% | $1,450 |
-| GPT-6 Luna | 1,448 | 80.8% | 78.2% to 83.1% | 93.2% | $113 |
+| Claude Haiku 4.5 | 1,490 | 83.1% | 80.8% to 85.2% | 92.6% | $725 |
+| GPT-6 Luna | 1,448 | 80.8% | 78.2% to 83.1% | 93.2% | $57 |
 | OpenAI Privacy Filter | 1,214 | 67.7% | 64.3% to 71.0% | 69.8% | $23 (self-hosted, L4) |
 | Microsoft Presidio | 859 | 47.9% | 45.0% to 50.8% | 49.6% | $3 (self-hosted, CPU) |
 | AWS Comprehend | not measured | | | | $351 |
@@ -107,9 +107,10 @@ For 1,000,000 documents a month like these, list prices read on 30 September
 - **AWS Comprehend `DetectPiiEntities`:** $0.000025 per 100-character unit,
   its cheapest tier, 3-unit minimum per request, units counted as characters
   over 100 with no rounding up.
-- **LLMs:** the tokens each provider reported for the run, at $0.10 and $0.50
-  (GPT-6 Luna) and $1 and $5 (Claude Haiku 4.5) per million input and output
-  tokens.
+- **LLMs:** the tokens each provider reported for the run, at each vendor's
+  Batch API price, their cheapest: $0.05 and $0.25 (GPT-6 Luna) and $0.50 and
+  $2.50 (Claude Haiku 4.5) per million input and output tokens. At standard
+  prices they cost twice that: $113 and $1,450.
 - **Presidio and Privacy Filter** are free to download, so their price is the
   compute: Modal list price per second (L4 $0.000222, a core $0.0000131, a GiB
   $0.00000222), divided by 75% utilisation and times 1.75 for region, at the

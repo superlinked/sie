@@ -128,8 +128,9 @@ SIE_TOKENS = {FIRST_MODEL: 238_605, SECOND_MODEL: 227_727}
 COMPREHEND_PER_UNIT = 0.000025
 COMPREHEND_MIN_UNITS = 3
 COMPREHEND_CHARS_PER_UNIT = 100
-# LLMs: $ per 1M input and output tokens, times the tokens each provider reported for the run.
-LLM_PRICES = {"llm:gpt-6-luna": (0.10, 0.50), "llm:claude-haiku-4-5": (1.00, 5.00)}
+# LLMs: $ per 1M input and output tokens, times the tokens each provider reported for the run, at each
+# vendor's Batch API price, half of list and its cheapest (list: GPT-6 Luna $0.10/$0.50, Claude Haiku 4.5 $1/$5).
+LLM_PRICES = {"llm:gpt-6-luna": (0.05, 0.25), "llm:claude-haiku-4-5": (0.50, 2.50)}
 # Self-hosted arms: Modal list price per second of the container, at the throughput measured in
 # results/e2_results.json, divided by 75% utilisation and times 1.75 for region.
 L4_PER_S = 0.000222
@@ -146,8 +147,8 @@ PUBLISHED_MONTHLY_USD = {
     COMPOSITION: 32,
     "presidio": 3,
     "privacy-filter": 23,
-    "llm:gpt-6-luna": 113,
-    "llm:claude-haiku-4-5": 1450,
+    "llm:gpt-6-luna": 57,
+    "llm:claude-haiku-4-5": 725,
     COMPREHEND: 351,
 }
 
