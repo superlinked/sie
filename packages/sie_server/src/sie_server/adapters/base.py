@@ -495,6 +495,19 @@ class ModelAdapter(ABC):
         """
         return None
 
+    def max_concurrent_dispatch(self) -> int:
+        """Return how many batches the worker may run through this adapter at once.
+
+        The default of 1 keeps the worker's single-batch dispatch: one forward
+        pass at a time on the inference thread. An adapter whose inference runs
+        in an out-of-process engine with its own continuous batching (SGLang)
+        can return more, so a batch that waits on its longest sequence does not
+        hold back every request queued behind it. The worker only honours
+        values above 1 for adapters without LoRA support, because LoRA
+        selection is adapter-global state.
+        """
+        return 1
+
     # -------------------------------------------------------------------------
     # LoRA Support (optional - adapters opt-in by overriding these methods)
     # -------------------------------------------------------------------------
