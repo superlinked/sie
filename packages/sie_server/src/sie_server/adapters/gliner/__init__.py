@@ -18,6 +18,13 @@ Joint entity-relation ("relex") models also extract relations between the
 entities they find when a request names relation types in
 ``options["relation_labels"]``. Without it they return entities only.
 
+GLiNER reads at most ``max_len`` words of a text at once (384 for most
+checkpoints). A longer document is read whole, as overlapping windows of words
+(see ``_word_window.document_windows``); the spans found in them are mapped
+back to the document and merged, and its input tokens are counted once each.
+A document needing more than ``_word_window.MAX_DOCUMENT_WINDOWS`` windows
+returns a per-item ``INPUT_TOO_LONG`` error rather than being read in part.
+
 A request's labels and relation types, which GLiNER encodes with every
 document and does not bill, may have at most 128 characters each and take at
 most ``max_prompt_tokens`` tokens together (default 1024); a longer prompt is
@@ -40,16 +47,28 @@ from sie_server.adapters._prompt_limit import (
 )
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_REQUIRES_TEXT, ComputePrecision
-from sie_server.adapters._word_window import bound_gliner_words, plan_forwards
+from sie_server.adapters._word_window import (
+    MAX_DOCUMENT_WINDOWS,
+    bound_gliner_words,
+    gliner_windows,
+    merge_window_spans,
+    plan_forwards,
+    window_item_counts,
+    window_rows,
+)
 from sie_server.core.extract_cost import MAX_EXTRACT_LABELS
-from sie_server.core.inference_output import ExtractOutput
+from sie_server.core.inference_output import ExtractItemError, ExtractOutput
 from sie_server.types.inputs import InvalidInputError, Item
-from sie_server.types.responses import Entity, Relation
+from sie_server.types.responses import Entity, ErrorCode, Relation
 
 # Error messages
 _ERR_REQUIRES_LABELS = "GLiNER requires labels parameter for extraction"
 _ERR_REQUIRES_NON_BLANK_TEXT = "GLiNER requires non-blank text for extraction"
 _ERR_PROMPT_EXHAUSTS_DOCUMENT = "GLiNER label prompt leaves no document tokens for extraction"
+_ERR_TOO_MANY_WINDOWS = (
+    f"GLiNER reads a document in at most {MAX_DOCUMENT_WINDOWS} windows of words; "
+    "split this document into shorter items"
+)
 # Joint entity-relation models score every ordered pair of entity candidates
 # inside the forward pass, so memory grows with the square of the candidate
 # count. Candidates are the spans above the entity threshold, which a caller
@@ -253,10 +272,16 @@ class GLiNERAdapter(BaseAdapter):
         if any(not text.strip() for text in texts):
             raise InvalidInputError(_ERR_REQUIRES_NON_BLANK_TEXT)
 
-        # Meter the exact post-word-truncation document window before GPU work.
+        # A document longer than the model's word window is read as several
+        # overlapping windows, each a row of its own (see ``_word_window.gliner_windows``).
+        plans = gliner_windows(self._model, texts)
+        rows, owners, overlaps = window_rows(texts, plans)
+
+        # Meter the exact post-word-truncation windows before GPU work.
         # Besides producing the authoritative terminal counts, this rejects a
         # finite-tokenizer prompt that leaves no represented document subword.
-        input_token_counts, row_tokens = self._meter(texts, labels, relation_labels)
+        row_counts, row_tokens = self._meter(rows, labels, relation_labels, overlaps) if rows else ([], [])
+        input_token_counts = window_item_counts(row_counts, owners, len(texts))
 
         # Get options with fallback to model defaults
         effective_threshold = self._validate_threshold(opts.get("threshold", self._threshold), "threshold")
@@ -284,16 +309,41 @@ class GLiNERAdapter(BaseAdapter):
 
         # Use batch prediction for efficiency (24x speedup vs single item loop)
         with torch.inference_mode():
-            batch_entities, batch_relations = self._inference(
-                texts,
-                labels,
-                row_tokens,
-                returns_relations=bool(relation_labels),
-                threshold=effective_threshold,
-                flat_ner=effective_flat_ner,
-                multi_label=effective_multi_label,
-                **relation_kwargs,
+            row_entities, row_relations = (
+                self._inference(
+                    rows,
+                    labels,
+                    row_tokens,
+                    returns_relations=bool(relation_labels),
+                    threshold=effective_threshold,
+                    flat_ner=effective_flat_ner,
+                    multi_label=effective_multi_label,
+                    **relation_kwargs,
+                )
+                if rows
+                else ([], [] if relation_labels else None)
             )
+
+        item_rows: list[list[int]] = [[] for _ in texts]
+        for position, owner in enumerate(owners):
+            item_rows[owner].append(position)
+        batch_entities: list[list[Any]] = []
+        batch_relations: list[list[Any]] | None = [] if row_relations is not None else None
+        for text, windows, positions in zip(texts, plans, item_rows, strict=True):
+            batch_entities.append(
+                []
+                if windows is None
+                else merge_window_spans(
+                    windows,
+                    [row_entities[position] for position in positions],
+                    text,
+                    flat_ner=bool(effective_flat_ner),
+                    multi_label=bool(effective_multi_label),
+                )
+            )
+            if batch_relations is not None and row_relations is not None:
+                found = [relation for position in positions for relation in row_relations[position] or []]
+                batch_relations.append(_best_relations(found) if len(positions) > 1 else found)
 
         # Convert to our format
         all_entities = []
@@ -322,7 +372,17 @@ class GLiNERAdapter(BaseAdapter):
                 raise ValueError("GLiNER returned relations for a different number of items")
             all_relations = [self._format_relations(relations) for relations in batch_relations]
 
-        return ExtractOutput(entities=all_entities, relations=all_relations, input_token_counts=input_token_counts)
+        errors = None
+        if any(windows is None for windows in plans):
+            errors = [
+                None
+                if windows is not None
+                else ExtractItemError(code=ErrorCode.INPUT_TOO_LONG.value, message=_ERR_TOO_MANY_WINDOWS)
+                for windows in plans
+            ]
+        return ExtractOutput(
+            entities=all_entities, relations=all_relations, errors=errors, input_token_counts=input_token_counts
+        )
 
     def _check_prompt(self, labels: list[str], relation_labels: list[str]) -> None:
         """Reject a request whose labels and relation types take more than ``max_prompt_tokens``.
@@ -441,14 +501,17 @@ class GLiNERAdapter(BaseAdapter):
         labels: list[str],
         relation_labels: list[str] | None = None,
     ) -> list[int] | None:
-        """Count the document subwords represented by GLiNER's real processor (see ``_meter``)."""
-        return self._meter(texts, labels, relation_labels)[0]
+        """Count the document subwords of each text GLiNER reads, over all its windows (see ``_meter``)."""
+        plans = gliner_windows(self._model, texts)
+        rows, owners, overlaps = window_rows(texts, plans)
+        return window_item_counts(self._meter(rows, labels, relation_labels, overlaps)[0], owners, len(texts))
 
     def _meter(
         self,
         texts: list[str],
         labels: list[str],
         relation_labels: list[str] | None = None,
+        overlaps: list[int | None] | None = None,
     ) -> tuple[list[int] | None, list[int] | None]:
         """Count the document subwords represented by GLiNER's real processor, and each row's tokens.
 
@@ -470,6 +533,12 @@ class GLiNERAdapter(BaseAdapter):
         are of the window gliner reads. The second list holds every row's
         attended tokens (prompt included), for planning forward passes.
         Both are None when the processor cannot be metered.
+
+        ``overlaps[i]`` is None for a row holding the start of a document, or
+        the number of words row ``i`` shares with the window before it (see
+        ``_word_window.document_windows``). Such a row counts neither its
+        special tokens nor the subwords of those words, so a document read in
+        several windows counts each of its tokens once, as if read in one row.
         """
         processor = getattr(self._model, "data_processor", None)
         prepare_inputs = getattr(self._model, "prepare_inputs", None)
@@ -504,6 +573,8 @@ class GLiNERAdapter(BaseAdapter):
                     entity_mappings = raw_batch["classes_to_id"]
                     encoded = processor.tokenize_inputs(retained_words, entity_mappings)
                 for batch_index in range(len(retained_words)):
+                    overlap = overlaps[start + batch_index] if overlaps is not None else None
+                    skip = overlap or 0
                     word_ids = encoded.word_ids(batch_index)
                     attention_mask = encoded["attention_mask"][batch_index].tolist()
                     words_mask = encoded["words_mask"][batch_index].tolist()
@@ -531,8 +602,12 @@ class GLiNERAdapter(BaseAdapter):
                         sum(
                             bool(attended)
                             and (
-                                word_id is None
-                                or (first_document_word_id is not None and word_id >= first_document_word_id)
+                                (word_id is None and overlap is None)
+                                or (
+                                    first_document_word_id is not None
+                                    and word_id is not None
+                                    and word_id >= first_document_word_id + skip
+                                )
                             )
                             for attended, word_id in zip(attention_mask, word_ids)
                         )
@@ -608,6 +683,16 @@ class GLiNERAdapter(BaseAdapter):
         if item.text is None:
             raise InvalidInputError(ERR_REQUIRES_TEXT.format(adapter_name="GLiNER adapter"))
         return item.text
+
+
+def _best_relations(relations: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Relations found in several windows of a document, each (head, tail, relation) once at its highest score."""
+    best: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for relation in relations:
+        key = (relation["head"]["text"], relation["tail"]["text"], relation["relation"])
+        if key not in best or relation["score"] > best[key]["score"]:
+            best[key] = relation
+    return list(best.values())
 
 
 def _cap_relation_candidates(model: Any, limit: int) -> None:
