@@ -209,6 +209,58 @@ def test_load_drops_is_embedding(
     assert child_env["PYTHONPATH"].split(os.pathsep)[0] == str(expected_compat_dir)
 
 
+@pytest.mark.parametrize("digits", [None, 19])
+@patch("sie_server.adapters.sglang._server.subprocess.Popen")
+@patch("sie_server.adapters.sglang._server.requests.get")
+@patch("sie_server.adapters.sglang._server.find_free_port")
+def test_load_passes_json_number_max_digits_to_the_child(
+    mock_find_port: MagicMock,
+    mock_requests_get: MagicMock,
+    mock_popen: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+    digits: int | None,
+) -> None:
+    monkeypatch.delenv("SIE_SGLANG_JSON_NUMBER_MAX_DIGITS", raising=False)
+    mock_find_port.return_value = 30005
+    mock_process = MagicMock()
+    mock_process.poll.return_value = None
+    mock_popen.return_value = mock_process
+    mock_requests_get.return_value = MagicMock(status_code=200)
+    adapter = SGLangGenerationAdapter(
+        model_name_or_path="Qwen/Qwen3-4B-Instruct",
+        grammar_backend="xgrammar",
+        json_number_max_digits=digits,
+    )
+
+    adapter.load("cuda:0")
+
+    child_env = mock_popen.call_args.kwargs["env"]
+    if digits is None:
+        assert "SIE_SGLANG_JSON_NUMBER_MAX_DIGITS" not in child_env
+    else:
+        assert child_env["SIE_SGLANG_JSON_NUMBER_MAX_DIGITS"] == "19"
+
+
+@pytest.mark.parametrize(
+    ("digits", "backend", "message"),
+    [
+        (0, "xgrammar", "positive integer"),
+        (-1, "xgrammar", "positive integer"),
+        (True, "xgrammar", "positive integer"),
+        ("19", "xgrammar", "positive integer"),
+        (19, "outlines", "needs grammar_backend 'xgrammar'"),
+        (19, None, "needs grammar_backend 'xgrammar'"),
+    ],
+)
+def test_json_number_max_digits_rejects_unusable_settings(digits: object, backend: str | None, message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        SGLangGenerationAdapter(
+            model_name_or_path="Qwen/Qwen3-4B-Instruct",
+            grammar_backend=backend,
+            json_number_max_digits=digits,  # type: ignore[arg-type]
+        )
+
+
 @patch("sie_server.adapters.sglang._server.subprocess.Popen")
 @patch("sie_server.adapters.sglang._server.requests.get")
 @patch("sie_server.adapters.sglang._server.find_free_port")

@@ -168,6 +168,22 @@ def _resolve_profile_startup_timeout(declared: float | None, *, tensor_parallel_
     return _server.resolve_startup_timeout(declared)
 
 
+_JSON_NUMBER_MAX_DIGITS_ENV = "SIE_SGLANG_JSON_NUMBER_MAX_DIGITS"
+
+
+def _validate_json_number_max_digits(value: Any, grammar_backend: str | None) -> int | None:
+    """Return a usable JSON number digit bound, or None when the profile sets none."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        msg = f"json_number_max_digits must be a positive integer, got {value!r}"
+        raise ValueError(msg)
+    if grammar_backend != "xgrammar":
+        msg = f"json_number_max_digits bounds XGrammar's JSON grammars and needs grammar_backend 'xgrammar', got {grammar_backend!r}"
+        raise ValueError(msg)
+    return value
+
+
 def _mamba_strategy_value(extra_launch_args: list[str], flag: str) -> str | None:
     """Return the value passed to the mamba strategy ``flag``, or ``None``.
 
@@ -486,9 +502,17 @@ class SGLangGenerationAdapter(GenerationAdapter):
         # "decide from the width", or off at every width for an adapter whose
         # profiles were sized on an engine that never captured it.
         disable_piecewise_cuda_graph: bool | None = None,
+        # Upper bound on the digits a JSON-schema grammar lets a number carry,
+        # in its integer part and in its fraction. XGrammar leaves both
+        # unbounded, so a greedy decode that starts repeating a digit runs to
+        # ``max_new_tokens``. None keeps the backend's unbounded numbers; the
+        # bound needs the ``xgrammar`` backend, which the child's sitecustomize
+        # patches.
+        json_number_max_digits: int | None = None,
         **kwargs: Any,  # accept extra args from loader for compatibility
     ) -> None:
         _ = kwargs
+        self._json_number_max_digits = _validate_json_number_max_digits(json_number_max_digits, grammar_backend)
         self._model_name_or_path = str(model_name_or_path)
         self._max_seq_length = max_seq_length
         self._mem_fraction_static = mem_fraction_static
@@ -865,6 +889,8 @@ class SGLangGenerationAdapter(GenerationAdapter):
         # auto-imports sitecustomize from PYTHONPATH during child startup.
         extra_env["PYTHONPATH"] = os.pathsep.join(self._compat_pythonpath_entries())
         extra_env["SIE_SGLANG_MM_PROCESS_CONFIG_COMPAT"] = "1"
+        if self._json_number_max_digits is not None:
+            extra_env[_JSON_NUMBER_MAX_DIGITS_ENV] = str(self._json_number_max_digits)
         logger.warning(
             "Resolved SGLang generation command: %s",
             " ".join(shlex.quote(str(arg)) for arg in cmd),

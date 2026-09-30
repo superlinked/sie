@@ -24,6 +24,10 @@ inputs:
 # also compiles JSON-schema grammars without free whitespace, so greedy
 # decoding cannot pad a reply with indentation or run to the output cap in
 # spaces.
+# Every profile also bounds each JSON number to 19 integer and 19 fractional
+# digits (``json_number_max_digits``). XGrammar leaves digit runs unbounded, so
+# a greedy decode that starts repeating a digit (``8214263.0000...``) ran to
+# the output cap on 2 of 30 page-image extractions on the batch profile.
 tasks:
   generate:
     # Keep the bare route conservative. Native context is exposed only through
@@ -70,6 +74,7 @@ profiles:
         disable_cuda_graph: true
         attention_backend: flashinfer
         grammar_backend: xgrammar
+        json_number_max_digits: 19
         tool_call_parser: qwen3_coder
         speculative:
           enabled: false
@@ -121,6 +126,7 @@ profiles:
         served_model_name: Qwen/Qwen3.8-27B-FP8
         attention_backend: fa3
         grammar_backend: xgrammar
+        json_number_max_digits: 19
         tool_call_parser: qwen3_coder
         extra_env:
           SIE_SGLANG_SINGLE_IMAGE_MAX_PIXELS: "3211264"
@@ -172,6 +178,7 @@ profiles:
         served_model_name: Qwen/Qwen3.8-27B-FP8
         attention_backend: fa3
         grammar_backend: xgrammar
+        json_number_max_digits: 19
         tool_call_parser: qwen3_coder
         extra_env:
           SIE_SGLANG_SINGLE_IMAGE_MAX_PIXELS: "3211264"
@@ -222,6 +229,7 @@ profiles:
         served_model_name: Qwen/Qwen3.8-27B-FP8
         attention_backend: fa3
         grammar_backend: xgrammar
+        json_number_max_digits: 19
         tool_call_parser: qwen3_coder
         extra_env:
           SIE_SGLANG_SINGLE_IMAGE_MAX_PIXELS: "3211264"
@@ -287,6 +295,7 @@ profiles:
         served_model_name: Qwen/Qwen3.8-27B-FP8
         attention_backend: fa3
         grammar_backend: xgrammar
+        json_number_max_digits: 19
         reasoning_parser: qwen3
         tool_call_parser: qwen3_coder
         extra_env:
@@ -352,6 +361,7 @@ profiles:
         served_model_name: Qwen/Qwen3.8-27B-FP8
         attention_backend: fa3
         grammar_backend: xgrammar
+        json_number_max_digits: 19
         tool_call_parser: qwen3_coder
         extra_env:
           SIE_SGLANG_SINGLE_IMAGE_MAX_PIXELS: "3211264"
@@ -403,6 +413,7 @@ profiles:
         served_model_name: Qwen/Qwen3.8-27B-FP8
         attention_backend: fa3
         grammar_backend: xgrammar
+        json_number_max_digits: 19
         tool_call_parser: qwen3_coder
         extra_env:
           SIE_SGLANG_SINGLE_IMAGE_MAX_PIXELS: "3211264"
@@ -450,6 +461,7 @@ profiles:
         served_model_name: Qwen/Qwen3.8-27B-FP8
         attention_backend: flashinfer
         grammar_backend: xgrammar
+        json_number_max_digits: 19
         tool_call_parser: qwen3_coder
         extra_env:
           SIE_SGLANG_SINGLE_IMAGE_MAX_PIXELS: "3211264"
@@ -499,6 +511,7 @@ profiles:
         served_model_name: Qwen/Qwen3.8-27B-FP8
         attention_backend: flashinfer
         grammar_backend: xgrammar
+        json_number_max_digits: 19
         tool_call_parser: qwen3_coder
         extra_env:
           SIE_SGLANG_SINGLE_IMAGE_MAX_PIXELS: "3211264"

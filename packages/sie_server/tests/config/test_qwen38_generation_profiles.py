@@ -299,3 +299,14 @@ def test_qwen38_reads_one_page_at_document_resolution_with_compact_json() -> Non
 
     # The bare route still fits one full-resolution page and the whole output cap.
     assert 3136 + output_cap < window
+
+
+def test_qwen38_json_grammars_bound_number_digits() -> None:
+    # XGrammar's unbounded digit runs let a temperature-0 decode loop to the
+    # output cap; every launch, including each grammar twin, bounds them.
+    config = load_model_config(_MODEL_PATH)
+
+    for name in config.profiles:
+        profile = config.resolve_profile(name)
+        assert profile.loadtime["grammar_backend"] == "xgrammar", name
+        assert profile.loadtime["json_number_max_digits"] == 19, name
