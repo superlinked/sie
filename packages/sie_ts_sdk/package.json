@@ -28,10 +28,7 @@
       }
     }
   },
-  "files": [
-    "dist",
-    "README.md"
-  ],
+  "files": ["dist", "README.md"],
   "scripts": {
     "build": "tsup",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.type-tests.json",
@@ -48,15 +45,7 @@
   "engines": {
     "node": ">=22.0.0"
   },
-  "keywords": [
-    "embeddings",
-    "vector",
-    "search",
-    "inference",
-    "reranking",
-    "colbert",
-    "maxsim"
-  ],
+  "keywords": ["embeddings", "vector", "search", "inference", "reranking", "colbert", "maxsim"],
   "author": "SIE Team",
   "license": "MIT",
   "repository": {
