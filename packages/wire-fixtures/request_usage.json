@@ -2,6 +2,7 @@
   "usage_container": "usage",
   "terminal_unit_fields": [
     "audio_ms",
+    "content_input_tokens",
     "images",
     "input_tokens",
     "output_tokens",

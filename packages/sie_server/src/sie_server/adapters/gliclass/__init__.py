@@ -154,12 +154,20 @@ _ERR_ITEM_LABELS_TRUNCATED = (
     "Shorten the document, or send options.overflow_policy='truncate_text'."
 )
 # Models that read the labels first (``prompt_first``) cut the document to the
-# room the label prompt and instruction leave. An item is refused unless its
-# document keeps at least this many tokens, rather than scored without it.
-_MIN_DOCUMENT_TOKENS = 1
+# room the label prompt and instruction leave. Under the default overflow
+# policy an item is refused unless that room holds at least this many tokens,
+# rather than scored without its document. The room is counted on the parts
+# tokenized apart; a token or two can merge where the instruction meets the
+# document, so the floor is the fit check's margin rather than one token.
+_MIN_DOCUMENT_TOKENS = _FIT_MARGIN_TOKENS
 _ERR_ITEM_NO_ROOM_FOR_DOCUMENT = (
     "The labels leave no room for the document in the gliclass model's max sequence length, "
     "so the model would not read it. Send fewer or shorter labels."
+)
+_ERR_ITEM_DOCUMENT_TOO_LONG = (
+    "The document does not fit whole in the gliclass model's max sequence length next to the labels "
+    "({observed} tokens, at most {limit}), and options.overflow_policy is 'error'. Shorten the document, "
+    "or send options.overflow_policy='truncate_text'."
 )
 _ERR_ITEM_DOCUMENT_TOO_SPARSE = (
     "The part of the document the gliclass model reads spans more than {limit} characters, too many to "
@@ -673,8 +681,7 @@ class GLiClassAdapter(BaseAdapter):
         prompt: str | None = None,
         examples: list[dict[str, Any]] | None = None,
         tokens: _RequestTokens | None = None,
-        indices: list[int] | None = None,
-    ) -> list[str]:
+    ) -> tuple[list[str], list[str | None]]:
         """Enforce overflow_policy by pre-tokenizing text and label_prompt separately.
 
         The model sees ``observed = text_tokens + label_prompt_tokens +
@@ -689,17 +696,22 @@ class GLiClassAdapter(BaseAdapter):
         - ``default`` returns texts unchanged (upstream as-is — may crash inside
           the model; ``_overflow_errors_as_input_too_long`` in ``extract`` is
           the defense-in-depth backstop).
-        - ``error`` raises ``InputTooLongError`` (whole batch fails, no partial
-          responses).
+        - ``error`` fails each item whose document does not fit whole with an
+          ``INPUT_TOO_LONG`` message; the other items run. One call can hold
+          several callers' requests with the same labels and options, so one
+          document never fails another caller's items, and no message names
+          an item index.
         - ``truncate_text`` slices text to
           ``budget = max_sequence_length - label_prompt_tokens - special_count``.
 
         Under ``truncate_text`` and ``error``, ``label_prompt`` alone exceeding
-        the cap always raises. ``indices`` gives each text's item index for
-        error messages when ``texts`` is a subset of the items.
+        the cap always raises: every request in the call shares the labels.
+
+        Returns the texts to encode and, per text, why it fails (or None).
         """
+        failures: list[str | None] = [None] * len(texts)
         if policy == "default":
-            return texts
+            return texts, failures
 
         if self._pipe is None or self._tokenizer is None or self._max_seq_length is None:
             raise RuntimeError(ERR_NOT_LOADED)
@@ -723,20 +735,16 @@ class GLiClassAdapter(BaseAdapter):
                 new_texts.append(text)
                 continue
             if policy == "error":
-                index = i if indices is None else indices[i]
                 if text in tokens.shortened and tokens.visible_tokens is not None:
                     # Only a prefix of this document was tokenized.
-                    text_tokens = tokens.visible_tokens
-                    counts = f"observed_tokens>={text_tokens + overhead}"
-                    text_count = f"text>={text_tokens}"
+                    observed_count = f"at least {tokens.visible_tokens + overhead}"
                 else:
-                    counts, text_count = f"observed_tokens={observed}", f"text={text_tokens}"
-                raise InputTooLongError(
-                    f"items[{index}] {counts} exceeds max_sequence_length ({self._max_seq_length}) "
-                    f"({text_count}, label_prompt={label_prompt_tokens}, special={self._special_count})"
-                )
+                    observed_count = str(observed)
+                failures[i] = _ERR_ITEM_DOCUMENT_TOO_LONG.format(observed=observed_count, limit=self._max_seq_length)
+                new_texts.append(text)
+                continue
             new_texts.append(self._tokenizer.decode(text_ids[:budget], skip_special_tokens=True))
-        return new_texts
+        return new_texts, failures
 
     def extract(
         self,
@@ -837,11 +845,14 @@ class GLiClassAdapter(BaseAdapter):
             )
 
         texts = [tokens.visible(text) or text for text in texts]
-        texts = self._apply_overflow_policy(
+        texts, overflows = self._apply_overflow_policy(
             texts, normalized_labels, overflow_policy, prompt=prompt, examples=examples, tokens=tokens
         )
         layout = self._request_layout(normalized_labels, prompt, examples, tokens)
-        failures = self._item_failures(texts, layout, normalized_labels, prompt, examples, tokens=tokens)
+        failures = self._item_failures(
+            texts, layout, normalized_labels, prompt, examples, tokens=tokens, overflow_policy=overflow_policy
+        )
+        failures = [overflow or failure for overflow, failure in zip(overflows, failures, strict=True)]
         fits = [failure is None for failure in failures]
         input_token_counts = self._input_token_counts(texts, prompt, examples, layout, fits, tokens=tokens)
         errors = self._item_errors(failures)
@@ -1234,17 +1245,19 @@ class GLiClassAdapter(BaseAdapter):
                     overflow=overflow_policy != "default",
                 )
             row_examples = group_examples[group] if group_examples is not None else None
-            row_texts = self._apply_overflow_policy(
+            row_texts, row_overflows = self._apply_overflow_policy(
                 [cast("str", texts[index]) for index in alive],
                 group_labels,
                 overflow_policy,
                 prompt=prompt,
                 examples=row_examples,
                 tokens=tokens,
-                indices=alive,
             )
             layout = self._request_layout(group_labels, prompt, row_examples, tokens)
-            row_failures = self._item_failures(row_texts, layout, group_labels, prompt, row_examples, tokens=tokens)
+            row_failures = self._item_failures(
+                row_texts, layout, group_labels, prompt, row_examples, tokens=tokens, overflow_policy=overflow_policy
+            )
+            row_failures = [overflow or failure for overflow, failure in zip(row_overflows, row_failures, strict=True)]
             row_counts = self._input_token_counts(
                 row_texts, prompt, row_examples, layout, [True] * len(alive), tokens=tokens
             )
@@ -1854,14 +1867,19 @@ class GLiClassAdapter(BaseAdapter):
         examples: list[dict[str, Any]] | None,
         *,
         tokens: _RequestTokens | None = None,
+        overflow_policy: OverflowPolicy = DEFAULT_OVERFLOW_POLICY,
     ) -> list[str | None]:
         """Why each item cannot be scored as sent (an ``INPUT_TOO_LONG`` message), or None.
 
         A model that reads the labels first keeps every label and cuts the
         document to the room left after the label prompt and instruction.
-        When that room is under ``_MIN_DOCUMENT_TOKENS``, the model would read
-        none of the document, so every item is refused. Otherwise a longer
-        document is cut, as ``truncate_text`` would cut it.
+        Under the default overflow policy, when that room is under
+        ``_MIN_DOCUMENT_TOKENS`` the model might read none of the document,
+        so every item is refused. Otherwise a longer document is cut, as
+        ``truncate_text`` would cut it. ``truncate_text`` and ``error`` have
+        already cut or checked each document against the room, and refused
+        the request when the labels leave none (see
+        ``_apply_overflow_policy``).
 
         A model that reads the document first keeps the document and loses
         the labels past the window, so an item is refused when its document
@@ -1876,8 +1894,8 @@ class GLiClassAdapter(BaseAdapter):
         if layout is None or self._tokenizer is None:
             return [None] * len(texts)
         if layout.prompt_first:
-            failure = None if layout.document_room >= _MIN_DOCUMENT_TOKENS else _ERR_ITEM_NO_ROOM_FOR_DOCUMENT
-            return [failure] * len(texts)
+            no_room = overflow_policy == "default" and layout.document_room < _MIN_DOCUMENT_TOKENS
+            return [_ERR_ITEM_NO_ROOM_FOR_DOCUMENT if no_room else None] * len(texts)
         tokens = tokens or _RequestTokens(self._tokenizer)
         failures: list[str | None] = []
         for text, ids in zip(texts, tokens.cut(texts, layout.window + _FIT_MARGIN_TOKENS), strict=True):

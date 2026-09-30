@@ -544,6 +544,11 @@ class UnitCounts(msgspec.Struct):
     audio_ms: int | None = None
     # Additive tail field: never insert before the four legacy positional slots.
     pairs: int | None = None
+    # Score only: the part of ``input_tokens`` that is the caller's own text
+    # (query, post-truncation document, and a supplied instruction, each
+    # tokenized alone), excluding prompt-template tokens. Never above
+    # ``input_tokens``. Additive tail field, like ``pairs``.
+    content_input_tokens: int | None = None
 
 
 class ItemOutcome(msgspec.Struct):

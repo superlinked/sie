@@ -880,6 +880,10 @@ pub struct UnitCounts {
     /// preserve the legacy positional MessagePack field order.
     #[serde(default)]
     pub pairs: Option<u64>,
+    /// Score only: the part of `input_tokens` that is the caller's own text,
+    /// excluding prompt-template tokens. Never above `input_tokens`.
+    #[serde(default)]
+    pub content_input_tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -127,6 +127,8 @@ export interface TimingInfo {
 export interface RequestUsage {
   inputTokens?: number;
   pairs?: number;
+  /** Caller-content tokens of a score request (query, documents, supplied instruction). */
+  contentInputTokens?: number;
   images?: number;
   pages?: number;
   outputTokens?: number;
@@ -416,6 +418,20 @@ export interface ScoreUsage {
   inputTokens: number;
   /** Images processed across query-document pairs */
   images?: number;
+  /** Content/template breakdown of `inputTokens`, when the reranker reports it */
+  inputTokensDetails?: ScoreInputTokensDetails;
+}
+
+/**
+ * Breakdown of score input tokens.
+ */
+export interface ScoreInputTokensDetails {
+  /**
+   * Caller text inside the scored pairs (query, post-truncation document and a
+   * supplied instruction, each tokenized alone). The rest of `inputTokens` is
+   * the reranker's prompt template.
+   */
+  contentTokens: number;
 }
 
 /**
@@ -778,7 +794,13 @@ export interface SIEClientOptions {
   timeout?: number;
   /** Default GPU type for all requests (e.g., "l4", "a100-80gb") */
   gpu?: string;
-  /** API key for authentication (sent as Bearer token) */
+  /**
+   * API key for authentication (sent as Bearer token). When omitted, the
+   * `SIE_API_KEY` environment variable is used only if the base URL has the
+   * same origin as `SIE_BASE_URL` (including when the base URL itself comes
+   * from `SIE_BASE_URL`); with a `controlPlaneUrl` on another origin the key
+   * must be passed explicitly. Pass `""` to send no credential.
+   */
   apiKey?: string;
   /**
    * Default for whether the SDK waits out transient "no capacity yet"

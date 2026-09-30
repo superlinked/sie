@@ -52,7 +52,9 @@ therefore kept rare and short:
 - at most one recording at a time in the process, across all models; a
   forward that finds another recording in progress runs eagerly;
 - no recording while less than a tenth of the device's memory is free;
-- a runner records at most 16 graphs at once, then one per 2 seconds.
+- a runner has a budget of 16 recordings that refills at one every 2
+  seconds: it records at most 16 graphs in quick succession, one after
+  another, then about one every 2 seconds.
 
 The forward that records a graph is answered by its first replay.
 
@@ -83,9 +85,10 @@ states are scored before the next replay. Only the recording thread's forward
 is diverted while a graph records; the diversion is per thread, so an eager
 forward of the same model on another thread runs unchanged. Anything
 unsupported, larger than the token bound, or whose shape failed to record runs
-eagerly. A shape whose recording or first replay fails for any reason but
-memory is not recorded again, and after three such shapes the runner turns
-graphs off for the process. The scoring head is not part of that count: it
+eagerly. A recording or first replay that runs out of memory drops every
+graph and pauses recording for a minute. A shape whose recording or first
+replay fails for any reason but memory is not recorded again, and after three
+such shapes the runner turns graphs off for the process. The scoring head is not part of that count: it
 reads the forward's own inputs, so its errors fail that forward alone, as they
 would eagerly. The runner
 counts every forward it is offered (``CudaGraphStats``) and logs the counts
@@ -132,9 +135,10 @@ _EXACT_RECORD_AT = 2
 # about twice the GPU time per token, so their graphs hold half as many.
 _MAX_GRAPH_TOKENS = 2048
 _WIDE_ENCODER_HIDDEN_SIZE = 768
-# A runner may record this many graphs at once, then one per this many
-# seconds, however its forwards repeat: recording costs a forward's launches,
-# and while it runs the allocator cannot free cached memory for other models.
+# A runner's recording budget: this many recordings, refilled at one per this
+# many seconds, however its forwards repeat. Recordings still run one at a time
+# (``_RECORDING_LOCK``): recording costs a forward's launches, and while it runs
+# the allocator cannot free cached memory for other models.
 _RECORDING_BURST = 16
 _SECONDS_PER_RECORDING = 2.0
 # After a recording runs out of memory, the runner records nothing for this long.
@@ -438,14 +442,17 @@ class CudaGraphRunner:
                 return None, "recording_failed"
             # The graph answers the forward that recorded it, replayed before
             # the budget check below can drop it. Its first replay is part of
-            # recording it: a failure other than memory runs the forward
-            # eagerly and the graph is not kept.
+            # recording it, and the graph is not kept if it fails. Running out
+            # of memory drops the graphs and pauses recording, as it does
+            # while recording, and the error reaches the forward's
+            # out-of-memory recovery; any other failure runs the forward
+            # eagerly.
             try:
                 hidden = self._replay_graph(key, entry, inputs)
             except Exception as exc:
+                self._recording_failed(key, exc)
                 if is_oom_error(exc):
                     raise
-                self._recording_failed(key, exc)
                 return None, "recording_failed"
             self._keep(key, entry, input_ids.device)
             self.stats.recorded += 1

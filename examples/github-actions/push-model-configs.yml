@@ -54,6 +54,7 @@ jobs:
         shell: bash
         env:
           SIE_ADMIN_TOKEN: ${{ secrets.SIE_ADMIN_TOKEN }}
+          SIE_GATEWAY_TOKEN: ${{ secrets.SIE_GATEWAY_TOKEN }}
         run: |
           set -euo pipefail
 
@@ -135,12 +136,16 @@ jobs:
 
             echo "::group::Poll gateway readiness for ${model_id}"
             local deadline=$(( $(date +%s) + READINESS_TIMEOUT_SECONDS ))
+            local gateway_auth=()
+            if [ -n "${SIE_GATEWAY_TOKEN:-}" ]; then
+              gateway_auth=(--header "Authorization: Bearer ${SIE_GATEWAY_TOKEN}")
+            fi
             while : ; do
               local snap http
               snap="$(mktemp)"
               http="$(curl --silent --show-error \
                 --output "$snap" --write-out '%{http_code}' \
-                --header "Authorization: Bearer ${SIE_ADMIN_TOKEN}" \
+                "${gateway_auth[@]}" \
                 "${SIE_GATEWAY_URL%/}/v1/configs/models/${model_id}/status")"
               if [ "$http" = "200" ]; then
                 if python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));sys.exit(0 if d.get("all_bundles_acked") else 1)' "$snap"; then

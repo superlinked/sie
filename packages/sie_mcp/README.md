@@ -322,6 +322,10 @@ Enable the edge:
 Replace the example `v0.7.1` image tag below with the SIE release you want
 to deploy.
 
+The edge Ingress carries connector secrets and OAuth tokens, so the chart
+requires TLS for it. This example issues the certificate with cert-manager
+(installed in the cluster) and Let's Encrypt:
+
 ```bash
 helm upgrade sie deploy/helm/sie-cluster -n sie --reuse-values \
   --set mcpEdge.enabled=true \
@@ -330,8 +334,18 @@ helm upgrade sie deploy/helm/sie-cluster -n sie --reuse-values \
   --set mcpEdge.existingSecretName=sie-mcp-connector-secrets \
   --set mcpEdge.publicUrl=https://mcp.example.com \
   --set mcpEdge.ingress.enabled=true \
-  --set mcpEdge.ingress.host=mcp.example.com
+  --set mcpEdge.ingress.host=mcp.example.com \
+  --set ingress.tlsConfig.enabled=true \
+  --set ingress.tlsConfig.mode=cert-manager \
+  --set ingress.tlsConfig.certManager.email=ops@example.com
 ```
+
+To use a certificate you manage instead, create a `kubernetes.io/tls` Secret
+named `<release fullname>-mcp-tls` (for example `sie-mcp-tls`) and set only
+`ingress.tlsConfig.enabled=true`. When TLS terminates in front of the Ingress,
+set `ingress.tlsConfig.mode=disabled`. `mcpEdge.ingress.allowPlaintext=true`
+serves the edge over plain HTTP, which exposes connector secrets and OAuth
+tokens on the network; use it only on a private network.
 
 For an external gateway instead of the in-cluster gateway, add:
 

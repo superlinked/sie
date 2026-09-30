@@ -15,6 +15,7 @@ from typing import Any
 
 import torch
 
+from sie_server.adapters._packed_rope import packed_rope_available, rotate_packed_qkv_
 from sie_server.adapters._utils import apply_rotary_pos_emb
 
 # ModernBertConfig class defaults in transformers 4.x.
@@ -74,6 +75,14 @@ def modernbert_rope_theta(config: Any, *, use_global: bool) -> float:
     return theta
 
 
+def parse_fused_rope(value: object, *, adapter: str) -> bool:
+    """The load-time ``fused_rope`` option: a boolean."""
+    if isinstance(value, bool):
+        return value
+    msg = f"{adapter} fused_rope must be true or false, got {value!r}"
+    raise ValueError(msg)
+
+
 def modernbert_rope_cos_sin(
     position_ids: torch.Tensor,
     *,
@@ -105,6 +114,7 @@ def run_modernbert_flash_layers(
     local_sin: torch.Tensor,
     *,
     compute_dtype: torch.dtype | None = None,
+    fused_rope: bool = False,
 ) -> torch.Tensor:
     """Run a ModernBERT layer stack over a packed batch with flash attention.
 
@@ -112,6 +122,14 @@ def run_modernbert_flash_layers(
     ``global_attn_every_n_layers``-th layer (0-indexed) uses full attention
     with the global RoPE base; the rest use a sliding window of
     ``local_attention`` tokens with the local RoPE base.
+
+    Queries and keys are rotated with PyTorch elementwise operations in the
+    projection dtype. With ``fused_rope``, on CUDA with Triton, one kernel per
+    layer (``rotate_packed_qkv_``) rotates them in place instead: in float32
+    and rounded once, which is flash-attn's rotary arithmetic, the one the
+    Hugging Face ModernBERT flash-attention forward runs. It is faster, and
+    its outputs differ by rounding; a model's profile opts in (see the server
+    README), and elsewhere ``fused_rope`` changes nothing.
 
     ``compute_dtype`` lets a caller keep the residual stream (``hidden``) and
     the layer norms in a wider type than the projections, the way mixed
@@ -129,6 +147,7 @@ def run_modernbert_flash_layers(
         total_tokens: ``cu_seqlens[-1]``.
         global_cos, global_sin, local_cos, local_sin: Per-token RoPE tables.
         compute_dtype: Dtype of the attention/MLP projections, or ``None``.
+        fused_rope: Rotate queries and keys with the fused kernel where it runs.
 
     Returns:
         Hidden states ``[total_tokens, hidden_size]`` before ``final_norm``.
@@ -147,6 +166,13 @@ def run_modernbert_flash_layers(
     local_window = getattr(cfg, "local_attention", -1)
     # flash_attn_varlen_func expects window_size as (left, right) tuple
     window = (local_window // 2, local_window // 2) if local_window > 0 else (-1, -1)
+    # The fused rotation reads row i of the per-token cos/sin tables for token i.
+    token_rows = (
+        torch.arange(total_tokens, dtype=torch.int32, device=hidden.device)
+        if fused_rope and packed_rope_available(hidden.device)
+        else None
+    )
+    half = head_dim // 2
 
     for layer_idx, layer in enumerate(model.layers):
         is_global = (layer_idx % global_every_n == 0) if global_every_n > 1 else True
@@ -159,12 +185,16 @@ def run_modernbert_flash_layers(
         # Fused QKV projection
         qkv = layer.attn.Wqkv(normed_hidden)
         qkv = qkv.view(total_tokens, 3, num_heads, head_dim)
-        query = qkv[:, 0]  # [total_tokens, num_heads, head_dim]
-        key = qkv[:, 1]
-        value = qkv[:, 2]
 
-        # Apply RoPE to Q and K (using layer-appropriate theta)
-        query, key = apply_rotary_pos_emb(query, key, cos, sin)
+        # Apply RoPE to Q and K (using layer-appropriate theta). The tables'
+        # two halves are equal (cos/sin of [freqs, freqs]); the fused kernel
+        # reads the first.
+        if token_rows is not None:
+            rotate_packed_qkv_(qkv, token_rows, cos[:, :half].to(qkv.dtype), sin[:, :half].to(qkv.dtype))
+            query, key = qkv[:, 0], qkv[:, 1]  # [total_tokens, num_heads, head_dim]
+        else:
+            query, key = apply_rotary_pos_emb(qkv[:, 0], qkv[:, 1], cos, sin)
+        value = qkv[:, 2]
 
         # Flash attention — global layers use full attention,
         # local layers use sliding window

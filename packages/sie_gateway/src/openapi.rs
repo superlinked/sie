@@ -3358,7 +3358,8 @@ mod tests {
         assert!(spec["paths"]["/readyz"]["get"]["description"]
             .as_str()
             .unwrap()
-            .contains("never returns 503"));
+            .contains("Readiness never depends on worker health"));
+        assert!(spec["paths"]["/readyz"]["get"]["responses"]["503"].is_object());
         assert_eq!(spec["paths"]["/openapi.json"]["get"]["security"], json!([]));
         // The rendered reference at /docs must be reachable without a token
         // when auth is on, so client codegen + discovery still work.

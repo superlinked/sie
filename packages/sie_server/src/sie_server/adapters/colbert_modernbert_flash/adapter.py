@@ -14,6 +14,7 @@ from sie_server.adapters._flash_pack import build_position_ids
 from sie_server.adapters._modernbert_flash import (
     modernbert_rope_cos_sin,
     modernbert_rope_theta,
+    parse_fused_rope,
     run_modernbert_flash_layers,
 )
 from sie_server.adapters._modernbert_flash_graphs import (
@@ -90,6 +91,7 @@ class ColBERTModernBERTFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
         muvera_config: dict[str, Any] | None = None,
         revision: str | None = None,
         cuda_graphs: str | bool = "off",
+        fused_rope: bool = False,
         **kwargs: Any,
     ) -> None:
         """Initialize the adapter.
@@ -115,13 +117,20 @@ class ColBERTModernBERTFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
                 replay the encoder as CUDA graphs (see
                 ``sie_server.adapters._modernbert_flash_graphs``). An operator
                 setting, fixed at load.
+            fused_rope: Whether queries and keys are rotated by one fused kernel
+                on CUDA (see ``run_modernbert_flash_layers``) instead of
+                PyTorch elementwise operations. An operator setting, fixed at
+                load; a model's profile enables it only where it is at least as
+                accurate against float32 (see the server README).
             **kwargs: Additional arguments (ignored).
 
         Raises:
-            ValueError: If ``cuda_graphs`` is not "off" or "bucketed".
+            ValueError: If ``cuda_graphs`` is not "off" or "bucketed", or
+                ``fused_rope`` is not a boolean.
         """
         _ = kwargs
         self._cuda_graphs = parse_graph_mode(cuda_graphs, adapter="ColBERTModernBERTFlashAdapter")
+        self._fused_rope = parse_fused_rope(fused_rope, adapter="ColBERTModernBERTFlashAdapter")
         self._model_name_or_path = str(model_name_or_path)
         self._revision = revision
         self._token_dim = token_dim
@@ -216,8 +225,9 @@ class ColBERTModernBERTFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
         positions = getattr(model.config, "max_position_embeddings", None)
         if isinstance(positions, int) and positions > 0:
             window = min(window, positions)
+        fused_rope = self._fused_rope
         return graph_runner(
-            lambda: modernbert_encoder(model, window=window, dtype=dtype),
+            lambda: modernbert_encoder(model, window=window, dtype=dtype, fused_rope=fused_rope),
             mode=self._cuda_graphs,
             device=self._device,
             hidden_size=model.config.hidden_size,
@@ -651,6 +661,7 @@ class ColBERTModernBERTFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
             global_sin,
             local_cos,
             local_sin,
+            fused_rope=self._fused_rope,
         )
 
     def _split_embeddings(

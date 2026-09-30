@@ -48,9 +48,10 @@ machineProfiles:
     machineType: g6.xlarge
     spot: false
 
-# Ingress via nginx-ingress (matches GCP)
+# Ingress via nginx-ingress. Off by default: install an ingress controller,
+# then enable it with hosts, TLS, and gateway auth (see the chart README).
 ingress:
-  enabled: true
+  enabled: false
   className: nginx
   # TLS defaults to BYO (user-supplied kubernetes.io/tls Secret).
   # Three other modes are supported:

@@ -26,6 +26,7 @@ spec:
     spec:
       {{- include "sie-cluster.imagePullSecrets" . | nindent 6 }}
       serviceAccountName: {{ include "sie-cluster.serviceAccountName" . }}
+      automountServiceAccountToken: false
       containers:
         - name: mcp-edge
           image: {{ include "sie-cluster.mcpEdge.image" . }}

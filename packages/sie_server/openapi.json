@@ -2355,6 +2355,22 @@
         "title": "ScoreEntryModel",
         "description": "Single score entry."
       },
+      "ScoreInputTokensDetailsModel": {
+        "properties": {
+          "content_tokens": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Content Tokens",
+            "description": "Caller text inside the scored pairs (query, post-truncation document, supplied instruction), each tokenized alone; the remainder of input_tokens is the reranker's prompt template"
+          }
+        },
+        "type": "object",
+        "required": [
+          "content_tokens"
+        ],
+        "title": "ScoreInputTokensDetailsModel",
+        "description": "Breakdown of score input tokens."
+      },
       "ScoreResponseModel": {
         "properties": {
           "model": {
@@ -2422,6 +2438,17 @@
             ],
             "title": "Images",
             "description": "Images processed across query-document pairs"
+          },
+          "input_tokens_details": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ScoreInputTokensDetailsModel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Content/template breakdown when the reranker reports it"
           }
         },
         "type": "object",

@@ -11,6 +11,7 @@ from sie_server.adapters._flash_base import FlashBaseAdapter
 from sie_server.adapters._modernbert_flash import (
     modernbert_rope_cos_sin,
     modernbert_rope_theta,
+    parse_fused_rope,
     run_modernbert_flash_layers,
 )
 from sie_server.adapters._modernbert_flash_graphs import (
@@ -72,6 +73,7 @@ class ModernBERTFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
         trust_remote_code: bool = True,
         revision: str | None = None,
         cuda_graphs: str | bool = "off",
+        fused_rope: bool = False,
         **kwargs: Any,
     ) -> None:
         """Initialize the adapter.
@@ -91,13 +93,20 @@ class ModernBERTFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
                 replay the encoder as CUDA graphs (see
                 ``sie_server.adapters._modernbert_flash_graphs``). An operator
                 setting, fixed at load.
+            fused_rope: Whether queries and keys are rotated by one fused kernel
+                on CUDA (see ``run_modernbert_flash_layers``) instead of
+                PyTorch elementwise operations. An operator setting, fixed at
+                load; a model's profile enables it only where it is at least as
+                accurate against float32 (see the server README).
             **kwargs: Additional arguments (ignored, for compatibility).
 
         Raises:
-            ValueError: If ``cuda_graphs`` is not "off" or "bucketed".
+            ValueError: If ``cuda_graphs`` is not "off" or "bucketed", or
+                ``fused_rope`` is not a boolean.
         """
         _ = kwargs
         self._cuda_graphs = parse_graph_mode(cuda_graphs, adapter="ModernBERTFlashAdapter")
+        self._fused_rope = parse_fused_rope(fused_rope, adapter="ModernBERTFlashAdapter")
         self._model_name_or_path = str(model_name_or_path)
         self._normalize = normalize
         self._max_seq_length = max_seq_length
@@ -176,9 +185,9 @@ class ModernBERTFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
         """The CUDA graph runner for the loaded model; None when graphs are off."""
         if self._device is None or self._tokenizer is None:
             return None
-        model, window = self._model, self._max_seq_length
+        model, window, fused_rope = self._model, self._max_seq_length, self._fused_rope
         return graph_runner(
-            lambda: modernbert_encoder(model, window=window, dtype=dtype),
+            lambda: modernbert_encoder(model, window=window, dtype=dtype, fused_rope=fused_rope),
             mode=self._cuda_graphs,
             device=self._device,
             hidden_size=model.config.hidden_size,
@@ -460,6 +469,7 @@ class ModernBERTFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
             global_sin,
             local_cos,
             local_sin,
+            fused_rope=self._fused_rope,
         )
 
     def _pool_embeddings(

@@ -77,14 +77,14 @@ pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(30);
 ///
 /// Returns `None` if `base_url` is unset (no control plane configured).
 /// Otherwise returns a handle to the running task.
-// The client-wiring args (base_url + admin_token + modal_proxy_token, #1740)
+// The client-wiring args (base URL, sie-config token, proxy token)
 // plus the four reconciliation handles are all independent inputs; bundling
 // them into a struct would obscure more than it clarifies for a single call
 // site. Matches the crate's other multi-input spawn/dispatch helpers.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn(
     base_url: Option<&str>,
-    admin_token: Option<&str>,
+    token: Option<&str>,
     modal_proxy_token: Option<&ModalProxyToken>,
     registry: Arc<ModelRegistry>,
     config_epoch: ConfigEpoch,
@@ -93,11 +93,11 @@ pub fn spawn(
     interval: Duration,
 ) -> Option<tokio::task::JoinHandle<()>> {
     let base = base_url?.to_string();
-    let admin_token = admin_token.map(str::to_string);
+    let token = token.map(str::to_string);
     let modal_proxy_token = modal_proxy_token.cloned();
 
     let handle = tokio::spawn(async move {
-        let client = match BootstrapClient::new(base, admin_token)
+        let client = match BootstrapClient::new(base, token)
             .map(|c| c.with_modal_proxy_token(modal_proxy_token))
         {
             Ok(c) => c,

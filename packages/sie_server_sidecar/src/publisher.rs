@@ -946,6 +946,7 @@ mod tests {
         o.units = Some(UnitCounts {
             input_tokens: None,
             pairs: None,
+            content_input_tokens: None,
             pages: Some(3),
             images: None,
             audio_ms: None,
@@ -970,6 +971,7 @@ mod tests {
         outcome.units = Some(UnitCounts {
             input_tokens: None,
             pairs: None,
+            content_input_tokens: None,
             pages: None,
             images: None,
             audio_ms: Some(1_001),
