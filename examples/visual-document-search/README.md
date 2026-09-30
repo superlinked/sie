@@ -92,11 +92,12 @@ sie-server serve --device cuda -m TomoroAI/tomoro-colqwen3-embed-4b:compact
 Then run it and score your run beside the recording:
 
 ```sh
-uv run python run.py --smoke                        # 20 questions, a minute
-uv run python run.py --dataset computer_science     # 1,360 pages
+uv run python run.py --smoke                        # 20 questions, a minute: checks the server and the model
+uv run python run.py                                # all six datasets, 16,309 pages
 uv run python score.py --rankings run-output
 ```
 
+`score.py` scores a run only when it covers all six datasets, the full benchmark, and names any missing file.
 `run.py` downloads each dataset from HuggingFace at the recorded revision and renders the pages as the recording did.
 It then ranks every page for every question. Set `SIE_BASE_URL` and `SIE_API_KEY` to call SIE Cloud instead of a local
 server.
