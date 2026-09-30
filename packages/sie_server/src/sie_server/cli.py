@@ -51,7 +51,13 @@ from sie_server.app.app_state_config import (
     AppStateConfig,
 )
 from sie_server.config.model import ModelConfig
-from sie_server.config.upstreams import REMOTE_SERVING_ENV, UPSTREAMS_FILE_ENV, UpstreamConfigError, load_upstreams
+from sie_server.config.upstreams import (
+    REMOTE_SERVING_ENV,
+    UPSTREAMS_FILE_ENV,
+    UpstreamConfigError,
+    load_upstreams,
+    remote_serving_from_env,
+)
 from sie_server.core.deps import collect_bundle_deps
 from sie_server.core.loader import load_model_configs
 from sie_server.core.logging import configure_logging, is_valid_log_level, valid_log_levels
@@ -360,13 +366,15 @@ def serve(
         ),
     ] = None,
     remote_serving: Annotated[
-        bool,
+        bool | None,
         typer.Option(
             "--remote-serving/--no-remote-serving",
-            envvar=REMOTE_SERVING_ENV,
-            help="Global switch for remote profiles. Off refuses every remote profile and sends nothing upstream.",
+            help=(
+                "Global switch for remote profiles. Off refuses every remote profile and sends nothing upstream. "
+                f"Without the flag, {REMOTE_SERVING_ENV} decides: unset means on, anything unrecognised means off."
+            ),
         ),
-    ] = True,
+    ] = None,
 ) -> None:
     """Start the SIE inference server."""
     from sie_sdk.storage import is_cloud_path
@@ -663,6 +671,8 @@ def serve(
                 raise typer.Exit(1)
         typer.echo(f"Pinned (from env): {len(pinned_models)} models will be kept resident")
 
+    if remote_serving is None:
+        remote_serving = remote_serving_from_env(os.environ.get(REMOTE_SERVING_ENV))
     if upstreams_file:
         # Same split as --log-level: a typed flag fails fast, a value from the
         # environment (Helm) warns and loads no upstream rather than crash-loop.

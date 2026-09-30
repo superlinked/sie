@@ -4,7 +4,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from sie_server.config.upstreams import REMOTE_SERVING_ENV, UPSTREAMS_FILE_ENV
+from sie_server.config.upstreams import REMOTE_SERVING_ENV, UPSTREAMS_FILE_ENV, remote_serving_from_env
 
 # Environment variable names for configuration
 ENV_DEVICE = "SIE_DEVICE"
@@ -142,8 +142,7 @@ class AppStateConfig:
         pinned_models = [m.strip() for m in pinned_str.split(",") if m.strip()] if pinned_str else None
         pool_name = os.environ.get(ENV_POOL) or None
         upstreams_file = os.environ.get(ENV_UPSTREAMS_FILE) or None
-        remote_serving_raw = os.environ.get(ENV_REMOTE_SERVING)
-        remote_serving = remote_serving_raw is None or remote_serving_raw.strip().lower() in {"1", "true", "yes", "on"}
+        remote_serving = remote_serving_from_env(os.environ.get(ENV_REMOTE_SERVING))
 
         return cls(
             models_dir=models_dir,

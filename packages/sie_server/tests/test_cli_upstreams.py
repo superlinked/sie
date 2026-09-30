@@ -139,3 +139,24 @@ def test_no_remote_serving_reaches_the_server_process(no_server: dict[str, Any],
     config: AppStateConfig = no_server["kwargs"]["config"]
     config.save_to_env_vars()
     assert AppStateConfig.from_env_vars().remote_serving is False
+
+
+@pytest.mark.parametrize(("value", "expected"), [("maybe", False), ("", False), ("off", False), ("on", True)])
+def test_serve_reads_the_switch_from_the_environment_failing_closed(
+    no_server: dict[str, Any], monkeypatch: pytest.MonkeyPatch, value: str, expected: bool
+) -> None:
+    monkeypatch.setenv("SIE_REMOTE_SERVING", value)
+
+    result = CliRunner().invoke(cli.app, ["serve"])
+
+    assert result.exit_code == 0, result.output
+    assert no_server["kwargs"]["config"].remote_serving is expected
+
+
+def test_a_typed_switch_overrides_the_environment(no_server: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SIE_REMOTE_SERVING", "0")
+
+    result = CliRunner().invoke(cli.app, ["serve", "--remote-serving"])
+
+    assert result.exit_code == 0, result.output
+    assert no_server["kwargs"]["config"].remote_serving is True

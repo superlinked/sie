@@ -7,7 +7,9 @@ Loading makes no outbound call, holds no weights and uses no accelerator.
 
 The upstream is outside this deployment, so its answer is treated as untrusted:
 the body is read uncompressed under a size cap and a deadline, and a failure
-reaches the caller as fixed text, never as anything the upstream sent.
+reaches the caller as fixed text, never as anything the upstream sent. No read
+waits longer than ``READ_TIMEOUT_S``, so a call takes at most the connect
+timeout plus ``REQUEST_DEADLINE_S`` plus one read timeout.
 """
 
 from __future__ import annotations
@@ -34,6 +36,8 @@ if TYPE_CHECKING:
 
 _MSGPACK = "application/msgpack"
 REQUEST_DEADLINE_S = 60.0
+READ_TIMEOUT_S = 10.0
+_CONNECT_TIMEOUT_S = 5.0
 _RESPONSE_OVERHEAD_BYTES = 1 << 20
 _BYTES_PER_VALUE = 16
 _UNKNOWN_DIM_RESPONSE_BYTES = 64 << 20
@@ -107,6 +111,7 @@ class SieUpstreamAdapter(BaseAdapter):
             f"/v1/encode/{quote(self._upstream_model, safe='/:')}",
             content=packb({"items": [{"text": item.text} for item in items], "params": params}),
             headers={"Content-Type": _MSGPACK, "Accept": _MSGPACK, "Accept-Encoding": "identity"},
+            timeout=httpx.Timeout(READ_TIMEOUT_S, connect=_CONNECT_TIMEOUT_S),
         )
         encode_prefix = self._client.base_url.raw_path.rstrip(b"/") + b"/v1/encode/"
         if not request.url.raw_path.startswith(encode_prefix):

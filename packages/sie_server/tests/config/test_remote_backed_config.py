@@ -8,6 +8,9 @@ import pytest
 from pydantic import ValidationError
 from sie_server.config.model import ModelConfig
 from sie_server.config.upstreams import Upstream, install_upstreams, validate_profile_upstreams
+from sie_server.core.registry import ModelRegistry
+from sie_server.ipc_types import ReplaceModelConfigEntry, ReplaceModelConfigsRequest
+from sie_server.queue_executor import QueueExecutor
 
 REMOTE_ADAPTER = "sie_server.adapters.remote.sie:SieUpstreamAdapter"
 LOCAL_ADAPTER = "sie_server.adapters.fake.adapter:FakeAdapter"
@@ -159,3 +162,45 @@ def test_a_local_model_may_add_a_remote_profile() -> None:
 
     assert config.resolve_profile("remote").loadtime["upstream"] == "team-sie"
     validate_profile_upstreams(config)
+
+
+def remote_yaml(model_id: str, upstream: str) -> str:
+    return f"""
+sie_id: {model_id}
+remote_backed: true
+tasks:
+  encode:
+    dense:
+      dim: 384
+profiles:
+  default:
+    adapter_path: {REMOTE_ADAPTER}
+    max_batch_tokens: 8192
+    adapter_options:
+      loadtime:
+        upstream: {upstream}
+        upstream_model: sie-fake
+"""
+
+
+async def test_a_config_snapshot_rejects_only_the_entry_naming_an_undefined_upstream() -> None:
+    registry = ModelRegistry(models_dir=None)
+    executor = QueueExecutor(registry)
+
+    response = await executor.replace_model_configs(
+        ReplaceModelConfigsRequest(
+            bundle_id="default",
+            epoch=1,
+            bundle_config_hash="",
+            models=[
+                ReplaceModelConfigEntry(model_id="acme/defined", model_config=remote_yaml("acme/defined", "team-sie")),
+                ReplaceModelConfigEntry(
+                    model_id="acme/undefined", model_config=remote_yaml("acme/undefined", "nobody")
+                ),
+            ],
+        )
+    )
+
+    assert registry.has_model("acme/defined")
+    assert not registry.has_model("acme/undefined")
+    assert "acme/undefined" not in response.applied_models
