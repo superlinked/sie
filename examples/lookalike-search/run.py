@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -83,14 +84,19 @@ def main() -> int:
         return 0
 
     target = args.output / "qwen3-embedding-4b"
-    target.mkdir(parents=True, exist_ok=True)
-    np.save(target / "corpus.npy", encode(client, passages, is_query=False))
-    (target / "corpus.ids.json").write_text(json.dumps([p["id"] for p in passages]))
-    np.save(
-        target / "queries.npy",
-        encode(client, [{"id": q["id"], "text": q["question"]} for q in questions], is_query=True),
-    )
-    (target / "queries.ids.json").write_text(json.dumps([q["id"] for q in questions]))
+    # Write all four files to a staging directory and swap it in only once both phases succeed, so a failed run
+    # never leaves corpus vectors from one run beside question vectors from another.
+    staging = args.output / "qwen3-embedding-4b.partial"
+    shutil.rmtree(staging, ignore_errors=True)
+    staging.mkdir(parents=True)
+    corpus_vectors = encode(client, passages, is_query=False)
+    question_vectors = encode(client, [{"id": q["id"], "text": q["question"]} for q in questions], is_query=True)
+    np.save(staging / "corpus.npy", corpus_vectors)
+    (staging / "corpus.ids.json").write_text(json.dumps([p["id"] for p in passages]))
+    np.save(staging / "queries.npy", question_vectors)
+    (staging / "queries.ids.json").write_text(json.dumps([q["id"] for q in questions]))
+    shutil.rmtree(target, ignore_errors=True)
+    staging.rename(target)
     print(f"wrote {target}; now: uv run python score.py --vectors {target}")
     return 0
 

@@ -34,6 +34,17 @@ import numpy as np
 HERE = Path(__file__).resolve().parent
 EVIDENCE = HERE / "evidence"
 OURS = "sie-qwen3-embedding-4b"
+# The MTEB figures superlinked.com/search and its SOURCES.md state, at their published precision.
+EXPECTED_MTEB = {
+    "sie-qwen3-embedding-4b": "54.6",
+    "openai-3-large": "50.8",
+    "openai-3-small": "47.5",
+    "voyage-4-large": "54.7",
+    "voyage-4-lite": "50.5",
+    "cohere-embed-v4": "52.3",
+    "sie-qwen3-embedding-8b": "54.8",
+    "sie-qwen3-embedding-4b-openai-route": "49.4",
+}
 
 
 def load(path: Path):
@@ -102,7 +113,11 @@ def main() -> int:
     # 1. Our ranking, recomputed from the vectors, must be the recorded one.
     ours = rank_ours(args.vectors, questions, passage_ids)
     recorded_ours = rankings[OURS]
-    differ = [q for q in ours if ours[q]["top10"][:1] != recorded_ours[q]["top10"][:1]]
+    differ = [
+        q
+        for q in ours
+        if ours[q]["top10"] != recorded_ours[q]["top10"] or ours[q]["goldRank"] != recorded_ours[q]["goldRank"]
+    ]
     if args.vectors == EVIDENCE / "vectors" / "qwen3-embedding-4b" and differ:
         print(f"{len(differ)} questions rank differently from the recording, e.g. {differ[:3]}", file=sys.stderr)
         return 1
@@ -129,19 +144,23 @@ def main() -> int:
     tasks = sorted(per_query)
     arms = [arm for arm in names if all(arm in per_query[t] for t in tasks)]
     print(f"\nEight MTEB retrieval tasks ({', '.join(tasks)}): first result relevant, mean over tasks")
-    for arm in sorted(
-        arms,
-        key=lambda a: -statistics.fmean(statistics.fmean(r["top1"] for r in per_query[t][a].values()) for t in tasks),
-    ):
-        macro = statistics.fmean(statistics.fmean(r["top1"] for r in per_query[t][arm].values()) for t in tasks)
+    macros = {
+        arm: statistics.fmean(statistics.fmean(r["top1"] for r in per_query[t][arm].values()) for t in tasks)
+        for arm in arms
+    }
+    for arm in sorted(arms, key=lambda a: -macros[a]):
         queries = sum(len(per_query[t][arm]) for t in tasks)
-        print(f"  {names[arm]:48s} {100 * macro:5.1f}%  ({queries:,} queries)")
+        print(f"  {names[arm]:48s} {100 * macros[arm]:5.1f}%  ({queries:,} queries)")
 
     expected = recorded.get("expected", {})
     if expected and args.vectors == EVIDENCE / "vectors" / "qwen3-embedding-4b":
         for arm, count in expected.get("heldoutFirst", {}).items():
             if firsts.get(arm) != count:
                 print(f"{names[arm]}: {firsts.get(arm)} first, the page says {count}", file=sys.stderr)
+                return 1
+        for arm, figure in EXPECTED_MTEB.items():
+            if f"{100 * macros[arm]:.1f}" != figure:
+                print(f"{names[arm]}: {100 * macros[arm]:.1f}% on MTEB, the page says {figure}%", file=sys.stderr)
                 return 1
         print("\nEvery figure matches superlinked.com/search.")
     return 0
