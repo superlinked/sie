@@ -10209,6 +10209,28 @@ pub fn parse_queue_request(
 
 pub(crate) const MAX_SCORE_ITEMS: usize = 1000;
 pub(crate) const MAX_EMBEDDING_INPUTS: usize = 256;
+/// Mirrors `sie_server.core.extract_cost.MAX_EXTRACT_LABELS`, which the
+/// server's HTTP API enforces on `params.labels`.
+pub(crate) const MAX_EXTRACT_LABELS: usize = 1000;
+
+/// Labels an extract request carries: `params.labels` plus every label of
+/// `params.options.label_groups`. A group whose value is not an array counts
+/// as one label.
+pub(crate) fn extract_label_count(params: &publisher::WorkParams) -> usize {
+    let labels = params.labels.as_ref().map_or(0, Vec::len);
+    let grouped = params
+        .options
+        .as_ref()
+        .and_then(|options| options.get("label_groups"))
+        .and_then(serde_json::Value::as_object)
+        .map_or(0, |groups| {
+            groups
+                .values()
+                .map(|group| group.as_array().map_or(1, Vec::len))
+                .fold(0usize, usize::saturating_add)
+        });
+    labels.saturating_add(grouped)
+}
 
 /// Reject queue-request bodies whose per-item / query shapes the worker
 /// cannot consume, at ingress, instead of forwarding them to a GPU lane
@@ -10255,6 +10277,13 @@ fn validate_queue_item_shapes(
                 return Err("'query' must be an object".to_string().into());
             }
         }
+    }
+
+    if endpoint == "extract" && extract_label_count(params) > MAX_EXTRACT_LABELS {
+        return Err(format!(
+            "'labels' and 'options.label_groups' must contain at most {MAX_EXTRACT_LABELS} labels together"
+        )
+        .into());
     }
 
     // Every work item must be a map/object.
@@ -20529,6 +20558,71 @@ mod tests {
             QueueParseError::Generic(message) => assert!(message.contains("at most 1000")),
             QueueParseError::PreBuilt(_) => panic!("expected generic parse error"),
         }
+    }
+
+    #[test]
+    fn test_parse_queue_request_extract_enforces_the_label_limit() {
+        let labels = |count: usize| -> Vec<serde_json::Value> {
+            (0..count)
+                .map(|index| json!(format!("label {index}")))
+                .collect()
+        };
+        let at_limit = serde_json::to_vec(&json!({
+            "items": [{"text": "document"}],
+            "params": {"labels": labels(MAX_EXTRACT_LABELS)}
+        }))
+        .unwrap();
+        let (_, params) = parse_queue_request(&at_limit, false, "extract").unwrap();
+        assert_eq!(extract_label_count(&params), MAX_EXTRACT_LABELS);
+
+        let grouped_at_limit = serde_json::to_vec(&json!({
+            "items": [{"text": "document"}],
+            "params": {
+                "labels": labels(400),
+                "options": {"label_groups": {"topic": labels(500), "urgency": labels(99), "remote": "yes"}}
+            }
+        }))
+        .unwrap();
+        let (_, params) = parse_queue_request(&grouped_at_limit, false, "extract").unwrap();
+        assert_eq!(extract_label_count(&params), MAX_EXTRACT_LABELS);
+
+        let too_many_labels = serde_json::to_vec(&json!({
+            "items": [{"text": "document"}],
+            "params": {"labels": labels(MAX_EXTRACT_LABELS + 1)}
+        }))
+        .unwrap();
+        let too_many_together = serde_json::to_vec(&json!({
+            "items": [{"text": "document"}],
+            "params": {
+                "labels": labels(1),
+                "options": {"label_groups": {"topic": labels(MAX_EXTRACT_LABELS)}}
+            }
+        }))
+        .unwrap();
+        let too_many_msgpack = rmp_serde::to_vec_named(&json!({
+            "items": [{"text": "document"}],
+            "params": {"options": {"label_groups": {"a": labels(600), "b": labels(401)}}}
+        }))
+        .unwrap();
+        for (body, is_msgpack) in [
+            (too_many_labels, false),
+            (too_many_together, false),
+            (too_many_msgpack, true),
+        ] {
+            match parse_queue_request(&body, is_msgpack, "extract").unwrap_err() {
+                QueueParseError::Generic(message) => {
+                    assert!(message.contains("at most 1000 labels"))
+                }
+                QueueParseError::PreBuilt(_) => panic!("expected generic parse error"),
+            }
+        }
+
+        let encode = serde_json::to_vec(&json!({
+            "items": [{"text": "document"}],
+            "params": {"options": {"label_groups": {"topic": labels(MAX_EXTRACT_LABELS + 1)}}}
+        }))
+        .unwrap();
+        assert!(parse_queue_request(&encode, false, "encode").is_ok());
     }
 
     // ── msgpack_numpy conversion tests ──────────────────────────

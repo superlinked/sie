@@ -53,6 +53,19 @@ removes matched stop sequences consistently from returned text, completion-token
 usage, and logprobs. Long completions delay the first visible text; existing
 request timeouts still apply. Other adapters are unaffected.
 
+### NLI zero-shot classification usage
+
+The NLI zero-shot classifiers (`MoritzLaurer/deberta-v3-base-zeroshot-v2.0`,
+`MoritzLaurer/deberta-v3-large-zeroshot-v2.0`,
+`MoritzLaurer/ModernBERT-base-zeroshot-v2.0`, `cross-encoder/nli-deberta-v3-base`
+and `facebook/bart-large-mnli`) score each label as its own (text, hypothesis)
+pair: the item's text next to the hypothesis template filled in with the label
+(`This text is about {}.` by default). `usage.input_tokens` counts, for each
+item, the tokens of all its pairs after truncation to the model's
+`max_sequence_length`, special tokens included, as the cross-encoder rerankers
+count each (query, document) pair. An item classified against n labels
+therefore counts its text n times. A request may carry at most 1,000 labels.
+
 ### GLiClass usage
 
 The shipped GLiClass and Opir profiles read a 1,024-token window

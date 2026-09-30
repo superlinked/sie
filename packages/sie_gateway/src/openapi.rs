@@ -428,6 +428,14 @@ fn patch_queue_request_batch_limits(value: &mut Value) {
         items["maxItems"] = json!(crate::handlers::proxy::MAX_SCORE_ITEMS);
     }
 
+    if let Some(labels) = schemas
+        .get_mut("ExtractParams")
+        .and_then(|schema| schema.get_mut("properties"))
+        .and_then(|properties| properties.get_mut("labels"))
+    {
+        labels["maxItems"] = json!(crate::handlers::proxy::MAX_EXTRACT_LABELS);
+    }
+
     if let Some(variants) = schemas
         .get_mut("OpenAIEmbeddingInput")
         .and_then(|schema| schema.get_mut("oneOf"))
@@ -4150,6 +4158,11 @@ mod tests {
             spec["components"]["schemas"]["ScoreRequest"]["properties"]["items"]["maxItems"],
             json!(crate::handlers::proxy::MAX_SCORE_ITEMS),
             "ScoreRequest must document the stricter runtime score-item limit",
+        );
+        assert_eq!(
+            spec["components"]["schemas"]["ExtractParams"]["properties"]["labels"]["maxItems"],
+            json!(crate::handlers::proxy::MAX_EXTRACT_LABELS),
+            "ExtractParams must document the runtime label limit",
         );
         let embedding_input_variants = spec["components"]["schemas"]["OpenAIEmbeddingInput"]
             ["oneOf"]

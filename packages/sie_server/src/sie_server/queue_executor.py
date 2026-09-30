@@ -23,6 +23,7 @@ from sie_server.api.ws import (
 from sie_server.config.model import ModelConfig
 from sie_server.core.encode_pipeline import EncodePipeline, resolve_encode_output_types
 from sie_server.core.extract_cost import (
+    MAX_EXTRACT_LABELS,
     adapter_extract_item_costs,
     build_extract_prepared_items,
     output_schema_shape_error,
@@ -1572,9 +1573,11 @@ class QueueExecutor:
         for bi in req.items:
             try:
                 # Reject before the worker walks the schema to build its
-                # batching key (same bound as the HTTP ExtractParams check).
+                # batching key (same bounds as the HTTP ExtractParams check).
                 if bi.output_schema is not None and (schema_error := output_schema_shape_error(bi.output_schema)):
                     raise InvalidInputError(schema_error)
+                if bi.labels is not None and len(bi.labels) > MAX_EXTRACT_LABELS:
+                    raise InvalidInputError(f"Field 'labels' must contain at most {MAX_EXTRACT_LABELS} labels")
                 options = merge_runtime_options(config, bi.options)
                 # Same precedence as the HTTP extract path: the request's own
                 # instruction, else one from the options (profile defaults
