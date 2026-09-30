@@ -142,7 +142,8 @@ class AppStateConfig:
         pinned_models = [m.strip() for m in pinned_str.split(",") if m.strip()] if pinned_str else None
         pool_name = os.environ.get(ENV_POOL) or None
         upstreams_file = os.environ.get(ENV_UPSTREAMS_FILE) or None
-        remote_serving = os.environ.get(ENV_REMOTE_SERVING, "1").strip().lower() not in {"0", "false", "no", "off"}
+        remote_serving_raw = os.environ.get(ENV_REMOTE_SERVING)
+        remote_serving = remote_serving_raw is None or remote_serving_raw.strip().lower() in {"1", "true", "yes", "on"}
 
         return cls(
             models_dir=models_dir,

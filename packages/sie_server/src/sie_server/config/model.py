@@ -575,6 +575,12 @@ class ProfileConfig(BaseModel):
 
 REMOTE_ADAPTER_MODULE_PREFIX = "sie_server.adapters.remote."
 REMOTE_PROFILE_LOADTIME_KEYS = frozenset({"upstream", "upstream_model"})
+UPSTREAM_NAME_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+# Every path segment starts with a letter or digit, so '.' and '..' cannot
+# appear: the value becomes part of an authenticated URL on the upstream.
+UPSTREAM_MODEL_PATTERN = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}(?:/[A-Za-z0-9][A-Za-z0-9._-]{0,127}){0,3}(?::[A-Za-z0-9][A-Za-z0-9._-]{0,63})?$"
+)
 
 
 def is_remote_adapter_path(adapter_path: str | None) -> bool:
@@ -854,6 +860,16 @@ class ModelConfig(BaseModel):
             missing = [key for key in sorted(REMOTE_PROFILE_LOADTIME_KEYS) if not loadtime.get(key)]
             if missing:
                 msg = f"Remote profile '{name}' must set load-time options: {', '.join(missing)}"
+                raise ValueError(msg)
+            upstream, upstream_model = loadtime["upstream"], loadtime["upstream_model"]
+            if not isinstance(upstream, str) or not UPSTREAM_NAME_PATTERN.fullmatch(upstream):
+                msg = f"Remote profile '{name}': 'upstream' must be an upstream name"
+                raise ValueError(msg)
+            if not isinstance(upstream_model, str) or not UPSTREAM_MODEL_PATTERN.fullmatch(upstream_model):
+                msg = (
+                    f"Remote profile '{name}': 'upstream_model' must be a model id such as 'org/name' "
+                    "or 'org/name:profile'"
+                )
                 raise ValueError(msg)
         return self
 

@@ -7,6 +7,8 @@ sent outside the deployment and the pod does not crash-loop.
 
 from __future__ import annotations
 
+import os
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +28,14 @@ VALID = (
 INVALID = VALID.replace("https://", "http://")
 
 
+@pytest.fixture(autouse=True)
+def _restore_environment() -> Iterator[None]:
+    saved = dict(os.environ)
+    yield
+    os.environ.clear()
+    os.environ.update(saved)
+
+
 @pytest.fixture
 def no_server(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     started: dict[str, Any] = {}
@@ -34,7 +44,14 @@ def no_server(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         started["kwargs"] = kwargs
 
     monkeypatch.setattr(cli, "run_server", fake_run_server)
-    for name in ("SIE_UPSTREAMS_FILE", "SIE_LOG_LEVEL", "SIE_PRELOAD_MODELS", "SIE_PINNED_MODELS", "SIE_EXTRA_MODELS"):
+    for name in (
+        "SIE_UPSTREAMS_FILE",
+        "SIE_REMOTE_SERVING",
+        "SIE_LOG_LEVEL",
+        "SIE_PRELOAD_MODELS",
+        "SIE_PINNED_MODELS",
+        "SIE_EXTRA_MODELS",
+    ):
         monkeypatch.delenv(name, raising=False)
     return started
 
@@ -72,8 +89,9 @@ def test_an_invalid_environment_file_loads_no_upstream(
     result = CliRunner().invoke(cli.app, ["serve"])
 
     assert result.exit_code == 0, result.output
-    assert "No upstream is loaded" in result.output
+    assert "No upstream is loaded and remote serving is off" in result.output
     assert no_server["kwargs"]["config"].upstreams_file is None
+    assert no_server["kwargs"]["config"].remote_serving is False
 
 
 def test_the_file_survives_the_uvicorn_handoff(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -85,3 +103,39 @@ def test_the_file_survives_the_uvicorn_handoff(tmp_path: Path, monkeypatch: pyte
 
     AppStateConfig().save_to_env_vars()
     assert AppStateConfig.from_env_vars().upstreams_file is None
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (None, True),
+        ("1", True),
+        ("on", True),
+        ("TRUE", True),
+        ("0", False),
+        ("off", False),
+        ("", False),
+        ("maybe", False),
+    ],
+)
+def test_the_switch_fails_closed_on_an_unrecognised_value(
+    monkeypatch: pytest.MonkeyPatch, value: str | None, expected: bool
+) -> None:
+    if value is None:
+        monkeypatch.delenv("SIE_REMOTE_SERVING", raising=False)
+    else:
+        monkeypatch.setenv("SIE_REMOTE_SERVING", value)
+
+    assert AppStateConfig.from_env_vars().remote_serving is expected
+
+
+def test_no_remote_serving_reaches_the_server_process(no_server: dict[str, Any], tmp_path: Path) -> None:
+    result = CliRunner().invoke(
+        cli.app, ["serve", "--upstreams-file", upstreams_file(tmp_path, VALID), "--no-remote-serving"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Remote serving: off" in result.output
+    config: AppStateConfig = no_server["kwargs"]["config"]
+    config.save_to_env_vars()
+    assert AppStateConfig.from_env_vars().remote_serving is False

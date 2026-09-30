@@ -27,7 +27,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from yaml.constructor import ConstructorError
 
-from sie_server.config.model import is_remote_adapter_path
+from sie_server.config.model import UPSTREAM_NAME_PATTERN, is_remote_adapter_path
 
 if TYPE_CHECKING:
     from sie_server.config.model import ModelConfig
@@ -35,7 +35,6 @@ if TYPE_CHECKING:
 UPSTREAMS_FILE_ENV = "SIE_UPSTREAMS_FILE"
 REMOTE_SERVING_ENV = "SIE_REMOTE_SERVING"
 
-_UPSTREAM_NAME = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 _ENV_VAR_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 _VISIBLE_ASCII = re.compile(r"^[\x21-\x7e]+$")
 _DEFAULT_PORTS = {"http": 80, "https": 443}
@@ -202,7 +201,7 @@ class UpstreamsFile(BaseModel):
     @classmethod
     def _names(cls, value: dict[str, Upstream]) -> dict[str, Upstream]:
         for name in value:
-            if not _UPSTREAM_NAME.fullmatch(name):
+            if not UPSTREAM_NAME_PATTERN.fullmatch(name):
                 raise UpstreamConfigError(
                     "upstream names are lowercase letters, digits and hyphens, at most 63 characters"
                 )
@@ -270,7 +269,13 @@ def upstream_for_serving(name: str) -> Upstream:
 
 
 def validate_profile_upstreams(config: ModelConfig) -> None:
-    """Reject a model whose remote profile names an upstream this server does not define."""
+    """Reject a model whose remote profile names an upstream this server does not define.
+
+    With remote serving off, every remote profile is refused at load anyway,
+    so the names are not checked and a stale model does not stop the server.
+    """
+    if not _INSTALLED.remote_serving:
+        return
     for profile_name in config.profiles:
         resolved = config.resolve_profile(profile_name)
         if not is_remote_adapter_path(resolved.adapter_path):

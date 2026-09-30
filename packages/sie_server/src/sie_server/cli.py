@@ -673,8 +673,9 @@ def serve(
             if _came_from_command_line("upstreams_file"):
                 typer.echo(f"Error: {exc}", err=True)
                 raise typer.Exit(1) from None
-            typer.echo(f"Warning: {exc}. No upstream is loaded.", err=True)
+            typer.echo(f"Warning: {exc}. No upstream is loaded and remote serving is off.", err=True)
             upstreams_file = None
+            remote_serving = False
         else:
             typer.echo(f"Upstreams: {', '.join(sorted(upstreams)) or 'none defined'}")
 

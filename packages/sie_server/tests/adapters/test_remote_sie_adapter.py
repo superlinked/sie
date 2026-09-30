@@ -158,11 +158,48 @@ def test_a_model_naming_an_undefined_upstream_stops_startup(tmp_path: Path) -> N
         pass
 
 
-def adapter_over(monkeypatch: pytest.MonkeyPatch, respond: httpx.Response) -> remote_sie.SieUpstreamAdapter:
+def test_a_malformed_credential_never_reaches_the_caller_or_the_upstream(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setenv(KEY_ENV, f"{CANARY} trailing-garbage")
+    caplog.set_level(logging.DEBUG)
+    with fake_sie_upstream() as (upstream_url, seen_authorization):
+        with TestClient(local_app(tmp_path, upstream_url)) as client:
+            response = encode_when_loaded(client, "acme/remote-fake", "remote backends")
+
+    assert response.status_code != 200
+    assert seen_authorization == []
+    assert CANARY not in response.text
+    assert CANARY not in caplog.text
+
+
+def test_with_the_switch_off_a_stale_upstream_name_does_not_stop_startup(tmp_path: Path) -> None:
+    app = local_app(tmp_path, "http://127.0.0.1:9", upstream="nobody", remote_serving=False)
+
+    with TestClient(app) as client:
+        response = encode_when_loaded(client, "acme/remote-fake", "remote backends")
+
+    assert response.status_code == 502, response.text
+    assert "remote serving is switched off" in response.text
+
+
+class Recorder:
+    def __init__(self, respond: httpx.Response) -> None:
+        self.requests: list[httpx.Request] = []
+        self._respond = respond
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        return self._respond
+
+
+def adapter_over(
+    monkeypatch: pytest.MonkeyPatch, recorder: Recorder, *, upstream_model: str = "sie-fake"
+) -> remote_sie.SieUpstreamAdapter:
     upstream = Upstream.model_validate(
         {
             "kind": "sie",
-            "base_url": "https://sie.example.internal",
+            "base_url": "https://sie.example.internal/tenant-a",
             "rate_cap": {"requests_per_minute": 60, "max_concurrency": 4},
         }
     )
@@ -170,41 +207,152 @@ def adapter_over(monkeypatch: pytest.MonkeyPatch, respond: httpx.Response) -> re
     monkeypatch.setattr(
         remote_sie,
         "upstream_sync_client",
-        lambda upstream: upstream_sync_client(upstream, transport=httpx.MockTransport(lambda _request: respond)),
+        lambda upstream: upstream_sync_client(upstream, transport=httpx.MockTransport(recorder)),
     )
-    adapter = remote_sie.SieUpstreamAdapter(upstream="team-sie", upstream_model="sie-fake", dense_dim=4)
+    adapter = remote_sie.SieUpstreamAdapter(upstream="team-sie", upstream_model=upstream_model, dense_dim=4)
     adapter.load("cpu")
     return adapter
 
 
-def msgpack_response(items: list[dict[str, Any]]) -> httpx.Response:
+def encode_payload(items: list[dict[str, Any]]) -> bytes:
     from sie_sdk._msgpack import packb
 
-    return httpx.Response(200, content=packb({"items": items}), headers={"Content-Type": "application/msgpack"})
+    return packb({"items": items})
 
 
-def test_a_dimension_mismatch_is_an_error_not_a_vector(monkeypatch: pytest.MonkeyPatch) -> None:
-    wrong = np.ones(8, dtype=np.float32)
-    adapter = adapter_over(monkeypatch, msgpack_response([{"dense": {"dims": 8, "dtype": "float32", "values": wrong}}]))
+def dense_item(values: np.ndarray) -> dict[str, Any]:
+    return {"dense": {"dims": int(values.shape[0]), "dtype": "float32", "values": values}}
 
-    with pytest.raises(remote_sie.RemoteUpstreamError, match="8-dimensional vectors, the model declares 4"):
+
+class _Body(httpx.SyncByteStream):
+    """A body that streams like a network response, rather than one read eagerly from bytes."""
+
+    def __init__(self, content: bytes) -> None:
+        self._content = content
+
+    def __iter__(self) -> Iterator[bytes]:
+        yield self._content
+
+
+def streamed(status: int, content: bytes, **headers: str) -> httpx.Response:
+    return httpx.Response(status, stream=_Body(content), headers=headers)
+
+
+def ok(content: bytes, **headers: str) -> httpx.Response:
+    return streamed(200, content, **{"Content-Type": "application/msgpack", **headers})
+
+
+def test_the_request_goes_to_the_encode_path_under_the_base_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    recorder = Recorder(ok(encode_payload([dense_item(np.ones(4, dtype=np.float32))])))
+    adapter = adapter_over(monkeypatch, recorder, upstream_model="org/name:profile")
+
+    output = adapter.encode([Item(text="a")], ["dense"])
+
+    assert output.dense is not None
+    assert output.dense.shape == (1, 4)
+    assert recorder.requests[0].url.raw_path == b"/tenant-a/v1/encode/org/name:profile"
+    assert recorder.requests[0].headers["accept-encoding"] == "identity"
+
+
+@pytest.mark.parametrize("upstream_model", ["../../admin", "a/../../../v1/configs/models"])
+def test_a_model_id_that_escapes_the_encode_path_is_never_sent(
+    monkeypatch: pytest.MonkeyPatch, upstream_model: str
+) -> None:
+    recorder = Recorder(ok(b""))
+    adapter = adapter_over(monkeypatch, recorder, upstream_model=upstream_model)
+
+    with pytest.raises(remote_sie.RemoteUpstreamError, match="does not form an encode path"):
         adapter.encode([Item(text="a")], ["dense"])
+
+    assert recorder.requests == []
+
+
+def test_upstream_error_text_is_never_relayed(monkeypatch: pytest.MonkeyPatch) -> None:
+    echoed = f"Authorization: Bearer {CANARY}"
+    recorder = Recorder(streamed(404, echoed.encode(), **{"X-SIE-Error-Code": "MODEL_NOT_FOUND"}))
+    adapter = adapter_over(monkeypatch, recorder)
+
+    with pytest.raises(remote_sie.RemoteUpstreamError) as raised:
+        adapter.encode([Item(text="a")], ["dense"])
+
+    assert str(raised.value) == "upstream answered 404 MODEL_NOT_FOUND"
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
+
+
+def test_an_unexpected_error_code_is_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
+    recorder = Recorder(streamed(500, b"x", **{"X-SIE-Error-Code": f"leak {CANARY}"}))
+    adapter = adapter_over(monkeypatch, recorder)
+
+    with pytest.raises(remote_sie.RemoteUpstreamError) as raised:
+        adapter.encode([Item(text="a")], ["dense"])
+
+    assert str(raised.value) == "upstream answered 500"
+
+
+def test_a_compressed_body_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    recorder = Recorder(ok(b"\x1f\x8b" + b"\0" * 32, **{"Content-Encoding": "gzip"}))
+    adapter = adapter_over(monkeypatch, recorder)
+
+    with pytest.raises(remote_sie.RemoteUpstreamError, match="compressed body"):
+        adapter.encode([Item(text="a")], ["dense"])
+
+
+def test_an_oversized_body_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    recorder = Recorder(ok(b"\0" * (2 << 20)))
+    adapter = adapter_over(monkeypatch, recorder)
+
+    with pytest.raises(remote_sie.RemoteUpstreamError, match="exceeds the size limit"):
+        adapter.encode([Item(text="a")], ["dense"])
+
+
+class _SlowBody(httpx.SyncByteStream):
+    def __iter__(self) -> Iterator[bytes]:
+        for _ in range(5):
+            time.sleep(0.1)
+            yield b"\0"
+
+
+def test_a_slow_body_is_cut_at_the_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(remote_sie, "REQUEST_DEADLINE_S", 0.2)
+    recorder = Recorder(httpx.Response(200, stream=_SlowBody()))
+    adapter = adapter_over(monkeypatch, recorder)
+
+    with pytest.raises(remote_sie.RemoteUpstreamError, match="exceeded the deadline"):
+        adapter.encode([Item(text="a")], ["dense"])
+
+
+@pytest.mark.parametrize(
+    ("content", "reason"),
+    [
+        (b"\xc1", "not an encode response"),
+        (encode_payload([dense_item(np.ones(8, dtype=np.float32))]), "8-dimensional vectors, the model declares 4"),
+        (encode_payload([dense_item(np.array([1.0, np.nan, 0.0, 0.0], dtype=np.float32))]), "non-finite"),
+        (encode_payload([{"dense": None}]), "without a dense vector"),
+    ],
+    ids=["undecodable", "wrong-dimension", "non-finite", "no-vector"],
+)
+def test_a_malformed_answer_is_an_error_not_a_vector(
+    monkeypatch: pytest.MonkeyPatch, content: bytes, reason: str
+) -> None:
+    adapter = adapter_over(monkeypatch, Recorder(ok(content)))
+
+    with pytest.raises(remote_sie.RemoteUpstreamError, match=reason):
+        adapter.encode([Item(text="a")], ["dense"])
+
+
+def test_an_item_without_text_is_refused_before_sending(monkeypatch: pytest.MonkeyPatch) -> None:
+    recorder = Recorder(ok(b""))
+    adapter = adapter_over(monkeypatch, recorder)
+
+    with pytest.raises(ValueError, match="text items only"):
+        adapter.encode([Item(text="a"), Item()], ["dense"])
+
+    assert recorder.requests == []
 
 
 def test_a_short_answer_is_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    vector = np.ones(4, dtype=np.float32)
-    adapter = adapter_over(
-        monkeypatch, msgpack_response([{"dense": {"dims": 4, "dtype": "float32", "values": vector}}])
-    )
+    adapter = adapter_over(monkeypatch, Recorder(ok(encode_payload([dense_item(np.ones(4, dtype=np.float32))]))))
 
     with pytest.raises(remote_sie.RemoteUpstreamError, match="different number of results"):
         adapter.encode([Item(text="a"), Item(text="b")], ["dense"])
-
-
-def test_an_upstream_error_is_raised_to_the_worker(monkeypatch: pytest.MonkeyPatch) -> None:
-    adapter = adapter_over(
-        monkeypatch, httpx.Response(404, json={"detail": {"code": "MODEL_NOT_FOUND", "message": "no such model"}})
-    )
-
-    with pytest.raises(Exception, match="no such model"):
-        adapter.encode([Item(text="a")], ["dense"])

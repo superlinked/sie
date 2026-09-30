@@ -92,6 +92,46 @@ def test_a_remote_profile_names_both_the_upstream_and_its_model() -> None:
         ModelConfig.model_validate(remote_backed(profiles={"default": remote_profile(upstream="team-sie")}))
 
 
+@pytest.mark.parametrize(
+    "upstream_model",
+    [
+        "../admin",
+        "a/../../v1/configs/models",
+        "a/./b",
+        "/abs",
+        "a/",
+        "a//b",
+        "a?b",
+        "a#b",
+        "a b",
+        "a%2e",
+        "a\\b",
+        5,
+        ["a"],
+    ],
+)
+def test_upstream_model_is_a_plain_model_id(upstream_model: Any) -> None:
+    with pytest.raises(ValidationError, match="'upstream_model' must be a model id"):
+        ModelConfig.model_validate(
+            remote_backed(profiles={"default": remote_profile(upstream="team-sie", upstream_model=upstream_model)})
+        )
+
+
+@pytest.mark.parametrize("upstream", ["Team_SIE", "../x", ["team-sie"], 7])
+def test_upstream_is_an_upstream_name(upstream: Any) -> None:
+    with pytest.raises(ValidationError, match="'upstream' must be an upstream name"):
+        ModelConfig.model_validate(
+            remote_backed(profiles={"default": remote_profile(upstream=upstream, upstream_model="sie-fake")})
+        )
+
+
+@pytest.mark.parametrize("upstream_model", ["sie-fake", "BAAI/bge-m3", "org/name:profile", "org/v1.5_x-y"])
+def test_ordinary_model_ids_are_accepted(upstream_model: str) -> None:
+    ModelConfig.model_validate(
+        remote_backed(profiles={"default": remote_profile(upstream="team-sie", upstream_model=upstream_model)})
+    )
+
+
 def test_an_undefined_upstream_name_is_rejected() -> None:
     config = ModelConfig.model_validate(
         remote_backed(profiles={"default": remote_profile(upstream="nobody", upstream_model="sie-fake")})
@@ -99,6 +139,9 @@ def test_an_undefined_upstream_name_is_rejected() -> None:
 
     with pytest.raises(ValueError, match="names an undefined upstream 'nobody'"):
         validate_profile_upstreams(config)
+
+    install_upstreams({}, remote_serving=False)
+    validate_profile_upstreams(config)
 
 
 def test_a_local_model_may_add_a_remote_profile() -> None:
