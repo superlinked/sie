@@ -1,5 +1,73 @@
 # Changelog
 
+## [0.9.0](https://github.com/superlinked/sie/compare/v0.8.3...v0.9.0) (2026-09-30)
+
+
+### ⚠ BREAKING CHANGES
+
+* **helm:** nats.auth.enabled defaults to true. Upgrading restarts NATS and rolls sie-config, the gateway, and the workers; pods that have not rolled yet are refused until they do, and memory-backed queued work is lost as on any NATS restart. To avoid the gap, upgrade once with nats.auth.allowAnonymous=true, then again without it. helm upgrade --reuse-values now fails the render because the reused NATS values lack the server wiring; use --reset-then-reuse-values or -f. With an external NATS server (nats.install=false), set nats.auth.existingSecrets.{config,gateway,worker} and create the users, or set nats.auth.enabled=false. nats-box and the NATS helm test pod are disabled by default. Credentials embedded in SIE_NATS_URL are not used.
+* **helm:** values-aws.yaml, values-gke.yaml, and values-aks.yaml no longer enable the gateway Ingress, so a plain upgrade with them removes the existing host-less, TLS-less Ingress. A gateway Ingress now renders only with gateway auth (gateway.auth.mode=static with gateway.auth.tokenSecretName), the oauth2-proxy edge on ingress-nginx, or ingress.allowUnauthenticated=true, and only with TLS or ingress.allowPlaintext=true; set both opt-ins to keep the previous catch-all Ingress. A LoadBalancer or NodePort gateway Service needs gateway auth or gateway.service.allowUnauthenticated=true. POST /v1/pools now rejects a warm floor above SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT (default 4) or a TTL above SIE_GATEWAY_POOL_MAX_TTL_S (default 3600) with 400, a pool beyond SIE_GATEWAY_MAX_POOLS (default 64) or named default with 403. The Python and TypeScript SDKs now send SIE_API_KEY when no API key is passed and the base URL has the same origin as SIE_BASE_URL; pass an empty API key to opt out.
+* **config:** the gateway no longer receives the sie-config admin token, so with gateway auth enabled its admin routes (POST, PUT and DELETE under /v1/pools, /v1/admin and /v1/configs) answer 403 until gateway.auth.adminTokenSecretName is set. sie-config, gateway and worker sidecar images older than this chart do not work with the split tokens.
+
+### Features
+
+* **examples:** add document-to-markdown-olmocr, LightOnOCR-2-1B on all of olmOCR-Bench ([#441](https://github.com/superlinked/sie/issues/441)) ([934a2a6](https://github.com/superlinked/sie/commit/934a2a6fdf4d36b41d8bfb8aaf001ec869e5ed31))
+* **examples:** add support-assistant-policy, the /chat support-rules run ([#438](https://github.com/superlinked/sie/issues/438)) ([533ed0f](https://github.com/superlinked/sie/commit/533ed0f28da12f5648a272df616131b42641bd57))
+* **generation:** report prefix-cache hits as usage.prompt_tokens_details.cached_tokens ([#386](https://github.com/superlinked/sie/issues/386)) ([c125504](https://github.com/superlinked/sie/commit/c12550414a1da8b78e4b883487f1f42c7b0dc6f9))
+* **helm:** authenticate every NATS connection with per-component users ([#421](https://github.com/superlinked/sie/issues/421)) ([60f30ab](https://github.com/superlinked/sie/commit/60f30ab4a6f11c95a65d0f016e7c3840bd08e823))
+* **models:** add tencent/Hy-MT2-1.8B ([#360](https://github.com/superlinked/sie/issues/360)) ([08c111f](https://github.com/superlinked/sie/commit/08c111ff91dad7ea6a4f070396155d4f06270f79))
+* **models:** add thinking profiles for Qwen3.8-27B-FP8 ([#383](https://github.com/superlinked/sie/issues/383)) ([ad87d96](https://github.com/superlinked/sie/commit/ad87d963f57a738df7ff37da9e8f69ed8b5e8bc3))
+* **score:** report the caller's content tokens separately from the reranker prompt template ([#442](https://github.com/superlinked/sie/issues/442)) ([b17a906](https://github.com/superlinked/sie/commit/b17a90664588fd48c2f8f50168b32e60c314da78))
+* **server:** add operator-defined upstreams with credential and egress controls ([#431](https://github.com/superlinked/sie/issues/431)) ([fe22241](https://github.com/superlinked/sie/commit/fe22241111ea334d9caa4aa22040c817472db4d4))
+* **server:** serve GLiClass multilang-ultra and the layer-wise v1.0 checkpoints ([#420](https://github.com/superlinked/sie/issues/420)) ([5699f3e](https://github.com/superlinked/sie/commit/5699f3eedc35780891f836dc5c791f6caa388957))
+* **server:** serve TopK-Embed-V1 multi-vector models (0.8B and 2B) ([#417](https://github.com/superlinked/sie/issues/417)) ([36c6129](https://github.com/superlinked/sie/commit/36c612915a4ce51c1baa2207cde0663b76744502))
+
+
+### Bug Fixes
+
+* align deadline dashboards and workspace resolver contracts ([#412](https://github.com/superlinked/sie/issues/412)) ([a0805c3](https://github.com/superlinked/sie/commit/a0805c3fdc5aa3c40bb3cd721931b010076f8da6))
+* **config:** give gateways and worker sidecars a read-only sie-config token ([#418](https://github.com/superlinked/sie/issues/418)) ([ef3eb69](https://github.com/superlinked/sie/commit/ef3eb69b331432cdb0411d8d643441508e2eda24))
+* **config:** validate model config writes against the worker schema and support chart rollback ([#392](https://github.com/superlinked/sie/issues/392)) ([296998f](https://github.com/superlinked/sie/commit/296998f630f252a991a30e12c4fc048482afb6f8))
+* **gateway:** carry request deadlines to workers and bound direct generation ([#401](https://github.com/superlinked/sie/issues/401)) ([8ec3b7e](https://github.com/superlinked/sie/commit/8ec3b7ec4245b95540fc2d0a72df1110d5b475ad))
+* **gateway:** distinguish request body read failures from size limits ([#385](https://github.com/superlinked/sie/issues/385)) ([d7e0ffa](https://github.com/superlinked/sie/commit/d7e0ffac9116864127d865e03249802ed4e95fba))
+* **gateway:** fence configuration exports against concurrent updates ([#387](https://github.com/superlinked/sie/issues/387)) ([1b83d3e](https://github.com/superlinked/sie/commit/1b83d3e06cf4762cf27c006bc9bef51dab1673bb))
+* **gateway:** keep other bundle models routable while workers predate a new adapter ([#419](https://github.com/superlinked/sie/issues/419)) ([a6eb6bb](https://github.com/superlinked/sie/commit/a6eb6bbcf02d1a43772a0d12cc2b5dd306f9795c))
+* **generation:** verify strict structured output and serve grammars on grammar-safe profiles ([#399](https://github.com/superlinked/sie/issues/399)) ([5e2ae50](https://github.com/superlinked/sie/commit/5e2ae504b031f6d4182c5e731fbb115881a9e110))
+* **helm:** generate the sie-config admin token and gate gateway readiness ([#396](https://github.com/superlinked/sie/issues/396)) ([7060f20](https://github.com/superlinked/sie/commit/7060f20c6e3a3df727800ba3caa1101dc61c0493))
+* **helm:** require authenticated, TLS-protected gateway exposure and bound the pool API ([#393](https://github.com/superlinked/sie/issues/393)) ([bc2e66a](https://github.com/superlinked/sie/commit/bc2e66a2aad6083dd74a3a862d32a7cc15e4f5bb))
+* **integrations:** send explicit item ids so rerankers map scores back ([#410](https://github.com/superlinked/sie/issues/410)) ([c07db06](https://github.com/superlinked/sie/commit/c07db0638d51b68e86154682660ec43320421efe))
+* keep out-of-range timeouts from panicking the gateway and sidecar ([#411](https://github.com/superlinked/sie/issues/411)) ([658d1d4](https://github.com/superlinked/sie/commit/658d1d464618d8aefd88fee54b53f0b4ef31f24a))
+* **models:** serve Iso-ModernColBERT with its PyLate recipe ([#436](https://github.com/superlinked/sie/issues/436)) ([422232f](https://github.com/superlinked/sie/commit/422232f178463719ea8bb97cf6465c75feb13c6b))
+* preserve trace context across local ingest handoffs ([#405](https://github.com/superlinked/sie/issues/405)) ([1e12c2d](https://github.com/superlinked/sie/commit/1e12c2dd579ca556f02e5e91d675182deb5f9776))
+* **runtime:** preserve model retries and parked shutdown settlement ([#408](https://github.com/superlinked/sie/issues/408)) ([7d70326](https://github.com/superlinked/sie/commit/7d70326d287e5cc4121030c88a2c513d7e91d6c1))
+* **runtime:** recover MLX exits and isolate invalid model configs ([#413](https://github.com/superlinked/sie/issues/413)) ([51699dc](https://github.com/superlinked/sie/commit/51699dcf8683b547726b8d477466fa87e9c8cb6b))
+* **sdk:** retry only requests that never reached the server ([#400](https://github.com/superlinked/sie/issues/400)) ([0860d41](https://github.com/superlinked/sie/commit/0860d417ed6097eea4a608fdda6fb2b2b7a405eb))
+* **server:** fail only the over-long GLiClass item under overflow_policy error ([#429](https://github.com/superlinked/sie/issues/429)) ([0db8a34](https://github.com/superlinked/sie/commit/0db8a34936f27fab30cb5f2e15abc765dc6782ba))
+* **server:** keep loaded models serving while another model loads or is evicted ([#398](https://github.com/superlinked/sie/issues/398)) ([88ee59a](https://github.com/superlinked/sie/commit/88ee59aac10006d1aa658bdf256fa03abf959d49))
+* **server:** pause GLiClass graph recording after an out-of-memory first replay ([#434](https://github.com/superlinked/sie/issues/434)) ([1f5426d](https://github.com/superlinked/sie/commit/1f5426d72d95c8f5ab0633d1e3dba2563bfe58c1))
+* **server:** refuse GLiClass items whose labels leave no room for the document ([#427](https://github.com/superlinked/sie/issues/427)) ([b5778bd](https://github.com/superlinked/sie/commit/b5778bd2fcb3facd7cecad2d27f0fdb3fad0d597))
+* **server:** reject token ids and apply model profiles on /v1/embeddings ([#395](https://github.com/superlinked/sie/issues/395)) ([078c6e5](https://github.com/superlinked/sie/commit/078c6e5d3f1b7b28544d8434ab600ab60106837a))
+* **server:** retry transient model-load failures and reload exited engines ([#394](https://github.com/superlinked/sie/issues/394)) ([8767c81](https://github.com/superlinked/sie/commit/8767c819e41cce74145a5ca4b96a31a0ffe3ae32))
+* **server:** send float16 multivectors to the sidecar as bytes ([#416](https://github.com/superlinked/sie/issues/416)) ([7ee9f75](https://github.com/superlinked/sie/commit/7ee9f75ef54abdf151ab125615ca015b03168d83))
+* **telemetry:** count sidecar barrier NAKs of unsupported models as model_unsupported ([#432](https://github.com/superlinked/sie/issues/432)) ([a009826](https://github.com/superlinked/sie/commit/a009826ccaf8dc6e57c1c7403efa411eb8502426))
+* **telemetry:** preserve long finite lifecycle durations ([#407](https://github.com/superlinked/sie/issues/407)) ([0edcfb3](https://github.com/superlinked/sie/commit/0edcfb373eaa543162265e730617e87b8a7ee930))
+* **telemetry:** preserve safe per-request batch timing ([#402](https://github.com/superlinked/sie/issues/402)) ([f0cb865](https://github.com/superlinked/sie/commit/f0cb8652084390d0775a9315e8a1b41b1141e9af))
+* **telemetry:** raise the sidecar NATS series budget for the deadline reason ([#428](https://github.com/superlinked/sie/issues/428)) ([db02e21](https://github.com/superlinked/sie/commit/db02e2196760129607ec25265a2303499ae0f2af))
+* **telemetry:** rebuild remote metric scalar attributes ([#406](https://github.com/superlinked/sie/issues/406)) ([91079ac](https://github.com/superlinked/sie/commit/91079ac30c45f7b57e085b5af60b165d74847e5e))
+* **telemetry:** record failures and streamed response lifecycle ([#404](https://github.com/superlinked/sie/issues/404)) ([e4e7ec0](https://github.com/superlinked/sie/commit/e4e7ec0b4a422329c43b098bf91703315a20f940))
+* **telemetry:** validate exported log resource and completion fields ([#409](https://github.com/superlinked/sie/issues/409)) ([ed0ad32](https://github.com/superlinked/sie/commit/ed0ad32c0eb6d1c75f6eae36940b40331c269da9))
+
+
+### Performance Improvements
+
+* **models:** load five more DeBERTa-v3 GLiClass models with bucketed CUDA graphs ([#422](https://github.com/superlinked/sie/issues/422)) ([aa9b323](https://github.com/superlinked/sie/commit/aa9b3230142fe7691e5e9325c77e2d3d1f807581))
+* **models:** raise GLiClass windows to the reference 1,024 tokens ([#425](https://github.com/superlinked/sie/issues/425)) ([7c89f6b](https://github.com/superlinked/sie/commit/7c89f6ba26a56d95031bb13e4a86425fa5b0074b))
+* **models:** serve MADLAD from its bfloat16 CTranslate2 artifact ([#433](https://github.com/superlinked/sie/issues/433)) ([7256a68](https://github.com/superlinked/sie/commit/7256a687e3bca40b350f81928eed51bb6ad15088))
+* **server:** bound GLiClass CUDA graph keys so mixed traffic keeps replaying ([#389](https://github.com/superlinked/sie/issues/389)) ([5c50c33](https://github.com/superlinked/sie/commit/5c50c33089cf6b38bb0b8414895c3206647ff706))
+* **server:** fuse the ModernBERT flash RoPE for models as accurate against float32 ([#424](https://github.com/superlinked/sie/issues/424)) ([f18d6d5](https://github.com/superlinked/sie/commit/f18d6d5e1abf62d01ee1e929d31050907a4f5022))
+* **server:** replay ModernBERT flash forwards as CUDA graphs ([#423](https://github.com/superlinked/sie/issues/423)) ([4c4c3a2](https://github.com/superlinked/sie/commit/4c4c3a21eb079b56aea7623c2bc50cab80b4c3d2))
+* **server:** run GLiClass ModernBERT encoders through the flash-attention varlen stack ([#414](https://github.com/superlinked/sie/issues/414)) ([77577f9](https://github.com/superlinked/sie/commit/77577f969ed6ed659a1ba0c0db78e1aa73ba11b9))
+
 ## [0.8.3](https://github.com/superlinked/sie/compare/v0.8.2...v0.8.3) (2026-09-26)
 
 
