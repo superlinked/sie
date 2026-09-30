@@ -120,3 +120,65 @@ async def test_stop_fails_concurrent_batches_instead_of_hanging() -> None:
     await asyncio.wait_for(stopping, timeout=10)
     for future in futures:
         assert future.done()
+
+
+@pytest.mark.asyncio
+async def test_an_idle_direct_queue_holds_no_slot_from_preformed_batches() -> None:
+    from sie_server.core.worker.model_worker import PreformedExtractRequest
+
+    adapter = _GatedAdapter(2)
+    worker = ModelWorker(adapter, _config())
+    await worker.start()
+    try:
+        # One direct request starts the loop and finishes, leaving it idle.
+        adapter.release.set()
+        first = await _submit(worker, 1)
+        await asyncio.wait_for(asyncio.gather(*first), timeout=5)
+        adapter.release.clear()
+        adapter.peak = 0
+
+        def request() -> PreformedExtractRequest:
+            return PreformedExtractRequest(
+                prepared_items=[ExtractPreparedItem(cost=1, original_index=0)], items=[Item(text="p")]
+            )
+
+        batches = [asyncio.create_task(worker.submit_extract_preformed_batch([request()], lora=None)) for _ in range(2)]
+        await _wait_for_peak(adapter, 2)
+        assert adapter.peak == 2
+        adapter.release.set()
+        await asyncio.wait_for(asyncio.gather(*batches), timeout=5)
+    finally:
+        adapter.release.set()
+        await worker.stop()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_dispatch_steps_the_adaptive_controller() -> None:
+    from sie_server.core.worker.types import AdaptiveBatchingParams
+
+    adapter = _GatedAdapter(2)
+    adapter.release.set()
+    config = WorkerConfig(
+        max_batch_tokens=100,
+        max_batch_requests=1,
+        max_batch_wait_ms=1,
+        adaptive_batching=AdaptiveBatchingParams(enabled=True),
+    )
+    worker = ModelWorker(adapter, config)
+    await worker.start()
+    try:
+        assert worker._adaptive_controller is not None
+        steps: list[int] = []
+        original = worker._step_adaptive_controller
+
+        def counted(batch, telemetry) -> None:
+            steps.append(batch.size)
+            original(batch, telemetry)
+
+        worker._step_adaptive_controller = counted  # type: ignore[method-assign]
+        futures = await _submit(worker, 3)
+        await asyncio.wait_for(asyncio.gather(*futures), timeout=5)
+        await asyncio.sleep(0.05)
+        assert sum(steps) == 3
+    finally:
+        await worker.stop()

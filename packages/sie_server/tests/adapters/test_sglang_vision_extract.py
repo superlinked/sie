@@ -603,3 +603,14 @@ async def test_aclose_client_runs_on_dedicated_request_loop(adapter: SGLangVisio
         assert adapter._http_client is None
     finally:
         adapter.unload()
+
+
+def test_a_new_request_loop_gets_a_new_request_bound(adapter: SGLangVisionExtractAdapter) -> None:
+    adapter._request_slots = asyncio.Semaphore(1)
+    adapter._start_request_loop()
+    try:
+        assert adapter._request_slots is None
+    finally:
+        loop = adapter._request_loop
+        assert loop is not None
+        loop.call_soon_threadsafe(loop.stop)

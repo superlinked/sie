@@ -195,6 +195,8 @@ class SGLangVisionExtractAdapter(SGLangGenerationAdapter):
             raise RuntimeError(msg)
         self._request_loop = loop
         self._request_loop_thread = thread
+        # A semaphore binds to the loop it first waits on; a reload gets a new loop.
+        self._request_slots = None
 
     def unload(self) -> None:
         loop = self._request_loop

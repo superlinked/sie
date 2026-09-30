@@ -1261,34 +1261,7 @@ class ModelWorker:
                     unique_requests = len({id(m) for m in batch.metadata})
                     self._stats.requests_per_batch.append(unique_requests)
 
-                # Track batch efficiency for adaptive controller
-                if self._efficiency_tracker is not None:
-                    self._efficiency_tracker.record(batch.total_cost, self._batch_config.max_batch_cost)
-
-                # Step the adaptive controller after processing. ``apply_step``
-                # owns the controller-output → _batch_config write-back (see
-                # AdaptiveBatchController); it is synchronous, so the in-place
-                # mutation stays safe against BatchFormer's async lock, which
-                # cannot interleave with it.
-                if self._adaptive_controller is not None and self._latency_tracker is not None:
-                    observed_p50 = self._latency_tracker.p50()
-                    fill_ratio = self._efficiency_tracker.mean_fill_ratio() if self._efficiency_tracker else None
-                    starvation_resets_before = self._adaptive_controller.starvation_resets
-                    self._adaptive_controller.apply_step(
-                        self._batch_config, observed_p50, fill_ratio, batch_size=batch.size
-                    )
-                    if telemetry is not None:
-                        telemetry.adaptive_snapshot(
-                            model=self._model_name or "other",
-                            profile="default",
-                            wait_ms=self._adaptive_controller.current_wait_ms,
-                            cost=self._adaptive_controller.current_batch_cost,
-                            observed_p50_ms=observed_p50,
-                            target_p50_ms=self._adaptive_controller.target_p50_ms,
-                            starvation_resets_delta=(
-                                self._adaptive_controller.starvation_resets - starvation_resets_before
-                            ),
-                        )
+                self._step_adaptive_controller(batch, telemetry)
 
                 # Log every 10 batches at INFO level for visibility
                 if self._stats.batches_processed % 10 == 0:
@@ -1318,28 +1291,60 @@ class ModelWorker:
 
         logger.debug("Process loop stopped")
 
+    def _step_adaptive_controller(self, batch: FormattedBatch[HasCost, RequestMetadata], telemetry: Any) -> None:
+        """Record a finished batch's efficiency and step the adaptive controller.
+
+        Runs on the worker's event loop after each dispatched batch, in both the
+        single-batch loop and concurrent dispatch. ``apply_step`` owns the
+        controller-output to ``_batch_config`` write-back (see
+        AdaptiveBatchController); it is synchronous, so the in-place mutation
+        stays safe against BatchFormer's async lock, which cannot interleave
+        with it.
+        """
+        if self._efficiency_tracker is not None:
+            self._efficiency_tracker.record(batch.total_cost, self._batch_config.max_batch_cost)
+        if self._adaptive_controller is not None and self._latency_tracker is not None:
+            observed_p50 = self._latency_tracker.p50()
+            fill_ratio = self._efficiency_tracker.mean_fill_ratio() if self._efficiency_tracker else None
+            starvation_resets_before = self._adaptive_controller.starvation_resets
+            self._adaptive_controller.apply_step(self._batch_config, observed_p50, fill_ratio, batch_size=batch.size)
+            if telemetry is not None:
+                telemetry.adaptive_snapshot(
+                    model=self._model_name or "other",
+                    profile="default",
+                    wait_ms=self._adaptive_controller.current_wait_ms,
+                    cost=self._adaptive_controller.current_batch_cost,
+                    observed_p50_ms=observed_p50,
+                    target_p50_ms=self._adaptive_controller.target_p50_ms,
+                    starvation_resets_delta=(self._adaptive_controller.starvation_resets - starvation_resets_before),
+                )
+
     async def _process_loop_concurrent(self) -> None:
-        """Dispatch batches as soon as a slot frees, up to ``_dispatch_width``.
+        """Dispatch batches as soon as they form, up to ``_dispatch_width`` at once.
 
         Used only for adapters that declare ``max_concurrent_dispatch() > 1``
         and have no LoRA support, so there is no active-LoRA state to protect
-        and no ``set_active_lora`` call. A slot is taken *before* a batch is
-        pulled, so queued work stays in the batcher (visible to queue limits
-        and to ``stop()``'s drain) until it can actually run. Each batch is
-        pulled as an idle worker would, without waiting to coalesce: the engine
-        behind the adapter does the batching.
+        and no ``set_active_lora`` call. Each batch is pulled as an idle worker
+        would, without waiting to coalesce: the engine behind the adapter does
+        the batching. A slot is taken only once a batch exists, so an idle
+        direct queue never holds a slot the pre-formed (sidecar) path needs.
+        While a pulled batch waits for a slot it is registered in flight, so
+        ``stop()`` fails its requests instead of losing them.
         """
         while self._running:
             try:
-                await self._dispatch_slots.acquire()
-                try:
-                    _active_lora, batch, _ = await self._get_next_batch_fcfs(True)
-                except BaseException:
-                    self._dispatch_slots.release()
-                    raise
+                _active_lora, batch, _ = await self._get_next_batch_fcfs(True)
                 if batch.size == 0:
-                    self._dispatch_slots.release()
                     continue
+                waiting = self._register_in_flight(batch)
+                try:
+                    await self._dispatch_slots.acquire()
+                except asyncio.CancelledError:
+                    waiting.orphaned = not self._running
+                    if not waiting.orphaned:
+                        self._in_flight.pop(waiting.token, None)
+                    raise
+                self._in_flight.pop(waiting.token, None)
                 task = asyncio.create_task(self._dispatch_concurrently(batch))
                 self._dispatch_tasks.add(task)
                 task.add_done_callback(self._dispatch_tasks.discard)
@@ -1358,6 +1363,7 @@ class ModelWorker:
         try:
             await self._process_batch(batch, engine_queue_owned=True)
             self._record_runtime_batch(batch)
+            self._step_adaptive_controller(batch, worker_telemetry() if worker_telemetry_enabled() else None)
         except asyncio.CancelledError:
             raise
         except Exception:
