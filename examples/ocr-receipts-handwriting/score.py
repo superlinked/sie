@@ -48,7 +48,7 @@ ARMS = {
 SETS = ("gnhk", "cord", "sroie")
 
 # What superlinked.com/ocr publishes: words read correctly in whole percent, ours rounded
-# down and every rival up, and $ per 1,000 images (GPT-5.4 mini at its batch price on
+# down and every rival up, and $ per 1,000 images (GPT-5.4 mini at its real-time price on
 # its recorded tokens; self-hosted engines at $0 plus your servers).
 PAGE = {
     "percent": {
@@ -58,7 +58,7 @@ PAGE = {
         "tesseract-5": 57,
         "easyocr": 56,
     },
-    "usd_per_1k": {"sie-lightonocr-2-1b": 1.16, "gpt-5.4-mini": 1.18},
+    "usd_per_1k": {"sie-lightonocr-2-1b": 1.16, "gpt-5.4-mini": 2.36},
 }
 
 # The token rule, fixed before the run: NFKC; markup stripped from model output; split on
@@ -123,9 +123,9 @@ def recorded() -> int:
     per_image = json.loads((EVIDENCE / "per_image.json").read_text())
     gpt = results["gpt_5_4_mini"]
     rate = gpt["usd_per_1m"]
-    gpt_batch = (gpt["mean_input_tokens"] * rate["input"] + gpt["mean_output_tokens"] * rate["output"]) / 1e6 * 1000
-    gpt_batch *= rate["batch_discount"]
-    prices = {"sie-lightonocr-2-1b": results["sie"]["price_page_usd_per_1k"], "gpt-5.4-mini": gpt_batch}
+    # Real-time against real-time: GPT-5.4 mini's standard token price, not its batch tier.
+    gpt_usd = (gpt["mean_input_tokens"] * rate["input"] + gpt["mean_output_tokens"] * rate["output"]) / 1e6 * 1000
+    prices = {"sie-lightonocr-2-1b": results["sie"]["price_page_usd_per_1k"], "gpt-5.4-mini": gpt_usd}
 
     ok = True
     print(f"{'Arm':38} {'Words':>7} {'Digits':>7}  {'GNHK':>6} {'CORD':>6} {'SROIE':>6}  $/1k images")

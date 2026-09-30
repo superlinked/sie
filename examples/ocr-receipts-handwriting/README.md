@@ -10,7 +10,7 @@ EasyOCR read the same images, and every output was scored by the same rule.
 | System | Words read exactly | Handwriting (GNHK) | $ per 1,000 images |
 | --- | --- | --- | --- |
 | SIE LightOnOCR-2-1B | 92.4% | 83.9% | $1.16 |
-| GPT-5.4 mini | 91.3% | 81.6% | $1.18 on the batch API, $2.36 standard |
+| GPT-5.4 mini | 91.3% | 81.6% | $2.36 |
 | PaddleOCR PP-OCRv5, self-hosted | 81.9% | 54.6% | $0 plus your servers |
 | Tesseract 5, self-hosted | 56.7% | 12.5% | $0 plus your servers |
 | EasyOCR, self-hosted | 55.1% | 15.7% | $0 plus your servers |
@@ -62,7 +62,7 @@ hold 63% of its unmatched tokens. The evidence holds every arm's precision.
 
 Every arm received the same bytes: each photo converted to RGB, longest side at most
 2,048 px, JPEG quality 92. GPT-5.4 mini's price is its recorded tokens (1,898 input and
-209 output per image on average) at $0.75 and $4.50 per million, halved on the batch API
+209 output per image on average) at its real-time $0.75 and $4.50 per million
 ([OpenAI pricing](https://developers.openai.com/api/docs/pricing), read 30 September 2026).
 
 Google Cloud Vision, AWS Textract `DetectDocumentText` and Azure AI Document Intelligence
