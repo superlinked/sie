@@ -99,6 +99,10 @@ def extract(sie: SIEClient, model: str, offset: int, text: str) -> list[dict[str
     from sie_sdk.types import Item
 
     result = sie.extract(model, Item(text=text), labels=REQUEST_LABELS)
+    # Some SDK versions return a per-item failure in result["error"] instead of
+    # raising; an empty entity list there is a failure, not a clean document.
+    if result.get("error"):
+        raise RuntimeError(f"{model}: {result['error']}")
     return [
         {
             "start": e["start"] + offset,
