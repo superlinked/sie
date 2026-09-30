@@ -273,6 +273,7 @@ def test_the_request_goes_to_the_encode_path_under_the_base_url(monkeypatch: pyt
     assert output.dense.shape == (1, 4)
     assert recorder.requests[0].url.raw_path == b"/tenant-a/v1/encode/org/name:profile"
     assert recorder.requests[0].headers["accept-encoding"] == "identity"
+    assert recorder.requests[0].extensions["timeout"]["read"] == remote_sie.READ_TIMEOUT_S
 
 
 @pytest.mark.parametrize("upstream_model", ["../../admin", "a/../../../v1/configs/models"])

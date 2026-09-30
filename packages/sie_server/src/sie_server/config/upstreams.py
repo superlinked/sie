@@ -248,6 +248,11 @@ class _InstalledUpstreams:
 _INSTALLED = _InstalledUpstreams()
 
 
+def remote_serving_from_env(raw: str | None) -> bool:
+    """Parse ``SIE_REMOTE_SERVING``. Unset means on; anything unrecognised means off."""
+    return raw is None or raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def install_upstreams(upstreams: Mapping[str, Upstream], *, remote_serving: bool = True) -> None:
     """Install the startup upstreams. ``remote_serving=False`` refuses every remote profile."""
     _INSTALLED.upstreams = MappingProxyType(dict(upstreams))
