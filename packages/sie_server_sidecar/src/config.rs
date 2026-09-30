@@ -260,10 +260,7 @@ impl std::fmt::Debug for WorkerConfig {
             health_publish_interval_ms,
         } = self;
         f.debug_struct("WorkerConfig")
-            .field(
-                "nats_url",
-                &nats_url.as_deref().map(redact_url_userinfo),
-            )
+            .field("nats_url", &nats_url.as_deref().map(redact_url_userinfo))
             .field("nats_credentials", nats_credentials)
             .field("local_socket_path", local_socket_path)
             .field("pool", pool)
