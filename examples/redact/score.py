@@ -131,6 +131,8 @@ COMPREHEND_CHARS_PER_UNIT = 100
 # LLMs: $ per 1M input and output tokens, times the tokens each provider reported for the run, at each
 # vendor's Batch API price, half of list and its cheapest (list: GPT-6 Luna $0.10/$0.50, Claude Haiku 4.5 $1/$5).
 LLM_PRICES = {"llm:gpt-6-luna": (0.05, 0.25), "llm:claude-haiku-4-5": (0.50, 2.50)}
+# The standard prices the recorded results were costed at, checked against them below.
+LLM_LIST_PRICES = {"llm:gpt-6-luna": (0.10, 0.50), "llm:claude-haiku-4-5": (1.00, 5.00)}
 # Self-hosted arms: Modal list price per second of the container, at the throughput measured in
 # results/e2_results.json, divided by 75% utilisation and times 1.75 for region.
 L4_PER_S = 0.000222
@@ -380,14 +382,17 @@ def bootstrap(per_arm: dict[str, list[dict[str, int]]]) -> dict[str, dict[str, l
 
 
 def monthly_usd(
-    documents: list[dict[str, Any]], rows: dict[str, dict[int, dict[str, Any]]], e2: dict[str, Any]
+    documents: list[dict[str, Any]],
+    rows: dict[str, dict[int, dict[str, Any]]],
+    e2: dict[str, Any],
+    llm_prices: dict[str, tuple[float, float]] = LLM_PRICES,
 ) -> dict[str, float]:
     """$ a month for MONTHLY_DOCUMENTS documents like the study's, per arm."""
     n = len(documents)
     per_document = {COMPOSITION: sum(SIE_TOKENS[m] * SIE_PRICE_PER_1M_TOKENS[m] / 1e6 for m in SIE_TOKENS) / n}
     units = sum(max(COMPREHEND_MIN_UNITS, len(d["text"]) / COMPREHEND_CHARS_PER_UNIT) for d in documents)
     per_document[COMPREHEND] = units * COMPREHEND_PER_UNIT / n
-    for arm, (price_in, price_out) in LLM_PRICES.items():
+    for arm, (price_in, price_out) in llm_prices.items():
         tokens_in = sum((r["output"] or {}).get("tokens_in", 0) for r in rows[arm].values())
         tokens_out = sum((r["output"] or {}).get("tokens_out", 0) for r in rows[arm].values())
         per_document[arm] = (tokens_in * price_in + tokens_out * price_out) / 1e6 / n
@@ -575,8 +580,11 @@ def main() -> int:
         "presidio": e2["self_host"]["presidio"]["usd_per_1m_documents"],
         "privacy-filter": e2["self_host"]["privacy-filter"]["usd_per_1m_documents"],
     }
+    # The recording costs the LLMs at standard prices; the page and the table above use batch.
+    at_list = monthly_usd(documents, rows, e2, LLM_LIST_PRICES)
     for arm, value in recorded_usd.items():
-        check.equal(f"{arm} $ per 1M documents (recorded)", round(usd[arm], 6), round(value, 6))
+        got = at_list[arm] if arm in LLM_LIST_PRICES else usd[arm]
+        check.equal(f"{arm} $ per 1M documents (recorded)", round(got, 6), round(value, 6))
 
     print()
     if not replay:
