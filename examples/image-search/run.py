@@ -4,7 +4,7 @@
     uv run python fetch.py --photos
     SIE_API_KEY=... uv run python run.py                          # SIE Cloud
     uv run python run.py --base-url http://localhost:8080         # your own server:
-                                                                  #   sie-server serve -m google/siglip-so400m-patch14-224
+                                                                  #   sie-server serve -m google/siglip-so400m-patch14-384
     uv run python score.py --vectors run-output/vectors
 
 SigLIP puts a photo and a shopper's words in one 1,152-dimensional space, so
@@ -30,7 +30,7 @@ from sie_sdk import SIEClient
 
 HERE = Path(__file__).resolve().parent
 EVIDENCE = HERE / "evidence"
-MODEL = "google/siglip-so400m-patch14-224"
+MODEL = "google/siglip-so400m-patch14-384"
 
 
 def dense(results: list, sent: int) -> list[list[float]]:

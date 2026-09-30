@@ -28,13 +28,15 @@ questions whose first result is a right product.
 
 | Product | Right product first (of 309) |
 | --- | --- |
-| SIE SigLIP so400m (`google/siglip-so400m-patch14-224`) | 84.1% |
 | Cohere Embed v4 | 84.1% |
+| SIE SigLIP so400m (`google/siglip-so400m-patch14-384`) | 83.2% |
 | Voyage multimodal-3.5 | 75.1% |
 | GPT-6 Luna captions + OpenAI text-embedding-3-small | 53.4% |
 
-SIE is ahead of Voyage (47 questions only SIE got right, 19 only Voyage did;
-p < 0.001) and level with Cohere (23 and 23). On Flickr30k and MS-COCO, which are
+SIE is ahead of Voyage (43 questions only SIE got right, 18 only Voyage did;
+p = 0.002). Against Cohere the difference is not significant (23 and 26,
+p = 0.78). `score.py` also prints the smaller `google/siglip-so400m-patch14-224`,
+which scores 84.1% here. On Flickr30k and MS-COCO, which are
 street and scene photos rather than products, Cohere and Voyage rank the right
 image first more often than SIE; `score.py` prints those too.
 
@@ -42,7 +44,7 @@ image first more often than SIE; `score.py` prints those too.
 
 | Product | Called as | Photo | Query |
 | --- | --- | --- | --- |
-| SIE SigLIP so400m | `google/siglip-so400m-patch14-224` on the open-source SIE server | JPEG bytes | the question |
+| SIE SigLIP so400m | `google/siglip-so400m-patch14-384` on the open-source SIE server, the checkpoint SIE Cloud serves | JPEG bytes | the question |
 | Voyage multimodal-3.5 | Voyage `multimodalembeddings` | `input_type="document"` | `input_type="query"` |
 | Cohere Embed v4 | Cohere v2 embed, `embed-v4.0`, float | `search_document` | `search_query` |
 | GPT-6 Luna captions | GPT-6 Luna captions each photo once (`detail="low"`), then `text-embedding-3-small` embeds the caption | the caption | `text-embedding-3-small` |
@@ -77,7 +79,7 @@ SIE Cloud or at your own server:
 
 ```sh
 uv run python fetch.py --photos
-sie-server serve -m google/siglip-so400m-patch14-224      # or use SIE Cloud with SIE_API_KEY
+sie-server serve -m google/siglip-so400m-patch14-384      # or use SIE Cloud with SIE_API_KEY
 uv run python run.py --base-url http://localhost:8080
 uv run python score.py --vectors run-output/vectors
 ```

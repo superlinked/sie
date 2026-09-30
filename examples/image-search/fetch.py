@@ -31,7 +31,7 @@ HERE = Path(__file__).resolve().parent
 EVIDENCE = HERE / "evidence"
 
 DATASET = "superlinked/sie-task-evidence"
-REVISION = "edf371d5d260dcfd64bda9f215713472087b5440"
+REVISION = "96c541a6a72ecb2ca72ee3644caecdb209ed476c"
 TASK = "image-search"
 
 API = f"https://huggingface.co/api/datasets/{DATASET}/tree/{REVISION}"
@@ -47,10 +47,10 @@ REQUIRED = (
     "inputs/questions.json",
     "rankings/e1.json.gz",
     "rankings/e0.json.gz",
-    "vectors/siglip-so400m-224/images.npy",
-    "vectors/siglip-so400m-224/images.ids.json",
-    "vectors/siglip-so400m-224/texts.npy",
-    "vectors/siglip-so400m-224/texts.ids.json",
+    "vectors/siglip-so400m-384/images.npy",
+    "vectors/siglip-so400m-384/images.ids.json",
+    "vectors/siglip-so400m-384/texts.npy",
+    "vectors/siglip-so400m-384/texts.ids.json",
     "stats/e1.json",
     "stats/e0.json",
 )

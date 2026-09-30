@@ -32,10 +32,10 @@ import numpy as np
 
 HERE = Path(__file__).resolve().parent
 EVIDENCE = HERE / "evidence"
-OURS = "sie-siglip-so400m-patch14-224"
+OURS = "sie-siglip-so400m-384-oss"
 # The share of right products first that superlinked.com/image-search and its SOURCES.md state.
 EXPECTED = {
-    OURS: "84.1",
+    OURS: "83.2",
     "cohere-embed-v4@1024": "84.1",
     "voyage-mm-3.5@1024": "75.1",
     "openai-caption-3-small@1024": "53.4",
@@ -83,7 +83,7 @@ def main() -> int:
     parser.add_argument(
         "--vectors",
         type=Path,
-        default=EVIDENCE / "vectors" / "siglip-so400m-224",
+        default=EVIDENCE / "vectors" / "siglip-so400m-384",
         help="SIE vectors to rank: the recorded ones, or a run.py output directory",
     )
     args = parser.parse_args()
@@ -101,7 +101,7 @@ def main() -> int:
     # 1. Our ranking, recomputed from the vectors, must be the recorded one.
     ours = rank_ours(args.vectors, [r["image_id"] for r in catalogue], [q["id"] for q in questions])
     recorded = {qid: [image_id for image_id, _ in rows] for qid, rows in rankings[OURS].items()}
-    recorded_run = args.vectors == EVIDENCE / "vectors" / "siglip-so400m-224"
+    recorded_run = args.vectors == EVIDENCE / "vectors" / "siglip-so400m-384"
     differ = [qid for qid in ours if ours[qid] != recorded[qid][:20]]
     if recorded_run and differ:
         print(f"{len(differ)} questions rank differently from the recording, e.g. {differ[:3]}", file=sys.stderr)
