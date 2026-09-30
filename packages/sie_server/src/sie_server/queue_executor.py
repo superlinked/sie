@@ -1932,6 +1932,25 @@ def _units_from_token_counts(counts: Any, expected_len: int) -> UnitCounts | Non
     return UnitCounts(input_tokens=sum(int(c) for c in counts))
 
 
+def _content_token_total(content: Any, input_tokens: Any, expected_len: int) -> int | None:
+    """Sum per-pair caller-content token counts for one score work item.
+
+    Every pair must carry a well-formed count no larger than its own input
+    count; anything else leaves the dimension unset rather than attributing a
+    partial or inconsistent sum.
+    """
+    if not isinstance(content, list) or not isinstance(input_tokens, list):
+        return None
+    if len(content) != expected_len or len(input_tokens) != expected_len:
+        return None
+    for count, total in zip(content, input_tokens, strict=True):
+        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+            return None
+        if not isinstance(total, int) or isinstance(total, bool) or count > total:
+            return None
+    return sum(content)
+
+
 def _backfill_score_units(
     adapter: Any,
     bi: ScoreBatchItem,
@@ -2045,6 +2064,13 @@ def _score_success_outcome(
         instruction=bi.instruction,
     )
     units = _with_images(units, sum(image_counts) if image_counts is not None else None)
+    content_tokens = _content_token_total(
+        getattr(score_output, "content_token_counts", None),
+        getattr(score_output, "input_token_counts", None),
+        score_output.batch_size,
+    )
+    if content_tokens is not None and units is not None and units.input_tokens is not None:
+        units = msgspec.structs.replace(units, content_input_tokens=content_tokens)
 
     # Score output is always Rust-frameable: the Python and Rust
     # sort/rank paths produce byte-identical results (see the

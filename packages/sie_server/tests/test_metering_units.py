@@ -435,6 +435,64 @@ class TestScoreBackfill:
         assert assembled.input_token_counts == [7, 8]
         assert assembled.input_image_counts == [1, 2]
 
+    @pytest.mark.parametrize("counts", [[-1], [True]])
+    def test_score_output_rejects_invalid_content_counts(self, counts: list[int]) -> None:
+        with pytest.raises(ValueError, match="non-negative integers"):
+            ScoreOutput(scores=np.array([0.5], dtype=np.float32), content_token_counts=counts)
+
+    def test_score_handler_preserves_content_counts_across_oom_slicing(self) -> None:
+        handler = ScoreHandler()
+        output = ScoreOutput(
+            scores=np.array([0.9, 0.1], dtype=np.float32),
+            input_token_counts=[80, 90],
+            content_token_counts=[7, 17],
+        )
+
+        partials = {index: handler.slice_output(output, index) for index in range(2)}
+        assembled = handler.assemble_output(partials, batch_size=2)
+
+        assert assembled.content_token_counts == [7, 17]
+        partials[1] = ScoreOutput(scores=np.array([0.1], dtype=np.float32), input_token_counts=[90])
+        assert handler.assemble_output(partials, batch_size=2).content_token_counts is None
+
+    @pytest.mark.asyncio
+    async def test_content_tokens_settle_beside_input_tokens(self) -> None:
+        adapter = JinaFlashCrossEncoderAdapter(model_name_or_path="stub/model", max_seq_length=512)
+        score_output = ScoreOutput(
+            scores=np.array([0.9, 0.1], dtype=np.float32),
+            input_token_counts=[80, 90],
+            content_token_counts=[7, 17],
+        )
+        reg = _score_registry()
+        reg.get.return_value = adapter
+        reg.start_worker = AsyncMock(return_value=_score_worker(score_output))
+
+        outcome = await QueueExecutor(reg).process_score_batch(_score_request())
+
+        units = outcome.outcomes[0].units
+        assert units is not None
+        assert (units.input_tokens, units.content_input_tokens, units.pairs) == (170, 24, 2)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("content", [None, [7, 91]])
+    async def test_content_tokens_are_omitted_unless_every_pair_fits_its_input(self, content: list[int] | None) -> None:
+        adapter = JinaFlashCrossEncoderAdapter(model_name_or_path="stub/model", max_seq_length=512)
+        score_output = ScoreOutput(
+            scores=np.array([0.9, 0.1], dtype=np.float32),
+            input_token_counts=[80, 90],
+            content_token_counts=content,
+        )
+        reg = _score_registry()
+        reg.get.return_value = adapter
+        reg.start_worker = AsyncMock(return_value=_score_worker(score_output))
+
+        outcome = await QueueExecutor(reg).process_score_batch(_score_request())
+
+        units = outcome.outcomes[0].units
+        assert units is not None
+        assert units.input_tokens == 170
+        assert units.content_input_tokens is None
+
     @pytest.mark.asyncio
     async def test_qwen3_vl_settles_only_images_consumed_per_pair(self) -> None:
         adapter = Qwen3VLRerankerAdapter(model_name_or_path="stub/model")

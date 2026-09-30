@@ -123,6 +123,16 @@ class ScoreOutput:
     # keep each pair's count attributed to the right work item.
     input_token_counts: list[int] | None = None
 
+    # Per-pair counts of the caller's own text inside each pair: the query,
+    # the document as processed after truncation, and a request instruction
+    # when one was supplied, each tokenized on its own with the model's
+    # tokenizer. Excludes prompt-template tokens the adapter adds around them
+    # (chat markers, system prompt, field labels, the built-in default
+    # instruction). Aligned 1:1 with ``scores`` and never above the matching
+    # ``input_token_counts`` entry. ``None`` when the adapter does not
+    # separate its template from the caller's text.
+    content_token_counts: list[int] | None = None
+
     # Authoritative per-pair counts of images actually processed. A query
     # image is counted once for every candidate pair because the cross-encoder
     # processes that image again for each candidate. The queue executor sums
@@ -153,6 +163,15 @@ class ScoreOutput:
             isinstance(count, int) and not isinstance(count, bool) and count >= 0 for count in self.input_image_counts
         ):
             raise ValueError("input_image_counts must contain only non-negative integers")
+        if self.content_token_counts is not None:
+            if len(self.content_token_counts) != self.batch_size:
+                msg = f"content_token_counts length {len(self.content_token_counts)} != batch_size {self.batch_size}"
+                raise ValueError(msg)
+            if not all(
+                isinstance(count, int) and not isinstance(count, bool) and count >= 0
+                for count in self.content_token_counts
+            ):
+                raise ValueError("content_token_counts must contain only non-negative integers")
 
 
 @dataclass

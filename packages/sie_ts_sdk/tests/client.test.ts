@@ -1589,6 +1589,22 @@ describe("SIEClient.score() - reranking", () => {
     expect(result.usage).toEqual({ inputTokens: 91, images: 2 });
   });
 
+  it("should expose the content-token breakdown of score usage", async () => {
+    mockFetch.mockResolvedValueOnce(
+      createMsgpackResponse({
+        model: "Qwen/Qwen3-Reranker-0.6B",
+        scores: [{ item_id: "doc-1", score: 0.9, rank: 0 }],
+        usage: { input_tokens: 80, input_tokens_details: { content_tokens: 7 } },
+      }),
+    );
+
+    const result = await client.score("Qwen/Qwen3-Reranker-0.6B", { text: "query" }, [
+      { text: "doc" },
+    ]);
+
+    expect(result.usage).toEqual({ inputTokens: 80, inputTokensDetails: { contentTokens: 7 } });
+  });
+
   it("should use correct URL with model in path", async () => {
     mockFetch.mockResolvedValueOnce(
       createMsgpackResponse({

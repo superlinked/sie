@@ -401,6 +401,20 @@ export interface ScoreUsage {
   inputTokens: number;
   /** Images processed across query-document pairs */
   images?: number;
+  /** Content/template breakdown of `inputTokens`, when the reranker reports it */
+  inputTokensDetails?: ScoreInputTokensDetails;
+}
+
+/**
+ * Breakdown of score input tokens.
+ */
+export interface ScoreInputTokensDetails {
+  /**
+   * Caller text inside the scored pairs (query, post-truncation document and a
+   * supplied instruction, each tokenized alone). The rest of `inputTokens` is
+   * the reranker's prompt template.
+   */
+  contentTokens: number;
 }
 
 /**

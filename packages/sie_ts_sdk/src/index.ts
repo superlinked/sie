@@ -68,6 +68,7 @@ export type {
   TimingInfo,
   EncodeResult,
   ScoreEntry,
+  ScoreInputTokensDetails,
   ScoreUsage,
   ScoreResult,
   Entity,

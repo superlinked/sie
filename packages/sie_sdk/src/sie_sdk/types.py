@@ -407,11 +407,23 @@ class ScoreEntry(TypedDict):
     rank: int
 
 
+class ScoreInputTokensDetails(TypedDict):
+    """Breakdown of score input tokens.
+
+    ``content_tokens`` counts the caller's text inside the scored pairs (query,
+    post-truncation document and a supplied instruction, each tokenized alone).
+    The rest of ``input_tokens`` is the reranker's prompt template.
+    """
+
+    content_tokens: Required[int]
+
+
 class ScoreUsage(TypedDict):
     """Authoritative usage reported by a score adapter."""
 
     input_tokens: Required[int]
     images: NotRequired[int]
+    input_tokens_details: NotRequired[ScoreInputTokensDetails]
 
 
 class ScoreResult(TypedDict, total=False):

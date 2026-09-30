@@ -130,6 +130,76 @@ def test_qwen3_score_pairs_surfaces_exact_truncated_lengths(monkeypatch: pytest.
     assert all(count <= max_length for count in output.input_token_counts)
 
 
+def _char_qwen3_adapter(monkeypatch: pytest.MonkeyPatch, pairs: int) -> Qwen2FlashCrossEncoderAdapter:
+    adapter = Qwen2FlashCrossEncoderAdapter(
+        "unused",
+        max_seq_length=4096,
+        input_format="qwen3",
+        score_mode="log_softmax",
+    )
+    adapter._tokenizer = _CharTokenizer()  # ty: ignore[invalid-assignment]
+    adapter._model = object()
+    adapter._device = "cpu"
+    adapter._pre_tokenize_templates()
+    monkeypatch.setattr(
+        adapter,
+        "_forward_flash",
+        lambda *_args, **_kwargs: torch.zeros((pairs, 2)),
+    )
+    return adapter
+
+
+def test_qwen3_content_counts_exclude_the_template_and_default_instruction(monkeypatch: pytest.MonkeyPatch) -> None:
+    adapter = _char_qwen3_adapter(monkeypatch, pairs=2)
+    query = Item(text="query")
+    docs = [Item(text="x" * 100), Item(text="short")]
+    template_length = len(adapter._build_input_ids("query", "", max_length=4096)) - len("query")
+    max_length = template_length + len("query") + 7
+
+    output = adapter.score_pairs([query, query], docs, options={"max_seq_length": max_length})
+
+    assert output.content_token_counts == [len("query") + 7, len("query") + len("short")]
+    assert output.input_token_counts == [template_length + count for count in output.content_token_counts]
+
+
+def test_qwen3_content_counts_bill_a_supplied_instruction(monkeypatch: pytest.MonkeyPatch) -> None:
+    adapter = _char_qwen3_adapter(monkeypatch, pairs=2)
+    queries = [Item(text="q1"), Item(text="query two")]
+    docs = [Item(text="doc"), Item(text="document")]
+
+    supplied = adapter.score_pairs(queries, docs, instruction="Find the rule")
+    empty = adapter.score_pairs(queries, docs, instruction="")
+    default = adapter.score_pairs(queries, docs)
+
+    assert supplied.content_token_counts == [
+        len("q1") + len("Find the rule") + len("doc"),
+        len("query two") + len("Find the rule") + len("document"),
+    ]
+    assert (
+        empty.content_token_counts
+        == default.content_token_counts
+        == [
+            len("q1") + len("doc"),
+            len("query two") + len("document"),
+        ]
+    )
+    assert empty.input_token_counts == default.input_token_counts
+
+
+def test_mxbai_format_reports_no_content_split(monkeypatch: pytest.MonkeyPatch) -> None:
+    adapter = Qwen2FlashCrossEncoderAdapter("unused", max_seq_length=4096)
+    adapter._tokenizer = _CharTokenizer()  # ty: ignore[invalid-assignment]
+    adapter._model = object()
+    adapter._device = "cpu"
+    adapter._pre_tokenize_templates()
+    monkeypatch.setattr(adapter, "_forward_flash", lambda *_args, **_kwargs: torch.zeros((1, 2)))
+
+    output = adapter.score_pairs([Item(text="query")], [Item(text="doc")])
+
+    assert output.input_token_counts is not None
+    assert output.content_token_counts is None
+
+
 def test_qwen3_rejects_query_template_larger_than_model_window() -> None:
     adapter = Qwen2FlashCrossEncoderAdapter("unused", input_format="qwen3")
     adapter._tokenizer = _CharTokenizer()  # ty: ignore[invalid-assignment]

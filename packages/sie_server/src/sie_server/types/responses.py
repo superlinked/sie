@@ -76,9 +76,22 @@ class ScoreEntry(TypedDict):
 
 # Kept as its own name for existing importers and for the published
 # ``ScoreUsageModel`` schema; structurally identical to :class:`Usage`.
+class ScoreInputTokensDetails(TypedDict):
+    """Breakdown of score ``input_tokens``.
+
+    ``content_tokens`` is the caller's own text inside every scored pair: the
+    query, the document after truncation, and a request instruction when one
+    was supplied, each tokenized alone. The rest of ``input_tokens`` is the
+    prompt template the reranker wraps around each pair.
+    """
+
+    content_tokens: Required[int]
+
+
 class ScoreUsage(TypedDict):
     input_tokens: Required[int]
     images: NotRequired[int]
+    input_tokens_details: NotRequired[ScoreInputTokensDetails]
 
 
 class ScoreResponse(TypedDict, total=False):
