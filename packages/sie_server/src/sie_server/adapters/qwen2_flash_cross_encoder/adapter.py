@@ -218,16 +218,18 @@ class Qwen2FlashCrossEncoderAdapter(FlashBaseAdapter):
         )[0]
 
         # Reranking consumes only the configured negative/positive token
-        # logits. Cache those two output-head rows so each request avoids a
-        # full-vocabulary projection.
+        # logits. Cache those two output-head rows, in float32, so each
+        # request avoids a full-vocabulary projection and a per-call cast.
         score_token_ids = torch.tensor(
             [self._no_token_id, self._yes_token_id],
             dtype=torch.long,
             device=device,
         )
         lm_head = self._model.lm_head
-        self._score_weight = lm_head.weight.index_select(0, score_token_ids).detach()
-        self._score_bias = lm_head.bias.index_select(0, score_token_ids).detach() if lm_head.bias is not None else None
+        self._score_weight = lm_head.weight.index_select(0, score_token_ids).detach().float()
+        self._score_bias = (
+            lm_head.bias.index_select(0, score_token_ids).detach().float() if lm_head.bias is not None else None
+        )
 
         # Pre-tokenize templates based on input format
         self._pre_tokenize_templates()
@@ -314,13 +316,12 @@ class Qwen2FlashCrossEncoderAdapter(FlashBaseAdapter):
     def _project_score_logits(self, last_hidden: torch.Tensor) -> torch.Tensor:
         """Project last-token states onto only the configured score tokens, in float32.
 
-        Two output rows cost nothing to project at full precision, and the
-        yes/no logits are the whole score, so they are not rounded to bfloat16.
+        The two score rows are cached in float32 at load. The yes/no logits are
+        the whole score, so they are not rounded to bfloat16.
         """
         if self._score_weight is None:
             raise RuntimeError(ERR_NOT_LOADED)
-        bias = self._score_bias.float() if self._score_bias is not None else None
-        return torch.nn.functional.linear(last_hidden.float(), self._score_weight.float(), bias)
+        return torch.nn.functional.linear(last_hidden.float(), self._score_weight, self._score_bias)
 
     def score(
         self,

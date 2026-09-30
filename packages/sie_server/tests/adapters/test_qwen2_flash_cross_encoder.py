@@ -66,14 +66,15 @@ def test_score_projection_runs_in_float32_for_bfloat16_states() -> None:
     adapter = Qwen2FlashCrossEncoderAdapter("unused")
     lm_head = torch.nn.Linear(4, 11, bias=True).to(torch.bfloat16)
     token_ids = torch.tensor([7, 3])
-    adapter._score_weight = lm_head.weight.index_select(0, token_ids)
-    adapter._score_bias = lm_head.bias.index_select(0, token_ids)
+    # As cached at load: the two score rows in float32.
+    adapter._score_weight = lm_head.weight.index_select(0, token_ids).float()
+    adapter._score_bias = lm_head.bias.index_select(0, token_ids).float()
     hidden = torch.randn(5, 4).to(torch.bfloat16)
 
     projected = adapter._project_score_logits(hidden)
 
     assert projected.dtype == torch.float32
-    expected = torch.nn.functional.linear(hidden.float(), adapter._score_weight.float(), adapter._score_bias.float())
+    expected = torch.nn.functional.linear(hidden.float(), adapter._score_weight, adapter._score_bias)
     torch.testing.assert_close(projected, expected)
 
 
