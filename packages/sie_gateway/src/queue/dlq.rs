@@ -5,6 +5,7 @@ use futures_util::StreamExt;
 use tracing::{debug, error, info, warn};
 
 use super::stream_durability;
+use crate::nats::manager::server_originated;
 use crate::observability::metrics::{self as telemetry, QueueEvent, QueueEventOutcome};
 
 const DLQ_STREAM_NAME: &str = "DEAD_LETTERS";
@@ -123,6 +124,14 @@ impl DlqListener {
     ) {
         while let Some(msg) = subscriber.next().await {
             let subject = msg.subject.as_str();
+            if let Some(reason) = server_originated(&msg) {
+                warn!(
+                    subject = %subject,
+                    reason,
+                    "dropping max-deliveries advisory that the server did not emit itself"
+                );
+                continue;
+            }
             let payload = msg.payload.to_vec();
 
             // Parse the advisory to extract stream/consumer info

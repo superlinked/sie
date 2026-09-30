@@ -12,6 +12,8 @@ VISUAL_MODELS = (
     "TomoroAI/tomoro-colqwen3-embed-4b",
     "nvidia/llama-nemoretriever-colembed-3b-v1",
     "nvidia/nemotron-colembed-vl-4b-v2",
+    "topk-io/topk-embed-v1-xsmall",
+    "topk-io/topk-embed-v1-small",
 )
 
 

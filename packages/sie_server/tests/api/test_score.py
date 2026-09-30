@@ -13,6 +13,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sie_server.adapters.base import ModelCapabilities, ModelDims
 from sie_server.api.score import router as score_router
+from sie_server.api.score import score_usage_from_output
 from sie_server.config.model import (
     EmbeddingDim,
     EncodeTask,
@@ -842,3 +843,33 @@ class TestScoreNonFiniteGuard:
         )
         assert response.status_code == 200
         assert len(response.json()["scores"]) == 3
+
+
+class TestScoreUsageContentBreakdown:
+    """``usage.input_tokens_details.content_tokens`` reports the caller's text."""
+
+    def test_reports_content_tokens_beside_the_templated_total(self) -> None:
+        output = ScoreOutput(
+            scores=np.array([0.5, 0.25], dtype=np.float32),
+            input_token_counts=[80, 90],
+            content_token_counts=[7, 17],
+        )
+
+        assert score_usage_from_output(output) == {
+            "input_tokens": 170,
+            "input_tokens_details": {"content_tokens": 24},
+        }
+
+    def test_omits_the_breakdown_when_the_adapter_does_not_split_it(self) -> None:
+        output = ScoreOutput(scores=np.array([0.5], dtype=np.float32), input_token_counts=[80])
+
+        assert score_usage_from_output(output) == {"input_tokens": 80}
+
+    def test_omits_a_breakdown_larger_than_its_pair(self) -> None:
+        output = ScoreOutput(
+            scores=np.array([0.5], dtype=np.float32),
+            input_token_counts=[80],
+            content_token_counts=[81],
+        )
+
+        assert score_usage_from_output(output) == {"input_tokens": 80}

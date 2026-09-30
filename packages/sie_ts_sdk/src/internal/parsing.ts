@@ -430,6 +430,7 @@ interface WireScoreEntry {
 interface WireScoreUsage {
   input_tokens: number;
   images?: number;
+  input_tokens_details?: { content_tokens: number };
 }
 
 interface WireScoreResult {
@@ -643,6 +644,13 @@ export function parseScoreResult(data: unknown): ScoreResult {
       ? {
           inputTokens: wire.usage.input_tokens,
           images: wire.usage.images,
+          ...(wire.usage.input_tokens_details
+            ? {
+                inputTokensDetails: {
+                  contentTokens: wire.usage.input_tokens_details.content_tokens,
+                },
+              }
+            : {}),
         }
       : undefined,
   };

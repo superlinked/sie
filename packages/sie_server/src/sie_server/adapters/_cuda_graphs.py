@@ -1,9 +1,10 @@
 """Process-wide pieces shared by the CUDA graph runners.
 
 A runner records the kernel launches of a forward once per input shape and
-replays them with one call. Two runners exist: the GLiClass DeBERTa encoder
-(``gliclass/cuda_graphs.py``) and the ModernBERT flash-attention varlen
-encoders (``_modernbert_flash_graphs.py``). They record different forwards,
+replays them with one call. Three runners exist: the GLiClass DeBERTa encoder
+(``gliclass/cuda_graphs.py``), the ModernBERT flash-attention varlen encoders
+(``_modernbert_flash_graphs.py``) and TopK-Embed's text model
+(``topk_embed/graphs.py``). They record different forwards,
 but they share one device and one caching allocator, so these rules hold
 across every runner in the process:
 

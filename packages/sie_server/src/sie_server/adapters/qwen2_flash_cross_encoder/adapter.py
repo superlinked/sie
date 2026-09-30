@@ -369,15 +369,29 @@ class Qwen2FlashCrossEncoderAdapter(FlashBaseAdapter):
 
         # Build input sequences with chat template
         all_input_ids = []
+        content_counts: list[int] | None = [] if self._input_format == "qwen3" else None
+        caller_text_tokens: dict[str, int] = {}
         for query_item, doc_item in zip(queries, docs, strict=True):
             query_text = self._extract_text_only(query_item)
             doc_text = self._extract_text_only(doc_item)
-            input_ids = self._build_input_ids(
-                query_text,
-                doc_text,
-                max_length=max_length,
-                instruction=instruction,
-            )
+            if content_counts is None:
+                input_ids = self._build_input_ids(
+                    query_text,
+                    doc_text,
+                    max_length=max_length,
+                    instruction=instruction,
+                )
+            else:
+                input_ids, document_tokens = self._build_qwen3_pair(
+                    query_text,
+                    doc_text,
+                    max_length=max_length,
+                    instruction=instruction,
+                )
+                caller_tokens = self._caller_text_tokens(query_text, caller_text_tokens)
+                if instruction:
+                    caller_tokens += self._caller_text_tokens(instruction, caller_text_tokens)
+                content_counts.append(min(len(input_ids), caller_tokens + document_tokens))
             all_input_ids.append(input_ids)
 
         # Build packed representation
@@ -415,7 +429,20 @@ class Qwen2FlashCrossEncoderAdapter(FlashBaseAdapter):
             scores_tensor = self._compute_scores(logits)
             scores_array = scores_tensor.cpu().numpy().astype(np.float32)
 
-        return ScoreOutput(scores=scores_array, input_token_counts=seq_lengths)
+        return ScoreOutput(
+            scores=scores_array,
+            input_token_counts=seq_lengths,
+            content_token_counts=content_counts,
+        )
+
+    def _caller_text_tokens(self, text: str, cache: dict[str, int]) -> int:
+        """Token count of one caller-supplied string tokenized on its own."""
+        count = cache.get(text)
+        if count is None:
+            assert self._tokenizer is not None
+            count = len(self._tokenizer.encode(text, add_special_tokens=False))
+            cache[text] = count
+        return count
 
     # ------------------------------------------------------------------
     # Input construction
@@ -514,6 +541,23 @@ class Qwen2FlashCrossEncoderAdapter(FlashBaseAdapter):
         Format:
         <chat_prefix><Instruct>: {instruction}\n<Query>: {query}\n<Document>: {document}<chat_suffix>
         """
+        input_ids, _document_tokens = self._build_qwen3_pair(
+            query,
+            document,
+            max_length=max_length,
+            instruction=instruction,
+        )
+        return input_ids
+
+    def _build_qwen3_pair(
+        self,
+        query: str,
+        document: str,
+        *,
+        max_length: int | None = None,
+        instruction: str | None = None,
+    ) -> tuple[list[int], int]:
+        """Return the Qwen3 pair's input IDs and its post-truncation document token count."""
         assert self._tokenizer is not None
         effective_max_length = max_length or self._max_seq_length
         inst = instruction or self._default_instruction or QWEN3_DEFAULT_INSTRUCTION
@@ -538,7 +582,7 @@ class Qwen2FlashCrossEncoderAdapter(FlashBaseAdapter):
         elif len(doc_ids) > max_doc_len:
             doc_ids = doc_ids[:max_doc_len]
 
-        return self._chat_prefix_ids + user_prefix_ids + doc_ids + self._chat_suffix_ids
+        return self._chat_prefix_ids + user_prefix_ids + doc_ids + self._chat_suffix_ids, len(doc_ids)
 
     def _extract_text_only(self, item: Item) -> str:
         if item.images or item.audio is not None or item.video is not None or item.document is not None:

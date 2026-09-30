@@ -54,8 +54,9 @@ eagerly.
 Recording follows the GLiClass DeBERTa graphs (``gliclass/cuda_graphs.py``)
 and shares their process-wide rules (``_cuda_graphs.py``): one recording at a
 time in the process, none while less than a tenth of the device's memory is
-free, at most 16 recordings at once and then one per 2 seconds, and the
-graphs of one model within 4% of the device's memory. The set of shapes is
+free, a budget of 16 recordings per model that refills at one every 2 seconds
+(16 in quick succession, one after another, then about one every 2 seconds),
+and the graphs of one model within 4% of the device's memory. The set of shapes is
 fixed, so when a model's graphs reach that budget the runner stops recording
 and keeps replaying the graphs it has. A shape is recorded the first time a
 forward needs it (the dense adapter's warm-up forward, at load, records the
@@ -114,7 +115,8 @@ _MIN_SLOTS = 8
 _MAX_SLOTS = 128
 # ``max_seqlen`` of a graph for rows that all fit in it.
 _SHORT_ROWS = 512
-# A runner may record this many graphs at once, then one per this many seconds.
+# A runner's recording budget: this many recordings, refilled at one per this
+# many seconds. Recordings still run one at a time (``RECORDING_LOCK``).
 _RECORDING_BURST = 16
 _SECONDS_PER_RECORDING = 2.0
 # After a recording runs out of memory, the runner records nothing for this long.
@@ -243,14 +245,17 @@ def graph_runner(
     )
 
 
-def modernbert_encoder(model: Any, *, window: int, dtype: torch.dtype) -> tuple[EncodeFn, list[torch.Tensor]]:
+def modernbert_encoder(
+    model: Any, *, window: int, dtype: torch.dtype, fused_rope: bool = False
+) -> tuple[EncodeFn, list[torch.Tensor]]:
     """The encoder a graph records for a Hugging Face ``ModernBertModel`` on the shared layer stack.
 
     Token embeddings (and their norm), ``run_modernbert_flash_layers`` and the
     final norm: what the dense and late-interaction adapters run eagerly.
     Eagerly they compute each forward's RoPE ``cos``/``sin`` rows from its
     positions; here the rows are gathered from tables over the model window,
-    computed the same way, so they hold the same values.
+    computed the same way, so they hold the same values. ``fused_rope`` goes to
+    the layer stack, so a graph records the rotation its model runs eagerly.
 
     Returns:
         The encoder, and the RoPE tables it reads (for the runner's memory budget).
@@ -290,6 +295,7 @@ def modernbert_encoder(model: Any, *, window: int, dtype: torch.dtype) -> tuple[
             global_sin[positions],
             local_cos[positions],
             local_sin[positions],
+            fused_rope=fused_rope,
         )
         if hasattr(model, "final_norm"):
             hidden = model.final_norm(hidden)

@@ -336,6 +336,51 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+const SIE_BASE_URL_ENV = "SIE_BASE_URL";
+const SIE_API_KEY_ENV = "SIE_API_KEY";
+
+/**
+ * Read a non-blank environment variable. Undefined outside Node-like runtimes
+ * and where reading the environment is not permitted (Deno without --allow-env
+ * throws).
+ */
+function readEnv(name: string): string | undefined {
+  try {
+    const value = globalThis.process?.env?.[name]?.trim();
+    return value ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function urlOrigin(url: string): string | undefined {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "http:" || parsed.protocol === "https:" ? parsed.origin : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * `SIE_API_KEY`, scoped to the origin named by `SIE_BASE_URL`. Connection
+ * requests reuse the client's key, so a control-plane URL on another origin
+ * requires an explicit key.
+ */
+function envApiKeyFor(baseUrl: string, controlPlaneUrl: string | undefined): string | undefined {
+  const apiKey = readEnv(SIE_API_KEY_ENV);
+  const envOrigin = urlOrigin(readEnv(SIE_BASE_URL_ENV) ?? "");
+  if (!apiKey || envOrigin === undefined || urlOrigin(baseUrl) !== envOrigin) {
+    return undefined;
+  }
+  if (controlPlaneUrl && urlOrigin(controlPlaneUrl) !== envOrigin) {
+    throw new TypeError(
+      `${SIE_API_KEY_ENV} is scoped to the ${SIE_BASE_URL_ENV} origin and is not sent to controlPlaneUrl on another origin; pass apiKey explicitly.`,
+    );
+  }
+  return apiKey;
+}
+
 const CONTENT_SAFE_MEDIA_TYPES = new Set([
   "application/json",
   "application/problem+json",
@@ -424,6 +469,7 @@ function parseRequestMetadata(headers: Headers, body?: unknown): RequestMetadata
   const usageHeaders = {
     inputTokens: "x-sie-units-input-tokens",
     pairs: "x-sie-units-pairs",
+    contentInputTokens: "x-sie-units-content-input-tokens",
     images: "x-sie-units-images",
     pages: "x-sie-units-pages",
     outputTokens: "x-sie-units-output-tokens",
@@ -935,15 +981,20 @@ export class SIEClient {
   /**
    * Create a new SIE client.
    *
-   * @param baseUrl - Base URL of the SIE server (e.g., "http://localhost:8080")
+   * @param baseUrl - Base URL of the SIE server (e.g., "http://localhost:8080").
+   *   Defaults to the `SIE_BASE_URL` environment variable when omitted.
    * @param options - Client options
    */
-  constructor(baseUrl: string, options: SIEClientOptions = {}) {
+  constructor(baseUrl?: string, options: SIEClientOptions = {}) {
+    const url = baseUrl ?? readEnv(SIE_BASE_URL_ENV);
+    if (url === undefined) {
+      throw new TypeError(`baseUrl is required: pass it explicitly or set ${SIE_BASE_URL_ENV}.`);
+    }
     // Validate eagerly: a scheme-less baseUrl ("localhost:8080") would
     // otherwise only surface at request time as a fetch `TypeError`.
     let parsed: URL | undefined;
     try {
-      parsed = new URL(baseUrl);
+      parsed = new URL(url);
     } catch {
       parsed = undefined;
     }
@@ -952,7 +1003,7 @@ export class SIEClient {
     // check while silently targeting the wrong host. Require a real
     // `scheme://<authority>`: `https?://` immediately followed by a non-slash
     // authority character.
-    const hasRealAuthority = /^https?:\/\/[^/]/i.test(baseUrl);
+    const hasRealAuthority = /^https?:\/\/[^/]/i.test(url);
     if (
       !parsed ||
       (parsed.protocol !== "http:" && parsed.protocol !== "https:") ||
@@ -960,16 +1011,16 @@ export class SIEClient {
       !hasRealAuthority
     ) {
       throw new TypeError(
-        `Invalid baseUrl "${baseUrl}": must be an absolute http(s) URL with a host, e.g. "http://localhost:8080".`,
+        `Invalid baseUrl "${url}": must be an absolute http(s) URL with a host, e.g. "http://localhost:8080".`,
       );
     }
     // Remove trailing slash
-    this.baseUrl = baseUrl.replace(/\/$/, "");
+    this.baseUrl = url.replace(/\/$/, "");
     // `timeoutMs` is the unit-encoded name; `timeout` is a deprecated alias
     // for the same MILLISECONDS value. `timeoutMs` wins if both are set.
     this.timeout = options.timeoutMs ?? options.timeout ?? DEFAULT_TIMEOUT;
     this.gpu = options.gpu;
-    this.apiKey = options.apiKey;
+    this.apiKey = options.apiKey ?? envApiKeyFor(this.baseUrl, options.controlPlaneUrl);
     // BREAKING CHANGE (0.7): default flipped from `false` to `true` to match
     // the Python SDK (`wait_for_capacity=True`). Callers that relied on
     // fail-fast 503 PROVISIONING / connect-error behaviour must now pass

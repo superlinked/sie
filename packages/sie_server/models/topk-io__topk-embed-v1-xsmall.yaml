@@ -1,0 +1,58 @@
+sie_id: topk-io/topk-embed-v1-xsmall
+hf_id: topk-io/topk-embed-v1-xsmall
+hf_revision: d09d8a7a8cdd6c287f792b3c4d7b41233d46e66a
+inputs:
+  # Text queries; text or page-image documents (one image per document).
+  text: true
+  image: true
+  audio: false
+  video: false
+tasks:
+  encode:
+    dense: null
+    sparse: null
+    multivector:
+      dim: 1024
+  score: null
+  extract: null
+# Document cap. The checkpoint allows 8192 tokens (sentence_bert_config.json
+# document_length), but on the cluster path one item's result must serialize
+# under 16 MiB (sidecar MAX_CHUNKED_RESULT_BYTES, gateway per-item limit): at
+# 1024 float16 numbers a token that is 8192 tokens before the envelope, so 8000
+# keeps each document at 15.6 MiB. float32 responses take twice as much. The
+# adapter caps queries at query_length (1024) and each image at 1280 merged
+# patches (2.5 MiB).
+max_sequence_length: 8000
+profiles:
+  default:
+    max_batch_tokens: 16384
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.topk_embed.adapter:TopkEmbedAdapter
+    adapter_options:
+      loadtime:
+        # CUDA graphs for small text batches (queries) on the packed CUDA path;
+        # anything else runs eagerly. See adapters/topk_embed/graphs.py.
+        cuda_graphs: bucketed
+        # Tokens per packed forward: 8192 beat 16384 and 32768 by 5 to 17% on an
+        # L40S at every document length (the server's batches still take 16384).
+        text_batch_tokens: 8192
+        muvera_config:
+          num_repetitions: 40
+          num_simhash_projections: 6
+          projection_dim: null
+          final_projection_dim: 10240
+      runtime:
+        normalize: true
+        # The model computes in bf16, so float16 loses nothing and halves the
+        # payload (a page is ~1230 token vectors). Clients can ask for float32.
+        output_dtype: float16
+  muvera:
+    extends: default
+    adapter_options:
+      runtime:
+        normalize: true
+        output_types:
+        - dense
+        output_similarity:
+          dense: dot
+        muvera: {}

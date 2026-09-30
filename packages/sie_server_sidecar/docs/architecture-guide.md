@@ -183,6 +183,41 @@ tombstone filters that redelivery. Static inference already sent over backend
 IPC is not preempted; the gateway has removed its collector and drops the late
 result.
 
+### Connection and permissions
+
+The sidecar connects with the credentials in `SIE_NATS_USER` and
+`SIE_NATS_PASSWORD`, which are read from the environment only (there are no
+CLI flags for them, and `--help` hides the value of `SIE_NATS_URL`). Setting
+only one of the two fails startup. Credentials in `SIE_NATS_URL` are not used,
+and logs redact any userinfo in it. In the Helm chart only the sidecar
+container of a worker pod receives the worker credentials, not the container
+that runs model code.
+
+The client uses the inbox prefix `_INBOX_WORKER` for its JetStream API replies
+and pull deliveries. The chart's `sie-worker` user may subscribe to that
+prefix, to `sie.config.models.*`, and to the three cancel subject trees, and
+may publish results into the gateway's `_INBOX` subjects, heartbeats on
+`sie.health.>`, acknowledgements on `$JS.ACK.>`, and the JetStream API calls
+above: stream info, create, and update (the sidecar creates its
+direct-dispatch stream and reconciles the pool stream), and consumer list,
+info, create, delete, and pull. It cannot publish work, config deltas, or
+cancels, subscribe to the gateway's inboxes, or delete or purge streams. Its
+stream and consumer management still reaches other pools' streams, durables,
+and the gateway's inboxes; the full matrix and what the worker user can still
+do are in the chart README ("NATS authentication"). The worker pod mounts no
+Kubernetes API token.
+
+Because stream management lets the server deliver stored messages on a
+worker's behalf past its publish permissions, the sidecar drops cancel
+signals that carry a reply subject or a `Nats-` header, and drops (ACKs) work
+that carries a `Nats-` header other than the gateway's `Nats-Msg-Id`. A
+subject transform on the pool stream still adds work without such a header.
+
+On the generation path the sidecar publishes a backend `publish` event only
+when its reply subject equals the work item's `reply_subject`. The backend
+runs model code, so it must not choose where the sidecar's NATS user
+publishes.
+
 Source: [`nats_consumer.rs`](../src/nats_consumer.rs),
 [`subject.rs`](../src/subject.rs), and the gateway
 [queue publisher](../../sie_gateway/src/queue/publisher.rs).
@@ -464,8 +499,12 @@ The sidecar subscribes to bundle-scoped config deltas:
 sie.config.models.{bundle}
 ```
 
-Each notification is checked for trusted producer, bundle, epoch, and payload
-size. Accepted deltas are forwarded to the colocated backend through
+A notification with a reply subject or any `Nats-` header is dropped first:
+`sie-config` publishes plain core messages, and such a delivery can only come
+from the NATS server acting for a user that manages JetStream streams or
+consumers (for example a stream's republish setting), past that user's publish
+permissions. Each remaining notification is checked for trusted producer,
+bundle, epoch, and payload size. Accepted deltas are forwarded to the colocated backend through
 `ApplyModelConfig`, together with the notification's `bundle_adapters` list for
 this bundle when `sie-config` sends one. The backend returns the applied bundle
 config hash and `unsupported_models`, the routable ids that hash covers but the
@@ -483,6 +522,12 @@ When `SIE_CONFIG_SERVICE_URL` is configured, the export reconciler fetches
 `/v1/configs/epoch` and `/v1/configs/export` from `sie-config`. Bundle-relevant
 exports are sent to the backend through `ReplaceModelConfigs`, with the
 export's `bundle_adapters` list for this bundle.
+
+The reconciler authenticates with `SIE_CONFIG_SERVICE_TOKEN`
+(`--config-service-token`), `sie-config`'s read-scoped `SIE_CONFIG_READ_TOKEN`,
+which cannot write configs. When the variable is set it decides, and a blank
+value sends no token. When it is unset, the sidecar falls back to
+`SIE_ADMIN_TOKEN` and logs a deprecation warning at startup.
 
 Export reconciliation skips unchanged periodic exports. Exports older than the
 local epoch are skipped unless the reconciler is handling an epoch-rewind

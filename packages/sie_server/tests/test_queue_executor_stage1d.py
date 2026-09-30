@@ -25,7 +25,9 @@ import time
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import msgpack
 import msgpack_numpy
+import msgspec
 import numpy as np
 import pytest
 from sie_server.core.inference_output import ScoreOutput
@@ -341,6 +343,52 @@ class TestMultivectorFastPathGate:
         assert raw.multivector.token_dims == 4
         assert raw.multivector.dtype == "float16"
 
+    def test_float16_travels_as_bytes_when_the_sidecar_takes_them(self) -> None:
+        arr = np.arange(12, dtype=np.float16).reshape(3, 4)
+        raw = _maybe_multivector_raw_output({"multivector": arr}, self._config(), ["multivector"], f16_bytes=True)
+        assert raw is not None
+        assert raw.multivector is not None
+        mv = raw.multivector
+        assert (mv.num_tokens, mv.token_dims, mv.dtype) == (3, 4, "float16")
+        assert mv.values == []
+        assert mv.values_f16 == arr.astype("<f2").tobytes()
+
+    def test_float16_stays_a_list_without_the_sidecar_flag(self) -> None:
+        arr = np.arange(12, dtype=np.float16).reshape(3, 4)
+        raw = _maybe_multivector_raw_output({"multivector": arr}, self._config(), ["multivector"])
+        assert raw is not None
+        assert raw.multivector is not None
+        assert raw.multivector.values == arr.ravel().tolist()
+        assert raw.multivector.values_f16 == b""
+
+    def test_float32_stays_a_list_even_when_bytes_are_accepted(self) -> None:
+        arr = np.arange(12, dtype=np.float32).reshape(3, 4)
+        raw = _maybe_multivector_raw_output({"multivector": arr}, self._config(), ["multivector"], f16_bytes=True)
+        assert raw is not None
+        assert raw.multivector is not None
+        assert raw.multivector.values == arr.ravel().tolist()
+        assert raw.multivector.values_f16 == b""
+
+    def test_float16_bytes_keep_the_ipc_response_small(self) -> None:
+        # 2 bytes a value on the wire instead of 9 (a msgpack double per Python float).
+        arr = np.ones((512, 2048), dtype=np.float16)
+        packed = {
+            flag: len(
+                msgpack.packb(
+                    msgspec.to_builtins(
+                        _maybe_multivector_raw_output(
+                            {"multivector": arr}, self._config(mv_dim=2048), ["multivector"], f16_bytes=flag
+                        ),
+                        builtin_types=(bytes, memoryview),
+                    ),
+                    use_bin_type=True,
+                )
+            )
+            for flag in (False, True)
+        }
+        assert packed[True] < 2.01 * arr.size
+        assert packed[False] > 8.9 * arr.size
+
     def test_bit_packed_binary_falls_back(self) -> None:
         # ``shape[1] < mv_dim`` signals binary multivector packed into
         # bytes; framing in Rust isn't supported yet, must fall back.
@@ -468,6 +516,29 @@ class TestProcessEncodeBatchSparseMV:
         assert o.raw_output is not None
         assert o.raw_output.multivector is not None
         assert o.raw_output.multivector.dtype == "float16"
+
+    @pytest.mark.asyncio
+    async def test_float16_multivector_travels_as_bytes_when_the_sidecar_accepts_them(self) -> None:
+        reg = self._mv_registry()
+        ex = QueueExecutor(reg)
+
+        arr = np.arange(8, dtype=np.float16).reshape(2, 4)
+        with patch(
+            "sie_server.core.encode_pipeline.EncodePipeline.run_encode",
+            new_callable=AsyncMock,
+            return_value=([{"multivector": arr}], RequestTiming()),
+        ):
+            outcome = await ex.process_encode_batch(
+                ProcessEncodeBatchRequest(
+                    model_id=MODEL_ID,
+                    items=[_encode_item(output_types=["multivector"])],
+                    accepts_batched_f16_multivectors=True,
+                ),
+            )
+
+        mv = outcome.outcomes[0].raw_output.multivector
+        assert mv.values == []
+        assert mv.values_f16 == arr.astype("<f2").tobytes()
 
 
 # -----------------------------------------------------------------------------

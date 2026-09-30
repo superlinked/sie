@@ -53,7 +53,7 @@ def verify_pkce(code_verifier: str, code_challenge: str, method: str) -> bool:
     except UnicodeEncodeError:
         return False
     expected = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
-    return secrets.compare_digest(expected, code_challenge)
+    return secrets.compare_digest(expected.encode(), code_challenge.encode("utf-8", "surrogatepass"))
 
 
 class OAuthError(Exception):

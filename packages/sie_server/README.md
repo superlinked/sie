@@ -26,11 +26,11 @@ pip install sie-server
   pip install sie-server "transformers<5"
   ```
 
-- **Transformers 5 bundle** (LightOnOCR, GLM-OCR, GLiGuard, and the GLiNER2.5-Decide models) — requires
-  `transformers` 5.x, and is served with `-b transformers5`. The GLiNER2.5-Decide models also need `gliner2`
-  2.x. `sie-server` itself asks for `gliner2<2`, which the default bundle's GLiNER2 models need, so pip
-  reports that conflict when the second command below installs 2.x; the transformers5 bundle's GLiNER2
-  models are verified on 2.0.0:
+- **Transformers 5 bundle** (LightOnOCR, GLM-OCR, GLiGuard, the GLiNER2.5-Decide models, and the TopK-Embed-V1
+  multi-vector models) — requires `transformers` 5.x, and is served with `-b transformers5`. The GLiNER2.5-Decide
+  models also need `gliner2` 2.x. `sie-server` itself asks for `gliner2<2`, which the default bundle's GLiNER2
+  models need, so pip reports that conflict when the second command below installs 2.x; the transformers5
+  bundle's GLiNER2 models are verified on 2.0.0:
 
   ```bash
   pip install sie-server "transformers>=5,<6"
@@ -75,11 +75,19 @@ The models that read the labels before the document (`prompt_first` in the
 checkpoint's config: every shipped GLiClass model except `gliclass-small-v1.0`,
 `gliclass-base-v1.0` and `gliclass-large-v1.0`) cut the document to the room
 the label prompt and instruction leave, and count only the part of the document
-they read, as `truncate_text` would. When the labels leave no room for any of
-the document, each item returns a per-item `INPUT_TOO_LONG` error and counts
-nothing, rather than being scored without its document. With `overflow_policy`
-`truncate_text` or `error`, such a request is refused with `INPUT_TOO_LONG`, as
+they read, as `truncate_text` would. When the labels leave fewer than 8 tokens
+for the document (a margin for tokenization at the boundary), each item returns
+a per-item `INPUT_TOO_LONG` error and counts nothing, rather than being scored
+with little or none of its document. With `overflow_policy` `truncate_text` or
+`error`, the document is cut to that room or checked against it instead, and a
+request whose labels leave no room at all is refused with `INPUT_TOO_LONG`, as
 before.
+
+With `options={"overflow_policy": "error"}`, an item whose document does not
+fit whole next to the labels returns a per-item `INPUT_TOO_LONG` error and
+counts nothing, while the other items succeed. Concurrent requests that share
+labels and options are batched into one model call, so an over-long document
+fails only its own item, never another request's.
 
 The instruction and each example text may be at most 2,048 characters, and
 together with the example labels at most 8,192 characters. Up to 32 examples
@@ -124,17 +132,26 @@ between the top two labels, and eager execution flips some near ties too,
 depending on which inputs share its batch.
 
 **When a speed-up ships enabled.** A shipped GLiClass profile enables a
-speed-up that changes scores, such as `bucketed` graphs, only when both hold
-against eager execution on the evaluation sets below:
+speed-up that changes scores, such as `bucketed` graphs, only when, on the
+evaluation sets below, both of the first two conditions hold against eager
+execution, or the third holds against float32:
 
 1. no probability moves by more than 0.02;
 2. every answer whose top label changes had an eager top-two margin smaller
    than eager's own regrouping noise, δ_eager: the largest probability change
    eager execution makes on the same inputs when they share a batch with other
-   inputs.
+   inputs;
+3. against a float32 reference of the same checkpoint, the speed-up is at
+   least as accurate as the current path: its largest change against float32
+   is no larger than the current path's, and it changes no more top labels (or,
+   for scores, reorders no more pairs) against float32 than the current path
+   does.
 
 A top label that changes under the second condition was a near tie that eager
-fp16 execution already flips under batching.
+fp16 execution already flips under batching. The third condition admits a
+speed-up that rounds differently from the current path, by more than eager's
+own batching noise, but lands no farther from float32. The ModernBERT
+adapters below apply the same rule to their scores.
 
 **Evaluation sets.** The main set is the 384 CVE descriptions from
 `examples/typed-decisions`, three questions each, asked one at a time, as
@@ -236,9 +253,14 @@ to satisfy other allocations, so another model on the same GPU that needs
 memory in that window (about one forward) can run out of memory where it
 otherwise would not. Recording is kept rare to limit this: one recording at a
 time in the process, none while less than a tenth of the device's memory is
-free, and per model at most 16 recordings at once, then one per 2 seconds. If a
-recording itself runs out of memory, the request still gets its eager answer;
-the model drops its graphs and records nothing for a minute.
+free, and per model a budget of 16 recordings that refills at one every 2
+seconds, so a model records at most 16 graphs in quick succession, one after
+another, then about one every 2 seconds. If recording a graph runs out of
+memory, the request still gets its eager answer; the model drops its graphs and
+records nothing for a minute. If the new graph's first replay runs out of
+memory, the model also drops its graphs and records nothing for a minute, but
+the request fails with that error, as an eager forward that runs out of memory
+does.
 
 Both limits are approximate. The free-memory check reads the device once,
 before recording, so a model loading at the same moment can still meet one
@@ -473,7 +495,7 @@ document dot products for dense models and MaxSim for late interaction:
 | `granite-embedding-97m-multilingual-r2` | 0.006 | 57 (0.008) | 0.015 (0.015) |
 | `Reason-ModernColBERT` | 0.007 | 1 (0.007) | 0.022 (0.021) |
 | `mLateOn` | 0.020 | 17 (0.029) | 0.037 (0.046) |
-| `Iso-ModernColBERT` | 0.047 | 19 (0.058) | 0.082 (0.100) |
+| `Iso-ModernColBERT` | none (bit-identical) | none | 0.20 (0.21) |
 
 Graphs meet the rule a GLiClass speed-up ships under (see "When a speed-up
 ships enabled" above), read for scores instead of label probabilities: no
@@ -490,6 +512,36 @@ and 0.7644 with graphs, `GTE-ModernColBERT-v1` 0.7573 and 0.7558, and
 `gte-reranker-modernbert-base` reranking the top 20 of `gte-modernbert-base`
 0.7760 and 0.7767.
 
+The eager batching noise is largest for `mxbai-edge-colbert-v0-32m` and
+`Iso-ModernColBERT` because their profiles compute in bfloat16, whose
+significand is three bits shorter than float16's (the other late-interaction
+models compute in float16). With more packed rows, cuBLAS picks a different
+matrix-multiply kernel; in the forward we traced, the first outputs to differ,
+by one unit in the last place, were those of the first layer's attention output
+projection. A few document tokens amplify that rounding: punctuation, `[SEP]`
+or the `[D] ` marker, close to where the encoder turns a token into an attention
+sink. The token builds a large activation in one forward and not in the other,
+so its vector turns. Per-token cosine to the one-item forward went as low as
+0.82 for `Iso-ModernColBERT` on the abstracts above, while more than 99.8% of
+tokens stayed above 0.999 on a sample of mixed lengths. The reference
+implementation behaves the same way. PyLate in bfloat16 moves such tokens as
+much between a document encoded alone and in a batch; in float32 neither PyLate
+nor the Hugging Face forward moves them. In float32 on the CPU, this adapter's
+packed forward gives each item the same vectors alone and in any batch, equal
+to the Hugging Face forward (`tests/adapters/test_colbert_modernbert_flash_batch_invariance.py`).
+
+`Iso-ModernColBERT` serves the recipe its checkpoint publishes for PyLate, as
+`GTE-ModernColBERT-v1` does:
+
+- `[Q] ` and `[D] ` markers;
+- queries cut at 32 tokens and documents at 300 (its `long_context` profile
+  keeps 8,192);
+- the punctuation skiplist, which drops the document vectors that training
+  never scores.
+
+Its row above was measured with that recipe. With it, SciFact nDCG@10 rose from
+0.7326 to 0.7573 (PyLate: 0.7574 in bfloat16, 0.7584 in float32).
+
 The shipped profiles of every model on these adapters load with `bucketed`
 graphs: `GTE-ModernColBERT-v1`, `Reason-ModernColBERT`, `mLateOn`,
 `Iso-ModernColBERT`, `mxbai-edge-colbert-v0-32m`, `gte-modernbert-base`,
@@ -503,9 +555,10 @@ A graph is recorded the first time a request needs its shape (the dense
 adapter's warm-up records the smallest at load), and that request is answered
 by its first replay. Recording follows the rules of the GLiClass graphs above,
 and shares their process-wide limits: one recording at a time in the process,
-none while less than a tenth of the device's memory is free, at most 16
-recordings at once and then one per 2 seconds, and a model's graphs within
-4% of the device's memory (900 MB on an L4). A model's graphs, which share
+none while less than a tenth of the device's memory is free, a budget of 16
+recordings per model that refills at one every 2 seconds (16 in quick
+succession, one after another, then about one every 2 seconds), and a
+model's graphs within 4% of the device's memory (900 MB on an L4). A model's graphs, which share
 one memory pool and one output buffer, held 40 to 105 MB on an L4 once every
 shape its traffic needed was recorded. A recording that runs out of memory
 drops the model's graphs and pauses recording for a minute; a shape that
@@ -513,6 +566,20 @@ fails to record for another reason runs eagerly from then on, and after
 three such shapes the model runs eagerly for the rest of the process. Each
 model counts the forwards it replays, records and runs eagerly (by reason),
 and logs the counts every ten minutes while it serves requests.
+
+**Fused rotary embedding.** The dense and late-interaction adapters rotate
+queries and keys with about ten small PyTorch kernels per layer. With
+`adapter_options.loadtime.fused_rope: true`, one Triton kernel per layer does
+it instead, with flash-attn's rotary arithmetic (float32, rounded once, as
+the Hugging Face flash-attention forward rotates): on an L4, 26.5 µs instead
+of 178 µs per layer at 2,048 tokens. For the models below that is 1.13-1.18x
+the speed of one-query requests (with CUDA graphs on both sides) and
+1.17-1.22x the throughput of 64-abstract requests. Outputs change by rounding, more than the eager path's own batching
+noise, so the option ships under the third condition of the rule above.
+Against a float32 reference of each checkpoint, on the SciFact sets of the
+graphs comparison, it is at least as accurate as the unfused rotation for
+`modernbert-embed-base`, `Reason-ModernColBERT` and `mLateOn`, and their
+profiles enable it. The other models load without it.
 
 ## Configuration
 

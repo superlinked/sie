@@ -329,11 +329,28 @@ class ScoreEntryModel(BaseModel):
     rank: int = Field(..., description="Rank (0 = most relevant)")
 
 
+class ScoreInputTokensDetailsModel(BaseModel):
+    """Breakdown of score input tokens."""
+
+    content_tokens: int = Field(
+        ...,
+        ge=0,
+        description=(
+            "Caller text inside the scored pairs (query, post-truncation document, supplied instruction), "
+            "each tokenized alone; the remainder of input_tokens is the reranker's prompt template"
+        ),
+    )
+
+
 class ScoreUsageModel(BaseModel):
     """Authoritative worker-emitted score usage."""
 
     input_tokens: int = Field(..., ge=0, description="Post-truncation input tokens processed")
     images: int | None = Field(default=None, ge=0, description="Images processed across query-document pairs")
+    input_tokens_details: ScoreInputTokensDetailsModel | None = Field(
+        default=None,
+        description="Content/template breakdown when the reranker reports it",
+    )
 
 
 class ScoreResponseModel(BaseModel):

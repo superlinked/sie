@@ -12,7 +12,7 @@ use utoipa::ToSchema;
 use crate::http_error::{code as err_code, json_detail};
 use crate::server::AppState;
 use crate::state::model_registry::ModelRegistry;
-use crate::state::pool_manager::DEFAULT_POOL_NAME;
+use crate::state::pool_manager::{PoolLimitError, DEFAULT_POOL_NAME};
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct CreatePoolRequest {
@@ -23,16 +23,24 @@ pub struct CreatePoolRequest {
     /// `queueRouting.staticQueuePools` for dedicated capacity.
     #[serde(default)]
     pub queue_pool: Option<String>,
+    /// Required workers per machine profile. Requirements summing to more
+    /// than the gateway limit (`SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT`,
+    /// default 4) are rejected.
     #[serde(default)]
     pub gpus: HashMap<String, u32>,
     #[serde(default)]
     pub gpu_caps: HashMap<String, u32>,
     #[serde(default)]
     pub bundle: Option<String>,
+    /// Lease TTL in seconds; omit for the gateway default. Values above the
+    /// gateway limit (`SIE_GATEWAY_POOL_MAX_TTL_S`, default 3600) are rejected.
     #[serde(default)]
     pub ttl_seconds: Option<u64>,
     /// Per-pool warm floor (minimum machines kept warm via KEDA). Default 0
-    /// keeps scale-from-zero. See `PoolSpec::minimum_worker_count`.
+    /// keeps scale-from-zero. It applies to each of the pool's machine
+    /// profiles; a floor whose total across profiles exceeds the gateway limit
+    /// (`SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT`, default 4) is rejected.
+    /// See `PoolSpec::minimum_worker_count`.
     #[serde(default)]
     pub minimum_worker_count: u32,
     /// Per-pool pinned-model set. Each id is validated against the models the
@@ -96,7 +104,8 @@ fn canonicalize_pinned_models(
     request_body = CreatePoolRequest,
     responses(
         (status = 201, description = "Pool created, renewed, or updated", body = crate::types::pool::Pool),
-        (status = 400, description = "Invalid pool request", body = crate::openapi::StandardApiError)
+        (status = 400, description = "Invalid pool request, including a TTL or warm floor above the gateway limit", body = crate::openapi::StandardApiError),
+        (status = 403, description = "Admin token required for this mutation (or admin token not configured), the pool is named `default`, or the gateway's limit on API-created pools is reached", body = crate::openapi::StandardApiError)
     )
 )]
 pub async fn create_pool(
@@ -109,6 +118,17 @@ pub async fn create_pool(
             Json(json_detail(
                 err_code::INVALID_REQUEST,
                 "Pool name is required",
+            )),
+        )
+            .into_response();
+    }
+
+    if req.name.eq_ignore_ascii_case(DEFAULT_POOL_NAME) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json_detail(
+                err_code::POOL_OPERATION_FORBIDDEN,
+                "The default pool is managed by the gateway and cannot be created or modified through the API",
             )),
         )
             .into_response();
@@ -158,12 +178,20 @@ pub async fn create_pool(
             info!(event = "pool.create", pool = %req.name, status = 201u16, "audit");
             (StatusCode::CREATED, Json(json!(pool))).into_response()
         }
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            Json(json_detail(err_code::INVALID_REQUEST, e.to_string())),
-        )
-            .into_response(),
+        Err(e) => create_pool_error_response(e.as_ref()),
     }
+}
+
+fn create_pool_error_response(
+    error: &(dyn std::error::Error + Send + Sync + 'static),
+) -> axum::response::Response {
+    let (status, code) = match error.downcast_ref::<PoolLimitError>() {
+        Some(PoolLimitError::TooManyPools { .. }) => {
+            (StatusCode::FORBIDDEN, err_code::POOL_OPERATION_FORBIDDEN)
+        }
+        _ => (StatusCode::BAD_REQUEST, err_code::INVALID_REQUEST),
+    };
+    (status, Json(json_detail(code, error.to_string()))).into_response()
 }
 
 #[utoipa::path(
@@ -412,6 +440,54 @@ mod tests {
         )
         .expect("a tracked model must be accepted");
         assert_eq!(out, vec!["test/model".to_string()]);
+    }
+
+    async fn error_body(response: axum::response::Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn pool_limit_is_a_forbidden_pool_operation() {
+        let response = create_pool_error_response(&PoolLimitError::TooManyPools { max: 64 });
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = error_body(response).await;
+        assert_eq!(body["detail"]["code"], err_code::POOL_OPERATION_FORBIDDEN);
+        assert!(body["detail"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("SIE_GATEWAY_MAX_POOLS"));
+    }
+
+    #[tokio::test]
+    async fn spec_limits_are_invalid_requests() {
+        for error in [
+            PoolLimitError::MinimumWorkerCount {
+                requested: 10,
+                max: 4,
+            },
+            PoolLimitError::WarmFloorTotal {
+                minimum_worker_count: 4,
+                profiles: 3,
+                max: 4,
+            },
+            PoolLimitError::GpuRequirementTotal {
+                requested: 6,
+                max: 4,
+            },
+            PoolLimitError::Ttl {
+                requested: u64::MAX,
+                max: 3600,
+            },
+        ] {
+            let response = create_pool_error_response(&error);
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let body = error_body(response).await;
+            assert_eq!(body["detail"]["code"], err_code::INVALID_REQUEST);
+            assert_eq!(body["detail"]["message"], error.to_string());
+        }
     }
 
     #[test]

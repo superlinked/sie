@@ -775,6 +775,12 @@ pub struct UnitCounts {
     /// MessagePack field order is preserved.
     #[serde(default)]
     pub output_tokens: Option<u64>,
+    /// Score only: the part of `input_tokens` that is the caller's own text
+    /// (query, post-truncation document and any supplied instruction, each
+    /// tokenized alone), excluding the adapter's prompt-template tokens.
+    /// Never above `input_tokens`. Appended last, like `output_tokens`.
+    #[serde(default)]
+    pub content_input_tokens: Option<u64>,
 }
 
 struct CachedStreamInfo {
@@ -7700,6 +7706,7 @@ mod tests {
             units: Some(UnitCounts {
                 input_tokens: None,
                 pairs: None,
+                content_input_tokens: None,
                 pages: None,
                 images: None,
                 audio_ms: Some(1_001),

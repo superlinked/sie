@@ -11,7 +11,7 @@ from collections.abc import Mapping
 from hashlib import sha256
 from typing import cast
 
-_CUDA_ONLY_PACKAGES = frozenset({"flash-attn", "xformers"})
+_CUDA_ONLY_PACKAGES = frozenset({"fla-core", "flash-attn", "xformers"})
 
 
 def resolve_bundle_requirements(

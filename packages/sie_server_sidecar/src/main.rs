@@ -8,14 +8,14 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use clap::Parser;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
-use sie_server_sidecar::config::WorkerConfig;
+use sie_server_sidecar::config::{NatsCredentials, WorkerConfig};
 use sie_server_sidecar::config_subscriber::trusted_producers_from_env;
 use sie_server_sidecar::dispatcher::default_max_concurrent_batches;
 use sie_server_sidecar::{run, run_local};
 
-#[derive(Parser, Debug)]
+#[derive(Parser)]
 #[command(author, version, about = "SIE server sidecar", long_about = None)]
 struct Cli {
     /// Work-ingest mode: `nats` (default; JetStream pull consumer) or
@@ -29,8 +29,9 @@ struct Cli {
     #[arg(long, env = "SIE_SIDECAR_LOCAL_SOCKET")]
     local_socket: Option<String>,
 
-    /// Required for `--ingest nats`; unused in local mode.
-    #[arg(long, env = "SIE_NATS_URL")]
+    /// Required for `--ingest nats`; unused in local mode. Credentials come
+    /// from `SIE_NATS_USER` / `SIE_NATS_PASSWORD`, never from the URL.
+    #[arg(long, env = "SIE_NATS_URL", hide_env_values = true)]
     nats_url: Option<String>,
 
     #[arg(long, env = "SIE_POOL")]
@@ -78,7 +79,7 @@ struct Cli {
     gateway_url: Option<String>,
 
     /// Bearer token for gateway pool-status reads.
-    #[arg(long, env = "SIE_GATEWAY_API_KEY")]
+    #[arg(long, env = "SIE_GATEWAY_API_KEY", hide_env_values = true)]
     gateway_api_key: Option<String>,
 
     /// Enable/disable the worker-side pool admission gate.
@@ -142,9 +143,10 @@ struct Cli {
     #[arg(long, env = "SIE_CONFIG_SERVICE_URL")]
     config_service_url: Option<String>,
 
-    /// Bearer token for sie-config export reads. Defaults from the shared
-    /// SIE_ADMIN_TOKEN secret in Helm when config auth is enabled.
-    #[arg(long, env = "SIE_ADMIN_TOKEN")]
+    /// Bearer token for the sie-config epoch and export reads: a read-scoped
+    /// sie-config token (SIE_CONFIG_READ_TOKEN there). A blank value sends no
+    /// token. When this is unset, SIE_ADMIN_TOKEN is used instead (deprecated).
+    #[arg(long, env = "SIE_CONFIG_SERVICE_TOKEN", hide_env_values = true)]
     config_service_token: Option<String>,
 
     /// Worker-side config epoch poll interval in milliseconds.
@@ -196,8 +198,23 @@ async fn main() -> anyhow::Result<()> {
     let ipc_socket_paths = parse_ipc_socket_paths(cli.ipc_socket_paths.as_deref())
         .unwrap_or_else(|| vec![ipc_socket_path.clone()]);
     validate_unique_ipc_socket_paths(&ipc_socket_paths)?;
+    let config_service_url = cli.config_service_url.filter(|url| !url.trim().is_empty());
+    let config_service_token = resolve_config_service_token(
+        cli.config_service_token,
+        std::env::var_os(CONFIG_SERVICE_TOKEN_ENV).is_some(),
+        std::env::var(LEGACY_CONFIG_SERVICE_TOKEN_ENV).ok(),
+    );
+    if config_service_url.is_some() && config_service_token.from_admin_token {
+        warn!(
+            "sie-config credential taken from {LEGACY_CONFIG_SERVICE_TOKEN_ENV} because \
+             {CONFIG_SERVICE_TOKEN_ENV} is unset; this is deprecated, set \
+             {CONFIG_SERVICE_TOKEN_ENV} to sie-config's read-scoped token (SIE_CONFIG_READ_TOKEN)"
+        );
+    }
+    let nats_credentials = NatsCredentials::from_env().map_err(anyhow::Error::msg)?;
     let config = WorkerConfig {
         nats_url: cli.nats_url,
+        nats_credentials,
         local_socket_path: cli.local_socket.map(Into::into),
         pool,
         bundle,
@@ -228,10 +245,8 @@ async fn main() -> anyhow::Result<()> {
         machine_profile,
         gpu_count: cli.gpu_count,
         bundle_config_hash: cli.bundle_config_hash,
-        config_service_url: cli.config_service_url.filter(|url| !url.trim().is_empty()),
-        config_service_token: cli
-            .config_service_token
-            .filter(|token| !token.trim().is_empty()),
+        config_service_url,
+        config_service_token: config_service_token.token,
         config_poll_interval_ms: cli.config_poll_interval_ms.max(1_000),
         config_full_export_interval_ms: cli.config_full_export_interval_ms,
         nats_config_trusted_producers: trusted_producers_from_env(),
@@ -265,6 +280,36 @@ async fn main() -> anyhow::Result<()> {
     // Flush any pending OTLP spans before a clean exit.
     sie_server_sidecar::observability::tracing::shutdown_tracing();
     Ok(())
+}
+
+const CONFIG_SERVICE_TOKEN_ENV: &str = "SIE_CONFIG_SERVICE_TOKEN";
+const LEGACY_CONFIG_SERVICE_TOKEN_ENV: &str = "SIE_ADMIN_TOKEN";
+
+struct ConfigServiceToken {
+    token: Option<String>,
+    from_admin_token: bool,
+}
+
+/// `--config-service-token` / `SIE_CONFIG_SERVICE_TOKEN` decides whenever it is
+/// set, and a blank value means no token. Only when it is unset does the
+/// sidecar fall back to `SIE_ADMIN_TOKEN`.
+fn resolve_config_service_token(
+    configured: Option<String>,
+    configured_env_is_set: bool,
+    admin_token: Option<String>,
+) -> ConfigServiceToken {
+    let non_blank = |token: String| (!token.trim().is_empty()).then_some(token);
+    if configured.is_some() || configured_env_is_set {
+        return ConfigServiceToken {
+            token: configured.and_then(non_blank),
+            from_admin_token: false,
+        };
+    }
+    let token = admin_token.and_then(non_blank);
+    ConfigServiceToken {
+        from_admin_token: token.is_some(),
+        token,
+    }
 }
 
 fn init_tracing() {
@@ -398,11 +443,78 @@ mod tests {
     use std::path::PathBuf;
 
     use super::parse_ipc_socket_paths;
+    use super::resolve_config_service_token;
     use super::validate_ingest_mode;
     use super::validate_lane_segment;
     use super::validate_model_ready_liveness_budget;
     use super::validate_unique_ipc_socket_paths;
+    use super::Cli;
     use super::IngestMode;
+    use clap::CommandFactory;
+
+    #[test]
+    fn secret_env_args_hide_their_values() {
+        let command = Cli::command();
+        let secret_args: Vec<_> = command
+            .get_arguments()
+            .filter_map(|arg| {
+                let env = arg.get_env()?.to_str()?.to_string();
+                ["TOKEN", "KEY", "SECRET", "PASSWORD"]
+                    .iter()
+                    .any(|marker| env.contains(marker))
+                    .then_some((env, arg.is_hide_env_values_set()))
+            })
+            .collect();
+        assert_eq!(
+            secret_args,
+            vec![
+                ("SIE_GATEWAY_API_KEY".to_string(), true),
+                ("SIE_CONFIG_SERVICE_TOKEN".to_string(), true),
+            ]
+        );
+    }
+
+    fn resolved(
+        configured: Option<&str>,
+        configured_env_is_set: bool,
+        admin_token: Option<&str>,
+    ) -> (Option<String>, bool) {
+        let resolved = resolve_config_service_token(
+            configured.map(String::from),
+            configured_env_is_set,
+            admin_token.map(String::from),
+        );
+        (resolved.token, resolved.from_admin_token)
+    }
+
+    #[test]
+    fn config_service_token_is_preferred_over_the_admin_token() {
+        assert_eq!(
+            resolved(Some("config-read"), true, Some("admin")),
+            (Some("config-read".to_string()), false)
+        );
+        assert_eq!(
+            resolved(Some("config-read"), false, Some("admin")),
+            (Some("config-read".to_string()), false)
+        );
+    }
+
+    #[test]
+    fn a_set_but_blank_config_service_token_sends_no_token() {
+        for blank in [Some(""), Some("  "), None] {
+            assert_eq!(resolved(blank, true, Some("admin")), (None, false));
+        }
+    }
+
+    #[test]
+    fn an_unset_config_service_token_falls_back_to_the_admin_token() {
+        assert_eq!(
+            resolved(None, false, Some("admin")),
+            (Some("admin".to_string()), true)
+        );
+        assert_eq!(resolved(None, false, Some(" ")), (None, false));
+        assert_eq!(resolved(None, false, None), (None, false));
+    }
 
     #[test]
     fn ingest_mode_nats_requires_nats_url() {

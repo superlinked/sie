@@ -299,6 +299,237 @@ correct on overlays.
 {{- end }}
 
 {{/*
+Deployment environment passed to sie-config as SIE_DEPLOYMENT_ENV. sie-config
+refuses unauthenticated /v1/configs requests when it is "prod" or "production".
+*/}}
+{{- define "sie-cluster.config.deploymentEnv" -}}
+{{- if and .Values.telemetry .Values.telemetry.deploymentEnv -}}
+{{- .Values.telemetry.deploymentEnv | toString -}}
+{{- else -}}
+production
+{{- end -}}
+{{- end }}
+
+{{/*
+Data key of the admin-token Secret (config.auth.adminTokenSecretKey). Fails the
+render when it is empty or null.
+*/}}
+{{- define "sie-cluster.config.adminTokenSecretKey" -}}
+{{- $key := default "" .Values.config.auth.adminTokenSecretKey | toString | trim -}}
+{{- if not $key -}}
+{{- fail "config.auth.adminTokenSecretKey is empty. Set it to the Secret key that holds the sie-config admin token (the chart default is SIE_ADMIN_TOKEN)." -}}
+{{- end -}}
+{{- $key -}}
+{{- end }}
+
+{{- define "sie-cluster.config.generatedAdminTokenSecretName" -}}
+{{- printf "%s-admin-token" (include "sie-cluster.config.serviceName" .) -}}
+{{- end }}
+
+{{/*
+"true" when the chart generates the admin-token Secret: no
+config.auth.adminTokenSecretName, and config.auth.generateAdminToken is not
+false. An absent key counts as true, so `helm upgrade --reuse-values` from a
+release that predates the key keeps the default. An empty value also counts as
+true.
+*/}}
+{{- define "sie-cluster.config.generatesAdminToken" -}}
+{{- $auth := .Values.config.auth | default dict -}}
+{{- if and (not $auth.adminTokenSecretName) (ne (dig "generateAdminToken" true $auth | toString | trim | lower) "false") -}}
+true
+{{- end -}}
+{{- end }}
+
+{{/*
+Secret holding the sie-config admin (write) token, which only sie-config reads:
+config.auth.adminTokenSecretName when set, otherwise the chart-generated
+Secret, otherwise empty (no token).
+*/}}
+{{- define "sie-cluster.config.adminTokenSecretName" -}}
+{{- if .Values.config.auth.adminTokenSecretName -}}
+{{- .Values.config.auth.adminTokenSecretName -}}
+{{- else if include "sie-cluster.config.generatesAdminToken" . -}}
+{{- include "sie-cluster.config.generatedAdminTokenSecretName" . -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Data key of the read-token Secret (config.auth.readTokenSecretKey). An absent
+key, as after `helm upgrade --reuse-values` from a release that predates it,
+takes the default; an empty value fails the render.
+*/}}
+{{- define "sie-cluster.config.readTokenSecretKey" -}}
+{{- $key := dig "readTokenSecretKey" "SIE_CONFIG_READ_TOKEN" (.Values.config.auth | default dict) | default "" | toString | trim -}}
+{{- if not $key -}}
+{{- fail "config.auth.readTokenSecretKey is empty. Set it to the Secret key that holds the sie-config read token (the chart default is SIE_CONFIG_READ_TOKEN)." -}}
+{{- end -}}
+{{- $key -}}
+{{- end }}
+
+{{- define "sie-cluster.config.generatedReadTokenSecretName" -}}
+{{- printf "%s-read-token" (include "sie-cluster.config.serviceName" .) -}}
+{{- end }}
+
+{{/*
+"true" when the chart generates the read-token Secret: sie-config has an admin
+token, config.auth.readTokenSecretName is empty, and
+config.auth.generateReadToken is not false. Absent keys take their defaults,
+so `helm upgrade --reuse-values` from a release that predates them generates
+the Secret. An empty generateReadToken also counts as true.
+*/}}
+{{- define "sie-cluster.config.generatesReadToken" -}}
+{{- $auth := .Values.config.auth | default dict -}}
+{{- if and (include "sie-cluster.config.adminTokenSecretName" .) (not (dig "readTokenSecretName" "" $auth)) (ne (dig "generateReadToken" true $auth | toString | trim | lower) "false") -}}
+true
+{{- end -}}
+{{- end }}
+
+{{/*
+Secret holding the read-scoped sie-config token that sie-config accepts on
+reads and the gateway and worker sidecars present: config.auth.readTokenSecretName
+when set, otherwise the chart-generated Secret, otherwise empty (no token).
+*/}}
+{{- define "sie-cluster.config.readTokenSecretName" -}}
+{{- $name := dig "readTokenSecretName" "" (.Values.config.auth | default dict) -}}
+{{- if $name -}}
+{{- $name -}}
+{{- else if include "sie-cluster.config.generatesReadToken" . -}}
+{{- include "sie-cluster.config.generatedReadTokenSecretName" . -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Env entry SIE_CONFIG_SERVICE_TOKEN for a sie-config consumer (the gateway or a
+worker sidecar): the read token, or an empty value when the chart runs no
+sie-config or sie-config has no read token, so the consumer never falls back to
+presenting SIE_ADMIN_TOKEN.
+*/}}
+{{- define "sie-cluster.config.serviceTokenEnv" -}}
+{{- $secret := "" -}}
+{{- if .Values.config.enabled -}}
+{{- $secret = include "sie-cluster.config.readTokenSecretName" . -}}
+{{- end -}}
+- name: SIE_CONFIG_SERVICE_TOKEN
+{{- if $secret }}
+  valueFrom:
+    secretKeyRef:
+      name: {{ $secret }}
+      key: {{ include "sie-cluster.config.readTokenSecretKey" . }}
+{{- else }}
+  value: ""
+{{- end }}
+{{- end }}
+
+{{/*
+Data key of the gateway's inbound admin-token Secret
+(gateway.auth.adminTokenSecretKey), with the same absent-key default and
+empty-value failure as the sie-config keys.
+*/}}
+{{- define "sie-cluster.gateway.adminTokenSecretKey" -}}
+{{- $key := dig "adminTokenSecretKey" "SIE_ADMIN_TOKEN" (.Values.gateway.auth | default dict) | default "" | toString | trim -}}
+{{- if not $key -}}
+{{- fail "gateway.auth.adminTokenSecretKey is empty. Set it to the Secret key that holds the gateway admin token (the chart default is SIE_ADMIN_TOKEN)." -}}
+{{- end -}}
+{{- $key -}}
+{{- end }}
+
+{{/*
+Chart-generated token Secret: a random 64-character token on first install,
+and the existing token on upgrade (read with lookup and validated rather than
+replaced). Kept on uninstall. Args (dict): root, name (Secret), key (data key),
+keySetting and nameSetting (the values paths named in validation errors).
+*/}}
+{{- define "sie-cluster.config.generatedTokenSecret" -}}
+{{- $token := randAlphaNum 64 | b64enc -}}
+{{- with lookup "v1" "Secret" (include "sie-cluster.namespace" $.root) $.name -}}
+{{- $existing := index (.data | default dict) $.key | default "" -}}
+{{- include "sie-cluster.config.validateReusedToken" (dict "name" $.name "key" $.key "data" $existing "keySetting" $.keySetting "nameSetting" $.nameSetting) -}}
+{{- $token = $existing -}}
+{{- end }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ .name }}
+  namespace: {{ include "sie-cluster.namespace" .root }}
+  labels:
+    {{- include "sie-cluster.config.labels" .root | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+type: Opaque
+data:
+  {{ .key | quote }}: {{ $token | quote }}
+{{- end }}
+
+{{/*
+Fail when an existing chart-generated token Secret has no value under the
+configured key, or a value shorter than 32 characters, instead of replacing the
+token that running pods hold. Args (dict): name (Secret), key (data key), data
+(base64 value, empty when the key is missing), keySetting and nameSetting (the
+values paths for the Secret key and an operator-managed Secret).
+*/}}
+{{- define "sie-cluster.config.validateReusedToken" -}}
+{{- if not .data -}}
+{{- fail (printf "Secret %s exists but has no %s key. If %s was renamed, set it back to the key the Secret holds. If the Secret was created by hand, set %s to it so the chart uses it unchanged. Otherwise restore the key, or delete the Secret so the chart generates a new token, then restart sie-config, the gateway, and the workers." .name .key .keySetting .nameSetting) -}}
+{{- else if lt (len (b64dec .data)) 32 -}}
+{{- fail (printf "Secret %s holds a %s value shorter than 32 characters. Replace it with a random value of at least 32 characters, or delete the Secret so the chart generates a new token, then restart sie-config, the gateway, and the workers." .name .key) -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Fail the render when the sie-config tokens are not kept apart or sie-config
+would run without an admin token outside staging, development, or ci:
+- an admin token without a read token leaves the gateway and worker sidecars
+  without a credential;
+- a read token or gateway admin token that is the same Secret key as the
+  sie-config admin token hands the write credential to every gateway or worker
+  sidecar, and a gateway admin token that is the read token's Secret key lets
+  every worker sidecar call the gateway admin routes;
+- without an admin token, production ("prod" or "production") refuses every
+  write (and every read without a read token), and any other value leaves the
+  API unauthenticated.
+*/}}
+{{- define "sie-cluster.config.validateAuth" -}}
+{{- $admin := include "sie-cluster.config.adminTokenSecretName" . -}}
+{{- $read := include "sie-cluster.config.readTokenSecretName" . -}}
+{{- if and $admin (not $read) -}}
+{{- fail "sie-config has an admin token but no read token (config.auth.generateReadToken=false and config.auth.readTokenSecretName is empty), so the gateway and worker sidecars would have no credential to load the model catalog. Set config.auth.readTokenSecretName to an existing Secret, or set config.auth.generateReadToken=true so the chart generates one." -}}
+{{- end -}}
+{{- $adminRef := "" -}}
+{{- if $admin -}}
+{{- $adminRef = printf "%s/%s" $admin (include "sie-cluster.config.adminTokenSecretKey" .) -}}
+{{- end -}}
+{{- $readRef := "" -}}
+{{- if $read -}}
+{{- $readRef = printf "%s/%s" $read (include "sie-cluster.config.readTokenSecretKey" .) -}}
+{{- end -}}
+{{- if and $adminRef (eq $readRef $adminRef) -}}
+{{- fail (printf "config.auth.readTokenSecretName and readTokenSecretKey point at the sie-config admin token (%s), which would give every gateway and worker sidecar write access to the model catalog. Store the read token in a different Secret or key." $adminRef) -}}
+{{- end -}}
+{{- with dig "adminTokenSecretName" "" (.Values.gateway.auth | default dict) -}}
+{{- $gatewayRef := printf "%s/%s" . (include "sie-cluster.gateway.adminTokenSecretKey" $) -}}
+{{- if and $adminRef (eq $gatewayRef $adminRef) -}}
+{{- fail (printf "gateway.auth.adminTokenSecretName and adminTokenSecretKey point at the sie-config admin token (%s), which would give every gateway pod write access to the model catalog. Create a separate Secret for the gateway admin token." $gatewayRef) -}}
+{{- end -}}
+{{- if and $readRef (eq $gatewayRef $readRef) -}}
+{{- fail (printf "gateway.auth.adminTokenSecretName and adminTokenSecretKey point at the sie-config read token (%s), which every worker sidecar holds, so any worker sidecar could call the gateway admin routes. Create a separate Secret for the gateway admin token." $gatewayRef) -}}
+{{- end -}}
+{{- end -}}
+{{- if not $admin -}}
+{{- $env := include "sie-cluster.config.deploymentEnv" . | trim | lower -}}
+{{- $production := has $env (list "prod" "production") -}}
+{{- if or $production (not (has $env (list "staging" "development" "ci"))) -}}
+{{- $effect := "serve /v1/configs without authentication" -}}
+{{- if $read -}}
+{{- $effect = "refuse every config write and serve only reads that present the read token" -}}
+{{- else if $production -}}
+{{- $effect = "refuse every /v1/configs request and the gateway could not load the model catalog" -}}
+{{- end -}}
+{{- fail (printf "sie-config would run with telemetry.deploymentEnv=%q and no admin token (config.auth.generateAdminToken=false and config.auth.adminTokenSecretName is empty), so it would %s. Running without an admin token is supported only for telemetry.deploymentEnv staging, development, or ci. Otherwise set config.auth.adminTokenSecretName to an existing Secret, or set config.auth.generateAdminToken=true so the chart generates one." $env $effect) -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
 Worker StatefulSet name for a pool
 */}}
 {{- define "sie-cluster.worker.name" -}}
@@ -586,6 +817,211 @@ Runs from NOTES.txt so every install/upgrade is checked, regardless of which (or
 {{- end }}
 {{- end }}
 {{- end }}
+{{- end }}
+
+{{/*
+Strict boolean opt-in: only a YAML boolean true enables it. Any other non-null
+value fails the render so a quoted "false" can never read as true.
+Args (dict): value, path.
+*/}}
+{{- define "sie-cluster.optIn" -}}
+{{- $value := .value -}}
+{{- if not (or (kindIs "invalid" $value) (kindIs "bool" $value)) -}}
+{{- fail (printf "%s must be a boolean (true or false), got %q" .path (toString $value)) -}}
+{{- end -}}
+{{- if and (kindIs "bool" $value) $value -}}true{{- end -}}
+{{- end }}
+
+{{/*
+The SIE_AUTH_MODE the gateway container receives, as JSON {"mode", "known"}.
+gateway.auth.mode is passed verbatim; a later gateway.extraEnv entry named
+SIE_AUTH_MODE replaces it. An override without a literal value (valueFrom) is
+not known at render time.
+*/}}
+{{- define "sie-cluster.gateway.effectiveAuthMode" -}}
+{{- $gateway := default (dict) .Values.gateway -}}
+{{- $mode := toString (dig "auth" "mode" "none" $gateway) -}}
+{{- $known := true -}}
+{{- range $entry := (default (list) $gateway.extraEnv) -}}
+{{- if and (kindIs "map" $entry) (eq (toString (index $entry "name")) "SIE_AUTH_MODE") -}}
+{{- if hasKey $entry "value" -}}
+{{- $mode = toString (index $entry "value") -}}
+{{- $known = true -}}
+{{- else -}}
+{{- $mode = "" -}}
+{{- $known = false -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- dict "mode" $mode "known" $known | toJson -}}
+{{- end }}
+
+{{/*
+"true" when the gateway enforces token auth: the effective SIE_AUTH_MODE is
+known and is exactly static or token, the values the gateway accepts.
+*/}}
+{{- define "sie-cluster.gateway.authenticates" -}}
+{{- $auth := include "sie-cluster.gateway.effectiveAuthMode" . | fromJson -}}
+{{- if and $auth.known (has $auth.mode (list "static" "token")) -}}true{{- end -}}
+{{- end }}
+
+{{/*
+Validation: gateway auth values. The gateway accepts exactly none, "", static,
+and token, and refuses every request when token auth has no token.
+*/}}
+{{- define "sie-cluster.validateGatewayAuth" -}}
+{{- $gateway := default (dict) .Values.gateway -}}
+{{- $auth := include "sie-cluster.gateway.effectiveAuthMode" . | fromJson -}}
+{{- if $auth.known -}}
+{{- if not (has $auth.mode (list "none" "" "static" "token")) -}}
+{{- fail (printf "gateway auth mode %q is not supported; set gateway.auth.mode (or a gateway.extraEnv SIE_AUTH_MODE override) to none, static, or token." $auth.mode) -}}
+{{- end -}}
+{{- if has $auth.mode (list "static" "token") -}}
+{{- $tokenSource := dig "auth" "tokenSecretName" "" $gateway -}}
+{{- range $entry := (default (list) $gateway.extraEnv) -}}
+{{- if and (kindIs "map" $entry) (has (toString (index $entry "name")) (list "SIE_AUTH_TOKEN" "SIE_AUTH_TOKENS")) -}}
+{{- $tokenSource = "extraEnv" -}}
+{{- end -}}
+{{- end -}}
+{{- if not $tokenSource -}}
+{{- fail (printf "gateway auth mode %q needs tokens: set gateway.auth.tokenSecretName to a Secret holding comma-separated tokens, or the gateway refuses every request." $auth.mode) -}}
+{{- end -}}
+{{- else if dig "auth" "tokenSecretName" "" $gateway -}}
+{{- fail "gateway.auth.tokenSecretName is set but gateway auth mode is none: the gateway treats tokens without token auth as a misconfiguration and refuses every request with 500. Set gateway.auth.mode=static to enforce the tokens, or clear gateway.auth.tokenSecretName." -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Validation: the oauth2-proxy edge (auth.enabled) is enforced only by an
+ingress-nginx controller, which honours the nginx.ingress.kubernetes.io/auth-*
+annotations; auth.ingress.acceptedControllers lists the IngressClass
+spec.controller values that count (default k8s.io/ingress-nginx). With cluster
+access the chart looks up the IngressClass named by ingress.className. When it
+is empty, the API server assigns one of the classes marked as default, so every
+default class must use an accepted controller. An offline render (helm
+template) cannot see IngressClasses and cannot tell ingress-nginx from other
+controllers that also use the class name nginx, so it accepts only
+ingress.className=nginx.
+*/}}
+{{- define "sie-cluster.validateOauth2EdgeController" -}}
+{{- $className := toString (default "" .Values.ingress.className) -}}
+{{- $accepted := list -}}
+{{- range $controller := (default (list "k8s.io/ingress-nginx") (dig "ingress" "acceptedControllers" nil (default (dict) .Values.auth))) -}}
+{{- $accepted = append $accepted (toString $controller) -}}
+{{- end -}}
+{{- $classes := lookup "networking.k8s.io/v1" "IngressClass" "" "" -}}
+{{- $items := list -}}
+{{- if $classes -}}
+{{- $items = default (list) $classes.items -}}
+{{- end -}}
+{{- if $items -}}
+{{- $candidates := list -}}
+{{- range $class := $items -}}
+{{- $metadata := default (dict) $class.metadata -}}
+{{- $annotations := default (dict) $metadata.annotations -}}
+{{- if $className -}}
+{{- if eq (toString $metadata.name) $className -}}
+{{- $candidates = append $candidates $class -}}
+{{- end -}}
+{{- else if eq (toString (index $annotations "ingressclass.kubernetes.io/is-default-class")) "true" -}}
+{{- $candidates = append $candidates $class -}}
+{{- end -}}
+{{- end -}}
+{{- if not $candidates -}}
+{{- if $className -}}
+{{- fail (printf "auth.enabled=true needs an ingress-nginx IngressClass for the gateway Ingress, but no IngressClass named %q exists in the cluster." $className) -}}
+{{- end -}}
+{{- fail "auth.enabled=true needs an ingress-nginx IngressClass for the gateway Ingress, but ingress.className is empty and no IngressClass is marked as the cluster default." -}}
+{{- end -}}
+{{- range $class := $candidates -}}
+{{- $controller := toString (dig "spec" "controller" "" $class) -}}
+{{- if not (has $controller $accepted) -}}
+{{- fail (printf "auth.enabled=true puts the oauth2-proxy edge in front of the gateway through ingress-nginx auth annotations, but IngressClass %q%s uses controller %q, which is not in auth.ingress.acceptedControllers %v; other controllers, such as the NGINX Inc controller (nginx.org/ingress-controller), ignore those annotations, so the gateway would be published without that check. Use an ingress-nginx IngressClass, add its controller to auth.ingress.acceptedControllers, or enable gateway auth (gateway.auth.mode=static) and set auth.enabled=false." (toString (dig "metadata" "name" "" $class)) (ternary "" " (a default IngressClass, which the API server may assign to the Ingress)" (ne $className "")) $controller $accepted) -}}
+{{- end -}}
+{{- end -}}
+{{- else if ne $className "nginx" -}}
+{{- fail (printf "auth.enabled=true puts the oauth2-proxy edge in front of the gateway through ingress-nginx auth annotations. This render cannot inspect IngressClasses (for example helm template), so it accepts only ingress.className=nginx and cannot verify the controller behind %q. Use ingress.className=nginx with ingress-nginx, install with cluster access so the chart can check the IngressClass controller, or enable gateway auth (gateway.auth.mode=static) and set auth.enabled=false." $className) -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Validation: a gateway Ingress needs authentication and TLS.
+Authentication is gateway token auth, the oauth2-proxy edge (auth.enabled,
+enforced through ingress-nginx annotations; see
+sie-cluster.validateOauth2EdgeController), or the explicit
+ingress.allowUnauthenticated opt-in. A hostname is not access
+control. TLS is ingress.tlsConfig.enabled with at least one host (the chart
+renders no TLS block without one), ingress.tlsConfig.mode=disabled as an
+explicit statement that TLS terminates upstream, or the explicit
+ingress.allowPlaintext opt-in.
+*/}}
+{{- define "sie-cluster.validateIngressExposure" -}}
+{{- if .Values.ingress.enabled -}}
+{{- $allowUnauthenticated := include "sie-cluster.optIn" (dict "value" .Values.ingress.allowUnauthenticated "path" "ingress.allowUnauthenticated") -}}
+{{- $allowPlaintext := include "sie-cluster.optIn" (dict "value" .Values.ingress.allowPlaintext "path" "ingress.allowPlaintext") -}}
+{{- $edgeAuth := dig "enabled" false (default (dict) .Values.auth) -}}
+{{- if $edgeAuth -}}
+{{- include "sie-cluster.validateOauth2EdgeController" . -}}
+{{- end -}}
+{{- $gatewayAuth := include "sie-cluster.gateway.authenticates" . -}}
+{{- if not (or $gatewayAuth $edgeAuth $allowUnauthenticated) -}}
+{{- $auth := include "sie-cluster.gateway.effectiveAuthMode" . | fromJson -}}
+{{- fail (printf "Refusing to render the gateway Ingress: nothing authenticates its requests (effective SIE_AUTH_MODE=%q, auth.enabled=false), so it would publish the inference and pool APIs to anyone who can reach the ingress controller. A hostname or TLS is not access control. Enable gateway auth (gateway.auth.mode=static with gateway.auth.tokenSecretName) or the oauth2-proxy edge (auth.enabled=true with ingress-nginx), or set ingress.allowUnauthenticated=true to publish it without authentication." $auth.mode) -}}
+{{- end -}}
+{{- $hosts := include "sie-cluster.ingress.hosts" . | fromJsonArray -}}
+{{- $tls := include "sie-cluster.ingressTlsConfig" . | fromYaml -}}
+{{- $upstreamTls := eq (toString (default "byo" $tls.mode)) "disabled" -}}
+{{- $ingressTls := and $tls.enabled (gt (len $hosts) 0) -}}
+{{- if not (or $upstreamTls $ingressTls $allowPlaintext) -}}
+{{- fail "Refusing to render the gateway Ingress without TLS: tokens and session cookies would cross the network in plaintext. Set ingress.hosts with ingress.tlsConfig.enabled=true (the Ingress carries TLS only for named hosts, so an IP-only self-signed certificate is not supported for the gateway Ingress), set ingress.tlsConfig.mode=disabled when TLS terminates upstream of the Ingress, or set ingress.allowPlaintext=true to serve plain HTTP." -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Validation: the MCP edge Ingress carries connector secrets and OAuth tokens,
+so it needs TLS (ingress.tlsConfig.enabled, or mode=disabled when TLS
+terminates upstream) or the explicit mcpEdge.ingress.allowPlaintext opt-in.
+*/}}
+{{- define "sie-cluster.validateMcpEdgeIngressTls" -}}
+{{- $tls := include "sie-cluster.ingressTlsConfig" . | fromYaml -}}
+{{- $upstreamTls := eq (toString (default "byo" $tls.mode)) "disabled" -}}
+{{- $allowPlaintext := include "sie-cluster.optIn" (dict "value" (dig "ingress" "allowPlaintext" nil (default (dict) .Values.mcpEdge)) "path" "mcpEdge.ingress.allowPlaintext") -}}
+{{- if not (or $tls.enabled $upstreamTls $allowPlaintext) -}}
+{{- fail "Refusing to render the MCP edge Ingress without TLS: it carries connector secrets and OAuth tokens. Set ingress.tlsConfig.enabled=true, set ingress.tlsConfig.mode=disabled when TLS terminates upstream of the Ingress, or set mcpEdge.ingress.allowPlaintext=true to serve plain HTTP." -}}
+{{- end -}}
+{{- if and $tls.enabled (eq (toString $tls.mode) "self-signed") -}}
+{{- fail (printf "ingress.tlsConfig.mode=self-signed issues its certificate into %q for the gateway hosts only; nothing issues the MCP edge certificate (Secret %q) for mcpEdge.ingress.host. Use ingress.tlsConfig.mode=cert-manager, or mode=byo with that Secret created, or mode=disabled when TLS terminates upstream of the Ingress." (toString $tls.secretName) (printf "%s-tls" (include "sie-cluster.mcpEdge.serviceName" .))) -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Validation: a gateway Service of type LoadBalancer or NodePort is reachable
+from outside the cluster on most managed Kubernetes platforms, so it needs
+gateway token auth or the explicit gateway.service.allowUnauthenticated
+opt-in, and, because the gateway serves plain HTTP, the explicit
+gateway.service.allowPlaintext acknowledgement. sie-config accepts unauthenticated writes unless an admin token is
+configured (outside a production deployment environment), so its Service
+stays ClusterIP.
+*/}}
+{{- define "sie-cluster.validateServiceExposure" -}}
+{{- $serviceType := toString (dig "service" "type" "ClusterIP" (default (dict) .Values.gateway)) -}}
+{{- if has $serviceType (list "LoadBalancer" "NodePort") -}}
+{{- $allowUnauthenticated := include "sie-cluster.optIn" (dict "value" (dig "service" "allowUnauthenticated" nil (default (dict) .Values.gateway)) "path" "gateway.service.allowUnauthenticated") -}}
+{{- if not (or (include "sie-cluster.gateway.authenticates" .) $allowUnauthenticated) -}}
+{{- fail (printf "Refusing to render gateway.service.type=%s without gateway auth: the Service is reachable from outside the cluster on most managed platforms and would publish the inference and pool APIs. Enable gateway auth (gateway.auth.mode=static with gateway.auth.tokenSecretName), or set gateway.service.allowUnauthenticated=true." $serviceType) -}}
+{{- end -}}
+{{- $allowPlaintext := include "sie-cluster.optIn" (dict "value" (dig "service" "allowPlaintext" nil (default (dict) .Values.gateway)) "path" "gateway.service.allowPlaintext") -}}
+{{- if not $allowPlaintext -}}
+{{- fail (printf "Refusing to render gateway.service.type=%s without an explicit TLS decision: the gateway serves plain HTTP, so tokens would cross the network in cleartext unless the load balancer terminates TLS. Prefer an Ingress with TLS, or configure TLS termination through provider annotations in gateway.service.annotations and set gateway.service.allowPlaintext=true to acknowledge that the gateway itself serves HTTP." $serviceType) -}}
+{{- end -}}
+{{- end -}}
+{{- $config := default (dict) .Values.config -}}
+{{- $configServiceType := toString (dig "service" "type" "ClusterIP" $config) -}}
+{{- if and $config.enabled (ne $configServiceType "ClusterIP") -}}
+{{- fail (printf "config.service.type=%s is not supported: sie-config is the configuration write authority and must stay ClusterIP. Reach it in-cluster or through kubectl port-forward." $configServiceType) -}}
+{{- end -}}
 {{- end }}
 
 {{/*

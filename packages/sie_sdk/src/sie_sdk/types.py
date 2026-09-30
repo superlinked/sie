@@ -165,6 +165,7 @@ class RequestUsage(TypedDict, total=False):
 
     input_tokens: int
     pairs: int
+    content_input_tokens: int
     images: int
     pages: int
     output_tokens: int
@@ -176,7 +177,7 @@ class RequestUsage(TypedDict, total=False):
 #: The metered dimensions of :class:`RequestUsage` — the units a consumer
 #: prices. Every member is a non-negative integer count.
 TERMINAL_UNIT_FIELDS: frozenset[str] = frozenset(
-    {"audio_ms", "images", "input_tokens", "output_tokens", "pages", "pairs"}
+    {"audio_ms", "content_input_tokens", "images", "input_tokens", "output_tokens", "pages", "pairs"}
 )
 
 #: The settled-charge annotations of :class:`RequestUsage`. The gateway is
@@ -407,11 +408,23 @@ class ScoreEntry(TypedDict):
     rank: int
 
 
+class ScoreInputTokensDetails(TypedDict):
+    """Breakdown of score input tokens.
+
+    ``content_tokens`` counts the caller's text inside the scored pairs (query,
+    post-truncation document and a supplied instruction, each tokenized alone).
+    The rest of ``input_tokens`` is the reranker's prompt template.
+    """
+
+    content_tokens: Required[int]
+
+
 class ScoreUsage(TypedDict):
     """Authoritative usage reported by a score adapter."""
 
     input_tokens: Required[int]
     images: NotRequired[int]
+    input_tokens_details: NotRequired[ScoreInputTokensDetails]
 
 
 class ScoreResult(TypedDict, total=False):

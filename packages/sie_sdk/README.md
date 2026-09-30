@@ -150,9 +150,12 @@ that row's label prompt, unless the document count alone is already higher.
 An item whose document pushes the labels out of the window, in any of its rows,
 comes back with an `INPUT_TOO_LONG` error in its `error` field and is not
 billed. The other items still succeed. Models that read the labels before
-the document count only the part of the document they read, and a row whose
-labels leave no room for the document fails its item the same way, instead of
-being scored without the document.
+the document count only the part of the document they read. Under the default
+overflow policy, a row whose labels leave the document fewer than 8 tokens
+fails its item the same way, instead of being scored with little or none of
+the document; `truncate_text` and `error` accept a document cut to, or fitting
+in, a smaller room. With `options={"overflow_policy": "error"}`, a document
+that does not fit whole fails only its own item, the same way.
 
 On a CUDA server, the operator can load the DeBERTa-based GLiClass models with
 CUDA graphs, which cut the CPU time spent launching kernels. With `bucketed`
@@ -250,6 +253,16 @@ client = SIEClient(
     api_key="YOUR_API_KEY",
 )
 ```
+
+When `base_url` is omitted, the client reads `SIE_BASE_URL`. When `api_key` is
+omitted, it selects `SIE_API_KEY` only for a base URL with the same origin as
+`SIE_BASE_URL`; a client for any other URL does not pick it up. Set both
+variables to let code and integrations that construct a client without
+credentials use a gateway with token auth. An explicit argument always wins;
+`api_key=""` sends no credential. The `connections` namespace reuses the
+client's key on requests to an explicitly configured `control_plane_url`, so a
+client whose `control_plane_url` is on another origin must pass `api_key`
+explicitly rather than rely on `SIE_API_KEY`.
 
 ## Generation execution evidence
 

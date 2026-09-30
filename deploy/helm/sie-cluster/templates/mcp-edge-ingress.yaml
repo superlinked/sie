@@ -12,6 +12,7 @@
 {{- fail (printf "Invalid configuration: mcpEdge.ingress.host (%s) collides with a gateway ingress host; both Ingresses would serve path / on the same hostname. Give the MCP edge a distinct host (e.g. sie-mcp.example.com)." $host) }}
 {{- end }}
 {{- end }}
+{{- include "sie-cluster.validateMcpEdgeIngressTls" . }}
 {{- $tls := include "sie-cluster.ingressTlsConfig" . | fromYaml }}
 {{- $tlsSecret := printf "%s-tls" (include "sie-cluster.mcpEdge.serviceName" .) }}
 apiVersion: networking.k8s.io/v1

@@ -724,6 +724,37 @@ def test_vidore_colqwen2_5_v0_2_image_multivector() -> None:
     _assert_multivector_image("vidore/colqwen2.5-v0.2", 128, None)
 
 
+# TopK-Embed-V1 needs transformers >= 5.2, which the transformers5 bundle carries:
+# run these with that bundle's requirements, e.g.
+#   python -m sie_server.cli resolve-deps --bundle transformers5 > /tmp/t5.txt
+#   uv run --no-sync --with-requirements /tmp/t5.txt pytest -c pyproject.toml -m model \
+#       packages/sie_server/tests/test_all_models.py -k topk_embed
+def test_topk_io_topk_embed_v1_xsmall_multivector() -> None:
+    pytest.importorskip("transformers.models.qwen3_5", reason="needs transformers >= 5.2 (the transformers5 bundle)")
+    _assert_multivector(
+        "topk-io/topk-embed-v1-xsmall", 1024, [-0.033416748046875, 0.038848876953125, 0.0215911865234375]
+    )
+
+
+def test_topk_io_topk_embed_v1_xsmall_image_multivector() -> None:
+    pytest.importorskip("transformers.models.qwen3_5", reason="needs transformers >= 5.2 (the transformers5 bundle)")
+    _assert_multivector_image(
+        "topk-io/topk-embed-v1-xsmall", 1024, [-0.069580078125, 0.037445068359375, -0.021209716796875]
+    )
+
+
+def test_topk_io_topk_embed_v1_small_multivector() -> None:
+    pytest.importorskip("transformers.models.qwen3_5", reason="needs transformers >= 5.2 (the transformers5 bundle)")
+    _assert_multivector("topk-io/topk-embed-v1-small", 2048, [0.02752685546875, -0.04046630859375, 0.00592041015625])
+
+
+def test_topk_io_topk_embed_v1_small_image_multivector() -> None:
+    pytest.importorskip("transformers.models.qwen3_5", reason="needs transformers >= 5.2 (the transformers5 bundle)")
+    _assert_multivector_image(
+        "topk-io/topk-embed-v1-small", 2048, [0.036773681640625, -0.04022216796875, -0.0186614990234375]
+    )
+
+
 # =============================================================================
 # Multivector models with muvera profiles (dense via postprocessor)
 # =============================================================================

@@ -33,6 +33,8 @@ profiles:
         skip_special_tokens: false
         doc_punctuation_skiplist: false
         cuda_graphs: bucketed
+        # At least as accurate as the unfused rotation against float32 (see the server README).
+        fused_rope: true
       runtime: {}
   muvera:
     extends: default

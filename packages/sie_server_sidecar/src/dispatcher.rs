@@ -258,6 +258,7 @@ struct GenerateDeliveryLogContext {
     work_item_id: String,
     request_id: String,
     model_id: String,
+    reply_subject: String,
     delivery: DeliveryContext,
 }
 
@@ -362,6 +363,22 @@ fn caller_item_id_from_value(value: &MsgValue) -> Option<String> {
 /// True if `reply_subject` is acceptable for use on a `WorkItem`.
 /// Empty is allowed (fire-and-forget). Non-empty subjects must start
 /// with `_INBOX.` so malicious producers can't redirect results.
+/// The first `Nats-` header on a work delivery other than `Nats-Msg-Id`.
+///
+/// The gateway publishes work with at most `Nats-Msg-Id`. The NATS server adds
+/// other `Nats-` headers when it copies stored messages into a work stream on
+/// a user's behalf, past that user's publish permissions: a stream republish
+/// adds `Nats-Stream`, and a stream source adds `Nats-Stream-Source`.
+pub fn unexpected_work_header(headers: Option<&async_nats::HeaderMap>) -> Option<String> {
+    headers?.iter().find_map(|(name, _)| {
+        let name: &str = name.as_ref();
+        let nats_header = name
+            .get(..5)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("nats-"));
+        (nats_header && !name.eq_ignore_ascii_case("Nats-Msg-Id")).then(|| name.to_string())
+    })
+}
+
 pub(crate) fn reply_subject_is_safe(reply_subject: &str) -> bool {
     reply_subject.is_empty() || reply_subject.starts_with(INBOX_PREFIX)
 }
@@ -1158,6 +1175,18 @@ fn unknown_bundle_config_hash<'a>(
     first_unknown.map(|hash| (hash, count))
 }
 
+/// Telemetry reason for NAKing `model_id` work that a config barrier refused.
+/// A model the worker reports it cannot serve is `model_unsupported`, as it is
+/// at intake and before readiness; any other refusal is an old bundle hash
+/// (`retry`).
+fn barrier_nak_reason(state: Option<&ConfigApplyState>, model_id: &str) -> &'static str {
+    if state.is_some_and(|state| state.model_is_unsupported(model_id)) {
+        "model_unsupported"
+    } else {
+        "retry"
+    }
+}
+
 impl Dispatcher {
     /// Process a full fetched batch.
     ///
@@ -1195,6 +1224,22 @@ impl Dispatcher {
             self.runtime_state
                 .telemetry
                 .nats_received(msg.info().ok().map(|info| info.delivered as u64));
+            if let Some(header) = unexpected_work_header(msg.headers.as_ref()) {
+                warn!(
+                    subject = %msg.subject,
+                    header = %header,
+                    "rejecting work the NATS server copied from another stream — ACKing to drop",
+                );
+                if let Err(e) = ack(
+                    &Delivery::Nats(msg, admission_permit, None),
+                    &self.runtime_state.telemetry,
+                )
+                .await
+                {
+                    warn!(error = %e, "ack failed on drop");
+                }
+                continue;
+            }
             // Source of truth for routing is the NATS subject (JetStream
             // already used it to dispatch to this consumer). If the subject
             // doesn't yield a model_id, we can't trust the payload either,
@@ -1840,13 +1885,16 @@ impl Dispatcher {
         let _execution_guard = if let Some(state) = self.config_apply_state.as_ref() {
             let guard = state.lock_execution().await;
             if !state.accepts_work(&wi.bundle_config_hash, &model_id) {
+                let reason = barrier_nak_reason(Some(state), &model_id);
                 info!(
                     model = %model_id,
                     expected_hash = %wi.bundle_config_hash,
                     local_hash = %state.current_bundle_config_hash(),
-                    "generate bundle config hash changed before execution — NAKing"
+                    reason,
+                    "generate work refused at the config barrier before execution — NAKing"
                 );
-                nak_msg(&msg, base_delay_ms, &self.runtime_state.telemetry).await;
+                nak_msg_with_reason(&msg, base_delay_ms, &self.runtime_state.telemetry, reason)
+                    .await;
                 return;
             }
             Some(guard)
@@ -1916,6 +1964,7 @@ impl Dispatcher {
             work_item_id: wi.work_item_id.clone(),
             request_id: wi.request_id.clone(),
             model_id: model_id.clone(),
+            reply_subject: wi.reply_subject.clone(),
             delivery,
         });
         let executed_bundle_config_hash: Arc<str> = Arc::from(wi.bundle_config_hash.clone());
@@ -2163,9 +2212,15 @@ impl Dispatcher {
                 group_size,
                 local_hash = %local_hash,
                 expected_hash,
-                "request bundle config hash is unknown locally — NAKing group"
+                "request bundle config hash is unknown locally, or the model is unsupported — NAKing group"
             );
-            nak_all(&items, base_delay_ms, &self.runtime_state.telemetry).await;
+            nak_all_at_barrier(
+                &items,
+                base_delay_ms,
+                &self.runtime_state.telemetry,
+                self.config_apply_state.as_deref(),
+            )
+            .await;
             return Ok(());
         }
         let readiness_resp = loop {
@@ -2513,16 +2568,17 @@ impl Dispatcher {
                     expected_hash,
                     unknown_hash_count,
                     local_hash = %state.current_bundle_config_hash(),
-                    "encode bundle config hash changed before execution — NAKing"
+                    "encode work refused at the config barrier before execution — NAKing"
                 );
                 let msgs_only: Vec<(WorkItem, Delivery)> = resolved
                     .into_iter()
                     .map(|(wi, delivery, _, _, _)| (wi, delivery))
                     .collect();
-                nak_all(
+                nak_all_at_barrier(
                     &msgs_only,
                     base_nak_delay_ms(),
                     &self.runtime_state.telemetry,
+                    Some(state),
                 )
                 .await;
                 return Ok(());
@@ -2681,16 +2737,17 @@ impl Dispatcher {
                     expected_hash,
                     unknown_hash_count,
                     local_hash = %state.current_bundle_config_hash(),
-                    "score bundle config hash changed before execution — NAKing"
+                    "score work refused at the config barrier before execution — NAKing"
                 );
                 let msgs_only: Vec<(WorkItem, Delivery)> = prepared
                     .into_iter()
                     .map(|(wi, delivery, _, _, _)| (wi, delivery))
                     .collect();
-                nak_all(
+                nak_all_at_barrier(
                     &msgs_only,
                     base_nak_delay_ms(),
                     &self.runtime_state.telemetry,
+                    Some(state),
                 )
                 .await;
                 return Ok(());
@@ -2876,16 +2933,17 @@ impl Dispatcher {
                     expected_hash,
                     unknown_hash_count,
                     local_hash = %state.current_bundle_config_hash(),
-                    "extract bundle config hash changed before execution — NAKing"
+                    "extract work refused at the config barrier before execution — NAKing"
                 );
                 let msgs_only: Vec<(WorkItem, Delivery)> = resolved
                     .into_iter()
                     .map(|(wi, delivery, _, _, _)| (wi, delivery))
                     .collect();
-                nak_all(
+                nak_all_at_barrier(
                     &msgs_only,
                     base_nak_delay_ms(),
                     &self.runtime_state.telemetry,
+                    Some(state),
                 )
                 .await;
                 return Ok(());
@@ -4305,6 +4363,11 @@ async fn handle_generate_event(
 ) -> Result<(), DispatchError> {
     match event.kind.as_str() {
         "publish" => {
+            if event.reply_subject != delivery_log.reply_subject {
+                return Err(DispatchError::Ipc(IpcError::Server(
+                    "generation publish reply_subject mismatch".to_string(),
+                )));
+            }
             let payload =
                 stamp_generate_execution_hash(event.payload, executed_bundle_config_hash)?;
             publisher.publish_raw(&event.reply_subject, payload).await?;
@@ -4639,6 +4702,29 @@ async fn nak_all(
         nak_one(d, delay_ms, telemetry).await;
     }
     debug!(count = items.len(), delay_ms, "NAKed group");
+}
+
+/// NAK work a config barrier refused, each item counted with its own reason
+/// ([`barrier_nak_reason`]).
+async fn nak_all_at_barrier(
+    items: &[(WorkItem, Delivery)],
+    delay_ms: u64,
+    telemetry: &crate::observability::metrics::SidecarTelemetry,
+    state: Option<&ConfigApplyState>,
+) {
+    for (wi, d) in items {
+        nak_one_with_reason(
+            d,
+            delay_ms,
+            telemetry,
+            barrier_nak_reason(state, &wi.model_id),
+        )
+        .await;
+    }
+    debug!(
+        count = items.len(),
+        delay_ms, "NAKed group at a config barrier"
+    );
 }
 
 async fn nak_one(
@@ -5130,17 +5216,18 @@ async fn process_scheduler_batch(
                 expected_hash,
                 unknown_hash_count,
                 local_hash = %state.current_bundle_config_hash(),
-                "scheduler bundle config hash changed before execution — NAKing batch"
+                "scheduler work refused at the config barrier before execution — NAKing batch"
             );
             let msgs_only: Vec<(WorkItem, Delivery)> = batch
                 .metadata
                 .into_iter()
                 .map(|meta| (meta.wi, meta.delivery))
                 .collect();
-            nak_all(
+            nak_all_at_barrier(
                 &msgs_only,
                 base_nak_delay_ms(),
                 &dispatcher.runtime_state.telemetry,
+                Some(state),
             )
             .await;
             return;
@@ -6338,6 +6425,64 @@ mod tests {
     /// Far longer than any readiness deadline the tests use.
     const STALLED_PROBE: Duration = Duration::from_secs(1_000_000);
 
+    #[tokio::test]
+    async fn generation_publish_to_a_subject_other_than_the_work_item_reply_is_refused() {
+        let client = async_nats::ConnectOptions::new()
+            .retry_on_initial_connect()
+            .connect("nats://127.0.0.1:1")
+            .await
+            .expect("an offline client needs no server");
+        let telemetry = crate::observability::metrics::SidecarTelemetry::default();
+        let publisher = Arc::new(WorkPublisher::new(
+            client.clone(),
+            "worker-test",
+            telemetry.clone(),
+        ));
+        let message = Message {
+            message: async_nats::Message {
+                subject: "sie.work.test".into(),
+                reply: None,
+                payload: Default::default(),
+                headers: None,
+                status: None,
+                description: None,
+                length: 0,
+            },
+            context: async_nats::jetstream::new(client),
+        };
+        let delivery = DeliveryContext::from_message(&message);
+        let delivery_log = Arc::new(GenerateDeliveryLogContext {
+            work_item_id: "wi-1".to_string(),
+            request_id: "req-1".to_string(),
+            model_id: "model".to_string(),
+            reply_subject: "_INBOX.router.req-1".to_string(),
+            delivery,
+        });
+        for subject in ["$JS.API.STREAM.CREATE.X", "sie.config.models._all", ""] {
+            let result = handle_generate_event(
+                GenerateEvent {
+                    kind: "publish".to_string(),
+                    reply_subject: subject.to_string(),
+                    payload: Vec::new(),
+                    delay_ms: None,
+                    error: None,
+                },
+                Arc::clone(&publisher),
+                telemetry.clone(),
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(QueuedMessage::new(message.clone(), None)),
+                Arc::clone(&delivery_log),
+                "",
+            )
+            .await;
+            let error = result.expect_err(subject).to_string();
+            assert!(
+                error.contains("reply_subject mismatch"),
+                "{subject}: {error}"
+            );
+        }
+    }
+
     /// A NATS delivery whose ACK, NAK and progress calls fail: it has no
     /// reply subject and its client never reaches a server.
     async fn unacknowledgeable_nats_delivery() -> Delivery {
@@ -6955,6 +7100,54 @@ mod tests {
     }
 
     #[test]
+    fn barrier_naks_count_unsupported_models_as_model_unsupported() {
+        let state = ConfigApplyState::new(String::new());
+        assert!(state.mark_export_reconciled(1, Some("hash-1".into()), vec!["B".into()], false));
+
+        assert_eq!(barrier_nak_reason(Some(&state), "B"), "model_unsupported");
+        assert_eq!(barrier_nak_reason(Some(&state), "b"), "model_unsupported");
+        // A supported model refused at the barrier carries an old bundle hash.
+        assert_eq!(barrier_nak_reason(Some(&state), "A"), "retry");
+        assert_eq!(barrier_nak_reason(None, "B"), "retry");
+    }
+
+    /// The architecture guide counts NAKs for a model in `unsupported_models`
+    /// as `model_unsupported` at intake, before readiness and at the config
+    /// execution barrier. A barrier that NAKs through the plain `retry`
+    /// helpers would count a model that turned unsupported after intake as a
+    /// retry. Checked structurally, like the barrier ordering above, so a
+    /// future barrier that NAKs the old way fails here.
+    #[test]
+    fn config_execution_barriers_nak_with_their_reason() {
+        let source = include_str!("dispatcher.rs");
+        let production = source
+            .split("\nmod tests {")
+            .next()
+            .expect("dispatcher.rs must have a production section");
+        let barrier = concat!("lock_execution", "().await");
+        let mut naking = 0;
+        for (site, _) in production.match_indices(barrier) {
+            let rest = &production[site..];
+            let refusal = &rest[..rest.find("Some(guard)").expect("a barrier keeps its guard")];
+            if !refusal.contains("nak") {
+                continue; // local-ingest generate answers with an error, not a NAK
+            }
+            naking += 1;
+            assert!(
+                !refusal.contains(concat!("nak_all", "("))
+                    && !refusal.contains(concat!("nak_msg", "(")),
+                "the barrier at byte {site} NAKs with the plain retry reason"
+            );
+            assert!(
+                refusal.contains("nak_all_at_barrier") || refusal.contains("barrier_nak_reason"),
+                "the barrier at byte {site} does not attribute its NAK reason"
+            );
+        }
+        // Generate, encode, score, extract and the scheduler batch.
+        assert_eq!(naking, 5, "expected five NAKing config execution barriers");
+    }
+
+    #[test]
     fn unknown_bundle_config_hash_flags_models_the_worker_cannot_serve() {
         let state = ConfigApplyState::new(String::new());
         assert!(state.mark_export_reconciled(1, Some("hash-1".into()), vec!["B".into()], false));
@@ -6969,6 +7162,24 @@ mod tests {
             unknown_bundle_config_hash([&served, &unsupported], Some(&state)),
             Some(("hash-1", 1))
         );
+    }
+
+    #[test]
+    fn unexpected_work_header_allows_only_the_gateway_message_id() {
+        assert_eq!(unexpected_work_header(None), None);
+        let mut gateway = async_nats::HeaderMap::new();
+        gateway.insert("Nats-Msg-Id", "req-1");
+        gateway.insert("traceparent", "00-abc-def-01");
+        assert_eq!(unexpected_work_header(Some(&gateway)), None);
+        for name in ["Nats-Stream", "Nats-Stream-Source", "nats-subject"] {
+            let mut copied = async_nats::HeaderMap::new();
+            copied.insert(name, "x");
+            assert_eq!(
+                unexpected_work_header(Some(&copied)).as_deref(),
+                Some(name),
+                "{name}"
+            );
+        }
     }
 
     #[test]

@@ -362,8 +362,17 @@ def _maybe_multivector_raw_output(
     formatted: dict[str, Any],
     config: Any,
     output_types: list[str],
+    *,
+    f16_bytes: bool = False,
 ) -> RawOutput | None:
     """Multivector-only fast path for the Rust output shaper.
+
+    With ``f16_bytes`` (the sidecar declares it takes float16 byte buffers) a
+    float16 matrix travels as its little-endian bytes in ``values_f16``: 2 bytes
+    a value, where a list of Python floats packs as 9-byte msgpack doubles.
+    Wide multivector models need it to stay under the IPC response cap: one
+    8,192-token document of a 2,048-dim model is 16.8M values, 144 MiB as
+    doubles against 32 MiB as float16.
 
     Mirrors the invariants of the ``multivector`` branch of
     ``_wrap_encode_output``:
@@ -408,6 +417,17 @@ def _maybe_multivector_raw_output(
         token_dims = int(mv_dim)
     else:
         token_dims = int(arr.shape[1])
+
+    if f16_bytes and arr.dtype == np.float16:
+        return RawOutput(
+            multivector=MultivectorOutput(
+                values=[],
+                num_tokens=num_tokens,
+                token_dims=token_dims,
+                dtype="float16",
+                values_f16=np.ascontiguousarray(arr, dtype="<f2").tobytes(),
+            ),
+        )
 
     # Values must be contiguous in C order so ``.tobytes()`` (and the
     # Rust ``values.to_le_bytes()`` equivalent) agree. ``tolist()``
@@ -1088,6 +1108,7 @@ class QueueExecutor:
                 request_options=group[0].options or {},
                 outcomes=outcomes,
                 isolation=isolation,
+                f16_bytes=req.accepts_batched_f16_multivectors,
             )
 
         return BatchOutcome(outcomes=[outcomes[bi.work_item_id] for bi in items])
@@ -1105,6 +1126,7 @@ class QueueExecutor:
         outcomes: dict[str, ItemOutcome],
         isolation: _IsolationBudget,
         depth: int = 0,
+        f16_bytes: bool = False,
     ) -> None:
         """Run one encode sub-group and record its per-item outcomes.
 
@@ -1112,7 +1134,8 @@ class QueueExecutor:
         ``InvalidInputError`` can be isolated by re-running narrower groups —
         see :meth:`_isolate_encode_invalid_input`. ``isolation`` is the batch's
         shared re-run budget and ``depth`` the current bisection depth, both
-        carried only for that path.
+        carried only for that path. ``f16_bytes``: the sidecar takes float16
+        multivectors as byte buffers (see :func:`_maybe_multivector_raw_output`).
         """
         # Validate each item against the typed Item contract at the seam
         # (parity with the HTTP path). A per-item decode failure is isolated
@@ -1253,6 +1276,7 @@ class QueueExecutor:
                             formatted_outputs[idx],
                             config,
                             response_output_types,
+                            f16_bytes=f16_bytes,
                         )
                     if raw_output is None:
                         output = _wrap_encode_output(formatted_outputs[idx], config)
@@ -1304,6 +1328,7 @@ class QueueExecutor:
                 error=e,
                 isolation=isolation,
                 depth=depth,
+                f16_bytes=f16_bytes,
             )
         except Exception as e:  # noqa: BLE001
             logger.warning("Encode sub-batch failed for model %s: %s", model_id, e)
@@ -1324,6 +1349,7 @@ class QueueExecutor:
         error: InvalidInputError,
         isolation: _IsolationBudget,
         depth: int,
+        f16_bytes: bool = False,
     ) -> None:
         """Fail only the request that supplied the malformed input.
 
@@ -1410,6 +1436,7 @@ class QueueExecutor:
                 outcomes=outcomes,
                 isolation=isolation,
                 depth=depth + 1,
+                f16_bytes=f16_bytes,
             )
 
     # -- Score -------------------------------------------------------------
@@ -1905,6 +1932,25 @@ def _units_from_token_counts(counts: Any, expected_len: int) -> UnitCounts | Non
     return UnitCounts(input_tokens=sum(int(c) for c in counts))
 
 
+def _content_token_total(content: Any, input_tokens: Any, expected_len: int) -> int | None:
+    """Sum per-pair caller-content token counts for one score work item.
+
+    Every pair must carry a well-formed count no larger than its own input
+    count; anything else leaves the dimension unset rather than attributing a
+    partial or inconsistent sum.
+    """
+    if not isinstance(content, list) or not isinstance(input_tokens, list):
+        return None
+    if len(content) != expected_len or len(input_tokens) != expected_len:
+        return None
+    for count, total in zip(content, input_tokens, strict=True):
+        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+            return None
+        if not isinstance(total, int) or isinstance(total, bool) or count > total:
+            return None
+    return sum(content)
+
+
 def _backfill_score_units(
     adapter: Any,
     bi: ScoreBatchItem,
@@ -2018,6 +2064,13 @@ def _score_success_outcome(
         instruction=bi.instruction,
     )
     units = _with_images(units, sum(image_counts) if image_counts is not None else None)
+    content_tokens = _content_token_total(
+        getattr(score_output, "content_token_counts", None),
+        getattr(score_output, "input_token_counts", None),
+        score_output.batch_size,
+    )
+    if content_tokens is not None and units is not None and units.input_tokens is not None:
+        units = msgspec.structs.replace(units, content_input_tokens=content_tokens)
 
     # Score output is always Rust-frameable: the Python and Rust
     # sort/rank paths produce byte-identical results (see the

@@ -440,6 +440,7 @@ describe("SIEClient.encode() - basic usage", () => {
           "x-sie-execution-binding-sha256": "b".repeat(64),
           "x-sie-units-input-tokens": "11",
           "x-sie-units-pairs": "2",
+          "x-sie-units-content-input-tokens": "9",
           "x-sie-units-images": "1",
           "x-sie-units-pages": "3",
           "x-sie-units-output-tokens": "5",
@@ -461,6 +462,7 @@ describe("SIEClient.encode() - basic usage", () => {
       usage: {
         inputTokens: 11,
         pairs: 2,
+        contentInputTokens: 9,
         images: 1,
         pages: 3,
         outputTokens: 5,
@@ -1587,6 +1589,22 @@ describe("SIEClient.score() - reranking", () => {
     expect(result.scores[0]?.rank).toBe(0);
     expect(result.scores[0]?.score).toBeCloseTo(0.95);
     expect(result.usage).toEqual({ inputTokens: 91, images: 2 });
+  });
+
+  it("should expose the content-token breakdown of score usage", async () => {
+    mockFetch.mockResolvedValueOnce(
+      createMsgpackResponse({
+        model: "Qwen/Qwen3-Reranker-0.6B",
+        scores: [{ item_id: "doc-1", score: 0.9, rank: 0 }],
+        usage: { input_tokens: 80, input_tokens_details: { content_tokens: 7 } },
+      }),
+    );
+
+    const result = await client.score("Qwen/Qwen3-Reranker-0.6B", { text: "query" }, [
+      { text: "doc" },
+    ]);
+
+    expect(result.usage).toEqual({ inputTokens: 80, inputTokensDetails: { contentTokens: 7 } });
   });
 
   it("should use correct URL with model in path", async () => {

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import math
 import re
 from collections.abc import Callable
@@ -12,6 +13,9 @@ import pytest
 import torch
 from sie_server.adapters.errors import InputTooLongError
 from sie_server.adapters.gliclass import GLiClassAdapter
+from sie_server.core.inference_output import ExtractOutput
+from sie_server.core.prepared import ExtractPreparedItem
+from sie_server.core.worker import ModelWorker, WorkerConfig
 from sie_server.types.inputs import InvalidInputError, Item
 
 _CLASS_TOKEN = 7
@@ -1069,8 +1073,8 @@ class TestOverflowBudget:
         adapter._pipe = _Pipe()
         text = " ".join(f"w{i}" for i in range(12))
 
-        plain = adapter._apply_overflow_policy([text], ["a"], "truncate_text")
-        with_context = adapter._apply_overflow_policy(
+        plain, _ = adapter._apply_overflow_policy([text], ["a"], "truncate_text")
+        with_context, _ = adapter._apply_overflow_policy(
             [text],
             ["a"],
             "truncate_text",
@@ -1189,8 +1193,9 @@ class TestFlatLabelOverflow:
 
     # The label prompt is 9 tokens (3 markers, 5 label words and SEP) with its
     # last marker at index 5. At max_length 11 the window keeps 9 tokens: every
-    # marker fits, and nothing is left for the document.
-    @pytest.mark.parametrize(("max_length", "refused"), [(11, True), (12, False)])
+    # marker fits, and nothing is left for the document. Room under the fit
+    # margin (8 tokens, at max_length 18) is refused too; 8 tokens (19) is not.
+    @pytest.mark.parametrize(("max_length", "refused"), [(11, True), (12, True), (18, True), (19, False)])
     def test_labels_first_items_are_refused_when_the_labels_leave_no_room_for_the_document(
         self, max_length: int, refused: bool
     ) -> None:
@@ -1202,8 +1207,7 @@ class TestFlatLabelOverflow:
         if not refused:
             assert output.errors is None
             assert [call["texts"] for call in pipe.prepare_calls] == [["The app crashes", "Charged twice"]]
-            # The model reads one token of each document: usage counts that token and CLS/SEP.
-            assert output.input_token_counts == [3, 3]
+            assert output.input_token_counts == [5, 4]
             return
         assert pipe.prepare_calls == []
         assert output.errors is not None
@@ -1241,6 +1245,26 @@ class TestFlatLabelOverflow:
             adapter.extract(
                 [Item(text="The app crashes")], labels=list(_LABELS), options={"overflow_policy": "truncate_text"}
             )
+
+    def test_overflow_policy_error_fails_only_the_document_that_does_not_fit(self) -> None:
+        # Window of 18 content tokens after CLS/SEP; the label prompt takes 9.
+        adapter, pipe = self._adapter(prompt_first=True, max_length=20)
+        short, long_text = "The app crashes", " ".join(["word"] * 12)
+
+        output = adapter.extract(
+            [Item(text=short), Item(text=long_text)], labels=list(_LABELS), options={"overflow_policy": "error"}
+        )
+
+        assert [call["texts"] for call in pipe.prepare_calls] == [[short]]
+        assert output.errors is not None
+        assert output.errors[0] is None
+        assert output.errors[1] is not None
+        assert output.errors[1].code == "INPUT_TOO_LONG"
+        assert "overflow_policy is 'error'" in output.errors[1].message
+        assert "items[" not in output.errors[1].message
+        assert output.classifications is not None
+        assert output.classifications[1] == []
+        assert output.input_token_counts == [5, 0]
 
     def test_truncate_text_cuts_the_document_to_the_room_the_labels_leave(self) -> None:
         adapter, pipe = self._adapter(prompt_first=True, max_length=12)
@@ -1315,3 +1339,59 @@ class TestFlatLabelOverflow:
 
         with pytest.raises(InputTooLongError):
             adapter.extract([Item(text="The app crashes")], labels=list(_LABELS))
+
+
+class TestFusedRequestsUnderOverflowPolicyError:
+    @pytest.mark.asyncio
+    async def test_one_callers_long_document_fails_only_that_item(self) -> None:
+        """Two callers with the same labels and options fuse into one adapter call.
+
+        Under overflow_policy "error", the over-long document fails only its
+        own item: the other caller's item and the same caller's other item
+        are scored, and no message names an item index.
+        """
+        adapter, _ = _adapter(lambda _text, label: 1.0 if label == "bug report" else 0.0, max_length=20)
+        calls: list[int] = []
+        extract = adapter.extract
+
+        def counting_extract(items: list[Item], **kwargs: Any) -> ExtractOutput:
+            calls.append(len(items))
+            return extract(items, **kwargs)
+
+        adapter.extract = counting_extract  # ty:ignore[invalid-assignment]
+        worker = ModelWorker(
+            adapter, WorkerConfig(max_batch_tokens=10_000, max_batch_requests=10, max_batch_wait_ms=50)
+        )
+        options = {"overflow_policy": "error"}
+        await worker.start()
+        try:
+            first = await worker.submit_extract(
+                [ExtractPreparedItem(cost=15, original_index=0)],
+                [Item(text="The app crashes")],
+                labels=list(_LABELS),
+                options=options,
+            )
+            second = await worker.submit_extract(
+                [ExtractPreparedItem(cost=13, original_index=0), ExtractPreparedItem(cost=60, original_index=1)],
+                [Item(text="Charged twice"), Item(text=" ".join(["word"] * 12))],
+                labels=list(_LABELS),
+                options=options,
+            )
+            first_result = await asyncio.wait_for(first, timeout=5.0)
+            second_result = await asyncio.wait_for(second, timeout=5.0)
+        finally:
+            await worker.stop()
+
+        assert calls == [3]
+        assert not any(first_result.output.errors or [])
+        assert first_result.output.classifications is not None
+        assert first_result.output.classifications[0][0]["label"] == "bug report"
+        errors = second_result.output.errors
+        assert errors is not None
+        assert errors[0] is None
+        assert second_result.output.classifications is not None
+        assert second_result.output.classifications[0][0]["label"] == "bug report"
+        assert errors[1] is not None
+        assert errors[1].code == "INPUT_TOO_LONG"
+        assert "items[" not in errors[1].message
+        assert second_result.output.classifications[1] == []

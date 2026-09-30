@@ -9882,19 +9882,31 @@ fn aggregate_result_usage(successful: &[&publisher::WorkResult]) -> Option<Value
     let mut input_tokens = 0_u64;
     let mut images = 0_u64;
     let mut all_have_images = true;
+    let mut content_tokens = Some(0_u64);
     for result in successful {
         let units = result.units.as_ref()?;
-        input_tokens = input_tokens.checked_add(units.input_tokens?)?;
+        let result_input_tokens = units.input_tokens?;
+        input_tokens = input_tokens.checked_add(result_input_tokens)?;
         match units.images {
             Some(value) => images = images.checked_add(value)?,
             None => all_have_images = false,
         }
+        content_tokens = match (content_tokens, units.content_input_tokens) {
+            (Some(total), Some(value)) if value <= result_input_tokens => total.checked_add(value),
+            _ => None,
+        };
     }
 
     let mut usage = Map::new();
     usage.insert("input_tokens".to_string(), json!(input_tokens));
     if all_have_images {
         usage.insert("images".to_string(), json!(images));
+    }
+    if let Some(content_tokens) = content_tokens {
+        usage.insert(
+            "input_tokens_details".to_string(),
+            json!({ "content_tokens": content_tokens }),
+        );
     }
     Some(Value::Object(usage))
 }
@@ -14666,6 +14678,8 @@ mod tests {
             k8s_port: 0,
             health_mode: "http".to_string(),
             nats_url: String::new(),
+            nats_user: String::new(),
+            nats_password: String::new(),
             nats_config_trusted_producers: Vec::new(),
             auth_mode: "none".to_string(),
             auth_tokens: Vec::new(),
@@ -25229,6 +25243,7 @@ mod tests {
                 images: Some(2),
                 audio_ms: None,
                 pairs: None,
+                content_input_tokens: None,
                 gpu_second: None,
                 output_tokens: None,
             }),
@@ -25246,6 +25261,59 @@ mod tests {
         }
     }
 
+    /// A reranker that separates the caller's text from its prompt template
+    /// reports that part as `input_tokens_details.content_tokens`, only when
+    /// every result carries a count that fits inside its own input count.
+    #[test]
+    fn test_score_success_body_reports_content_tokens_only_when_every_result_has_them() {
+        let result = |input: u64, content: Option<u64>| {
+            successful_item_result(
+                json!([{"item_id": "0", "score": 0.75, "rank": 0}]),
+                Some(publisher::UnitCounts {
+                    input_tokens: Some(input),
+                    pairs: Some(1),
+                    content_input_tokens: content,
+                    ..Default::default()
+                }),
+            )
+        };
+        let complete = [result(80, Some(7)), result(90, Some(17))];
+        let partial = [result(80, Some(7)), result(90, None)];
+        let oversized = [result(80, Some(81))];
+        for use_msgpack in [false, true] {
+            let decode = |body: Vec<u8>| -> Value {
+                if use_msgpack {
+                    rmp_serde::from_slice(&body).unwrap()
+                } else {
+                    serde_json::from_slice(&body).unwrap()
+                }
+            };
+            let refs: Vec<_> = complete.iter().collect();
+            let response = decode(build_queue_success_body(
+                "score",
+                "reranker",
+                &refs,
+                use_msgpack,
+            ));
+            assert_eq!(response["usage"]["input_tokens"], 170);
+            assert_eq!(
+                response["usage"]["input_tokens_details"]["content_tokens"],
+                24
+            );
+            for results in [&partial[..], &oversized[..]] {
+                let refs: Vec<_> = results.iter().collect();
+                let response = decode(build_queue_success_body(
+                    "score",
+                    "reranker",
+                    &refs,
+                    use_msgpack,
+                ));
+                assert!(response["usage"]["input_tokens"].as_u64().is_some());
+                assert!(response["usage"].get("input_tokens_details").is_none());
+            }
+        }
+    }
+
     /// The queue ingress reports the worker's own token count on `encode`, so
     /// the two encode ingresses agree and `/v1/embeddings` has an exact number
     /// to render on the managed path too.
@@ -25259,6 +25327,7 @@ mod tests {
                 images: Some(2),
                 audio_ms: None,
                 pairs: None,
+                content_input_tokens: None,
                 gpu_second: None,
                 output_tokens: None,
             }),
@@ -25288,6 +25357,7 @@ mod tests {
                 images: Some(3),
                 audio_ms: None,
                 pairs: None,
+                content_input_tokens: None,
                 gpu_second: None,
                 output_tokens: None,
             }),
@@ -25368,6 +25438,7 @@ mod tests {
                 images: None,
                 audio_ms: None,
                 pairs: None,
+                content_input_tokens: None,
                 gpu_second: None,
                 output_tokens: None,
             }),
@@ -25388,6 +25459,7 @@ mod tests {
                 images: Some(1),
                 audio_ms: None,
                 pairs: None,
+                content_input_tokens: None,
                 gpu_second: None,
                 output_tokens: None,
             }),
@@ -25400,6 +25472,7 @@ mod tests {
                 images: Some(1),
                 audio_ms: None,
                 pairs: None,
+                content_input_tokens: None,
                 gpu_second: None,
                 output_tokens: None,
             }),
@@ -25417,6 +25490,7 @@ mod tests {
                 images: None,
                 audio_ms: None,
                 pairs: None,
+                content_input_tokens: None,
                 gpu_second: None,
                 output_tokens: None,
             }),
@@ -25429,6 +25503,7 @@ mod tests {
                 images: None,
                 audio_ms: None,
                 pairs: None,
+                content_input_tokens: None,
                 gpu_second: None,
                 output_tokens: None,
             }),

@@ -959,6 +959,8 @@ mod flat_404_tests {
             k8s_port: 8080,
             health_mode: "ws".to_string(),
             nats_url: String::new(),
+            nats_user: String::new(),
+            nats_password: String::new(),
             nats_config_trusted_producers: vec!["sie-config".to_string()],
             // Auth disabled so requests reach the router and exercise the
             // route table itself — the flat 404 must come from the
@@ -1060,6 +1062,55 @@ mod flat_404_tests {
             bytes.len(),
             String::from_utf8_lossy(&bytes),
         );
+    }
+
+    async fn post_pool(app: &Router, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/pools")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    #[tokio::test]
+    async fn test_create_pool_refuses_the_default_pool_name() {
+        let (app, _bundles_dir, _models_dir) = build_router();
+        for name in ["default", "DEFAULT"] {
+            let (status, body) =
+                post_pool(&app, serde_json::json!({"name": name, "gpus": {"l4": 0}})).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{name}");
+            assert_eq!(body["detail"]["code"], "POOL_OPERATION_FORBIDDEN");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_create_pool_rejects_limits_through_the_router() {
+        let (app, _bundles_dir, _models_dir) = build_router();
+        for body in [
+            serde_json::json!({"name": "bench", "gpus": {"l4": 1}, "minimum_worker_count": 99}),
+            serde_json::json!({"name": "bench", "gpus": {"l4": 1}, "ttl_seconds": 86_400}),
+            serde_json::json!({"name": "bench", "gpus": {"l4": 6}}),
+        ] {
+            let (status, detail) = post_pool(&app, body).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(detail["detail"]["code"], "INVALID_REQUEST");
+        }
+        let (status, _) = post_pool(
+            &app,
+            serde_json::json!({"name": "bench", "gpus": {"l4": 1}}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
     }
 
     #[tokio::test]

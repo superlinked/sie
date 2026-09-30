@@ -14,14 +14,20 @@
 //!
 //! Invariant: `set_max` only increases the counter. We never roll backward,
 //! so if bootstrap and an inbound delta race, the larger wins.
+//!
+//! The handle also records whether a complete export snapshot has ever been
+//! applied. A NATS delta can move the epoch above `0` before any export, so
+//! the epoch value alone cannot answer that question. The flag only moves
+//! from `false` to `true`.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 /// Shared, monotonically non-decreasing epoch counter.
 #[derive(Debug, Clone, Default)]
 pub struct ConfigEpoch {
     inner: Arc<AtomicU64>,
+    bootstrapped: Arc<AtomicBool>,
 }
 
 impl ConfigEpoch {
@@ -72,6 +78,17 @@ impl ConfigEpoch {
         self.inner.store(value, Ordering::Relaxed);
         crate::observability::metrics::set_config_applied_epoch(value);
     }
+
+    /// Record that a complete `sie-config` export snapshot was applied.
+    pub fn mark_bootstrapped(&self) {
+        self.bootstrapped.store(true, Ordering::Release);
+    }
+
+    /// Whether a complete `sie-config` export snapshot has ever been applied
+    /// on this replica.
+    pub fn is_bootstrapped(&self) -> bool {
+        self.bootstrapped.load(Ordering::Acquire)
+    }
 }
 
 #[cfg(test)]
@@ -121,5 +138,17 @@ mod tests {
         // And after a force_set we can still advance normally.
         assert!(e.set_max(15));
         assert_eq!(e.get(), 15);
+    }
+
+    #[test]
+    fn bootstrapped_is_shared_and_independent_of_the_epoch() {
+        let a = ConfigEpoch::new();
+        let b = a.clone();
+        a.set_max(3);
+        assert!(!b.is_bootstrapped());
+        a.mark_bootstrapped();
+        assert!(b.is_bootstrapped());
+        b.force_set(0);
+        assert!(a.is_bootstrapped());
     }
 }

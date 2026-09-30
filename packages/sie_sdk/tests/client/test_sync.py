@@ -796,6 +796,7 @@ class TestScore:
         mock_response.headers = {
             "X-SIE-Request-ID": "req-score",
             "X-SIE-Units-Pairs": "3",
+            "X-SIE-Units-Content-Input-Tokens": "40",
             "X-SIE-Credits-Debited": "7",
         }
         mock_response.content = msgpack.packb(
@@ -833,7 +834,7 @@ class TestScore:
             assert result["usage"] == {"input_tokens": 91, "images": 2}
             assert result["request"] == {
                 "id": "req-score",
-                "usage": {"pairs": 3},
+                "usage": {"pairs": 3, "content_input_tokens": 40},
                 "credits_debited": 7,
             }
             client.close()

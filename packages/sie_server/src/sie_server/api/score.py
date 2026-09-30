@@ -24,7 +24,7 @@ from sie_server.observability.worker_telemetry import worker_telemetry, worker_t
 from sie_server.types.inputs import Item
 from sie_server.types.openapi import ScoreResponseModel
 from sie_server.types.requests import ScoreRequest
-from sie_server.types.responses import ErrorCode, ScoreEntry, ScoreResponse, ScoreUsage
+from sie_server.types.responses import ErrorCode, ScoreEntry, ScoreInputTokensDetails, ScoreResponse, ScoreUsage
 
 if TYPE_CHECKING:
     from sie_server.core.registry import ModelRegistry
@@ -82,6 +82,13 @@ def score_usage_from_output(output: ScoreOutput) -> ScoreUsage | None:
     usage = ScoreUsage(input_tokens=sum(output.input_token_counts))
     if output.input_image_counts is not None:
         usage["images"] = sum(output.input_image_counts)
+    content = output.content_token_counts
+    if (
+        content is not None
+        and len(content) == len(output.input_token_counts)
+        and all(count <= total for count, total in zip(content, output.input_token_counts, strict=True))
+    ):
+        usage["input_tokens_details"] = ScoreInputTokensDetails(content_tokens=sum(content))
     return usage
 
 
