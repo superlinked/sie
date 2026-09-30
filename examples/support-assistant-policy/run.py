@@ -35,7 +35,7 @@ import os
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -103,10 +103,12 @@ class Backend:
             response = self.client.chat.completions.create(
                 model=self.model, messages=messages, max_completion_tokens=scenario.MAX_OUTPUT_TOKENS, **extra
             )
+            # Some OpenAI-compatible servers omit usage; count those tokens as zero.
+            usage = response.usage
             return (
                 response.choices[0].message.content or "",
-                response.usage.prompt_tokens,
-                response.usage.completion_tokens,
+                int(getattr(usage, "prompt_tokens", 0) or 0),
+                int(getattr(usage, "completion_tokens", 0) or 0),
                 None,
             )
         # The SDK takes no typed temperature for these models, so it goes in the body as the API accepts it.
@@ -249,7 +251,7 @@ def main() -> int:
             "temperature": backend.temperature,
             "maxTokens": scenario.MAX_OUTPUT_TOKENS,
         },
-        "runDate": datetime.now(UTC).date().isoformat(),
+        "runDate": datetime.now(timezone.utc).date().isoformat(),  # noqa: UP017 - --show runs on python3 < 3.11
         "conversations": results,
     }
     if provider == "sie":

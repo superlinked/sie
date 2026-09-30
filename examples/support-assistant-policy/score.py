@@ -106,6 +106,11 @@ def verify_evidence() -> dict[str, Any]:
     if sha256(manifest_path) != MANIFEST_SHA256:
         raise SystemExit("evidence/manifest.json is not the manifest this example pins; run fetch.py again")
     manifest = load(manifest_path)
+    # Every file this script reads must be one the manifest pins.
+    needed = {"hand_labels.json", *(f"judged/{arm['file']}" for arm in manifest["arms"])}
+    unlisted = needed - manifest["files_sha256"].keys()
+    if unlisted:
+        raise SystemExit(f"the manifest does not cover: {', '.join(sorted(unlisted))}")
     for name, digest in manifest["files_sha256"].items():
         path = EVIDENCE / name
         if not path.exists() or sha256(path) != digest:

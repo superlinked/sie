@@ -128,9 +128,19 @@ def main() -> int:
                 print(f"  missing {name}", file=sys.stderr)
             return 1
 
+        # Move the old evidence aside and delete it only once the new set is in place,
+        # so a failed rename never leaves no evidence at all.
+        backup = EVIDENCE.with_name(EVIDENCE.name + ".old")
+        shutil.rmtree(backup, ignore_errors=True)
         if EVIDENCE.exists():
-            shutil.rmtree(EVIDENCE)
-        staging.rename(EVIDENCE)
+            EVIDENCE.rename(backup)
+        try:
+            staging.rename(EVIDENCE)
+        except OSError:
+            if backup.exists():
+                backup.rename(EVIDENCE)
+            raise
+        shutil.rmtree(backup, ignore_errors=True)
     finally:
         # A failure leaves the previous evidence/ untouched and removes the
         # half-downloaded staging directory rather than leaving it to be found.
