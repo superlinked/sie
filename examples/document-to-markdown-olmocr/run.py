@@ -101,7 +101,7 @@ def main() -> int:
         started = time.perf_counter()
         try:
             result = client.extract(MODEL, {"images": [image]})
-            target.write_text(result["entities"][0]["text"])
+            target.write_text(result["entities"][0]["text"], encoding="utf-8")
             return pdf_rel, time.perf_counter() - started, None
         except Exception as error:  # noqa: BLE001 - reported per page
             return pdf_rel, time.perf_counter() - started, f"{type(error).__name__}: {error}"

@@ -85,16 +85,19 @@ def overall(by_file: dict[str, tuple[int, int]]) -> float:
 
 def recorded() -> int:
     manifest = verified()
-    rivals = json.loads((EVIDENCE / "rivals.json").read_text())
+    rivals = json.loads((EVIDENCE / "rivals.json").read_text(encoding="utf-8"))
     print(f"olmOCR-Bench, {manifest['pages']} pages, {manifest['scorer']}, run {', '.join(manifest['run_dates'])}\n")
     header = f"{'':44}" + "".join(f"{f[:10]:>11}" for f in FILES) + f"{'Overall':>9}"
     print(header)
     problems = []
     results = {}
     for arm, name in ARMS.items():
-        rows = [json.loads(line) for line in (EVIDENCE / "per_test" / f"{arm}.jsonl").read_text().splitlines()]
+        rows = [
+            json.loads(line)
+            for line in (EVIDENCE / "per_test" / f"{arm}.jsonl").read_text(encoding="utf-8").splitlines()
+        ]
         by_file = rates(rows)
-        summary = json.loads((EVIDENCE / "scores" / f"{arm}.json").read_text())
+        summary = json.loads((EVIDENCE / "scores" / f"{arm}.json").read_text(encoding="utf-8"))
         for file, (passed, total) in by_file.items():
             if (summary["files"][file]["passed"], summary["files"][file]["total"]) != (passed, total):
                 problems.append(f"{arm} {file}: per-test {passed}/{total}, scorer {summary['files'][file]}")
@@ -153,8 +156,12 @@ def rescore(runs: Path) -> int:
             (scoring / "pdfs" / pdf).parent.mkdir(parents=True, exist_ok=True)
             (scoring / "pdfs" / pdf).symlink_to(bench / "pdfs" / pdf)
         for jsonl in bench.glob("*.jsonl"):
-            kept = [line for line in jsonl.read_text().splitlines() if line and json.loads(line)["pdf"] in pages]
-            (scoring / jsonl.name).write_text("\n".join(kept) + ("\n" if kept else ""))
+            kept = [
+                line
+                for line in jsonl.read_text(encoding="utf-8").splitlines()
+                if line and json.loads(line)["pdf"] in pages
+            ]
+            (scoring / jsonl.name).write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
         (scoring / arm.name).symlink_to(arm.resolve())
         return subprocess.run(
             [sys.executable, "-m", "olmocr.bench.benchmark", "--dir", str(scoring)], check=False
