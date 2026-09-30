@@ -1,0 +1,91 @@
+sie_id: Qwen/Qwen3Guard-Gen-0.6B
+hf_id: Qwen/Qwen3Guard-Gen-0.6B
+hf_revision: fada3b2f655b89601929198343c94cd2f64d93cc
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  # CHECK POLICY job: a generative guard model (Apache-2.0, ungated). Send the
+  # text to check as the only user message through chat completions; the
+  # model's own chat template wraps it in the moderation prompt (policy, nine
+  # unsafe categories) and the model answers in two lines:
+  #
+  #   Safety: Unsafe
+  #   Categories: Violent
+  #
+  # The first line is one of Safe / Unsafe / Controversial; the second lists
+  # the unsafe categories, or "None". A trailing assistant turn switches the
+  # template to response moderation, which adds a "Refusal: Yes|No" line.
+  # /v1/generate passes raw input without the template; to use that route,
+  # render the template client-side first.
+  #
+  # Served as plain greedy generation: there is no ``guard`` loadtime block,
+  # because the adapter's logprob threshold reads a one-token Yes/No verdict
+  # (Granite Guardian's format) and does not apply to this output.
+  generate:
+    # The model's native window. Long inputs are checked whole, not
+    # truncated; the template itself adds about 330 tokens.
+    context_length: 32768
+    # The verdict is about ten tokens. The cap only bounds a runaway answer.
+    max_output_tokens: 128
+    # No chat_template_kwargs: the template takes none and already emits an
+    # empty <think></think> block, so the model never reasons first.
+    capabilities:
+      grammar: []
+      streaming: true
+      tools: false
+      # Content-moderation / policy-check job. Informational (not
+      # request-gated); the model="guard" alias is unchanged.
+      guard: true
+max_sequence_length: 32768
+# KV-cache memory math (Qwen3ForCausalLM 0.6B, bf16), same geometry as
+# Qwen/Qwen3-0.6B:
+#   layers=28, kv_heads=8, head_dim=128, bytes_per_elem=2
+#   kv_bytes_per_token = 2 x 28 x 8 x 128 x 2 = 114,688 B (112 KB)
+# About 1.5 GB of weights leaves (24 x 0.85 - 1.5) GB / 112 KB = 177,000
+# tokens of KV on an L4 and about 300,000 on an A100-40GB. The budgets below
+# admit two (L4) or four (A100) full-context checks at once.
+profiles:
+  default:
+    # max_batch_tokens is a generic engine knob; generation does not batch at
+    # the SIE layer (SGLang batches internally) but the validator requires it.
+    max_batch_tokens: 16384
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.sglang.generation:SGLangGenerationAdapter
+    # Measured on an L4 with SGLang 0.5.10.post1: p50 about 100 ms per check
+    # (ToxicChat prompts, one request in flight).
+    # L4 baseline: two full-context checks, or many short ones, in flight.
+    kv_budget_tokens: 65536
+    adapter_options:
+      loadtime:
+        mem_fraction_static: 0.85
+        served_model_name: Qwen/Qwen3Guard-Gen-0.6B
+      runtime:
+        first_chunk_timeout_s: 30
+        inter_chunk_timeout_s: 10
+        overall_timeout_s: 300
+        # Greedy: a guard verdict must be deterministic.
+        default_sampling:
+          temperature: 0.0
+        stop_tokens:
+          - "<|im_end|>"
+  a100-40gb:
+    max_batch_tokens: 32768
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.sglang.generation:SGLangGenerationAdapter
+    # Four full-context admissions.
+    kv_budget_tokens: 131072
+    adapter_options:
+      loadtime:
+        mem_fraction_static: 0.85
+        served_model_name: Qwen/Qwen3Guard-Gen-0.6B
+      runtime:
+        first_chunk_timeout_s: 30
+        inter_chunk_timeout_s: 10
+        overall_timeout_s: 300
+        default_sampling:
+          temperature: 0.0
+        stop_tokens:
+          - "<|im_end|>"

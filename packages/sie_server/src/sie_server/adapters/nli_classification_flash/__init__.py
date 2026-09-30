@@ -9,8 +9,9 @@ import torch.nn.functional as F
 from sie_server.adapters._flash_base import FlashBaseAdapter
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_NOT_LOADED, ERR_REQUIRES_TEXT, ComputePrecision
+from sie_server.core.extract_cost import MAX_EXTRACT_LABELS
 from sie_server.core.inference_output import ExtractOutput
-from sie_server.types.inputs import Item
+from sie_server.types.inputs import InvalidInputError, Item
 from sie_server.types.responses import Classification
 
 if TYPE_CHECKING:
@@ -21,6 +22,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _ERR_REQUIRES_LABELS = "Zero-shot classification requires labels parameter."
+_ERR_TOO_MANY_LABELS = f"Zero-shot classification requests may carry at most {MAX_EXTRACT_LABELS} labels"
 
 
 class NLIClassificationFlashAdapter(FlashBaseAdapter):
@@ -172,11 +174,14 @@ class NLIClassificationFlashAdapter(FlashBaseAdapter):
                 Supported: hypothesis_template (str), multi_label (bool).
 
         Returns:
-            List of dicts, one per item, each containing:
-                - "classifications": List of {label, score} sorted by score descending
-                - "entities": Empty list
-                - "data": Empty dict
+            ExtractOutput with, per item, the classifications ({label, score},
+            sorted by score descending), an empty entity list, and the input
+            token count: the tokens of every (text, hypothesis) pair the model
+            reads for the item, after truncation and without padding.
         """
+        if labels is not None and len(labels) > MAX_EXTRACT_LABELS:
+            raise InvalidInputError(_ERR_TOO_MANY_LABELS)
+
         self._check_loaded()
         if self._tokenizer is None:
             raise RuntimeError(ERR_NOT_LOADED)
@@ -214,6 +219,12 @@ class NLIClassificationFlashAdapter(FlashBaseAdapter):
             truncation=True,
             padding=True,
             return_tensors="pt",
+        )
+        attention_mask = encodings.get("attention_mask")
+        input_token_counts = (
+            [int(count) for count in attention_mask.sum(dim=1).view(n_texts, n_labels).sum(dim=1).tolist()]
+            if attention_mask is not None
+            else None
         )
         encodings = {k: v.to(self._device) for k, v in encodings.items()}
 
@@ -258,4 +269,5 @@ class NLIClassificationFlashAdapter(FlashBaseAdapter):
         return ExtractOutput(
             entities=[[] for _ in items],
             classifications=all_classifications,
+            input_token_counts=input_token_counts,
         )
