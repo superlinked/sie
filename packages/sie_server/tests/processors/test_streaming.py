@@ -3678,6 +3678,74 @@ def test_validate_generate_caps_profile_min_new_tokens_to_explicit_max() -> None
     assert result.min_tokens == 1
 
 
+def _chat_recipe_generation_config() -> ModelConfig:
+    config = _make_generation_config()
+    config.profiles["default"].adapter_options.runtime["default_sampling"] = {
+        "temperature": 0.7,
+        "top_p": 0.8,
+        "top_k": 20,
+        "presence_penalty": 1.5,
+    }
+    return config
+
+
+@pytest.mark.parametrize(
+    "grammar",
+    [
+        {"kind": "json_schema", "value": {"type": "object"}},
+        {"kind": "regex", "value": "(yes|no)"},
+    ],
+)
+def test_validate_generate_grammar_work_item_defaults_to_greedy(grammar: dict[str, Any]) -> None:
+    result = StreamingProcessor._validate_generate_params(
+        _make_work_item(
+            generate={
+                "messages": [{"role": "user", "content": "Extract"}],
+                "max_new_tokens": 64,
+                "grammar": grammar,
+            }
+        ),
+        _chat_recipe_generation_config(),
+    )
+
+    assert not isinstance(result, _ValidationError)
+    assert result.grammar is not None
+    assert result.temperature == 0.0
+    assert result.presence_penalty == 0.0
+    assert result.frequency_penalty == 0.0
+    assert result.top_p == 0.8
+
+
+def test_validate_generate_grammar_work_item_keeps_explicit_temperature() -> None:
+    result = StreamingProcessor._validate_generate_params(
+        _make_work_item(
+            generate={
+                "messages": [{"role": "user", "content": "Extract"}],
+                "max_new_tokens": 64,
+                "temperature": 0.5,
+                "grammar": {"kind": "json_schema", "value": {"type": "object"}},
+            }
+        ),
+        _chat_recipe_generation_config(),
+    )
+
+    assert not isinstance(result, _ValidationError)
+    assert result.temperature == 0.5
+    assert result.presence_penalty == 0.0
+
+
+def test_validate_generate_unconstrained_work_item_keeps_profile_recipe() -> None:
+    result = StreamingProcessor._validate_generate_params(
+        _make_work_item(messages=[{"role": "user", "content": "Hi"}]),
+        _chat_recipe_generation_config(),
+    )
+
+    assert not isinstance(result, _ValidationError)
+    assert result.temperature == 0.7
+    assert result.presence_penalty == 1.5
+    assert result.frequency_penalty is None
+
+
 @pytest.mark.parametrize(
     "chat_template_kwargs",
     [

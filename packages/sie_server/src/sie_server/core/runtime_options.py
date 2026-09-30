@@ -134,6 +134,19 @@ _GENERATION_SAMPLING_KEYS = {
     "min_new_tokens": "min_tokens",
     "seed": "seed",
 }
+# Sampler defaults for a grammar-constrained request (``json_schema``,
+# ``regex``, or ``ebnf``). They sit above the profile's ``default_sampling``
+# and below every caller-set value (typed request fields and
+# ``options.default_sampling``). A profile's chat recipe is tuned for prose:
+# sampled temperature makes extracted values change between identical calls,
+# and presence or frequency penalties push against the repeated keys, quotes,
+# and braces that JSON needs. ``top_p``, ``top_k``, and ``min_p`` have no
+# effect at temperature 0, so they are left as the profile sets them.
+GRAMMAR_SAMPLING_DEFAULTS: dict[str, float] = {
+    "temperature": 0.0,
+    "presence_penalty": 0.0,
+    "frequency_penalty": 0.0,
+}
 
 
 def _is_finite_number(value: object) -> bool:
@@ -143,6 +156,26 @@ def _is_finite_number(value: object) -> bool:
         return math.isfinite(float(value))
     except OverflowError:
         return False
+
+
+def grammar_default_sampling(
+    profile_sampling: object,
+    request_sampling: object = None,
+) -> dict[str, Any]:
+    """Return the sampler defaults for a grammar-constrained request.
+
+    Layers, lowest first: the profile's ``default_sampling``,
+    :data:`GRAMMAR_SAMPLING_DEFAULTS`, then the request's
+    ``options.default_sampling``. Typed request fields still win over the
+    result because callers only fill fields the request left unset.
+    """
+    merged: dict[str, Any] = {}
+    if isinstance(profile_sampling, dict):
+        merged.update(cast("dict[str, Any]", profile_sampling))
+    merged.update(GRAMMAR_SAMPLING_DEFAULTS)
+    if isinstance(request_sampling, dict):
+        merged.update(cast("dict[str, Any]", request_sampling))
+    return merged
 
 
 def apply_generation_runtime_options(
@@ -156,6 +189,10 @@ def apply_generation_runtime_options(
     ``**options`` seam. Validate the currently governed runtime surface and
     translate it here so unsupported options fail closed instead of leaking to
     adapter kwargs or being silently ignored.
+
+    When ``generate_params`` carries a ``grammar``, the sampler defaults come
+    from :func:`grammar_default_sampling`: temperature and the presence and
+    frequency penalties default to 0 unless the caller set them.
     """
     if request_options is not None and not isinstance(request_options, dict):
         raise ValueError("'options' must be an object")
@@ -190,6 +227,8 @@ def apply_generation_runtime_options(
     request_sampling = request_options.get("default_sampling") if request_options else None
     if isinstance(profile_sampling, dict) and isinstance(request_sampling, dict):
         runtime["default_sampling"] = {**profile_sampling, **request_sampling}
+    if generate_params.get("grammar") is not None:
+        runtime["default_sampling"] = grammar_default_sampling(profile_sampling, request_sampling)
     result = dict(generate_params)
 
     # The typed request maximum is a hard caller limit. Reject an explicit
