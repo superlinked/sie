@@ -1,4 +1,4 @@
-data/
+evidence/
 run-output/
 __pycache__/
 *.pyc
