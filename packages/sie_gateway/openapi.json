@@ -1037,13 +1037,14 @@
               "minimum": 0,
               "type": "integer"
             },
+            "description": "Required workers per machine profile. Requirements summing to more\nthan the gateway limit (`SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT`,\ndefault 4) are rejected.",
             "propertyNames": {
               "type": "string"
             },
             "type": "object"
           },
           "minimum_worker_count": {
-            "description": "Per-pool warm floor (minimum machines kept warm via KEDA). Default 0\nkeeps scale-from-zero. See `PoolSpec::minimum_worker_count`.",
+            "description": "Per-pool warm floor (minimum machines kept warm via KEDA). Default 0\nkeeps scale-from-zero. It applies to each of the pool's machine\nprofiles; a floor whose total across profiles exceeds the gateway limit\n(`SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT`, default 4) is rejected.\nSee `PoolSpec::minimum_worker_count`.",
             "format": "int32",
             "minimum": 0,
             "type": "integer"
@@ -1073,6 +1074,7 @@
             ]
           },
           "ttl_seconds": {
+            "description": "Lease TTL in seconds; omit for the gateway default. Values above the\ngateway limit (`SIE_GATEWAY_POOL_MAX_TTL_S`, default 3600) are rejected.",
             "format": "int64",
             "minimum": 0,
             "type": [
@@ -2185,6 +2187,13 @@
           "total_eligible_workers": {
             "minimum": 0,
             "type": "integer"
+          },
+          "unsupported_workers": {
+            "description": "Workers that report the expected hash but cannot serve this model, for\nexample during a rollout that adds its adapter to the bundle.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           }
         },
         "required": [
@@ -3966,6 +3975,17 @@
             "format": "int32",
             "type": "integer"
           },
+          "unsupported_models": {
+            "description": "Models covered by `bundle_config_hash` that this worker cannot serve,\nfor example during a rollout that adds adapters to its bundle. The\ngateway does not route these models to it. Omitted when empty.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "unsupported_models_overflow": {
+            "description": "The worker reported more unsupported models than the gateway accepts\n(1024), so no model is routed to its lane (pool, machine profile,\nbundle) while it overflows. Omitted when false.",
+            "type": "boolean"
+          },
           "url": {
             "type": "string"
           }
@@ -4149,7 +4169,7 @@
     },
     "/readyz": {
       "get": {
-        "description": "Process readiness only. Always returns 200 once the gateway is serving requests; never returns 503. Worker readiness is reported by GET /health and by inference responses with retryable provisioning signals from a workerless gateway. This contract supports KEDA scale-from-zero.",
+        "description": "Gateway readiness. When a config service URL is configured, returns 503 until this replica has applied its first complete configuration snapshot, and 200 from then on, including while the config service is later unreachable. Without a config service URL it returns 200 once the gateway is serving requests. Readiness never depends on worker health: worker readiness is reported by GET /health and by inference responses with retryable provisioning signals from a workerless gateway. This contract supports KEDA scale-from-zero.",
         "operationId": "readyz",
         "responses": {
           "200": {
@@ -4160,7 +4180,17 @@
                 }
               }
             },
-            "description": "Gateway process is ready"
+            "description": "Gateway is ready"
+          },
+          "503": {
+            "content": {
+              "text/plain; charset=utf-8": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The first configuration snapshot has not been applied yet"
           }
         },
         "security": [],
@@ -6795,7 +6825,7 @@
                 }
               }
             },
-            "description": "Invalid pool request"
+            "description": "Invalid pool request, including a TTL or warm floor above the gateway limit"
           },
           "401": {
             "content": {
@@ -6815,7 +6845,7 @@
                 }
               }
             },
-            "description": "Valid bearer token but admin token required for this mutation (or admin token not configured)"
+            "description": "Admin token required for this mutation (or admin token not configured), the pool is named `default`, or the gateway's limit on API-created pools is reached"
           },
           "500": {
             "content": {

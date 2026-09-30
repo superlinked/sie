@@ -112,13 +112,15 @@ that group's labels, plus the instruction and examples. A group then scores as
 a request whose `labels` are that group's labels would. The rows of a call
 share forward passes, so on a GPU, fp16 rounding can move a probability by a
 few thousandths against the one-group request. Batching several items into one
-call does the same. A call takes at most 64 groups, or 32 on models with a
-1,024-token window. Every group reads the part of the document that fits in
+call does the same. A call takes at most 32 groups on the GLiClass models,
+which read a 1,024-token window (64 on a model configured with a 512-token
+window). Every group reads the part of the document that fits in
 the model's window again, so that part may span at most 64 characters per token
-of the window: 32,768 characters on a 512-token model, 65,536 on a 1,024-token
+of the window: 65,536 characters on a 1,024-token model, 32,768 on a 512-token
 one. With few groups the bound is 524,288 characters divided by the number of
 groups, when that is larger. Prose fills a 512-token window in about 2,300
-characters, and text laid out with long runs of spaces in about 20,000. Text
+characters, and text laid out with long runs of spaces in about 20,000; a
+1,024-token window takes about twice as much. Text
 written without spaces between words is read whole, so the bound applies to
 the whole document. A document over the bound comes back with an
 `INPUT_TOO_LONG` error, and the other items still succeed.
@@ -147,15 +149,24 @@ instruction or examples, each row's count is capped at the model window minus
 that row's label prompt, unless the document count alone is already higher.
 An item whose document pushes the labels out of the window, in any of its rows,
 comes back with an `INPUT_TOO_LONG` error in its `error` field and is not
-billed. The other items still succeed.
+billed. The other items still succeed. Models that read the labels before
+the document count only the part of the document they read. Under the default
+overflow policy, a row whose labels leave the document fewer than 8 tokens
+fails its item the same way, instead of being scored with little or none of
+the document; `truncate_text` and `error` accept a document cut to, or fitting
+in, a smaller room. With `options={"overflow_policy": "error"}`, a document
+that does not fit whole fails only its own item, the same way.
 
 On a CUDA server, the operator can load the DeBERTa-based GLiClass models with
 CUDA graphs, which cut the CPU time spent launching kernels. With `bucketed`
 graphs, sequence lengths and batch sizes are padded to buckets, which moves
-probabilities slightly, as batching requests together does. `gliclass-base-v1.0`,
-`gliclass-large-v1.0` and `opir-multitask-large-v1.0` load with `bucketed`
-graphs by default: their probabilities differed from eager execution by up to
-0.019 in our tests, with no top label changed. Send
+probabilities slightly, as batching requests together does. The DeBERTa-v3
+models (`gliclass-small-v1.0`, `gliclass-base-v1.0`, `gliclass-large-v1.0`,
+`gliclass-base-v3.0`, `gliclass-large-v3.0`, the base and large instruct models
+and `opir-multitask-large-v1.0`) load with `bucketed` graphs by default: their
+probabilities differed from eager execution by up to 0.019 in our tests, and a
+top label changed only where eager's top two labels were closer than eager
+execution's own batch-to-batch variation. Send
 `options={"cuda_graphs": "off"}` to run a request eagerly; a request cannot
 turn graphs on. See the server README for each model's measurements and the
 memory graphs use.
@@ -242,6 +253,16 @@ client = SIEClient(
     api_key="YOUR_API_KEY",
 )
 ```
+
+When `base_url` is omitted, the client reads `SIE_BASE_URL`. When `api_key` is
+omitted, it selects `SIE_API_KEY` only for a base URL with the same origin as
+`SIE_BASE_URL`; a client for any other URL does not pick it up. Set both
+variables to let code and integrations that construct a client without
+credentials use a gateway with token auth. An explicit argument always wins;
+`api_key=""` sends no credential. The `connections` namespace reuses the
+client's key on requests to an explicitly configured `control_plane_url`, so a
+client whose `control_plane_url` is on another origin must pass `api_key`
+explicitly rather than rely on `SIE_API_KEY`.
 
 ## Generation execution evidence
 

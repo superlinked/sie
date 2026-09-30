@@ -1,0 +1,30 @@
+sie_id: knowledgator/gliclass-modern-large-v3.0
+hf_id: knowledgator/gliclass-modern-large-v3.0
+hf_revision: 668dd0d2a2c0d3a2cdc9231d539b42fde10e90ad
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: null
+  extract: {}
+max_sequence_length: 1024  # the gliclass pipeline's default window, also used in training
+profiles:
+  default:
+    max_batch_tokens: 16384
+    compute_precision: null
+    adapter_path: sie_server.adapters.gliclass:GLiClassAdapter
+    adapter_options:
+      loadtime:
+        classification_type: single-label
+        modernbert_flash: single-label
+      runtime:
+        threshold: 0.0
+  multi-label:
+    extends: default
+    adapter_options:
+      runtime:
+        classification_type: multi-label
+        threshold: 0.0

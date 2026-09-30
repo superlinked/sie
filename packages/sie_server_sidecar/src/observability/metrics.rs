@@ -86,7 +86,7 @@ const CONFIG_OPERATION_SERIES: usize = 6;
 const CONFIG_OUTCOME_SERIES: usize = 18;
 const NATS_OPERATION_SERIES: usize = 7;
 const BINARY_OUTCOME_SERIES: usize = 3;
-const NATS_REASON_SERIES: usize = 11;
+const NATS_REASON_SERIES: usize = 12;
 const DELIVERY_REDELIVERED_SERIES: usize = 2;
 const RESULT_TRANSPORT_MODE_SERIES: usize = 4;
 const RESULT_TRANSPORT_OUTCOME_SERIES: usize = 4;
@@ -2305,6 +2305,7 @@ fn bounded_nats_reason(reason: &str) -> &'static str {
         "completed" => "completed",
         "retry" => "retry",
         "pool_not_assigned" => "pool_not_assigned",
+        "model_unsupported" => "model_unsupported",
         "first_delivery" => "first_delivery",
         "redelivery" => "redelivery",
         "metadata_unavailable" => "metadata_unavailable",
@@ -2686,6 +2687,8 @@ mod tests {
         assert_eq!(SIDECAR_WORK_ITEM_AGE_CARDINALITY_LIMIT, 7);
         assert_eq!(SIDECAR_WORK_ITEM_DEADLINE_CARDINALITY_LIMIT, 7 * 3);
         assert_eq!(SIDECAR_BATCH_FILL_CARDINALITY_LIMIT, 7 * 257 * 8);
+        // Operation, outcome and reason; `deadline_exceeded` is the twelfth reason.
+        assert_eq!(SIDECAR_NATS_CARDINALITY_LIMIT, 7 * 3 * 12);
         assert_eq!(SIDECAR_IPC_RESPONSE_CHUNK_CARDINALITY_LIMIT, 3);
         assert_eq!(SIDECAR_RESULT_TRANSPORT_CARDINALITY_LIMIT, 4 * 4);
         assert_eq!(SIDECAR_GENERATION_LOADING_CARDINALITY_LIMIT, 257 * 4 * 4);
@@ -2736,6 +2739,37 @@ mod tests {
             "unknown-state",
         ];
         let loading_outcomes = ["success", "ack_error", "publish_error", "unknown-outcome"];
+        let nats_operations = [
+            "receive",
+            "ack",
+            "nak",
+            "progress",
+            "fetch",
+            "stream",
+            "unknown-operation",
+        ];
+        let nats_outcomes = ["success", "error", "unknown-outcome"];
+        let nats_reasons = [
+            "none",
+            "completed",
+            "retry",
+            "pool_not_assigned",
+            "model_unsupported",
+            "first_delivery",
+            "redelivery",
+            "metadata_unavailable",
+            "transport",
+            "stream_ended",
+            "deadline_exceeded",
+            "unknown-reason",
+        ];
+        for operation in nats_operations {
+            for outcome in nats_outcomes {
+                for reason in nats_reasons {
+                    telemetry.nats_operation(operation, outcome, reason, 1);
+                }
+            }
+        }
         for model in models.iter().map(String::as_str).chain(["unknown/model"]) {
             for operation in operations {
                 for flush_reason in flush_reasons {
@@ -2783,6 +2817,18 @@ mod tests {
             sum.data_points().count(),
             SIDECAR_GENERATION_LOADING_CARDINALITY_LIMIT
         );
+        assert!(sum.data_points().all(|point| point
+            .attributes()
+            .all(|attribute| attribute.key.as_str() != "otel.metric.overflow")));
+
+        let nats = exported
+            .iter()
+            .find(|metric| metric.name() == NATS_OPERATIONS_METRIC_NAME)
+            .expect("nats operations");
+        let AggregatedMetrics::U64(MetricData::Sum(sum)) = nats.data() else {
+            panic!("nats operations must be a u64 sum")
+        };
+        assert_eq!(sum.data_points().count(), SIDECAR_NATS_CARDINALITY_LIMIT);
         assert!(sum.data_points().all(|point| point
             .attributes()
             .all(|attribute| attribute.key.as_str() != "otel.metric.overflow")));

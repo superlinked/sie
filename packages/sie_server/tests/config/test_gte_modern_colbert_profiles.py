@@ -43,7 +43,7 @@ def test_long_context_changes_only_document_length() -> None:
     [
         ("lightonai__GTE-ModernColBERT-v1.yaml", True),
         ("lightonai__Reason-ModernColBERT.yaml", False),
-        ("topk-io__Iso-ModernColBERT.yaml", False),
+        ("topk-io__Iso-ModernColBERT.yaml", True),
     ],
 )
 def test_flash_and_fallback_share_explicit_punctuation_policy(filename: str, expected: bool) -> None:

@@ -10,7 +10,10 @@
 #   * a three-member NATS cluster with a JetStream file store on each member;
 #   * work-queue streams created file-backed and replicated across all three,
 #     so a broker restart or a single-member loss keeps queued and in-flight
-#     work.
+#     work;
+#   * a worker NetworkPolicy that admits connections to the worker HTTP ports
+#     only from this release's gateway pods (needs a NetworkPolicy-enforcing
+#     CNI; add workers.networkPolicy.extraIngress for other direct callers).
 #
 # Layer it under a provider overlay:
 #
@@ -45,3 +48,7 @@ nats:
 queueRouting:
   streamStorage: file
   streamReplicas: 3
+
+workers:
+  networkPolicy:
+    enabled: true

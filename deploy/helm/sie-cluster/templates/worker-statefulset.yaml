@@ -37,8 +37,10 @@ fast at render time.
      reason as on the gateway: both create the work streams, first creator
      wins, so the chart renders one value onto both. An extraEnv override
      here would move only the workers and silently reintroduce the divergence
-     the gateway-deployment render guards exist to prevent. */}}
-{{- $reservedSidecarEnv := concat $reservedOtelEnv (list "SIE_BUNDLE" "SIE_GPU_COUNT" "SIE_HEALTH_PUBLISH_ENABLED" "SIE_HEALTH_PUBLISH_INTERVAL_MS" "SIE_MACHINE_PROFILE" "SIE_OTEL_LANE" "SIE_POOL" "SIE_STREAM_MAX_AGE_S" "SIE_STREAM_REPLICAS" "SIE_STREAM_STORAGE" "SIE_WORKER_ID") -}}
+     the gateway-deployment render guards exist to prevent. The sidecar's
+     sie-config credential comes only from config.auth, so SIE_ADMIN_TOKEN and
+     SIE_CONFIG_SERVICE_TOKEN are reserved too. */}}
+{{- $reservedSidecarEnv := concat $reservedOtelEnv (list "SIE_ADMIN_TOKEN" "SIE_BUNDLE" "SIE_CONFIG_SERVICE_TOKEN" "SIE_GPU_COUNT" "SIE_HEALTH_PUBLISH_ENABLED" "SIE_HEALTH_PUBLISH_INTERVAL_MS" "SIE_MACHINE_PROFILE" "SIE_NATS_PASSWORD" "SIE_NATS_USER" "SIE_OTEL_LANE" "SIE_POOL" "SIE_STREAM_MAX_AGE_S" "SIE_STREAM_REPLICAS" "SIE_STREAM_STORAGE" "SIE_WORKER_ID") -}}
 {{- include "sie-cluster.env.assertNoReserved" (dict "path" "workers.common.extraEnv" "entries" $root.Values.workers.common.extraEnv "reserved" $reservedWorkerEnv) -}}
 {{- include "sie-cluster.env.assertNoReserved" (dict "path" "workers.common.workerSidecar.extraEnv" "entries" $root.Values.workers.common.workerSidecar.extraEnv "reserved" $reservedSidecarEnv) -}}
 {{- range $poolName, $pool := .Values.workers.pools }}
@@ -237,6 +239,7 @@ spec:
       runtimeClassName: {{ $root.Values.workers.common.runtimeClassName | quote }}
       {{- end }}
       serviceAccountName: {{ include "sie-cluster.serviceAccountName" $root }}
+      automountServiceAccountToken: false
       terminationGracePeriodSeconds: 65
       securityContext:
         # SIE server runs as sie user (uid 1000, gid 1000)
@@ -533,6 +536,7 @@ spec:
             {{- if $root.Values.nats.enabled }}
             - name: SIE_NATS_URL
               value: {{ $root.Values.nats.url | default (printf "nats://%s:4222" ($root.Values.nats.serviceName | default (printf "%s-nats" $root.Release.Name))) | quote }}
+            {{- include "sie-cluster.nats.clientAuthEnv" (dict "root" $root "component" "worker") | nindent 12 }}
             {{- end }}
             {{- if $root.Values.config.enabled }}
             - name: SIE_NATS_CONFIG_TRUSTED_PRODUCERS
@@ -544,13 +548,7 @@ spec:
             # /v1/configs/export through adapter IPC.
             - name: SIE_CONFIG_SERVICE_URL
               value: {{ include "sie-cluster.config.internalUrl" $root | quote }}
-            {{- if $root.Values.config.auth.adminTokenSecretName }}
-            - name: SIE_ADMIN_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: {{ $root.Values.config.auth.adminTokenSecretName }}
-                  key: {{ $root.Values.config.auth.adminTokenSecretKey }}
-            {{- end }}
+            {{- include "sie-cluster.config.serviceTokenEnv" $root | nindent 12 }}
             {{- if $configReconcile.pollIntervalMs }}
             - name: SIE_WORKER_CONFIG_POLL_INTERVAL_MS
               value: {{ $configReconcile.pollIntervalMs | quote }}

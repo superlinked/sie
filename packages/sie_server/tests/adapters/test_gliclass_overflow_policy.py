@@ -44,45 +44,53 @@ class TestApplyOverflowPolicy:
         adapter = _make_adapter()
         texts = ["a b c d e f g h i j"]  # 10 tokens, observed = 16 > 10
 
-        assert adapter._apply_overflow_policy(texts, _LABELS, "default") == texts
+        assert adapter._apply_overflow_policy(texts, _LABELS, "default") == (texts, [None])
 
     def test_default_is_the_default_arg(self) -> None:
         adapter = _make_adapter()
         texts = ["a b c d e f g h i j"]
 
-        assert adapter._apply_overflow_policy(texts, _LABELS) == texts
+        assert adapter._apply_overflow_policy(texts, _LABELS) == (texts, [None])
 
     def test_truncate_text_passes_fitting_text_through(self) -> None:
         adapter = _make_adapter()
         texts = ["a b c d"]  # 4 tokens, observed = 10
 
-        assert adapter._apply_overflow_policy(texts, _LABELS, "truncate_text") == ["a b c d"]
+        assert adapter._apply_overflow_policy(texts, _LABELS, "truncate_text") == (["a b c d"], [None])
 
     def test_truncate_text_slices_overflowing_text_to_budget(self) -> None:
         adapter = _make_adapter()
         texts = ["a b c d e f g"]  # 7 tokens, budget = 4
 
-        assert adapter._apply_overflow_policy(texts, _LABELS, "truncate_text") == ["a b c d"]
+        assert adapter._apply_overflow_policy(texts, _LABELS, "truncate_text") == (["a b c d"], [None])
 
     def test_truncate_text_mixed_batch(self) -> None:
         adapter = _make_adapter()
         texts = ["a b", "a b c d e f g"]
 
-        assert adapter._apply_overflow_policy(texts, _LABELS, "truncate_text") == ["a b", "a b c d"]
+        assert adapter._apply_overflow_policy(texts, _LABELS, "truncate_text") == (["a b", "a b c d"], [None, None])
 
-    def test_error_raises_on_overflowing_text(self) -> None:
+    def test_error_fails_only_the_overflowing_text(self) -> None:
         adapter = _make_adapter()
-        texts = ["a b c d e"]  # 5 tokens, observed = 11 > 10
+        texts = ["a b", "a b c d e"]  # the second is 5 tokens, observed = 11 > 10
 
-        with pytest.raises(InputTooLongError, match=r"items\[0\] observed_tokens=11"):
-            adapter._apply_overflow_policy(texts, _LABELS, "error")
+        out, failures = adapter._apply_overflow_policy(texts, _LABELS, "error")
 
-    def test_error_reports_first_overflowing_item_index(self) -> None:
+        assert out == texts
+        assert failures[0] is None
+        assert failures[1] is not None
+        assert "(11 tokens, at most 10)" in failures[1]
+        assert "overflow_policy is 'error'" in failures[1]
+
+    def test_error_messages_name_no_item_index(self) -> None:
+        # One adapter call can hold several callers' requests, so an index
+        # would point into another caller's items.
         adapter = _make_adapter()
-        texts = ["a b", "a b c d e f"]
 
-        with pytest.raises(InputTooLongError, match=r"items\[1\]"):
-            adapter._apply_overflow_policy(texts, _LABELS, "error")
+        _, failures = adapter._apply_overflow_policy(["a b", "a b c d e f"], _LABELS, "error")
+
+        assert failures[1] is not None
+        assert "items[" not in failures[1]
 
     def test_label_prompt_overflow_raises_under_truncate_text(self) -> None:
         adapter = _make_adapter(max_seq_length=5)  # overhead 6 > 5
@@ -100,7 +108,7 @@ class TestApplyOverflowPolicy:
         adapter = _make_adapter(max_seq_length=5)
         texts = ["a b c"]
 
-        assert adapter._apply_overflow_policy(texts, _LABELS, "default") == texts
+        assert adapter._apply_overflow_policy(texts, _LABELS, "default") == (texts, [None])
 
 
 class _RaisingPipe:

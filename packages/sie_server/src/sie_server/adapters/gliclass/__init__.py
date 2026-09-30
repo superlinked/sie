@@ -75,6 +75,8 @@ from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_NOT_LOADED, ComputePrecision
 from sie_server.adapters.errors import InputTooLongError
 from sie_server.adapters.gliclass.cuda_graphs import GRAPH_MODES, CudaGraphRunner, GraphMode, unsupported_reason
+from sie_server.adapters.gliclass.modernbert_flash import ModernBertFlashEncoder
+from sie_server.adapters.gliclass.modernbert_flash import unsupported_reason as flash_unsupported_reason
 from sie_server.core.extract_cost import MAX_EXTRACT_LABELS
 from sie_server.core.inference_output import ExtractItemError, ExtractOutput
 from sie_server.core.oom import is_oom_error
@@ -151,6 +153,22 @@ _ERR_ITEM_LABELS_TRUNCATED = (
     "The document pushes the labels out of the gliclass model's max sequence length. "
     "Shorten the document, or send options.overflow_policy='truncate_text'."
 )
+# Models that read the labels first (``prompt_first``) cut the document to the
+# room the label prompt and instruction leave. Under the default overflow
+# policy an item is refused unless that room holds at least this many tokens,
+# rather than scored without its document. The room is counted on the parts
+# tokenized apart; a token or two can merge where the instruction meets the
+# document, so the floor is the fit check's margin rather than one token.
+_MIN_DOCUMENT_TOKENS = _FIT_MARGIN_TOKENS
+_ERR_ITEM_NO_ROOM_FOR_DOCUMENT = (
+    "The labels leave no room for the document in the gliclass model's max sequence length, "
+    "so the model would not read it. Send fewer or shorter labels."
+)
+_ERR_ITEM_DOCUMENT_TOO_LONG = (
+    "The document does not fit whole in the gliclass model's max sequence length next to the labels "
+    "({observed} tokens, at most {limit}), and options.overflow_policy is 'error'. Shorten the document, "
+    "or send options.overflow_policy='truncate_text'."
+)
 _ERR_ITEM_DOCUMENT_TOO_SPARSE = (
     "The part of the document the gliclass model reads spans more than {limit} characters, too many to "
     "encode once per label group. Shorten the document, send fewer groups, or send "
@@ -167,7 +185,10 @@ class _RequestLayout:
     last marker sits at ``last_marker``. ``context_tokens`` counts the
     billable instruction and example texts. ``overhead_tokens`` is everything
     a row encodes besides its document and special tokens: the label prompt,
-    the instruction and the formatted examples.
+    the instruction and the formatted examples. ``document_room`` is the most
+    document tokens the model reads: the window for a model that reads the
+    document first, and for one that reads the labels first the window minus
+    the label prompt and instruction that precede the document.
     """
 
     prompt_first: bool
@@ -176,12 +197,7 @@ class _RequestLayout:
     last_marker: int
     context_tokens: int
     overhead_tokens: int
-
-    def labels_fit(self, document_tokens: int) -> bool:
-        """Whether every label marker survives truncation next to this document."""
-        if self.prompt_first:
-            return self.last_marker < self.window
-        return document_tokens + self.last_marker < self.window
+    document_room: int
 
 
 @dataclass
@@ -459,7 +475,7 @@ class GLiClassAdapter(BaseAdapter):
     spec: ClassVar[AdapterSpec] = AdapterSpec(
         inputs=("text",),
         outputs=("json",),
-        unload_fields=("_pipe", "_tokenizer", "_graphs"),
+        unload_fields=("_pipe", "_tokenizer", "_graphs", "_flash"),
     )
 
     def __init__(
@@ -472,6 +488,7 @@ class GLiClassAdapter(BaseAdapter):
         compute_precision: ComputePrecision = "float16",
         revision: str | None = None,
         cuda_graphs: str | bool = "off",
+        modernbert_flash: bool | str = False,
         **kwargs: Any,
     ) -> None:
         """Initialize GLiClass adapter.
@@ -496,10 +513,18 @@ class GLiClassAdapter(BaseAdapter):
                 (see ``cuda_graphs.py``). An operator setting: a request can
                 only opt out, with ``options={"cuda_graphs": "off"}``. YAML
                 reads an unquoted ``off`` as ``False``, which also means off.
+            modernbert_flash: Whether a model with a ModernBERT or mmBERT
+                encoder runs it through the packed flash-attention layer
+                stack on CUDA (see ``modernbert_flash.py``): ``true`` for
+                every request, ``"single-label"`` for single-label requests
+                only (multi-label requests run the gliclass forward), or
+                ``false``. Other models and devices run as before. An
+                operator setting.
             **kwargs: Additional arguments (ignored for compatibility).
 
         Raises:
-            ValueError: If ``cuda_graphs`` is not one of the three modes.
+            ValueError: If ``cuda_graphs`` is not one of the three modes, or
+                ``modernbert_flash`` is not true, false or "single-label".
         """
         self._model_name_or_path = str(model_name_or_path)
         self._classification_type = self._validate_classification_type(classification_type)
@@ -513,6 +538,18 @@ class GLiClassAdapter(BaseAdapter):
             msg = f"GLiClass cuda_graphs must be 'off', 'exact' or 'bucketed', got {cuda_graphs!r}"
             raise ValueError(msg)
         self._cuda_graphs = cast("GraphMode", cuda_graphs)
+        if not isinstance(modernbert_flash, bool) and modernbert_flash != "single-label":
+            msg = f"GLiClass modernbert_flash must be true, false or 'single-label', got {modernbert_flash!r}"
+            raise ValueError(msg)
+        self._modernbert_flash = modernbert_flash
+        # The classification types whose requests may use the flash encoder.
+        self._flash_types: frozenset[ClassificationType] = (
+            frozenset({"single-label", "multi-label"})
+            if modernbert_flash is True
+            else frozenset({"single-label"})
+            if modernbert_flash == "single-label"
+            else frozenset()
+        )
 
         # The gliclass pipe for the model's architecture: it assembles and
         # tokenizes model inputs and holds the model.
@@ -520,6 +557,9 @@ class GLiClassAdapter(BaseAdapter):
         # Records and replays forwards as CUDA graphs, when the operator
         # enabled them and the model and device support them.
         self._graphs: CudaGraphRunner | None = None
+        # Runs a ModernBERT encoder on packed rows with flash attention, when
+        # the operator enabled it and the model and device support it.
+        self._flash: ModernBertFlashEncoder | None = None
         self._tokenizer: PreTrainedTokenizerBase | None = None
         self._special_count: int = 0
         self._max_token_chars: int = _DEFAULT_MAX_TOKEN_CHARS
@@ -562,17 +602,18 @@ class GLiClassAdapter(BaseAdapter):
         tokenizer = self._load_tokenizer(shared_kwargs)
 
         # Bound the tokenizer's max length so any internal tokenization in the
-        # gliclass library auto-truncates to the model's actual capacity.
+        # gliclass library auto-truncates to the configured window.
         if self._max_seq_length is not None:
             tokenizer.model_max_length = self._max_seq_length
 
         # Pass max_length explicitly so the pipe's
         # ``tokenizer(..., truncation=True, max_length=self.max_length)`` calls
-        # cap inputs at the model's position-embedding limit. Without this the
-        # library defaults to 1024, which exceeds the 512-token capacity of the
-        # current GLiClass models and causes argmax-on-empty-tensor crashes for
-        # long inputs. The classification type only matters to the pipeline's
-        # own ``__call__``, which the adapter does not use.
+        # cap inputs at the configured window (``max_sequence_length``) rather
+        # than the library default. The GLiClass encoders use relative (DeBERTa)
+        # or rotary (ModernBERT) positions, so the window is the length the
+        # model was trained on, not a position-table size. The classification
+        # type only matters to the pipeline's own ``__call__``, which the
+        # adapter does not use.
         pipeline_kwargs: dict[str, Any] = {
             "model": model,
             "tokenizer": tokenizer,
@@ -591,6 +632,7 @@ class GLiClassAdapter(BaseAdapter):
         self._special_count = int(tokenizer.num_special_tokens_to_add(pair=False))
         self._max_token_chars = _longest_token_chars(tokenizer)
         self._graphs = self._graph_runner(pipe, tokenizer)
+        self._flash = self._flash_encoder(pipe)
 
     def _load_tokenizer(self, shared_kwargs: dict[str, Any]) -> PreTrainedTokenizerBase:
         try:
@@ -639,8 +681,7 @@ class GLiClassAdapter(BaseAdapter):
         prompt: str | None = None,
         examples: list[dict[str, Any]] | None = None,
         tokens: _RequestTokens | None = None,
-        indices: list[int] | None = None,
-    ) -> list[str]:
+    ) -> tuple[list[str], list[str | None]]:
         """Enforce overflow_policy by pre-tokenizing text and label_prompt separately.
 
         The model sees ``observed = text_tokens + label_prompt_tokens +
@@ -655,17 +696,22 @@ class GLiClassAdapter(BaseAdapter):
         - ``default`` returns texts unchanged (upstream as-is — may crash inside
           the model; ``_overflow_errors_as_input_too_long`` in ``extract`` is
           the defense-in-depth backstop).
-        - ``error`` raises ``InputTooLongError`` (whole batch fails, no partial
-          responses).
+        - ``error`` fails each item whose document does not fit whole with an
+          ``INPUT_TOO_LONG`` message; the other items run. One call can hold
+          several callers' requests with the same labels and options, so one
+          document never fails another caller's items, and no message names
+          an item index.
         - ``truncate_text`` slices text to
           ``budget = max_sequence_length - label_prompt_tokens - special_count``.
 
         Under ``truncate_text`` and ``error``, ``label_prompt`` alone exceeding
-        the cap always raises. ``indices`` gives each text's item index for
-        error messages when ``texts`` is a subset of the items.
+        the cap always raises: every request in the call shares the labels.
+
+        Returns the texts to encode and, per text, why it fails (or None).
         """
+        failures: list[str | None] = [None] * len(texts)
         if policy == "default":
-            return texts
+            return texts, failures
 
         if self._pipe is None or self._tokenizer is None or self._max_seq_length is None:
             raise RuntimeError(ERR_NOT_LOADED)
@@ -689,20 +735,16 @@ class GLiClassAdapter(BaseAdapter):
                 new_texts.append(text)
                 continue
             if policy == "error":
-                index = i if indices is None else indices[i]
                 if text in tokens.shortened and tokens.visible_tokens is not None:
                     # Only a prefix of this document was tokenized.
-                    text_tokens = tokens.visible_tokens
-                    counts = f"observed_tokens>={text_tokens + overhead}"
-                    text_count = f"text>={text_tokens}"
+                    observed_count = f"at least {tokens.visible_tokens + overhead}"
                 else:
-                    counts, text_count = f"observed_tokens={observed}", f"text={text_tokens}"
-                raise InputTooLongError(
-                    f"items[{index}] {counts} exceeds max_sequence_length ({self._max_seq_length}) "
-                    f"({text_count}, label_prompt={label_prompt_tokens}, special={self._special_count})"
-                )
+                    observed_count = str(observed)
+                failures[i] = _ERR_ITEM_DOCUMENT_TOO_LONG.format(observed=observed_count, limit=self._max_seq_length)
+                new_texts.append(text)
+                continue
             new_texts.append(self._tokenizer.decode(text_ids[:budget], skip_special_tokens=True))
-        return new_texts
+        return new_texts, failures
 
     def extract(
         self,
@@ -784,6 +826,7 @@ class GLiClassAdapter(BaseAdapter):
 
         overflow_policy = opts.get("overflow_policy", DEFAULT_OVERFLOW_POLICY)
         graphs = self._request_cuda_graphs(opts)
+        flash = classification_type in self._flash_types
         tokens = _RequestTokens(self._tokenizer, self._visible_tokens())
 
         if label_groups is not None and group_encoding == "separate":
@@ -798,23 +841,35 @@ class GLiClassAdapter(BaseAdapter):
                 overflow_policy=overflow_policy,
                 tokens=tokens,
                 graphs=graphs,
+                flash=flash,
             )
 
         texts = [tokens.visible(text) or text for text in texts]
-        texts = self._apply_overflow_policy(
+        texts, overflows = self._apply_overflow_policy(
             texts, normalized_labels, overflow_policy, prompt=prompt, examples=examples, tokens=tokens
         )
         layout = self._request_layout(normalized_labels, prompt, examples, tokens)
-        fits = self._items_fit(texts, layout, normalized_labels, prompt, examples, tokens=tokens)
+        failures = self._item_failures(
+            texts, layout, normalized_labels, prompt, examples, tokens=tokens, overflow_policy=overflow_policy
+        )
+        failures = [overflow or failure for overflow, failure in zip(overflows, failures, strict=True)]
+        fits = [failure is None for failure in failures]
         input_token_counts = self._input_token_counts(texts, prompt, examples, layout, fits, tokens=tokens)
-        errors = self._item_errors(fits)
+        errors = self._item_errors(failures)
         kept = [index for index, ok in enumerate(fits) if ok]
         kept_texts = [texts[index] for index in kept]
 
         if label_groups is not None:
             rows = (
                 self._joint_scores(
-                    kept_texts, label_groups, normalized_labels, classification_type, prompt, examples, graphs=graphs
+                    kept_texts,
+                    label_groups,
+                    normalized_labels,
+                    classification_type,
+                    prompt,
+                    examples,
+                    graphs=graphs,
+                    flash=flash,
                 )
                 if kept_texts
                 else []
@@ -846,6 +901,7 @@ class GLiClassAdapter(BaseAdapter):
                 prompt=prompt,
                 examples=examples,
                 graphs=graphs,
+                flash=flash,
             )
 
         all_classifications: list[list[Classification]] = [[] for _ in items]
@@ -922,6 +978,7 @@ class GLiClassAdapter(BaseAdapter):
         examples: list[dict[str, Any]] | list[list[dict[str, Any]]] | None,
         batch_size: int = _PIPELINE_BATCH_SIZE,
         graphs: GraphMode = "off",
+        flash: bool = True,
     ) -> list[list[float]]:
         """Each row's label scores, computed as the gliclass pipeline computes them.
 
@@ -945,7 +1002,7 @@ class GLiClassAdapter(BaseAdapter):
                 inputs = pipe.prepare_inputs(
                     batch_texts, batch_labels, same_labels=shared, examples=batch_examples, prompt=prompt
                 )
-                logits = self._forward(pipe, inputs, batch_labels, same_labels=shared, graphs=graphs)
+                logits = self._forward(pipe, inputs, batch_labels, same_labels=shared, graphs=graphs, flash=flash)
                 row_labels = cast("list[list[str]]", [batch_labels] * len(batch_texts) if shared else batch_labels)
                 probs = torch.sigmoid(logits) if classification_type == "multi-label" else None
                 rows: list[torch.Tensor] = []
@@ -975,12 +1032,15 @@ class GLiClassAdapter(BaseAdapter):
         *,
         same_labels: bool,
         graphs: GraphMode = "off",
+        flash: bool = True,
     ) -> torch.Tensor:
         """Run the model on tokenized rows, passing the class-slot count the pipeline passes.
 
         With ``graphs`` other than "off", a CUDA graph replays the encoder
         when the model and shape allow it, and the scoring head runs on its
         output with this forward's class slots; otherwise it runs eagerly.
+        A model loaded with ``modernbert_flash`` runs its encoder on packed
+        rows instead, and the scoring head the same way.
         """
         forward_kwargs: dict[str, Any] = {}
         resolve_max_num_classes = getattr(pipe, "_resolve_max_num_classes", None)
@@ -988,6 +1048,16 @@ class GLiClassAdapter(BaseAdapter):
             forward_kwargs["max_num_classes"] = resolve_max_num_classes(labels, same_labels)
         classes = forward_kwargs.get("max_num_classes")
         try:
+            runner = self._flash if flash else None
+            if runner is not None:
+                try:
+                    logits = runner.run(inputs, classes)
+                except Exception as exc:
+                    if is_oom_error(exc):
+                        raise
+                    logits = self._answer_flash_failure(pipe, inputs, forward_kwargs, exc)
+                if logits is not None:
+                    return logits
             if self._graphs is not None:
                 logits = self._graphs.run(dict(inputs), classes, graphs)
                 if logits is not None:
@@ -1023,6 +1093,44 @@ class GLiClassAdapter(BaseAdapter):
             name=self._model_name_or_path,
         )
 
+    def _answer_flash_failure(
+        self, pipe: Any, inputs: Any, forward_kwargs: dict[str, Any], error: Exception
+    ) -> torch.Tensor:
+        """Answer a forward the flash encoder failed with the gliclass forward.
+
+        When the gliclass forward succeeds, the failure was the flash path's:
+        it is logged and the model runs the gliclass forward from then on. When
+        the gliclass forward fails too, the input is at fault; its error
+        propagates as it always has, and the flash encoder stays on.
+        """
+        logits = pipe.model(**inputs, **forward_kwargs).logits
+        self._flash = None
+        logger.error(
+            "GLiClass flash encoder failed for %s on a forward the gliclass forward answers; "
+            "the model runs the gliclass forward from now on",
+            self._model_name_or_path,
+            exc_info=error,
+        )
+        return logits
+
+    def _flash_encoder(self, pipe: Any) -> ModernBertFlashEncoder | None:
+        """The packed flash-attention encoder for a loaded model; None when it is off or does not apply."""
+        model = getattr(pipe, "model", None)
+        if not self._modernbert_flash or model is None:
+            return None
+        device = getattr(pipe, "device", "cpu")
+        reason = flash_unsupported_reason(model, device)
+        if reason is not None:
+            # Off CUDA this is the expected fallback; on CUDA it is worth a look.
+            log = logger.info if not str(device).startswith("cuda") else logger.warning
+            log(
+                "GLiClass modernbert_flash does not apply to %s, which runs the gliclass forward: %s",
+                self._model_name_or_path,
+                reason,
+            )
+            return None
+        return ModernBertFlashEncoder(model, max_length=int(pipe.max_length))
+
     @staticmethod
     def _row_width(pipe: Any, labels: list[str], batch_width: int) -> int:
         """Class slots a forward over only this row's labels would score.
@@ -1045,6 +1153,7 @@ class GLiClassAdapter(BaseAdapter):
         examples: list[dict[str, Any]] | None,
         *,
         graphs: GraphMode = "off",
+        flash: bool = True,
     ) -> list[list[float]]:
         """Score all groups' labels in one row per text and normalize per group.
 
@@ -1068,7 +1177,7 @@ class GLiClassAdapter(BaseAdapter):
                     examples=examples,
                     prompt=prompt,
                 )
-                logits = self._forward(pipe, inputs, flat_labels, same_labels=True, graphs=graphs)
+                logits = self._forward(pipe, inputs, flat_labels, same_labels=True, graphs=graphs, flash=flash)
                 if logits.shape[-1] < num_labels:
                     raise InputTooLongError(_ERR_INPUT_TOO_LONG)
                 chunks.append(logits[:, :num_labels].float())
@@ -1097,15 +1206,18 @@ class GLiClassAdapter(BaseAdapter):
         overflow_policy: OverflowPolicy,
         tokens: _RequestTokens,
         graphs: GraphMode = "off",
+        flash: bool = True,
     ) -> ExtractOutput:
         """Encode the document once per group, with only that group's labels.
 
         Each row is what a request with ``labels`` set to the group's labels
         encodes: its overflow policy, window check and metering apply per
-        row. An item whose labels do not fit in one of its rows fails with
-        ``INPUT_TOO_LONG``, is billed nothing and is not checked against the
-        remaining groups; the other items still run. ``texts`` holds each
-        document's readable prefix, or None for one whose readable part
+        row. An item whose labels do not fit in one of its rows, or whose
+        row leaves no room for its document, fails with ``INPUT_TOO_LONG``,
+        is billed nothing and is not checked against the remaining groups;
+        the other items still run. A group whose labels cannot fit the
+        window refuses the request whatever the documents. ``texts`` holds
+        each document's readable prefix, or None for one whose readable part
         exceeds the per-group character bound.
 
         The first group's context is tokenized and checked alone, so a
@@ -1120,9 +1232,9 @@ class GLiClassAdapter(BaseAdapter):
         item_rows: list[list[str]] = [[] for _ in range(item_count)]
         item_lengths: list[list[int]] | None = [[] for _ in range(item_count)]
         for group, (_, group_labels) in enumerate(label_groups):
+            # Once every item has failed, the remaining groups still run their
+            # request checks (overflow policy, label window) on no rows.
             alive = [index for index, failure in enumerate(failures) if failure is None]
-            if not alive:
-                break
             if group == 1:
                 self._contexts(
                     tokens,
@@ -1133,17 +1245,19 @@ class GLiClassAdapter(BaseAdapter):
                     overflow=overflow_policy != "default",
                 )
             row_examples = group_examples[group] if group_examples is not None else None
-            row_texts = self._apply_overflow_policy(
+            row_texts, row_overflows = self._apply_overflow_policy(
                 [cast("str", texts[index]) for index in alive],
                 group_labels,
                 overflow_policy,
                 prompt=prompt,
                 examples=row_examples,
                 tokens=tokens,
-                indices=alive,
             )
             layout = self._request_layout(group_labels, prompt, row_examples, tokens)
-            row_fits = self._items_fit(row_texts, layout, group_labels, prompt, row_examples, tokens=tokens)
+            row_failures = self._item_failures(
+                row_texts, layout, group_labels, prompt, row_examples, tokens=tokens, overflow_policy=overflow_policy
+            )
+            row_failures = [overflow or failure for overflow, failure in zip(row_overflows, row_failures, strict=True)]
             row_counts = self._input_token_counts(
                 row_texts, prompt, row_examples, layout, [True] * len(alive), tokens=tokens
             )
@@ -1153,8 +1267,8 @@ class GLiClassAdapter(BaseAdapter):
             if row_lengths is None:
                 item_lengths = None
             for position, index in enumerate(alive):
-                if not row_fits[position]:
-                    failures[index] = _ERR_ITEM_LABELS_TRUNCATED
+                if row_failures[position] is not None:
+                    failures[index] = row_failures[position]
                     continue
                 item_rows[index].append(row_texts[position])
                 if counts is not None and row_counts is not None:
@@ -1180,6 +1294,7 @@ class GLiClassAdapter(BaseAdapter):
             group_examples=group_examples,
             row_lengths=None if item_lengths is None else [item_lengths[index] for index in kept],
             graphs=graphs,
+            flash=flash,
         )
         return self._grouped_output(
             rows,
@@ -1202,6 +1317,7 @@ class GLiClassAdapter(BaseAdapter):
         group_examples: list[list[dict[str, Any]]] | None,
         row_lengths: list[list[int]] | None = None,
         graphs: GraphMode = "off",
+        flash: bool = True,
     ) -> list[list[float]]:
         """Scores of every (item, group) row, flattened per item in group order.
 
@@ -1237,6 +1353,7 @@ class GLiClassAdapter(BaseAdapter):
                         examples=None if row_examples is None else [row_examples[row] for row in chunk],
                         batch_size=len(chunk),
                         graphs=graphs,
+                        flash=flash,
                     )
                     for row, row_scores in zip(chunk, scored, strict=True):
                         per_row[row] = row_scores
@@ -1249,6 +1366,7 @@ class GLiClassAdapter(BaseAdapter):
                         prompt=prompt,
                         examples=group_examples[group] if group_examples is not None else None,
                         graphs=graphs,
+                        flash=flash,
                     )
                     for group, (_, group_labels) in enumerate(label_groups)
                 ]
@@ -1729,16 +1847,18 @@ class GLiClassAdapter(BaseAdapter):
                 "GLiClass instruction, examples and labels leave no room for the document in the "
                 f"model's {window}-token window; shorten the instruction or send fewer examples"
             )
+        prompt_first = bool(getattr(config, "prompt_first", False))
         return _RequestLayout(
-            prompt_first=bool(getattr(config, "prompt_first", False)),
+            prompt_first=prompt_first,
             window=window,
             label_tokens=len(label_ids),
             last_marker=markers[-1],
             context_tokens=prompt_tokens + example_text_tokens,
             overhead_tokens=len(label_ids) + prompt_tokens + examples_tokens,
+            document_room=window - len(label_ids) - prompt_tokens if prompt_first else window,
         )
 
-    def _items_fit(
+    def _item_failures(
         self,
         texts: list[str],
         layout: _RequestLayout | None,
@@ -1747,29 +1867,47 @@ class GLiClassAdapter(BaseAdapter):
         examples: list[dict[str, Any]] | None,
         *,
         tokens: _RequestTokens | None = None,
-    ) -> list[bool]:
-        """Whether each item's label markers survive truncation.
+        overflow_policy: OverflowPolicy = DEFAULT_OVERFLOW_POLICY,
+    ) -> list[str | None]:
+        """Why each item cannot be scored as sent (an ``INPUT_TOO_LONG`` message), or None.
 
-        Documents are tokenized once, on their own. Tokenizing a document next
-        to the label prompt can differ from that by a token or two (a trailing
-        space before a marker, for example), so items within a few tokens of
-        the window edge are checked exactly on their fused encoding. Counting
-        up to that margin past the window means a document that fills the
-        window by itself is refused without the exact check.
+        A model that reads the labels first keeps every label and cuts the
+        document to the room left after the label prompt and instruction.
+        Under the default overflow policy, when that room is under
+        ``_MIN_DOCUMENT_TOKENS`` the model might read none of the document,
+        so every item is refused. Otherwise a longer document is cut, as
+        ``truncate_text`` would cut it. ``truncate_text`` and ``error`` have
+        already cut or checked each document against the room, and refused
+        the request when the labels leave none (see
+        ``_apply_overflow_policy``).
+
+        A model that reads the document first keeps the document and loses
+        the labels past the window, so an item is refused when its document
+        pushes a label marker out. Documents are tokenized once, on their own.
+        Tokenizing a document next to the label prompt can differ from that by
+        a token or two (a trailing space before a marker, for example), so
+        items within a few tokens of the window edge are checked exactly on
+        their fused encoding. Counting up to that margin past the window means
+        a document that fills the window by itself is refused without the
+        exact check.
         """
-        if layout is None or layout.prompt_first or self._tokenizer is None:
-            return [True] * len(texts)
+        if layout is None or self._tokenizer is None:
+            return [None] * len(texts)
+        if layout.prompt_first:
+            no_room = overflow_policy == "default" and layout.document_room < _MIN_DOCUMENT_TOKENS
+            return [_ERR_ITEM_NO_ROOM_FOR_DOCUMENT if no_room else None] * len(texts)
         tokens = tokens or _RequestTokens(self._tokenizer)
-        fits: list[bool] = []
+        failures: list[str | None] = []
         for text, ids in zip(texts, tokens.cut(texts, layout.window + _FIT_MARGIN_TOKENS), strict=True):
             estimate = len(ids) + layout.last_marker
             if estimate < layout.window - _FIT_MARGIN_TOKENS:
-                fits.append(True)
+                fits = True
             elif estimate >= layout.window + _FIT_MARGIN_TOKENS:
-                fits.append(False)
+                fits = False
             else:
-                fits.append(self._labels_survive(text, list(ids[: layout.window]), labels, prompt, examples))
-        return fits
+                fits = self._labels_survive(text, list(ids[: layout.window]), labels, prompt, examples)
+            failures.append(None if fits else _ERR_ITEM_LABELS_TRUNCATED)
+        return failures
 
     def _labels_survive(
         self,
@@ -1791,17 +1929,17 @@ class GLiClassAdapter(BaseAdapter):
         return ids.count(marker) >= text_ids.count(marker) + len(labels)
 
     @staticmethod
-    def _item_errors(fits: list[bool]) -> list[ExtractItemError | None] | None:
-        """Per-item INPUT_TOO_LONG for items whose labels would be cut off.
+    def _item_errors(failures: list[str | None]) -> list[ExtractItemError | None] | None:
+        """Per-item INPUT_TOO_LONG for items that cannot be scored as sent (see ``_item_failures``).
 
         Reporting these per item keeps one oversized document from failing
         every request batched with it.
         """
-        if all(fits):
+        if all(failure is None for failure in failures):
             return None
         return [
-            None if ok else ExtractItemError(code=ErrorCode.INPUT_TOO_LONG.value, message=_ERR_ITEM_LABELS_TRUNCATED)
-            for ok in fits
+            None if failure is None else ExtractItemError(code=ErrorCode.INPUT_TOO_LONG.value, message=failure)
+            for failure in failures
         ]
 
     def _input_token_counts(
@@ -1822,12 +1960,19 @@ class GLiClassAdapter(BaseAdapter):
         pipeline's marker tokens are not billed. With an instruction or
         examples, a row's total is capped at the model window minus the
         label prompt, the most free-form text it can encode, unless the
-        document count alone is already higher. Items refused because their
-        labels would be cut off are billed nothing.
+        document count alone is already higher. A document counts at most
+        the tokens of it the model reads (``document_room``), so a model that
+        reads the labels first counts what its window keeps after them, as
+        ``truncate_text`` would. Items refused because their labels would be
+        cut off, or because the labels leave no room for the document, are
+        billed nothing.
         """
         counts = self._doc_input_token_counts(texts, tokens)
         if counts is None:
             return None
+        if layout is not None:
+            readable = max(layout.document_room, 0) + self._special_count
+            counts = [min(count, readable) for count in counts]
         if prompt or examples:
             if layout is not None:
                 context_tokens = layout.context_tokens

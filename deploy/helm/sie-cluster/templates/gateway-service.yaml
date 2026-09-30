@@ -1,3 +1,4 @@
+{{- include "sie-cluster.validateServiceExposure" . }}
 apiVersion: v1
 kind: Service
 metadata:

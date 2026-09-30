@@ -1027,6 +1027,10 @@ def _assert_gliclass_groups(adapter: Any, expected_topic: str) -> None:
         assert 0.0 <= answer["confidence"] <= 1.0
 
 
+def test_knowledgator_gliclass_base_v1_0_lw_extract() -> None:
+    assert _gliclass_top(_get_adapter("knowledgator/gliclass-base-v1.0-lw"), _TICKET, _TICKET_LABELS) == "bug report"
+
+
 def test_knowledgator_gliclass_base_v3_0_extract() -> None:
     assert _gliclass_top(_get_adapter("knowledgator/gliclass-base-v3.0"), _TICKET, _TICKET_LABELS) == "bug report"
 
@@ -1115,6 +1119,12 @@ def test_knowledgator_gliclass_large_v1_0_extract() -> None:
     assert list(joint.data[0]) == list(_TICKET_GROUPS)
 
 
+def test_knowledgator_gliclass_large_v1_0_lw_extract() -> None:
+    adapter = _get_adapter("knowledgator/gliclass-large-v1.0-lw")
+    assert _gliclass_top(adapter, _TICKET, _TICKET_LABELS) == "bug report"
+    _assert_gliclass_groups(adapter, "bug report")
+
+
 def test_knowledgator_gliclass_large_v3_0_extract() -> None:
     # A request without instruction, examples, or label_groups keeps the scores
     # the adapter has always returned for this model.
@@ -1134,6 +1144,11 @@ def test_knowledgator_gliclass_multilang_mini_long_documents() -> None:
 def test_knowledgator_gliclass_multilang_mini_extract() -> None:
     labels = ["billing", "account access", "feature request"]
     assert _gliclass_top(_get_adapter("knowledgator/gliclass-multilang-mini"), _ACCOUNT_DE, labels) == "account access"
+
+
+def test_knowledgator_gliclass_multilang_ultra_extract() -> None:
+    labels = ["billing", "account access", "feature request"]
+    assert _gliclass_top(_get_adapter("knowledgator/gliclass-multilang-ultra"), _ACCOUNT_DE, labels) == "account access"
 
 
 def test_knowledgator_gliclass_small_v1_0_extract() -> None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import errno
 import logging
 import math
+import os
 import random
 import re
 import socket
@@ -141,6 +142,58 @@ def validate_base_url(base_url: str) -> None:
         _ = parts.port
     except ValueError as exc:
         raise ValueError(msg) from exc
+
+
+SIE_BASE_URL_ENV = "SIE_BASE_URL"
+SIE_API_KEY_ENV = "SIE_API_KEY"
+
+
+def resolve_base_url(base_url: str | None) -> str:
+    """Return ``base_url``, or the ``SIE_BASE_URL`` environment variable when it is omitted."""
+    if base_url is not None:
+        return base_url
+    env_base_url = os.environ.get(SIE_BASE_URL_ENV, "").strip()
+    if not env_base_url:
+        msg = f"base_url is required: pass it explicitly or set {SIE_BASE_URL_ENV}"
+        raise ValueError(msg)
+    return env_base_url
+
+
+def _url_origin(url: str) -> tuple[str, str, int] | None:
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError:
+        return None
+    scheme = parts.scheme.lower()
+    if scheme not in {"http", "https"} or not parts.hostname:
+        return None
+    return scheme, parts.hostname.lower(), port or (443 if scheme == "https" else 80)
+
+
+def resolve_api_key(api_key: str | None, base_url: str, control_plane_url: str | None = None) -> str | None:
+    """Return ``api_key``, or ``SIE_API_KEY`` when it is omitted and ``base_url`` is the ``SIE_BASE_URL`` origin.
+
+    An explicit value, including an empty string, always wins, so a caller can
+    opt out of the environment credential. The environment key is scoped to
+    the origin named by ``SIE_BASE_URL``: a client built for any other URL
+    does not select it, and a client whose ``control_plane_url`` names another
+    origin must pass its key explicitly, because connection requests reuse the
+    client's key.
+    """
+    if api_key is not None:
+        return api_key
+    env_api_key = os.environ.get(SIE_API_KEY_ENV, "").strip()
+    env_origin = _url_origin(os.environ.get(SIE_BASE_URL_ENV, "").strip())
+    if not env_api_key or env_origin is None or _url_origin(base_url) != env_origin:
+        return None
+    if control_plane_url and _url_origin(control_plane_url) != env_origin:
+        msg = (
+            f"{SIE_API_KEY_ENV} is scoped to the {SIE_BASE_URL_ENV} origin and is not sent to "
+            "control_plane_url on another origin; pass api_key explicitly"
+        )
+        raise ValueError(msg)
+    return env_api_key
 
 
 def url_origin_for_logging(url: str) -> str:

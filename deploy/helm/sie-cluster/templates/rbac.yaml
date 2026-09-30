@@ -33,6 +33,9 @@ subjects:
 # Role for gateway to manage resource pools (ConfigMaps + Leases)
 # Pools use ConfigMap for spec/status and Lease for TTL
 # See: Rust gateway pool management
+# Pool ConfigMap names are dynamic, so the rule cannot use resourceNames and
+# covers every ConfigMap in the namespace, including the NATS server
+# configuration. Only gateway pods mount a token for this ServiceAccount.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:

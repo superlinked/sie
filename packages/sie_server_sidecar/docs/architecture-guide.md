@@ -183,6 +183,41 @@ tombstone filters that redelivery. Static inference already sent over backend
 IPC is not preempted; the gateway has removed its collector and drops the late
 result.
 
+### Connection and permissions
+
+The sidecar connects with the credentials in `SIE_NATS_USER` and
+`SIE_NATS_PASSWORD`, which are read from the environment only (there are no
+CLI flags for them, and `--help` hides the value of `SIE_NATS_URL`). Setting
+only one of the two fails startup. Credentials in `SIE_NATS_URL` are not used,
+and logs redact any userinfo in it. In the Helm chart only the sidecar
+container of a worker pod receives the worker credentials, not the container
+that runs model code.
+
+The client uses the inbox prefix `_INBOX_WORKER` for its JetStream API replies
+and pull deliveries. The chart's `sie-worker` user may subscribe to that
+prefix, to `sie.config.models.*`, and to the three cancel subject trees, and
+may publish results into the gateway's `_INBOX` subjects, heartbeats on
+`sie.health.>`, acknowledgements on `$JS.ACK.>`, and the JetStream API calls
+above: stream info, create, and update (the sidecar creates its
+direct-dispatch stream and reconciles the pool stream), and consumer list,
+info, create, delete, and pull. It cannot publish work, config deltas, or
+cancels, subscribe to the gateway's inboxes, or delete or purge streams. Its
+stream and consumer management still reaches other pools' streams, durables,
+and the gateway's inboxes; the full matrix and what the worker user can still
+do are in the chart README ("NATS authentication"). The worker pod mounts no
+Kubernetes API token.
+
+Because stream management lets the server deliver stored messages on a
+worker's behalf past its publish permissions, the sidecar drops cancel
+signals that carry a reply subject or a `Nats-` header, and drops (ACKs) work
+that carries a `Nats-` header other than the gateway's `Nats-Msg-Id`. A
+subject transform on the pool stream still adds work without such a header.
+
+On the generation path the sidecar publishes a backend `publish` event only
+when its reply subject equals the work item's `reply_subject`. The backend
+runs model code, so it must not choose where the sidecar's NATS user
+publishes.
+
 Source: [`nats_consumer.rs`](../src/nats_consumer.rs),
 [`subject.rs`](../src/subject.rs), and the gateway
 [queue publisher](../../sie_gateway/src/queue/publisher.rs).
@@ -446,8 +481,9 @@ cover the finite domain of every sidecar stream so valid labels do not enter
 `otel.metric.overflow`.
 
 Readiness state is shared with the NATS health publisher. The health publisher
-emits worker identity, bundle, machine profile, readiness, and the current
-bundle config hash. It also mirrors the latest `loaded_models` list reported by
+emits worker identity, bundle, machine profile, readiness, the current
+bundle config hash, and, when non-empty, the `unsupported_models` committed
+with that hash. It also mirrors the latest `loaded_models` list reported by
 the backend IPC heartbeat so gateway pool/model gauges reflect live residency in
 NATS health mode.
 
@@ -463,17 +499,35 @@ The sidecar subscribes to bundle-scoped config deltas:
 sie.config.models.{bundle}
 ```
 
-Each notification is checked for trusted producer, bundle, epoch, and payload
-size. Accepted deltas are forwarded to the colocated backend through
-`ApplyModelConfig`. The backend returns the applied bundle config hash. The
-sidecar stores that hash in `ConfigApplyState` only when it exactly matches a
-non-empty control-plane hash. A mismatch or missing backend proof does not
+A notification with a reply subject or any `Nats-` header is dropped first:
+`sie-config` publishes plain core messages, and such a delivery can only come
+from the NATS server acting for a user that manages JetStream streams or
+consumers (for example a stream's republish setting), past that user's publish
+permissions. Each remaining notification is checked for trusted producer,
+bundle, epoch, and payload size. Accepted deltas are forwarded to the colocated backend through
+`ApplyModelConfig`, together with the notification's `bundle_adapters` list for
+this bundle when `sie-config` sends one. The backend returns the applied bundle
+config hash and `unsupported_models`, the routable ids that hash covers but the
+backend cannot serve. The sidecar stores the hash and the list together in
+`ConfigApplyState` only when the hash exactly matches a non-empty control-plane
+hash. Before anything is committed, the sidecar adopts the backend's IPC `Ping`
+hash, which never replaces a committed pair. `Ping` carries no list, so its hash
+must imply full support: the Python worker scopes it by its image's bundle file,
+and the Candle worker returns a hash it echoed only after applying every entry.
+A mismatch or missing backend proof does not
 advance the epoch, advertised hash, or loaded-model state, leaving the worker
 quarantined from hash-bound work until reconciliation succeeds.
 
 When `SIE_CONFIG_SERVICE_URL` is configured, the export reconciler fetches
 `/v1/configs/epoch` and `/v1/configs/export` from `sie-config`. Bundle-relevant
-exports are sent to the backend through `ReplaceModelConfigs`.
+exports are sent to the backend through `ReplaceModelConfigs`, with the
+export's `bundle_adapters` list for this bundle.
+
+The reconciler authenticates with `SIE_CONFIG_SERVICE_TOKEN`
+(`--config-service-token`), `sie-config`'s read-scoped `SIE_CONFIG_READ_TOKEN`,
+which cannot write configs. When the variable is set it decides, and a blank
+value sends no token. When it is unset, the sidecar falls back to
+`SIE_ADMIN_TOKEN` and logs a deprecation warning at startup.
 
 Export reconciliation skips unchanged periodic exports. Exports older than the
 local epoch are skipped unless the reconciler is handling an epoch-rewind
@@ -486,7 +540,12 @@ expected bundle config hash for the resolved pool and bundle. Config mutation
 takes an exclusive execution barrier and backend inference takes a shared
 barrier. Immediately before execution the dispatcher requires an exact match
 with the worker's current hash; old hashes are NAKed rather than executed
-against newer weights. Successful non-streaming results echo that stable
+against newer weights. Work for a model in the current `unsupported_models`
+list is NAKed at intake, again immediately before each readiness probe, and at
+that barrier, before backend IPC, so the dispatcher never asks the backend to
+load or run such a model. The backend's own eager load of pinned models does
+not consult the list. These NAKs are counted with reason `model_unsupported`.
+Successful non-streaming results echo that stable
 execution hash so the gateway can bind response provenance to the exact worker
 execution. Empty hashes remain accepted only for legacy, non-attested traffic.
 
