@@ -535,6 +535,79 @@ def test_cuda_chat_blocking_proxies_profile_defaults_and_returns_openai_shape(
     registry.touch_lru.assert_called_once_with(requested_model)
 
 
+def _sglang_body_config(default_sampling: dict[str, Any]) -> SimpleNamespace:
+    profile = SimpleNamespace(runtime={"default_sampling": default_sampling}, loadtime={})
+    return SimpleNamespace(
+        tasks=SimpleNamespace(generate=SimpleNamespace(max_output_tokens=512, chat_template_kwargs={})),
+        resolve_profile=MagicMock(return_value=profile),
+    )
+
+
+_CHAT_RECIPE = {"temperature": 0.7, "top_p": 0.8, "top_k": 20, "presence_penalty": 1.5}
+
+
+def _prepare_body(body: dict[str, Any]) -> dict[str, Any]:
+    adapter = SGLangGenerationAdapter(model_name_or_path="upstream/repo", served_model_name="served")
+    return openai_local._prepare_sglang_body(
+        body,
+        config=_sglang_body_config(dict(_CHAT_RECIPE)),
+        adapter=adapter,
+        max_completion_tokens=body.get("max_completion_tokens"),
+        max_tokens=None,
+        seed=None,
+    )
+
+
+@pytest.mark.parametrize("format_type", ["json_schema", "json_object"])
+def test_cuda_chat_response_format_defaults_to_greedy_without_penalties(format_type: str) -> None:
+    response_format: dict[str, Any] = {"type": format_type}
+    if format_type == "json_schema":
+        response_format["json_schema"] = {"name": "record", "schema": {"type": "object"}}
+
+    proxied = _prepare_body(
+        {
+            "messages": [{"role": "user", "content": "Extract"}],
+            "max_completion_tokens": 64,
+            "response_format": response_format,
+        }
+    )
+
+    assert proxied["temperature"] == 0.0
+    assert proxied["presence_penalty"] == 0.0
+    assert proxied["frequency_penalty"] == 0.0
+    assert proxied["top_p"] == 0.8
+    assert proxied["top_k"] == 20
+
+
+def test_cuda_chat_response_format_keeps_explicit_sampler_fields() -> None:
+    proxied = _prepare_body(
+        {
+            "messages": [{"role": "user", "content": "Extract"}],
+            "max_completion_tokens": 64,
+            "temperature": 0.6,
+            "presence_penalty": 0.5,
+            "response_format": {"type": "json_schema", "json_schema": {"name": "r", "schema": {"type": "object"}}},
+        }
+    )
+
+    assert proxied["temperature"] == 0.6
+    assert proxied["presence_penalty"] == 0.5
+    assert proxied["frequency_penalty"] == 0.0
+
+
+@pytest.mark.parametrize("response_format", [None, {"type": "text"}])
+def test_cuda_chat_without_grammar_keeps_profile_recipe(response_format: dict[str, Any] | None) -> None:
+    body: dict[str, Any] = {"messages": [{"role": "user", "content": "Hi"}], "max_completion_tokens": 64}
+    if response_format is not None:
+        body["response_format"] = response_format
+
+    proxied = _prepare_body(body)
+
+    assert proxied["temperature"] == 0.7
+    assert proxied["presence_penalty"] == 1.5
+    assert "frequency_penalty" not in proxied
+
+
 def test_cuda_chat_stream_sanitizes_split_reasoning_and_closes_upstream(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

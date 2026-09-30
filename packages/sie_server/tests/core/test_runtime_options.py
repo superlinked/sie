@@ -253,6 +253,93 @@ def test_generation_frequency_penalty_and_seed_defaults_apply() -> None:
     assert resolved["seed"] == -(1 << 63)
 
 
+_CHAT_RECIPE = {"temperature": 0.7, "top_p": 0.8, "top_k": 20, "presence_penalty": 1.5}
+_JSON_GRAMMAR = {"json_schema": {"type": "object", "properties": {"injured": {"type": "integer"}}}}
+
+
+def _chat_recipe_config() -> ModelConfig:
+    config = _generation_config()
+    config.profiles["default"].adapter_options.runtime["default_sampling"] = dict(_CHAT_RECIPE)
+    return config
+
+
+@pytest.mark.parametrize("grammar", [_JSON_GRAMMAR, {"regex": "(yes|no)"}])
+def test_generation_grammar_request_defaults_to_greedy_without_penalties(grammar: dict[str, Any]) -> None:
+    resolved = apply_generation_runtime_options(
+        _chat_recipe_config(),
+        None,
+        {"prompt": "hi", "max_new_tokens": 64, "grammar": grammar},
+    )
+
+    assert resolved["temperature"] == 0.0
+    assert resolved["presence_penalty"] == 0.0
+    assert resolved["frequency_penalty"] == 0.0
+    # Inert at temperature 0; kept as the profile sets them.
+    assert resolved["top_p"] == 0.8
+    assert resolved["top_k"] == 20
+    assert resolved["grammar"] == grammar
+
+
+def test_generation_grammar_request_keeps_explicit_sampler_fields() -> None:
+    resolved = apply_generation_runtime_options(
+        _chat_recipe_config(),
+        None,
+        {
+            "prompt": "hi",
+            "max_new_tokens": 64,
+            "grammar": _JSON_GRAMMAR,
+            "temperature": 0.9,
+            "presence_penalty": 0.4,
+        },
+    )
+
+    assert resolved["temperature"] == 0.9
+    assert resolved["presence_penalty"] == 0.4
+    assert resolved["frequency_penalty"] == 0.0
+
+
+def test_generation_grammar_request_keeps_request_default_sampling() -> None:
+    resolved = apply_generation_runtime_options(
+        _chat_recipe_config(),
+        {"default_sampling": {"temperature": 0.3, "presence_penalty": 1.0}},
+        {"prompt": "hi", "max_new_tokens": 64, "grammar": _JSON_GRAMMAR},
+    )
+
+    assert resolved["temperature"] == 0.3
+    assert resolved["presence_penalty"] == 1.0
+    assert resolved["top_p"] == 0.8
+
+
+def test_generation_grammar_request_without_profile_sampling_is_greedy() -> None:
+    config = _generation_config()
+    del config.profiles["default"].adapter_options.runtime["default_sampling"]
+
+    resolved = apply_generation_runtime_options(
+        config,
+        None,
+        {"prompt": "hi", "max_new_tokens": 64, "grammar": _JSON_GRAMMAR},
+    )
+
+    assert resolved["temperature"] == 0.0
+    assert resolved["presence_penalty"] == 0.0
+    assert "top_p" not in resolved
+
+
+@pytest.mark.parametrize("grammar", [None, "absent"])
+def test_generation_unconstrained_request_keeps_profile_recipe(grammar: object) -> None:
+    params: dict[str, Any] = {"prompt": "hi", "max_new_tokens": 64}
+    if grammar != "absent":
+        params["grammar"] = grammar
+
+    resolved = apply_generation_runtime_options(_chat_recipe_config(), None, params)
+
+    assert resolved["temperature"] == 0.7
+    assert resolved["top_p"] == 0.8
+    assert resolved["top_k"] == 20
+    assert resolved["presence_penalty"] == 1.5
+    assert resolved.get("frequency_penalty") is None
+
+
 def test_generation_profile_default_min_new_tokens_caps_to_explicit_max() -> None:
     config = _generation_config()
     config.profiles["default"].adapter_options.runtime["default_sampling"]["min_new_tokens"] = 10

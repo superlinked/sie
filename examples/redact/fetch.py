@@ -1,203 +1,165 @@
 #!/usr/bin/env python3
-"""Download the recorded redact evidence from a pinned dataset revision.
+"""Download this task's recorded evidence from the pinned dataset revision.
 
-    python3 fetch.py [--dest data]
+    python3 fetch.py
 
-Standard library only. No API key, no Hugging Face token, no inference spend.
-The dataset is public and anonymous-readable.
+Standard library only. No token, no account, no API key. The dataset is public
+and this pulls it anonymously.
 
-REVISION is a commit SHA, never a branch. `main` moves; a SHA does not.
+Everything lands in evidence/: the 660 documents with their gold spans, every
+arm's recorded response for every document, and the study's results files.
+score.py reads from there and never touches the network.
 
-Every downloaded file is checked against a digest before the scorer sees it.
-The chain is anchored in this file: MANIFEST_SHA256 pins manifest.json,
-manifest.json pins calls.json and every input file. A file that is missing or
-that fails its digest is a FAILURE, never a skip, and the script exits
-nonzero without writing a partial tree the scorer could mistake for complete.
+REVISION is a dataset commit, deliberately not `main`, so a later upload cannot
+change what this example scores.
 
-This script replaces `--dest` wholesale, so it refuses to touch anything it did
-not write. A directory qualifies only when it holds a `.sie-evidence` marker naming
-this dataset and task, and never when it is the working directory, an ancestor
-of it, your home directory or the filesystem root. Anything else stops the run
-with an explanation rather than being deleted.
-
-The replacement itself is two renames, not a delete and a copy: the old
-directory is renamed aside, the verified download is renamed into place, and
-only then is the old one removed. If the second rename fails the first is
-undone, so a reader is never left with neither.
+Every file is checked twice. First against the id the dataset lists for it at
+that revision (the git object id, or the SHA-256 of a Git LFS file). Then
+against the SHA-256 in manifest.json, whose own SHA-256 is pinned below. A file
+that is missing, extra or fails either check stops the run, and evidence/ is
+left as it was.
 """
 
 from __future__ import annotations
 
-import argparse
 import hashlib
 import json
-import os
 import shutil
 import sys
 import tempfile
-import urllib.error
 import urllib.request
 from pathlib import Path
 
+HERE = Path(__file__).resolve().parent
+EVIDENCE = HERE / "evidence"
+
 DATASET = "superlinked/sie-task-evidence"
+REVISION = "4999a499aed5ea77181973070fa435a616552d80"
 TASK = "redact"
-REVISION = "f2a5ffc8f157696f5dadd04dfbdf38d0bc991854"
-MANIFEST_SHA256 = "a1473db90bc914526bc0f84681e497840a4c33998b0f73f7d7a0ab51e4339d3f"
+MANIFEST_SHA256 = "a3a7b8b6c73f20e4bcf99b5adec37ada0ff67f7a57d8b91cf8fac9e0406a6961"
 
-BASE = f"https://huggingface.co/datasets/{DATASET}/resolve/{REVISION}/{TASK}"
-HTTP_OK = 200
-MARKER_NAME = ".sie-evidence"
+API = f"https://huggingface.co/api/datasets/{DATASET}/tree/{REVISION}"
+FILES = f"https://huggingface.co/datasets/{DATASET}/resolve/{REVISION}"
 
-
-def download(relative_path: str) -> bytes:
-    url = f"{BASE}/{relative_path}"
-    request = urllib.request.Request(url, headers={"Accept": "*/*"})  # noqa: S310
-    try:
-        with urllib.request.urlopen(request, timeout=120) as response:  # noqa: S310
-            if response.status != HTTP_OK:
-                raise RuntimeError(f"{url} returned HTTP {response.status}")
-            return response.read()
-    except urllib.error.HTTPError as error:
-        raise RuntimeError(f"{url} returned HTTP {error.code}") from error
-    except urllib.error.URLError as error:
-        raise RuntimeError(f"{url} could not be reached: {error.reason}") from error
-
-
-def digest(payload: bytes) -> str:
-    return hashlib.sha256(payload).hexdigest()
+# Every file score.py reads. A listing missing one of these is a failure, not a
+# short download: score.py would otherwise report on whatever happened to arrive.
+REQUIRED = (
+    "manifest.json",
+    "inputs/gretel-main.jsonl",
+    "rows/sie__urchade__gliner_multi_pii-v1.jsonl",
+    "rows/sie__numind__NuNER_Zero.jsonl",
+    "rows/presidio.jsonl",
+    "rows/privacy-filter.jsonl",
+    "rows/llm__gpt-6-luna.jsonl",
+    "rows/llm__claude-haiku-4-5.jsonl",
+    "results/gretel-main_results.json",
+    "results/gretel-main_tokens.json",
+    "results/e2_results.json",
+)
 
 
-def marker_bytes() -> bytes:
-    """What marks a directory as this script's to replace."""
-    return (
-        json.dumps(
-            {"written_by": "fetch.py", "dataset": DATASET, "task": TASK, "revision": REVISION},
-            indent=2,
-        )
-        + "\n"
-    ).encode("utf-8")
+def git_blob_oid(data: bytes) -> str:
+    """The object id git gives these bytes, which is what the dataset publishes.
 
-
-def refuse_reason(dest: Path) -> str | None:
-    """Why `dest` must not be replaced, or None when replacing it is safe.
-
-    Checked before anything is downloaded and again before the swap.
+    SHA-1 is not chosen here for its strength; it is the identifier the dataset
+    already exposes, so the value can be checked against Hugging Face by hand.
     """
-    resolved = dest.resolve()
-    cwd = Path.cwd().resolve()
-    # These hold whatever the marker says. A marker can be planted; the
-    # working tree still must not be removable by a --dest typo.
-    if resolved == resolved.parent:
-        return f"{resolved} is the filesystem root"
-    if resolved == cwd:
-        return f"{resolved} is the current working directory"
-    if resolved in cwd.parents:
-        return f"{resolved} contains the current working directory"
-    if resolved == Path.home().resolve():
-        return f"{resolved} is your home directory"
-
-    if dest.is_symlink():
-        return f"{dest} is a symlink"
-    if not dest.exists():
-        return None
-    if not dest.is_dir():
-        return f"{dest} exists and is not a directory"
-
-    marker = dest / MARKER_NAME
-    if not marker.is_file():
-        return (
-            f"{dest} exists but holds no {MARKER_NAME}, so this script did not write it. "
-            f"Move it aside, or pass --dest somewhere else."
-        )
-    try:
-        recorded = json.loads(marker.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as error:
-        return f"{dest}/{MARKER_NAME} could not be read: {error}"
-    if recorded.get("dataset") != DATASET or recorded.get("task") != TASK:
-        return f"{dest}/{MARKER_NAME} names {recorded.get('dataset')}/{recorded.get('task')}, not {DATASET}/{TASK}"
-    return None
+    return hashlib.sha1(b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest()
 
 
-def swap_into_place(staging: Path, dest: Path) -> None:
-    """Put `staging` at `dest` without deleting anything first.
+def get(url: str) -> bytes:
+    # No Authorization header: the dataset is public and this must work for a
+    # reader who has never signed in to Hugging Face.
+    request = urllib.request.Request(url, headers={"User-Agent": f"sie-examples/{TASK}"})
+    with urllib.request.urlopen(request, timeout=300) as response:
+        return response.read()
 
-    Both live in the same parent, so each rename is atomic and cannot half
-    happen. The previous directory is only removed once the new one is in
-    place; if that fails, the previous one goes back.
-    """
-    previous = None
-    if dest.exists():
-        previous = dest.with_name(f"{dest.name}.previous-{os.getpid()}")
-        if previous.exists():
-            shutil.rmtree(previous)
-        dest.replace(previous)
-    try:
-        staging.replace(dest)
-    except OSError:
-        if previous is not None:
-            previous.replace(dest)
-        raise
-    if previous is not None:
-        shutil.rmtree(previous, ignore_errors=True)
+
+def listing() -> list[dict]:
+    entries = json.loads(get(f"{API}/{TASK}?recursive=true"))
+    files = [entry for entry in entries if entry.get("type") == "file"]
+    if not files:
+        raise SystemExit(f"{DATASET} revision {REVISION} has no files under {TASK}/")
+    return files
+
+
+def check_listed_id(remote: str, body: bytes, entry: dict) -> None:
+    if entry.get("size") is not None and len(body) != entry["size"]:
+        raise SystemExit(f"{remote}: downloaded {len(body)} bytes, the dataset lists {entry['size']}")
+    lfs_oid = (entry.get("lfs") or {}).get("oid")
+    blob_oid = entry.get("oid")
+    if lfs_oid:
+        if hashlib.sha256(body).hexdigest() != lfs_oid:
+            raise SystemExit(f"{remote}: the bytes do not hash to the LFS digest the dataset lists")
+    elif blob_oid:
+        if git_blob_oid(body) != blob_oid:
+            raise SystemExit(f"{remote}: the bytes do not match the object id the dataset lists")
+    else:
+        raise SystemExit(f"{remote}: the dataset lists no id for this file, so it cannot be checked")
+
+
+def check_manifest(staging: Path, written: set[str]) -> None:
+    manifest_bytes = (staging / "manifest.json").read_bytes()
+    if hashlib.sha256(manifest_bytes).hexdigest() != MANIFEST_SHA256:
+        raise SystemExit("manifest.json does not match the digest this script pins")
+    listed = {f["path"]: f for f in json.loads(manifest_bytes)["files"]}
+    extra = written - set(listed) - {"manifest.json"}
+    if extra:
+        raise SystemExit(f"files the manifest does not list: {', '.join(sorted(extra))}")
+    for path, entry in sorted(listed.items()):
+        if path not in written:
+            raise SystemExit(f"{path}: listed in manifest.json but not downloaded")
+        body = (staging / path).read_bytes()
+        if len(body) != entry["bytes"] or hashlib.sha256(body).hexdigest() != entry["sha256"]:
+            raise SystemExit(f"{path}: does not match the SHA-256 in manifest.json")
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--dest", default="data", help="output directory (default: data)")
-    args = parser.parse_args()
-
-    dest = Path(args.dest)
-    reason = refuse_reason(dest)
-    if reason is not None:
-        print(f"refusing to replace {dest}: {reason}", file=sys.stderr)
-        return 1
-
-    dest.parent.mkdir(parents=True, exist_ok=True)
-
-    manifest_bytes = download("manifest.json")
-    if digest(manifest_bytes) != MANIFEST_SHA256:
-        print(
-            f"manifest.json digest is {digest(manifest_bytes)}, expected {MANIFEST_SHA256}",
-            file=sys.stderr,
-        )
-        return 1
-    manifest = json.loads(manifest_bytes)
-
-    files = manifest["files_sha256"]
-    # Staged beside the destination, so the swap below is a rename on one
-    # filesystem rather than a copy that can fail half way.
-    staging = Path(tempfile.mkdtemp(prefix=f".{TASK}-evidence-", dir=dest.parent))
+    print(f"{DATASET} at {REVISION}")
+    # Download into a staging directory and swap it in only once every file has
+    # arrived and checked, so a failure never leaves a mixed set behind.
+    staging = Path(tempfile.mkdtemp(prefix="sie-evidence-", dir=HERE))
     try:
-        (staging / "manifest.json").write_bytes(manifest_bytes)
-        for relative_path, expected in sorted(files.items()):
-            payload = download(relative_path)
-            actual = digest(payload)
-            if actual != expected:
-                print(f"{relative_path} digest is {actual}, expected {expected}", file=sys.stderr)
-                return 1
-            target = staging / relative_path
+        total = 0
+        written: set[str] = set()
+        for entry in sorted(listing(), key=lambda item: item["path"]):
+            remote = entry["path"]
+            relative = remote[len(TASK) + 1 :]
+            body = get(f"{FILES}/{remote}")
+            check_listed_id(remote, body, entry)
+            target = staging / relative
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(payload)
+            target.write_bytes(body)
+            written.add(relative)
+            total += len(body)
+            print(f"  {relative} ({len(body):,} bytes)")
 
-        calls_sha = digest((staging / "calls.json").read_bytes())
-        if calls_sha != manifest["calls_sha256"]:
-            print("calls.json does not match the digest in manifest.json", file=sys.stderr)
+        missing = [name for name in REQUIRED if name not in written]
+        if missing:
+            print("The download is incomplete; score.py would not be scoring the recorded run:", file=sys.stderr)
+            for name in missing:
+                print(f"  missing {name}", file=sys.stderr)
             return 1
+        check_manifest(staging, written)
 
-        (staging / MARKER_NAME).write_bytes(marker_bytes())
-
-        # Re-checked here: the first check ran before the download, and the
-        # destination could have changed since.
-        reason = refuse_reason(dest)
-        if reason is not None:
-            print(f"refusing to replace {dest}: {reason}", file=sys.stderr)
-            return 1
-        swap_into_place(staging, dest)
+        # Move the old evidence aside and delete it only once the new set is in
+        # place, so a failed rename never leaves no evidence at all.
+        backup = EVIDENCE.with_name(EVIDENCE.name + ".old")
+        shutil.rmtree(backup, ignore_errors=True)
+        if EVIDENCE.exists():
+            EVIDENCE.rename(backup)
+        try:
+            staging.rename(EVIDENCE)
+        except OSError:
+            if backup.exists():
+                backup.rename(EVIDENCE)
+            raise
+        shutil.rmtree(backup, ignore_errors=True)
     finally:
         shutil.rmtree(staging, ignore_errors=True)
 
-    print(f"{TASK}: {len(files) + 1} files verified into {args.dest}/ at revision {REVISION}")
-    print(f"{manifest['call_count']} recorded calls in {args.dest}/calls.json")
+    print(f"Wrote {total:,} bytes to {EVIDENCE}, every file checked against the dataset and manifest.json")
+    print("Now run: python3 score.py")
     return 0
 
 

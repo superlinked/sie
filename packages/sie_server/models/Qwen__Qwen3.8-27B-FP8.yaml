@@ -14,6 +14,20 @@ inputs:
   # Qwen documents native video understanding, but video is not yet wired
   # through the SIE generation request surface.
   video: false
+# A request with ONE image reads it at up to 3,211,264 pixels (3,136 visual
+# tokens, one per merged 32x32 patch), the resolution a dense form or statement
+# needs: at the family's 1,003,520 a full page came back with misread names and
+# digits. SIE_SGLANG_SINGLE_IMAGE_MAX_PIXELS raises the bound for single-image
+# requests only; a request with two or more images keeps --mm-process-config's
+# 1,003,520 per image, so multi-image requests fit the 8K window exactly as
+# before. The worker reserves the matching bound per request. Every profile
+# also compiles JSON-schema grammars without free whitespace, so greedy
+# decoding cannot pad a reply with indentation or run to the output cap in
+# spaces.
+# Every profile also bounds each JSON number to 19 integer and 19 fractional
+# digits (``json_number_max_digits``). XGrammar leaves digit runs unbounded, so
+# a greedy decode that starts repeating a digit (``8214263.0000...``) ran to
+# the output cap on 2 of 30 page-image extractions on the batch profile.
 tasks:
   generate:
     # Keep the bare route conservative. Native context is exposed only through
@@ -53,17 +67,21 @@ profiles:
     kv_budget_tokens: 8192
     adapter_options:
       loadtime:
+        extra_env:
+          SIE_SGLANG_SINGLE_IMAGE_MAX_PIXELS: "3211264"
         mem_fraction_static: 0.85
         served_model_name: Qwen/Qwen3.8-27B-FP8
         disable_cuda_graph: true
         attention_backend: flashinfer
         grammar_backend: xgrammar
+        json_number_max_digits: 19
         tool_call_parser: qwen3_coder
         speculative:
           enabled: false
         extra_launch_args:
           - "--mm-process-config"
           - '{"image":{"min_pixels":65536,"max_pixels":1003520}}'
+          - "--constrained-json-disable-any-whitespace"
           - "--kv-cache-dtype"
           - "bfloat16"
           - "--mamba-ssm-dtype"
@@ -72,7 +90,9 @@ profiles:
         first_chunk_timeout_s: 90
         inter_chunk_timeout_s: 15
         overall_timeout_s: 600
-        # Official Qwen3.8 non-thinking sampling recipe.
+        # Official Qwen3.8 non-thinking sampling recipe. Grammar-constrained
+        # requests default to temperature 0 and no presence penalty instead
+        # (see GRAMMAR_SAMPLING_DEFAULTS in core/runtime_options.py).
         default_sampling:
           temperature: 0.7
           top_p: 0.8
@@ -106,8 +126,10 @@ profiles:
         served_model_name: Qwen/Qwen3.8-27B-FP8
         attention_backend: fa3
         grammar_backend: xgrammar
+        json_number_max_digits: 19
         tool_call_parser: qwen3_coder
         extra_env:
+          SIE_SGLANG_SINGLE_IMAGE_MAX_PIXELS: "3211264"
           SGLANG_JIT_DEEPGEMM_FAST_WARMUP: "1"
         speculative:
           enabled: true
@@ -118,6 +140,7 @@ profiles:
         extra_launch_args:
           - "--mm-process-config"
           - '{"image":{"min_pixels":65536,"max_pixels":1003520}}'
+          - "--constrained-json-disable-any-whitespace"
           - "--kv-cache-dtype"
           - "bfloat16"
           - "--mamba-ssm-dtype"
@@ -155,14 +178,17 @@ profiles:
         served_model_name: Qwen/Qwen3.8-27B-FP8
         attention_backend: fa3
         grammar_backend: xgrammar
+        json_number_max_digits: 19
         tool_call_parser: qwen3_coder
         extra_env:
+          SIE_SGLANG_SINGLE_IMAGE_MAX_PIXELS: "3211264"
           SGLANG_JIT_DEEPGEMM_FAST_WARMUP: "1"
         speculative:
           enabled: false
         extra_launch_args:
           - "--mm-process-config"
           - '{"image":{"min_pixels":65536,"max_pixels":1003520}}'
+          - "--constrained-json-disable-any-whitespace"
           - "--kv-cache-dtype"
           - "bfloat16"
           - "--mamba-ssm-dtype"
@@ -180,6 +206,72 @@ profiles:
           - "1"
           - "--cuda-graph-max-bs-decode"
           - "1"
+
+  # H100-80GB batch lane: the h100-256k launch shape without speculation,
+  # admitting up to 16 running requests with CUDA graphs captured for every
+  # decode batch size through 16. Speculation stays off so xgrammar enforces
+  # every constrained token, which makes this the concurrent grammar-safe
+  # native-window lane. Measured on one H100 80GB with a ~670-token json_schema
+  # request: 72 tok/s decode at batch 1 against 11.6 on the bare route, and
+  # 148 requests/min at 8 in flight against 44. Standalone so its grammar twin
+  # inherits only this shape.
+  h100-256k-batch:
+    grammar_profile: h100-256k-batch-no-spec
+    max_output_tokens: 32768
+    max_batch_tokens: 262144
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.sglang.cuda13:SGLangCuda13Adapter
+    kv_budget_tokens: 262144
+    adapter_options:
+      loadtime:
+        max_seq_length: 262144
+        mem_fraction_static: 0.85
+        served_model_name: Qwen/Qwen3.8-27B-FP8
+        attention_backend: fa3
+        grammar_backend: xgrammar
+        json_number_max_digits: 19
+        tool_call_parser: qwen3_coder
+        extra_env:
+          SIE_SGLANG_SINGLE_IMAGE_MAX_PIXELS: "3211264"
+          SGLANG_JIT_DEEPGEMM_FAST_WARMUP: "1"
+        speculative:
+          enabled: false
+        extra_launch_args:
+          - "--mm-process-config"
+          - '{"image":{"min_pixels":65536,"max_pixels":1003520}}'
+          - "--constrained-json-disable-any-whitespace"
+          - "--kv-cache-dtype"
+          - "bfloat16"
+          - "--mamba-ssm-dtype"
+          - "bfloat16"
+          - "--mamba-radix-cache-strategy"
+          - "extra_buffer"
+          - "--disable-overlap-schedule"
+          - "--page-size"
+          - "64"
+          - "--chunked-prefill-size"
+          - "32768"
+          - "--max-prefill-tokens"
+          - "32768"
+          - "--max-running-requests"
+          - "16"
+          - "--cuda-graph-max-bs-decode"
+          - "16"
+      runtime:
+        first_chunk_timeout_s: 900
+        inter_chunk_timeout_s: 30
+        overall_timeout_s: 1800
+        default_sampling:
+          temperature: 0.7
+          top_p: 0.8
+          top_k: 20
+          presence_penalty: 1.5
+        stop_tokens:
+          - "<|im_end|>"
+  # Constrained-decoding identity for the batch lane; identical because the
+  # parent is already non-speculative and grammar-safe.
+  h100-256k-batch-no-spec:
+    extends: h100-256k-batch
 
   # H100-80GB thinking: the h100-256k launch shape without speculation, plus
   # the qwen3 reasoning parser and the strict-thinking lane so a premature EOS
@@ -203,15 +295,18 @@ profiles:
         served_model_name: Qwen/Qwen3.8-27B-FP8
         attention_backend: fa3
         grammar_backend: xgrammar
+        json_number_max_digits: 19
         reasoning_parser: qwen3
         tool_call_parser: qwen3_coder
         extra_env:
+          SIE_SGLANG_SINGLE_IMAGE_MAX_PIXELS: "3211264"
           SGLANG_JIT_DEEPGEMM_FAST_WARMUP: "1"
         speculative:
           enabled: false
         extra_launch_args:
           - "--mm-process-config"
           - '{"image":{"min_pixels":65536,"max_pixels":1003520}}'
+          - "--constrained-json-disable-any-whitespace"
           - "--kv-cache-dtype"
           - "bfloat16"
           - "--mamba-ssm-dtype"
@@ -266,8 +361,10 @@ profiles:
         served_model_name: Qwen/Qwen3.8-27B-FP8
         attention_backend: fa3
         grammar_backend: xgrammar
+        json_number_max_digits: 19
         tool_call_parser: qwen3_coder
         extra_env:
+          SIE_SGLANG_SINGLE_IMAGE_MAX_PIXELS: "3211264"
           SGLANG_JIT_DEEPGEMM_FAST_WARMUP: "1"
         speculative:
           enabled: true
@@ -278,6 +375,7 @@ profiles:
         extra_launch_args:
           - "--mm-process-config"
           - '{"image":{"min_pixels":65536,"max_pixels":1003520}}'
+          - "--constrained-json-disable-any-whitespace"
           - "--kv-cache-dtype"
           - "bfloat16"
           - "--mamba-ssm-dtype"
@@ -315,14 +413,17 @@ profiles:
         served_model_name: Qwen/Qwen3.8-27B-FP8
         attention_backend: fa3
         grammar_backend: xgrammar
+        json_number_max_digits: 19
         tool_call_parser: qwen3_coder
         extra_env:
+          SIE_SGLANG_SINGLE_IMAGE_MAX_PIXELS: "3211264"
           SGLANG_JIT_DEEPGEMM_FAST_WARMUP: "1"
         speculative:
           enabled: false
         extra_launch_args:
           - "--mm-process-config"
           - '{"image":{"min_pixels":65536,"max_pixels":1003520}}'
+          - "--constrained-json-disable-any-whitespace"
           - "--kv-cache-dtype"
           - "bfloat16"
           - "--mamba-ssm-dtype"
@@ -360,8 +461,10 @@ profiles:
         served_model_name: Qwen/Qwen3.8-27B-FP8
         attention_backend: flashinfer
         grammar_backend: xgrammar
+        json_number_max_digits: 19
         tool_call_parser: qwen3_coder
         extra_env:
+          SIE_SGLANG_SINGLE_IMAGE_MAX_PIXELS: "3211264"
           SGLANG_JIT_DEEPGEMM_FAST_WARMUP: "1"
         speculative:
           enabled: true
@@ -372,6 +475,7 @@ profiles:
         extra_launch_args:
           - "--mm-process-config"
           - '{"image":{"min_pixels":65536,"max_pixels":1003520}}'
+          - "--constrained-json-disable-any-whitespace"
           - "--kv-cache-dtype"
           - "bfloat16"
           - "--mamba-ssm-dtype"
@@ -407,14 +511,17 @@ profiles:
         served_model_name: Qwen/Qwen3.8-27B-FP8
         attention_backend: flashinfer
         grammar_backend: xgrammar
+        json_number_max_digits: 19
         tool_call_parser: qwen3_coder
         extra_env:
+          SIE_SGLANG_SINGLE_IMAGE_MAX_PIXELS: "3211264"
           SGLANG_JIT_DEEPGEMM_FAST_WARMUP: "1"
         speculative:
           enabled: false
         extra_launch_args:
           - "--mm-process-config"
           - '{"image":{"min_pixels":65536,"max_pixels":1003520}}'
+          - "--constrained-json-disable-any-whitespace"
           - "--kv-cache-dtype"
           - "bfloat16"
           - "--mamba-ssm-dtype"

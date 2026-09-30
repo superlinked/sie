@@ -10209,6 +10209,28 @@ pub fn parse_queue_request(
 
 pub(crate) const MAX_SCORE_ITEMS: usize = 1000;
 pub(crate) const MAX_EMBEDDING_INPUTS: usize = 256;
+/// Mirrors `sie_server.core.extract_cost.MAX_EXTRACT_LABELS`, which the
+/// server's HTTP API enforces on `params.labels`.
+pub(crate) const MAX_EXTRACT_LABELS: usize = 1000;
+
+/// Labels an extract request carries: `params.labels` plus every label of
+/// `params.options.label_groups`. A group whose value is not an array counts
+/// as one label.
+pub(crate) fn extract_label_count(params: &publisher::WorkParams) -> usize {
+    let labels = params.labels.as_ref().map_or(0, Vec::len);
+    let grouped = params
+        .options
+        .as_ref()
+        .and_then(|options| options.get("label_groups"))
+        .and_then(serde_json::Value::as_object)
+        .map_or(0, |groups| {
+            groups
+                .values()
+                .map(|group| group.as_array().map_or(1, Vec::len))
+                .fold(0usize, usize::saturating_add)
+        });
+    labels.saturating_add(grouped)
+}
 
 /// Reject queue-request bodies whose per-item / query shapes the worker
 /// cannot consume, at ingress, instead of forwarding them to a GPU lane
@@ -10255,6 +10277,13 @@ fn validate_queue_item_shapes(
                 return Err("'query' must be an object".to_string().into());
             }
         }
+    }
+
+    if endpoint == "extract" && extract_label_count(params) > MAX_EXTRACT_LABELS {
+        return Err(format!(
+            "'labels' and 'options.label_groups' must contain at most {MAX_EXTRACT_LABELS} labels together"
+        )
+        .into());
     }
 
     // Every work item must be a map/object.
@@ -14880,9 +14909,18 @@ mod tests {
     #[derive(Default)]
     struct GenerationTargetProbe {
         targets: std::sync::Mutex<Vec<(String, PublishTarget)>>,
+        params: std::sync::Mutex<Vec<WorkParams>>,
     }
 
     impl GenerationTargetProbe {
+        fn take_params(&self) -> WorkParams {
+            self.params
+                .lock()
+                .expect("params probe lock")
+                .pop()
+                .expect("generation publish params")
+        }
+
         fn take_target(&self) -> (String, PublishTarget) {
             self.targets
                 .lock()
@@ -14925,7 +14963,7 @@ mod tests {
             display_model: &str,
             _engine: &str,
             _bundle_config_hash: &str,
-            _params: &WorkParams,
+            params: &WorkParams,
             _admission_pool: &str,
         ) -> Result<
             (
@@ -14936,6 +14974,10 @@ mod tests {
             ),
             String,
         > {
+            self.params
+                .lock()
+                .expect("params probe lock")
+                .push(params.clone());
             self.targets
                 .lock()
                 .expect("target probe lock")
@@ -14978,7 +15020,7 @@ mod tests {
             display_model: &str,
             _engine: &str,
             bundle_config_hash: &str,
-            _params: &WorkParams,
+            params: &WorkParams,
             _admission_pool: &str,
         ) -> Result<
             (
@@ -14989,6 +15031,10 @@ mod tests {
             ),
             String,
         > {
+            self.params
+                .lock()
+                .expect("params probe lock")
+                .push(params.clone());
             self.targets
                 .lock()
                 .expect("target probe lock")
@@ -15851,6 +15897,151 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_generation_target(probe.take_target(), "org/g", "org/g:no-spec", "a100-80gb");
+    }
+
+    /// A reason-first schema: property and keyword order deliberately
+    /// non-alphabetical at every level, so a sorted re-serialisation
+    /// anywhere between the request body and the queue payload shows up.
+    const REASON_FIRST_SCHEMA: &str = r#"{
+        "type": "object",
+        "properties": {
+            "zeta_reasoning": {"type": "string"},
+            "answer": {
+                "type": "object",
+                "properties": {"value": {"type": "string"}, "confidence": {"type": "number"}},
+                "required": ["value", "confidence"]
+            }
+        },
+        "required": ["zeta_reasoning", "answer"]
+    }"#;
+
+    /// Build a request from literal body text so the test controls the
+    /// exact key order on the wire (a `json!` value would not).
+    fn raw_json_request(uri: &str, body: String) -> Request {
+        Request::builder()
+            .uri(uri)
+            .header("content-type", "application/json")
+            .header("x-sie-machine-profile", "a100-80gb")
+            .body(Body::from(body))
+            .expect("request")
+    }
+
+    fn msgpack_field(value: &rmpv::Value, key: &str) -> rmpv::Value {
+        value
+            .as_map()
+            .expect("msgpack map")
+            .iter()
+            .find(|(k, _)| k.as_str() == Some(key))
+            .map(|(_, v)| v.clone())
+            .unwrap_or_else(|| panic!("missing {key:?} in {value}"))
+    }
+
+    fn msgpack_keys(value: &rmpv::Value) -> Vec<String> {
+        value
+            .as_map()
+            .expect("msgpack map")
+            .iter()
+            .map(|(k, _)| k.as_str().expect("string key").to_string())
+            .collect()
+    }
+
+    /// Encode the captured generate params exactly as the queue publisher
+    /// does (`rmp_serde::to_vec_named`) and return `grammar.value` decoded
+    /// from those bytes.
+    fn queued_json_schema(params: &WorkParams) -> rmpv::Value {
+        let generate = params.generate.as_ref().expect("generate params");
+        let bytes = rmp_serde::to_vec_named(generate).expect("encode generate payload");
+        let decoded = rmpv::decode::read_value(&mut bytes.as_slice()).expect("decode payload");
+        let grammar = msgpack_field(&decoded, "grammar");
+        assert_eq!(
+            msgpack_field(&grammar, "kind").as_str(),
+            Some("json_schema")
+        );
+        msgpack_field(&grammar, "value")
+    }
+
+    fn assert_reason_first_order(schema: &rmpv::Value) {
+        assert_eq!(msgpack_keys(schema), ["type", "properties", "required"]);
+        let properties = msgpack_field(schema, "properties");
+        assert_eq!(msgpack_keys(&properties), ["zeta_reasoning", "answer"]);
+        let answer = msgpack_field(&properties, "answer");
+        assert_eq!(msgpack_keys(&answer), ["type", "properties", "required"]);
+        assert_eq!(
+            msgpack_keys(&msgpack_field(&answer, "properties")),
+            ["value", "confidence"]
+        );
+    }
+
+    async fn reason_first_state() -> (Arc<AppState>, Arc<GenerationTargetProbe>) {
+        let (state, probe) = mixed_governed_generation_state(false).await;
+        let mut state = Arc::try_unwrap(state).unwrap_or_else(|_| panic!("unique test state"));
+        state.model_access_policy = None;
+        (Arc::new(state), probe)
+    }
+
+    #[tokio::test]
+    async fn chat_response_format_json_schema_reaches_queue_in_caller_property_order() {
+        let (state, probe) = reason_first_state().await;
+        let body = format!(
+            r#"{{"model": "org/g",
+                "messages": [{{"role": "user", "content": "hello"}}],
+                "max_tokens": 4,
+                "response_format": {{
+                    "type": "json_schema",
+                    "json_schema": {{"name": "reason_first", "schema": {REASON_FIRST_SCHEMA}}}
+                }}}}"#
+        );
+
+        let response =
+            proxy_chat(State(state), raw_json_request("/v1/chat/completions", body)).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_generation_target(probe.take_target(), "org/g", "org/g:no-spec", "a100-80gb");
+        assert_reason_first_order(&queued_json_schema(&probe.take_params()));
+    }
+
+    #[tokio::test]
+    async fn native_json_schema_grammar_reaches_queue_in_caller_property_order() {
+        let (state, probe) = reason_first_state().await;
+        let body = format!(
+            r#"{{"prompt": "hello", "max_new_tokens": 4,
+                "grammar": {{"json_schema": {REASON_FIRST_SCHEMA}}}}}"#
+        );
+
+        let response = proxy_request(
+            State(state),
+            raw_json_request("/v1/generate/org%2Fg", body),
+            "generate",
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_generation_target(probe.take_target(), "org/g", "org/g:no-spec", "a100-80gb");
+        assert_reason_first_order(&queued_json_schema(&probe.take_params()));
+    }
+
+    #[test]
+    fn msgpack_json_schema_grammar_keeps_caller_property_order() {
+        // Decode straight into rmpv so the msgpack map keeps the text's
+        // key order without going through serde_json::Value.
+        let schema_msgpack: rmpv::Value =
+            serde_json::from_str(REASON_FIRST_SCHEMA).expect("schema as msgpack value");
+        let body = vec![
+            (rmpv::Value::from("prompt"), rmpv::Value::from("hi")),
+            (rmpv::Value::from("max_new_tokens"), rmpv::Value::from(8u32)),
+            (
+                rmpv::Value::from("grammar"),
+                rmpv::Value::Map(vec![(rmpv::Value::from("json_schema"), schema_msgpack)]),
+            ),
+        ];
+        let generate = generate_params_from_rmpv(&body)
+            .expect("rmpv ok")
+            .expect("some params");
+        let params = WorkParams {
+            generate: Some(generate),
+            ..Default::default()
+        };
+        assert_reason_first_order(&queued_json_schema(&params));
     }
 
     #[tokio::test]
@@ -20529,6 +20720,71 @@ mod tests {
             QueueParseError::Generic(message) => assert!(message.contains("at most 1000")),
             QueueParseError::PreBuilt(_) => panic!("expected generic parse error"),
         }
+    }
+
+    #[test]
+    fn test_parse_queue_request_extract_enforces_the_label_limit() {
+        let labels = |count: usize| -> Vec<serde_json::Value> {
+            (0..count)
+                .map(|index| json!(format!("label {index}")))
+                .collect()
+        };
+        let at_limit = serde_json::to_vec(&json!({
+            "items": [{"text": "document"}],
+            "params": {"labels": labels(MAX_EXTRACT_LABELS)}
+        }))
+        .unwrap();
+        let (_, params) = parse_queue_request(&at_limit, false, "extract").unwrap();
+        assert_eq!(extract_label_count(&params), MAX_EXTRACT_LABELS);
+
+        let grouped_at_limit = serde_json::to_vec(&json!({
+            "items": [{"text": "document"}],
+            "params": {
+                "labels": labels(400),
+                "options": {"label_groups": {"topic": labels(500), "urgency": labels(99), "remote": "yes"}}
+            }
+        }))
+        .unwrap();
+        let (_, params) = parse_queue_request(&grouped_at_limit, false, "extract").unwrap();
+        assert_eq!(extract_label_count(&params), MAX_EXTRACT_LABELS);
+
+        let too_many_labels = serde_json::to_vec(&json!({
+            "items": [{"text": "document"}],
+            "params": {"labels": labels(MAX_EXTRACT_LABELS + 1)}
+        }))
+        .unwrap();
+        let too_many_together = serde_json::to_vec(&json!({
+            "items": [{"text": "document"}],
+            "params": {
+                "labels": labels(1),
+                "options": {"label_groups": {"topic": labels(MAX_EXTRACT_LABELS)}}
+            }
+        }))
+        .unwrap();
+        let too_many_msgpack = rmp_serde::to_vec_named(&json!({
+            "items": [{"text": "document"}],
+            "params": {"options": {"label_groups": {"a": labels(600), "b": labels(401)}}}
+        }))
+        .unwrap();
+        for (body, is_msgpack) in [
+            (too_many_labels, false),
+            (too_many_together, false),
+            (too_many_msgpack, true),
+        ] {
+            match parse_queue_request(&body, is_msgpack, "extract").unwrap_err() {
+                QueueParseError::Generic(message) => {
+                    assert!(message.contains("at most 1000 labels"))
+                }
+                QueueParseError::PreBuilt(_) => panic!("expected generic parse error"),
+            }
+        }
+
+        let encode = serde_json::to_vec(&json!({
+            "items": [{"text": "document"}],
+            "params": {"options": {"label_groups": {"topic": labels(MAX_EXTRACT_LABELS + 1)}}}
+        }))
+        .unwrap();
+        assert!(parse_queue_request(&encode, false, "encode").is_ok());
     }
 
     // ── msgpack_numpy conversion tests ──────────────────────────

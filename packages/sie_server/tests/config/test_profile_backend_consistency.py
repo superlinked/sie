@@ -177,3 +177,39 @@ def test_guardian_task_pins_harm_risk() -> None:
     assert generate.get("chat_template_kwargs") == {
         "guardian_config": {"risk_name": "harm"},
     }
+
+
+QWEN3GUARD_PROFILES = sorted(MODELS_DIR.glob("Qwen__Qwen3Guard-Gen-*.yaml"))
+
+
+@pytest.mark.parametrize("path", QWEN3GUARD_PROFILES, ids=lambda p: p.stem)
+def test_qwen3guard_profiles_serve_greedy_text_verdicts(path: Path) -> None:
+    """Qwen3Guard answers in text lines, so it must stay greedy and off the logprob dial.
+
+    The adapter's ``guard`` load-time block reads a one-token Yes/No verdict
+    from logprobs. Qwen3Guard answers ``Safety: ...`` / ``Categories: ...``
+    instead, so a ``guard`` block would misread it. Every profile is
+    non-extending, so each must repeat greedy sampling and the stop token.
+    """
+    data = yaml.safe_load(path.read_text()) or {}
+    generate = (data.get("tasks") or {}).get("generate") or {}
+    assert (generate.get("capabilities") or {}).get("guard") is True
+    assert "chat_template_kwargs" not in generate
+
+    profiles = data.get("profiles") or {}
+    assert profiles, f"No profiles found in {path.name}"
+    for name, entry in profiles.items():
+        options = entry.get("adapter_options") or {}
+        loadtime = options.get("loadtime") or {}
+        runtime = options.get("runtime") or {}
+        assert "guard" not in loadtime, f"{path.name}:{name} must not carry a logprob guard block"
+        assert loadtime.get("served_model_name") == data["sie_id"], f"{path.name}:{name}"
+        assert runtime.get("default_sampling") == {"temperature": 0.0}, f"{path.name}:{name}"
+        assert runtime.get("stop_tokens") == ["<|im_end|>"], f"{path.name}:{name}"
+
+
+def test_qwen3guard_catalog_entries_present() -> None:
+    assert [p.name for p in QWEN3GUARD_PROFILES] == [
+        "Qwen__Qwen3Guard-Gen-0.6B.yaml",
+        "Qwen__Qwen3Guard-Gen-4B.yaml",
+    ]

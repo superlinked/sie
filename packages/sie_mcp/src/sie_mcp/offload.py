@@ -36,12 +36,13 @@ REQUEST_TIMEOUT_S = 600.0
 # the server applies the model's default (0.5) and drops lower spans first.
 MIN_PII_SCORE = 0.3
 
-# Bounded windowing for the GLiNER extract/redact path. GLiNER reads only the
-# first ``max_len`` words of each text (384 for the default models) and silently
-# ignores the rest, where a word is a match of ``_GLINER_WORD``, so every
-# punctuation mark counts as one. The label prompt does not count toward that
-# limit. A document is therefore split into overlapping windows of
-# EXTRACT_WINDOW_WORDS words, under the smallest ``max_len`` of the GLiNER models
+# Bounded windowing for the GLiNER extract/redact path. A GLiNER model reads
+# ``max_len`` words of a text at once (384 for the default models), where a word
+# is a match of ``_GLINER_WORD``, so every punctuation mark counts as one. The
+# label prompt does not count toward that limit. Older servers silently ignored
+# the rest of a longer text; current servers read it in windows of their own but
+# fail an item that needs too many. A document is therefore split here into
+# overlapping windows of EXTRACT_WINDOW_WORDS words, under the smallest ``max_len`` of the GLiNER models
 # in the catalog (296) so that any configured model reads each window whole, and
 # the entities are merged with offsets shifted back to the original text. The overlap is longer than the
 # longest span the default models predict (12 words), so an entity that

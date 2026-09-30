@@ -12,6 +12,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
+from PIL import Image as PILImage
+
 from sie_server.core.prepared import (
     DetectionPayload,
     DonutPayload,
@@ -29,7 +31,6 @@ from sie_server.types.inputs import decode_image
 
 if TYPE_CHECKING:
     import torch
-    from PIL import Image as PILImage
 
     from sie_server.config.model import ModelConfig
     from sie_server.types.inputs import Item
@@ -1247,6 +1248,17 @@ class GlmOcrPreprocessor:
         return out
 
 
+def _shrink_to(image: PILImage.Image, max_side: int | None) -> PILImage.Image:
+    """``image`` with its longer side at most ``max_side``, aspect ratio kept; the image itself when it fits."""
+    if max_side is None or max(image.width, image.height) <= max_side:
+        return image
+    scale = max_side / max(image.width, image.height)
+    size = (max(1, round(image.width * scale)), max(1, round(image.height * scale)))
+    # reducing_gap lets PIL box-reduce by an integer factor first, then finish
+    # with Lanczos: close to a full Lanczos resize at a fraction of the cost.
+    return image.resize(size, PILImage.Resampling.LANCZOS, reducing_gap=3.0)
+
+
 class DetectionPreprocessor:
     """Preprocessor for object detection models (GroundingDINO, OWL-v2).
 
@@ -1277,15 +1289,26 @@ class DetectionPreprocessor:
         self,
         image_processor: Any,
         model_name: str,
+        *,
+        max_side: int | None = None,
     ) -> None:
         """Initialize with a HuggingFace image processor.
 
         Args:
             image_processor: HuggingFace image processor (processor.image_processor).
             model_name: Model name for logging.
+            max_side: When set, an image whose longer side exceeds it is first
+                shrunk with PIL (aspect ratio kept) so its longer side equals
+                ``max_side``. The model input is far smaller than a phone or
+                drone photo, and resizing a 14-megapixel frame inside the
+                image processor took seconds a request. ``original_size`` stays
+                the size that was sent, so boxes still map to the caller's
+                pixels. Pick a value at least twice the processor's own target
+                so the processor's resize still does the final antialiasing.
         """
         self._image_processor = image_processor
         self._model_name = model_name
+        self._max_side = max_side
 
     @property
     def modality(self) -> str:
@@ -1317,6 +1340,7 @@ class DetectionPreprocessor:
         # a raw TypeError.
         pil_img = _load_rgb(img, item_index=index)
         original_size = (pil_img.width, pil_img.height)
+        pil_img = _shrink_to(pil_img, self._max_side)
 
         # Run image_processor to produce tensor (resize, normalize)
         # This is the expensive part (~23ms, 94% of preprocessing)

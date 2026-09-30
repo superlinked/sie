@@ -2,8 +2,10 @@
 
 These models keep a document's first ``max_len`` words and encode every
 subword of each, so one long unbroken run made the encoder input unbounded.
-The adapters now read words through ``_word_window``. These tests use gliner's
-real processor with an in-memory tokenizer that gives one subword per
+The adapters now read words through ``_word_window``. A document longer than one
+window is read in several (``test_gliner_windows``), and one that needs more
+than ``MAX_DOCUMENT_WINDOWS`` fails with ``INPUT_TOO_LONG``. These tests use
+gliner's real processor with an in-memory tokenizer that gives one subword per
 character, as DeBERTa tokenizers split a run of accented letters.
 """
 
@@ -20,6 +22,7 @@ from sie_server.adapters._word_window import (
     ATTENTION_BUDGET,
     MAX_WORD_CHARS,
     WindowedSplitter,
+    gliner_windows,
     subword_budget,
 )
 from sie_server.adapters.gliner import GLiNERAdapter
@@ -27,6 +30,7 @@ from sie_server.adapters.gliner_bi import GLiNERBiAdapter
 from sie_server.adapters.glirel import _SUBWORDS_PER_WORD as GLIREL_SUBWORDS_PER_WORD
 from sie_server.adapters.glirel import GLiRELAdapter
 from sie_server.types.inputs import InvalidInputError, Item
+from sie_server.types.responses import ErrorCode
 
 gliner_config = pytest.importorskip("gliner.config")
 gliner_processor = pytest.importorskip("gliner.data_processing.processor")
@@ -118,6 +122,15 @@ def encoded(model: FakeGLiNER, texts: list[str], labels: list[str]) -> list[list
     return encoding["input_ids"].tolist()
 
 
+def window_texts(model: FakeGLiNER, texts: list[str]) -> list[str]:
+    """The text of each window the adapters read ``texts`` in."""
+    return [
+        text[window.start : window.end]
+        for text, windows in zip(texts, gliner_windows(model, texts), strict=True)
+        for window in windows or []
+    ]
+
+
 def encoded_rows(model: FakeGLiNER, texts: list[str], labels: list[str]) -> list[int]:
     """Tokens of each row gliner would give the encoder: the label prompt, then the document."""
     split, _, _ = model.prepare_inputs(texts)
@@ -146,15 +159,20 @@ def test_gliner_reads_ordinary_text_as_before(text: str) -> None:
     reference_model = FakeGLiNER(DEBERTA)  # gliner's own word splitter
     reference_adapter = GLiNERAdapter("fake/gliner")
     reference_adapter._model = reference_model
-    reference_counts = reference_adapter._doc_input_token_counts([text], ["person"])
     model = FakeGLiNER(DEBERTA)
     adapter = load(GLiNERAdapter, model)
 
     output = adapter.extract([Item(text=text)], labels=["person"])
 
-    assert encoded(model, [text], ["person"]) == encoded(reference_model, [text], ["person"])
-    assert output.input_token_counts == reference_counts
-    assert model.calls == [[text]]
+    # Each window is encoded as gliner's own splitter encodes its text.
+    (rows,) = model.calls
+    for row in rows:
+        assert encoded(model, [row], ["person"]) == encoded(reference_model, [row], ["person"])
+    if len(rows) == 1:
+        assert rows == [text]
+        assert output.input_token_counts == reference_adapter._doc_input_token_counts([text], ["person"])
+    # Every character but whitespace is a subword, counted once, with [CLS] and [SEP].
+    assert output.input_token_counts == [sum(not char.isspace() for char in text) + 2]
 
 
 @pytest.mark.parametrize("encoder_config", [DEBERTA, MODERNBERT], ids=["deberta", "modernbert"])
@@ -172,10 +190,35 @@ def test_gliner_reads_long_words_within_the_subword_budget(text: str, encoder_co
     assert isinstance(model.data_processor.words_splitter, WindowedSplitter)
     assert all(end - start <= MAX_WORD_CHARS for start, end in zip(starts[0], ends[0], strict=True))
     assert sum(len(word) for word in split) <= budget
-    # The meter counts the document subwords gliner encodes (with [CLS] and [SEP]).
-    assert output.input_token_counts == [sum(len(word) for word in split) + 2, 28]
     assert max(encoded_rows(model, [text], ["person"])) <= budget + 16
+    # The document needs more windows than one is read in: it fails whole
+    # rather than being read in part, and the other item is read as before.
+    assert output.errors is not None
+    assert output.errors[0] is not None
+    assert output.errors[0].code == ErrorCode.INPUT_TOO_LONG.value
+    assert output.errors[1] is None
+    assert output.entities[0] == []
+    assert output.input_token_counts == [0, 28]
+    assert model.calls == [["Priya Raman works at Novartis."]]
     assert seconds < 2.0
+
+
+@pytest.mark.parametrize("encoder_config", [DEBERTA, MODERNBERT], ids=["deberta", "modernbert"])
+def test_gliner_reads_long_words_in_windows_within_the_subword_budget(encoder_config: dict[str, Any]) -> None:
+    model = FakeGLiNER(encoder_config)
+    adapter = load(GLiNERAdapter, model)
+    budget = subword_budget(MAX_LEN, encoder_config)
+    text = ("b" * 200 + " ") * 60
+
+    output = adapter.extract([Item(text=text)], labels=["person"])
+
+    (rows,) = model.calls
+    assert len(rows) > 1
+    assert output.errors is None
+    for row in rows:
+        (split,), _, _ = model.prepare_inputs([row])
+        assert sum(len(word) for word in split) <= budget
+    assert output.input_token_counts == [200 * 60 + 2]
 
 
 def test_gliner_plans_forward_passes_for_long_rows_on_deberta() -> None:
@@ -188,12 +231,16 @@ def test_gliner_plans_forward_passes_for_long_rows_on_deberta() -> None:
     output = adapter.extract([Item(text=text) for text in texts], labels=["person"])
 
     assert len(output.entities) == len(texts)
-    assert sorted(text for call in model.calls for text in call) == sorted(texts)
+    assert output.input_token_counts == [200 * 40 + 2] * 8 + [28] * 4
+    # Each long text is read as three windows of 20 words.
+    assert sorted(text for call in model.calls for text in call) == sorted(window_texts(model, texts))
+    assert len(window_texts(model, texts[:1])) == 3
     assert len(model.calls) > 2
     for call in model.calls:
-        longest = max(rows[texts.index(text)] for text in call)
+        longest = max(encoded_rows(model, call, ["person"]))
         assert len(call) <= 8
         assert len(call) == 1 or len(call) * longest**2 <= ATTENTION_BUDGET
+    assert max(rows) <= max(encoded_rows(model, texts, ["person"]))
 
 
 def test_gliner_keeps_one_call_for_long_rows_on_other_encoders() -> None:
@@ -203,7 +250,9 @@ def test_gliner_keeps_one_call_for_long_rows_on_other_encoders() -> None:
 
     adapter.extract([Item(text=text) for text in texts], labels=["person"])
 
-    assert model.calls == [texts]
+    # One call holding the three windows of each text.
+    assert len(model.calls) == 1
+    assert len(model.calls[0]) == 3 * len(texts)
 
 
 def test_gliner_caps_an_absolute_position_encoder_at_its_position_table() -> None:
@@ -214,8 +263,9 @@ def test_gliner_caps_an_absolute_position_encoder_at_its_position_table() -> Non
     output = adapter.extract([Item(text=text)], labels=["person"])
 
     assert model.data_processor.transformer_tokenizer.model_max_length == 512
-    assert output.input_token_counts is not None
-    assert output.input_token_counts[0] <= subword_budget(MAX_LEN, BERT) + 2
+    assert output.input_token_counts == [len(text) - (MAX_LEN - 1) + 2]
+    (rows,) = model.calls
+    assert max(encoded_rows(model, rows, ["person"])) <= subword_budget(MAX_LEN, BERT) + 2 + 3
     assert max(encoded_rows(model, [text] * 2, ["person"] * 200)) <= 512
 
 
@@ -241,7 +291,8 @@ def test_gliner_bi_encoder_plans_forward_passes_for_long_rows_on_deberta() -> No
 
     assert len(output.entities) == len(texts)
     assert len(model.calls) > 2
-    assert sorted(text for call in model.calls for text in call) == sorted(texts)
+    assert sorted(text for call in model.calls for text in call) == sorted(window_texts(model, texts))
+    assert output.input_token_counts == [200 * 40 + 2] * 8 + [28] * 4
 
 
 def glirel_adapter(max_words: int = MAX_LEN) -> tuple[GLiRELAdapter, MagicMock]:

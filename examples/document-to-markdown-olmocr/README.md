@@ -48,6 +48,13 @@ leaderboard. Pooling every test into one rate gives a different, higher number
 | Azure Document Intelligence Layout, published | 48.7 | 0.0 | 99.1 | 21.7 | 85.5 | 67.4 | 28.3 | 0.0 | 87.6 |
 | AWS Textract, published | 40.2 | 0.0 | 100.0 | 26.8 | 65.8 | 19.7 | 23.6 | 0.0 | 85.3 |
 
+Without the two math files, where neither service emits LaTeX, the six other
+files average 71.1 for SIE LightOnOCR-2-1B, 64.9 for Azure and 53.5 for
+Textract; `score.py` prints both. Azure's Markdown wraps page headers and
+footers in HTML comments, which the scorer reads as text, so its 21.7 on
+headers and footers is likely an underestimate; with every one of those tests
+passed its Overall would be 58.5.
+
 The two rival rows are [Unsiloed's run](https://github.com/Unsiloed-AI/unsiloed-olmocr-benchmark/blob/main/reports/preliminary_2026-05-19.md)
 on olmocr 0.4.27 (19 May 2026), not ours: Azure `prebuilt-layout` with Markdown
 output, and Textract `AnalyzeDocument` with `TABLES`. Neither service emits

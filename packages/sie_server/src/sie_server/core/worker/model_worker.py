@@ -110,6 +110,19 @@ class _InFlightBatch:
         return owner is None or owner.done() or owner.cancelling() > 0
 
 
+def _dispatch_width(adapter: object) -> int:
+    """Batches a worker may run at once through ``adapter`` (see ``BaseAdapter``)."""
+    declared = getattr(adapter, "max_concurrent_dispatch", None)
+    supports_lora = getattr(adapter, "supports_lora", None)
+    if not callable(declared) or (callable(supports_lora) and supports_lora()):
+        return 1
+    try:
+        width = int(declared())
+    except (TypeError, ValueError):
+        return 1
+    return max(1, width)
+
+
 class ModelWorker:
     """Worker that batches and processes inference requests for a single model.
 
@@ -173,6 +186,15 @@ class ModelWorker:
         # dispatch, so the set_lora -> forward pair must be atomic.
         self._adapter_dispatch_lock = asyncio.Lock()
 
+        # Batches this worker may run at once. 1 (the default) is the classic
+        # single-batch dispatch. An adapter that fronts an out-of-process engine
+        # with its own continuous batching may declare more, so one batch
+        # waiting on its longest sequence does not hold back the queue behind
+        # it. Never for LoRA adapters: LoRA selection is adapter-global state.
+        self._dispatch_width = _dispatch_width(adapter)
+        self._dispatch_slots = asyncio.Semaphore(self._dispatch_width)
+        self._dispatch_tasks: set[asyncio.Task[None]] = set()
+
         # Initialize operation handlers (dependency injection point)
         if handlers is not None:
             self._handlers: dict[str, OperationHandler[Any]] = handlers
@@ -202,7 +224,9 @@ class ModelWorker:
 
         # Thread pool for running inference (doesn't block event loop)
         self._inference_executor = ThreadPoolExecutor(
-            max_workers=1,  # Single worker for GPU serialization
+            # One thread serialises in-process GPU work; an engine-backed
+            # adapter that allows concurrent dispatch gets one per batch.
+            max_workers=self._dispatch_width,
             thread_name_prefix="inference",
         )
 
@@ -396,6 +420,15 @@ class ModelWorker:
                 with contextlib.suppress(asyncio.CancelledError):
                     await self._process_task
                 self._process_task = None
+            # Concurrent dispatches unwind the same way the loop's own batch
+            # does: cancellation marks each in-flight batch orphaned, and the
+            # drain below fails its futures.
+            dispatches = list(self._dispatch_tasks)
+            for task in dispatches:
+                task.cancel()
+            for task in dispatches:
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
         finally:
             # ``finally``, and before the executor join, for two reasons.
             # The await above is a cancellation point: ``_do_unload`` runs
@@ -1017,6 +1050,13 @@ class ModelWorker:
             total_cost=total_cost,
         )
 
+        if self._dispatch_width > 1:
+            # No LoRA state to protect (see ``_dispatch_width``); bound the
+            # batches in flight instead of serialising them.
+            async with self._dispatch_slots:
+                await self._process_batch(synthetic_batch)
+            return futures
+
         async with self._adapter_dispatch_lock:
             self._adapter.set_active_lora(lora)
             await self._process_batch(synthetic_batch)
@@ -1135,6 +1175,9 @@ class ModelWorker:
     async def _process_loop(self) -> None:
         """Background loop that processes batches using FCFS across LoRAs."""
         logger.debug("Process loop started")
+        if self._dispatch_width > 1:
+            await self._process_loop_concurrent()
+            return
 
         # Track idle state across iterations. When idle, the next batch is
         # dispatched immediately (low-concurrency optimization). When busy
@@ -1218,34 +1261,7 @@ class ModelWorker:
                     unique_requests = len({id(m) for m in batch.metadata})
                     self._stats.requests_per_batch.append(unique_requests)
 
-                # Track batch efficiency for adaptive controller
-                if self._efficiency_tracker is not None:
-                    self._efficiency_tracker.record(batch.total_cost, self._batch_config.max_batch_cost)
-
-                # Step the adaptive controller after processing. ``apply_step``
-                # owns the controller-output → _batch_config write-back (see
-                # AdaptiveBatchController); it is synchronous, so the in-place
-                # mutation stays safe against BatchFormer's async lock, which
-                # cannot interleave with it.
-                if self._adaptive_controller is not None and self._latency_tracker is not None:
-                    observed_p50 = self._latency_tracker.p50()
-                    fill_ratio = self._efficiency_tracker.mean_fill_ratio() if self._efficiency_tracker else None
-                    starvation_resets_before = self._adaptive_controller.starvation_resets
-                    self._adaptive_controller.apply_step(
-                        self._batch_config, observed_p50, fill_ratio, batch_size=batch.size
-                    )
-                    if telemetry is not None:
-                        telemetry.adaptive_snapshot(
-                            model=self._model_name or "other",
-                            profile="default",
-                            wait_ms=self._adaptive_controller.current_wait_ms,
-                            cost=self._adaptive_controller.current_batch_cost,
-                            observed_p50_ms=observed_p50,
-                            target_p50_ms=self._adaptive_controller.target_p50_ms,
-                            starvation_resets_delta=(
-                                self._adaptive_controller.starvation_resets - starvation_resets_before
-                            ),
-                        )
+                self._step_adaptive_controller(batch, telemetry)
 
                 # Log every 10 batches at INFO level for visibility
                 if self._stats.batches_processed % 10 == 0:
@@ -1274,6 +1290,86 @@ class ModelWorker:
             logger.info("Worker stats summary:\n%s", self._stats.summary())
 
         logger.debug("Process loop stopped")
+
+    def _step_adaptive_controller(self, batch: FormattedBatch[HasCost, RequestMetadata], telemetry: Any) -> None:
+        """Record a finished batch's efficiency and step the adaptive controller.
+
+        Runs on the worker's event loop after each dispatched batch, in both the
+        single-batch loop and concurrent dispatch. ``apply_step`` owns the
+        controller-output to ``_batch_config`` write-back (see
+        AdaptiveBatchController); it is synchronous, so the in-place mutation
+        stays safe against BatchFormer's async lock, which cannot interleave
+        with it.
+        """
+        if self._efficiency_tracker is not None:
+            self._efficiency_tracker.record(batch.total_cost, self._batch_config.max_batch_cost)
+        if self._adaptive_controller is not None and self._latency_tracker is not None:
+            observed_p50 = self._latency_tracker.p50()
+            fill_ratio = self._efficiency_tracker.mean_fill_ratio() if self._efficiency_tracker else None
+            starvation_resets_before = self._adaptive_controller.starvation_resets
+            self._adaptive_controller.apply_step(self._batch_config, observed_p50, fill_ratio, batch_size=batch.size)
+            if telemetry is not None:
+                telemetry.adaptive_snapshot(
+                    model=self._model_name or "other",
+                    profile="default",
+                    wait_ms=self._adaptive_controller.current_wait_ms,
+                    cost=self._adaptive_controller.current_batch_cost,
+                    observed_p50_ms=observed_p50,
+                    target_p50_ms=self._adaptive_controller.target_p50_ms,
+                    starvation_resets_delta=(self._adaptive_controller.starvation_resets - starvation_resets_before),
+                )
+
+    async def _process_loop_concurrent(self) -> None:
+        """Dispatch batches as soon as they form, up to ``_dispatch_width`` at once.
+
+        Used only for adapters that declare ``max_concurrent_dispatch() > 1``
+        and have no LoRA support, so there is no active-LoRA state to protect
+        and no ``set_active_lora`` call. Each batch is pulled as an idle worker
+        would, without waiting to coalesce: the engine behind the adapter does
+        the batching. A slot is taken only once a batch exists, so an idle
+        direct queue never holds a slot the pre-formed (sidecar) path needs.
+        While a pulled batch waits for a slot it is registered in flight, so
+        ``stop()`` fails its requests instead of losing them.
+        """
+        while self._running:
+            try:
+                _active_lora, batch, _ = await self._get_next_batch_fcfs(True)
+                if batch.size == 0:
+                    continue
+                waiting = self._register_in_flight(batch)
+                try:
+                    await self._dispatch_slots.acquire()
+                except asyncio.CancelledError:
+                    waiting.orphaned = not self._running
+                    if not waiting.orphaned:
+                        self._in_flight.pop(waiting.token, None)
+                    raise
+                self._in_flight.pop(waiting.token, None)
+                task = asyncio.create_task(self._dispatch_concurrently(batch))
+                self._dispatch_tasks.add(task)
+                task.add_done_callback(self._dispatch_tasks.discard)
+            except asyncio.CancelledError:
+                logger.debug("Process loop cancelled")
+                break
+            except Exception:
+                logger.exception("Error in process loop")
+
+        if self._stats.instrumentation_enabled:
+            logger.info("Worker stats summary:\n%s", self._stats.summary())
+        logger.debug("Process loop stopped")
+
+    async def _dispatch_concurrently(self, batch: FormattedBatch[HasCost, RequestMetadata]) -> None:
+        """Run one batch in its own task and free its dispatch slot after."""
+        try:
+            await self._process_batch(batch, engine_queue_owned=True)
+            self._record_runtime_batch(batch)
+            self._step_adaptive_controller(batch, worker_telemetry() if worker_telemetry_enabled() else None)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Error dispatching batch")
+        finally:
+            self._dispatch_slots.release()
 
     async def _process_batch(
         self,

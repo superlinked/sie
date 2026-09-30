@@ -1,3 +1,4 @@
+mod canonical_json;
 mod config;
 mod discovery;
 mod endpoint;

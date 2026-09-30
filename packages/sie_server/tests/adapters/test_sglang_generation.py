@@ -209,6 +209,58 @@ def test_load_drops_is_embedding(
     assert child_env["PYTHONPATH"].split(os.pathsep)[0] == str(expected_compat_dir)
 
 
+@pytest.mark.parametrize("digits", [None, 19])
+@patch("sie_server.adapters.sglang._server.subprocess.Popen")
+@patch("sie_server.adapters.sglang._server.requests.get")
+@patch("sie_server.adapters.sglang._server.find_free_port")
+def test_load_passes_json_number_max_digits_to_the_child(
+    mock_find_port: MagicMock,
+    mock_requests_get: MagicMock,
+    mock_popen: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+    digits: int | None,
+) -> None:
+    monkeypatch.delenv("SIE_SGLANG_JSON_NUMBER_MAX_DIGITS", raising=False)
+    mock_find_port.return_value = 30005
+    mock_process = MagicMock()
+    mock_process.poll.return_value = None
+    mock_popen.return_value = mock_process
+    mock_requests_get.return_value = MagicMock(status_code=200)
+    adapter = SGLangGenerationAdapter(
+        model_name_or_path="Qwen/Qwen3-4B-Instruct",
+        grammar_backend="xgrammar",
+        json_number_max_digits=digits,
+    )
+
+    adapter.load("cuda:0")
+
+    child_env = mock_popen.call_args.kwargs["env"]
+    if digits is None:
+        assert "SIE_SGLANG_JSON_NUMBER_MAX_DIGITS" not in child_env
+    else:
+        assert child_env["SIE_SGLANG_JSON_NUMBER_MAX_DIGITS"] == "19"
+
+
+@pytest.mark.parametrize(
+    ("digits", "backend", "message"),
+    [
+        (0, "xgrammar", "positive integer"),
+        (-1, "xgrammar", "positive integer"),
+        (True, "xgrammar", "positive integer"),
+        ("19", "xgrammar", "positive integer"),
+        (19, "outlines", "needs grammar_backend 'xgrammar'"),
+        (19, None, "needs grammar_backend 'xgrammar'"),
+    ],
+)
+def test_json_number_max_digits_rejects_unusable_settings(digits: object, backend: str | None, message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        SGLangGenerationAdapter(
+            model_name_or_path="Qwen/Qwen3-4B-Instruct",
+            grammar_backend=backend,
+            json_number_max_digits=digits,  # type: ignore[arg-type]
+        )
+
+
 @patch("sie_server.adapters.sglang._server.subprocess.Popen")
 @patch("sie_server.adapters.sglang._server.requests.get")
 @patch("sie_server.adapters.sglang._server.find_free_port")
@@ -2473,6 +2525,60 @@ print("mm-process-config-ready")
     assert completed.returncode == 0, completed.stderr
     assert "Error in sitecustomize" not in completed.stderr
     assert completed.stdout.strip() == "mm-process-config-ready"
+
+
+def test_mm_process_config_compat_raises_the_bound_for_single_image_requests_only(tmp_path: Path) -> None:
+    package_root = tmp_path / "site"
+    processors = package_root / "sglang" / "srt" / "multimodal" / "processors"
+    processors.mkdir(parents=True)
+    for package in (
+        package_root / "sglang",
+        package_root / "sglang" / "srt",
+        package_root / "sglang" / "srt" / "multimodal",
+        processors,
+    ):
+        (package / "__init__.py").write_text("", encoding="utf-8")
+    # The pinned SGLang release forwards image_config itself inside
+    # process_mm_data, after the hook runs; the fake does the same.
+    (processors / "base_processor.py").write_text(
+        """class BaseMultimodalProcessor:
+    def __init__(self):
+        self.image_config = {"min_pixels": 65536, "max_pixels": 1003520}
+
+    def process_mm_data(self, input_text, images=None, videos=None, audios=None, **kwargs):
+        if images and self.image_config:
+            kwargs.setdefault("images_kwargs", {}).update(self.image_config)
+        return kwargs
+""",
+        encoding="utf-8",
+    )
+    compat_dir = Path(__file__).resolve().parents[2] / "src/sie_server/adapters/sglang/_compat"
+    script = """import sitecustomize
+from sglang.srt.multimodal.processors.base_processor import BaseMultimodalProcessor
+
+processor = BaseMultimodalProcessor()
+one = processor.process_mm_data("x", images=[b"page"])
+two = processor.process_mm_data("x", images=[b"a", b"b"])
+assert one["images_kwargs"] == {"min_pixels": 65536, "max_pixels": 3211264}, one
+assert two["images_kwargs"] == {"min_pixels": 65536, "max_pixels": 1003520}, two
+assert processor.image_config == {"min_pixels": 65536, "max_pixels": 1003520}
+assert processor.process_mm_data("x", images=None) == {}
+print("single-image-bound-ready")
+"""
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join((str(compat_dir), str(package_root)))
+    env["SIE_SGLANG_MM_PROCESS_CONFIG_COMPAT"] = "1"
+    env["SIE_SGLANG_SINGLE_IMAGE_MAX_PIXELS"] = "3211264"
+    completed = subprocess.run(  # noqa: S603 - executes the fixed local interpreter
+        [sys.executable, "-c", script],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "single-image-bound-ready"
 
 
 def test_mm_process_config_compat_redacts_media_load_failures(tmp_path: Path) -> None:

@@ -13,8 +13,11 @@ from sie_server.adapters._word_window import (
     MAX_DOCUMENT_SUBWORDS,
     MAX_WORD_CHARS,
     SUBWORDS_PER_WORD,
+    DocumentWindow,
     SubwordCounter,
     WindowedSplitter,
+    document_windows,
+    merge_window_spans,
     pieces,
     plan_forwards,
     read_window,
@@ -216,3 +219,133 @@ def test_a_long_row_does_not_pad_the_short_rows_it_would_fit_with() -> None:
     groups = plan_forwards(rows, rows_per_pass=8)
 
     assert groups == [[1, 2, 3, 4, 5, 6, 7, 8], [9, 10, 11], [0]]
+
+
+def splitter(max_words: int, max_subwords: int = 1000) -> WindowedSplitter:
+    return WindowedSplitter(words, max_words=max_words, max_subwords=max_subwords, count_subwords=per_char)
+
+
+def test_a_document_read_whole_is_one_window_of_all_of_it() -> None:
+    text = "Priya Raman works at Novartis.  "
+
+    assert document_windows(text, splitter(10)) == [DocumentWindow(0, len(text), len(text) - 2, None)]
+
+
+def test_windows_share_words_and_read_every_word() -> None:
+    text = " ".join(f"w{index}" for index in range(100))
+
+    windows = document_windows(text, splitter(20), overlap_words=5)
+
+    assert windows is not None
+    read = [text[window.start : window.read_end].split() for window in windows]
+    assert read[0] == [f"w{index}" for index in range(20)]
+    assert read[1][:5] == read[0][-5:]
+    assert [window.overlap for window in windows] == [None] + [5] * (len(windows) - 1)
+    assert {word for words_read in read for word in words_read} == set(text.split())
+    assert windows[-1].end == len(text)
+
+
+def test_windows_advance_through_a_word_read_in_pieces() -> None:
+    text = "x" * (10 * MAX_WORD_CHARS) + " tail"
+
+    windows = document_windows(text, splitter(10, max_subwords=MAX_WORD_CHARS))
+
+    # One piece a window: nothing is shared, and every piece is read.
+    assert windows is not None
+    assert [window.start for window in windows] == [index * MAX_WORD_CHARS for index in range(10)] + [len(text) - 4]
+    assert [window.overlap for window in windows] == [None] + [0] * 10
+
+
+def test_windows_through_a_word_longer_than_a_slice_read_each_piece_once() -> None:
+    text = "x" * 50_000 + " tail"
+    reader = splitter(10, max_subwords=MAX_WORD_CHARS)
+
+    windows = document_windows(text, reader, max_windows=1000)
+
+    assert windows is not None
+    pieces_read = -(-50_000 // MAX_WORD_CHARS)
+    # The last window reads the last piece and "tail".
+    assert [window.start for window in windows] == [index * MAX_WORD_CHARS for index in range(pieces_read)]
+    assert windows[-1].read_end == len(text)
+    for window in windows[:-1]:
+        # Each window's text reads the piece the window reads, from a bounded prefix of the document.
+        assert window.end - window.start <= 20_000
+        (word,) = reader(text[window.start : window.end])
+        assert (word[1] + window.start, word[2] + window.start) == (window.start, window.read_end)
+
+
+def test_windows_of_a_document_longer_than_the_window_limit_are_none() -> None:
+    text = " ".join(f"w{index}" for index in range(100))
+
+    assert document_windows(text, splitter(20), overlap_words=10, max_windows=8) is None
+    assert document_windows(text, splitter(20), overlap_words=10, max_windows=9) is not None
+
+
+def test_windows_of_a_long_document_are_read_from_bounded_slices() -> None:
+    text = " ".join(f"w{index}" for index in range(200_000))
+
+    windows = document_windows(text, splitter(64), max_windows=10)
+
+    assert windows is None
+
+
+def span(start: int, end: int, score: float, label: str = "person") -> dict[str, Any]:
+    return {"text": "", "label": label, "score": score, "start": start, "end": end}
+
+
+TEXT = "0123456789" * 3
+# Windows reading characters 0-20 and 10-30 (the merge uses offsets only).
+TWO = [DocumentWindow(0, 20, 20, None), DocumentWindow(10, 30, 30, 2)]
+
+
+def merged(spans: list[list[dict[str, Any]]], *, flat_ner: bool = True, multi_label: bool = False) -> list[Any]:
+    result = merge_window_spans(TWO, spans, TEXT, flat_ner=flat_ner, multi_label=multi_label)
+    return [(one["start"], one["end"], one["label"], one["score"], one["text"]) for one in result]
+
+
+def test_one_window_spans_are_returned_as_they_are() -> None:
+    spans = [span(3, 1, 0.5, "odd")]
+
+    assert merge_window_spans([TWO[0]], [spans], TEXT, flat_ner=True, multi_label=False) == spans
+
+
+def test_merged_spans_move_to_document_offsets_and_keep_their_best_score() -> None:
+    result = merged([[span(12, 15, 0.6), span(2, 4, 0.7)], [span(2, 5, 0.9), span(12, 15, 0.8)]])
+
+    assert result == [(2, 4, "person", 0.7, "23"), (12, 15, "person", 0.9, "234"), (22, 25, "person", 0.8, "234")]
+
+
+def test_a_span_cut_at_an_edge_gives_way_to_the_neighbour_that_reads_it_whole() -> None:
+    # 18-20 ends at the first window's edge; the second window found 18-22.
+    result = merged([[span(18, 20, 0.99)], [span(8, 12, 0.7)]])
+
+    assert result == [(18, 22, "person", 0.7, "8901")]
+
+
+def test_a_span_at_an_edge_stays_when_the_neighbour_found_nothing_there() -> None:
+    assert merged([[span(18, 20, 0.99)], []]) == [(18, 20, "person", 0.99, "89")]
+    # A neighbour's span of another label does not replace it.
+    assert merged([[span(18, 20, 0.99)], [span(8, 12, 0.7, "place")]]) == [(18, 20, "person", 0.99, "89")]
+
+
+def test_a_span_at_the_start_of_a_window_gives_way_to_the_window_before() -> None:
+    result = merged([[span(8, 12, 0.5)], [span(0, 2, 0.99)]])
+
+    assert result == [(8, 12, "person", 0.5, "8901")]
+
+
+def test_overlapping_spans_from_two_windows_resolve_as_gliner_resolves_them() -> None:
+    first = [span(12, 16, 0.6, "person")]
+    second = [span(4, 8, 0.8, "place"), span(5, 6, 0.9, "thing")]
+
+    # flat_ner: highest score first, nothing overlapping what is kept.
+    assert merged([first, second]) == [(15, 16, "thing", 0.9, "5")]
+    # Nested: a span inside a kept one stays, a partly overlapping one does not.
+    assert merged([first, second], flat_ner=False) == [(14, 18, "place", 0.8, "4567"), (15, 16, "thing", 0.9, "5")]
+
+
+def test_multi_label_keeps_one_span_with_several_labels() -> None:
+    spans = [[span(12, 15, 0.6, "person")], [span(2, 5, 0.9, "place")]]
+
+    assert merged(spans) == [(12, 15, "place", 0.9, "234")]
+    assert merged(spans, multi_label=True) == [(12, 15, "place", 0.9, "234"), (12, 15, "person", 0.6, "234")]

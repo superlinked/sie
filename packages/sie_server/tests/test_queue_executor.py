@@ -14,6 +14,7 @@ from sie_server.adapters._base_adapter import BaseAdapter
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters.laya.adapter import LayaAdapter
 from sie_server.config.model import EmbeddingDim, EncodeTask, ModelConfig, ProfileConfig, Tasks
+from sie_server.core.extract_cost import MAX_EXTRACT_LABELS
 from sie_server.core.inference_output import ExtractOutput, ScoreOutput
 from sie_server.core.loader import expand_profile_variants, load_model_config
 from sie_server.core.registry import ModelRegistry
@@ -561,6 +562,30 @@ class TestProcessEncodeBatch:
         assert by_id["ok.0"].disposition == "publish_and_ack"
         submitted = worker.submit_extract_preformed_batch.await_args.args[0]
         assert [request.output_schema for request in submitted] == [None]
+
+    @pytest.mark.asyncio
+    async def test_too_many_labels_is_isolated_as_invalid_input(self) -> None:
+        reg = _make_registry()
+        worker = AsyncMock()
+        fut: asyncio.Future[WorkerResult] = asyncio.Future()
+        fut.set_result(WorkerResult(output=ExtractOutput(entities=[[]]), timing=RequestTiming()))
+        worker.submit_extract_preformed_batch = AsyncMock(return_value=[fut])
+        reg.start_worker = AsyncMock(return_value=worker)
+        over = _extract_item(wiid="over.0")
+        over.labels = [f"label {index}" for index in range(MAX_EXTRACT_LABELS + 1)]
+        at_limit = _extract_item(wiid="limit.0")
+        at_limit.labels = [f"label {index}" for index in range(MAX_EXTRACT_LABELS)]
+
+        outcome = await QueueExecutor(reg).process_extract_batch(
+            ProcessExtractBatchRequest(model_id="test/model", items=[over, at_limit])
+        )
+
+        by_id = {item.work_item_id: item for item in outcome.outcomes}
+        assert by_id["over.0"].disposition == "publish_error_and_ack"
+        assert by_id["over.0"].error_code == "INVALID_INPUT"
+        assert by_id["limit.0"].disposition == "publish_and_ack"
+        submitted = worker.submit_extract_preformed_batch.await_args.args[0]
+        assert [len(request.labels) for request in submitted] == [MAX_EXTRACT_LABELS]
 
     @pytest.mark.asyncio
     async def test_malformed_item_isolated_as_invalid_input(self) -> None:

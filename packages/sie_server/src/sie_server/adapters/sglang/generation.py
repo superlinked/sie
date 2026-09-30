@@ -62,6 +62,10 @@ from sie_server.types.inputs import ImageInput, VideoInput, media_bytes
 
 logger = logging.getLogger(__name__)
 
+# Pixels per visual token for the Qwen3.x vision encoders SGLang serves here: a
+# 16-pixel patch merged 2x2, so one token covers 32x32 pixels.
+_MERGED_PATCH_PIXELS = 32 * 32
+
 # HTTP timeout knobs for /generate. The worker-side admission/cancel layer is
 # the source of truth for total request lifetime, so the streaming read timeout
 # is disabled by default (``read=None`` — keep reading as long as bytes arrive).
@@ -162,6 +166,22 @@ def _resolve_profile_startup_timeout(declared: float | None, *, tensor_parallel_
         )
         raise ValueError(msg)
     return _server.resolve_startup_timeout(declared)
+
+
+_JSON_NUMBER_MAX_DIGITS_ENV = "SIE_SGLANG_JSON_NUMBER_MAX_DIGITS"
+
+
+def _validate_json_number_max_digits(value: Any, grammar_backend: str | None) -> int | None:
+    """Return a usable JSON number digit bound, or None when the profile sets none."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        msg = f"json_number_max_digits must be a positive integer, got {value!r}"
+        raise ValueError(msg)
+    if grammar_backend != "xgrammar":
+        msg = f"json_number_max_digits bounds XGrammar's JSON grammars and needs grammar_backend 'xgrammar', got {grammar_backend!r}"
+        raise ValueError(msg)
+    return value
 
 
 def _mamba_strategy_value(extra_launch_args: list[str], flag: str) -> str | None:
@@ -482,9 +502,17 @@ class SGLangGenerationAdapter(GenerationAdapter):
         # "decide from the width", or off at every width for an adapter whose
         # profiles were sized on an engine that never captured it.
         disable_piecewise_cuda_graph: bool | None = None,
+        # Upper bound on the digits a JSON-schema grammar lets a number carry,
+        # in its integer part and in its fraction. XGrammar leaves both
+        # unbounded, so a greedy decode that starts repeating a digit runs to
+        # ``max_new_tokens``. None keeps the backend's unbounded numbers; the
+        # bound needs the ``xgrammar`` backend, which the child's sitecustomize
+        # patches.
+        json_number_max_digits: int | None = None,
         **kwargs: Any,  # accept extra args from loader for compatibility
     ) -> None:
         _ = kwargs
+        self._json_number_max_digits = _validate_json_number_max_digits(json_number_max_digits, grammar_backend)
         self._model_name_or_path = str(model_name_or_path)
         self._max_seq_length = max_seq_length
         self._mem_fraction_static = mem_fraction_static
@@ -656,6 +684,43 @@ class SGLangGenerationAdapter(GenerationAdapter):
         """Return the child parser used to separate private reasoning output."""
         return self._reasoning_parser
 
+    @property
+    def image_token_budget(self) -> int | None:
+        """Return the most visual tokens ONE image of a single-image request can expand to.
+
+        A Qwen3.x vision encoder emits one token per merged 32x32 patch, so the
+        bound is ``ceil(max_pixels / 1024)``. ``max_pixels`` is
+        ``SIE_SGLANG_SINGLE_IMAGE_MAX_PIXELS`` from the profile's ``extra_env``
+        when set (the compat hook applies it to single-image requests), else
+        the launch's ``--mm-process-config`` ``image.max_pixels``. ``None`` when
+        neither is set, and the worker falls back to its family-wide estimate.
+        """
+        single = str(self._extra_env.get("SIE_SGLANG_SINGLE_IMAGE_MAX_PIXELS", "")).strip()
+        if single.isdigit() and int(single) > 0:
+            return math.ceil(int(single) / _MERGED_PATCH_PIXELS)
+        return self.multi_image_token_budget
+
+    @property
+    def multi_image_token_budget(self) -> int | None:
+        """Return the most visual tokens each image of a multi-image request can expand to.
+
+        Read from the launch's ``--mm-process-config`` ``image.max_pixels``;
+        ``None`` when the launch sets no image bound.
+        """
+        args = self._extra_launch_args
+        if "--mm-process-config" not in args:
+            return None
+        index = args.index("--mm-process-config")
+        if index + 1 >= len(args):
+            return None
+        try:
+            max_pixels = json.loads(args[index + 1]).get("image", {}).get("max_pixels")
+        except (json.JSONDecodeError, AttributeError):
+            return None
+        if not isinstance(max_pixels, int) or max_pixels <= 0:
+            return None
+        return math.ceil(max_pixels / _MERGED_PATCH_PIXELS)
+
     def _compat_pythonpath_entries(self) -> tuple[str, ...]:
         """Return trusted compatibility paths for the SGLang child.
 
@@ -824,6 +889,8 @@ class SGLangGenerationAdapter(GenerationAdapter):
         # auto-imports sitecustomize from PYTHONPATH during child startup.
         extra_env["PYTHONPATH"] = os.pathsep.join(self._compat_pythonpath_entries())
         extra_env["SIE_SGLANG_MM_PROCESS_CONFIG_COMPAT"] = "1"
+        if self._json_number_max_digits is not None:
+            extra_env[_JSON_NUMBER_MAX_DIGITS_ENV] = str(self._json_number_max_digits)
         logger.warning(
             "Resolved SGLang generation command: %s",
             " ".join(shlex.quote(str(arg)) for arg in cmd),

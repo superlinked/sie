@@ -229,6 +229,15 @@ answer = client.chat_completions(
 print(answer["choices"][0]["message"]["content"])
 ```
 
+Requests that constrain decoding with a grammar (`response_format` with a
+`json_schema` or `json_object` type, the Responses `text.format`, or a native
+`grammar`) default to greedy decoding: temperature, `presence_penalty`, and
+`frequency_penalty` are 0 unless the request sets them. The model profile's
+sampling recipe still applies to every other request. Some profiles ship a
+chat recipe (Qwen3.8 uses temperature 0.7 and presence penalty 1.5) that makes
+extracted values change between identical calls; set `temperature` explicitly
+to sample a constrained request.
+
 The worker renders the selected model's template and applies served template
 settings with operator configuration taking precedence over request kwargs.
 Granite Guardian's shipped risk dimension is `harm`; prose requesting a
