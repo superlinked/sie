@@ -45,7 +45,7 @@ spans it masks completely. The metric was fixed before the first request on
 | Arm | Masked (of 1,792) | Coverage recall | 95% interval | States and countries excused | $ a month, 1M documents |
 | --- | --- | --- | --- | --- | --- |
 | SIE, two models composed | 1,591 | 88.8% | 86.7% to 90.9% | 90.5% | $32 |
-| AWS Comprehend | 1,491 | 83.2% | 80.3% to 85.8% | 84.2% | $351 |
+| AWS Comprehend | 1,491 | 83.2% | 80.3% to 85.8% | 84.2% | $351 (cheapest tier, a lower bound) |
 | Claude Haiku 4.5 | 1,490 | 83.1% | 80.8% to 85.2% | 92.6% | $1,450 |
 | GPT-6 Luna | 1,448 | 80.8% | 78.2% to 83.1% | 93.2% | $113 |
 | OpenAI Privacy Filter | 1,214 | 67.7% | 64.3% to 71.0% | 69.8% | $23 (self-hosted, L4) |
@@ -56,8 +56,9 @@ SIE minus each arm, paired: Presidio +37.5 to +44.3 points, Privacy Filter
 GPT-6 Luna +5.3 to +11.0. With states and countries excused SIE stays ahead of
 Presidio (+37.6 to +44.3), Privacy Filter (+17.4 to +24.1) and Comprehend
 (+3.5 to +9.3), is level with Claude Haiku 4.5 (-4.5 to +0.3) and behind GPT-6
-Luna (-4.9 to -0.4). SIE's lead over the two LLM prompts on the first figure is
-addresses whose state they left readable; the label list has no `state`. So
+Luna (-4.9 to -0.4). SIE's lead over the two LLM prompts on the first figure
+comes from address spans where the prompts leave the state readable; the label
+list has no `state`. So
 this study makes no detection claim against an LLM prompt. It does say what
 they cost, and that redacting with an LLM API sends the unredacted text to that
 API.
@@ -111,7 +112,11 @@ For 1,000,000 documents a month like these, list prices read on 30 September
   documents.
 - **AWS Comprehend `DetectPiiEntities`:** $0.000025 per 100-character unit,
   its cheapest tier, 3-unit minimum per request, units counted as characters
-  over 100 with no rounding up.
+  over 100 with no rounding up. This is a lower bound. AWS bills monthly
+  volume in tiers ($0.0001 per unit for the first 10 million, $0.00005 for the
+  next 40 million, $0.000025 only between 50 and 100 million) and rounds each
+  request up to whole units, so 1,000,000 documents like these cost more than
+  $351.
 - **LLMs:** the tokens each provider reported for the run, at each vendor's
   standard real-time list price: $0.10 and $0.50 (GPT-6 Luna) and $1 and $5
   (Claude Haiku 4.5) per million input and output tokens. Every arm here
