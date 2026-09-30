@@ -625,6 +625,7 @@ CREDITS_DEBITED_HEADER = "X-SIE-Credits-Debited"
 REQUEST_USAGE_HEADERS = {
     "input_tokens": "X-SIE-Units-Input-Tokens",
     "pairs": "X-SIE-Units-Pairs",
+    "content_input_tokens": "X-SIE-Units-Content-Input-Tokens",
     "images": "X-SIE-Units-Images",
     "pages": "X-SIE-Units-Pages",
     "output_tokens": "X-SIE-Units-Output-Tokens",
@@ -1011,6 +1012,7 @@ def parse_request_metadata(headers: Any, body: Any = None) -> RequestMetadata | 
     usage: RequestUsage = {}
     input_tokens = _parse_nonnegative_meter_header(headers, REQUEST_USAGE_HEADERS["input_tokens"])
     pairs = _parse_nonnegative_meter_header(headers, REQUEST_USAGE_HEADERS["pairs"])
+    content_input_tokens = _parse_nonnegative_meter_header(headers, REQUEST_USAGE_HEADERS["content_input_tokens"])
     images = _parse_nonnegative_meter_header(headers, REQUEST_USAGE_HEADERS["images"])
     pages = _parse_nonnegative_meter_header(headers, REQUEST_USAGE_HEADERS["pages"])
     output_tokens = _parse_nonnegative_meter_header(headers, REQUEST_USAGE_HEADERS["output_tokens"])
@@ -1019,6 +1021,8 @@ def parse_request_metadata(headers: Any, body: Any = None) -> RequestMetadata | 
         usage["input_tokens"] = input_tokens
     if pairs is not None:
         usage["pairs"] = pairs
+    if content_input_tokens is not None:
+        usage["content_input_tokens"] = content_input_tokens
     if images is not None:
         usage["images"] = images
     if pages is not None:

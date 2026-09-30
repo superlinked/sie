@@ -165,6 +165,7 @@ class RequestUsage(TypedDict, total=False):
 
     input_tokens: int
     pairs: int
+    content_input_tokens: int
     images: int
     pages: int
     output_tokens: int
@@ -176,7 +177,7 @@ class RequestUsage(TypedDict, total=False):
 #: The metered dimensions of :class:`RequestUsage` — the units a consumer
 #: prices. Every member is a non-negative integer count.
 TERMINAL_UNIT_FIELDS: frozenset[str] = frozenset(
-    {"audio_ms", "images", "input_tokens", "output_tokens", "pages", "pairs"}
+    {"audio_ms", "content_input_tokens", "images", "input_tokens", "output_tokens", "pages", "pairs"}
 )
 
 #: The settled-charge annotations of :class:`RequestUsage`. The gateway is

@@ -469,6 +469,7 @@ function parseRequestMetadata(headers: Headers, body?: unknown): RequestMetadata
   const usageHeaders = {
     inputTokens: "x-sie-units-input-tokens",
     pairs: "x-sie-units-pairs",
+    contentInputTokens: "x-sie-units-content-input-tokens",
     images: "x-sie-units-images",
     pages: "x-sie-units-pages",
     outputTokens: "x-sie-units-output-tokens",

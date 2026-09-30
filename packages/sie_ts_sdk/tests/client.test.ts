@@ -440,6 +440,7 @@ describe("SIEClient.encode() - basic usage", () => {
           "x-sie-execution-binding-sha256": "b".repeat(64),
           "x-sie-units-input-tokens": "11",
           "x-sie-units-pairs": "2",
+          "x-sie-units-content-input-tokens": "9",
           "x-sie-units-images": "1",
           "x-sie-units-pages": "3",
           "x-sie-units-output-tokens": "5",
@@ -461,6 +462,7 @@ describe("SIEClient.encode() - basic usage", () => {
       usage: {
         inputTokens: 11,
         pairs: 2,
+        contentInputTokens: 9,
         images: 1,
         pages: 3,
         outputTokens: 5,

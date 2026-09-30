@@ -127,6 +127,8 @@ export interface TimingInfo {
 export interface RequestUsage {
   inputTokens?: number;
   pairs?: number;
+  /** Caller-content tokens of a score request (query, documents, supplied instruction). */
+  contentInputTokens?: number;
   images?: number;
   pages?: number;
   outputTokens?: number;
