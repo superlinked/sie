@@ -1167,8 +1167,13 @@ def role_writes(role: dict, resource: str) -> bool:
     )
 
 
-def test_only_gateway_pods_hold_a_token_that_can_write_configmaps(tmp_path: Path) -> None:
-    docs = nats_documents(tmp_path, {**NATS_L4_POOL, "mcpEdge": {"enabled": True}})
+@pytest.mark.parametrize("overlays", [(), ("values-ha.yaml",)])
+def test_only_gateway_pods_hold_a_token_that_can_write_configmaps(tmp_path: Path, overlays: tuple[str, ...]) -> None:
+    overlay_args = [arg for overlay in overlays for arg in ("-f", str(helm.CHART_DIR / overlay))]
+    docs = nats_documents(tmp_path, {**NATS_L4_POOL, "mcpEdge": {"enabled": True}}, *overlay_args)
+    assert bool(overlays) == any(
+        doc["kind"] == "NetworkPolicy" and doc["metadata"]["name"].endswith("-worker") for doc in docs
+    )
     roles = {doc["metadata"]["name"]: doc for doc in docs if doc["kind"] == "Role"}
     assert not [name for name, role in roles.items() if role_writes(role, "secrets")]
     writers = {
