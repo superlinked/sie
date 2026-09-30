@@ -317,8 +317,8 @@ def main() -> int:
         provider = provider_of(args.model, args.provider)
         body = request_body(args.model, provider, items[find(items, prefix)], args.sdk_transform)
         url = {
-            "sie": f"{SIE_BASE_URL}{PATH}",
-            "openai": "https://api.openai.com/v1/chat/completions",
+            "sie": f"{args.base_url or os.environ.get('SIE_BASE_URL', SIE_BASE_URL)}{PATH}",
+            "openai": f"{args.base_url or 'https://api.openai.com/v1'}/chat/completions",
             "anthropic": "https://api.anthropic.com/v1/messages",
         }[provider]
         print(
