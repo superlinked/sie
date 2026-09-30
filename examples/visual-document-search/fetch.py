@@ -29,7 +29,7 @@ HERE = Path(__file__).resolve().parent
 EVIDENCE = HERE / "evidence"
 
 DATASET = "superlinked/sie-task-evidence"
-REVISION = "8804ceee79cc55ddf7607b63543dff5e4e6a6a07"
+REVISION = "45b85ef4efbbca1d2b4af7b8cbc8e83d5a354308"
 TASK = "visual-document-search-vidore-v3"
 
 API = f"https://huggingface.co/api/datasets/{DATASET}/tree/{REVISION}"
@@ -51,6 +51,8 @@ REQUIRED = (
     "manifest.json",
     "stats.json",
     "examples.json",
+    "CORRECTION.md",
+    "stats-english-documents.json",
     *(f"questions/{d}.json" for d in DATASETS),
     *(f"rankings/{arm}/{d}.json" for arm in ARMS for d in DATASETS),
 )

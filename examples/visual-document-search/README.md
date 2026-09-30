@@ -11,10 +11,10 @@ This is the recorded run behind
 page's [SOURCES.md](https://superlinked.com/reference/visual-document-search/SOURCES.md).
 
 **The benchmark.** [ViDoRe v3](https://arxiv.org/abs/2601.08620) (CC BY 4.0) covers annual reports and 10-K filings,
-FDA slide decks, European Commission reports, textbooks and energy and physics documents. It supplies human
-relevance grades for every question. The run uses six public datasets whose documents are in English:
-computer_science, finance_en, hr, pharmaceuticals, energy and physics. That is 1,816 English questions over 16,309
-pages. Every page of a dataset is a candidate for each of its questions.
+FDA slide decks, European Commission reports, a textbook, and French energy and physics documents. It supplies human
+relevance grades for every question. The run uses six public datasets and their English questions: 1,816 questions over
+16,309 pages. Four datasets hold English documents: computer_science, finance_en, hr and pharmaceuticals. Two hold
+French documents: energy and physics. Every page of a dataset is a candidate for each of its questions.
 
 **The renders.** Every page was rendered once to a JPEG with a 1,650-pixel long side, a US-letter page at 150 dpi.
 Every image model received the same bytes.
@@ -39,6 +39,10 @@ SIE's own default profile.
 - **Against Cohere Embed v4:** +3.0, interval +2.0 to +3.9.
 - **Against the default profile:** the compact profile is 1.4 points below it, but it encodes about twice as many pages
   per second.
+
+On the four English-document datasets alone (1,206 questions), SIE's lead over each arm holds, in
+`evidence/stats-english-documents.json`. On energy and physics every arm searches French pages with English questions,
+which is why BM25, with an English stopword list, collapses there.
 
 The two parse arms read each page's markdown as ViDoRe ships it, which comes from a strong parser. A production OCR
 step would do no better.
