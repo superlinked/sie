@@ -50,6 +50,33 @@ def test_score_projection_matches_selected_full_vocabulary_logits() -> None:
     torch.testing.assert_close(adapter._project_score_logits(hidden), expected)
 
 
+def test_bfloat16_logits_near_certainty_still_rank_apart() -> None:
+    adapter = Qwen2FlashCrossEncoderAdapter("unused", score_mode="log_softmax")
+    # [no, yes] logits whose P(yes) all round to 1.0 in bfloat16.
+    logits = torch.tensor([[0.0, 6.0], [0.0, 7.0], [0.0, 9.0]], dtype=torch.bfloat16)
+
+    scores = adapter._compute_scores(logits)
+
+    assert scores.dtype == torch.float32
+    assert scores[0] < scores[1] < scores[2]
+
+
+def test_score_projection_runs_in_float32_for_bfloat16_states() -> None:
+    torch.manual_seed(0)
+    adapter = Qwen2FlashCrossEncoderAdapter("unused")
+    lm_head = torch.nn.Linear(4, 11, bias=True).to(torch.bfloat16)
+    token_ids = torch.tensor([7, 3])
+    adapter._score_weight = lm_head.weight.index_select(0, token_ids)
+    adapter._score_bias = lm_head.bias.index_select(0, token_ids)
+    hidden = torch.randn(5, 4).to(torch.bfloat16)
+
+    projected = adapter._project_score_logits(hidden)
+
+    assert projected.dtype == torch.float32
+    expected = torch.nn.functional.linear(hidden.float(), adapter._score_weight.float(), adapter._score_bias.float())
+    torch.testing.assert_close(projected, expected)
+
+
 def test_score_delegates_to_score_pairs_with_instruction_and_options() -> None:
     adapter = Qwen2FlashCrossEncoderAdapter("unused")
     adapter._model = object()

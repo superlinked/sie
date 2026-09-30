@@ -295,6 +295,10 @@ class Qwen2FlashCrossEncoderAdapter(FlashBaseAdapter):
         Returns:
             [batch_size] float32 scores.
         """
+        # Float32 throughout: in bfloat16, P(yes) has a step of 2**-8 near 1.0,
+        # so every candidate above about 0.996 ties at exactly 1.0 and the
+        # ranking among the most relevant candidates falls back to input order.
+        logits = logits.float()
         no_logits = logits[:, 0]
         yes_logits = logits[:, 1]
 
@@ -302,16 +306,21 @@ class Qwen2FlashCrossEncoderAdapter(FlashBaseAdapter):
             # Stack [no, yes] and apply log-softmax, take P(yes)
             pair = torch.stack([no_logits, yes_logits], dim=-1)  # [B, 2]
             log_probs = torch.nn.functional.log_softmax(pair, dim=-1)
-            return log_probs[:, 1].exp().float()
+            return log_probs[:, 1].exp()
 
         # logit_diff (default)
-        return (yes_logits - no_logits).float()
+        return yes_logits - no_logits
 
     def _project_score_logits(self, last_hidden: torch.Tensor) -> torch.Tensor:
-        """Project last-token states onto only the configured score tokens."""
+        """Project last-token states onto only the configured score tokens, in float32.
+
+        Two output rows cost nothing to project at full precision, and the
+        yes/no logits are the whole score, so they are not rounded to bfloat16.
+        """
         if self._score_weight is None:
             raise RuntimeError(ERR_NOT_LOADED)
-        return torch.nn.functional.linear(last_hidden, self._score_weight, self._score_bias)
+        bias = self._score_bias.float() if self._score_bias is not None else None
+        return torch.nn.functional.linear(last_hidden.float(), self._score_weight.float(), bias)
 
     def score(
         self,
