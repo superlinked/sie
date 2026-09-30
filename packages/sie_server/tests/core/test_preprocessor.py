@@ -9,6 +9,7 @@ from PIL import Image
 from sie_server.core.prepared import ImagePayload, PreparedItem, TextPayload
 from sie_server.core.preprocessor import ImagePreprocessor, Preprocessor, TextPreprocessor
 from sie_server.core.preprocessor.image import OpenCLIPImagePreprocessor
+from sie_server.core.preprocessor.vision import DetectionPreprocessor
 from sie_server.types.inputs import ImageInput, InvalidMediaError, Item
 
 
@@ -1121,3 +1122,39 @@ class TestNemoColEmbedPreprocessor:
         assert result["pixel_values"].numel() == 0
         assert result["input_ids"].numel() == 0
         assert result["attention_mask"].numel() == 0
+
+
+class TestDetectionPreprocessorMaxSide:
+    """An oversized photo is shrunk before the image processor, and boxes still map to the pixels sent."""
+
+    @staticmethod
+    def _jpeg(width: int, height: int) -> bytes:
+        buf = io.BytesIO()
+        Image.new("RGB", (width, height), (120, 40, 200)).save(buf, "JPEG")
+        return buf.getvalue()
+
+    def _prepare(self, width: int, height: int, max_side: int | None) -> tuple[tuple[int, int], tuple[int, int]]:
+        seen: dict[str, tuple[int, int]] = {}
+
+        def fake_processor(*, images, return_tensors):
+            seen["size"] = images.size
+            return {"pixel_values": torch.zeros(1, 3, 4, 4)}
+
+        pre = DetectionPreprocessor(image_processor=fake_processor, model_name="m", max_side=max_side)
+        item = Item(images=[{"data": self._jpeg(width, height), "format": "jpeg"}])
+        batch = pre.prepare([item], config=MagicMock())
+        return seen["size"], batch.items[0].payload.original_size
+
+    def test_large_photo_is_shrunk_but_keeps_its_original_size(self) -> None:
+        processed, original = self._prepare(8192, 1728, 1920)
+        assert processed == (1920, 405)
+        assert original == (8192, 1728)
+
+    def test_photo_within_the_cap_is_untouched(self) -> None:
+        processed, original = self._prepare(1920, 1080, 1920)
+        assert processed == (1920, 1080)
+        assert original == (1920, 1080)
+
+    def test_no_cap_keeps_the_old_behaviour(self) -> None:
+        processed, _ = self._prepare(4000, 3000, None)
+        assert processed == (4000, 3000)

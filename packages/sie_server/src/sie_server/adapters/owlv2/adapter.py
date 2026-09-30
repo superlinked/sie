@@ -54,6 +54,13 @@ _ERR_NO_LABELS = "Owlv2Adapter requires labels for object detection"
 _ERR_ENCODE_NOT_SUPPORTED = "Owlv2Adapter does not support encode(). Use extract() instead."
 
 
+def _square_side(image_processor: Any) -> int:
+    """The side of the square OWLv2 resizes every padded image to (960 for base, 1008 for large)."""
+    size = getattr(image_processor, "size", None) or {}
+    side = size.get("height") if isinstance(size, dict) else getattr(size, "height", None)
+    return int(side) if side else 1008
+
+
 class Owlv2Adapter(BaseAdapter):
     """Adapter for OWL-v2 open-vocabulary object detection.
 
@@ -125,9 +132,13 @@ class Owlv2Adapter(BaseAdapter):
             dtype,
         )
 
+        # The fast (torchvision) image processor. The slow NumPy one spent
+        # 0.24 s on a 640 x 480 photo and 15.6 s on an 8192 x 1728 one on an
+        # L4-class host, against a 0.1 s forward pass, and produced the same
+        # 960 x 960 input to within resampling noise.
         self._processor = Owlv2Processor.from_pretrained(
             self._model_name_or_path,
-            use_fast=False,
+            use_fast=True,
             **shared_kwargs,
         )
         self._model = Owlv2ForObjectDetection.from_pretrained(
@@ -144,6 +155,7 @@ class Owlv2Adapter(BaseAdapter):
         self._preprocessor = DetectionPreprocessor(
             image_processor=image_processor,
             model_name=self._model_name_or_path,
+            max_side=2 * _square_side(image_processor),
         )
 
         logger.info("OWL-v2 model loaded successfully")
