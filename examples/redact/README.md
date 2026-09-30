@@ -34,10 +34,13 @@ Two more figures it reproduces: 42 of the 49 masks land on a published gold
 span, and 0 of the 29 currency amounts across the ten recorded documents are
 masked.
 
-The second step is why the window matters. The model reads the first 384 words
-and punctuation marks and the reply gives no truncation signal, so a document
-longer than that has to be split by the caller, with each part's starting
-offset added back to the spans it returns.
+The second step is why the window matters. The model reads 384 words and
+punctuation marks at a time. The server this run was recorded against read
+only the first 384 and gave no truncation signal, so a longer document had to
+be split by the caller, with each part's starting offset added back to the
+spans it returns; the recorded inputs carry that split. Servers that include
+the fix for [#446](https://github.com/superlinked/sie/issues/446) read a longer
+document whole, in overlapping windows.
 
 ## Run it
 
