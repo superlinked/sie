@@ -29,6 +29,7 @@ import time
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from urllib.parse import urlsplit
 
 HERE = Path(__file__).resolve().parent
 RUNS = HERE / "runs"
@@ -111,7 +112,9 @@ def main() -> int:
         parser.error("--images must be at least 1")
     base_url = os.environ.get("SIE_BASE_URL", "https://api.superlinked.com").rstrip("/")
     api_key = os.environ.get("SIE_API_KEY")
-    if base_url == "https://api.superlinked.com" and not api_key:
+    endpoint = urlsplit(base_url)
+    hosted_origin = (endpoint.scheme, endpoint.hostname, endpoint.port or 443) == ("https", "api.superlinked.com", 443)
+    if hosted_origin and not api_key:
         print("Set SIE_API_KEY first (https://superlinked.com/cloud).", file=sys.stderr)
         return 1
 
