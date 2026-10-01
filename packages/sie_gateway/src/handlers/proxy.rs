@@ -4129,7 +4129,7 @@ pub(crate) async fn run_streaming_generate(
 pub(crate) fn worker_error_http_status(code: &str) -> StatusCode {
     match code {
         "invalid_request" | "unsupported_field" => StatusCode::BAD_REQUEST,
-        "context_exceeded" => StatusCode::BAD_REQUEST,
+        "context_exceeded" | INPUT_TOO_LONG_ERROR_CODE => StatusCode::BAD_REQUEST,
         PAYLOAD_TOO_LARGE_ERROR_CODE => StatusCode::PAYLOAD_TOO_LARGE,
         RESOURCE_EXHAUSTED_ERROR_CODE | MODEL_LOADING_ERROR_CODE | LORA_LOADING_ERROR_CODE => {
             StatusCode::SERVICE_UNAVAILABLE
@@ -4150,7 +4150,7 @@ pub(crate) fn worker_error_openai_type(code: &str) -> &'static str {
         "invalid_request" | "unsupported_field" | PAYLOAD_TOO_LARGE_ERROR_CODE => {
             oai_type::INVALID_REQUEST
         }
-        "context_exceeded" => oai_type::CONTEXT_LENGTH_EXCEEDED,
+        "context_exceeded" | INPUT_TOO_LONG_ERROR_CODE => oai_type::CONTEXT_LENGTH_EXCEEDED,
         "rate_limit_exceeded" => oai_type::RATE_LIMIT,
         COLD_START_RATE_LIMITED_ERROR_CODE => oai_type::RATE_LIMIT,
         _ => oai_type::SERVER_ERROR,
@@ -24999,6 +24999,33 @@ mod tests {
         assert_eq!(value["error"]["type"], oai_type::INVALID_REQUEST);
         assert_eq!(value["error"]["code"], oai_code::INVALID_REQUEST);
         assert_eq!(value["error"]["attempt_id"], "att-large-1");
+    }
+
+    #[tokio::test]
+    async fn test_an_input_too_long_generation_worker_error_returns_400() {
+        let err = StreamingDriverErr::WorkerError {
+            code: INPUT_TOO_LONG_ERROR_CODE.to_string(),
+            message: "the rendered prompt exceeds the model's input limit".to_string(),
+            param: Some("prompt".to_string()),
+            retry_after_s: None,
+            request_id: "req-too-long-1".to_string(),
+            attempt_id: "att-too-long-1".to_string(),
+        };
+        let response = build_streaming_error_response(&err);
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(response.headers().get("retry-after").is_none());
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["error"]["code"], INPUT_TOO_LONG_ERROR_CODE);
+        assert_eq!(value["error"]["type"], oai_type::CONTEXT_LENGTH_EXCEEDED);
+        assert_eq!(
+            value["error"]["message"],
+            "the rendered prompt exceeds the model's input limit"
+        );
+        assert_eq!(value["error"]["attempt_id"], "att-too-long-1");
     }
 
     #[tokio::test]

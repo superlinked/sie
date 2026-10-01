@@ -321,6 +321,7 @@ pub(crate) fn client_safe_worker_error_code(code: &str) -> &'static str {
     match code {
         "inference_error" => "inference_error",
         "grammar_compile_failed" => "grammar_compile_failed",
+        "INPUT_TOO_LONG" => "INPUT_TOO_LONG",
         "MODEL_LOADING" => "MODEL_LOADING",
         "MODEL_OUTPUT_PARSE_ERROR" => "MODEL_OUTPUT_PARSE_ERROR",
         "RESOURCE_EXHAUSTED" => "RESOURCE_EXHAUSTED",
@@ -1436,10 +1437,36 @@ mod tests {
     }
 
     #[test]
+    fn test_every_code_the_worker_publishes_as_client_safe_is_kept() {
+        let python_source =
+            include_str!("../../../sie_server/src/sie_server/adapters/_generation_base.py");
+        let declaration = python_source
+            .split_once("_CLIENT_SAFE_GENERATION_ERROR_CODES = frozenset(")
+            .expect("Python client-safe generation error codes must exist")
+            .1
+            .split_once('{')
+            .expect("Python client-safe generation error codes must open")
+            .1
+            .split_once('}')
+            .expect("Python client-safe generation error codes must close")
+            .0;
+        let python_codes: BTreeSet<_> = declaration
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix('"')?.strip_suffix("\","))
+            .collect();
+
+        assert!(python_codes.contains("INPUT_TOO_LONG"));
+        for code in python_codes {
+            assert_eq!(client_safe_worker_error_code(code), code, "{code}");
+        }
+    }
+
+    #[test]
     fn test_worker_error_public_contract_preserves_only_sanctioned_codes() {
         for code in [
             "inference_error",
             "grammar_compile_failed",
+            "INPUT_TOO_LONG",
             "MODEL_LOADING",
             "MODEL_OUTPUT_PARSE_ERROR",
             "RESOURCE_EXHAUSTED",
