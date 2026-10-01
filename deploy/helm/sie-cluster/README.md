@@ -853,7 +853,8 @@ NetworkPolicy.
   TCP 443 plus each upstream's explicit port, or its `proxy_url`'s explicit
   port when a proxy carries its traffic, to `allowedCidrs` (every address by
   default) except the denied ranges. A URL without a port adds nothing beyond
-  443. Nothing else is allowed.
+  443, so give an `http` `proxy_url` its port explicitly or admit the proxy with
+  `extraEgress`. Nothing else is allowed.
 - **Denied ranges:** a fixed base that values cannot remove: the private ranges
   (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16), the carrier-grade NAT range
   (100.64.0.0/10), link-local (169.254.0.0/16, which holds the cloud metadata

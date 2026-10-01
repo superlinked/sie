@@ -1450,8 +1450,20 @@ ports. Args (dict): ports, path.
 {{- if not (and (kindIs "map" $port) $port.port) -}}
 {{- fail (printf "%s[%d] admits every port: set port." $path $index) -}}
 {{- end -}}
-{{- if and $port.endPort (not (kindIs "string" $port.port)) (gt (sub (int $port.endPort) (int $port.port)) 60000) -}}
+{{- if not (kindIs "invalid" $port.endPort) -}}
+{{- $integral := list -}}
+{{- range $value := list $port.port $port.endPort -}}
+{{- $integral = append $integral (or (kindIs "int" $value) (kindIs "int64" $value) (and (kindIs "float64" $value) (eq (float64 $value) (floor (float64 $value))))) -}}
+{{- end -}}
+{{- if not (index $integral 0) -}}
+{{- fail (printf "%s[%d] sets endPort, which needs a numeric port, not a named one." $path $index) -}}
+{{- end -}}
+{{- if not (index $integral 1) -}}
+{{- fail (printf "%s[%d].endPort must be an integer." $path $index) -}}
+{{- end -}}
+{{- if gt (sub (int64 $port.endPort) (int64 $port.port)) 60000 -}}
 {{- fail (printf "%s[%d] spans nearly every port: list the ports instead." $path $index) -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 {{- end }}

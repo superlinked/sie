@@ -2264,6 +2264,46 @@ def test_an_empty_allowed_list_renders_no_public_rule(tmp_path: Path) -> None:
     assert not [peer for rule in egress for peer in rule.get("to", []) if "ipBlock" in peer]
 
 
+def test_an_extra_egress_port_range_set_on_the_command_line_renders(tmp_path: Path) -> None:
+    values_file = tmp_path / "values.yaml"
+    values_file.write_text(yaml.safe_dump(remote_pool_values()), encoding="utf-8")
+    rule = "workers.remote.networkPolicy.extraEgress[0]"
+
+    result = subprocess.run(
+        [
+            "mise",
+            "exec",
+            "--",
+            "helm",
+            "template",
+            "sie",
+            str(helm.CHART_DIR),
+            "--namespace",
+            "sie",
+            "-f",
+            str(values_file),
+            "--set",
+            f"{rule}.to[0].ipBlock.cidr=203.0.113.7/32",
+            "--set",
+            f"{rule}.ports[0].port=8000",
+            "--set",
+            f"{rule}.ports[0].endPort=9000",
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    (policy,) = [
+        doc
+        for doc in yaml.safe_load_all(result.stdout)
+        if doc and doc["kind"] == "NetworkPolicy" and doc["metadata"]["name"] == REMOTE_NETWORK_POLICY
+    ]
+    assert policy["spec"]["egress"][-1]["ports"] == [{"port": 8000, "endPort": 9000}]
+
+
 def test_extra_egress_rules_are_appended(tmp_path: Path) -> None:
     rule = {"to": [{"ipBlock": {"cidr": "169.254.169.254/32"}}], "ports": [{"port": 80, "protocol": "TCP"}]}
     values = remote_pool_values()
@@ -2298,6 +2338,22 @@ def test_extra_egress_rules_are_appended(tmp_path: Path) -> None:
         (
             {"extraEgress": [{"to": [{"ipBlock": {"cidr": "10.0.0.1/32"}}], "ports": [{"port": 1, "endPort": 65535}]}]},
             "extraEgress[0].ports[0] spans nearly every port",
+        ),
+        (
+            {
+                "extraEgress": [
+                    {"to": [{"ipBlock": {"cidr": "10.0.0.1/32"}}], "ports": [{"port": "https", "endPort": 9000}]}
+                ]
+            },
+            "extraEgress[0].ports[0] sets endPort, which needs a numeric port",
+        ),
+        (
+            {
+                "extraEgress": [
+                    {"to": [{"ipBlock": {"cidr": "10.0.0.1/32"}}], "ports": [{"port": 8000, "endPort": "9000"}]}
+                ]
+            },
+            "extraEgress[0].ports[0].endPort must be an integer",
         ),
         ({"allowedCidrs": ["2000::/3"]}, "allowedCidrs[0]: the only IPv6 entry is ::/0"),
         ({"allowedCidrs": ["10.1.0.0/16"]}, "allowedCidrs[0] lies inside the denied range 10.0.0.0/8"),
