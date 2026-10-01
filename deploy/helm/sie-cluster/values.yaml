@@ -909,6 +909,38 @@ workers:
     # iam.gke.io/gcp-service-account).
     serviceAccount:
       annotations: {}
+    # -- NetworkPolicy for the remote lanes' pods, rendered whenever a remote
+    # lane is enabled. Ingress: only this release's gateway pods, on the worker
+    # ports. Egress: DNS; this release's NATS, sie-config, gateway and telemetry
+    # collector; and TCP 443 plus every port in an upstream base_url or
+    # proxy_url, to allowedCidrs except deniedCidrs. It matches addresses and
+    # ports, not host names, and needs a CNI that enforces NetworkPolicy. See
+    # the chart README section "Remote backends".
+    networkPolicy:
+      enabled: true
+      # -- Destinations for TCP 443 and the upstream ports: upstreams, the
+      # payload store and telemetry. deniedCidrs are excluded from the
+      # 0.0.0.0/0 and ::/0 entries. An empty list renders no such rule.
+      allowedCidrs:
+        - 0.0.0.0/0
+        - ::/0
+      # -- Private, carrier-grade NAT and link-local ranges. On common clusters
+      # they hold the in-cluster pod and service addresses and the cloud
+      # metadata services. Add your cluster's ranges if they differ.
+      deniedCidrs:
+        - 10.0.0.0/8
+        - 172.16.0.0/12
+        - 192.168.0.0/16
+        - 100.64.0.0/10
+        - 169.254.0.0/16
+        - fc00::/7
+        - fe80::/10
+      # -- Additional egress rules, for example NATS outside this release, a
+      # private object-store or upstream endpoint, an egress proxy, or the
+      # node-local endpoint that workload identity reads credentials from.
+      # Each entry needs a non-empty `to` (scoped selectors or an ipBlock) and
+      # `ports` (each with a port).
+      extraEgress: []
 
   # -- Worker pools (one StatefulSet per enabled queuePool/machineProfile/bundle lane)
   # Each map entry creates a WorkerGroup family: one StatefulSet + one

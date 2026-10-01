@@ -837,6 +837,75 @@ Below, `<fullname>` is the chart's full name: `<release>-sie-cluster`, or
   `kubectl rollout restart statefulset/<fullname>-worker-remote-remote`.
   A change to `upstreams` restarts it automatically.
 
+#### Network policy for remote lanes
+
+When a remote lane is enabled, the chart also renders a `NetworkPolicy` for the
+remote lanes' pods (`workers.remote.networkPolicy.enabled`, on by default). It
+takes effect only with a CNI that enforces NetworkPolicy; with any other CNI it
+does nothing.
+
+- **Ingress:** only this release's gateway pods, on the worker ports. The worker
+  API has no authentication of its own, so without this rule any pod in the
+  cluster could call a remote lane directly and spend its upstream credentials.
+- **Egress:** DNS (port 53, to any address); this release's NATS (4222),
+  sie-config and gateway (8080) and telemetry collector (4327) pods; and TCP 443
+  plus every port named in an upstream `base_url` or `proxy_url`, to
+  `allowedCidrs` (every address by default) except `deniedCidrs`. Nothing else
+  is allowed.
+- **Default `deniedCidrs`:** the private ranges (10.0.0.0/8, 172.16.0.0/12,
+  192.168.0.0/16), the carrier-grade NAT range (100.64.0.0/10), link-local
+  (169.254.0.0/16), and IPv6 unique-local (fc00::/7) and link-local (fe80::/10).
+  On common clusters these ranges hold the in-cluster pod and service addresses
+  and the cloud metadata services. If your cluster uses other ranges, add them.
+
+**What the policy does not do.** NetworkPolicy matches addresses and ports, not
+host names. The remote lanes can reach any address outside `deniedCidrs` on the
+allowed ports, not only the upstreams you declared. To limit egress to the
+declared hosts, use a policy engine with DNS-aware rules (for example Cilium or
+Calico), or route upstream traffic through an egress proxy that enforces a host
+allowlist: set the upstream's `proxy_url`, set `allowedCidrs: []`, and admit the
+proxy, and the payload store if you use one, with `extraEgress`. DNS is not
+restricted.
+
+Some deployments need an `extraEgress` rule, because the default policy blocks
+the destination:
+
+- **NATS outside this release** (`nats.install: false`).
+- **Private endpoints.** A payload store or an upstream reached through a
+  private endpoint, such as AWS PrivateLink or an Azure private endpoint, has an
+  address in the private ranges.
+- **Carrier-grade NAT addresses.** Alibaba Cloud's internal OSS endpoints
+  resolve to addresses in 100.64.0.0/10, and some clusters assign pod addresses
+  from that range. Admit the specific endpoint range, not the whole block: the
+  Alibaba Cloud metadata service is also in it, at 100.100.100.200.
+- **Pod identity through a node-local endpoint.** GKE Workload Identity reads
+  credentials from the GKE metadata server (169.254.169.254, port 80) and EKS
+  Pod Identity from its agent (169.254.170.23, port 80). The default policy
+  blocks both, so the remote lanes cannot obtain cloud credentials, for example
+  for the payload store, until you admit that one address and port. EKS IRSA,
+  AKS workload identity and Alibaba Cloud RRSA exchange a projected token at the
+  provider's token endpoint on port 443; they need a rule only when that
+  endpoint has a private or carrier-grade NAT address, such as a VPC endpoint.
+- **An OTLP endpoint outside the cluster** on a port other than 443.
+
+```yaml
+workers:
+  remote:
+    networkPolicy:
+      extraEgress:
+        - to:
+            - ipBlock:
+                cidr: 169.254.169.254/32
+          ports:
+            - port: 80
+              protocol: TCP
+```
+
+Each `extraEgress` rule needs a non-empty `to` (a scoped selector or an
+`ipBlock`) and `ports` (each with a port). `workers.remote.networkPolicy.enabled:
+false` removes the policy; the install notes then warn that the remote lane's
+network access is not restricted.
+
 ### High availability in one file
 
 `values-ha.yaml` is the tested composition of the durability knobs below with

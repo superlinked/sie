@@ -1,0 +1,150 @@
+{{- $root := . -}}
+{{- $policy := dig "remote" "networkPolicy" dict $root.Values.workers -}}
+{{- if and (eq (include "sie-cluster.worker.remoteLaneEnabled" $root) "true") (dig "enabled" true $policy) }}
+{{- range $index, $rule := (default list $policy.extraEgress) }}
+{{- if not (and (kindIs "map" $rule) $rule.to $rule.ports) }}
+{{- fail (printf "workers.remote.networkPolicy.extraEgress[%d] needs a non-empty to and ports: a rule without them admits every destination or every port." $index) }}
+{{- end }}
+{{- range $peerIndex, $peer := $rule.to }}
+{{- $scoped := false }}
+{{- if kindIs "map" $peer }}
+{{- range $selectorKey := list "podSelector" "namespaceSelector" }}
+{{- $selector := index $peer $selectorKey }}
+{{- if and (kindIs "map" $selector) (or $selector.matchLabels $selector.matchExpressions) }}
+{{- $scoped = true }}
+{{- end }}
+{{- end }}
+{{- if and (kindIs "map" $peer.ipBlock) $peer.ipBlock.cidr }}
+{{- $scoped = true }}
+{{- end }}
+{{- end }}
+{{- if not $scoped }}
+{{- fail (printf "workers.remote.networkPolicy.extraEgress[%d].to[%d] admits every destination: give it a podSelector or namespaceSelector with matchLabels or matchExpressions, or an ipBlock." $index $peerIndex) }}
+{{- end }}
+{{- end }}
+{{- range $portIndex, $port := $rule.ports }}
+{{- if not (and (kindIs "map" $port) $port.port) }}
+{{- fail (printf "workers.remote.networkPolicy.extraEgress[%d].ports[%d] admits every port: set port." $index $portIndex) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- $deniedV4 := list }}
+{{- $deniedV6 := list }}
+{{- range $cidr := (default list $policy.deniedCidrs) }}
+{{- if not (and (kindIs "string" $cidr) (contains "/" $cidr)) }}
+{{- fail "workers.remote.networkPolicy.deniedCidrs entries must be CIDR strings" }}
+{{- end }}
+{{- if contains ":" $cidr }}
+{{- $deniedV6 = append $deniedV6 $cidr }}
+{{- else }}
+{{- $deniedV4 = append $deniedV4 $cidr }}
+{{- end }}
+{{- end }}
+{{- /* TCP 443 for object storage and telemetry, plus every port an upstream or
+       its proxy is reached on. A loopback upstream needs no egress. */ -}}
+{{- $ports := list 443 }}
+{{- range $name, $upstream := (default dict $root.Values.upstreams) }}
+{{- range $url := list $upstream.base_url $upstream.proxy_url }}
+{{- if $url }}
+{{- $authority := regexReplaceAll "^[a-z]+://([^/]+).*$" $url "${1}" }}
+{{- if not (regexMatch "^(localhost|127\\.[0-9.]+|\\[::1\\])(:[0-9]+)?$" $authority) }}
+{{- $port := ternary 443 80 (hasPrefix "https://" $url) }}
+{{- $explicit := regexFind ":[0-9]+$" $authority }}
+{{- if $explicit }}
+{{- $port = trimPrefix ":" $explicit | atoi }}
+{{- end }}
+{{- if not (has $port $ports) }}
+{{- $ports = append $ports $port }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- $maxWorkerChildCount := int (include "sie-cluster.worker.maxChildCount" $root) }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "sie-cluster.fullname" $root }}-worker-remote
+  namespace: {{ include "sie-cluster.namespace" $root }}
+  labels:
+    {{- include "sie-cluster.worker.labels" $root | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "sie-cluster.worker.selectorLabels" $root | nindent 6 }}
+      sie.superlinked.com/bundle: remote
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "sie-cluster.gateway.selectorLabels" $root | nindent 14 }}
+      ports:
+        {{- range $i := until $maxWorkerChildCount }}
+        - port: {{ add $root.Values.workers.common.port $i }}
+          protocol: TCP
+        {{- end }}
+  egress:
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    {{- if $root.Values.nats.install }}
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: nats
+              app.kubernetes.io/instance: {{ $root.Release.Name }}
+      ports:
+        - port: 4222
+          protocol: TCP
+    {{- end }}
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "sie-cluster.config.selectorLabels" $root | nindent 14 }}
+        - podSelector:
+            matchLabels:
+              {{- include "sie-cluster.gateway.selectorLabels" $root | nindent 14 }}
+      ports:
+        - port: 8080
+          protocol: TCP
+    {{- if eq (include "sie-cluster.otel.collectorEnabled" $root) "true" }}
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "sie-cluster.selectorLabels" $root | nindent 14 }}
+              app.kubernetes.io/component: otel-collector
+      ports:
+        - port: 4327
+          protocol: TCP
+    {{- end }}
+    {{- with $policy.allowedCidrs }}
+    - to:
+        {{- range $cidr := . }}
+        - ipBlock:
+            cidr: {{ $cidr | quote }}
+            {{- $except := list }}
+            {{- if eq $cidr "0.0.0.0/0" }}
+            {{- $except = $deniedV4 }}
+            {{- else if eq $cidr "::/0" }}
+            {{- $except = $deniedV6 }}
+            {{- end }}
+            {{- with $except }}
+            except:
+              {{- toYaml . | nindent 14 }}
+            {{- end }}
+        {{- end }}
+      ports:
+        {{- range $port := $ports }}
+        - port: {{ $port }}
+          protocol: TCP
+        {{- end }}
+    {{- end }}
+    {{- with $policy.extraEgress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}

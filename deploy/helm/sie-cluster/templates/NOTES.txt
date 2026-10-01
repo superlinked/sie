@@ -44,6 +44,17 @@ Grafana password: kubectl get secret -n {{ include "sie-cluster.kubePrometheusSt
 {{- if .Values.keda.install }}
 KEDA:       enabled
 {{- end }}
+{{- if eq (include "sie-cluster.worker.remoteLaneEnabled" .) "true" }}
+
+Remote backends: the remote lane is the only worker that holds upstream credentials.
+{{- if dig "remote" "networkPolicy" "enabled" true .Values.workers }}
+Its NetworkPolicy limits egress by address and port, not by host name, and works only with a CNI
+that enforces NetworkPolicy. See the chart README section "Remote backends".
+{{- else }}
+WARNING: workers.remote.networkPolicy.enabled=false, so the remote lane's network access is not
+restricted.
+{{- end }}
+{{- end }}
 {{- if and .Release.IsUpgrade (not .Values.ingress.enabled) (lookup "networking.k8s.io/v1" "Ingress" (include "sie-cluster.namespace" .) (include "sie-cluster.fullname" .)) }}
 
 WARNING: this upgrade removes the gateway Ingress {{ include "sie-cluster.fullname" . }} because

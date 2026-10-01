@@ -2018,3 +2018,167 @@ def test_an_image_pull_secret_may_hold_a_separate_upstream_key(tmp_path: Path) -
     result = render_workers(tmp_path, values)
 
     assert result.returncode == 0, result.stderr
+
+
+REMOTE_NETWORK_POLICY = "sie-sie-cluster-worker-remote"
+DEFAULT_DENIED_V4 = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "169.254.0.0/16"]
+DEFAULT_DENIED_V6 = ["fc00::/7", "fe80::/10"]
+
+
+def remote_network_policy(docs: list[dict]) -> dict | None:
+    policies = [
+        doc for doc in docs if doc["kind"] == "NetworkPolicy" and doc["metadata"]["name"] == REMOTE_NETWORK_POLICY
+    ]
+    return policies[0] if policies else None
+
+
+def pod_labels(doc: dict) -> dict:
+    if doc["kind"] == "Pod":
+        return doc["metadata"].get("labels", {})
+    return doc["spec"]["template"]["metadata"].get("labels", {})
+
+
+def selected_workloads(docs: list[dict], selector: dict) -> set[str]:
+    return {
+        doc["metadata"]["name"]
+        for doc, _ in pod_specs(docs)
+        if all(pod_labels(doc).get(key) == value for key, value in selector["matchLabels"].items())
+    }
+
+
+def test_the_remote_network_policy_admits_only_the_gateway_and_selects_only_remote_lanes(tmp_path: Path) -> None:
+    docs = rendered_documents(tmp_path, remote_pool_values(l4={"enabled": True}, cpu={"enabled": True}))
+
+    policy = remote_network_policy(docs)
+
+    assert policy is not None
+    spec = policy["spec"]
+    assert selected_workloads(docs, spec["podSelector"]) == {REMOTE_WORKER[1]}
+    assert spec["policyTypes"] == ["Ingress", "Egress"]
+    (ingress,) = spec["ingress"]
+    (peer,) = ingress["from"]
+    assert selected_workloads(docs, peer["podSelector"]) == {"sie-sie-cluster-gateway"}
+    assert ingress["ports"] == [{"port": 8080, "protocol": "TCP"}]
+
+
+def test_the_remote_network_policy_limits_egress_to_dns_the_release_and_public_upstream_ports(
+    tmp_path: Path,
+) -> None:
+    docs = rendered_documents(tmp_path, remote_pool_values())
+
+    egress = remote_network_policy(docs)["spec"]["egress"]
+
+    assert egress[0] == {"ports": [{"port": 53, "protocol": "UDP"}, {"port": 53, "protocol": "TCP"}]}
+    assert all("to" in rule and rule["ports"] for rule in egress[1:])
+    in_release = {
+        (workload, port["port"])
+        for rule in egress[1:]
+        for peer in rule["to"]
+        if "podSelector" in peer
+        for workload in selected_workloads(docs, peer["podSelector"])
+        for port in rule["ports"]
+    }
+    assert in_release == {
+        ("sie-nats", 4222),
+        ("sie-sie-cluster-config", 8080),
+        ("sie-sie-cluster-gateway", 8080),
+    }
+    (public,) = [rule for rule in egress if any("ipBlock" in peer for peer in rule.get("to", []))]
+    assert public["to"] == [
+        {"ipBlock": {"cidr": "0.0.0.0/0", "except": DEFAULT_DENIED_V4}},
+        {"ipBlock": {"cidr": "::/0", "except": DEFAULT_DENIED_V6}},
+    ]
+    assert public["ports"] == [{"port": 443, "protocol": "TCP"}, {"port": 3128, "protocol": "TCP"}]
+
+
+def test_the_remote_network_policy_admits_the_collector_when_it_runs(tmp_path: Path) -> None:
+    values = remote_pool_values()
+    values.update(AUTOSCALING_VALUES)
+
+    docs = rendered_documents(tmp_path, values)
+
+    egress = remote_network_policy(docs)["spec"]["egress"]
+    collector_rules = [
+        rule
+        for rule in egress
+        for peer in rule.get("to", [])
+        if "podSelector" in peer
+        and peer["podSelector"]["matchLabels"].get("app.kubernetes.io/component") == "otel-collector"
+    ]
+    assert [rule["ports"] for rule in collector_rules] == [[{"port": 4327, "protocol": "TCP"}]]
+
+
+def test_upstream_ports_come_from_the_upstream_urls(tmp_path: Path) -> None:
+    values = remote_pool_values()
+    values["upstreams"] = {
+        "tls-port": upstream(base_url="https://sie.example.internal:8443/v1"),
+        "default-port": upstream(base_url="https://host.example.com"),
+        "loopback": upstream(base_url="http://127.0.0.1:9000"),
+        "ipv6": upstream(base_url="https://[2001:db8::1]:9443"),
+    }
+
+    docs = rendered_documents(tmp_path, values)
+
+    (public,) = [
+        rule
+        for rule in remote_network_policy(docs)["spec"]["egress"]
+        if any("ipBlock" in peer for peer in rule.get("to", []))
+    ]
+    assert sorted(port["port"] for port in public["ports"]) == [443, 8443, 9443]
+
+
+def test_narrower_allowed_cidrs_carry_no_exceptions_and_an_empty_list_renders_no_public_rule(
+    tmp_path: Path,
+) -> None:
+    values = remote_pool_values()
+    values["workers"]["remote"] = {"networkPolicy": {"allowedCidrs": ["203.0.113.0/24"]}}
+    narrowed = remote_network_policy(rendered_documents(tmp_path, values))["spec"]["egress"]
+    values["workers"]["remote"] = {"networkPolicy": {"allowedCidrs": []}}
+    closed = remote_network_policy(rendered_documents(tmp_path, values))["spec"]["egress"]
+
+    assert [peer for rule in narrowed for peer in rule.get("to", []) if "ipBlock" in peer] == [
+        {"ipBlock": {"cidr": "203.0.113.0/24"}}
+    ]
+    assert not [peer for rule in closed for peer in rule.get("to", []) if "ipBlock" in peer]
+
+
+def test_extra_egress_rules_are_appended(tmp_path: Path) -> None:
+    rule = {"to": [{"ipBlock": {"cidr": "169.254.169.254/32"}}], "ports": [{"port": 80, "protocol": "TCP"}]}
+    values = remote_pool_values()
+    values["workers"]["remote"] = {"networkPolicy": {"extraEgress": [rule]}}
+
+    egress = remote_network_policy(rendered_documents(tmp_path, values))["spec"]["egress"]
+
+    assert egress[-1] == rule
+
+
+@pytest.mark.parametrize(
+    ("rule", "message"),
+    [
+        ({"ports": [{"port": 443}]}, "extraEgress[0] needs a non-empty to and ports"),
+        ({"to": [{"ipBlock": {"cidr": "10.0.0.1/32"}}]}, "extraEgress[0] needs a non-empty to and ports"),
+        ({"to": [{}], "ports": [{"port": 443}]}, "extraEgress[0].to[0] admits every destination"),
+        ({"to": [{"podSelector": {}}], "ports": [{"port": 443}]}, "extraEgress[0].to[0] admits every destination"),
+        ({"to": [{"ipBlock": {"cidr": "10.0.0.1/32"}}], "ports": [{}]}, "extraEgress[0].ports[0] admits every port"),
+    ],
+)
+def test_unscoped_extra_egress_fails_the_render(tmp_path: Path, rule: dict, message: str) -> None:
+    values = remote_pool_values()
+    values["workers"]["remote"] = {"networkPolicy": {"extraEgress": [rule]}}
+
+    result = render_chart(tmp_path, values)
+
+    assert result.returncode != 0
+    assert message in result.stderr
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"upstreams": {"team": upstream()}, **L4_POOL},
+        {"workers": {"remote": {"networkPolicy": {"enabled": False}}, "pools": {"remote": {"enabled": True}}}},
+    ],
+    ids=["no-remote-lane", "disabled"],
+)
+def test_no_remote_network_policy_without_a_remote_lane_or_when_disabled(tmp_path: Path, values: dict) -> None:
+    assert remote_network_policy(rendered_documents(tmp_path, values)) is None
