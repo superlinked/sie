@@ -759,7 +759,7 @@ routes every remote profile there, through the normal queue, because the
 `remote` bundle outranks `default` for the remote adapters. The gateway holds
 no upstream credential and calls no upstream.
 
-Enable the remote pool and define the upstreams:
+Enable the remote pool and the worker NetworkPolicy, and define the upstreams:
 
 ```yaml
 upstreams:
@@ -773,34 +773,66 @@ upstreams:
       requests_per_minute: 600
       max_concurrency: 32
 workers:
+  networkPolicy:
+    enabled: true
   pools:
     remote:
       enabled: true
 ```
 
+Below, `<fullname>` is the chart's full name: `<release>-sie-cluster`, or
+`fullnameOverride` when set, as every provider overlay does.
+
 - Each `upstreams` entry has the fields of the server's upstreams file:
   `kind` (`sie` or `openai`), `base_url` (https outside loopback, with no
   credentials, query or fragment), `rate_cap` (required) and an optional
-  `proxy_url`. `api_key_secret` names a Kubernetes Secret and key that you
+  `proxy_url`. An upstream of kind `openai` also declares the `endpoints` it
+  offers (`completions`, `chat`, `embeddings`, `rerank`) and may name request
+  fields to add to every call (`set_params`) or remove from it
+  (`strip_params`). `api_key_secret` names a Kubernetes Secret and key that you
   create; the chart rejects a plain string, so a credential cannot be written
-  into values. The chart checks these fields when it renders.
+  into values. The chart checks these fields as the server does when it
+  renders, and a test sends the same URLs and definitions through the chart
+  and the server's own parser.
 - Only the `worker` container of a `remote` lane receives the upstreams file
-  (the `<release>-sie-cluster-upstreams` ConfigMap) and the credentials
-  (environment variables read from the Secrets). The worker sidecar, the
-  gateway, sie-config and every other worker lane receive neither, and every
-  other lane runs with remote serving switched off, so it refuses a remote
-  profile even if one reaches it. The chart owns `SIE_UPSTREAMS_FILE`,
-  `SIE_REMOTE_SERVING` and the credential variables, so `extraEnv` cannot set
-  them, and an `extraEnv` entry that reads an upstream's Secret anywhere else
-  fails the render.
+  (the `<fullname>-upstreams` Secret, mounted read-only) and the credentials
+  (environment variables read from the Secrets you name). The file is a
+  Secret, not a ConfigMap, because it says where each credential is sent and
+  can hold `set_params` values. The worker sidecar, the gateway, sie-config and
+  every other worker lane receive neither, and every other lane runs with
+  remote serving switched off, so it refuses a remote profile even if one
+  reaches it. The chart owns `SIE_UPSTREAMS_FILE`, `SIE_REMOTE_SERVING` and
+  the credential variables, so `extraEnv` cannot set them, and an `extraEnv`
+  entry that reads an upstream's Secret anywhere else fails the render. An
+  upstream's Secret key must also differ from every Secret key the chart
+  hands to another component (the Hugging Face token, the gateway tokens, the
+  sie-config tokens and the NATS passwords).
+- **A remote lane needs `workers.networkPolicy.enabled: true`, and the render
+  fails without it.** The worker API has no authentication of its own, so
+  without a NetworkPolicy any pod in the cluster, including worker lanes that
+  run model code, could call a remote lane directly and spend its
+  credentials. The policy admits only this release's gateway pods, and needs
+  a CNI that enforces NetworkPolicy.
+- Remote lanes run as their own ServiceAccount, `<fullname>-worker-remote`,
+  with no Kubernetes API token, no cloud workload identity and no
+  `HF_TOKEN`. Without an identity they cannot read the payload store, so a
+  work item above 1MB for a remote model fails. To serve those, bind that
+  ServiceAccount to an identity limited to the payload store's `payloads/`
+  prefix through `workers.remote.serviceAccount.annotations`.
 - `workers.remote.serving: false` keeps remote lanes running but refuses every
-  remote profile and sends nothing upstream.
-- A remote lane requests no GPU and runs the `cpu-default` worker image
-  (`imageBundle: default`), which contains the remote adapters. A pool that
-  hosts a `remote` bundle must set `gpu.count: 0`.
+  remote profile and sends nothing upstream. The lanes then receive neither
+  the upstreams file nor the credentials.
+- A remote lane runs no model on an accelerator. It runs the `cpu-default`
+  worker image (`imageBundle: default`), which contains the remote adapters, and
+  the render fails when its pool sets `gpu.count` above 0, requests any
+  resource other than `cpu`, `memory` and `ephemeral-storage`, or sets a
+  `runtimeClassName`. It does not inherit `workers.common.runtimeClassName`.
+- The worker image must ship the `remote` bundle, which server images do from
+  the first release that includes #492. With an older image the worker exits
+  at start (`Bundle file not found`) and the lane restarts in a loop.
 - Workers read their environment at start. After rotating an upstream's
   Secret, restart the remote lane:
-  `kubectl rollout restart statefulset/<release>-sie-cluster-worker-remote-remote`.
+  `kubectl rollout restart statefulset/<fullname>-worker-remote-remote`.
   A change to `upstreams` restarts it automatically.
 
 ### High availability in one file
@@ -950,7 +982,9 @@ to the subjects that component uses:
   mcp-edge pods set `automountServiceAccountToken: false`, and none of them
   calls the Kubernetes API. They keep the `sie-server` ServiceAccount, so
   cloud workload identity (EKS IRSA and Pod Identity, GKE and AKS workload
-  identity, ACK RRSA), which projects its own token, keeps working. The
+  identity, ACK RRSA), which projects its own token, keeps working. Remote
+  lanes are the exception: they run as `<fullname>-worker-remote`, which has
+  no identity unless you give it one (see [Remote backends](#remote-backends)). The
   gateway's pool Role covers every ConfigMap in the namespace, including the
   NATS server configuration `<release>-nats-config`, because pool ConfigMaps
   are named at runtime. The gateway pod can therefore change the NATS users,
@@ -1231,7 +1265,11 @@ write access, or of the read token, which every worker sidecar holds.
   manages pools.
 - **Upstream credentials (when remote backends are used):** the `worker`
   container of each `remote` lane, from the Secrets that `upstreams` names.
-  See [Remote backends](#remote-backends).
+  Where each credential is sent is in the `<fullname>-upstreams` Secret, which
+  only that container mounts. Changing it takes write access to Secrets in the
+  release namespace: no workload of this chart has any Secret permission, and
+  the gateway's Role covers ConfigMaps and Leases only. See
+  [Remote backends](#remote-backends).
 
 Anyone who can read Secrets in the release namespace can read all of them.
 Limit Secret read access in that namespace accordingly.

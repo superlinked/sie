@@ -10,11 +10,23 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import pytest
 import yaml
-from sie_server.config.upstreams import Upstream, UpstreamKind, load_upstreams
+from pydantic import ValidationError
+from sie_server.config.upstreams import (
+    Upstream,
+    UpstreamConfigError,
+    UpstreamKind,
+    load_upstreams,
+    validate_upstream_url,
+)
 
 ROOT = Path(__file__).resolve().parents[3]
 FIXTURE = ROOT / "tools/ci/fixtures/helm-upstreams.yaml"
+DEFINITION_BASE = {
+    "base_url": "https://host.example.com/v1",
+    "rate_cap": {"requests_per_minute": 60, "max_concurrency": 4},
+}
 
 
 def fixture() -> dict[str, Any]:
@@ -42,3 +54,29 @@ def test_the_fixture_uses_every_upstream_field_the_server_defines() -> None:
     used = set().union(*(entry.keys() for entry in rendered.values()))
 
     assert used == set(Upstream.model_fields)
+
+
+@pytest.mark.parametrize("case", fixture()["urls"], ids=lambda case: case["url"])
+def test_the_server_judges_each_url_as_the_chart_does(case: dict[str, Any]) -> None:
+    field = "base_url" if case["tls"] else "proxy_url"
+    try:
+        validate_upstream_url(case["url"], field=field, require_tls=case["tls"])
+    except UpstreamConfigError:
+        accepted = False
+    else:
+        accepted = True
+
+    assert accepted is case["accepted"]
+
+
+@pytest.mark.parametrize("case", fixture()["definitions"], ids=lambda case: str(sorted(case["upstream"].items()))[:80])
+def test_the_server_judges_each_definition_as_the_chart_does(case: dict[str, Any]) -> None:
+    definition = {**DEFINITION_BASE, **case["upstream"]}
+    try:
+        Upstream.model_validate(definition)
+    except (ValidationError, UpstreamConfigError):
+        accepted = False
+    else:
+        accepted = True
+
+    assert accepted is case["accepted"]

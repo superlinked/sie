@@ -146,6 +146,19 @@ fast at render time.
 {{- if and $remoteLane (eq $imageBundle "remote") }}
 {{- fail (printf "workers.pools.%s.bundles.remote: no remote worker image is published; set imageBundle: default to run the remote adapters on the %s-default image" $poolName $platform) }}
 {{- end }}
+{{- if $remoteLane }}
+{{- range $resourceKind := list "requests" "limits" }}
+{{- range $resource, $_ := (dig $resourceKind dict (default dict $pool.resources)) }}
+{{- if not (has $resource (list "cpu" "memory" "ephemeral-storage")) }}
+{{- fail (printf "workers.pools.%s.resources.%s: a remote lane runs no model on an accelerator and requests only cpu, memory and ephemeral-storage" $poolName $resourceKind) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if $pool.runtimeClassName }}
+{{- fail (printf "workers.pools.%s.runtimeClassName: a remote lane runs on the cluster's default container runtime, never a GPU runtime; remove the runtime class" $poolName) }}
+{{- end }}
+{{- end }}
+{{- $deliverUpstreams := and $remoteLane (dig "remote" "serving" true $root.Values.workers) }}
 {{- $poolSidecar := default dict $pool.sidecar }}
 {{- $emulatedChildCount := int (dig "emulatedChildCount" 0 $poolSidecar) }}
 {{- if and (gt $emulatedChildCount 0) (gt $gpuCount 0) }}
@@ -242,17 +255,21 @@ spec:
         sie.superlinked.com/queue-pool: {{ $queuePool | quote }}
       annotations:
         checksum/otel-resource: {{ include "sie-cluster.otel.resourceChecksum" $root | quote }}
-        {{- if $remoteLane }}
+        {{- if $deliverUpstreams }}
         checksum/upstreams: {{ include "sie-cluster.upstreams.file" $root | sha256sum | quote }}
         {{- end }}
     spec:
       {{- include "sie-cluster.imagePullSecrets" $root | nindent 6 }}
       {{- if $pool.runtimeClassName }}
       runtimeClassName: {{ $pool.runtimeClassName | quote }}
-      {{- else if $root.Values.workers.common.runtimeClassName }}
+      {{- else if and $root.Values.workers.common.runtimeClassName (not $remoteLane) }}
       runtimeClassName: {{ $root.Values.workers.common.runtimeClassName | quote }}
       {{- end }}
+      {{- if $remoteLane }}
+      serviceAccountName: {{ include "sie-cluster.worker.remoteServiceAccountName" $root }}
+      {{- else }}
       serviceAccountName: {{ include "sie-cluster.serviceAccountName" $root }}
+      {{- end }}
       automountServiceAccountToken: false
       terminationGracePeriodSeconds: 65
       securityContext:
@@ -369,7 +386,7 @@ spec:
             # HuggingFace cache
             - name: HF_HOME
               value: {{ $root.Values.workers.common.hfCache.home | quote }}
-            {{- if $root.Values.workers.common.hfCache.tokenSecret }}
+            {{- if and $root.Values.workers.common.hfCache.tokenSecret (not $remoteLane) }}
             - name: HF_TOKEN
               valueFrom:
                 secretKeyRef:
@@ -411,7 +428,8 @@ spec:
               value: {{ if and $root.Values.telemetry $root.Values.telemetry.deploymentEnv }}{{ $root.Values.telemetry.deploymentEnv | quote }}{{ else }}"production"{{ end }}
             {{- if $remoteLane }}
             - name: SIE_REMOTE_SERVING
-              value: {{ ternary "1" "0" (dig "remote" "serving" true $root.Values.workers) | quote }}
+              value: {{ ternary "1" "0" $deliverUpstreams | quote }}
+            {{- if $deliverUpstreams }}
             - name: SIE_UPSTREAMS_FILE
               value: "/etc/sie/upstreams/upstreams.yaml"
             {{- range $upstreamName, $upstream := (default dict $root.Values.upstreams) }}
@@ -421,6 +439,7 @@ spec:
                 secretKeyRef:
                   name: {{ .name | quote }}
                   key: {{ .key | quote }}
+            {{- end }}
             {{- end }}
             {{- end }}
             {{- else }}
@@ -505,7 +524,7 @@ spec:
             - name: sie-ipc
               mountPath: /var/run/sie
             {{- end }}
-            {{- if $remoteLane }}
+            {{- if $deliverUpstreams }}
             - name: upstreams
               mountPath: /etc/sie/upstreams
               readOnly: true
@@ -805,10 +824,10 @@ spec:
             medium: Memory
             sizeLimit: 64Mi
         {{- end }}
-        {{- if $remoteLane }}
+        {{- if $deliverUpstreams }}
         - name: upstreams
-          configMap:
-            name: {{ include "sie-cluster.upstreams.configMapName" $root }}
+          secret:
+            secretName: {{ include "sie-cluster.upstreams.secretName" $root }}
         {{- end }}
 {{- end }}
 {{- end }}

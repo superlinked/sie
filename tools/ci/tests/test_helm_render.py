@@ -1409,8 +1409,9 @@ def test_rendered_nats_cluster_forms_only_with_route_credentials(tmp_path: Path)
 
 
 UPSTREAMS_FIXTURE = ROOT / "tools/ci/fixtures/helm-upstreams.yaml"
-UPSTREAMS_CONFIG_MAP = "sie-sie-cluster-upstreams"
+UPSTREAMS_SECRET = "sie-sie-cluster-upstreams"
 REMOTE_WORKER = ("StatefulSet", "sie-sie-cluster-worker-remote-remote", "worker")
+REMOTE_SERVICE_ACCOUNT = "sie-sie-cluster-worker-remote"
 CREDENTIAL_CANARY = "sk-canary-2f7c9e04b1d3a685"
 
 
@@ -1421,8 +1422,12 @@ def upstreams_fixture() -> dict:
 def remote_pool_values(**pools: dict) -> dict:
     return {
         "upstreams": upstreams_fixture()["values"],
-        "workers": {"pools": {"remote": {"enabled": True}, **pools}},
+        "workers": {"networkPolicy": {"enabled": True}, "pools": {"remote": {"enabled": True}, **pools}},
     }
+
+
+def with_worker_network_policy(values: dict) -> dict:
+    return {**values, "workers": {**values.get("workers", {}), "networkPolicy": {"enabled": True}}}
 
 
 def pod_specs(docs: list[dict]) -> list[tuple[dict, dict]]:
@@ -1449,36 +1454,44 @@ def secret_references(container: dict) -> set[str]:
 
 
 def containers_with_upstream_access(docs: list[dict], secret_names: set[str]) -> dict[str, set[tuple[str, str, str]]]:
-    access: dict[str, set[tuple[str, str, str]]] = {"secret": set(), "config_map": set(), "file_env": set()}
+    access: dict[str, set[tuple[str, str, str]]] = {"secret": set(), "file": set(), "file_env": set()}
     for doc, spec in pod_specs(docs):
         upstream_volumes = {
             volume["name"]
             for volume in spec.get("volumes", [])
-            if volume.get("configMap", {}).get("name") == UPSTREAMS_CONFIG_MAP
-            or volume.get("secret", {}).get("secretName") in secret_names
+            if volume.get("secret", {}).get("secretName") in {UPSTREAMS_SECRET, *secret_names}
+            or volume.get("configMap", {}).get("name") == UPSTREAMS_SECRET
         }
         for container in [*spec.get("initContainers", []), *spec["containers"]]:
             owner = (doc["kind"], doc["metadata"]["name"], container["name"])
             if secret_references(container) & secret_names:
                 access["secret"].add(owner)
             if any(mount["name"] in upstream_volumes for mount in container.get("volumeMounts", [])):
-                access["config_map"].add(owner)
+                access["file"].add(owner)
             if any(env["name"] == "SIE_UPSTREAMS_FILE" for env in container.get("env", [])):
                 access["file_env"].add(owner)
     return access
 
 
-def test_only_the_remote_lane_worker_receives_upstreams_and_credentials(tmp_path: Path) -> None:
-    docs = rendered_documents(tmp_path, remote_pool_values(l4={"enabled": True}, cpu={"enabled": True}))
-    secret_names = {
+def upstream_secret_names() -> set[str]:
+    return {
         upstream["api_key_secret"]["name"]
         for upstream in upstreams_fixture()["values"].values()
         if "api_key_secret" in upstream
     }
 
+
+def lane_pod_specs(docs: list[dict]) -> dict[str, dict]:
+    return {doc["metadata"]["name"]: doc["spec"]["template"]["spec"] for doc in docs if doc["kind"] == "StatefulSet"}
+
+
+def test_only_the_remote_lane_worker_receives_upstreams_and_credentials(tmp_path: Path) -> None:
+    docs = rendered_documents(tmp_path, remote_pool_values(l4={"enabled": True}, cpu={"enabled": True}))
+    secret_names = upstream_secret_names()
+
     access = containers_with_upstream_access(docs, secret_names)
 
-    assert access == {"secret": {REMOTE_WORKER}, "config_map": {REMOTE_WORKER}, "file_env": {REMOTE_WORKER}}
+    assert access == {"secret": {REMOTE_WORKER}, "file": {REMOTE_WORKER}, "file_env": {REMOTE_WORKER}}
     assert not [doc for doc in docs if doc["kind"] == "Secret" and doc["metadata"]["name"] in secret_names]
     remote_serving = env_entries(docs, "SIE_REMOTE_SERVING")
     assert remote_serving == {
@@ -1517,30 +1530,139 @@ def test_every_lane_names_a_bundle_the_server_ships(tmp_path: Path) -> None:
     assert rendered <= {path.stem for path in (ROOT / "packages/sie_server/bundles").glob("*.yaml")}
 
 
-def test_the_rendered_upstreams_file_matches_the_fixture(tmp_path: Path) -> None:
+def test_the_upstreams_file_is_a_secret_that_matches_the_fixture(tmp_path: Path) -> None:
     docs = rendered_documents(tmp_path, remote_pool_values())
 
-    (config_map,) = [
-        doc for doc in docs if doc["kind"] == "ConfigMap" and doc["metadata"]["name"] == UPSTREAMS_CONFIG_MAP
+    (secret,) = [doc for doc in docs if doc["kind"] == "Secret" and doc["metadata"]["name"] == UPSTREAMS_SECRET]
+
+    assert yaml.safe_load(secret["stringData"]["upstreams.yaml"]) == upstreams_fixture()["rendered"]
+    assert not [doc for doc in docs if doc["kind"] == "ConfigMap" and doc["metadata"]["name"] == UPSTREAMS_SECRET]
+
+
+def bound_rules(docs: list[dict], service_account: str) -> list[dict]:
+    roles = {(doc["kind"], doc["metadata"]["name"]): doc for doc in docs if doc["kind"] in {"Role", "ClusterRole"}}
+    rules = []
+    for doc in docs:
+        if doc["kind"] not in {"RoleBinding", "ClusterRoleBinding"}:
+            continue
+        subjects = doc.get("subjects") or []
+        if not any(s.get("kind") == "ServiceAccount" and s.get("name") == service_account for s in subjects):
+            continue
+        rules.extend(roles[(doc["roleRef"]["kind"], doc["roleRef"]["name"])].get("rules", []))
+    return rules
+
+
+def test_no_role_of_the_gateway_reaches_secrets_and_the_remote_lane_has_none(tmp_path: Path) -> None:
+    docs = rendered_documents(tmp_path, remote_pool_values())
+    (gateway,) = [
+        doc for doc in docs if doc["kind"] == "Deployment" and doc["metadata"]["name"] == GATEWAY.split("/")[0]
+    ]
+    gateway_account = gateway["spec"]["template"]["spec"]["serviceAccountName"]
+
+    gateway_rules = bound_rules(docs, gateway_account)
+
+    assert any("configmaps" in rule["resources"] for rule in gateway_rules)
+    assert not [rule for rule in gateway_rules if {"secrets", "*"} & set(rule["resources"])]
+    assert bound_rules(docs, REMOTE_SERVICE_ACCOUNT) == []
+
+
+def test_the_remote_lane_runs_as_its_own_account_without_identity_or_hugging_face_token(tmp_path: Path) -> None:
+    values = remote_pool_values(l4={"enabled": True})
+    values["serviceAccount"] = {"annotations": {"eks.amazonaws.com/role-arn": "arn:aws:iam::123456789012:role/sie"}}
+    values["workers"]["common"] = {"hfCache": {"tokenSecret": "hf-token"}}
+
+    docs = rendered_documents(tmp_path, values)
+
+    lanes = lane_pod_specs(docs)
+    (gateway,) = [
+        doc for doc in docs if doc["kind"] == "Deployment" and doc["metadata"]["name"] == GATEWAY.split("/")[0]
+    ]
+    assert lanes[REMOTE_WORKER[1]]["serviceAccountName"] == REMOTE_SERVICE_ACCOUNT
+    assert lanes[REMOTE_WORKER[1]]["automountServiceAccountToken"] is False
+    assert (
+        lanes["sie-sie-cluster-worker-l4-default"]["serviceAccountName"]
+        == gateway["spec"]["template"]["spec"]["serviceAccountName"]
+    )
+    (account,) = [
+        doc for doc in docs if doc["kind"] == "ServiceAccount" and doc["metadata"]["name"] == REMOTE_SERVICE_ACCOUNT
+    ]
+    assert account["automountServiceAccountToken"] is False
+    assert "annotations" not in account["metadata"]
+    assert set(env_entries(docs, "HF_TOKEN")) == {"sie-sie-cluster-worker-l4-default/worker"}
+
+
+def test_annotations_can_bind_the_remote_account_to_a_payload_store_identity(tmp_path: Path) -> None:
+    annotations = {"iam.gke.io/gcp-service-account": "payloads@example-project.iam.gserviceaccount.com"}
+    values = remote_pool_values()
+    values["workers"]["remote"] = {"serviceAccount": {"annotations": annotations}}
+
+    docs = rendered_documents(tmp_path, values)
+
+    (account,) = [
+        doc for doc in docs if doc["kind"] == "ServiceAccount" and doc["metadata"]["name"] == REMOTE_SERVICE_ACCOUNT
+    ]
+    assert account["metadata"]["annotations"] == annotations
+
+
+def test_remote_lanes_do_not_inherit_the_common_runtime_class(tmp_path: Path) -> None:
+    values = remote_pool_values(l4={"enabled": True})
+    values["workers"]["common"] = {"runtimeClassName": "nvidia"}
+
+    lanes = lane_pod_specs(rendered_documents(tmp_path, values))
+
+    assert "runtimeClassName" not in lanes[REMOTE_WORKER[1]]
+    assert lanes["sie-sie-cluster-worker-l4-default"]["runtimeClassName"] == "nvidia"
+
+
+def test_the_worker_network_policy_admits_only_the_gateway_to_the_remote_lane(tmp_path: Path) -> None:
+    docs = rendered_documents(tmp_path, remote_pool_values())
+    remote_labels = next(
+        doc["spec"]["template"]["metadata"]["labels"]
+        for doc in docs
+        if doc["kind"] == "StatefulSet" and doc["metadata"]["name"] == REMOTE_WORKER[1]
+    )
+
+    (policy,) = [
+        doc for doc in docs if doc["kind"] == "NetworkPolicy" and doc["metadata"]["name"] == "sie-sie-cluster-worker"
     ]
 
-    assert yaml.safe_load(config_map["data"]["upstreams.yaml"]) == upstreams_fixture()["rendered"]
+    assert policy["spec"]["podSelector"]["matchLabels"].items() <= remote_labels.items()
+    (ingress,) = policy["spec"]["ingress"]
+    (peer,) = ingress["from"]
+    assert peer["podSelector"]["matchLabels"]["app.kubernetes.io/component"] == "gateway"
+
+
+def test_a_remote_lane_needs_a_worker_network_policy(tmp_path: Path) -> None:
+    values = remote_pool_values()
+    values["workers"]["networkPolicy"] = {"enabled": False}
+
+    result = render_workers(tmp_path, values)
+
+    assert result.returncode != 0
+    assert "a remote lane needs workers.networkPolicy.enabled=true" in result.stderr
 
 
 def test_no_upstreams_file_is_rendered_without_a_remote_lane(tmp_path: Path) -> None:
     docs = rendered_documents(tmp_path, {"upstreams": upstreams_fixture()["values"], **L4_POOL})
 
-    assert not [doc for doc in docs if doc["metadata"]["name"] == UPSTREAMS_CONFIG_MAP]
+    assert not [doc for doc in docs if doc["metadata"]["name"] in {UPSTREAMS_SECRET, REMOTE_SERVICE_ACCOUNT}]
     assert env_entries(docs, "SIE_REMOTE_SERVING") == {"sie-sie-cluster-worker-l4-default/worker": "0"}
 
 
-def test_the_global_switch_turns_remote_serving_off_on_remote_lanes(tmp_path: Path) -> None:
+def test_the_global_switch_withholds_the_upstreams_and_credentials(tmp_path: Path) -> None:
     values = remote_pool_values()
     values["workers"]["remote"] = {"serving": False}
 
     docs = rendered_documents(tmp_path, values)
 
     assert env_entries(docs, "SIE_REMOTE_SERVING") == {"sie-sie-cluster-worker-remote-remote/worker": "0"}
+    assert not [name for name in container_env(docs, REMOTE_WORKER[1], "worker") if name.startswith("SIE_UPSTREAM")]
+    assert not [doc for doc in docs if doc["metadata"]["name"] == UPSTREAMS_SECRET]
+    assert containers_with_upstream_access(docs, upstream_secret_names()) == {
+        "secret": set(),
+        "file": set(),
+        "file_env": set(),
+    }
 
 
 def test_changing_an_upstream_restarts_the_remote_lane(tmp_path: Path) -> None:
@@ -1569,6 +1691,10 @@ def reads_secret(name: str) -> dict:
     return {"name": "SOME_KEY", "valueFrom": {"secretKeyRef": {"name": name, "key": "api-key"}}}
 
 
+def remote_lane(**pool: object) -> dict:
+    return {"workers": {"pools": {"remote": {"enabled": True, **pool}}}}
+
+
 SECRET_UPSTREAM = {"team": upstream(api_key_secret={"name": "team-upstream", "key": "api-key"})}
 
 
@@ -1576,24 +1702,34 @@ SECRET_UPSTREAM = {"team": upstream(api_key_secret={"name": "team-upstream", "ke
     ("values", "message"),
     [
         (
-            {"workers": {"pools": {"remote": {"enabled": True, "gpu": {"count": 1}}}}},
+            remote_lane(gpu={"count": 1}),
             "workers.pools.remote.bundles.remote: a remote lane holds upstream credentials",
         ),
         (
-            {
-                "workers": {
-                    "pools": {
-                        "remote": {
-                            "enabled": True,
-                            "bundles": {"remote": {"imageBundle": "remote", "minReplicas": 1, "maxReplicas": 1}},
-                        }
-                    }
-                }
-            },
+            remote_lane(bundles={"remote": {"imageBundle": "remote", "minReplicas": 1, "maxReplicas": 1}}),
             "no remote worker image is published",
         ),
-        ({"upstreams": {"team": upstream(extra=1)}}, "upstreams.team.extra is not an upstream field"),
+        (
+            remote_lane(resources={"limits": {"nvidia.com/gpu": "1"}}),
+            "workers.pools.remote.resources.limits: a remote lane runs no model on an accelerator",
+        ),
+        (
+            remote_lane(resources={"requests": {"amd.com/gpu": "1"}}),
+            "workers.pools.remote.resources.requests: a remote lane runs no model on an accelerator",
+        ),
+        (
+            remote_lane(runtimeClassName="nvidia"),
+            "workers.pools.remote.runtimeClassName: a remote lane runs on the cluster's default container runtime",
+        ),
+        (
+            {"upstreams": {"team": upstream(extra=1)}},
+            "upstreams.team: field 2, counting in name order, is not an upstream field",
+        ),
         ({"upstreams": {"team": upstream(kind="grpc")}}, "upstreams.team.kind must be sie or openai"),
+        (
+            {"upstreams": {"team": upstream(base_url="https://sie.example.internal:0")}},
+            "upstreams.team.base_url is not a valid URL: a port is 1 to 65535",
+        ),
         (
             {"upstreams": {"team": upstream(base_url=f"http://{CREDENTIAL_CANARY}.example.internal")}},
             "upstreams.team.base_url must use https outside loopback",
@@ -1614,7 +1750,35 @@ SECRET_UPSTREAM = {"team": upstream(api_key_secret={"name": "team-upstream", "ke
             {"upstreams": {"team": upstream(base_url="http://127.0.0.1:8080", proxy_url="http://proxy:3128")}},
             "upstreams.team.proxy_url requires an https base_url",
         ),
-        ({"upstreams": {"Team_SIE": upstream()}}, "is not an upstream name"),
+        (
+            {"upstreams": {"Team_SIE": upstream()}},
+            "upstreams: entry 1, counting in name order, is not an upstream name",
+        ),
+        (
+            {"upstreams": {CREDENTIAL_CANARY.upper(): upstream()}},
+            "upstreams: entry 1, counting in name order, is not an upstream name",
+        ),
+        ({"upstreams": {CREDENTIAL_CANARY: "pasted"}}, "upstreams: entry 1, counting in name order, must be a map"),
+        (
+            {"upstreams": {"team": {**upstream(), CREDENTIAL_CANARY: "pasted"}}},
+            "upstreams.team: field 4, counting in name order, is not an upstream field",
+        ),
+        (
+            {
+                "upstreams": {
+                    "team": upstream(rate_cap={"requests_per_minute": 1, "max_concurrency": 1, CREDENTIAL_CANARY: 1})
+                }
+            },
+            "upstreams.team.rate_cap: field 3, counting in name order, is not a rate cap field",
+        ),
+        (
+            {
+                "upstreams": {
+                    "team": upstream(api_key_secret={"name": "team-upstream", "key": "api-key", CREDENTIAL_CANARY: 1})
+                }
+            },
+            "upstreams.team.api_key_secret: field 3, counting in name order, is not a field",
+        ),
         ({"upstreams": {"team": upstream(rate_cap=None)}}, "upstreams.team.rate_cap is required"),
         (
             {"upstreams": {"team": upstream(rate_cap={"requests_per_minute": 0, "max_concurrency": 1})}},
@@ -1663,11 +1827,89 @@ SECRET_UPSTREAM = {"team": upstream(api_key_secret={"name": "team-upstream", "ke
             },
             "workers.pools.l4.bundles.default.extraEnv reads the upstream Secret",
         ),
+        (
+            {
+                "upstreams": SECRET_UPSTREAM,
+                "workers": {"common": {"hfCache": {"tokenSecret": "team-upstream", "tokenSecretKey": "api-key"}}},
+            },
+            "upstreams.team.api_key_secret and workers.common.hfCache.tokenSecret name the same Secret key "
+            "(team-upstream/api-key)",
+        ),
+        (
+            {
+                "upstreams": SECRET_UPSTREAM,
+                "gateway": {
+                    "auth": {"mode": "static", "tokenSecretName": "team-upstream", "tokenSecretKey": "api-key"}
+                },
+            },
+            "upstreams.team.api_key_secret and gateway.auth.tokenSecretName name the same Secret key",
+        ),
+        (
+            {
+                "upstreams": SECRET_UPSTREAM,
+                "gateway": {"auth": {"adminTokenSecretName": "team-upstream", "adminTokenSecretKey": "api-key"}},
+            },
+            "upstreams.team.api_key_secret and gateway.auth.adminTokenSecretName name the same Secret key",
+        ),
+        (
+            {
+                "upstreams": SECRET_UPSTREAM,
+                "config": {"auth": {"readTokenSecretName": "team-upstream", "readTokenSecretKey": "api-key"}},
+            },
+            "upstreams.team.api_key_secret and the sie-config read token name the same Secret key",
+        ),
+        (
+            {
+                "upstreams": {
+                    "team": upstream(api_key_secret={"name": GENERATED_ADMIN_TOKEN_SECRET, "key": "SIE_ADMIN_TOKEN"})
+                }
+            },
+            "upstreams.team.api_key_secret and the sie-config admin token name the same Secret key",
+        ),
+        (
+            {"upstreams": {"team": upstream(api_key_secret={"name": "sie-nats-auth-worker", "key": "password"})}},
+            "upstreams.team.api_key_secret and the NATS worker password name the same Secret key",
+        ),
     ],
 )
 def test_unsafe_remote_configuration_fails_the_render(tmp_path: Path, values: dict, message: str) -> None:
-    result = render_workers(tmp_path, values)
+    result = render_workers(tmp_path, with_worker_network_policy(values))
 
     assert result.returncode != 0
     assert message in result.stderr
-    assert CREDENTIAL_CANARY not in result.stderr
+    assert CREDENTIAL_CANARY not in result.stderr.lower()
+
+
+@pytest.mark.parametrize("case", upstreams_fixture()["urls"], ids=lambda case: case["url"])
+def test_the_chart_judges_each_url_as_the_server_does(tmp_path: Path, case: dict) -> None:
+    field = "base_url" if case["tls"] else "proxy_url"
+    definition = upstream(base_url=case["url"]) if case["tls"] else upstream(proxy_url=case["url"])
+
+    result = render_workers(tmp_path, {**remote_pool_values(), "upstreams": {"team": definition}})
+
+    if case["accepted"]:
+        assert result.returncode == 0, result.stderr
+    else:
+        assert result.returncode != 0
+        assert f"upstreams.team.{field} " in result.stderr
+
+
+DEFINITION_BASE = {
+    "base_url": "https://host.example.com/v1",
+    "rate_cap": {"requests_per_minute": 60, "max_concurrency": 4},
+}
+
+
+@pytest.mark.parametrize(
+    "case", upstreams_fixture()["definitions"], ids=lambda case: str(sorted(case["upstream"].items()))[:80]
+)
+def test_the_chart_judges_each_definition_as_the_server_does(tmp_path: Path, case: dict) -> None:
+    definition = {**DEFINITION_BASE, **case["upstream"]}
+
+    result = render_workers(tmp_path, {**remote_pool_values(), "upstreams": {"team": definition}})
+
+    if case["accepted"]:
+        assert result.returncode == 0, result.stderr
+    else:
+        assert result.returncode != 0
+        assert "upstreams.team" in result.stderr

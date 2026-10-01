@@ -878,7 +878,9 @@ workers:
   # traffic are unaffected. Requires a CNI that enforces NetworkPolicy.
   # NetworkPolicies are additive: any other policy that selects worker pods
   # and admits more sources widens access, so check for overlapping policies.
-  # Disabled by default; values-ha.yaml enables it.
+  # Disabled by default; values-ha.yaml enables it. A remote lane
+  # (workers.pools.remote) requires it, because any pod that reaches a remote
+  # lane could spend its upstream credentials.
   networkPolicy:
     enabled: false
     # -- Additional NetworkPolicy ingress rules for callers outside this chart
@@ -892,9 +894,19 @@ workers:
   # -- Remote serving on worker lanes whose bundle is `remote`.
   remote:
     # -- Global switch. false keeps remote lanes running but refuses every
-    # remote profile and sends nothing upstream. Every other lane always runs
-    # with remote serving off.
+    # remote profile and sends nothing upstream: the lanes then receive neither
+    # the upstreams file nor the credentials. Every other lane always runs with
+    # remote serving off.
     serving: true
+    # -- Remote lanes run as their own ServiceAccount, <fullname>-worker-remote,
+    # with no Kubernetes API token and, by default, no cloud workload identity.
+    # Without an identity they cannot read the payload store, so a work item
+    # above 1MB for a remote model fails. To serve those, bind this
+    # ServiceAccount to an identity limited to the payload store's payloads
+    # prefix with these annotations (for example eks.amazonaws.com/role-arn or
+    # iam.gke.io/gcp-service-account).
+    serviceAccount:
+      annotations: {}
 
   # -- Worker pools (one StatefulSet per enabled queuePool/machineProfile/bundle lane)
   # Each map entry creates a WorkerGroup family: one StatefulSet + one
@@ -1150,7 +1162,10 @@ workers:
 
     # Remote profiles (CPU, no GPU). The only lane that receives the upstreams
     # above and their credentials. It runs the cpu-default image, which
-    # contains the remote adapters, with the remote bundle.
+    # contains the remote adapters, with the remote bundle; the server image
+    # must ship the remote bundle. It requests only cpu, memory and
+    # ephemeral-storage, sets no runtimeClassName and does not inherit
+    # workers.common.runtimeClassName. It requires workers.networkPolicy.
 
     remote:
       enabled: false
