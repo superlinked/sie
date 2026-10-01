@@ -813,7 +813,7 @@ class ModelRegistry:
             residents = {
                 loaded_name
                 for loaded_name, loaded in self._loaded.items()
-                if loaded.device == member and loaded_name != for_model
+                if loaded.device == member and loaded_name != for_model and not serves_remotely(loaded.config)
             }
             if residents:
                 return False
@@ -854,7 +854,7 @@ class ModelRegistry:
             blockers.update(
                 loaded_name
                 for loaded_name, loaded in self._loaded.items()
-                if loaded.device == member and loaded_name != for_model
+                if loaded.device == member and loaded_name != for_model and not serves_remotely(loaded.config)
             )
         return blockers
 

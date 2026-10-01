@@ -15,11 +15,12 @@ import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock, patch
 
 import pytest
 import yaml
 from sie_server.adapters.remote.sie import SieUpstreamAdapter
-from sie_server.config.model import ModelConfig
+from sie_server.config.model import AdapterOptions, EmbeddingDim, EncodeTask, ModelConfig, ProfileConfig, Tasks
 from sie_server.config.upstreams import Upstream, install_upstreams
 from sie_server.core.encode_pipeline import EncodePipeline
 from sie_server.core.registry import ModelRegistry
@@ -226,4 +227,53 @@ async def test_a_load_started_while_the_model_drains_reloads_it_after_the_unload
         assert registry.get("acme/local") is not unloaded_adapter
     finally:
         latch.touch()
+        await registry.unload_all_async()
+
+
+async def test_a_remote_profile_does_not_occupy_a_device_group() -> None:
+    wide = ModelConfig(
+        sie_id="acme/wide",
+        hf_id="acme/wide",
+        tasks=Tasks(encode=EncodeTask(dense=EmbeddingDim(dim=384))),
+        profiles={
+            "default": ProfileConfig(
+                adapter_path="sie_server.adapters.sglang.embedding:SGLangEmbeddingAdapter",
+                max_batch_tokens=8192,
+                adapter_options=AdapterOptions(loadtime={"tensor_parallel_size": 2, "request_read_timeout_s": 120.0}),
+            )
+        },
+    )
+    remote = ModelConfig.model_validate(
+        {
+            "sie_id": "acme/remote",
+            "remote_backed": True,
+            "tasks": {"encode": {"dense": {"dim": 384}}},
+            "profiles": {
+                "default": {
+                    "adapter_path": REMOTE_ADAPTER,
+                    "max_batch_tokens": 8192,
+                    "adapter_options": {"loadtime": {"upstream": "team-sie", "upstream_model": "sie-fake"}},
+                }
+            },
+        }
+    )
+    registry = ModelRegistry(device="cuda", devices=["cuda:0", "cuda:1"])
+    for manager in registry.memory_managers.values():
+        manager.check_pressure = MagicMock(return_value=False)  # type: ignore[method-assign]
+    registry.add_config(remote)
+    registry.add_config(wide)
+    wide_adapter = MagicMock()
+    wide_adapter.capabilities.outputs = ["dense"]
+    wide_adapter.memory_footprint.return_value = 1000
+    try:
+        await registry.load_async("acme/remote", device="cuda:0")
+        with (
+            patch("sie_sdk.cache.ensure_model_cached", return_value=Path("/fake/cache/acme-wide")),
+            patch("sie_server.core.model_loader.load_adapter", return_value=wide_adapter),
+        ):
+            await registry.load_async("acme/wide", device="cuda")
+
+        assert sorted(registry._device_claims) == ["cuda:0", "cuda:1"]
+        assert registry.is_loaded("acme/remote")
+    finally:
         await registry.unload_all_async()
