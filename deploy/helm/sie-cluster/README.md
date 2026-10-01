@@ -1113,9 +1113,12 @@ token for read-only tooling. With `config.auth.adminTokenSecretName` or
 `config.auth.readTokenSecretName` set, that token is in the named Secret
 instead. `<fullname>` is `fullnameOverride` when set, which the bundled cloud
 overlays (`values-aws.yaml`, `values-gke.yaml`, `values-aks.yaml`, and
-`values-ack.yaml`) set to `sie`. Otherwise it is `<release>-sie-cluster`, or
-the release name alone when it already contains `sie-cluster`, as in the Quick
-Start. Set `FULLNAME` to match, for example `FULLNAME=sie` for an overlay
+`values-ack.yaml`) set to `sie`. Otherwise it is `<release>-<name>`, where
+`<name>` is `nameOverride` or `sie-cluster`, or the release name alone when it
+already contains `<name>`, as in the Quick Start. The result is cut to 63
+characters with no trailing hyphen. The install notes print these commands
+with the rendered names, and `helm get notes <release> -n sie` prints them
+again. Set `FULLNAME` to match, for example `FULLNAME=sie` for an overlay
 install:
 
 ```bash
