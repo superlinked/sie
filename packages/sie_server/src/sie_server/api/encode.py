@@ -2,7 +2,7 @@ import logging
 from typing import Annotated, Any, cast
 
 import numpy as np
-from fastapi import APIRouter, Header, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from sie_sdk.types import DEFAULT_OUTPUT_DTYPE, DType, OutputDType, np_to_dtype
 
@@ -13,10 +13,10 @@ from sie_server.api.helpers import (
     RequestParser,
     ResponseBuilder,
     oom_retry_after_from_registry,
-    serving_disclosure_headers,
     validated_total,
 )
 from sie_server.api.options import resolve_runtime_options_with_profile
+from sie_server.api.routing import remote_routing, route_request
 from sie_server.api.serialization import MsgPackResponse
 from sie_server.api.validation import validate_machine_profile_header
 from sie_server.config.model import ModelConfig
@@ -33,7 +33,7 @@ from sie_server.types.responses import EncodeResponse, ErrorCode, TimingInfo, Us
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/v1", tags=["encode"])
+router = APIRouter(prefix="/v1", tags=["encode"], dependencies=[Depends(remote_routing)])
 
 
 def encode_usage_from_timing(timing: RequestTiming | None, item_count: int) -> Usage | None:
@@ -267,14 +267,7 @@ async def encode(
             span.set_attribute("output_types", ",".join(params.output_types or ["dense"]))
 
         registry = http_request.app.state.registry
-        device = registry.device
-
-        # Validate model state using helper
-        model_checker = ModelStateChecker(registry, model, span)
-        model_checker.check_exists()
-        model_checker.check_not_unloading()
-        model_checker.check_not_loading()
-        await model_checker.ensure_loaded(device)
+        ModelStateChecker(registry, model, span).check_exists()
 
         # Get config
         config = registry.get_config(model)
@@ -295,13 +288,6 @@ async def encode(
         # instruction was already extracted from params above
         if instruction is None:
             instruction = options.get("instruction")
-
-        # Check if LoRA is specified and ensure it's loaded
-        lora = options.get("lora_id")
-        if lora is not None:
-            await model_checker.ensure_lora_loaded(lora)
-            # Worker batcher routes on options["lora"]; profile uses "lora_id".
-            options["lora"] = lora
 
         # Get output_dtype: request param > profile > default
         # Request param takes precedence to allow per-request overrides
@@ -333,6 +319,15 @@ async def encode(
                 },
             ) from e
 
+        route = await route_request(http_request, model, span, profile=profile_name, queued_items=len(request.items))
+
+        # Check if LoRA is specified and ensure it's loaded
+        lora = options.get("lora_id")
+        if lora is not None:
+            await ModelStateChecker(registry, route.key, span).ensure_lora_loaded(lora)
+            # Worker batcher routes on options["lora"]; profile uses "lora_id".
+            options["lora"] = lora
+
         items = request.items
 
         # Run encoding (preprocess → execute)
@@ -347,11 +342,11 @@ async def encode(
         try:
             results, timing = await EncodePipeline.run_encode(
                 registry=registry,
-                model=model,
+                model=route.key,
                 items=items,
                 output_types=adapter_output_types,
                 instruction=instruction,
-                config=config,
+                config=registry.get_config(route.key),
                 is_query=is_query,
                 options=options,
                 response_output_types=output_types,
@@ -433,5 +428,5 @@ async def encode(
 
         # Build response headers and return
         headers = ResponseBuilder.build_headers(timing)
-        headers.update(serving_disclosure_headers(registry, model))
+        headers.update(route.headers())
         return ResponseBuilder.build_response(response, accept, headers, convert_for_json=True)

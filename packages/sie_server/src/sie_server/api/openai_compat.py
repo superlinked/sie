@@ -23,7 +23,7 @@ import time
 from typing import TYPE_CHECKING, Annotated, Literal
 
 import numpy as np
-from fastapi import APIRouter, Header, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic.json_schema import SkipJsonSchema
@@ -35,10 +35,10 @@ from sie_server.api.helpers import (
     check_sdk_version,
     oom_retry_after_from_registry,
     openai_error_response,
-    serving_disclosure_headers,
     upstream_unavailable_exception,
 )
 from sie_server.api.options import resolve_runtime_options_with_profile
+from sie_server.api.routing import error_code, fallback_refusal, remote_routing, route_request
 from sie_server.api.validation import validate_machine_profile_header
 from sie_server.core.encode_pipeline import EncodePipeline, resolve_encode_output_types
 from sie_server.core.model_suggestions import suggestion_suffix
@@ -59,7 +59,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/v1", tags=["openai-compat"])
+router = APIRouter(prefix="/v1", tags=["openai-compat"], dependencies=[Depends(remote_routing)])
 
 
 # OpenAI-compatible request/response types
@@ -200,7 +200,9 @@ def _openai_state_error(error: HTTPException) -> HTTPException:
         return error
     inner: dict[str, object] = dict(detail)
     inner.setdefault("message", "service unavailable")
-    inner["type"] = "server_error"
+    inner["type"] = (
+        "invalid_request_error" if error.status_code < status.HTTP_500_INTERNAL_SERVER_ERROR else "server_error"
+    )
     return HTTPException(status_code=error.status_code, detail={"error": inner}, headers=error.headers)
 
 
@@ -374,7 +376,7 @@ async def create_embeddings(
     try:
         return await _create_embeddings(request, http_request, response, x_machine_profile)
     except HTTPException as exc:
-        return openai_error_response(exc)
+        return openai_error_response(fallback_refusal(http_request, exc.status_code, error_code(exc)) or exc)
 
 
 async def _create_embeddings(
@@ -413,20 +415,6 @@ async def _create_embeddings(
         # cost the caller a cold model load first.
         _validate_dimensions(request.dimensions, registry, model)
 
-        # Check if model is being unloaded
-        if registry.is_unloading(model):
-            span.set_attribute("error", "model_unloading")
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail={
-                    "error": {
-                        "code": "model_not_available",
-                        "message": f"Model '{model}' is unloading",
-                        "type": "server_error",
-                    }
-                },
-            )
-
         texts = _normalize_input(request.input)
 
         if not texts:
@@ -459,22 +447,6 @@ async def _create_embeddings(
 
         span.set_attribute("batch_size", len(texts))
 
-        # Model load states: mirror the native routes' ModelStateChecker
-        # contract instead of blocking the request on a cold load. A recorded
-        # terminal failure short-circuits as 502 MODEL_LOAD_FAILED with no
-        # Retry-After (and, critically, no re-triggered doomed load); a cold
-        # model kicks off a background load and returns 503 MODEL_LOADING +
-        # Retry-After immediately so clients retry instead of hanging. This is
-        # single-node parity with the gateway's /v1/embeddings behavior.
-        device = registry.device
-        checker = ModelStateChecker(registry, model, span)
-        try:
-            checker.check_not_failed()
-            checker.check_not_loading()
-            await checker.ensure_loaded(device)
-        except HTTPException as error:
-            raise _openai_state_error(error) from error
-
         config = registry.get_config(model)
 
         # Same profile resolution as native /v1/encode with no request params,
@@ -499,9 +471,22 @@ async def _create_embeddings(
                     }
                 },
             ) from e
+
+        # Model load states: mirror the native routes' ModelStateChecker
+        # contract instead of blocking the request on a cold load. A recorded
+        # terminal failure short-circuits as 502 MODEL_LOAD_FAILED with no
+        # Retry-After (and, critically, no re-triggered doomed load); a cold
+        # model kicks off a background load and returns 503 MODEL_LOADING +
+        # Retry-After immediately so clients retry instead of hanging. This is
+        # single-node parity with the gateway's /v1/embeddings behavior.
+        try:
+            route = await route_request(http_request, model, span, queued_items=len(items))
+        except HTTPException as error:
+            raise _openai_state_error(error) from error
+
         lora = options.get("lora_id")
         if lora is not None:
-            await checker.ensure_lora_loaded(lora)
+            await ModelStateChecker(registry, route.key, span).ensure_lora_loaded(lora)
             options["lora"] = lora
 
         # Run encoding
@@ -510,11 +495,11 @@ async def _create_embeddings(
         try:
             results, timing = await EncodePipeline.run_encode(
                 registry=registry,
-                model=model,
+                model=route.key,
                 items=items,
                 output_types=adapter_output_types,
                 instruction=options.get("instruction"),
-                config=config,
+                config=registry.get_config(route.key),
                 is_query=bool(options.get("is_query", False)),
                 options=options,
                 response_output_types=response_output_types,
@@ -674,5 +659,5 @@ async def _create_embeddings(
                 postprocessing_s=timing.postprocessing_ms / 1000.0,
                 units=units,
             )
-        response.headers.update(serving_disclosure_headers(registry, model))
+        response.headers.update(route.headers())
         return _build_embeddings_response(results, texts, model, encoding_format)

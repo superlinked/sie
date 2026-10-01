@@ -1773,9 +1773,35 @@ class ModelRegistry:
             device: Device string (e.g., "cuda:0", "cpu").
         """
         try:
+            if await self._load_recording_failure(name, device):
+                logger.info("Background model load completed: %s", name)
+        finally:
+            # Always remove from _loading when background task completes.
+            # This handles the case where load_async returned early (model already
+            # loaded by another task) without entering its own finally block.
+            # For normal loads, load_async already discarded, so this is a no-op.
+            self._loading.discard(name)
+
+    async def load_now(self, name: str, device: str) -> bool:
+        """Load a model and wait for it, recording a failure as a background load does.
+
+        A request can wait for a model whose load is quick, such as a remote
+        profile, instead of being asked to retry. A recorded failure still in
+        cooldown is not retried.
+
+        Returns:
+            Whether the model is loaded.
+        """
+        if name in self._loaded and name not in self._unloading:
+            return True
+        if self.is_failed(name):
+            return False
+        return await self._load_recording_failure(name, device)
+
+    async def _load_recording_failure(self, name: str, device: str) -> bool:
+        """Run ``load_async``, clearing a recorded failure on success and recording one on failure."""
+        try:
             await self.load_async(name, device)
-            logger.info("Background model load completed: %s", name)
-            self.clear_failure(name)
         except (KeyboardInterrupt, SystemExit, asyncio.CancelledError):
             # Operator-initiated shutdown / task cancellation must NOT
             # be recorded as a load failure — that would leave the
@@ -1785,16 +1811,14 @@ class ModelRegistry:
             raise
         except _ConfigChangedDuringLoadError:
             # Config mutation invalidated this attempt, not the model itself.
-            # Keep the current config eligible for a later background load.
-            logger.info("Discarded stale background model load: %s", name)
+            # Keep the current config eligible for a later load.
+            logger.info("Discarded stale model load: %s", name)
+            return False
         except Exception as exc:  # noqa: BLE001 — classify_load_error buckets every exception type
             self._record_load_failure(name, exc)
-        finally:
-            # Always remove from _loading when background task completes.
-            # This handles the case where load_async returned early (model already
-            # loaded by another task) without entering its own finally block.
-            # For normal loads, load_async already discarded, so this is a no-op.
-            self._loading.discard(name)
+            return False
+        self.clear_failure(name)
+        return True
 
     def _record_load_failure(self, name: str, exc: BaseException, *, attempts: int | None = None) -> None:
         """Classify ``exc`` and record a :class:`LoadFailure` for ``name``.

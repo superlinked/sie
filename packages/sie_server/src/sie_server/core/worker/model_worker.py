@@ -920,6 +920,17 @@ class ModelWorker:
             logger.debug("Created batcher for LoRA '%s'", lora)
         return self._batchers[lora]
 
+    def queue_full_error(self, n_items: int) -> QueueFullError | None:
+        """The refusal that ``n_items`` more items would meet now, or ``None`` when the queue takes them."""
+        max_queue = self._config.max_queue_size
+        if max_queue <= 0:
+            return None
+        current_pending = self.pending_count
+        if current_pending + n_items <= max_queue:
+            return None
+        msg = f"Queue full: {current_pending} items pending, cannot add {n_items} more (limit: {max_queue})"
+        return QueueFullError(msg, pending=current_pending, requested=n_items, limit=max_queue)
+
     def _check_queue_capacity(self, n_items: int) -> None:
         """Check if queue can accept n_items, raise QueueFullError if not.
 
@@ -932,13 +943,9 @@ class ModelWorker:
         if not self._running:
             msg = "ModelWorker is not running"
             raise RuntimeError(msg)
-        max_queue = self._config.max_queue_size
-        if max_queue > 0:
-            current_pending = self.pending_count
-            new_count = current_pending + n_items
-            if new_count > max_queue:
-                msg = f"Queue full: {current_pending} items pending, cannot add {n_items} more (limit: {max_queue})"
-                raise QueueFullError(msg, pending=current_pending, requested=n_items, limit=max_queue)
+        error = self.queue_full_error(n_items)
+        if error is not None:
+            raise error
 
     def _create_future_and_timing(
         self,

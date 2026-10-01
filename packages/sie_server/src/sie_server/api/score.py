@@ -1,7 +1,7 @@
 import logging
 from typing import TYPE_CHECKING, Annotated, Any
 
-from fastapi import APIRouter, Header, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 
 from sie_server.adapters.errors import InputTooLongError
@@ -15,6 +15,7 @@ from sie_server.api.helpers import (
     serving_disclosure_headers,
 )
 from sie_server.api.options import resolve_runtime_options
+from sie_server.api.routing import remote_routing, route_request
 from sie_server.api.serialization import MsgPackResponse
 from sie_server.api.validation import validate_machine_profile_header
 from sie_server.core.inference_output import ScoreOutput
@@ -32,7 +33,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/v1", tags=["score"])
+router = APIRouter(prefix="/v1", tags=["score"], dependencies=[Depends(remote_routing)])
 
 
 def _build_response(
@@ -216,11 +217,9 @@ async def score(
         span.set_attribute("batch_size", len(request.items))
 
         registry = http_request.app.state.registry
-        device = registry.device
 
         # Validate model state using helper (split to check capability before loading)
-        model_checker = ModelStateChecker(registry, model, span)
-        model_checker.check_exists()
+        ModelStateChecker(registry, model, span).check_exists()
 
         # Check model config supports scoring (before loading gate — fail fast)
         config = registry.get_config(model)
@@ -235,11 +234,6 @@ async def score(
                 },
             )
 
-        # Continue model state validation
-        model_checker.check_not_unloading()
-        model_checker.check_not_loading()
-        await model_checker.ensure_loaded(device)
-
         # Resolve profile and merge runtime options (outside inference try/except
         # so ValueError from invalid profiles returns 400, not 500)
         instruction = request.instruction
@@ -252,6 +246,13 @@ async def score(
 
         query = request.query
         items = request.items
+        route = await route_request(
+            http_request,
+            model,
+            span,
+            profile=request.options.get("profile") if request.options else None,
+            queued_items=len(items),
+        )
 
         # Score using worker with batching
         error_handler = InferenceErrorHandler(
@@ -265,7 +266,7 @@ async def score(
         try:
             worker_result = await _score_via_worker(
                 registry,
-                model,
+                route.key,
                 query,
                 items,
                 instruction=instruction,
@@ -318,5 +319,5 @@ async def score(
 
         # Build response headers and return
         headers = ResponseBuilder.build_headers(timing)
-        headers.update(serving_disclosure_headers(registry, model))
+        headers.update(route.headers())
         return ResponseBuilder.build_response(response, accept, headers)

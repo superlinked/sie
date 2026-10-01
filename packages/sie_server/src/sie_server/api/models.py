@@ -3,7 +3,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
-from sie_server.config.model import ModelConfig, is_remote_adapter_path
+from sie_server.config.model import ModelConfig, RoutingPolicy, is_remote_adapter_path
 from sie_server.config.upstreams import installed_upstreams
 from sie_server.core.model_suggestions import suggestion_suffix
 from sie_server.types.responses import ErrorCode
@@ -119,10 +119,15 @@ class ModelInfo(BaseModel):
 
 def _resolve_routing(config: ModelConfig) -> ModelRouting:
     default = config.resolve_profile("default")
-    if not is_remote_adapter_path(default.adapter_path):
+    policy: RoutingPolicy
+    if is_remote_adapter_path(default.adapter_path):
+        policy, remote = "remote_only", default
+    elif config.routing is not None and config.routing.fallback_profile is not None:
+        policy, remote = config.routing.policy, config.resolve_profile(config.routing.fallback_profile)
+    else:
         return ModelRouting()
-    upstream = installed_upstreams().get(default.loadtime.get("upstream", ""))
-    return ModelRouting(policy="remote_only", upstream_kind=upstream.kind.value if upstream is not None else None)
+    upstream = installed_upstreams().get(remote.loadtime.get("upstream", ""))
+    return ModelRouting(policy=policy, upstream_kind=upstream.kind.value if upstream is not None else None)
 
 
 def _resolve_state_and_error(

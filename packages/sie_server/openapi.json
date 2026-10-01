@@ -115,6 +115,24 @@
               ],
               "title": "X-Sie-Machine-Profile"
             }
+          },
+          {
+            "name": "X-SIE-Remote",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The only accepted value is `forbid`. It keeps the request off remote upstreams: local capacity serves or refuses it, and a model served only by an upstream answers 400. Any other value answers 400.",
+              "title": "X-Sie-Remote"
+            },
+            "description": "The only accepted value is `forbid`. It keeps the request off remote upstreams: local capacity serves or refuses it, and a model served only by an upstream answers 400. Any other value answers 400."
           }
         ],
         "responses": {
@@ -221,6 +239,24 @@
               ],
               "title": "X-Sie-Machine-Profile"
             }
+          },
+          {
+            "name": "X-SIE-Remote",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The only accepted value is `forbid`. It keeps the request off remote upstreams: local capacity serves or refuses it, and a model served only by an upstream answers 400. Any other value answers 400.",
+              "title": "X-Sie-Remote"
+            },
+            "description": "The only accepted value is `forbid`. It keeps the request off remote upstreams: local capacity serves or refuses it, and a model served only by an upstream answers 400. Any other value answers 400."
           }
         ],
         "responses": {
@@ -311,6 +347,24 @@
               ],
               "title": "X-Sie-Machine-Profile"
             }
+          },
+          {
+            "name": "X-SIE-Remote",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The only accepted value is `forbid`. It keeps the request off remote upstreams: local capacity serves or refuses it, and a model served only by an upstream answers 400. Any other value answers 400.",
+              "title": "X-Sie-Remote"
+            },
+            "description": "The only accepted value is `forbid`. It keeps the request off remote upstreams: local capacity serves or refuses it, and a model served only by an upstream answers 400. Any other value answers 400."
           }
         ],
         "responses": {
@@ -437,6 +491,24 @@
               ],
               "title": "X-Sie-Machine-Profile"
             }
+          },
+          {
+            "name": "X-SIE-Remote",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The only accepted value is `forbid`. It keeps the request off remote upstreams: local capacity serves or refuses it, and a model served only by an upstream answers 400. Any other value answers 400.",
+              "title": "X-Sie-Remote"
+            },
+            "description": "The only accepted value is `forbid`. It keeps the request off remote upstreams: local capacity serves or refuses it, and a model served only by an upstream answers 400. Any other value answers 400."
           }
         ],
         "responses": {
@@ -586,6 +658,24 @@
               ],
               "title": "X-Sie-Machine-Profile"
             }
+          },
+          {
+            "name": "X-SIE-Remote",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The only accepted value is `forbid`. It keeps the request off remote upstreams: local capacity serves or refuses it, and a model served only by an upstream answers 400. Any other value answers 400.",
+              "title": "X-Sie-Remote"
+            },
+            "description": "The only accepted value is `forbid`. It keeps the request off remote upstreams: local capacity serves or refuses it, and a model served only by an upstream answers 400. Any other value answers 400."
           }
         ],
         "responses": {
@@ -698,6 +788,24 @@
               ],
               "title": "X-Sie-Machine-Profile"
             }
+          },
+          {
+            "name": "X-SIE-Remote",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The only accepted value is `forbid`. It keeps the request off remote upstreams: local capacity serves or refuses it, and a model served only by an upstream answers 400. Any other value answers 400.",
+              "title": "X-Sie-Remote"
+            },
+            "description": "The only accepted value is `forbid`. It keeps the request off remote upstreams: local capacity serves or refuses it, and a model served only by an upstream answers 400. Any other value answers 400."
           }
         ],
         "requestBody": {
@@ -793,6 +901,24 @@
               ],
               "title": "X-Sie-Machine-Profile"
             }
+          },
+          {
+            "name": "X-SIE-Remote",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The only accepted value is `forbid`. It keeps the request off remote upstreams: local capacity serves or refuses it, and a model served only by an upstream answers 400. Any other value answers 400.",
+              "title": "X-Sie-Remote"
+            },
+            "description": "The only accepted value is `forbid`. It keeps the request off remote upstreams: local capacity serves or refuses it, and a model served only by an upstream answers 400. Any other value answers 400."
           }
         ],
         "responses": {
@@ -877,6 +1003,24 @@
               ],
               "title": "X-Sie-Machine-Profile"
             }
+          },
+          {
+            "name": "X-SIE-Remote",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The only accepted value is `forbid`. It keeps the request off remote upstreams: local capacity serves or refuses it, and a model served only by an upstream answers 400. Any other value answers 400.",
+              "title": "X-Sie-Remote"
+            },
+            "description": "The only accepted value is `forbid`. It keeps the request off remote upstreams: local capacity serves or refuses it, and a model served only by an upstream answers 400. Any other value answers 400."
           }
         ],
         "responses": {

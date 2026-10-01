@@ -404,7 +404,7 @@ class TestOpenAIEmbeddings:
         data = response.json()
         assert "detail" not in data
         error = data["error"]
-        assert error["code"] == "model_not_available"
+        assert error["code"] == "MODEL_NOT_LOADED"
         assert error["type"] == "server_error"
         assert "message" in error
 

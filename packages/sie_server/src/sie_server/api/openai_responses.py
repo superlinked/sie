@@ -13,7 +13,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Annotated, Any, cast
 
-from fastapi import APIRouter, Header, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from sie_sdk.queue_types import denormalize_model_id
 
@@ -31,14 +31,15 @@ from sie_server.api.openai_completions import (
     _MAX_F32,
     _MAX_PROMPT_BYTES,
     _collect_completion,
+    _completion_error_response,
     _CompletionError,
-    _error_response,
     _from_generation_error,
     _from_http_exception,
     _generation_timeout_error,
     _number,
     _read_json_body,
 )
+from sie_server.api.routing import remote_routing, route_request
 from sie_server.api.validation import validate_machine_profile_header, validate_signed_i64
 from sie_server.core.runtime_options import (
     GenerationTimeoutError,
@@ -49,7 +50,7 @@ from sie_server.core.runtime_options import (
 from sie_server.observability.tracing import tracer
 from sie_server.types.openapi import OpenAIResponsesResponseModel
 
-router = APIRouter(prefix="/v1", tags=["openai-compat"])
+router = APIRouter(prefix="/v1", tags=["openai-compat"], dependencies=[Depends(remote_routing)])
 logger = logging.getLogger(__name__)
 
 _MAX_U32 = (1 << 32) - 1
@@ -249,11 +250,7 @@ async def responses(
         registry_key = denormalize_model_id(params.model)
         with tracer.start_as_current_span("openai_responses") as span:
             span.set_attribute("model", params.model)
-            checker = ModelStateChecker(registry, registry_key, span)
-            checker.check_exists()
-            checker.check_not_failed()
-            checker.check_not_unloading()
-            checker.check_not_loading()
+            ModelStateChecker(registry, registry_key, span).check_exists()
 
             config = registry.get_config(registry_key)
             generate_task = getattr(config.tasks, "generate", None)
@@ -303,9 +300,9 @@ async def responses(
             except ValueError as exc:
                 raise _CompletionError(str(exc), code="invalid_request") from exc
 
-            await checker.ensure_loaded(registry.device)
-            adapter = registry.get(registry_key)
-            registry.touch_lru(registry_key)
+            route = await route_request(http_request, registry_key, span)
+            adapter = registry.get(route.key)
+            registry.touch_lru(route.key)
             if not isinstance(adapter, GenerationAdapter):
                 raise _CompletionError(
                     f"Model '{params.model}' adapter does not support generation",
@@ -401,9 +398,10 @@ async def responses(
                         }
                     ],
                     "usage": usage,
-                }
+                },
+                headers=route.headers(),
             )
     except _CompletionError as exc:
-        return _error_response(exc)
+        return _completion_error_response(http_request, exc)
     except HTTPException as exc:
-        return _error_response(_from_http_exception(exc))
+        return _completion_error_response(http_request, _from_http_exception(exc))

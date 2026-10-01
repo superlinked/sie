@@ -54,7 +54,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, cast
 
-from fastapi import APIRouter, Header, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse, StreamingResponse
 from sie_sdk.queue_types import denormalize_model_id
 
@@ -79,6 +79,7 @@ from sie_server.adapters._generation_base import (
     thinking_blocks_must_be_hidden,
 )
 from sie_server.api.helpers import ModelStateChecker, oom_retry_after_from_registry, read_bounded_request_body
+from sie_server.api.routing import remote_routing, route_request
 from sie_server.api.validation import validate_machine_profile_header, validate_signed_i64
 from sie_server.core.grammar_routing import resolve_grammar_serving_model
 from sie_server.core.runtime_options import (
@@ -106,7 +107,7 @@ logger = logging.getLogger(__name__)
 
 _MAX_RETRY_AFTER_S = 60
 
-router = APIRouter(prefix="/v1", tags=["generate"])
+router = APIRouter(prefix="/v1", tags=["generate"], dependencies=[Depends(remote_routing)])
 
 
 # Field whitelist — matches the gateway's ``proxy_generate`` validation
@@ -1107,7 +1108,6 @@ async def generate(
             raise _bad_request("'max_new_tokens' must be a positive integer", param="max_new_tokens")
 
         registry = http_request.app.state.registry
-        device = registry.device
         serving_key = registry_key
         if grammar is not None:
             try:
@@ -1115,13 +1115,7 @@ async def generate(
             except GenerationError as exc:
                 raise _generation_http_exception(exc, registry) from exc
 
-        # Standard model-state gates: 404 if unknown, 503 if loading/unloading,
-        # 502 if a terminal load failure is in cooldown.
-        checker = ModelStateChecker(registry, serving_key, span)
-        checker.check_exists()
-        checker.check_not_failed()
-        checker.check_not_unloading()
-        checker.check_not_loading()
+        ModelStateChecker(registry, serving_key, span).check_exists()
 
         config = registry.get_config(serving_key)
         # Enforce the gateway-side cap mirror: max_new_tokens ≤
@@ -1239,9 +1233,9 @@ async def generate(
 
         # Do not start a potentially expensive model load until the complete
         # request has passed validation.
-        await checker.ensure_loaded(device)
-        adapter = registry.get(serving_key)
-        registry.touch_lru(serving_key)
+        route = await route_request(http_request, registry_key, span, serving_key=serving_key)
+        adapter = registry.get(route.key)
+        registry.touch_lru(route.key)
         if not isinstance(adapter, GenerationAdapter):
             raise _bad_request(
                 f"Model '{model}' adapter does not support generate (not a GenerationAdapter)",
@@ -1313,7 +1307,7 @@ async def generate(
                     oom_retry_after_s=oom_retry_after_from_registry(registry),
                 ),
                 media_type="text/event-stream",
-                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", **route.headers()},
             )
 
         try:
@@ -1413,5 +1407,6 @@ async def generate(
                     ),
                     **({"images": len(images)} if images else {}),
                 },
-            }
+            },
+            headers=route.headers(),
         )

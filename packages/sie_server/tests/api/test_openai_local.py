@@ -91,6 +91,8 @@ def _cuda_chat_client(
         tasks=SimpleNamespace(generate=generate_task, score=None),
         resolve_profile=MagicMock(return_value=profile),
         inputs=SimpleNamespace(video=video),
+        profiles={},
+        routing=None,
     )
     registry = MagicMock()
     registry.device = "cuda:0"
@@ -138,6 +140,8 @@ def _mlx_chat_client(
     config = SimpleNamespace(
         tasks=SimpleNamespace(generate=generate_task, score=None),
         resolve_profile=MagicMock(return_value=profile),
+        profiles={},
+        routing=None,
     )
     registry = MagicMock()
     registry.device = "mps"
@@ -1386,6 +1390,8 @@ def _rerank_client() -> tuple[TestClient, MagicMock]:
     config = SimpleNamespace(
         tasks=SimpleNamespace(generate=None, score=SimpleNamespace()),
         resolve_profile=MagicMock(return_value=profile),
+        profiles={},
+        routing=None,
     )
     registry = MagicMock()
     registry.device = "cpu"

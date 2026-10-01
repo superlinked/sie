@@ -32,7 +32,7 @@ from typing import Annotated, Any, cast
 from urllib.parse import urlsplit
 
 import httpx
-from fastapi import APIRouter, Header, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from sie_sdk.queue_types import denormalize_model_id
 
@@ -55,6 +55,7 @@ from sie_server.api.helpers import (
     upstream_unavailable_exception,
 )
 from sie_server.api.options import resolve_runtime_options
+from sie_server.api.routing import error_code, fallback_refusal, remote_routing, route_request
 from sie_server.api.score import score_usage_from_output
 from sie_server.api.validation import validate_machine_profile_header, validate_signed_i64
 from sie_server.config.model import validate_chat_template_kwargs
@@ -82,7 +83,7 @@ from sie_server.types.responses import ErrorCode
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/v1", tags=["openai-compat"])
+router = APIRouter(prefix="/v1", tags=["openai-compat"], dependencies=[Depends(remote_routing)])
 
 # Inter-chunk read timeout — bounded so a wedged child cannot hang the direct
 # ingress forever. Keep the established MLX override name for compatibility;
@@ -989,7 +990,7 @@ async def chat_completions(
     try:
         return await _chat_completions(http_request, x_machine_profile)
     except HTTPException as exc:
-        return openai_error_response(exc)
+        return openai_error_response(fallback_refusal(http_request, exc.status_code, error_code(exc)) or exc)
 
 
 async def _chat_completions(
@@ -1031,7 +1032,8 @@ async def _chat_completions(
 
     registry = http_request.app.state.registry
     device = registry.device
-    registry_key = denormalize_model_id(model)
+    requested_key = denormalize_model_id(model)
+    registry_key = requested_key
     if _response_format_constrains_decoding(body.get("response_format")):
         try:
             registry_key = resolve_grammar_serving_model(registry, registry_key)
@@ -1047,8 +1049,7 @@ async def _chat_completions(
 
     with tracer.start_as_current_span("chat_completions") as span:
         span.set_attribute("model", model)
-        checker = ModelStateChecker(registry, registry_key, span)
-        checker.check_exists()
+        ModelStateChecker(registry, registry_key, span).check_exists()
 
         # Validate capability and all CUDA edge fields before a model download.
         config = registry.get_config(registry_key)
@@ -1078,13 +1079,10 @@ async def _chat_completions(
         else:
             _validate_mlx_chat_body(body)
 
-        checker.check_not_failed()
-        checker.check_not_unloading()
-        checker.check_not_loading()
-        await checker.ensure_loaded(device)
+        route = await route_request(http_request, requested_key, span, serving_key=registry_key)
 
-        adapter = registry.get(registry_key)
-        registry.touch_lru(registry_key)
+        adapter = registry.get(route.key)
+        registry.touch_lru(route.key)
         slot: asyncio.Semaphore | None = None
         reasoning_parser: str | None = None
         if isinstance(adapter, MLXGenerationAdapter) and not str(device).startswith("cuda"):
@@ -1195,7 +1193,7 @@ async def _chat_completions(
                     strict_grammar=strict_grammar,
                 ),
                 media_type="text/event-stream",
-                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", **route.headers()},
             )
 
         if slot is not None:
@@ -1237,7 +1235,7 @@ async def _chat_completions(
             violation = await _strict_output_violation(strict_grammar, _completed_choice_contents(payload))
             if violation is not None:
                 return _strict_output_error_response(violation)
-        return JSONResponse(content=payload)
+        return JSONResponse(content=payload, headers=route.headers())
 
 
 # -- /v1/rerank (Cohere/OpenAI shape over the score adapter) -----------------
@@ -1260,7 +1258,7 @@ async def rerank(
     try:
         return await _rerank(http_request, x_machine_profile)
     except HTTPException as exc:
-        return openai_error_response(exc)
+        return openai_error_response(fallback_refusal(http_request, exc.status_code, error_code(exc)) or exc)
 
 
 async def _rerank(
@@ -1302,14 +1300,12 @@ async def _rerank(
             raise _bad_request(error, param="documents")
 
     registry = http_request.app.state.registry
-    device = registry.device
     registry_key = denormalize_model_id(model)
 
     with tracer.start_as_current_span("rerank") as span:
         span.set_attribute("model", model)
         span.set_attribute("batch_size", len(documents))
-        checker = ModelStateChecker(registry, registry_key, span)
-        checker.check_exists()
+        ModelStateChecker(registry, registry_key, span).check_exists()
 
         config = registry.get_config(registry_key)
         if config.tasks.score is None:
@@ -1317,22 +1313,24 @@ async def _rerank(
                 f"Model '{model}' does not support reranking (no score task). Use a reranker model.",
             )
 
-        checker.check_not_failed()
-        checker.check_not_unloading()
-        checker.check_not_loading()
-        await checker.ensure_loaded(device)
-
         options_raw = body.get("options")
         if options_raw is not None and not isinstance(options_raw, dict):
             raise _bad_request("'options' must be an object", param="options")
         options = resolve_runtime_options(config, options_raw, span)
         instruction = options.get("instruction")
+        route = await route_request(
+            http_request,
+            registry_key,
+            span,
+            profile=options_raw.get("profile") if options_raw else None,
+            queued_items=len(doc_items),
+        )
 
         timing = RequestTiming()
         timing.start_tokenization()
         prepared_items = build_score_prepared_items(query_item, doc_items)
         timing.end_tokenization()
-        worker = await registry.start_worker(registry_key)
+        worker = await registry.start_worker(route.key)
         future = await worker.submit_score(
             prepared_items=prepared_items,
             query=query_item,
@@ -1392,5 +1390,5 @@ async def _rerank(
             "results": results,
             "usage": usage,
         },
-        headers=serving_disclosure_headers(registry, registry_key),
+        headers=route.headers(),
     )

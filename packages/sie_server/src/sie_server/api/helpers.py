@@ -12,7 +12,6 @@ from fastapi.responses import JSONResponse
 
 from sie_server.adapters.errors import InputTooLongError, UpstreamUnavailableError
 from sie_server.api.serialization import MsgPackResponse, _convert_for_json
-from sie_server.config.model import is_remote_adapter_path
 from sie_server.core.model_suggestions import suggestion_suffix
 from sie_server.core.oom import is_oom_error
 from sie_server.core.timing import RequestTiming
@@ -111,16 +110,13 @@ SERVED_BY_HEADER = "X-SIE-Served-By"
 UPSTREAM_HEADER = "X-SIE-Upstream"
 
 
-def serving_disclosure_headers(registry: "ModelRegistry", model: str) -> dict[str, str]:
-    """Which side serves ``model``: ``local``, or ``remote`` with the upstream's name.
-
-    Read from the model's config rather than the loaded adapter, so a concurrent
-    unload cannot change the answer after the request was served.
-    """
-    profile = registry.get_config(model).resolve_profile("default")
-    if is_remote_adapter_path(profile.adapter_path):
-        return {SERVED_BY_HEADER: "remote", UPSTREAM_HEADER: str(profile.loadtime["upstream"])}
-    return {SERVED_BY_HEADER: "local"}
+def queue_full_exception(error: QueueFullError) -> HTTPException:
+    """503 ``QUEUE_FULL`` with ``Retry-After`` for a queue that other work fills right now."""
+    return HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail={"code": ErrorCode.QUEUE_FULL.value, "message": str(error)},
+        headers={"Retry-After": str(_QUEUE_FULL_RETRY_AFTER_S)},
+    )
 
 
 def upstream_unavailable_exception(error: UpstreamUnavailableError, model: str) -> HTTPException:
@@ -638,14 +634,7 @@ class InferenceErrorHandler:
             )
         self.span.set_attribute("error", "queue_full")
         self._record_completion("retry")
-        return HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={
-                "code": ErrorCode.QUEUE_FULL.value,
-                "message": str(error),
-            },
-            headers={"Retry-After": str(_QUEUE_FULL_RETRY_AFTER_S)},
-        )
+        return queue_full_exception(error)
 
     def handle_value_error(self, error: ValueError) -> HTTPException:
         """Handle invalid input errors.

@@ -23,7 +23,7 @@ from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as package_version
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Header, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse, StreamingResponse
 from sie_sdk.queue_types import denormalize_model_id
 
@@ -41,6 +41,7 @@ from sie_server.adapters._generation_base import (
 )
 from sie_server.api.generate import _generation_http_exception
 from sie_server.api.helpers import ModelStateChecker, check_sdk_version
+from sie_server.api.routing import fallback_refusal, remote_routing, route_request
 from sie_server.api.validation import validate_machine_profile_header, validate_signed_i64
 from sie_server.core.runtime_options import (
     GenerationTimeoutError,
@@ -53,7 +54,7 @@ from sie_server.types.openapi import OpenAICompletionResponseModel
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/v1", tags=["openai-compat"])
+router = APIRouter(prefix="/v1", tags=["openai-compat"], dependencies=[Depends(remote_routing)])
 
 _MAX_COMPLETIONS_BODY_BYTES = int(os.environ.get("SIE_GENERATE_MAX_BODY_BYTES", str(24 * 1024 * 1024)))
 _MAX_PROMPT_BYTES = int(os.environ.get("SIE_GENERATE_MAX_PROMPT_BYTES", str(4 * 1024 * 1024)))
@@ -152,6 +153,12 @@ def _from_http_exception(exc: HTTPException) -> _CompletionError:
         code=code,
         headers=dict(exc.headers) if exc.headers is not None else None,
     )
+
+
+def _completion_error_response(request: Request, error: _CompletionError) -> JSONResponse:
+    """The response for ``error``, or for the local refusal it replaces when it ends a bridged attempt."""
+    refusal = fallback_refusal(request, error.status_code, error.code)
+    return _error_response(_from_http_exception(refusal) if refusal is not None else error)
 
 
 def _from_generation_error(error: GenerationError, registry: Any) -> _CompletionError:
@@ -622,11 +629,7 @@ async def completions(
         registry_key = denormalize_model_id(params.model)
         with tracer.start_as_current_span("openai_completions") as span:
             span.set_attribute("model", params.model)
-            checker = ModelStateChecker(registry, registry_key, span)
-            checker.check_exists()
-            checker.check_not_failed()
-            checker.check_not_unloading()
-            checker.check_not_loading()
+            ModelStateChecker(registry, registry_key, span).check_exists()
 
             config = registry.get_config(registry_key)
             generate_task = getattr(config.tasks, "generate", None)
@@ -670,9 +673,9 @@ async def completions(
             except ValueError as exc:
                 raise _CompletionError(str(exc), code="invalid_request") from exc
 
-            await checker.ensure_loaded(registry.device)
-            adapter = registry.get(registry_key)
-            registry.touch_lru(registry_key)
+            route = await route_request(http_request, registry_key, span)
+            adapter = registry.get(route.key)
+            registry.touch_lru(route.key)
             if not isinstance(adapter, GenerationAdapter):
                 raise _CompletionError(
                     f"Model '{params.model}' adapter does not support generation",
@@ -730,7 +733,7 @@ async def completions(
                         registry=registry,
                     ),
                     media_type="text/event-stream",
-                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", **route.headers()},
                 )
 
             try:
@@ -774,9 +777,10 @@ async def completions(
                     ],
                     "system_fingerprint": _system_fingerprint(canonical_model),
                     "usage": usage,
-                }
+                },
+                headers=route.headers(),
             )
     except _CompletionError as exc:
-        return _error_response(exc)
+        return _completion_error_response(http_request, exc)
     except HTTPException as exc:
-        return _error_response(_from_http_exception(exc))
+        return _completion_error_response(http_request, _from_http_exception(exc))

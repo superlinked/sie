@@ -427,6 +427,11 @@ def installed_upstreams() -> Mapping[str, Upstream]:
     return _INSTALLED.upstreams
 
 
+def remote_serving_enabled() -> bool:
+    """Whether this server may serve any request through a remote profile."""
+    return _INSTALLED.remote_serving
+
+
 def upstream_for_serving(name: str) -> Upstream:
     """The upstream a remote profile may call now. Raises when serving is refused."""
     if not _INSTALLED.remote_serving:
