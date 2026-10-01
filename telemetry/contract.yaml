@@ -755,7 +755,9 @@ enums:
     - auth_misconfigured
     - region_mismatch
     - license_excluded
+    - serving_unavailable
     - payload_too_large
+    - invalid_request
     - insufficient_credits
     - key_spend_limit_exceeded
     - rate_limited

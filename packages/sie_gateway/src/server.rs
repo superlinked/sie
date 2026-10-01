@@ -77,7 +77,10 @@ pub trait ModelAccessPolicy: Send + Sync {
     ///
     /// `ext` carries the request extensions, so an implementation can record the
     /// refusal on whatever per-request observability slot the deployment
-    /// installed. Consulted AFTER `visible`, so a caller who may not see the
+    /// installed. A refusal answered 503 records
+    /// [`AdmissionOutcome::ServingUnavailable`](crate::observability::metrics::AdmissionOutcome::ServingUnavailable),
+    /// so a temporary refusal is not counted as an authentication fault.
+    /// Consulted AFTER `visible`, so a caller who may not see the
     /// model has already been answered the not-found shape and this refusal can
     /// never become a cross-tenant existence oracle. The default returns `None`,
     /// so the OSS self-host build refuses nothing.

@@ -168,6 +168,11 @@ pub enum AdmissionOutcome {
     AuthMisconfigured,
     RegionMismatch,
     LicenseExcluded,
+    /// A deployment's `ModelAccessPolicy::serving_refusal` declined to serve
+    /// the resolved model for now and answered 503. Distinct from
+    /// `AuthMisconfigured`: the request authenticated, and the refusal is a
+    /// retryable serving state rather than a broken credential setup.
+    ServingUnavailable,
     PayloadTooLarge,
     /// A policy gate refused the request because it could not read the field it
     /// gates on — e.g. a `multipart/form-data` inference body whose `model`
@@ -189,6 +194,7 @@ impl AdmissionOutcome {
             Self::AuthMisconfigured => "auth_misconfigured",
             Self::RegionMismatch => "region_mismatch",
             Self::LicenseExcluded => "license_excluded",
+            Self::ServingUnavailable => "serving_unavailable",
             Self::PayloadTooLarge => "payload_too_large",
             Self::InvalidRequest => "invalid_request",
             Self::InsufficientCredits => "insufficient_credits",
@@ -2257,6 +2263,70 @@ mod tests {
             .build();
         let telemetry = GatewayTelemetry::new(&provider.meter("sie-gateway-test"));
         (telemetry, exporter, provider)
+    }
+
+    fn every_admission_outcome() -> [AdmissionOutcome; 12] {
+        use AdmissionOutcome::*;
+        // A new variant fails to compile here until it is listed below.
+        let _exhaustive = |outcome: AdmissionOutcome| match outcome {
+            Admitted
+            | Unauthenticated
+            | Forbidden
+            | AuthMisconfigured
+            | RegionMismatch
+            | LicenseExcluded
+            | ServingUnavailable
+            | PayloadTooLarge
+            | InvalidRequest
+            | InsufficientCredits
+            | KeySpendLimitExceeded
+            | RateLimited => (),
+        };
+        [
+            Admitted,
+            Unauthenticated,
+            Forbidden,
+            AuthMisconfigured,
+            RegionMismatch,
+            LicenseExcluded,
+            ServingUnavailable,
+            PayloadTooLarge,
+            InvalidRequest,
+            InsufficientCredits,
+            KeySpendLimitExceeded,
+            RateLimited,
+        ]
+    }
+
+    #[test]
+    fn every_admission_outcome_is_declared_in_the_telemetry_contract() {
+        let contract: serde_yaml::Value = serde_yaml::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../telemetry/contract.yaml"
+        )))
+        .expect("telemetry contract parses");
+        let declared: HashSet<&str> = contract["enums"]["admission_outcome"]
+            .as_sequence()
+            .expect("admission_outcome is a contract enum")
+            .iter()
+            .map(|value| value.as_str().expect("enum values are strings"))
+            .collect();
+        for outcome in every_admission_outcome() {
+            assert!(
+                declared.contains(outcome.as_str()),
+                "{} is missing from enums.admission_outcome in telemetry/contract.yaml",
+                outcome.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn every_admission_outcome_exports_a_distinct_label() {
+        let labels: HashSet<&str> = every_admission_outcome()
+            .into_iter()
+            .map(AdmissionOutcome::as_str)
+            .collect();
+        assert_eq!(labels.len(), every_admission_outcome().len());
     }
 
     #[test]
