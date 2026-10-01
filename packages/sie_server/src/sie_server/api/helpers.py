@@ -10,7 +10,7 @@ import msgspec
 from fastapi import HTTPException, Request, status
 from fastapi.responses import JSONResponse
 
-from sie_server.adapters.errors import InputTooLongError
+from sie_server.adapters.errors import InputTooLongError, UpstreamUnavailableError
 from sie_server.api.serialization import MsgPackResponse, _convert_for_json
 from sie_server.config.model import is_remote_adapter_path
 from sie_server.core.model_suggestions import suggestion_suffix
@@ -121,6 +121,30 @@ def serving_disclosure_headers(registry: "ModelRegistry", model: str) -> dict[st
     if is_remote_adapter_path(profile.adapter_path):
         return {SERVED_BY_HEADER: "remote", UPSTREAM_HEADER: str(profile.loadtime["upstream"])}
     return {SERVED_BY_HEADER: "local"}
+
+
+def upstream_unavailable_exception(error: UpstreamUnavailableError, model: str) -> HTTPException:
+    """503 for a request its upstream did not serve, with the upstream's clamped ``Retry-After``.
+
+    A model that is not ready upstream answers ``MODEL_LOADING``; a busy or
+    unreachable upstream answers ``QUEUE_FULL``. The SDKs retry both. The
+    message is fixed text: nothing the upstream sent reaches the caller.
+    """
+    if error.kind == "not_ready":
+        code = ErrorCode.MODEL_LOADING
+        message = f"Model '{model}' is loading on its upstream, please retry"
+    else:
+        code = ErrorCode.QUEUE_FULL
+        message = f"The upstream serving model '{model}' is {error.kind}, please retry"
+    return HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail={"code": code.value, "message": message},
+        headers={
+            "Retry-After": str(error.retry_after_s),
+            SERVED_BY_HEADER: "remote",
+            UPSTREAM_HEADER: error.upstream,
+        },
+    )
 
 
 def _get_server_version() -> str:
@@ -659,8 +683,10 @@ class InferenceErrorHandler:
         OOM errors are mapped to 503 ``RESOURCE_EXHAUSTED`` with a
         ``Retry-After`` header so the SDK can auto-retry. A request the
         worker drained on eviction never ran at all, so it maps to the
-        existing retryable 503 ``MODEL_LOADING`` shape. Everything else
-        keeps the legacy 500 ``INFERENCE_ERROR`` mapping.
+        existing retryable 503 ``MODEL_LOADING`` shape. A request a remote
+        profile's upstream did not serve maps to a retryable 503 through
+        :func:`upstream_unavailable_exception`. Everything else keeps the
+        legacy 500 ``INFERENCE_ERROR`` mapping.
 
         Args:
             error: Exception from inference.
@@ -690,6 +716,12 @@ class InferenceErrorHandler:
                 },
                 headers={"Retry-After": str(WORKER_DRAINED_RETRY_AFTER_S)},
             )
+
+        if isinstance(error, UpstreamUnavailableError):
+            logger.warning("%s for model %s was not served by its upstream: %s", operation, self.model, error)
+            self.span.set_attribute("error", f"upstream_{error.kind}")
+            self._record_completion("retry")
+            return upstream_unavailable_exception(error, self.model)
 
         # Recognise both the worker's ``ResourceExhaustedError`` (recovery
         # exhausted) and any OOM that escaped without recovery (recovery

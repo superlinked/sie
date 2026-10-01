@@ -13,7 +13,7 @@ import msgspec
 import yaml
 from sie_sdk._msgpack import packb as pack_msgpack
 
-from sie_server.adapters.errors import InputTooLongError
+from sie_server.adapters.errors import InputTooLongError, UpstreamUnavailableError
 from sie_server.api.ws import (
     BundleConfigView,
     BundleMetadataUnavailableError,
@@ -102,6 +102,7 @@ _INFERENCE_ERROR_CODE: Final[str] = "inference_error"
 # which under a systemic failure is also the correct answer, because every one
 # of them was going to fail anyway.
 _MAX_ENCODE_ISOLATION_PASSES: Final[int] = 24
+_UPSTREAM_NAK_MAX_DELAY_S: Final[float] = 60.0
 _CANONICAL_AUDIO_SAMPLE_RATE: Final[int] = 16_000
 _MAX_AUDIO_CHANNELS: Final[int] = 2
 _MIN_AUDIO_SAMPLE_RATE: Final[int] = 8_000
@@ -2187,6 +2188,20 @@ def _oom_nak_outcome(bi: EncodeBatchItem | ScoreBatchItem | ExtractBatchItem) ->
     )
 
 
+def _upstream_nak_outcome(bi: EncodeBatchItem | ScoreBatchItem | ExtractBatchItem, retry_after_s: int) -> ItemOutcome:
+    # Never shorter than the base delay: a work item has a fixed number of
+    # deliveries, and a one-second hint would spend them long before the
+    # gateway stops waiting for the result.
+    delay_s = min(_UPSTREAM_NAK_MAX_DELAY_S, max(_default_nak_delay_s(), float(retry_after_s)))
+    return ItemOutcome(
+        work_item_id=bi.work_item_id,
+        request_id=bi.request_id,
+        item_index=bi.item_index,
+        disposition="nak_retry",
+        nak_delay_ms=int(delay_s * 1000),
+    )
+
+
 def _inference_exception_outcome(
     bi: EncodeBatchItem | ScoreBatchItem | ExtractBatchItem,
     exc: BaseException,
@@ -2201,6 +2216,10 @@ def _inference_exception_outcome(
         # park items in a batcher today, so this arm is a contract guard
         # against a future caller that submits through the queueing path.
         return _nak_outcome(bi)
+    if isinstance(exc, UpstreamUnavailableError):
+        # A remote profile's upstream did not serve the item, and asking again
+        # later may succeed: redeliver instead of publishing a terminal error.
+        return _upstream_nak_outcome(bi, exc.retry_after_s)
     if isinstance(exc, InputTooLongError):
         # The input exceeds the model's window: INPUT_TOO_LONG (HTTP 400), as
         # the HTTP path reports it, not a server-side inference failure.

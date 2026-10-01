@@ -28,6 +28,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic.json_schema import SkipJsonSchema
 
+from sie_server.adapters.errors import UpstreamUnavailableError
 from sie_server.api.helpers import (
     WORKER_DRAINED_RETRY_AFTER_S,
     ModelStateChecker,
@@ -35,6 +36,7 @@ from sie_server.api.helpers import (
     oom_retry_after_from_registry,
     openai_error_response,
     serving_disclosure_headers,
+    upstream_unavailable_exception,
 )
 from sie_server.api.options import resolve_runtime_options_with_profile
 from sie_server.api.validation import validate_machine_profile_header
@@ -565,6 +567,19 @@ async def _create_embeddings(
                 },
                 headers={"Retry-After": str(WORKER_DRAINED_RETRY_AFTER_S)},
             ) from e
+        except UpstreamUnavailableError as e:
+            logger.warning("Embeddings for model %s were not served by its upstream: %s", model, e)
+            span.set_attribute("error", f"upstream_{e.kind}")
+            if inference_started is not None:
+                worker_telemetry().item_completed(
+                    operation="embeddings",
+                    outcome="retry",
+                    model=model,
+                    profile="default",
+                    duration_s=time.perf_counter() - inference_started,
+                    item_count=len(items),
+                )
+            raise _openai_state_error(upstream_unavailable_exception(e, model)) from e
         except Exception as e:
             if is_oom_error(e):
                 # Transient memory pressure (worker ResourceExhaustedError after
