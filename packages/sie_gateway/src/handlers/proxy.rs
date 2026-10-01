@@ -349,6 +349,7 @@ pub(crate) struct RetryAfter {
     pub model_loading: &'static str,
     pub resource_exhausted: &'static str,
     pub lora_loading: &'static str,
+    pub queue_full: &'static str,
 }
 
 impl RetryAfter {
@@ -362,6 +363,7 @@ impl RetryAfter {
         model_loading: "5",
         resource_exhausted: "5",
         lora_loading: "5",
+        queue_full: "5",
     };
 }
 
@@ -392,6 +394,11 @@ const RESOURCE_EXHAUSTED_RETRY_AFTER: &str = RetryAfter::DEFAULT.resource_exhaus
 /// see ``sie_sdk.client._shared.LORA_LOADING_*``.
 const LORA_LOADING_ERROR_CODE: &str = "LORA_LOADING";
 const LORA_LOADING_RETRY_AFTER: &str = RetryAfter::DEFAULT.lora_loading;
+/// A worker could not serve the item now, for example because a remote
+/// profile's upstream is busy, unreachable or rate capped. Retryable, with the
+/// worker's ``retry_after_s`` when it gave one.
+const QUEUE_FULL_ERROR_CODE: &str = "QUEUE_FULL";
+const QUEUE_FULL_RETRY_AFTER: &str = RetryAfter::DEFAULT.queue_full;
 const INVALID_INPUT_ERROR_CODE: &str = "INVALID_INPUT";
 /// Worker-side input exceeds the model's context window (for example a label
 /// set that does not fit). Caller-fixable, so it maps to 400 like
@@ -3207,7 +3214,11 @@ async fn queue_mode_proxy(
                 .first()
                 .and_then(|r| r.error.as_deref())
                 .unwrap_or("Worker reported a retryable error");
-            return build_retryable_error_response(code, first_msg);
+            return build_retryable_error_response(
+                code,
+                first_msg,
+                longest_worker_retry_after(&errors),
+            );
         }
         if let Some((status, code)) = unanimous_terminal_client_error(&errors) {
             let first_msg = errors
@@ -4143,9 +4154,10 @@ pub(crate) fn worker_error_http_status(code: &str) -> StatusCode {
         "invalid_request" | "unsupported_field" => StatusCode::BAD_REQUEST,
         "context_exceeded" | INPUT_TOO_LONG_ERROR_CODE => StatusCode::BAD_REQUEST,
         PAYLOAD_TOO_LARGE_ERROR_CODE => StatusCode::PAYLOAD_TOO_LARGE,
-        RESOURCE_EXHAUSTED_ERROR_CODE | MODEL_LOADING_ERROR_CODE | LORA_LOADING_ERROR_CODE => {
-            StatusCode::SERVICE_UNAVAILABLE
-        }
+        RESOURCE_EXHAUSTED_ERROR_CODE
+        | MODEL_LOADING_ERROR_CODE
+        | LORA_LOADING_ERROR_CODE
+        | QUEUE_FULL_ERROR_CODE => StatusCode::SERVICE_UNAVAILABLE,
         MODEL_LOAD_FAILED_ERROR_CODE => StatusCode::BAD_GATEWAY,
         "transport_failure" => StatusCode::SERVICE_UNAVAILABLE,
         "cancelled" => StatusCode::REQUEST_TIMEOUT,
@@ -4180,15 +4192,21 @@ pub(crate) fn worker_error_openai_type(code: &str) -> &'static str {
 /// with [`worker_error_http_status`] / [`worker_error_openai_type`].
 fn worker_error_retry_after(
     code: &str,
-    resource_exhausted_retry_after_s: Option<u16>,
+    worker_retry_after_s: Option<u16>,
 ) -> Option<(String, &'static str)> {
+    let worker_hint = || {
+        worker_retry_after_s
+            .filter(|value| (1..=60).contains(value))
+            .map(|value| value.to_string())
+    };
     match code {
         RESOURCE_EXHAUSTED_ERROR_CODE => Some((
-            resource_exhausted_retry_after_s
-                .filter(|value| (1..=60).contains(value))
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| RESOURCE_EXHAUSTED_RETRY_AFTER.to_string()),
+            worker_hint().unwrap_or_else(|| RESOURCE_EXHAUSTED_RETRY_AFTER.to_string()),
             RESOURCE_EXHAUSTED_ERROR_CODE,
+        )),
+        QUEUE_FULL_ERROR_CODE => Some((
+            worker_hint().unwrap_or_else(|| QUEUE_FULL_RETRY_AFTER.to_string()),
+            QUEUE_FULL_ERROR_CODE,
         )),
         MODEL_LOADING_ERROR_CODE => Some((
             MODEL_LOADING_RETRY_AFTER.to_string(),
@@ -9126,6 +9144,7 @@ fn unanimous_retryable_error_code(errors: &[&publisher::WorkResult]) -> Option<&
         RESOURCE_EXHAUSTED_ERROR_CODE => RESOURCE_EXHAUSTED_ERROR_CODE,
         MODEL_LOADING_ERROR_CODE => MODEL_LOADING_ERROR_CODE,
         LORA_LOADING_ERROR_CODE => LORA_LOADING_ERROR_CODE,
+        QUEUE_FULL_ERROR_CODE => QUEUE_FULL_ERROR_CODE,
         _ => return None,
     };
     if errors
@@ -9249,10 +9268,23 @@ fn build_terminal_client_error_response(
 ///
 /// The worker is **not** marked unhealthy — these codes are transient
 /// per-request signals, not worker-health signals.
-fn build_retryable_error_response(code: &'static str, message: &str) -> Response {
+/// The longest retry hint the failed results carry, if any.
+fn longest_worker_retry_after(errors: &[&publisher::WorkResult]) -> Option<u16> {
+    errors
+        .iter()
+        .filter_map(|result| result.retry_after_s)
+        .max()
+        .map(|seconds| u16::try_from(seconds).unwrap_or(u16::MAX))
+}
+
+fn build_retryable_error_response(
+    code: &'static str,
+    message: &str,
+    worker_retry_after_s: Option<u16>,
+) -> Response {
     // Retry hint via the shared `worker_error_retry_after` classifier — the
     // same source of truth the streaming path uses.
-    let retry_after = worker_error_retry_after(code, None)
+    let retry_after = worker_error_retry_after(code, worker_retry_after_s)
         .map(|(retry_after, _)| retry_after)
         .unwrap_or_else(|| {
             // Defensive default. Should be unreachable given the
@@ -14695,6 +14727,7 @@ mod tests {
         assert_eq!(RetryAfter::DEFAULT.model_loading, "5");
         assert_eq!(RetryAfter::DEFAULT.resource_exhausted, "5");
         assert_eq!(RetryAfter::DEFAULT.lora_loading, "5");
+        assert_eq!(RetryAfter::DEFAULT.queue_full, "5");
         // The named constants alias the typed home — pin each against its wire
         // literal (not against `RetryAfter::DEFAULT.*`, which would be a
         // tautological `x == x`), so a broken alias is actually caught.
@@ -14704,6 +14737,7 @@ mod tests {
         assert_eq!(MODEL_LOADING_RETRY_AFTER, "5");
         assert_eq!(RESOURCE_EXHAUSTED_RETRY_AFTER, "5");
         assert_eq!(LORA_LOADING_RETRY_AFTER, "5");
+        assert_eq!(QUEUE_FULL_RETRY_AFTER, "5");
     }
 
     fn admission_test_state(pool_manager: Arc<PoolManager>) -> AppState {
@@ -18476,6 +18510,7 @@ mod tests {
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
             execution_binding_sha256: None,
+            retry_after_s: None,
         };
         let body = build_generate_success_body("Qwen/Qwen3-4B-Instruct", &[&r], false);
         let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -18962,6 +18997,7 @@ mod tests {
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
             execution_binding_sha256: None,
+            retry_after_s: None,
         }
     }
 
@@ -19010,6 +19046,7 @@ mod tests {
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
             execution_binding_sha256: None,
+            retry_after_s: None,
         }
     }
 
@@ -19126,8 +19163,11 @@ mod tests {
 
     #[test]
     fn test_build_retryable_error_response_lora_loading_status_and_headers() {
-        let resp =
-            build_retryable_error_response(LORA_LOADING_ERROR_CODE, "Loading lora adapter 'foo'");
+        let resp = build_retryable_error_response(
+            LORA_LOADING_ERROR_CODE,
+            "Loading lora adapter 'foo'",
+            None,
+        );
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
         let headers = resp.headers();
         assert_eq!(
@@ -19137,6 +19177,49 @@ mod tests {
         assert_eq!(
             headers.get("x-sie-error-code").unwrap(),
             LORA_LOADING_ERROR_CODE
+        );
+    }
+
+    #[tokio::test]
+    async fn test_unanimous_queue_full_answers_503_with_the_longest_worker_hint() {
+        let mut short = _err_result(Some("QUEUE_FULL"), "upstream busy");
+        short.retry_after_s = Some(3);
+        let mut long = _err_result(Some("QUEUE_FULL"), "upstream busy");
+        long.retry_after_s = Some(9);
+        let unhinted = _err_result(Some("QUEUE_FULL"), "upstream busy");
+        let errors: Vec<&publisher::WorkResult> = vec![&short, &long, &unhinted];
+
+        assert_eq!(
+            unanimous_retryable_error_code(&errors),
+            Some(QUEUE_FULL_ERROR_CODE)
+        );
+        let resp = build_retryable_error_response(
+            QUEUE_FULL_ERROR_CODE,
+            "upstream busy",
+            longest_worker_retry_after(&errors),
+        );
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(resp.headers().get("retry-after").unwrap(), "9");
+        assert_eq!(
+            resp.headers().get("x-sie-error-code").unwrap(),
+            QUEUE_FULL_ERROR_CODE
+        );
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), 64 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["error"]["code"], QUEUE_FULL_ERROR_CODE);
+
+        let without_hint = build_retryable_error_response(
+            QUEUE_FULL_ERROR_CODE,
+            "upstream busy",
+            longest_worker_retry_after(&[&unhinted]),
+        );
+        assert_eq!(
+            without_hint.headers().get("retry-after").unwrap(),
+            QUEUE_FULL_RETRY_AFTER
         );
     }
 
@@ -19666,6 +19749,7 @@ mod tests {
         let resp = build_retryable_error_response(
             RESOURCE_EXHAUSTED_ERROR_CODE,
             "CUDA out of memory after recovery",
+            None,
         );
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
         let headers = resp.headers();
@@ -19688,6 +19772,7 @@ mod tests {
         let resp = build_retryable_error_response(
             RESOURCE_EXHAUSTED_ERROR_CODE,
             "CUDA out of memory after recovery",
+            None,
         );
         let body_bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
             .await
@@ -21034,6 +21119,7 @@ mod tests {
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
             execution_binding_sha256: None,
+            retry_after_s: None,
         };
         let resp_body = result.result_msgpack.clone();
         assert_eq!(resp_body, payload);
@@ -21074,6 +21160,7 @@ mod tests {
                 executed_bundle_config_hash: None,
                 execution_identity_sha256: None,
                 execution_binding_sha256: None,
+                retry_after_s: None,
             },
             publisher::WorkResult {
                 work_item_id: "r1.1".to_string(),
@@ -21095,6 +21182,7 @@ mod tests {
                 executed_bundle_config_hash: None,
                 execution_identity_sha256: None,
                 execution_binding_sha256: None,
+                retry_after_s: None,
             },
         ];
         let items: Vec<serde_json::Value> = results
@@ -25440,6 +25528,26 @@ mod tests {
                 LORA_LOADING_ERROR_CODE
             ))
         );
+        assert_eq!(
+            worker_error_retry_after(QUEUE_FULL_ERROR_CODE, None),
+            Some((QUEUE_FULL_RETRY_AFTER.to_string(), QUEUE_FULL_ERROR_CODE))
+        );
+        assert_eq!(
+            worker_error_retry_after(QUEUE_FULL_ERROR_CODE, Some(12)),
+            Some(("12".to_string(), QUEUE_FULL_ERROR_CODE))
+        );
+        assert_eq!(
+            worker_error_retry_after(MODEL_LOADING_ERROR_CODE, Some(12)),
+            Some((
+                MODEL_LOADING_RETRY_AFTER.to_string(),
+                MODEL_LOADING_ERROR_CODE
+            )),
+            "only the codes that take a worker hint use it"
+        );
+        assert_eq!(
+            worker_error_http_status(QUEUE_FULL_ERROR_CODE),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
         // Terminal / non-retryable codes carry no retry hint.
         assert_eq!(worker_error_retry_after("invalid_request", None), None);
         assert_eq!(
@@ -25576,6 +25684,7 @@ mod tests {
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
             execution_binding_sha256: None,
+            retry_after_s: None,
         }
     }
 

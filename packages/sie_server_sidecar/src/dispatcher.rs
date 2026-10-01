@@ -74,6 +74,12 @@ const MODEL_LOADING_ERROR_CODE: &str = "MODEL_LOADING";
 /// the Python `ErrorCode.MODEL_LOAD_FAILED`.
 const MODEL_LOAD_FAILED_ERROR_CODE: &str = "MODEL_LOAD_FAILED";
 const INVALID_INPUT_ERROR_CODE: &str = "INVALID_INPUT";
+/// A remote profile's upstream cannot serve now; retryable, like the single
+/// server's `QUEUE_FULL` for a busy or unreachable upstream.
+const QUEUE_FULL_ERROR_CODE: &str = "QUEUE_FULL";
+const FALLBACK_REFUSAL_MESSAGE: &str = "The remote profile cannot serve this request now";
+/// Operation of a work item that only asks the worker to load its model.
+const LOAD_OPERATION: &str = "load";
 const PAYLOAD_TOO_LARGE_ERROR_CODE: &str = "PAYLOAD_TOO_LARGE";
 const PAYLOAD_ERROR_CODE: &str = "payload_error";
 const PAYLOAD_RESOLVE_ERROR_MESSAGE: &str = "failed to resolve item";
@@ -2394,6 +2400,13 @@ impl Dispatcher {
                 "encode" => encode_items.push((wi, delivery)),
                 "score" => score_items.push((wi, delivery)),
                 "extract" => extract_items.push((wi, delivery)),
+                // The model is ready by now, which is all a load asks for.
+                LOAD_OPERATION => {
+                    debug!(model = %model_id, "load-only work item: model ready");
+                    if let Err(e) = ack(&delivery, &self.runtime_state.telemetry).await {
+                        warn!(error = %e, "ack of a load-only work item failed");
+                    }
+                }
                 _ => unknown_items.push((wi, delivery)),
             }
         }
@@ -3213,12 +3226,58 @@ impl Dispatcher {
                 }
             }
             Disposition::NakRetry => {
-                nak_one(
-                    delivery,
-                    outcome.nak_delay_ms.unwrap_or_else(base_nak_delay_ms),
-                    &self.runtime_state.telemetry,
-                )
-                .await;
+                let delay_ms = outcome.nak_delay_ms.unwrap_or_else(base_nak_delay_ms);
+                if wi.fallback_reason.is_some() {
+                    let retry_after_s = outcome
+                        .retry_after_s
+                        .unwrap_or_else(|| delay_ms.div_ceil(1000).try_into().unwrap_or(u32::MAX));
+                    self.refuse_fallback_attempt(
+                        wi,
+                        delivery,
+                        outcome
+                            .error_code
+                            .as_deref()
+                            .unwrap_or(QUEUE_FULL_ERROR_CODE),
+                        retry_after_s,
+                    )
+                    .await;
+                    return;
+                }
+                nak_one(delivery, delay_ms, &self.runtime_state.telemetry).await;
+            }
+        }
+    }
+
+    /// Answer a work item the gateway sent to a remote profile in place of a
+    /// refusing local route. The gateway is holding that local refusal for
+    /// its caller, so a redelivery would only make the caller wait: the item
+    /// is answered at once with a retryable error and ACKed. If the error
+    /// cannot be published the item is NAKed, as for any failed publish.
+    async fn refuse_fallback_attempt(
+        &self,
+        wi: &WorkItem,
+        delivery: &Delivery,
+        code: &str,
+        retry_after_s: u32,
+    ) {
+        let mut outcome = synthetic_error_outcome(wi, code, FALLBACK_REFUSAL_MESSAGE);
+        outcome.retry_after_s = Some(retry_after_s);
+        match self
+            .deliver_result(wi, delivery, &outcome, None, None)
+            .await
+        {
+            Ok(()) | Err(crate::publisher::PublishError::EmptyReplySubject) => {
+                if let Err(e) = ack(delivery, &self.runtime_state.telemetry).await {
+                    warn!(error = %e, "ack after a fallback refusal failed");
+                }
+            }
+            Err(e) => {
+                warn!(
+                    work_item_id = %wi.work_item_id,
+                    error = %e,
+                    "failed to publish a fallback refusal — NAKing"
+                );
+                nak_one(delivery, base_nak_delay_ms(), &self.runtime_state.telemetry).await;
             }
         }
     }
@@ -4298,6 +4357,7 @@ fn synthetic_error_outcome(wi: &WorkItem, code: &str, message: &str) -> ItemOutc
         postprocessing_ms: None,
         raw_output: None,
         units: None,
+        retry_after_s: None,
     }
 }
 
@@ -6058,6 +6118,7 @@ mod tests {
             tracestate: None,
             timestamp: 0.0,
             deadline: None,
+            fallback_reason: None,
         }
     }
 
@@ -6305,6 +6366,183 @@ mod tests {
             vec![(0, base_nak_delay_ms()), (1, base_nak_delay_ms())]
         );
         assert!(backend.encoded_models().is_empty());
+    }
+
+    /// Every model is ready; every encode item comes back as `NakRetry`
+    /// carrying `outcome`'s error code, retry hint and delay.
+    struct NakingBackend {
+        error_code: Option<&'static str>,
+        retry_after_s: Option<u32>,
+        nak_delay_ms: Option<u64>,
+        encoded: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::backend::InferenceBackend for NakingBackend {
+        fn name(&self) -> &'static str {
+            "naking"
+        }
+
+        fn supports(&self, _model_id: &str) -> bool {
+            true
+        }
+
+        async fn ensure_model_ready(
+            &self,
+            _model_id: &str,
+        ) -> Result<crate::ipc_types::EnsureModelReadyResponse, BackendError> {
+            Ok(crate::ipc_types::EnsureModelReadyResponse {
+                state: ReadinessState::Ready,
+                batch_budget: None,
+                descriptor: None,
+            })
+        }
+
+        async fn process_encode_batch(
+            &self,
+            req: ProcessEncodeBatchRequest,
+        ) -> Result<BatchOutcome, BackendError> {
+            self.encoded.fetch_add(req.items.len(), Ordering::SeqCst);
+            let outcomes = req
+                .items
+                .iter()
+                .map(|item| ItemOutcome {
+                    nak_delay_ms: self.nak_delay_ms,
+                    error_code: self.error_code.map(str::to_string),
+                    retry_after_s: self.retry_after_s,
+                    ..outcome(
+                        &item.request_id,
+                        item.item_index,
+                        Disposition::NakRetry,
+                        None,
+                        None,
+                    )
+                })
+                .collect();
+            Ok(BatchOutcome {
+                outcomes,
+                batched_f16_multivectors: Vec::new(),
+            })
+        }
+
+        async fn process_score_batch(
+            &self,
+            _req: ProcessScoreBatchRequest,
+        ) -> Result<BatchOutcome, BackendError> {
+            Err(BackendError::UnsupportedModel("score".into()))
+        }
+
+        async fn process_extract_batch(
+            &self,
+            _req: ProcessExtractBatchRequest,
+        ) -> Result<BatchOutcome, BackendError> {
+            Err(BackendError::UnsupportedModel("extract".into()))
+        }
+    }
+
+    fn naking_backend(
+        error_code: Option<&'static str>,
+        retry_after_s: Option<u32>,
+        nak_delay_ms: Option<u64>,
+    ) -> Arc<NakingBackend> {
+        Arc::new(NakingBackend {
+            error_code,
+            retry_after_s,
+            nak_delay_ms,
+            encoded: std::sync::atomic::AtomicUsize::new(0),
+        })
+    }
+
+    async fn settle_one(
+        dispatcher: &Arc<Dispatcher>,
+        work: WorkItem,
+    ) -> Vec<crate::delivery::LocalDeliveryEvent> {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        dispatcher
+            .dispatch_decoded(
+                vec![(work, Delivery::Local(LocalDelivery::new(0, 0, tx)))],
+                1,
+                Instant::now(),
+            )
+            .await;
+        dispatcher.join_parked_groups(Duration::from_secs(5)).await;
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+        events
+    }
+
+    fn fallback_attempt(model: &str) -> WorkItem {
+        WorkItem {
+            fallback_reason: Some("model_loading".to_string()),
+            ..wi("bridge", 0, model, "encode")
+        }
+    }
+
+    #[tokio::test]
+    async fn a_fallback_attempt_is_answered_at_once_where_other_work_is_redelivered() {
+        let dispatcher = dispatcher_with_backend(naking_backend(None, None, Some(2_500)));
+
+        let ordinary = settle_one(&dispatcher, wi("plain", 0, "acme/model:remote", "encode")).await;
+        let bridged = settle_one(&dispatcher, fallback_attempt("acme/model:remote")).await;
+
+        assert!(
+            matches!(
+                ordinary.as_slice(),
+                [crate::delivery::LocalDeliveryEvent::Retry {
+                    slot: 0,
+                    delay_ms: 2_500,
+                    ..
+                }]
+            ),
+            "{ordinary:?}"
+        );
+        let [crate::delivery::LocalDeliveryEvent::Result { slot: 0, result }] = bridged.as_slice()
+        else {
+            panic!("a fallback attempt must settle with a result: {bridged:?}");
+        };
+        assert!(!result.success);
+        assert_eq!(result.error_code.as_deref(), Some(QUEUE_FULL_ERROR_CODE));
+        assert_eq!(
+            result.retry_after_s,
+            Some(3),
+            "the NAK delay, rounded up to seconds"
+        );
+        assert_eq!(result.error.as_deref(), Some(FALLBACK_REFUSAL_MESSAGE));
+    }
+
+    #[tokio::test]
+    async fn a_fallback_refusal_keeps_the_engines_code_and_retry_hint() {
+        let dispatcher =
+            dispatcher_with_backend(naking_backend(Some("MODEL_LOADING"), Some(7), None));
+
+        let bridged = settle_one(&dispatcher, fallback_attempt("acme/model:remote")).await;
+
+        let [crate::delivery::LocalDeliveryEvent::Result { result, .. }] = bridged.as_slice()
+        else {
+            panic!("a fallback attempt must settle with a result: {bridged:?}");
+        };
+        assert_eq!(result.error_code.as_deref(), Some("MODEL_LOADING"));
+        assert_eq!(result.retry_after_s, Some(7));
+    }
+
+    #[tokio::test]
+    async fn a_load_only_work_item_settles_once_its_model_is_ready_without_running() {
+        let backend = naking_backend(None, None, None);
+        let dispatcher = dispatcher_with_backend(backend.clone());
+
+        let events = settle_one(
+            &dispatcher,
+            WorkItem {
+                item: None,
+                ..wi("load", 0, "acme/model", LOAD_OPERATION)
+            },
+        )
+        .await;
+
+        assert!(events.is_empty(), "a load publishes nothing: {events:?}");
+        assert_eq!(backend.encoded.load(Ordering::SeqCst), 0);
     }
 
     fn dispatcher_listing_unsupported(
@@ -7737,6 +7975,7 @@ mod tests {
             postprocessing_ms: post_ms,
             raw_output: None,
             units: None,
+            retry_after_s: None,
         }
     }
 

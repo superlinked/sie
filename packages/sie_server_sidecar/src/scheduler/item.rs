@@ -719,6 +719,7 @@ mod tests {
             tracestate: None,
             timestamp: 0.0,
             deadline: None,
+            fallback_reason: None,
         }
     }
 

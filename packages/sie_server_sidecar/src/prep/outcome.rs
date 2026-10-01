@@ -47,6 +47,7 @@ impl EncodeItemHandle {
             postprocessing_ms: None,
             raw_output: None,
             units: None,
+            retry_after_s: None,
         }
     }
 }
@@ -70,6 +71,7 @@ pub fn encode_error_outcome(item: &EncodeBatchItem, code: &str, message: String)
         postprocessing_ms: None,
         raw_output: None,
         units: None,
+        retry_after_s: None,
     }
 }
 
@@ -93,6 +95,7 @@ pub fn encode_error_outcome_score(
         postprocessing_ms: None,
         raw_output: None,
         units: None,
+        retry_after_s: None,
     }
 }
 

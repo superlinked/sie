@@ -247,6 +247,7 @@ mod tests {
             payload_fetch_ms: None,
             units: None,
             executed_bundle_config_hash: None,
+            retry_after_s: None,
         }
     }
 

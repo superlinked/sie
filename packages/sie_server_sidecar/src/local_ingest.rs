@@ -1644,6 +1644,7 @@ fn error_result(wi: &WorkItem, worker_id: &str, code: &str, message: &str) -> Wo
         // caller addressed this worker's socket, not a pool subject.
         worker_direct: true,
         executed_bundle_config_hash: None,
+        retry_after_s: None,
     }
 }
 
@@ -1864,6 +1865,7 @@ mod tests {
             tracestate: None,
             timestamp: 0.0,
             deadline: None,
+            fallback_reason: None,
         }
     }
 
@@ -2422,6 +2424,7 @@ mod tests {
             tracestate: None,
             timestamp: 0.0,
             deadline: None,
+            fallback_reason: None,
         };
         let items = rmp_serde::to_vec_named(&vec![work_item]).unwrap();
         let request = RequestEnvelope {

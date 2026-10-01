@@ -28,7 +28,8 @@ class WorkItem(_WorkItemRequired, total=False):
         request_id: Unique ID for the originating client request. Format: ``{router_id}-{counter}``.
         item_index: Position of this item in the original request (for result ordering).
         total_items: Total number of items in the original request.
-        operation: Inference operation: ``"encode"`` | ``"score"`` | ``"extract"``.
+        operation: Inference operation: ``"encode"`` | ``"score"`` | ``"extract"``, or
+            ``"load"`` for an item without input that only asks the worker to load the model.
         model_id: Model identifier (e.g., ``"BAAI/bge-m3"``).
         profile_id: Profile name (e.g., ``"default"``).
         display_model: The model id the caller asked for, when the gateway dispatched the
@@ -59,6 +60,9 @@ class WorkItem(_WorkItemRequired, total=False):
         timestamp: Unix timestamp when the work item was created.
         deadline: Absolute Unix timestamp, on the clock that stamps ``timestamp``,
             after which no caller waits for this item. Absent when unknown.
+        fallback_reason: Present when the gateway sent the item to a remote profile in place of
+            a local route that refused it; names the refusal. The worker answers such an item
+            once and never redelivers it.
     """
 
     bundle_config_hash: str
@@ -104,6 +108,7 @@ class WorkItem(_WorkItemRequired, total=False):
     tracestate: str | None
 
     deadline: float
+    fallback_reason: str
 
 
 class _WorkResultRequired(TypedDict):
@@ -157,6 +162,9 @@ class WorkResult(_WorkResultRequired, total=False):
         executed_bundle_config_hash: Worker-origin hash of the registry bundle
             held stable for this successful execution. Optional for rolling
             and self-host compatibility.
+        retry_after_s: Seconds after which a retryable error may succeed, when the
+            worker gave a hint. The gateway uses it as ``Retry-After`` for a
+            ``QUEUE_FULL`` or ``RESOURCE_EXHAUSTED`` answer.
     """
 
     result_msgpack: bytes | None
@@ -179,6 +187,7 @@ class WorkResult(_WorkResultRequired, total=False):
 
     execution_identity_sha256: str | None
     executed_bundle_config_hash: str | None
+    retry_after_s: int | None
 
 
 # -- NATS subject helpers ---------------------------------------------------

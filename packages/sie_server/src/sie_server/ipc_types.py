@@ -574,6 +574,9 @@ class ItemOutcome(msgspec.Struct):
     # that don't know the key (older Rust sidecars) ignore it and older
     # producers simply omit it — the NATS wire contract is unchanged.
     units: UnitCounts | None = None
+    # Seconds after which a retryable error may succeed; the sidecar passes it
+    # onto ``WorkResult.retry_after_s`` and the gateway's ``Retry-After``.
+    retry_after_s: int | None = None
 
 
 class BatchedF16MultivectorItem(msgspec.Struct):

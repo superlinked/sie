@@ -91,6 +91,8 @@ struct WorkResultRef<'a> {
     worker_direct: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     executed_bundle_config_hash: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retry_after_s: Option<u32>,
 }
 
 impl<'a> WorkResultRef<'a> {
@@ -137,6 +139,7 @@ impl<'a> WorkResultRef<'a> {
             worker_direct,
             executed_bundle_config_hash: executed_bundle_config_hash
                 .filter(|hash| !hash.is_empty()),
+            retry_after_s: outcome.retry_after_s,
         }
     }
 
@@ -159,6 +162,7 @@ impl<'a> WorkResultRef<'a> {
             units: self.units.cloned(),
             worker_direct: self.worker_direct,
             executed_bundle_config_hash: self.executed_bundle_config_hash.map(str::to_owned),
+            retry_after_s: self.retry_after_s,
         }
     }
 
@@ -182,6 +186,7 @@ impl<'a> WorkResultRef<'a> {
             units: result.units.as_ref(),
             worker_direct: result.worker_direct,
             executed_bundle_config_hash: result.executed_bundle_config_hash.as_deref(),
+            retry_after_s: result.retry_after_s,
         }
     }
 
@@ -899,6 +904,7 @@ mod tests {
             postprocessing_ms: Some(0.3),
             raw_output: None,
             units: None,
+            retry_after_s: None,
         }
     }
 

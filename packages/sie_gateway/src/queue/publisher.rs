@@ -731,6 +731,10 @@ pub struct WorkResult {
     /// rolling/self-host compatibility.
     #[serde(default)]
     pub execution_binding_sha256: Option<String>,
+    /// Seconds after which a retryable error may succeed, when the worker
+    /// gave a hint. Absent from older workers and from successful results.
+    #[serde(default)]
+    pub retry_after_s: Option<u32>,
 }
 
 /// One bounded fragment of a named-msgpack encoded [`WorkResult`].
@@ -1578,6 +1582,7 @@ fn fail_pending_result_chunk_request(
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
             execution_binding_sha256: None,
+            retry_after_s: None,
         })
         .collect();
     if let Some(sender) = collector.sender.take() {
@@ -6560,6 +6565,7 @@ mod tests {
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
             execution_binding_sha256: None,
+            retry_after_s: None,
         }
     }
 
@@ -7164,6 +7170,7 @@ mod tests {
                     executed_bundle_config_hash: None,
                     execution_identity_sha256: None,
                     execution_binding_sha256: None,
+                    retry_after_s: None,
                 }),
                 None,
             ],
@@ -7238,6 +7245,7 @@ mod tests {
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
             execution_binding_sha256: None,
+            retry_after_s: None,
         };
         let duplicate = WorkResult {
             result_msgpack: vec![2],
@@ -7302,6 +7310,7 @@ mod tests {
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
             execution_binding_sha256: None,
+            retry_after_s: None,
         };
         let pool_result = WorkResult {
             result_msgpack: vec![2],
@@ -7588,6 +7597,35 @@ mod tests {
         assert!(!decoded.accepts_result_chunks);
     }
 
+    #[test]
+    fn work_results_carry_the_workers_retry_hint_and_older_ones_decode_without_it() {
+        #[derive(Serialize)]
+        struct SidecarResult<'a> {
+            work_item_id: &'a str,
+            request_id: &'a str,
+            item_index: u32,
+            success: bool,
+            error_code: &'a str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            retry_after_s: Option<u32>,
+        }
+        let decode = |retry_after_s| {
+            let bytes = rmp_serde::to_vec_named(&SidecarResult {
+                work_item_id: "req.0",
+                request_id: "req",
+                item_index: 0,
+                success: false,
+                error_code: "QUEUE_FULL",
+                retry_after_s,
+            })
+            .unwrap();
+            rmp_serde::from_slice::<WorkResult>(&bytes).unwrap()
+        };
+
+        assert_eq!(decode(Some(7)).retry_after_s, Some(7));
+        assert_eq!(decode(None).retry_after_s, None);
+    }
+
     /// Regression: `WorkItemRef` is the borrowed view we use on the
     /// publish hot path and it **must** serialize to the exact same
     /// msgpack bytes as the owned `WorkItem`. Any drift in field
@@ -7744,6 +7782,7 @@ mod tests {
             execution_binding_sha256: Some(
                 "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
             ),
+            retry_after_s: None,
         };
 
         let encoded = rmp_serde::to_vec(&result).unwrap();
@@ -7960,6 +7999,7 @@ mod tests {
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
             execution_binding_sha256: None,
+            retry_after_s: None,
         })
         .expect("encode work result")
     }
@@ -8108,6 +8148,7 @@ mod tests {
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
             execution_binding_sha256: None,
+            retry_after_s: None,
         };
         let encoded = rmp_serde::to_vec(&result).unwrap();
         let extracted = extract_request_id_fast(&encoded);
@@ -8136,6 +8177,7 @@ mod tests {
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
             execution_binding_sha256: None,
+            retry_after_s: None,
         };
         let encoded = rmp_serde::to_vec_named(&result).unwrap();
         let extracted = extract_request_id_fast(&encoded);
@@ -8181,6 +8223,7 @@ mod tests {
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
             execution_binding_sha256: None,
+            retry_after_s: None,
         };
         let encoded = rmp_serde::to_vec(&result).unwrap();
         let extracted = extract_request_id_fast(&encoded);

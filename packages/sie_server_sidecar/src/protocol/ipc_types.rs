@@ -861,6 +861,10 @@ pub struct ItemOutcome {
     /// `WorkResult` wire unchanged.
     #[serde(default)]
     pub units: Option<UnitCounts>,
+    /// Seconds after which a retryable error may succeed. Optional; passed
+    /// through onto the `WorkResult` wire unchanged.
+    #[serde(default)]
+    pub retry_after_s: Option<u32>,
 }
 
 /// Mirror of `sie_server.ipc_types.UnitCounts` — a field is set only when
@@ -1267,6 +1271,7 @@ mod tests {
             postprocessing_ms: None,
             raw_output: None,
             units: None,
+            retry_after_s: None,
         };
         let bytes = rmp_serde::to_vec_named(&outcome).unwrap();
         let back: ItemOutcome = rmp_serde::from_slice(&bytes).unwrap();

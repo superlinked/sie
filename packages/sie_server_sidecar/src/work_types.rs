@@ -99,6 +99,12 @@ pub struct WorkItem {
         skip_serializing_if = "Option::is_none"
     )]
     pub deadline: Option<f64>,
+    /// Set by the gateway when it sent the item to a remote profile in place
+    /// of a local route that refused it; names the refusal. Someone is
+    /// waiting to answer with that local refusal, so the item is answered
+    /// once and never redelivered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_reason: Option<String>,
 }
 
 fn deserialize_lenient_seconds<'de, D>(deserializer: D) -> Result<Option<f64>, D::Error>
@@ -213,6 +219,11 @@ pub struct WorkResult {
     /// The gateway uses it as post-execution provenance evidence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub executed_bundle_config_hash: Option<String>,
+    /// Seconds after which a retryable error may succeed, passed through from
+    /// the engine's `ItemOutcome.retry_after_s`. Absent on success and when
+    /// the engine gave no hint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after_s: Option<u32>,
 }
 
 /// One bounded chunk of a serialized [`WorkResult`].
@@ -280,6 +291,7 @@ mod tests {
             tracestate: None,
             timestamp: 1_700_000_000.0,
             deadline: None,
+            fallback_reason: None,
         }
     }
 
@@ -472,6 +484,7 @@ mod tests {
             units: None,
             worker_direct: true,
             executed_bundle_config_hash: None,
+            retry_after_s: None,
         };
         let bytes = rmp_serde::to_vec_named(&result).unwrap();
         let back: WorkResult = rmp_serde::from_slice(&bytes).unwrap();
