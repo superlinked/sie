@@ -524,6 +524,10 @@ struct WorkItemRef<'a> {
     pub operation: &'a str,
     pub model_id: &'a str,
     pub profile_id: &'a str,
+    /// The model id the caller asked for, when routing dispatched the work to
+    /// another route of it (a profile variant). Absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_model: Option<&'a str>,
     pub engine: &'a str,
     pub pool_name: &'a str,
     #[serde(skip_serializing_if = "str::is_empty")]
@@ -569,6 +573,12 @@ struct WorkItemRef<'a> {
     pub tracestate: Option<&'a str>,
 }
 
+/// The requested model id a work item carries: present only when it differs
+/// from the route the work runs on.
+fn requested_model_on_wire<'a>(display_model: &'a str, model: &str) -> Option<&'a str> {
+    (!display_model.is_empty() && display_model != model).then_some(display_model)
+}
+
 /// Per-request context that every [`WorkItemRef`] in a batch borrows
 /// from. Grouping these lets us build the per-item view with a single
 /// struct literal and keeps `publish_single` / `publish_score` from
@@ -577,6 +587,7 @@ struct WorkItemShared<'a> {
     request_id: &'a str,
     endpoint: &'a str,
     model: &'a str,
+    display_model: Option<&'a str>,
     pool: &'a str,
     admission_pool: &'a str,
     gpu: &'a str,
@@ -2915,6 +2926,7 @@ impl WorkPublisher {
         admission_pool: &str,
         endpoint: &str,
         model: &str,
+        display_model: &str,
         engine: &str,
         bundle_config_hash: &str,
         items: Vec<rmpv::Value>,
@@ -2939,6 +2951,7 @@ impl WorkPublisher {
                 admission_pool,
                 endpoint,
                 model,
+                display_model,
                 engine,
                 bundle_config_hash,
                 items,
@@ -2966,6 +2979,7 @@ impl WorkPublisher {
         admission_pool: &str,
         endpoint: &str,
         model: &str,
+        display_model: &str,
         engine: &str,
         bundle_config_hash: &str,
         items: Vec<rmpv::Value>,
@@ -3072,6 +3086,7 @@ impl WorkPublisher {
             request_id: &request_id,
             endpoint,
             model,
+            display_model: requested_model_on_wire(display_model, model),
             pool: &pool,
             admission_pool,
             gpu: &gpu,
@@ -3372,6 +3387,7 @@ impl WorkPublisher {
             operation: shared.endpoint,
             model_id: shared.model,
             profile_id: "default",
+            display_model: shared.display_model,
             engine: shared.engine,
             pool_name: shared.pool,
             admission_pool: shared.admission_pool,
@@ -3584,6 +3600,7 @@ impl WorkPublisher {
             request_id: &request_id,
             endpoint: "generate",
             model: &model,
+            display_model: requested_model_on_wire(display_model, &model),
             pool: &pool,
             admission_pool,
             gpu: &machine_profile,
@@ -3730,6 +3747,7 @@ impl WorkPublisher {
             request_id: &request_id,
             endpoint: "generate",
             model: &model,
+            display_model: requested_model_on_wire(display_model, &model),
             pool: &pool,
             admission_pool,
             gpu: &machine_profile,
@@ -3997,6 +4015,7 @@ impl WorkPublisher {
             operation: shared.endpoint,
             model_id: shared.model,
             profile_id: "default",
+            display_model: shared.display_model,
             engine: shared.engine,
             pool_name: shared.pool,
             admission_pool: shared.admission_pool,
@@ -4292,6 +4311,7 @@ impl WorkPublisher {
             operation: shared.endpoint,
             model_id: shared.model,
             profile_id: "default",
+            display_model: shared.display_model,
             engine: shared.engine,
             pool_name: shared.pool,
             admission_pool: shared.admission_pool,
@@ -6120,6 +6140,8 @@ mod tests {
         pub model_id: String,
         #[serde(default)]
         pub profile_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub display_model: Option<String>,
         #[serde(default)]
         pub engine: String,
         pub pool_name: String,
@@ -7478,6 +7500,7 @@ mod tests {
             operation: "encode".to_string(),
             model_id: "BAAI/bge-m3".to_string(),
             profile_id: String::new(),
+            display_model: None,
             engine: "pytorch".to_string(),
             pool_name: "default".to_string(),
             admission_pool: "default".to_string(),
@@ -7580,6 +7603,7 @@ mod tests {
             operation: "encode".to_string(),
             model_id: "BAAI/bge-m3".to_string(),
             profile_id: "default".to_string(),
+            display_model: Some("org/requested".to_string()),
             engine: "pytorch".to_string(),
             pool_name: "default".to_string(),
             admission_pool: "tenant".to_string(),
@@ -7625,6 +7649,7 @@ mod tests {
             operation: &owned.operation,
             model_id: &owned.model_id,
             profile_id: &owned.profile_id,
+            display_model: owned.display_model.as_deref(),
             engine: &owned.engine,
             pool_name: &owned.pool_name,
             admission_pool: &owned.admission_pool,
@@ -7805,6 +7830,7 @@ mod tests {
             operation: "encode".to_string(),
             model_id: "model".to_string(),
             profile_id: String::new(),
+            display_model: None,
             engine: String::new(),
             pool_name: "default".to_string(),
             admission_pool: String::new(),
@@ -8487,6 +8513,7 @@ mod tests {
             operation: "generate".to_string(),
             model_id: "m".to_string(),
             profile_id: "default".to_string(),
+            display_model: None,
             engine: "pytorch".to_string(),
             pool_name: "p".to_string(),
             admission_pool: String::new(),
@@ -8638,6 +8665,7 @@ mod tests {
             operation: "generate".to_string(),
             model_id: "m".to_string(),
             profile_id: "default".to_string(),
+            display_model: None,
             engine: "pytorch".to_string(),
             pool_name: "p".to_string(),
             admission_pool: String::new(),
@@ -8684,6 +8712,7 @@ mod tests {
             operation: "generate".to_string(),
             model_id: "m".to_string(),
             profile_id: "default".to_string(),
+            display_model: None,
             engine: "pytorch".to_string(),
             pool_name: "p".to_string(),
             admission_pool: String::new(),
@@ -8966,6 +8995,150 @@ mod tests {
         );
     }
 
+    /// NATS-gated: a work item carries `display_model` only when the caller
+    /// asked for a model other than the route the work runs on, on the batch
+    /// and on the generation publish path alike.
+    #[tokio::test]
+    async fn work_items_carry_the_requested_model_only_when_it_differs() {
+        use futures_util::StreamExt;
+
+        let Ok(url) = std::env::var("NATS_URL") else {
+            eprintln!("skipping: NATS_URL not set");
+            return;
+        };
+        let client =
+            match tokio::time::timeout(Duration::from_secs(2), async_nats::connect(&url)).await {
+                Ok(Ok(c)) => c,
+                _ => {
+                    eprintln!("skipping: could not connect to NATS at {url}");
+                    return;
+                }
+            };
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let pool = format!("itdisplay{nanos}");
+        let publisher = Arc::new(WorkPublisher::new(
+            async_nats::jetstream::new(client.clone()),
+            "it-router".to_string(),
+            Arc::new(crate::queue::payload_store::DisabledPayloadStore),
+            Duration::from_secs(5),
+            1024,
+            WorkStreamConfig {
+                max_age: Duration::from_secs(300),
+                storage: jetstream::stream::StorageType::Memory,
+                num_replicas: 1,
+            },
+        ));
+        let subjects = format!("sie.work.{pool}.>");
+        let stream = async_nats::jetstream::new(client.clone())
+            .get_or_create_stream(jetstream::stream::Config {
+                name: stream_name(&pool),
+                subjects: vec![subjects.clone()],
+                retention: jetstream::stream::RetentionPolicy::WorkQueue,
+                storage: jetstream::stream::StorageType::Memory,
+                max_age: Duration::from_secs(300),
+                max_messages: 100_000,
+                discard: jetstream::stream::DiscardPolicy::New,
+                ..Default::default()
+            })
+            .await
+            .expect("create work stream");
+        stream
+            .create_consumer(jetstream::consumer::pull::Config {
+                durable_name: Some("itworker".to_string()),
+                filter_subject: subjects.clone(),
+                ..Default::default()
+            })
+            .await
+            .expect("create work consumer");
+        let mut sub = client.subscribe(subjects).await.expect("subscribe");
+        client.flush().await.expect("flush");
+        let target = |model: &str| PublishTarget::Pool {
+            pool: pool.clone(),
+            machine_profile: "l4".to_string(),
+            bundle: "default".to_string(),
+            model: model.to_string(),
+        };
+        async fn next_work_item(sub: &mut async_nats::Subscriber) -> (String, Option<String>) {
+            let msg = tokio::time::timeout(Duration::from_secs(5), sub.next())
+                .await
+                .expect("timed out waiting for the published work item")
+                .expect("subscription closed before a message arrived");
+            let work: WorkItem = rmp_serde::from_slice(&msg.payload).expect("decode work item");
+            (work.model_id, work.display_model)
+        }
+        let mut published = Vec::new();
+
+        for (model, display_model) in [
+            ("acme/model", "acme/model"),
+            ("acme/model:remote", "acme/model"),
+        ] {
+            let items = vec![rmpv::Value::Map(vec![(
+                rmpv::Value::from("text"),
+                rmpv::Value::from("hello"),
+            )])];
+            let (_request_id, _rx, durability) = publisher
+                .publish_work(
+                    target(model),
+                    &pool,
+                    "encode",
+                    model,
+                    display_model,
+                    "pytorch",
+                    "",
+                    items,
+                    &WorkParams::default(),
+                )
+                .await
+                .expect("publish_work");
+            durability.wait().await.expect("durable publish ACK");
+            published.push(next_work_item(&mut sub).await);
+        }
+        let generate = WorkParams {
+            generate: Some(GenerateParams {
+                input: GenerateInput::Prompt {
+                    prompt: "hi".to_string(),
+                },
+                max_new_tokens: 4,
+                ..Default::default()
+            }),
+            ..WorkParams::default()
+        };
+        let (_request_id, _rx, _notify, durability) = publisher
+            .publish_generate_streaming(
+                target("acme/model:remote"),
+                "acme/model",
+                "pytorch",
+                "",
+                &generate,
+                &pool,
+            )
+            .await
+            .expect("publish_generate_streaming");
+        durability.wait().await.expect("durable publish ACK");
+        published.push(next_work_item(&mut sub).await);
+
+        assert_eq!(
+            published,
+            vec![
+                ("acme/model".to_string(), None),
+                (
+                    "acme/model:remote".to_string(),
+                    Some("acme/model".to_string())
+                ),
+                (
+                    "acme/model:remote".to_string(),
+                    Some("acme/model".to_string())
+                ),
+            ]
+        );
+        let _ = async_nats::jetstream::new(client.clone())
+            .delete_stream(stream_name(&pool))
+            .await;
+    }
+
     /// Integration test (issue #1500): drive a real `WorkPublisher` encode
     /// publish over a live NATS/JetStream broker, with the inbound trace
     /// context scoped over the publish via `with_context` exactly as
@@ -9094,7 +9267,7 @@ mod tests {
         // Mirror the handler: scope the inbound context over the publish.
         let (_request_id, _rx, durability) = publisher
             .publish_work(
-                target, &pool, "encode", model, "pytorch", "", items, &params,
+                target, &pool, "encode", model, model, "pytorch", "", items, &params,
             )
             .with_context(cx)
             .await
@@ -9224,6 +9397,7 @@ mod tests {
                 target,
                 &pool,
                 "encode",
+                model,
                 model,
                 "pytorch",
                 "",
@@ -9371,7 +9545,7 @@ mod tests {
         )])];
         let (request_id, _rx, durability) = publisher
             .publish_work(
-                target, &pool, "encode", model, "pytorch", "", items, &params,
+                target, &pool, "encode", model, model, "pytorch", "", items, &params,
             )
             .await
             .expect("publish oversized work item");

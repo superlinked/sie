@@ -420,7 +420,7 @@ The `ConfigNotification` JSON payload carries the following fields, verified aga
 
 The hot path is always **msgpack** (`rmp_serde` on the gateway, `msgpack-python` / `msgpack-numpy` on workers). Specifically:
 
-- `WorkItem` (gateway → worker on JetStream): msgpack.
+- `WorkItem` (gateway → worker on JetStream): msgpack. `model_id` is the route the work runs on. When routing dispatched the request to another route of the requested model (a profile variant), `display_model` carries the model id the caller asked for, so logs and accounting downstream can report it; it is omitted otherwise. `WorkDispatcher::publish_work` takes the same `display_model`.
 - `WorkResult` (worker → gateway on the inbox subject): msgpack. Numpy arrays use `msgpack-numpy`'s extension-free encoding (maps with a `nd: true` sentinel + `type`, `shape`, `data`). When the gateway advertises `WorkItem.accepts_result_chunks: true`, a result that does not fit one NATS message may instead arrive as named-msgpack `result_chunk_v1` envelopes. This boolean negotiates v1 only; a future envelope version requires a new capability rather than reinterpreting the existing field. The gateway reassembles v1 transfers within the pending request lifetime, with a SHA-256 digest and fixed item/chunk/request/process memory limits, then decodes the reconstructed bytes as the same `WorkResult`. The gateway transcodes to native JSON arrays only when the client's `Accept` header asks for JSON.
 
 JSON (`serde_json`) is used where payloads are low-frequency or human-oriented:
@@ -819,6 +819,7 @@ WorkItem {
   operation:     "encode",
   model_id:      "BAAI/bge-m3",
   profile_id:    "default",
+  display_model: "…",                       // the model the caller asked for; only when it differs from model_id
   pool_name:     "default",
   admission_pool: "default",
   machine_profile: "default",

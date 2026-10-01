@@ -1698,6 +1698,7 @@ mod tests {
                 _admission_pool: &str,
                 _endpoint: &str,
                 _model: &str,
+                _display_model: &str,
                 _engine: &str,
                 _bundle_config_hash: &str,
                 _items: Vec<rmpv::Value>,
