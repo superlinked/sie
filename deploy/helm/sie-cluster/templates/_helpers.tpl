@@ -1342,6 +1342,17 @@ true
 The upstreams file is a Secret, not a ConfigMap: it says where each credential
 is sent, and the gateway's Role may write every ConfigMap in the namespace.
 */}}
+{{/*
+SIE_UPSTREAM_NAMES for sie-config: the names of the upstreams the remote lanes
+define, from the same values the upstreams Secret is rendered from, or empty
+when no remote lane is enabled, so sie-config refuses every remote profile.
+*/}}
+{{- define "sie-cluster.upstreams.names" -}}
+{{- if eq (include "sie-cluster.worker.remoteLaneEnabled" .) "true" -}}
+{{- keys (default dict .Values.upstreams) | sortAlpha | join "," -}}
+{{- end -}}
+{{- end }}
+
 {{- define "sie-cluster.upstreams.secretName" -}}
 {{- printf "%s-upstreams" (include "sie-cluster.fullname" .) -}}
 {{- end }}

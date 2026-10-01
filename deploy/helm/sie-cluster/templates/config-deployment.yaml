@@ -94,6 +94,8 @@ spec:
             # (writable) catalog.
             - name: SIE_DEPLOYMENT_ENV
               value: {{ include "sie-cluster.config.deploymentEnv" . | quote }}
+            - name: SIE_UPSTREAM_NAMES
+              value: {{ include "sie-cluster.upstreams.names" . | quote }}
             {{- with include "sie-cluster.config.adminTokenSecretName" . }}
             - name: SIE_ADMIN_TOKEN
               valueFrom:

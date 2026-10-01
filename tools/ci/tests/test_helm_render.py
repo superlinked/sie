@@ -2528,3 +2528,18 @@ def test_remote_policy_accepts_combined_selectors_and_a_named_port(tmp_path: Pat
         }
     }
     assert render_workers(tmp_path, values).returncode == 0
+
+
+def test_sie_config_receives_the_names_in_the_rendered_upstreams_file(tmp_path: Path) -> None:
+    docs = rendered_documents(tmp_path, remote_pool_values())
+
+    (secret,) = [doc for doc in docs if doc["kind"] == "Secret" and doc["metadata"]["name"] == UPSTREAMS_SECRET]
+    names = container_env(docs, *CONFIG_SERVICE.split("/"))["SIE_UPSTREAM_NAMES"]["value"]
+
+    assert names.split(",") == sorted(yaml.safe_load(secret["stringData"]["upstreams.yaml"])["upstreams"])
+
+
+def test_without_a_remote_lane_sie_config_receives_no_upstream_names(tmp_path: Path) -> None:
+    docs = rendered_documents(tmp_path, {"upstreams": upstreams_fixture()["values"], **L4_POOL})
+
+    assert container_env(docs, *CONFIG_SERVICE.split("/"))["SIE_UPSTREAM_NAMES"]["value"] == ""

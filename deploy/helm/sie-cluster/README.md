@@ -805,6 +805,11 @@ Below, `<fullname>` is the chart's full name: `<release>-sie-cluster`, or
   upstream's Secret key must also differ from every Secret key the chart
   hands to another component (the Hugging Face token, the gateway tokens, the
   sie-config tokens and the NATS passwords).
+- sie-config receives the upstream names (`SIE_UPSTREAM_NAMES`), built from the
+  same `upstreams` values as the remote lanes' file, and refuses with a `422` a
+  model whose remote profile names any other upstream. Without a remote lane it
+  receives no names and refuses every remote profile, which no lane could
+  serve.
 - **A remote lane needs a NetworkPolicy, and the render fails without one.**
   The worker API has no authentication of its own, so without a policy any pod
   in the cluster, including worker lanes that run model code, could call a
