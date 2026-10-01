@@ -47,12 +47,20 @@ cardinality_budgets:
       overflow_backend: other
       overflow_effect: telemetry_only_serving_fail_open
       warning: at_most_once_per_process
+    upstream_names:
+      admitted_exact_process_lifetime: 16
+      collapsed_overflow_names: 1
+      total_series_names: 17
+      selection: first_observed_distinct_upstream_names
+      overflow_label: other
     fixed_domains:
       lane_per_process: 1
       operation: operation
       worker_outcome: worker_outcome
       inference_phase: inference_phase
       unit_type: unit_type
+      upstream_per_process: 17
+      upstream_refusal: upstream_refusal
     instrument_limits:
       shared_worker_request:
         metrics: [sie.worker.requests, sie.worker.request.duration]
@@ -66,6 +74,14 @@ cardinality_budgets:
         metrics: [sie.worker.units]
         formula: catalog_series_pairs * operation * unit_type
         limit: 5397
+      upstream_refusals:
+        metrics: [sie.worker.upstream.refusals]
+        formula: lane_per_process * upstream_per_process * upstream_refusal
+        limit: 68
+      upstream_breaker:
+        metrics: [sie.worker.upstream.breaker.open]
+        formula: lane_per_process * upstream_per_process
+        limit: 17
     applies_to:
       service: sie-worker
       runtime: python
@@ -90,6 +106,8 @@ cardinality_budgets:
         - generation_grammar
         - generation_grammar_cache
         - generation_grammar_compile
+        - worker_upstream
+        - worker_upstream_refusal
   worker_rust_facade:
     scope: per_process_per_instrument
     sdk_series_retention: process_lifetime
@@ -793,7 +811,7 @@ enums:
     - transport_failure
     - other
   worker_outcome: [success, error, retry, cancelled, other]
-  worker_backend: [python, candle, sglang, other]
+  worker_backend: [python, candle, sglang, remote, other]
   inference_phase: [tokenization, inference, postprocessing]
   unit_type: [input_tokens, pages, images]
   flush_reason: [cost_cap, count_cap, timeout, coalesce, single_oversize, idle_bypass, drain, other]
@@ -949,6 +967,7 @@ enums:
   generation_admission_outcome: [admitted, rejected, error, other]
   generation_admission_reason: [none, kv_budget, resolver_error, missing_budget, other]
   generation_duplicate_path: [first_chunk_fallback, other]
+  upstream_refusal: [rate_cap, concurrency_cap, breaker_open, other]
   forward_state: [active, waiting]
   forward_outcome: [success, error]
   forward_input_source: [prepared, raw, other]
@@ -1018,6 +1037,7 @@ attribute_domains:
   profile: {type: release_catalog_value, invalid: other}
   pool: {type: physical_queue_pool, invalid: other}
   bundle: {type: release_manifest_value, invalid: other}
+  upstream: {type: startup_configuration_upstream_name, invalid: other}
 
 attribute_sets:
   control_plane_operation:
@@ -1324,6 +1344,13 @@ attribute_sets:
     lane: lane
     model: model
     profile: profile
+  worker_upstream:
+    upstream: upstream
+    lane: lane
+  worker_upstream_refusal:
+    reason: upstream_refusal
+    upstream: upstream
+    lane: lane
   keda_lane:
     pool: pool
     machine_profile: machine_profile
@@ -2477,6 +2504,25 @@ metrics:
     unit: "{request}"
     attributes: generation_grammar
     prometheus_name: sie_worker_generation_grammar_requests_total
+    export: [prometheus, otlp]
+
+  # Remote profiles call upstreams through one process-wide limiter per
+  # upstream name: a request budget, a concurrency cap and a circuit breaker.
+  - name: sie.worker.upstream.refusals
+    owner: worker_python_engine
+    facade_event: worker.upstream_refused
+    type: counter
+    unit: "{request}"
+    attributes: worker_upstream_refusal
+    prometheus_name: sie_worker_upstream_refusals_total
+    export: [prometheus, otlp]
+  - name: sie.worker.upstream.breaker.open
+    owner: worker_python_engine
+    facade_event: worker.upstream_breaker_changed
+    type: gauge
+    unit: "{upstream}"
+    attributes: worker_upstream
+    prometheus_name: sie_worker_upstream_breaker_open
     export: [prometheus, otlp]
 
   # Rust/Candle-specific forward diagnostics share the canonical worker meter

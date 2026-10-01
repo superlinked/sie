@@ -47,6 +47,7 @@ from sie_server.adapters.remote._batching import (
     score_each_request,
 )
 from sie_server.adapters.remote._http import RemoteUpstreamError, send_bounded
+from sie_server.adapters.remote._limits import upstream_limiter
 from sie_server.config.upstreams import UpstreamConfigError, UpstreamKind, upstream_for_serving
 from sie_server.core.inference_output import EncodeOutput, ExtractItemError, ExtractOutput, ScoreOutput, SparseVector
 from sie_server.core.postprocessor_registry import POSTPROCESSOR_OPTION_KEYS
@@ -179,7 +180,8 @@ class SieUpstreamAdapter(BaseAdapter):
         if instruction is not None:
             params["instruction"] = instruction
         wire_items = [_wire_item(item) for item in items]
-        encoded = call_each(executor, lambda wire_item: self._encode_one(wire_item, params, requested), wire_items)
+        with upstream_limiter(self._upstream_name).batch(len(wire_items)):
+            encoded = call_each(executor, lambda wire_item: self._encode_one(wire_item, params, requested), wire_items)
         extra: dict[str, Any] = {}
         token_counts = _reported([None if answer.usage is None else answer.usage.input_tokens for answer in encoded])
         if token_counts is not None:
@@ -224,7 +226,7 @@ class SieUpstreamAdapter(BaseAdapter):
             )
             return RequestScores(scores=_scores(decoded, len(request_docs)), usage=_usage(decoded))
 
-        return score_each_request(executor, queries, docs, score_request)
+        return score_each_request(executor, queries, docs, score_request, limiter=upstream_limiter(self._upstream_name))
 
     def extract(
         self,
@@ -248,7 +250,8 @@ class SieUpstreamAdapter(BaseAdapter):
         if forwarded := _forwarded_options(options):
             params["options"] = forwarded
         wire_items = [_wire_item(item) for item in items]
-        extracted = call_each(executor, lambda wire_item: self._extract_one(wire_item, params), wire_items)
+        with upstream_limiter(self._upstream_name).batch(len(wire_items)):
+            extracted = call_each(executor, lambda wire_item: self._extract_one(wire_item, params), wire_items)
         errors = [answer.error for answer in extracted]
         return ExtractOutput(
             entities=[answer.entities for answer in extracted],

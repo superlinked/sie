@@ -7,6 +7,7 @@ serves the remote-backed model ``acme/remote-fake`` through it.
 
 from __future__ import annotations
 
+import json
 import socket
 import threading
 import time
@@ -147,6 +148,8 @@ def remote_app(
         upstream_model: str = "sie-fake",
         extra_models: dict[str, str] | None = None,
         preload: bool = False,
+        rate_cap: dict[str, int] | None = None,
+        breaker: dict[str, float] | None = None,
     ) -> FastAPI:
         models = tmp_path / "models"
         models.mkdir(exist_ok=True)
@@ -156,13 +159,15 @@ def remote_app(
         for file_name, text in (extra_models or {}).items():
             (models / file_name).write_text(text, encoding="utf-8")
         upstreams = tmp_path / "upstreams.yaml"
+        limits = f"    rate_cap: {json.dumps(rate_cap or {'requests_per_minute': 600, 'max_concurrency': 8})}\n"
+        if breaker is not None:
+            limits += f"    breaker: {json.dumps(breaker)}\n"
         upstreams.write_text(
             "upstreams:\n"
             "  fake-sie:\n"
             "    kind: sie\n"
             f"    base_url: {upstream_url}\n"
-            f"    api_key_secret: {upstream_credential_env}\n"
-            "    rate_cap: {requests_per_minute: 600, max_concurrency: 8}\n",
+            f"    api_key_secret: {upstream_credential_env}\n" + limits,
             encoding="utf-8",
         )
         return AppFactory.create_app(

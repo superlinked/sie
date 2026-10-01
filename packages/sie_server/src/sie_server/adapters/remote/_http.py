@@ -29,13 +29,17 @@ from email.utils import parsedate_to_datetime
 import httpx
 from sie_sdk._msgpack import unpackb
 
-from sie_server.adapters.errors import InputTooLongError, UpstreamUnavailableError
+from sie_server.adapters.errors import (
+    RETRY_AFTER_MAX_S,
+    RETRY_AFTER_MIN_S,
+    InputTooLongError,
+    UpstreamUnavailableError,
+)
+from sie_server.adapters.remote._limits import upstream_limiter
 from sie_server.config.upstreams import UpstreamCredentialError
 from sie_server.core.upstream_client import UpstreamRedirectRefusedError
 from sie_server.types.inputs import InvalidInputError
 
-RETRY_AFTER_MIN_S = 1
-RETRY_AFTER_MAX_S = 60
 DEFAULT_RETRY_AFTER_S = 5
 _ERROR_BODY_MAX_BYTES = 64 << 10
 
@@ -82,11 +86,17 @@ def send_bounded(
 ) -> bytes:
     """Send ``request`` to ``upstream`` and return the body of a successful answer.
 
-    Raises :class:`UpstreamUnavailableError` when the same request may succeed
-    later, :class:`InputTooLongError` or :class:`InvalidInputError` when the
-    upstream refused the input, and :class:`RemoteUpstreamError` otherwise.
+    The call goes through the upstream's limiter, which may refuse it without
+    sending (see :mod:`sie_server.adapters.remote._limits`). Raises
+    :class:`UpstreamUnavailableError` when the same request may succeed later,
+    :class:`InputTooLongError` or :class:`InvalidInputError` when the upstream
+    refused the input, and :class:`RemoteUpstreamError` otherwise.
     """
-    deadline = time.monotonic() + deadline_s
+    with upstream_limiter(upstream).call():
+        return _send(client, request, upstream=upstream, max_bytes=max_bytes, deadline=time.monotonic() + deadline_s)
+
+
+def _send(client: httpx.Client, request: httpx.Request, *, upstream: str, max_bytes: int, deadline: float) -> bytes:
     try:
         response = client.send(request, stream=True)
     except UpstreamCredentialError:

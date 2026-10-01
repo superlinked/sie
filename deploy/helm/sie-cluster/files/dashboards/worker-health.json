@@ -443,6 +443,31 @@
           "refId": "G"
         }
       ]
+    },
+    {
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 68 },
+      "id": 75,
+      "title": "Remote Upstream Limits",
+      "description": "Upstream calls the worker refused without sending, by upstream and the limit reached (request rate cap, concurrency cap, open circuit breaker), and whether each upstream's circuit breaker is open.",
+      "type": "timeseries",
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "options": {
+        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "expr": "sum by (upstream, reason, lane) (rate(sie_worker_upstream_refusals_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\"}[5m]))",
+          "legendFormat": "refused/sec {{upstream}} / {{reason}} / {{lane}}",
+          "refId": "A"
+        },
+        {
+          "expr": "max by (upstream, lane) (sie_worker_upstream_breaker_open{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\"})",
+          "legendFormat": "breaker open {{upstream}} / {{lane}}",
+          "refId": "B"
+        }
+      ]
     }
   ],
   "refresh": "10s",

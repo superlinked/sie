@@ -103,6 +103,8 @@ GENERATION_DUPLICATE_PREVENTED_METRIC_NAME: Final = "sie.worker.generation.dupli
 GRAMMAR_COMPILE_DURATION_METRIC_NAME: Final = "sie.worker.generation.grammar.compile.duration"
 GRAMMAR_CACHE_LOOKUPS_METRIC_NAME: Final = "sie.worker.generation.grammar.cache.lookups"
 GRAMMAR_REQUESTS_METRIC_NAME: Final = "sie.worker.generation.grammar.requests"
+UPSTREAM_REFUSALS_METRIC_NAME: Final = "sie.worker.upstream.refusals"
+UPSTREAM_BREAKER_OPEN_METRIC_NAME: Final = "sie.worker.upstream.breaker.open"
 
 QUEUE_DURATION_BUCKETS_S: Final = (
     0.0001,
@@ -210,6 +212,9 @@ _DUPLICATE_PATHS: Final = frozenset({"first_chunk_fallback", _OTHER})
 _FLUSH_REASONS: Final = frozenset(
     {"cost_cap", "count_cap", "timeout", "coalesce", "single_oversize", "idle_bypass", "drain", "other"}
 )
+_UPSTREAM_REFUSALS: Final = frozenset({"rate_cap", "concurrency_cap", "breaker_open", _OTHER})
+_MAX_UPSTREAMS: Final = 16
+_REMOTE_ADAPTER_PREFIX: Final = "sie_server.adapters.remote."
 
 _METER_PROVIDER: MeterProvider | None = None
 
@@ -230,6 +235,11 @@ _catalog_admission_lock = Lock()
 # cannot create unbounded model/profile streams through configuration churn.
 _admitted_catalog_pairs: set[tuple[str, str]] = set()
 _catalog_collapse_warning_emitted = False
+# Upstream names come from the server's startup configuration. Admit the first
+# ones seen for the process lifetime and collapse the rest, so the upstream
+# attribute stays bounded like the catalog pairs.
+_upstream_admission_lock = Lock()
+_admitted_upstreams: set[str] = set()
 
 
 class WorkerTelemetryFacade(Protocol):
@@ -395,6 +405,10 @@ class WorkerTelemetryFacade(Protocol):
         duration_s: object,
     ) -> None: ...
 
+    def upstream_refused(self, *, upstream: object, refusal: object) -> None: ...
+
+    def upstream_breaker_changed(self, *, upstream: object, open: bool) -> None: ...
+
 
 class _NoopWorkerTelemetry:
     """Zero-work provider used until OTLP metrics are explicitly enabled."""
@@ -457,6 +471,12 @@ class _NoopWorkerTelemetry:
         return
 
     def grammar_compile_completed(self, **_: Any) -> None:
+        return
+
+    def upstream_refused(self, **_: Any) -> None:
+        return
+
+    def upstream_breaker_changed(self, **_: Any) -> None:
         return
 
 
@@ -636,6 +656,16 @@ class WorkerTelemetry:
             GRAMMAR_REQUESTS_METRIC_NAME,
             unit="{request}",
             description="Structured-output generation requests by grammar backend and kind",
+        )
+        self._upstream_refusals = meter.create_counter(
+            UPSTREAM_REFUSALS_METRIC_NAME,
+            unit="{request}",
+            description="Upstream calls this server refused without sending, by the limit reached",
+        )
+        self._upstream_breaker_open = meter.create_gauge(
+            UPSTREAM_BREAKER_OPEN_METRIC_NAME,
+            unit="{upstream}",
+            description="Whether an upstream's circuit breaker is open",
         )
 
     def item_completed(
@@ -1013,6 +1043,12 @@ class WorkerTelemetry:
             },
         )
 
+    def upstream_refused(self, *, upstream: object, refusal: object) -> None:
+        self._upstream_refusals.add(1, {**_upstream_attributes(upstream), "reason": _enum(refusal, _UPSTREAM_REFUSALS)})
+
+    def upstream_breaker_changed(self, *, upstream: object, open: bool) -> None:
+        self._upstream_breaker_open.set(1 if open else 0, _upstream_attributes(upstream))
+
     @staticmethod
     def _generation_stream_attributes(model: object, grammar: object) -> dict[str, str]:
         return {**_model_attributes(model, "default"), "grammar": _enum(grammar, _GRAMMAR_MODES)}
@@ -1208,6 +1244,8 @@ def metric_names() -> frozenset[str]:
             GRAMMAR_COMPILE_DURATION_METRIC_NAME,
             GRAMMAR_CACHE_LOOKUPS_METRIC_NAME,
             GRAMMAR_REQUESTS_METRIC_NAME,
+            UPSTREAM_REFUSALS_METRIC_NAME,
+            UPSTREAM_BREAKER_OPEN_METRIC_NAME,
         }
     )
 
@@ -1386,9 +1424,23 @@ def _adapter_backend(adapter_path: str) -> str:
         return "candle"
     if ".sglang." in adapter_path:
         return "sglang"
+    if adapter_path.startswith(_REMOTE_ADAPTER_PREFIX):
+        return "remote"
     if adapter_path.startswith("sie_server.adapters."):
         return "python"
     return _OTHER
+
+
+def _upstream_attributes(upstream: object) -> dict[str, str]:
+    name = _bounded_release_value(upstream)
+    if name != _OTHER:
+        with _upstream_admission_lock:
+            if name not in _admitted_upstreams:
+                if len(_admitted_upstreams) >= _MAX_UPSTREAMS:
+                    name = _OTHER
+                else:
+                    _admitted_upstreams.add(name)
+    return {"upstream": name, "lane": _context.lane}
 
 
 def _bounded_release_value(value: object) -> str:

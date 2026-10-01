@@ -348,6 +348,13 @@ Rust request-detail subset bounds requests at `33 × 7 × 5 = 1,155`, phases at
 admitting arbitrary finish reasons or silently folding a contract-valid
 terminal into `other`.
 
+The Python worker's remote-upstream instruments carry the name of an upstream
+from the server's startup configuration instead of the catalog pair. The
+facade admits the first 16 upstream names it sees for the lifetime of the
+process and collapses the rest to `other`, so `sie.worker.upstream.refusals`
+retains at most `17 × 4 = 68` series (three refusal reasons and `other`) and
+`sie.worker.upstream.breaker.open` at most 17.
+
 Every Rust-engine instrument has an explicit SDK view derived from its
 checked-in admission tier and finite domains, so contract-valid series do not
 become `otel.metric.overflow`. Forward output paths use one closed six-value

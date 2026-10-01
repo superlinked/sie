@@ -11,8 +11,10 @@ upstream's ``requests_per_minute``.
 
 from __future__ import annotations
 
+import contextvars
 from collections.abc import Callable, Sequence
 from concurrent.futures import FIRST_EXCEPTION, Executor, wait
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -22,6 +24,7 @@ from sie_server.adapters.remote._http import RemoteUpstreamError
 from sie_server.core.inference_output import ScoreOutput
 
 if TYPE_CHECKING:
+    from sie_server.adapters.remote._limits import UpstreamLimiter
     from sie_server.config.upstreams import Upstream
     from sie_server.types.inputs import Item
 
@@ -63,12 +66,18 @@ def call_each[RequestT, AnswerT](
 ) -> list[AnswerT]:
     """Answer every request through ``call``, as many at once as ``executor`` runs, in request order.
 
-    After a failure no further request is started. Once the started ones have
-    finished, the first failure in request order is raised.
+    Each call runs in a copy of the caller's context, so it counts against a
+    batch the caller reserved from the upstream's limiter. After a failure no
+    further request is started. Once the started ones have finished, the first
+    failure in request order is raised.
     """
     if len(requests) == 1:
         return [call(requests[0])]
-    futures = [executor.submit(call, request) for request in requests]
+
+    def run(context: contextvars.Context, request: RequestT) -> AnswerT:
+        return context.run(call, request)
+
+    futures = [executor.submit(run, contextvars.copy_context(), request) for request in requests]
     wait(futures, return_when=FIRST_EXCEPTION)
     for future in futures:
         future.cancel()
@@ -96,21 +105,26 @@ def score_each_request(
     queries: Sequence[Item],
     docs: Sequence[Item],
     score_request: Callable[[Item, list[Item]], RequestScores],
+    *,
+    limiter: UpstreamLimiter | None = None,
 ) -> ScoreOutput:
     """Score a fused batch with one upstream request per API request.
 
-    Each request's reported totals are carried on its first pair and its other
-    pairs carry zero, so every per-request sum is the upstream's own count. A
-    count is reported only when every request reported it.
+    With ``limiter``, the upstream requests are reserved from its budget
+    together before any is sent. Each request's reported totals are carried on
+    its first pair and its other pairs carry zero, so every per-request sum is
+    the upstream's own count. A count is reported only when every request
+    reported it.
     """
     if len(queries) != len(docs):
         raise ValueError(f"queries and docs must be parallel; got {len(queries)} vs {len(docs)}")
     requests = pairs_by_request(queries)
-    answers = call_each(
-        executor,
-        lambda request: score_request(request.query, [docs[position] for position in request.positions]),
-        requests,
-    )
+    with limiter.batch(len(requests)) if limiter is not None else nullcontext():
+        answers = call_each(
+            executor,
+            lambda request: score_request(request.query, [docs[position] for position in request.positions]),
+            requests,
+        )
     scores = np.zeros(len(docs), dtype=np.float32)
     for request, answer in zip(requests, answers, strict=True):
         if len(answer.scores) != len(request.positions):

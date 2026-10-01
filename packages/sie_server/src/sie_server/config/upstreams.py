@@ -233,6 +233,20 @@ class RateCap(BaseModel):
     max_concurrency: int = Field(gt=0)
 
 
+class Breaker(BaseModel):
+    """When an upstream that keeps failing stops receiving calls, and for how long.
+
+    The circuit opens for ``cooldown_s`` once ``failures`` calls in a row, all
+    within ``window_s``, found the upstream unavailable.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+
+    failures: int = Field(default=5, gt=0, le=1000)
+    window_s: float = Field(default=30.0, gt=0, le=3600)
+    cooldown_s: float = Field(default=60.0, gt=0, le=3600)
+
+
 class Upstream(BaseModel):
     """One named upstream from the startup configuration."""
 
@@ -243,6 +257,7 @@ class Upstream(BaseModel):
     api_key_secret: str | None = None
     """Name of the environment variable that holds the credential."""
     rate_cap: RateCap
+    breaker: Breaker = Field(default_factory=Breaker)
     proxy_url: str | None = None
     """The only egress proxy used for this upstream. Ambient proxy variables are ignored."""
     endpoints: frozenset[UpstreamEndpoint] = frozenset()
