@@ -3,7 +3,7 @@
 
     uv run python run.py --smoke                         # computer_science, first 20 questions, 40 pages
     uv run python run.py --dataset computer_science      # one dataset, every page
-    uv run python run.py                                 # all six datasets, 16,309 pages
+    uv run python run.py                                 # all six datasets, 11,624 pages
     uv run python score.py --rankings run-output
 
 It downloads each dataset from HuggingFace at the revision the recorded run used, renders every page the way the
