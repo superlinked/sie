@@ -1501,6 +1501,22 @@ def test_only_the_remote_lane_worker_receives_upstreams_and_credentials(tmp_path
     assert "nvidia.com/gpu" not in worker["resources"]["limits"]
 
 
+def test_every_lane_names_a_bundle_the_server_ships(tmp_path: Path) -> None:
+    pools = yaml.safe_load((ROOT / helm.CHART_DIR / "values.yaml").read_text(encoding="utf-8"))["workers"]["pools"]
+    docs = rendered_documents(tmp_path, remote_pool_values(**{name: {"enabled": True} for name in pools}))
+
+    rendered = {
+        arg.removeprefix("--bundle=")
+        for _, spec in pod_specs(docs)
+        for container in spec["containers"]
+        for arg in container.get("args", [])
+        if arg.startswith("--bundle=")
+    }
+
+    assert rendered == {bundle for pool in pools.values() for bundle in pool["bundles"]}
+    assert rendered <= {path.stem for path in (ROOT / "packages/sie_server/bundles").glob("*.yaml")}
+
+
 def test_the_rendered_upstreams_file_matches_the_fixture(tmp_path: Path) -> None:
     docs = rendered_documents(tmp_path, remote_pool_values())
 
