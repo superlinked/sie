@@ -138,12 +138,11 @@ Five hosted GLiGuard calls agreed on all five when this example was written.
 ## What result to expect
 
 `python3 score.py` prints the table above with pooled tp / fp / fn beside each
-row, the pooled F1 differences in the registered comparison with this run's and the
-registered intervals, the pre-registered bars, the price per million prompts
+row, the pooled F1 differences in the registered comparison with recorded intervals, or this run's intervals when resampling is requested, the pre-registered bars, the price per million prompts
 and the latency check. It ends with:
 
 ```
-Every count matches the study's report, and every figure matches superlinked.com/guardrails.
+Every count and registered comparison figure matches the study's report.
 ```
 
 It exits non-zero if any count differs from the study's report or any figure
