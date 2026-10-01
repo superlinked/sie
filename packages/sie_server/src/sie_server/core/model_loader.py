@@ -19,7 +19,7 @@ from sie_server.config.serving_artifacts import (
 )
 from sie_server.core.inference import AttentionBackend, ComputePrecision
 from sie_server.core.load_errors import ModelLoadTimeoutError
-from sie_server.core.loader import load_adapter
+from sie_server.core.loader import load_adapter, serves_remotely
 from sie_server.core.oom import OomRecoveryConfig
 from sie_server.core.worker import ModelWorker, WorkerConfig
 from sie_server.core.worker.types import AdaptiveBatchingParams
@@ -262,6 +262,9 @@ class ModelLoader:
         """
         from sie_sdk.cache import ensure_model_cached, get_cache_config
 
+        if serves_remotely(config):
+            return
+
         model_id = config.hf_id
         cache_config = get_cache_config()
         serving_artifact = config.serving_artifact_declaration()
@@ -451,6 +454,16 @@ class ModelLoader:
 
         # Normal adapters can run in thread pool
         return await self._load_in_executor(name, device, adapter, config)
+
+    async def load_remote_async(self, name: str, config: ModelConfig, model_dir: Path, device: str) -> LoadedModel:
+        """Instantiate and load a remote adapter without the shared load executor.
+
+        A remote adapter holds no weights and no device memory, and loading it
+        makes no outbound call, so it never waits for another model's load.
+        """
+        adapter = await asyncio.to_thread(self.instantiate_adapter, name, config, model_dir, device)
+        await asyncio.to_thread(_run_load_with_markers, name, device, adapter)
+        return self._finish_load(name, device, adapter, config)
 
     async def _load_in_executor(
         self,

@@ -42,7 +42,12 @@ from sie_server.core.load_errors import (
     ModelLoadTimeoutError,
     classify_load_error,
 )
-from sie_server.core.loader import expand_profile_variants, load_model_configs, validate_loadtime_options
+from sie_server.core.loader import (
+    expand_profile_variants,
+    load_model_configs,
+    serves_remotely,
+    validate_loadtime_options,
+)
 from sie_server.core.memory import MemoryConfig, MemoryManager
 from sie_server.core.model_loader import DEFAULT_MAX_LORAS, LoadedModel, ModelLoader
 from sie_server.core.oom import is_oom_error
@@ -1521,6 +1526,22 @@ class ModelRegistry:
             load_stage = "total"
 
             try:
+                if serves_remotely(config):
+                    # No weights and no device memory: no placement, admission or
+                    # eviction, and never registered with a memory manager.
+                    loaded = await self._loader.load_remote_async(
+                        name, config, self._model_dirs.get(name, Path()), device
+                    )
+                    async with self._get_config_update_lock(), lock:
+                        if not _model_configs_semantically_equal(self._configs.get(name), config):
+                            loaded.adapter.unload()
+                            self._loader.unregister(name, loaded.device)
+                            msg = f"Model '{name}' config changed while it was loading; retry"
+                            raise _ConfigChangedDuringLoadError(msg)
+                        self._loaded[name] = loaded
+                    load_outcome = "success"
+                    return loaded.adapter
+
                 # The download holds neither lock. It is intentionally unbounded
                 # by the post-download timeout in ``ModelLoader`` — slow user
                 # networks are supported via ``HF_HUB_DOWNLOAD_TIMEOUT`` stall
@@ -1699,8 +1720,9 @@ class ModelRegistry:
         """
         self._bind_lifecycle_loop()
 
-        # Already loaded - no action needed
-        if name in self._loaded:
+        # Already loaded - no action needed. A model that is unloading is
+        # reloaded once the unload completes; ``load_async`` waits for it.
+        if name in self._loaded and name not in self._unloading:
             return False
 
         # Already loading - no action needed

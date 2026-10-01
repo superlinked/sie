@@ -27,6 +27,7 @@ from sie_server.config.model import (
     ProfileConfig,
     ResolvedProfile,
     is_immutable_revision,
+    is_remote_adapter_path,
     lora_entry_ref,
 )
 from sie_server.config.package_artifacts import (
@@ -743,6 +744,11 @@ def _import_custom_adapter(file_path: Path, class_name: str) -> type[ModelAdapte
     return getattr(module, class_name)
 
 
+def serves_remotely(config: ModelConfig) -> bool:
+    """Whether ``config`` is served by a remote adapter: no local weights, no accelerator, no outbound call to load."""
+    return "default" in config.profiles and is_remote_adapter_path(config.resolve_profile("default").adapter_path)
+
+
 def _build_adapter_kwargs(
     config: ModelConfig,
     default_compute_precision: ComputePrecision,
@@ -764,9 +770,10 @@ def _build_adapter_kwargs(
     # Determine model path: weights_path takes precedence over hf_id.
     # package_backed adapters (e.g., Docling) carry their own weights via the
     # installed package and intentionally have neither hf_id nor weights_path.
-    # remote_backed models are served by an upstream and have no weights at all.
+    # A remote adapter is served by an upstream and uses no local weights.
+    remote = serves_remotely(config)
     model_name_or_path: str | Path | None
-    if config.package_backed or config.remote_backed:
+    if config.package_backed or config.remote_backed or remote:
         model_name_or_path = None
     elif config.weights_path is not None:
         model_name_or_path = config.weights_path
@@ -827,7 +834,7 @@ def _build_adapter_kwargs(
             served: lora_entry_ref(value)[0] if value else value for served, value in lora_paths.items()
         }
 
-    if config.package_backed:
+    if config.package_backed and not remote:
         declaration = config.package_artifact_declaration
         offline = any(
             os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
