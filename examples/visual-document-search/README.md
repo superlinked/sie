@@ -13,7 +13,7 @@ page's [SOURCES.md](https://superlinked.com/reference/visual-document-search/SOU
 **The benchmark.** [ViDoRe v3](https://arxiv.org/abs/2601.08620) (CC BY 4.0) covers annual reports and 10-K filings,
 FDA slide decks, European Commission reports, a textbook, and French energy and physics documents. It supplies human
 relevance grades for every question. The run uses six public datasets and their English questions: 1,816 questions over
-16,309 pages. Four datasets hold English documents: computer_science, finance_en, hr and pharmaceuticals. Two hold
+11,624 pages. Four datasets hold English documents: computer_science, finance_en, hr and pharmaceuticals. Two hold
 French documents: energy and physics. Every page of a dataset is a candidate for each of its questions.
 
 **The renders.** Every page was rendered once to a JPEG with a 1,650-pixel long side, a US-letter page at 150 dpi.
@@ -97,7 +97,7 @@ Then run it and score your run beside the recording:
 
 ```sh
 uv run python run.py --smoke                        # 20 questions, a minute: checks the server and the model
-uv run python run.py                                # all six datasets, 16,309 pages
+uv run python run.py                                # all six datasets, 11,624 pages
 uv run python score.py --rankings run-output
 ```
 
