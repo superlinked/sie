@@ -2649,12 +2649,7 @@ pub struct ModelInfoWire {
     #[serde(default)]
     pub pending_generation: crate::queue::publisher::PendingGenerationSnapshot,
     /// How the bare model name is served: the routing policy and the kind of
-    /// upstream a remote profile calls. A single SIE server emits it on every
-    /// entry.
-    //
-    // Maintainer note: the gateway does not emit it yet. It is declared here,
-    // the schema of record, so the SDKs can type it; emission arrives with
-    // cluster remote worker pools.
+    /// upstream a remote profile calls. Emitted on every entry.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub routing: Option<ModelRoutingWire>,
     /// Short task-tier names that resolve to this model, for example

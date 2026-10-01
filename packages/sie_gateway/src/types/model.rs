@@ -436,6 +436,20 @@ pub struct ProfileConfig {
     pub extends: Option<String>,
 }
 
+/// Module prefix of the adapters that forward a profile to an upstream.
+const REMOTE_ADAPTER_MODULE_PREFIX: &str = "sie_server.adapters.remote.";
+
+/// The upstream kind each remote adapter module calls. An adapter refuses an
+/// upstream of any other kind when it loads, so the module determines the kind.
+const REMOTE_ADAPTER_UPSTREAM_KINDS: &[(&str, &str)] = &[("sie_server.adapters.remote.sie", "sie")];
+
+fn remote_adapter_upstream_kind(module: &str) -> Option<&'static str> {
+    REMOTE_ADAPTER_UPSTREAM_KINDS
+        .iter()
+        .find(|(candidate, _)| *candidate == module)
+        .map(|(_, kind)| *kind)
+}
+
 #[derive(Debug, Clone)]
 pub struct ModelEntry {
     pub name: String,
@@ -502,7 +516,27 @@ impl ModelEntry {
                 "sql": self.info_extras.sql,
                 "guard": self.info_extras.guard,
             },
+            "routing": self.routing_value(),
         })
+    }
+
+    /// ``routing`` on a ``/v1/models`` entry, by the single server's rule: a
+    /// route whose default profile uses a remote adapter is ``remote_only``.
+    /// The gateway holds no upstream configuration, so the upstream kind is the
+    /// one the adapter module speaks.
+    fn routing_value(&self) -> Value {
+        let module = self
+            .profile_configs
+            .get("default")
+            .and_then(|profile| profile.adapter_path.as_deref())
+            .map(|path| path.split(':').next().unwrap_or(path));
+        match module {
+            Some(module) if module.starts_with(REMOTE_ADAPTER_MODULE_PREFIX) => json!({
+                "policy": "remote_only",
+                "upstream_kind": remote_adapter_upstream_kind(module),
+            }),
+            _ => json!({ "policy": Value::Null, "upstream_kind": Value::Null }),
+        }
     }
 
     /// Per-profile LoRA-adapter served-names for this entry, scoped to a
@@ -1510,5 +1544,94 @@ profiles:
             })
             .expect("a100 profile entry");
         assert_eq!(a100_adapters, vec!["b1".to_string()]);
+    }
+
+    fn entry_with_default_adapter(adapter_path: Option<&str>) -> ModelEntry {
+        let mut profile_configs = HashMap::new();
+        if let Some(adapter_path) = adapter_path {
+            profile_configs.insert(
+                "default".to_string(),
+                CanonicalProfile {
+                    kv_budget_tokens: None,
+                    adapter_path: Some(adapter_path.to_string()),
+                    max_batch_tokens: Some(8192),
+                    compute_precision: None,
+                    max_output_tokens: None,
+                    adapter_options: None,
+                    grammar_profile: None,
+                    chat_template_kwargs: None,
+                },
+            );
+        }
+        ModelEntry {
+            name: "acme/model".to_string(),
+            canonical_base_model: "acme/model".to_string(),
+            canonical_profile: "default".to_string(),
+            pool: None,
+            bundles: Vec::new(),
+            adapter_modules: HashSet::new(),
+            profile_names: profile_configs.keys().cloned().collect(),
+            profile_configs,
+            info_extras: ModelInfoExtras::default(),
+        }
+    }
+
+    #[test]
+    fn test_routing_reports_remote_only_for_a_remote_default_profile() {
+        let entry =
+            entry_with_default_adapter(Some("sie_server.adapters.remote.sie:SieUpstreamAdapter"));
+        assert_eq!(
+            entry.to_model_info_value(false)["routing"],
+            json!({"policy": "remote_only", "upstream_kind": "sie"})
+        );
+    }
+
+    #[test]
+    fn test_routing_names_no_kind_for_a_remote_adapter_without_one() {
+        let entry = entry_with_default_adapter(Some("sie_server.adapters.remote.other:Adapter"));
+        assert_eq!(
+            entry.to_model_info_value(false)["routing"],
+            json!({"policy": "remote_only", "upstream_kind": null})
+        );
+    }
+
+    #[test]
+    fn test_routing_is_local_for_a_local_profile_or_none() {
+        for adapter_path in [
+            Some("sie_server.adapters.sentence_transformer:SentenceTransformerAdapter"),
+            Some("sie_server.adapters.remote_lookalike:Adapter"),
+            None,
+        ] {
+            let entry = entry_with_default_adapter(adapter_path);
+            assert_eq!(
+                entry.to_model_info_value(true)["routing"],
+                json!({"policy": null, "upstream_kind": null}),
+                "{adapter_path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_every_remote_bundle_adapter_names_its_upstream_kind() {
+        let bundle: serde_yaml::Value =
+            serde_yaml::from_str(include_str!("../../../sie_server/bundles/remote.yaml"))
+                .expect("valid remote bundle YAML");
+        let adapters: Vec<&str> = bundle["adapters"]
+            .as_sequence()
+            .expect("remote bundle lists adapters")
+            .iter()
+            .map(|adapter| adapter.as_str().expect("adapter module name"))
+            .collect();
+        assert!(!adapters.is_empty());
+        for adapter in adapters {
+            assert!(
+                adapter.starts_with(REMOTE_ADAPTER_MODULE_PREFIX),
+                "{adapter} in the remote bundle is not a remote adapter"
+            );
+            assert!(
+                remote_adapter_upstream_kind(adapter).is_some(),
+                "{adapter} needs an entry in REMOTE_ADAPTER_UPSTREAM_KINDS"
+            );
+        }
     }
 }

@@ -1242,4 +1242,103 @@ mod route_tests {
             .unwrap()
             .contains("anything"));
     }
+
+    fn seed_remote_backed_model(state: &AppState, bundles_dir: &std::path::Path, model_id: &str) {
+        std::fs::write(
+            bundles_dir.join("remote.yaml"),
+            "name: remote\npriority: 1\nadapters:\n  - sie_server.adapters.remote.sie\n",
+        )
+        .unwrap();
+        state.model_registry.reload();
+        let mut profiles = HashMap::new();
+        profiles.insert(
+            "default".to_string(),
+            ProfileConfig {
+                kv_budget_tokens: None,
+                max_output_tokens: None,
+                grammar_profile: None,
+                chat_template_kwargs: None,
+                adapter_path: Some("sie_server.adapters.remote.sie:SieUpstreamAdapter".to_string()),
+                max_batch_tokens: Some(8192),
+                compute_precision: None,
+                adapter_options: Some(serde_json::json!({
+                    "loadtime": {"upstream": "team-sie", "upstream_model": "org/name"}
+                })),
+                extends: None,
+            },
+        );
+        state
+            .model_registry
+            .add_model_config(ModelConfig {
+                name: model_id.to_string(),
+                hf_revision: None,
+                adapter_module: None,
+                default_bundle: None,
+                pool: None,
+                profiles,
+                inputs: None,
+                tasks: None,
+                max_sequence_length: None,
+            })
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_models_report_routing_on_every_entry() {
+        let (app, state, bundles_dir, _models_dir) = build_router_with_state().await;
+        seed_remote_backed_model(&state, bundles_dir.path(), "acme/remote");
+        seed_model(&state, "BAAI/bge-m3");
+
+        let listing = body_json(
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/v1/models")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        let routing: HashMap<String, serde_json::Value> = listing["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|model| {
+                (
+                    model["name"].as_str().unwrap().to_string(),
+                    model["routing"].clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            routing,
+            HashMap::from([
+                (
+                    "acme/remote".to_string(),
+                    serde_json::json!({"policy": "remote_only", "upstream_kind": "sie"})
+                ),
+                (
+                    "BAAI/bge-m3".to_string(),
+                    serde_json::json!({"policy": null, "upstream_kind": null})
+                ),
+            ])
+        );
+
+        let detail = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/models/acme/remote")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(detail.status(), StatusCode::OK);
+        assert_eq!(
+            body_json(detail).await["routing"],
+            serde_json::json!({"policy": "remote_only", "upstream_kind": "sie"})
+        );
+    }
 }

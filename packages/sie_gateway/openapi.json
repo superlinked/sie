@@ -2435,7 +2435,7 @@
               },
               {
                 "$ref": "#/components/schemas/ModelRoutingWire",
-                "description": "How the bare model name is served: the routing policy and the kind of\nupstream a remote profile calls. A single SIE server emits it on every\nentry."
+                "description": "How the bare model name is served: the routing policy and the kind of\nupstream a remote profile calls. Emitted on every entry."
               }
             ]
           },

@@ -6607,4 +6607,86 @@ profiles:
             );
         }
     }
+
+    fn repository_bundles_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../sie_server/bundles")
+    }
+
+    fn remote_profile() -> crate::types::model::ProfileConfig {
+        crate::types::model::ProfileConfig {
+            adapter_options: Some(serde_json::json!({
+                "loadtime": {"upstream": "team-sie", "upstream_model": "org/name"}
+            })),
+            ..profile(
+                Some("sie_server.adapters.remote.sie:SieUpstreamAdapter"),
+                Some(8192),
+                None,
+            )
+        }
+    }
+
+    fn model_with_profiles(
+        name: &str,
+        profiles: Vec<(&str, crate::types::model::ProfileConfig)>,
+    ) -> ModelConfig {
+        ModelConfig {
+            name: name.to_string(),
+            hf_revision: None,
+            adapter_module: None,
+            default_bundle: None,
+            pool: None,
+            profiles: profiles
+                .into_iter()
+                .map(|(profile_name, profile)| (profile_name.to_string(), profile))
+                .collect(),
+            inputs: None,
+            max_sequence_length: None,
+            tasks: None,
+        }
+    }
+
+    #[test]
+    fn test_remote_profiles_resolve_to_the_remote_bundle_of_the_repository() {
+        let (_dir, _bundles_dir, models_dir) = create_test_dirs();
+        let registry = ModelRegistry::new(repository_bundles_dir(), &models_dir, true);
+        registry
+            .add_model_config(model_with_profiles(
+                "acme/remote",
+                vec![("default", remote_profile())],
+            ))
+            .unwrap();
+        registry
+            .add_model_config(model_with_profiles(
+                "acme/hybrid",
+                vec![
+                    (
+                        "default",
+                        profile(
+                            Some("sie_server.adapters.bert_flash:BertFlashAdapter"),
+                            Some(4096),
+                            None,
+                        ),
+                    ),
+                    ("remote", remote_profile()),
+                ],
+            ))
+            .unwrap();
+
+        assert_eq!(
+            registry.get_model_bundles("acme/remote"),
+            vec!["remote".to_string(), "default".to_string()]
+        );
+        assert_eq!(
+            registry.resolve_bundle("acme/remote", None).unwrap(),
+            "remote"
+        );
+        assert_eq!(
+            registry.resolve_bundle("acme/hybrid", None).unwrap(),
+            "default"
+        );
+        assert_eq!(
+            registry.resolve_bundle("acme/hybrid:remote", None).unwrap(),
+            "remote"
+        );
+    }
 }
