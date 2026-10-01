@@ -63,11 +63,16 @@ def main() -> int:
 
     fmt = "png" if raw[:4] == b"\x89PNG" else "jpeg"
     with SIEClient(endpoint, api_key=key, timeout_s=120) as client:
+        models = client.list_models()
+        checkpoint = next((model for model in models if model["name"] == MODEL), None)
+        if checkpoint is None or checkpoint.get("revision") != REVISION:
+            raise ValueError("The catalog checkpoint differs from the recorded study")
         started = time.perf_counter()
-        response = client.extract(MODEL, {"images": [{"data": raw, "format": fmt}]}, labels=case["labels"])
+        response = client.extract(
+            MODEL, {"images": [{"data": raw, "format": fmt}]}, labels=case["labels"], options={"score_threshold": 0.1}
+        )
         elapsed = time.perf_counter() - started
-        if client.last_model_revision != REVISION:
-            raise ValueError("The served checkpoint differs from the recorded study")
+        execution_revision = client.last_model_revision
     print(
         json.dumps(
             {
@@ -75,6 +80,7 @@ def main() -> int:
                 "model": MODEL,
                 "revision": REVISION,
                 "seconds": elapsed,
+                "execution_revision": execution_revision,
                 "response": {k: v for k, v in response.items() if k != "request"},
             },
             indent=2,

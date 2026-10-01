@@ -67,7 +67,9 @@ uv run python run.py --case countingpills-12
 ```
 
 Only the second command sends a paid request. It runs the same OWLv2 checkpoint,
-labels and 0.1 score threshold used by the recorded product check.
+labels and 0.1 score threshold used by the recorded product check. The runner
+checks the catalog checkpoint before sending the image and reports the distinct
+execution bundle/config digest observed on the response.
 
 ## Data and protocol
 

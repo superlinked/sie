@@ -162,7 +162,14 @@ def main() -> int:
             near(round(page["arms"][arm]["ap"] * 100, 1), PUBLISHED_AP[arm], f"{arm} published AP")
         if arm in protocol["llm_prices_per_million_tokens"]:
             pin, pout = protocol["llm_prices_per_million_tokens"][arm]
-            tin, tout = sum(r.get("tokens_in", 0) for r in records), sum(r.get("tokens_out", 0) for r in records)
+            for record in records:
+                for field in ("tokens_in", "tokens_out"):
+                    value = record.get(field)
+                    require(
+                        type(value) is int and value > 0,
+                        f"{arm}: missing or invalid {field} for {record['dataset']}/{record['image_id']}",
+                    )
+            tin, tout = sum(r["tokens_in"] for r in records), sum(r["tokens_out"] for r in records)
             near(tin, scores[stem]["tokens_in"], f"{arm} input tokens")
             near(tout, scores[stem]["tokens_out"], f"{arm} output tokens")
             price = (tin * pin + tout * pout) / 1e6 / 2895 * 1000
@@ -223,6 +230,10 @@ def main() -> int:
         require([(r["dataset"], r["image_id"]) for r in records] == expected_ids, f"{arm}: latency sample differs")
         require([r["warmup"] for r in records] == [True] * 5 + [False] * 200, "Latency warmups changed")
         require(all(r["attempts"] == 1 for r in records), "Latency failure count changed")
+        if arm != "sie-owlv2-base":
+            for record in records:
+                for field in ("tokens_in", "tokens_out"):
+                    require(type(record.get(field)) is int and record[field] > 0, f"{arm}: invalid latency {field}")
         measured = records[5:]
         seconds = sorted(r["seconds"] for r in measured)
         near(statistics.median(seconds), summary["arms"][arm]["p50_seconds"], f"{arm} latency median")
