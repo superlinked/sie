@@ -879,8 +879,8 @@ workers:
   # NetworkPolicies are additive: any other policy that selects worker pods
   # and admits more sources widens access, so check for overlapping policies.
   # Disabled by default; values-ha.yaml enables it. A remote lane
-  # (workers.pools.remote) requires it, because any pod that reaches a remote
-  # lane could spend its upstream credentials.
+  # (workers.pools.remote) requires it, with extraIngress empty, because any
+  # pod that reaches a remote lane could spend its upstream credentials.
   networkPolicy:
     enabled: false
     # -- Additional NetworkPolicy ingress rules for callers outside this chart

@@ -812,7 +812,9 @@ Below, `<fullname>` is the chart's full name: `<release>-sie-cluster`, or
   without a NetworkPolicy any pod in the cluster, including worker lanes that
   run model code, could call a remote lane directly and spend its
   credentials. The policy admits only this release's gateway pods, and needs
-  a CNI that enforces NetworkPolicy.
+  a CNI that enforces NetworkPolicy. Because it also selects the remote lane,
+  `workers.networkPolicy.extraIngress` cannot be set while a remote lane is
+  enabled.
 - Remote lanes run as their own ServiceAccount, `<fullname>-worker-remote`,
   with no Kubernetes API token, no cloud workload identity and no
   `HF_TOKEN`. Without an identity they cannot read the payload store, so a

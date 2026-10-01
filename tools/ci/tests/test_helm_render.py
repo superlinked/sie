@@ -1642,6 +1642,20 @@ def test_a_remote_lane_needs_a_worker_network_policy(tmp_path: Path) -> None:
     assert "a remote lane needs workers.networkPolicy.enabled=true" in result.stderr
 
 
+def test_a_remote_lane_refuses_extra_ingress_sources(tmp_path: Path) -> None:
+    extra = {
+        "from": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "benchmarks"}}}],
+        "ports": [{"port": 8080, "protocol": "TCP"}],
+    }
+    values = remote_pool_values()
+    values["workers"]["networkPolicy"] = {"enabled": True, "extraIngress": [extra]}
+
+    result = render_workers(tmp_path, values)
+
+    assert result.returncode != 0
+    assert "workers.networkPolicy.extraIngress cannot be set while a remote lane is enabled" in result.stderr
+
+
 def test_no_upstreams_file_is_rendered_without_a_remote_lane(tmp_path: Path) -> None:
     docs = rendered_documents(tmp_path, {"upstreams": upstreams_fixture()["values"], **L4_POOL})
 
