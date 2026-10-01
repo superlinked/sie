@@ -40,6 +40,8 @@ use crate::types::AuditEntry;
 
 use crate::middleware::auth::{extract_bearer_token, mask_token};
 
+use super::serving_disclosure::ServingDisclosure;
+
 const GATEWAY_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// The ONE ingress bound every JSON body-bearing route accepts.
@@ -2153,11 +2155,12 @@ async fn resolve_routing(
 
 pub(crate) async fn proxy_request(
     State(state): State<Arc<AppState>>,
-    req: Request,
+    mut req: Request,
     endpoint: &str,
 ) -> Response {
     // SDK version skew detection
     check_sdk_version(req.headers());
+    let disclosure = ServingDisclosure::install(&mut req);
     let provisioning_surface = provisioning_surface_for_endpoint(endpoint);
 
     // Keep the pre-generation queue hot path untouched for encode /
@@ -2204,14 +2207,16 @@ pub(crate) async fn proxy_request(
     // guard in the first worker's TLS until thread teardown. Instrumenting the
     // future enters and exits the span around each poll instead.
     async move {
-        proxy_request_inner(
+        let mut response = proxy_request_inner(
             state,
             req,
             endpoint,
             provisioning_surface,
             inbound_publish_cx,
         )
-        .await
+        .await;
+        disclosure.stamp(response.status(), response.headers_mut());
+        response
     }
     .instrument(proxy_span)
     .await
@@ -2295,6 +2300,7 @@ async fn proxy_request_inner(
         Ok(r) => r,
         Err(resp) => return *resp,
     };
+    ServingDisclosure::record(&state, req.extensions(), &dispatch_model);
 
     if let Some((items, params)) = governed_generate_parsed.as_ref() {
         if let Some(response) = validate_native_generate_pre_admission(
@@ -7090,8 +7096,9 @@ impl GrammarProfileUnavailable {
         (status = 503, description = "Provisioning in progress, queue unavailable, or model loading", body = crate::openapi::OpenAIErrorEnvelope),
     )
 )]
-pub async fn proxy_chat(State(state): State<Arc<AppState>>, req: Request) -> Response {
+pub async fn proxy_chat(State(state): State<Arc<AppState>>, mut req: Request) -> Response {
     check_sdk_version(req.headers());
+    let disclosure = ServingDisclosure::install(&mut req);
     let metric_labels_slot = req
         .extensions()
         .get::<telemetry::MetricLabelsSlot>()
@@ -7124,9 +7131,13 @@ pub async fn proxy_chat(State(state): State<Arc<AppState>>, req: Request) -> Res
     // Poll-scoped instrumentation is thread-hop-safe. A guard returned by
     // `Span::enter()` must not cross the handler's awaits because Tokio may
     // resume the future on a different worker thread.
-    async move { proxy_chat_inner(state, req, metric_labels_slot).await }
-        .instrument(chat_span)
-        .await
+    async move {
+        let mut response = proxy_chat_inner(state, req, metric_labels_slot).await;
+        disclosure.stamp(response.status(), response.headers_mut());
+        response
+    }
+    .instrument(chat_span)
+    .await
 }
 
 async fn proxy_chat_inner(
@@ -7213,6 +7224,7 @@ async fn proxy_chat_inner(
                 .into_response();
         }
     }
+    ServingDisclosure::record(&state, &parts.extensions, &dispatch_model);
 
     // -- per-request max_output_tokens cap from model config + grammar capability.
     //    Gates resolve against the routed DISPATCH model so the profile-scoped
@@ -8004,7 +8016,14 @@ fn build_text_completion_body(
 /// `/v1/completions` — legacy OpenAI Completions. Reuses the shared model/route
 /// resolution + generation driver; differs from chat only in the request parse
 /// (raw `prompt` → `GenerateInput::Prompt`) and the `text_completion` body.
-pub async fn proxy_completions(State(state): State<Arc<AppState>>, req: Request) -> Response {
+pub async fn proxy_completions(State(state): State<Arc<AppState>>, mut req: Request) -> Response {
+    let disclosure = ServingDisclosure::install(&mut req);
+    let mut response = proxy_completions_inner(state, req).await;
+    disclosure.stamp(response.status(), response.headers_mut());
+    response
+}
+
+async fn proxy_completions_inner(state: Arc<AppState>, req: Request) -> Response {
     check_sdk_version(req.headers());
     let metric_labels_slot = req
         .extensions()
@@ -8056,6 +8075,7 @@ pub async fn proxy_completions(State(state): State<Arc<AppState>>, req: Request)
             Ok(mb) => mb,
             Err(resp) => return resp,
         };
+    ServingDisclosure::record(&state, &parts.extensions, &model_name);
     let (explicit_bundle_override, _) = parse_model_spec(&params.model);
 
     if let Some(response) = unsupported_streaming_response(
@@ -8653,7 +8673,14 @@ fn build_responses_body(
 )]
 /// `/v1/responses` — OpenAI Responses API (MVP). String `input` → raw-prompt
 /// generation via the shared resolve+drive helpers; `response`-shaped body.
-pub async fn proxy_responses(State(state): State<Arc<AppState>>, req: Request) -> Response {
+pub async fn proxy_responses(State(state): State<Arc<AppState>>, mut req: Request) -> Response {
+    let disclosure = ServingDisclosure::install(&mut req);
+    let mut response = proxy_responses_inner(state, req).await;
+    disclosure.stamp(response.status(), response.headers_mut());
+    response
+}
+
+async fn proxy_responses_inner(state: Arc<AppState>, req: Request) -> Response {
     check_sdk_version(req.headers());
     let metric_labels_slot = req
         .extensions()
@@ -8705,6 +8732,7 @@ pub async fn proxy_responses(State(state): State<Arc<AppState>>, req: Request) -
             Ok(mb) => mb,
             Err(resp) => return resp,
         };
+    ServingDisclosure::record(&state, &parts.extensions, &model_name);
     let (explicit_bundle_override, _) = parse_model_spec(&params.model);
     let ResolvedRoute {
         physical_lane,
@@ -9741,6 +9769,8 @@ pub(crate) fn is_valid_compat_model_id(model: &str) -> bool {
 pub(crate) fn is_openai_compat_forwarded_header(name: &str) -> bool {
     [
         "x-sie-request-id",
+        "x-sie-served-by",
+        "x-sie-upstream",
         "x-sie-version",
         "x-sie-server-version",
         "x-sie-worker",

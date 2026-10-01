@@ -78,6 +78,9 @@ fixture set. Current consumers:
   `SERVED_BY_VALUES`, `FALLBACK_REASONS` and header patterns against
   `serving_disclosure.json`, then sends and parses the headers through the
   client).
+- Gateway — `packages/sie_gateway/src/handlers/serving_disclosure.rs`
+  (asserts that the `X-SIE-Served-By` and `X-SIE-Upstream` names and the
+  served-by values it emits are the ones `serving_disclosure.json` declares).
 - Worker sidecar — `packages/sie_server_sidecar/src/health_publisher.rs`
   (the published key set equals `fields`, minus `omitted_when_empty` when those
   are empty) and gateway — `packages/sie_gateway/src/types/worker.rs` (the

@@ -450,6 +450,16 @@ fn remote_adapter_upstream_kind(module: &str) -> Option<&'static str> {
         .map(|(_, kind)| *kind)
 }
 
+/// The side that serves a route.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ServedBy {
+    Local,
+    /// A remote profile, with the upstream its load-time options name.
+    Remote {
+        upstream: Option<String>,
+    },
+}
+
 #[derive(Debug, Clone)]
 pub struct ModelEntry {
     pub name: String,
@@ -525,18 +535,38 @@ impl ModelEntry {
     /// The gateway holds no upstream configuration, so the upstream kind is the
     /// one the adapter module speaks.
     fn routing_value(&self) -> Value {
-        let module = self
-            .profile_configs
-            .get("default")
-            .and_then(|profile| profile.adapter_path.as_deref())
-            .map(|path| path.split(':').next().unwrap_or(path));
-        match module {
+        match self.default_adapter_module() {
             Some(module) if module.starts_with(REMOTE_ADAPTER_MODULE_PREFIX) => json!({
                 "policy": "remote_only",
                 "upstream_kind": remote_adapter_upstream_kind(module),
             }),
             _ => json!({ "policy": Value::Null, "upstream_kind": Value::Null }),
         }
+    }
+
+    /// The side that serves this route, by the single server's rule: a route
+    /// whose default profile uses a remote adapter is served by the upstream
+    /// that profile names.
+    pub fn served_by(&self) -> ServedBy {
+        match self.default_adapter_module() {
+            Some(module) if module.starts_with(REMOTE_ADAPTER_MODULE_PREFIX) => ServedBy::Remote {
+                upstream: self
+                    .profile_configs
+                    .get("default")
+                    .and_then(|profile| profile.adapter_options.as_ref())
+                    .and_then(|options| options.pointer("/loadtime/upstream"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            },
+            _ => ServedBy::Local,
+        }
+    }
+
+    fn default_adapter_module(&self) -> Option<&str> {
+        self.profile_configs
+            .get("default")
+            .and_then(|profile| profile.adapter_path.as_deref())
+            .map(|path| path.split(':').next().unwrap_or(path))
     }
 
     /// Per-profile LoRA-adapter served-names for this entry, scoped to a
@@ -1603,6 +1633,35 @@ profiles:
             profile_names: profile_configs.keys().cloned().collect(),
             profile_configs,
             info_extras: ModelInfoExtras::default(),
+        }
+    }
+
+    #[test]
+    fn test_served_by_names_the_upstream_of_a_remote_default_profile() {
+        let mut remote =
+            entry_with_default_adapter(Some("sie_server.adapters.remote.sie:SieUpstreamAdapter"));
+        assert_eq!(remote.served_by(), ServedBy::Remote { upstream: None });
+        remote
+            .profile_configs
+            .get_mut("default")
+            .unwrap()
+            .adapter_options = Some(json!({"loadtime": {"upstream": "team-sie"}}));
+        assert_eq!(
+            remote.served_by(),
+            ServedBy::Remote {
+                upstream: Some("team-sie".to_string())
+            }
+        );
+        for adapter_path in [
+            Some("sie_server.adapters.sentence_transformer:SentenceTransformerAdapter"),
+            Some("sie_server.adapters.remote_lookalike:Adapter"),
+            None,
+        ] {
+            assert_eq!(
+                entry_with_default_adapter(adapter_path).served_by(),
+                ServedBy::Local,
+                "{adapter_path:?}"
+            );
         }
     }
 

@@ -10,7 +10,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::types::bundle::{engine_adapter_prefixes, BundleInfo, DEFAULT_ENGINE, KNOWN_ENGINES};
 use crate::types::model::{
-    CanonicalProfile, ModelConfig, ModelEntry, ModelInfoExtras, ProfileConfig,
+    CanonicalProfile, ModelConfig, ModelEntry, ModelInfoExtras, ProfileConfig, ServedBy,
 };
 
 #[derive(Debug)]
@@ -1620,6 +1620,14 @@ impl ModelRegistry {
         let snap = self.snapshot.load();
         let canonical = Self::canonical_model_name(&snap, model)?;
         Self::immutable_model_revision(snap.models.get(&canonical)?)
+    }
+
+    /// The side that serves `model`'s route, or `None` when the registry does
+    /// not hold it.
+    pub fn served_by(&self, model: &str) -> Option<ServedBy> {
+        let snap = self.snapshot.load();
+        let canonical = Self::canonical_model_name(&snap, model)?;
+        snap.models.get(&canonical).map(ModelEntry::served_by)
     }
 
     pub fn get_model_pool_name(&self, model: &str) -> Option<String> {
