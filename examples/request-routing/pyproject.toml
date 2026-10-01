@@ -1,0 +1,24 @@
+[project]
+name = "superlinked-sie-request-routing-example"
+version = "0.1.0"
+description = "Route requests with a frozen embedding classifier and a conditional Qwen fallback"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "sie-sdk==0.9.0",
+  "numpy==2.4.6",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+sie-sdk = { git = "https://github.com/superlinked/sie", rev = "6cccc04de9c6b78d3217854ad2377de36c0ffbd2", subdirectory = "packages/sie_sdk" }
+
+[dependency-groups]
+dev = [
+  "ruff>=0.14",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
