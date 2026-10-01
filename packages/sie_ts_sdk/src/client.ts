@@ -146,6 +146,14 @@ import type {
   StreamGenerateOptions,
   WireModelInfo,
 } from "./types.js";
+import {
+  FALLBACK_ERROR_PATTERN,
+  FALLBACK_REASONS,
+  type FallbackReason,
+  SERVED_BY_VALUES,
+  type ServedBy,
+  UPSTREAM_NAME_PATTERN,
+} from "./types.js";
 import { SDK_VERSION } from "./version.js";
 
 const JOB_RESULT_NOT_FOUND_ERROR_CODE = "RESULT_NOT_FOUND";
@@ -436,6 +444,8 @@ function parseNonnegativeMeterHeader(headers: Headers, name: string): number | u
   return Number.isSafeInteger(parsed) ? parsed : undefined;
 }
 
+const REMOTE_HEADER = "X-SIE-Remote";
+
 /**
  * Parse optional request-scoped metadata from one successful terminal response.
  *
@@ -464,6 +474,22 @@ function parseRequestMetadata(headers: Headers, body?: unknown): RequestMetadata
   const executionBindingSha256 = headers.get("x-sie-execution-binding-sha256");
   if (executionBindingSha256 !== null && /^[0-9a-f]{64}$/.test(executionBindingSha256)) {
     metadata.executionBindingSha256 = executionBindingSha256;
+  }
+  const servedBy = headers.get("x-sie-served-by");
+  if (servedBy !== null && (SERVED_BY_VALUES as readonly string[]).includes(servedBy)) {
+    metadata.servedBy = servedBy as ServedBy;
+  }
+  const upstream = headers.get("x-sie-upstream");
+  if (upstream !== null && UPSTREAM_NAME_PATTERN.test(upstream)) {
+    metadata.upstream = upstream;
+  }
+  const fallbackReason = headers.get("x-sie-fallback-reason");
+  if (fallbackReason !== null && (FALLBACK_REASONS as readonly string[]).includes(fallbackReason)) {
+    metadata.fallbackReason = fallbackReason as FallbackReason;
+  }
+  const fallbackError = headers.get("x-sie-fallback-error");
+  if (fallbackError !== null && FALLBACK_ERROR_PATTERN.test(fallbackError)) {
+    metadata.fallbackError = fallbackError;
   }
 
   const usageHeaders = {
@@ -952,6 +978,7 @@ export class SIEClient {
   private readonly provisionTimeout: number;
   private readonly controlPlaneUrl?: string;
   private readonly org?: string;
+  private readonly remote?: "forbid";
 
   /** Batch class — `POST/GET /v1/jobs` on the keyed gateway. */
   readonly jobs: JobsNamespace;
@@ -1029,6 +1056,12 @@ export class SIEClient {
     this.provisionTimeout = options.provisionTimeout ?? DEFAULT_PROVISION_TIMEOUT;
     this.controlPlaneUrl = options.controlPlaneUrl?.replace(/\/$/, "");
     this.org = options.org;
+    if (options.remote !== undefined && options.remote !== "forbid") {
+      throw new TypeError(
+        `remote must be "forbid" or omitted, got ${JSON.stringify(options.remote)}`,
+      );
+    }
+    this.remote = options.remote;
 
     // First-class batch + connector surface.
     this.jobs = {
@@ -1420,6 +1453,7 @@ export class SIEClient {
     if (pool) headers["X-SIE-Pool"] = pool;
     if (gpu) headers["X-SIE-MACHINE-PROFILE"] = gpu;
     if (this.apiKey) headers.Authorization = `Bearer ${this.apiKey}`;
+    if (this.remote) headers[REMOTE_HEADER] = this.remote;
 
     const safeModel = model.replaceAll("/", "__");
     const url = `${this.baseUrl}/v1/generate/${encodeURIComponent(safeModel)}`;
@@ -1986,6 +2020,7 @@ export class SIEClient {
       [SDK_VERSION_HEADER]: SDK_VERSION,
     };
     if (this.apiKey) headers.Authorization = `Bearer ${this.apiKey}`;
+    if (this.remote) headers[REMOTE_HEADER] = this.remote;
     return headers;
   }
 
@@ -2845,6 +2880,10 @@ export class SIEClient {
 
     if (this.apiKey) {
       headers.Authorization = `Bearer ${this.apiKey}`;
+    }
+
+    if (this.remote) {
+      headers[REMOTE_HEADER] = this.remote;
     }
 
     const fetchWithinBudget = async (

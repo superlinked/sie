@@ -9,15 +9,28 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import get_args
+from typing import get_args, get_type_hints
 
-from sie_sdk.client._shared import REQUEST_USAGE_HEADERS, parse_extract_results
+from sie_sdk.client._shared import (
+    FALLBACK_ERROR_HEADER,
+    FALLBACK_ERROR_PATTERN,
+    FALLBACK_REASON_HEADER,
+    FALLBACK_REASONS,
+    REMOTE_HEADER,
+    REQUEST_USAGE_HEADERS,
+    SERVED_BY_HEADER,
+    SERVED_BY_VALUES,
+    UPSTREAM_HEADER,
+    UPSTREAM_NAME_PATTERN,
+    parse_extract_results,
+)
 from sie_sdk.types import (
     DECLARED_USAGE_FIELDS,
     SETTLED_CHARGE_FIELDS,
     TERMINAL_UNIT_FIELDS,
     ModelInfo,
     ModelState,
+    RequestMetadata,
     RequestUsage,
 )
 
@@ -123,3 +136,23 @@ def test_extract_parser_preserves_malformed_item_failures() -> None:
         {"code": "INTERNAL_ERROR", "message": "Malformed extraction item error"},
         {"code": "INTERNAL_ERROR", "message": "Malformed extraction item error"},
     ]
+
+
+def test_serving_disclosure_matches_golden_fixture() -> None:
+    """The remote-serving headers are one contract shared by the server and both SDKs."""
+    fixture = _load("serving_disclosure.json")
+    headers = fixture["response_headers"]
+    metadata = get_type_hints(RequestMetadata)
+
+    assert fixture["request_header"] == {"name": REMOTE_HEADER, "values": ["forbid"]}
+    assert {key: header["name"] for key, header in headers.items()} == {
+        "served_by": SERVED_BY_HEADER,
+        "upstream": UPSTREAM_HEADER,
+        "fallback_reason": FALLBACK_REASON_HEADER,
+        "fallback_error": FALLBACK_ERROR_HEADER,
+    }
+    assert set(headers) <= set(metadata)
+    assert set(headers["served_by"]["values"]) == SERVED_BY_VALUES == set(get_args(metadata["served_by"]))
+    assert set(headers["fallback_reason"]["values"]) == FALLBACK_REASONS == set(get_args(metadata["fallback_reason"]))
+    assert headers["upstream"]["pattern"] == UPSTREAM_NAME_PATTERN.pattern
+    assert headers["fallback_error"]["pattern"] == FALLBACK_ERROR_PATTERN.pattern

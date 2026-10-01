@@ -29,6 +29,11 @@ executable.
   score, extract) and for generation, keyed by status, error code, and whether
   a usable `Retry-After` is present. It also pins how a `Retry-After` value is
   parsed (delay seconds or an HTTP date; a past date means retry now).
+- `serving_disclosure.json` — remote serving: the `X-SIE-Remote: forbid`
+  request header a caller sends to keep a request off remote upstreams, and the
+  response headers that say which side served (`X-SIE-Served-By`,
+  `X-SIE-Upstream`, `X-SIE-Fallback-Reason`, `X-SIE-Fallback-Error`), each with
+  its allowed values or pattern. An SDK drops a value outside them.
 - `worker_status.json` — the worker heartbeat the sidecar publishes on
   `sie.health.<worker_id>`: the exact `fields` it sends, the
   `omitted_when_empty` fields it leaves out when empty, and a fully populated
@@ -60,13 +65,19 @@ fixture set. Current consumers:
   `request_usage.json`), and
   `packages/sie_sdk/tests/client/test_retry_classification.py` (replays every
   `retry_classification.json` case through both clients against a local HTTP
-  server).
+  server). `test_wire_contract.py` also asserts the header names, values and
+  patterns of `serving_disclosure.json` against the client constants and
+  `RequestMetadata`.
 - TypeScript SDK — `packages/sie_ts_sdk/tests/wireContract.test.ts` (asserts the
   runtime `MODEL_STATES` and `MODEL_INFO_WIRE_FIELDS` arrays — the single
   sources the `ModelState` type and `WireModelInfo` interface are checked
   against — match the fixtures), and
   `packages/sie_ts_sdk/tests/retryClassification.test.ts` (replays every
-  `retry_classification.json` case through the client with a stubbed `fetch`).
+  `retry_classification.json` case through the client with a stubbed `fetch`),
+  and `packages/sie_ts_sdk/tests/remoteServing.test.ts` (checks the runtime
+  `SERVED_BY_VALUES`, `FALLBACK_REASONS` and header patterns against
+  `serving_disclosure.json`, then sends and parses the headers through the
+  client).
 - Worker sidecar — `packages/sie_server_sidecar/src/health_publisher.rs`
   (the published key set equals `fields`, minus `omitted_when_empty` when those
   are empty) and gateway — `packages/sie_gateway/src/types/worker.rs` (the
