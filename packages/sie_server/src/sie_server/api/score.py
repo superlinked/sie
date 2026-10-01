@@ -12,6 +12,7 @@ from sie_server.api.helpers import (
     ResponseBuilder,
     ensure_finite_scores,
     oom_retry_after_from_registry,
+    serving_disclosure_headers,
 )
 from sie_server.api.options import resolve_runtime_options
 from sie_server.api.serialization import MsgPackResponse
@@ -317,4 +318,5 @@ async def score(
 
         # Build response headers and return
         headers = ResponseBuilder.build_headers(timing)
+        headers.update(serving_disclosure_headers(registry, model))
         return ResponseBuilder.build_response(response, accept, headers)

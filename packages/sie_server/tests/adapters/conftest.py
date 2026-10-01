@@ -50,10 +50,11 @@ profiles:
 
 @dataclass
 class LoopbackUpstream:
-    """A running upstream SIE app and the ``Authorization`` header of each encode it received."""
+    """A running upstream SIE app, the ``Authorization`` header of each encode and the path of each POST it received."""
 
     url: str
     seen_authorization: list[str | None] = field(default_factory=list)
+    posted_paths: list[str] = field(default_factory=list)
 
 
 @contextmanager
@@ -103,19 +104,25 @@ def serve_on_loopback() -> Callable[[FastAPI], AbstractContextManager[str]]:
 
 @pytest.fixture
 def sie_upstream(_offline_apps: None) -> Callable[..., AbstractContextManager[LoopbackUpstream]]:
-    """Start a real SIE app serving the fake models named, ``sie-fake`` when none is named."""
+    """Start a real SIE app serving the fake models named, ``sie-fake`` when none is named.
+
+    With ``models_dir`` the app serves every model in that directory instead.
+    """
 
     @contextmanager
-    def start(*models: str) -> Iterator[LoopbackUpstream]:
+    def start(*models: str, models_dir: Path | None = None) -> Iterator[LoopbackUpstream]:
+        model_filter = list(models) if models else (None if models_dir is not None else ["sie-fake"])
         app = AppFactory.create_app(
-            AppStateConfig(models_dir=str(MODELS_DIR), model_filter=list(models or ("sie-fake",)), device="cpu")
+            AppStateConfig(models_dir=str(models_dir or MODELS_DIR), model_filter=model_filter, device="cpu")
         )
         upstream = LoopbackUpstream(url="")
 
         @app.middleware("http")
-        async def record_authorization(request: Request, call_next: Any) -> Any:
+        async def record_requests(request: Request, call_next: Any) -> Any:
             if request.url.path.startswith("/v1/encode/"):
                 upstream.seen_authorization.append(request.headers.get("authorization"))
+            if request.method == "POST":
+                upstream.posted_paths.append(request.url.path)
             return await call_next(request)
 
         with _serve(app) as url:

@@ -631,6 +631,17 @@ def load_adapter(
                 exc_info=True,
             )
 
+    try:
+        constructor_parameters = inspect.signature(adapter_class.__init__).parameters
+    except (TypeError, ValueError):
+        constructor_parameters = {}
+    for keyword, dim in (
+        ("sparse_dim", config.dims.get("sparse")),
+        ("multivector_dim", config.dims.get("multivector")),
+    ):
+        if dim is not None and keyword in constructor_parameters and keyword not in adapter_kwargs:
+            adapter_kwargs[keyword] = dim
+
     # Instantiate adapter using factory method for device-aware selection
     # All adapters inherit create_for_device() from ModelAdapter base class
     adapter = adapter_class.create_for_device(device=device, **adapter_kwargs)

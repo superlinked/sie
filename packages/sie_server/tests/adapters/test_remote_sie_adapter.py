@@ -351,21 +351,22 @@ def test_a_malformed_answer_is_an_error_not_a_vector(
         adapter.encode([Item(text="a")], ["dense"])
 
 
-def test_an_item_without_text_is_refused_before_sending(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_an_input_other_than_text_or_images_is_refused_before_sending(monkeypatch: pytest.MonkeyPatch) -> None:
     recorder = Recorder(ok(b""))
     adapter = adapter_over(monkeypatch, recorder)
 
-    with pytest.raises(ValueError, match="text items only"):
-        adapter.encode([Item(text="a"), Item()], ["dense"])
+    with pytest.raises(InvalidInputError, match="text and image inputs only"):
+        adapter.encode([Item(text="a"), Item(document={"data": b"%PDF", "format": "pdf"})], ["dense"])
 
     assert recorder.requests == []
 
 
-def test_a_short_answer_is_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    adapter = adapter_over(monkeypatch, Recorder(ok(encode_payload([dense_item(np.ones(4, dtype=np.float32))]))))
+def test_an_answer_with_more_results_than_items_sent_is_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    answer = encode_payload([dense_item(np.ones(4, dtype=np.float32))] * 2)
+    adapter = adapter_over(monkeypatch, Recorder(ok(answer)))
 
     with pytest.raises(remote_sie.RemoteUpstreamError, match="different number of results"):
-        adapter.encode([Item(text="a"), Item(text="b")], ["dense"])
+        adapter.encode([Item(text="a")], ["dense"])
 
 
 def error_answer(
