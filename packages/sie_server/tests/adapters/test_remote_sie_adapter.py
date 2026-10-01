@@ -715,20 +715,49 @@ def test_a_busy_upstream_is_a_retryable_queue_full_on_both_routes(
         assert CANARY not in response.text
 
 
-def test_an_input_the_upstream_refuses_is_the_callers_error(
-    monkeypatch: pytest.MonkeyPatch, remote_app: Callable[..., Any]
+@pytest.mark.parametrize(
+    ("answer", "native_code", "openai_code", "message"),
+    [
+        pytest.param(
+            lambda: error_answer(400, "INPUT_TOO_LONG"),
+            "INPUT_TOO_LONG",
+            "INPUT_TOO_LONG",
+            "the upstream refused the input as too long (400 INPUT_TOO_LONG)",
+            id="too-long",
+        ),
+        pytest.param(
+            lambda: error_answer(422, "INVALID_INPUT"),
+            "INVALID_INPUT",
+            "invalid_request",
+            "the upstream refused the input (422 INVALID_INPUT)",
+            id="invalid",
+        ),
+    ],
+)
+def test_an_input_the_upstream_refuses_is_the_callers_error_on_both_routes(
+    monkeypatch: pytest.MonkeyPatch,
+    remote_app: Callable[..., Any],
+    answer: Callable[[], httpx.Response],
+    native_code: str,
+    openai_code: str,
+    message: str,
 ) -> None:
-    app = mock_upstream_app(monkeypatch, remote_app, lambda: error_answer(400, "INPUT_TOO_LONG"))
+    app = mock_upstream_app(monkeypatch, remote_app, answer)
 
     with TestClient(app) as client:
-        response = client.post(
+        native = client.post(
             "/v1/encode/acme/remote-fake", json={"items": [{"text": "a"}]}, headers={"Accept": "application/json"}
         )
+        openai = client.post("/v1/embeddings", json={"model": "acme/remote-fake", "input": "a"})
 
-    assert response.status_code == 400, response.text
-    assert response.json()["detail"] == {
-        "code": "INPUT_TOO_LONG",
-        "message": "the upstream refused the input as too long (400 INPUT_TOO_LONG)",
+    assert native.status_code == 400, native.text
+    assert native.json()["detail"] == {"code": native_code, "message": message}
+    assert openai.status_code == 400, openai.text
+    assert openai.json()["error"] == {
+        "code": openai_code,
+        "message": message,
+        "type": "invalid_request_error",
+        "param": "input",
     }
 
 

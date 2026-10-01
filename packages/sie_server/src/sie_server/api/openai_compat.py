@@ -28,7 +28,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic.json_schema import SkipJsonSchema
 
-from sie_server.adapters.errors import UpstreamUnavailableError
+from sie_server.adapters.errors import InputTooLongError, UpstreamUnavailableError
 from sie_server.api.helpers import (
     WORKER_DRAINED_RETRY_AFTER_S,
     ModelStateChecker,
@@ -47,7 +47,7 @@ from sie_server.core.worker import QueueFullError
 from sie_server.core.worker.types import WorkerDrainedError
 from sie_server.observability.tracing import tracer
 from sie_server.observability.worker_telemetry import worker_telemetry, worker_telemetry_enabled
-from sie_server.types.inputs import Item, item_size_error
+from sie_server.types.inputs import InvalidInputError, Item, item_size_error
 from sie_server.types.openapi import (
     OpenAIEmbeddingsErrorResponse,
     OpenAIEmbeddingsModelLoadFailedErrorResponse,
@@ -580,6 +580,29 @@ async def _create_embeddings(
                     item_count=len(items),
                 )
             raise _openai_state_error(upstream_unavailable_exception(e, model)) from e
+        except (InputTooLongError, InvalidInputError) as e:
+            too_long = isinstance(e, InputTooLongError)
+            span.set_attribute("error", "input_too_long" if too_long else "invalid_input")
+            if inference_started is not None:
+                worker_telemetry().item_completed(
+                    operation="embeddings",
+                    outcome="error",
+                    model=model,
+                    profile="default",
+                    duration_s=time.perf_counter() - inference_started,
+                    item_count=len(items),
+                )
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "error": {
+                        "code": ErrorCode.INPUT_TOO_LONG.value if too_long else "invalid_request",
+                        "message": str(e),
+                        "type": "invalid_request_error",
+                        "param": "input",
+                    }
+                },
+            ) from e
         except Exception as e:
             if is_oom_error(e):
                 # Transient memory pressure (worker ResourceExhaustedError after
