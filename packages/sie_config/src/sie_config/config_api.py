@@ -23,6 +23,7 @@ from sie_config.model_registry import (
     ModelRegistry,
     ProfileConflictError,
     parse_model_spec,
+    routing_refusal,
     undeclared_upstreams,
 )
 from sie_config.model_schema import model_config_schema_errors
@@ -382,6 +383,16 @@ def _declared_upstream_names() -> frozenset[str] | None:
     if raw is None:
         return None
     return frozenset(name for name in (part.strip() for part in raw.split(",")) if name)
+
+
+def _reject_unservable_routing(config: dict[str, Any]) -> None:
+    """Reject with 422 a model whose routing block the workers refuse when they load it."""
+    refusal = routing_refusal(config)
+    if refusal is not None:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "validation_error", "details": [{"message": refusal}]},
+        )
 
 
 def _reject_undeclared_upstreams(model_id: str, profiles: dict[str, Any], written: dict[str, Any]) -> None:
@@ -756,6 +767,7 @@ async def add_model(request: Request) -> Response:
                             ),
                         },
                     )
+            _reject_unservable_routing({**(existing_config or {}), **config})
 
             # 2. 409 conflict detection against what's already on disk.
             #    Only runs for pure-replay writes (no new profiles would be
@@ -1160,6 +1172,7 @@ async def replace_model(request: Request, model_id: str) -> Response:
                 ) from e
             written_profiles = config.get("profiles") or {}
             _reject_undeclared_upstreams(config["sie_id"], written_profiles, written_profiles)
+            _reject_unservable_routing(config)
 
             # Unchanged-content no-op: compare the incoming config against the
             # registry's current merged config. Equal => no epoch bump, no

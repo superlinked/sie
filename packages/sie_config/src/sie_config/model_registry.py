@@ -148,6 +148,38 @@ def undeclared_upstreams(profiles: dict, profile_names: Iterable[str], declared:
     return undeclared
 
 
+_HYBRID_ROUTING_POLICIES = frozenset({"fallback", "threshold"})
+_EQUIVALENCE_TASKS = ("encode", "score")
+
+
+def routing_refusal(config: dict) -> str | None:
+    """Why a worker refuses ``config``'s routing block when it loads the model, or ``None``.
+
+    Mirrors ``sie_server.config.routing.validate_model_routing``: ``threshold`` is not
+    served yet, and ``fallback`` and ``threshold`` are refused for a model that
+    declares ``encode`` or ``score``, until its remote profile is shown to be
+    equivalent to its local one.
+    """
+    routing = config.get("routing")
+    if not isinstance(routing, dict):
+        return None
+    model = config.get("sie_id")
+    policy = routing.get("policy")
+    if policy == "threshold":
+        return f"Model '{model}': routing policy 'threshold' is not available yet"
+    if policy not in _HYBRID_ROUTING_POLICIES:
+        return None
+    tasks = config.get("tasks")
+    declared = [name for name in _EQUIVALENCE_TASKS if isinstance(tasks, dict) and tasks.get(name) is not None]
+    if not declared:
+        return None
+    return (
+        f"Model '{model}' would serve {' and '.join(declared)} from both its local profile and remote "
+        f"profile '{routing.get('fallback_profile')}' under routing policy '{policy}'; that is refused until "
+        "the remote profile is shown to be equivalent to the local one"
+    )
+
+
 _PROFILE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
