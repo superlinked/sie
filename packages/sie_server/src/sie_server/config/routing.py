@@ -7,7 +7,10 @@ config: the models directory, a config added at runtime, and a config snapshot.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from sie_server.config.model import ModelConfig
+from sie_server.core.loader import expand_profile_variants, resolve_adapter_class
 
 _HYBRID_POLICIES = frozenset({"fallback", "threshold"})
 _EQUIVALENCE_TASKS = ("encode", "score")
@@ -34,6 +37,33 @@ def hybrid_equivalence_refusal(config: ModelConfig) -> str | None:
     )
 
 
+def remote_output_refusal(config: ModelConfig) -> str | None:
+    """Why the remote profile cannot serve every output the model declares, or ``None``.
+
+    Under ``fallback`` and ``threshold`` a caller cannot know which profile
+    serves a request, so the outputs a request may ask for cannot depend on
+    it. The remote profile's adapter class must declare every output the
+    model does.
+    """
+    routing = config.routing
+    if routing is None or routing.policy not in _HYBRID_POLICIES or routing.fallback_profile is None:
+        return None
+    variant = expand_profile_variants([config])[f"{config.sie_id}:{routing.fallback_profile}"]
+    try:
+        adapter_class = resolve_adapter_class(variant, Path())
+    except (ImportError, ValueError):
+        return f"Model '{config.sie_id}': the adapter of remote profile '{routing.fallback_profile}' cannot be imported"
+    spec = getattr(adapter_class, "spec", None)
+    uncovered = sorted(set(config.outputs) - set(getattr(spec, "outputs", ())))
+    if not uncovered:
+        return None
+    return (
+        f"Model '{config.sie_id}' declares {', '.join(uncovered)}, which remote profile "
+        f"'{routing.fallback_profile}' does not produce; under routing policy '{routing.policy}' either profile "
+        "may serve a request, so the remote profile must produce every output the model declares"
+    )
+
+
 def validate_model_routing(config: ModelConfig) -> None:
     """Refuse a routing block this server cannot honour. Raises ``ValueError``."""
     routing = config.routing
@@ -42,6 +72,6 @@ def validate_model_routing(config: ModelConfig) -> None:
     if routing.policy == "threshold":
         msg = f"Model '{config.sie_id}': routing policy 'threshold' is not available yet"
         raise ValueError(msg)
-    refusal = hybrid_equivalence_refusal(config)
+    refusal = hybrid_equivalence_refusal(config) or remote_output_refusal(config)
     if refusal is not None:
         raise ValueError(refusal)

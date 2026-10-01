@@ -4,15 +4,19 @@ from __future__ import annotations
 
 import logging
 import re
+import sys
 from collections.abc import Iterator
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 import pytest
 import yaml
 from pydantic import ValidationError
+from sie_server.adapters._base_adapter import BaseAdapter
+from sie_server.adapters._spec import AdapterSpec
 from sie_server.config.model import ModelConfig
-from sie_server.config.routing import hybrid_equivalence_refusal, validate_model_routing
+from sie_server.config.routing import hybrid_equivalence_refusal, remote_output_refusal, validate_model_routing
 from sie_server.config.upstreams import Upstream, install_upstreams
 from sie_server.core.loader import expand_profile_variants
 from sie_server.core.registry import ModelRegistry
@@ -21,6 +25,9 @@ from sie_server.queue_executor import QueueExecutor
 
 LOCAL_ADAPTER = "sie_server.adapters.fake.adapter:FakeAdapter"
 REMOTE_ADAPTER = "sie_server.adapters.remote.sie:SieUpstreamAdapter"
+DECLARED_OUTPUTS_MODULE = "sie_server.adapters.remote.declared_outputs"
+EXTRACT_REMOTE = f"{DECLARED_OUTPUTS_MODULE}:ExtractRemoteAdapter"
+GENERATE_REMOTE = f"{DECLARED_OUTPUTS_MODULE}:GenerateRemoteAdapter"
 FALLBACK = {"policy": "fallback", "fallback_profile": "remote"}
 THRESHOLD = {
     "policy": "threshold",
@@ -39,9 +46,9 @@ def local_profile(**extra: Any) -> dict[str, Any]:
     return {"adapter_path": LOCAL_ADAPTER, "max_batch_tokens": 8192, **extra}
 
 
-def remote_profile(**extra: Any) -> dict[str, Any]:
+def remote_profile(adapter_path: str = REMOTE_ADAPTER, **extra: Any) -> dict[str, Any]:
     return {
-        "adapter_path": REMOTE_ADAPTER,
+        "adapter_path": adapter_path,
         "max_batch_tokens": 8192,
         "adapter_options": {"loadtime": {"upstream": "team-sie", "upstream_model": "acme/upstream-model"}},
         **extra,
@@ -72,6 +79,30 @@ def remote_backed(*, routing: Any = None) -> dict[str, Any]:
     if routing is not None:
         spec["routing"] = routing
     return spec
+
+
+class ExtractRemoteAdapter(BaseAdapter):
+    spec = AdapterSpec(inputs=("text",), outputs=("json",), unload_fields=())
+
+    def extract(self, *args: Any, **kwargs: Any) -> Any:
+        raise NotImplementedError
+
+
+class GenerateRemoteAdapter(BaseAdapter):
+    spec = AdapterSpec(inputs=("text",), outputs=("tokens",), unload_fields=())
+
+
+@pytest.fixture(autouse=True)
+def _declared_outputs_module(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = ModuleType(DECLARED_OUTPUTS_MODULE)
+    module.ExtractRemoteAdapter = ExtractRemoteAdapter  # type: ignore[attr-defined]
+    module.GenerateRemoteAdapter = GenerateRemoteAdapter  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, DECLARED_OUTPUTS_MODULE, module)
+
+
+def extract_hybrid(*, sie_id: str = "acme/hybrid", **overrides: Any) -> dict[str, Any]:
+    profiles = {"default": local_profile(), "remote": remote_profile(EXTRACT_REMOTE)}
+    return hybrid(sie_id=sie_id, tasks=EXTRACT, profiles=profiles, **overrides)
 
 
 @pytest.fixture(autouse=True)
@@ -246,13 +277,61 @@ def test_hybrid_encode_and_score_are_refused(tasks: dict[str, Any], refused: str
 
 
 def test_hybrid_extract_is_allowed() -> None:
-    validate_model_routing(ModelConfig.model_validate(hybrid(tasks=EXTRACT)))
+    validate_model_routing(ModelConfig.model_validate(extract_hybrid()))
 
 
 def test_hybrid_generation_is_allowed() -> None:
-    profiles = {"default": local_profile(kv_budget_tokens=4096), "remote": remote_profile(kv_budget_tokens=4096)}
+    profiles = {
+        "default": local_profile(kv_budget_tokens=4096),
+        "remote": remote_profile(GENERATE_REMOTE, kv_budget_tokens=4096),
+    }
 
     validate_model_routing(ModelConfig.model_validate(hybrid(tasks=GENERATE, profiles=profiles)))
+
+
+@pytest.mark.parametrize(
+    ("tasks", "uncovered"),
+    [
+        (EXTRACT, "json"),
+        ({"encode": {"dense": {"dim": 384}, "sparse": {"dim": 30000}}}, "sparse"),
+    ],
+    ids=["extract-through-an-encode-adapter", "sparse-through-a-dense-adapter"],
+)
+def test_a_remote_profile_must_produce_every_declared_output(tasks: dict[str, Any], uncovered: str) -> None:
+    config = ModelConfig.model_validate(hybrid(tasks=tasks))
+
+    refusal = remote_output_refusal(config)
+
+    assert refusal is not None
+    assert f"declares {uncovered}, which remote profile 'remote' does not produce" in refusal
+
+
+def test_an_extract_model_with_an_encode_only_remote_profile_is_refused() -> None:
+    with pytest.raises(ValueError, match="which remote profile 'remote' does not produce"):
+        validate_model_routing(ModelConfig.model_validate(hybrid(tasks=EXTRACT)))
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        hybrid(tasks=ENCODE),
+        extract_hybrid(),
+        remote_backed(routing={"policy": "remote_only"}),
+        hybrid(tasks=EXTRACT, routing=None),
+    ],
+    ids=["dense-through-a-dense-adapter", "json-through-an-extract-adapter", "remote-only", "local-only"],
+)
+def test_a_remote_profile_covering_every_declared_output_is_accepted(config: dict[str, Any]) -> None:
+    assert remote_output_refusal(ModelConfig.model_validate(config)) is None
+
+
+def test_a_remote_profile_whose_adapter_cannot_be_imported_is_refused() -> None:
+    profiles = {"default": local_profile(), "remote": remote_profile(f"{DECLARED_OUTPUTS_MODULE}:MissingAdapter")}
+    config = ModelConfig.model_validate(hybrid(profiles=profiles))
+
+    assert remote_output_refusal(config) == (
+        "Model 'acme/hybrid': the adapter of remote profile 'remote' cannot be imported"
+    )
 
 
 def test_a_remote_only_model_serves_from_one_backend() -> None:
@@ -297,7 +376,7 @@ async def test_a_config_snapshot_rejects_only_the_refused_entry(caplog: pytest.L
             bundle_config_hash="",
             models=[
                 ReplaceModelConfigEntry(
-                    model_id="acme/extract", model_config=yaml.safe_dump(hybrid(sie_id="acme/extract"))
+                    model_id="acme/extract", model_config=yaml.safe_dump(extract_hybrid(sie_id="acme/extract"))
                 ),
                 ReplaceModelConfigEntry(
                     model_id="acme/encode", model_config=yaml.safe_dump(hybrid(sie_id="acme/encode", tasks=ENCODE))
