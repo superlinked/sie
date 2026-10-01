@@ -1,61 +1,64 @@
 {{- $root := . -}}
+{{- if eq (include "sie-cluster.worker.remoteNetworkPolicyEnabled" $root) "true" }}
 {{- $policy := dig "remote" "networkPolicy" dict $root.Values.workers -}}
-{{- if and (eq (include "sie-cluster.worker.remoteLaneEnabled" $root) "true") (dig "enabled" true $policy) }}
+{{- $dnsTo := dig "dnsTo" list $policy -}}
+{{- if not (and (kindIs "slice" $dnsTo) $dnsTo) -}}
+{{- fail "workers.remote.networkPolicy.dnsTo needs at least one peer: the cluster resolver the remote lanes may query." -}}
+{{- end -}}
+{{- include "sie-cluster.networkPolicy.validatePeers" (dict "peers" $dnsTo "path" "workers.remote.networkPolicy.dnsTo") -}}
 {{- range $index, $rule := (default list $policy.extraEgress) }}
 {{- if not (and (kindIs "map" $rule) $rule.to $rule.ports) }}
 {{- fail (printf "workers.remote.networkPolicy.extraEgress[%d] needs a non-empty to and ports: a rule without them admits every destination or every port." $index) }}
 {{- end }}
-{{- range $peerIndex, $peer := $rule.to }}
-{{- $scoped := false }}
-{{- if kindIs "map" $peer }}
-{{- range $selectorKey := list "podSelector" "namespaceSelector" }}
-{{- $selector := index $peer $selectorKey }}
-{{- if and (kindIs "map" $selector) (or $selector.matchLabels $selector.matchExpressions) }}
-{{- $scoped = true }}
-{{- end }}
-{{- end }}
-{{- if and (kindIs "map" $peer.ipBlock) $peer.ipBlock.cidr }}
-{{- $scoped = true }}
-{{- end }}
-{{- end }}
-{{- if not $scoped }}
-{{- fail (printf "workers.remote.networkPolicy.extraEgress[%d].to[%d] admits every destination: give it a podSelector or namespaceSelector with matchLabels or matchExpressions, or an ipBlock." $index $peerIndex) }}
-{{- end }}
-{{- end }}
-{{- range $portIndex, $port := $rule.ports }}
-{{- if not (and (kindIs "map" $port) $port.port) }}
-{{- fail (printf "workers.remote.networkPolicy.extraEgress[%d].ports[%d] admits every port: set port." $index $portIndex) }}
-{{- end }}
-{{- end }}
+{{- include "sie-cluster.networkPolicy.validatePeers" (dict "peers" $rule.to "path" (printf "workers.remote.networkPolicy.extraEgress[%d].to" $index)) }}
+{{- include "sie-cluster.networkPolicy.validatePorts" (dict "ports" $rule.ports "path" (printf "workers.remote.networkPolicy.extraEgress[%d].ports" $index)) }}
 {{- end }}
 {{- $deniedV4 := list }}
 {{- $deniedV6 := list }}
-{{- range $cidr := (default list $policy.deniedCidrs) }}
-{{- if not (and (kindIs "string" $cidr) (contains "/" $cidr)) }}
-{{- fail "workers.remote.networkPolicy.deniedCidrs entries must be CIDR strings" }}
-{{- end }}
+{{- range $cidr := (include "sie-cluster.worker.remoteDeniedCidrs" $root | fromJsonArray) }}
 {{- if contains ":" $cidr }}
 {{- $deniedV6 = append $deniedV6 $cidr }}
 {{- else }}
 {{- $deniedV4 = append $deniedV4 $cidr }}
 {{- end }}
 {{- end }}
-{{- /* TCP 443 for object storage and telemetry, plus every port an upstream or
-       its proxy is reached on. A loopback upstream needs no egress. */ -}}
+{{- $allowed := list }}
+{{- range $index, $cidr := (default list $policy.allowedCidrs) }}
+{{- $field := printf "workers.remote.networkPolicy.allowedCidrs[%d]" $index }}
+{{- if not (kindIs "string" $cidr) }}
+{{- fail (printf "%s must be a CIDR string" $field) }}
+{{- end }}
+{{- if contains ":" $cidr }}
+{{- if ne $cidr "::/0" }}
+{{- fail (printf "%s: the only IPv6 entry is ::/0, which carries every denied IPv6 range as an exception. Admit a narrower IPv6 destination with extraEgress." $field) }}
+{{- end }}
+{{- $allowed = append $allowed (dict "cidr" $cidr "except" $deniedV6) }}
+{{- else }}
+{{- $block := include "sie-cluster.cidr.ipv4" (dict "cidr" $cidr "field" $field) | fromJson }}
+{{- $except := list }}
+{{- range $deniedCidr := $deniedV4 }}
+{{- $denied := include "sie-cluster.cidr.ipv4" (dict "cidr" $deniedCidr "field" "a denied range") | fromJson }}
+{{- if eq (include "sie-cluster.cidr.ipv4Within" (dict "inner" $denied "outer" $block)) "true" }}
+{{- $except = append $except $deniedCidr }}
+{{- else if eq (include "sie-cluster.cidr.ipv4Within" (dict "inner" $block "outer" $denied)) "true" }}
+{{- fail (printf "%s lies inside the denied range %s. Admit a private destination with extraEgress." $field $deniedCidr) }}
+{{- end }}
+{{- end }}
+{{- $allowed = append $allowed (dict "cidr" $cidr "except" $except) }}
+{{- end }}
+{{- end }}
+{{- /* The ports of what the lane connects to directly: 443, and each upstream's
+       explicit port, or its proxy's when a proxy carries its traffic. A URL
+       without a port adds nothing, and a loopback upstream needs no egress. */ -}}
 {{- $ports := list 443 }}
 {{- range $name, $upstream := (default dict $root.Values.upstreams) }}
-{{- range $url := list $upstream.base_url $upstream.proxy_url }}
-{{- if $url }}
-{{- $authority := regexReplaceAll "^[a-z]+://([^/]+).*$" $url "${1}" }}
-{{- if not (regexMatch "^(localhost|127\\.[0-9.]+|\\[::1\\])(:[0-9]+)?$" $authority) }}
-{{- $port := ternary 443 80 (hasPrefix "https://" $url) }}
-{{- $explicit := regexFind ":[0-9]+$" $authority }}
-{{- if $explicit }}
-{{- $port = trimPrefix ":" $explicit | atoi }}
-{{- end }}
+{{- $url := $upstream.proxy_url | default $upstream.base_url | toString }}
+{{- $authority := regexReplaceAll "^[A-Za-z]+://([^/]*).*$" $url "${1}" }}
+{{- if not (regexMatch "(?i)^(localhost|127\\.[0-9.]+|\\[::1\\])(:[0-9]*)?$" $authority) }}
+{{- with regexFind ":[0-9]+$" $authority }}
+{{- $port := trimPrefix ":" . | atoi }}
 {{- if not (has $port $ports) }}
 {{- $ports = append $ports $port }}
-{{- end }}
 {{- end }}
 {{- end }}
 {{- end }}
@@ -87,7 +90,9 @@ spec:
           protocol: TCP
         {{- end }}
   egress:
-    - ports:
+    - to:
+        {{- toYaml $dnsTo | nindent 8 }}
+      ports:
         - port: 53
           protocol: UDP
         - port: 53
@@ -122,18 +127,22 @@ spec:
         - port: 4327
           protocol: TCP
     {{- end }}
-    {{- with $policy.allowedCidrs }}
+    {{- if $root.Values.observability.tracing.tempo.install }}
     - to:
-        {{- range $cidr := . }}
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: tempo
+              app.kubernetes.io/instance: {{ $root.Release.Name }}
+      ports:
+        - port: 4317
+          protocol: TCP
+    {{- end }}
+    {{- with $allowed }}
+    - to:
+        {{- range $block := . }}
         - ipBlock:
-            cidr: {{ $cidr | quote }}
-            {{- $except := list }}
-            {{- if eq $cidr "0.0.0.0/0" }}
-            {{- $except = $deniedV4 }}
-            {{- else if eq $cidr "::/0" }}
-            {{- $except = $deniedV6 }}
-            {{- end }}
-            {{- with $except }}
+            cidr: {{ $block.cidr | quote }}
+            {{- with $block.except }}
             except:
               {{- toYaml . | nindent 14 }}
             {{- end }}

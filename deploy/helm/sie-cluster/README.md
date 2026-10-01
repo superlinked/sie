@@ -759,7 +759,7 @@ routes every remote profile there, through the normal queue, because the
 `remote` bundle outranks `default` for the remote adapters. The gateway holds
 no upstream credential and calls no upstream.
 
-Enable the remote pool and the worker NetworkPolicy, and define the upstreams:
+Enable the remote pool and define the upstreams:
 
 ```yaml
 upstreams:
@@ -773,8 +773,6 @@ upstreams:
       requests_per_minute: 600
       max_concurrency: 32
 workers:
-  networkPolicy:
-    enabled: true
   pools:
     remote:
       enabled: true
@@ -807,14 +805,11 @@ Below, `<fullname>` is the chart's full name: `<release>-sie-cluster`, or
   upstream's Secret key must also differ from every Secret key the chart
   hands to another component (the Hugging Face token, the gateway tokens, the
   sie-config tokens and the NATS passwords).
-- **A remote lane needs `workers.networkPolicy.enabled: true`, and the render
-  fails without it.** The worker API has no authentication of its own, so
-  without a NetworkPolicy any pod in the cluster, including worker lanes that
-  run model code, could call a remote lane directly and spend its
-  credentials. The policy admits only this release's gateway pods, and needs
-  a CNI that enforces NetworkPolicy. Because it also selects the remote lane,
-  `workers.networkPolicy.extraIngress` cannot be set while a remote lane is
-  enabled.
+- **A remote lane needs a NetworkPolicy, and the render fails without one.**
+  The worker API has no authentication of its own, so without a policy any pod
+  in the cluster, including worker lanes that run model code, could call a
+  remote lane directly and spend its credentials. The remote lanes' own policy
+  is on by default; see [Network policy for remote lanes](#network-policy-for-remote-lanes).
 - Remote lanes run as their own ServiceAccount, `<fullname>-worker-remote`,
   with no Kubernetes API token, no cloud workload identity and no
   `HF_TOKEN`. Without an identity they cannot read the payload store, so a
@@ -839,36 +834,51 @@ Below, `<fullname>` is the chart's full name: `<release>-sie-cluster`, or
 
 #### Network policy for remote lanes
 
-When a remote lane is enabled, the chart also renders a `NetworkPolicy` for the
-remote lanes' pods (`workers.remote.networkPolicy.enabled`, on by default). It
-takes effect only with a CNI that enforces NetworkPolicy; with any other CNI it
-does nothing.
+When a remote lane is enabled, the chart renders a `NetworkPolicy` for the
+remote lanes' pods (`workers.remote.networkPolicy.enabled`, on by default).
+A remote lane needs this policy or `workers.networkPolicy`, and the render
+fails when both are off. The policy takes effect only with a CNI that enforces
+NetworkPolicy.
 
 - **Ingress:** only this release's gateway pods, on the worker ports. The worker
   API has no authentication of its own, so without this rule any pod in the
   cluster could call a remote lane directly and spend its upstream credentials.
-- **Egress:** DNS (port 53, to any address); this release's NATS (4222),
-  sie-config and gateway (8080) and telemetry collector (4327) pods; and TCP 443
-  plus every port named in an upstream `base_url` or `proxy_url`, to
-  `allowedCidrs` (every address by default) except `deniedCidrs`. Nothing else
-  is allowed.
-- **Default `deniedCidrs`:** the private ranges (10.0.0.0/8, 172.16.0.0/12,
-  192.168.0.0/16), the carrier-grade NAT range (100.64.0.0/10), link-local
-  (169.254.0.0/16), and IPv6 unique-local (fc00::/7) and link-local (fe80::/10).
-  On common clusters these ranges hold the in-cluster pod and service addresses
-  and the cloud metadata services. If your cluster uses other ranges, add them.
+  While this policy is on, `workers.networkPolicy` excludes the remote lanes, so
+  its `extraIngress` sources cannot reach them. NetworkPolicies are additive:
+  any other policy that selects these pods and admits more sources widens
+  access.
+- **Egress:** port 53 to the cluster resolver (`dnsTo`, by default the
+  `kube-dns` pods in `kube-system`); this release's NATS (4222), sie-config and
+  gateway (8080), telemetry collector (4327) and bundled Tempo (4317) pods; and
+  TCP 443 plus each upstream's explicit port, or its `proxy_url`'s explicit
+  port when a proxy carries its traffic, to `allowedCidrs` (every address by
+  default) except the denied ranges. A URL without a port adds nothing beyond
+  443. Nothing else is allowed.
+- **Denied ranges:** a fixed base that values cannot remove: the private ranges
+  (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16), the carrier-grade NAT range
+  (100.64.0.0/10), link-local (169.254.0.0/16, which holds the cloud metadata
+  services), 168.63.129.16, IPv6 unique-local (fc00::/7) and link-local
+  (fe80::/10), and the NAT64 prefixes (64:ff9b::/96, 64:ff9b:1::/48). Add more
+  with `extraDeniedCidrs`. Each IPv4 entry of `allowedCidrs` excludes the denied
+  ranges inside it, an entry inside a denied range fails the render, and the
+  only IPv6 entry is `::/0`.
 
 **What the policy does not do.** NetworkPolicy matches addresses and ports, not
-host names. The remote lanes can reach any address outside `deniedCidrs` on the
-allowed ports, not only the upstreams you declared. To limit egress to the
+host names. The remote lanes can reach any address outside the denied ranges on
+the allowed ports, not only the upstreams you declared. To limit egress to the
 declared hosts, use a policy engine with DNS-aware rules (for example Cilium or
 Calico), or route upstream traffic through an egress proxy that enforces a host
 allowlist: set the upstream's `proxy_url`, set `allowedCidrs: []`, and admit the
-proxy, and the payload store if you use one, with `extraEgress`. DNS is not
-restricted.
+proxy, and the payload store if you use one, with `extraEgress`. Port 53 is open
+only to `dnsTo`, but data tunnelled through the resolver itself is out of scope.
 
-Some deployments need an `extraEgress` rule, because the default policy blocks
-the destination:
+Kubernetes does not apply NetworkPolicy to traffic from a pod's own node, so
+the node and `hostNetwork` pods on a remote lane's node can still reach the
+worker port. An IPv6 cluster that gives pods global addresses must add its pod
+range to `extraDeniedCidrs`.
+
+Some deployments need an `extraEgress` rule, because the policy blocks the
+destination:
 
 - **NATS outside this release** (`nats.install: false`).
 - **Private endpoints.** A payload store or an upstream reached through a
@@ -880,13 +890,16 @@ the destination:
   Alibaba Cloud metadata service is also in it, at 100.100.100.200.
 - **Pod identity through a node-local endpoint.** GKE Workload Identity reads
   credentials from the GKE metadata server (169.254.169.254, port 80) and EKS
-  Pod Identity from its agent (169.254.170.23, port 80). The default policy
-  blocks both, so the remote lanes cannot obtain cloud credentials, for example
-  for the payload store, until you admit that one address and port. EKS IRSA,
-  AKS workload identity and Alibaba Cloud RRSA exchange a projected token at the
-  provider's token endpoint on port 443; they need a rule only when that
-  endpoint has a private or carrier-grade NAT address, such as a VPC endpoint.
-- **An OTLP endpoint outside the cluster** on a port other than 443.
+  Pod Identity from its agent (169.254.170.23, port 80). The policy blocks both,
+  so a remote lane given an identity through
+  `workers.remote.serviceAccount.annotations` cannot obtain it until you admit
+  that one address and port. EKS IRSA, AKS workload identity and Alibaba Cloud
+  RRSA exchange a projected token at the provider's token endpoint on port 443;
+  they need a rule only when that endpoint has a private or carrier-grade NAT
+  address, such as a VPC endpoint.
+- **An OTLP endpoint other than this release's collector or Tempo**, inside or
+  outside the cluster. Without a rule, the remote lanes' telemetry is dropped.
+- **A NodeLocal DNSCache**: add its address to `dnsTo` as an `ipBlock`.
 
 ```yaml
 workers:
@@ -901,10 +914,15 @@ workers:
               protocol: TCP
 ```
 
-Each `extraEgress` rule needs a non-empty `to` (a scoped selector or an
-`ipBlock`) and `ports` (each with a port). `workers.remote.networkPolicy.enabled:
-false` removes the policy; the install notes then warn that the remote lane's
-network access is not restricted.
+Admit 169.254.169.254 only where it serves workload identity, as on GKE with
+Workload Identity enabled. On nodes without it, this address serves the node's
+own credentials to any pod that can reach it.
+
+Each `extraEgress` rule needs a non-empty `to` (a scoped selector, or an
+`ipBlock` with a prefix length above /0) and `ports` (each with a port, and no
+range wider than 60000 ports). With `workers.remote.networkPolicy.enabled:
+false`, `workers.networkPolicy` must be on; it then limits who can reach the
+remote lanes, and their egress is not restricted.
 
 ### High availability in one file
 

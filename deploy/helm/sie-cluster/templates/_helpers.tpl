@@ -1351,6 +1351,112 @@ is sent, and the gateway's Role may write every ConfigMap in the namespace.
 {{- end }}
 
 {{/*
+"true" when the remote lanes' own NetworkPolicy renders: a remote lane is
+enabled and workers.remote.networkPolicy.enabled is not false.
+*/}}
+{{- define "sie-cluster.worker.remoteNetworkPolicyEnabled" -}}
+{{- if and (eq (include "sie-cluster.worker.remoteLaneEnabled" .) "true") (dig "remote" "networkPolicy" "enabled" true .Values.workers) -}}
+true
+{{- end -}}
+{{- end }}
+
+{{/*
+Ranges the remote lanes never reach through allowedCidrs, as a JSON list: a
+fixed base that values cannot remove (private, carrier-grade NAT, link-local
+and metadata addresses, IPv6 unique-local, link-local and NAT64 prefixes),
+followed by workers.remote.networkPolicy.extraDeniedCidrs.
+*/}}
+{{- define "sie-cluster.worker.remoteDeniedCidrs" -}}
+{{- $denied := list "10.0.0.0/8" "172.16.0.0/12" "192.168.0.0/16" "100.64.0.0/10" "169.254.0.0/16" "168.63.129.16/32" "fc00::/7" "fe80::/10" "64:ff9b::/96" "64:ff9b:1::/48" -}}
+{{- range $index, $cidr := (dig "remote" "networkPolicy" "extraDeniedCidrs" list .Values.workers) -}}
+{{- if not (and (kindIs "string" $cidr) (regexMatch "^[0-9A-Fa-f:.]+/[0-9]{1,3}$" $cidr)) -}}
+{{- fail (printf "workers.remote.networkPolicy.extraDeniedCidrs[%d] must be a CIDR" $index) -}}
+{{- end -}}
+{{- if not (contains ":" $cidr) -}}
+{{- $_ := include "sie-cluster.cidr.ipv4" (dict "cidr" $cidr "field" (printf "workers.remote.networkPolicy.extraDeniedCidrs[%d]" $index)) -}}
+{{- end -}}
+{{- $denied = append $denied $cidr -}}
+{{- end -}}
+{{- toJson $denied -}}
+{{- end }}
+
+{{/*
+An IPv4 CIDR as JSON {"ip": <address as an integer>, "prefix": <length>}.
+Args (dict): cidr, field.
+*/}}
+{{- define "sie-cluster.cidr.ipv4" -}}
+{{- $octet := "(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])" -}}
+{{- if not (regexMatch (printf "^%s\\.%s\\.%s\\.%s/(3[0-2]|[12]?[0-9])$" $octet $octet $octet $octet) .cidr) -}}
+{{- fail (printf "%s must be an IPv4 CIDR" .field) -}}
+{{- end -}}
+{{- $parts := regexSplit "[./]" .cidr -1 -}}
+{{- $ip := add (mul (atoi (index $parts 0)) 16777216) (mul (atoi (index $parts 1)) 65536) (mul (atoi (index $parts 2)) 256) (atoi (index $parts 3)) -}}
+{{- dict "ip" $ip "prefix" (atoi (index $parts 4)) | toJson -}}
+{{- end }}
+
+{{/*
+"true" when the IPv4 block `inner` lies inside `outer`. Two CIDR blocks are
+either nested or disjoint. Args (dict): inner, outer (from sie-cluster.cidr.ipv4).
+*/}}
+{{- define "sie-cluster.cidr.ipv4Within" -}}
+{{- if ge (int .inner.prefix) (int .outer.prefix) -}}
+{{- $scale := 1 -}}
+{{- range until (int (sub 32 (int .outer.prefix))) -}}
+{{- $scale = mul $scale 2 -}}
+{{- end -}}
+{{- if eq (div (int64 .inner.ip) $scale) (div (int64 .outer.ip) $scale) -}}
+true
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Fail unless every NetworkPolicy peer is scoped: a podSelector or
+namespaceSelector with matchLabels or matchExpressions, or an ipBlock whose
+prefix length is above 0. Args (dict): peers, path.
+*/}}
+{{- define "sie-cluster.networkPolicy.validatePeers" -}}
+{{- $path := .path -}}
+{{- range $index, $peer := .peers -}}
+{{- $scoped := false -}}
+{{- if kindIs "map" $peer -}}
+{{- range $selectorKey := list "podSelector" "namespaceSelector" -}}
+{{- $selector := index $peer $selectorKey -}}
+{{- if and (kindIs "map" $selector) (or $selector.matchLabels $selector.matchExpressions) -}}
+{{- $scoped = true -}}
+{{- end -}}
+{{- end -}}
+{{- if $peer.ipBlock -}}
+{{- $cidr := toString (dig "cidr" "" (default (dict) $peer.ipBlock)) -}}
+{{- if or (not $cidr) (regexMatch "/0+$" (trim $cidr)) -}}
+{{- fail (printf "%s[%d] admits every address: give the ipBlock a prefix length above 0." $path $index) -}}
+{{- end -}}
+{{- $scoped = true -}}
+{{- end -}}
+{{- end -}}
+{{- if not $scoped -}}
+{{- fail (printf "%s[%d] admits every destination: give it a podSelector or namespaceSelector with matchLabels or matchExpressions, or an ipBlock." $path $index) -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Fail unless every NetworkPolicy port names a port and spans at most 60000
+ports. Args (dict): ports, path.
+*/}}
+{{- define "sie-cluster.networkPolicy.validatePorts" -}}
+{{- $path := .path -}}
+{{- range $index, $port := .ports -}}
+{{- if not (and (kindIs "map" $port) $port.port) -}}
+{{- fail (printf "%s[%d] admits every port: set port." $path $index) -}}
+{{- end -}}
+{{- if and $port.endPort (not (kindIs "string" $port.port)) (gt (sub (int $port.endPort) (int $port.port)) 60000) -}}
+{{- fail (printf "%s[%d] spans nearly every port: list the ports instead." $path $index) -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
 Environment variable that carries one upstream's credential on remote lanes.
 Upstream names hold no underscore, so the mapping is one to one.
 */}}
@@ -1740,8 +1846,8 @@ credential pasted as a key would otherwise be printed.
 {{- end -}}
 {{- end -}}
 {{- end -}}
-{{- if and (eq (include "sie-cluster.worker.remoteLaneEnabled" $root) "true") (not (dig "networkPolicy" "enabled" false $root.Values.workers)) -}}
-{{- fail "a remote lane needs workers.networkPolicy.enabled=true. The worker API has no authentication of its own, so without a NetworkPolicy any pod in the cluster could call a remote lane directly and spend its upstream credentials." -}}
+{{- if and (eq (include "sie-cluster.worker.remoteLaneEnabled" $root) "true") (not (dig "networkPolicy" "enabled" false $root.Values.workers)) (ne (include "sie-cluster.worker.remoteNetworkPolicyEnabled" $root) "true") -}}
+{{- fail "a remote lane needs a NetworkPolicy: keep workers.remote.networkPolicy.enabled=true (the default) or set workers.networkPolicy.enabled=true. The worker API has no authentication of its own, so without a NetworkPolicy any pod in the cluster could call a remote lane directly and spend its upstream credentials." -}}
 {{- end -}}
 {{- if and (eq (include "sie-cluster.worker.remoteLaneEnabled" $root) "true") (dig "networkPolicy" "extraIngress" list $root.Values.workers) -}}
 {{- fail "workers.networkPolicy.extraIngress cannot be set while a remote lane is enabled: workers.networkPolicy also selects the remote lane, so every extraIngress source could call it directly and spend its upstream credentials." -}}

@@ -46,6 +46,14 @@ spec:
   podSelector:
     matchLabels:
       {{- include "sie-cluster.worker.selectorLabels" . | nindent 6 }}
+    {{- if eq (include "sie-cluster.worker.remoteNetworkPolicyEnabled" .) "true" }}
+    # The remote lanes have their own policy; extraIngress must not reach them.
+    matchExpressions:
+      - key: sie.superlinked.com/bundle
+        operator: NotIn
+        values:
+          - remote
+    {{- end }}
   policyTypes:
     - Ingress
   ingress:

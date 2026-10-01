@@ -911,35 +911,46 @@ workers:
       annotations: {}
     # -- NetworkPolicy for the remote lanes' pods, rendered whenever a remote
     # lane is enabled. Ingress: only this release's gateway pods, on the worker
-    # ports. Egress: DNS; this release's NATS, sie-config, gateway and telemetry
-    # collector; and TCP 443 plus every port in an upstream base_url or
-    # proxy_url, to allowedCidrs except deniedCidrs. It matches addresses and
-    # ports, not host names, and needs a CNI that enforces NetworkPolicy. See
-    # the chart README section "Remote backends".
+    # ports; the generic workers.networkPolicy then excludes the remote lanes.
+    # Egress: DNS to dnsTo; this release's NATS, sie-config, gateway,
+    # telemetry collector and bundled Tempo; and TCP 443 plus each upstream's
+    # explicit port (its proxy's, when it has one), to allowedCidrs except the
+    # denied ranges. It matches addresses and ports, not host names, and needs
+    # a CNI that enforces NetworkPolicy. See the chart README section "Network
+    # policy for remote lanes". A remote lane needs this policy or
+    # workers.networkPolicy.
     networkPolicy:
       enabled: true
-      # -- Destinations for TCP 443 and the upstream ports: upstreams, the
-      # payload store and telemetry. deniedCidrs are excluded from the
-      # 0.0.0.0/0 and ::/0 entries. An empty list renders no such rule.
+      # -- Destinations for TCP 443 and the upstream ports. Each IPv4 entry
+      # excludes the denied ranges inside it, and an entry inside a denied range
+      # fails the render. The only IPv6 entry is ::/0. An empty list renders no
+      # such rule.
       allowedCidrs:
         - 0.0.0.0/0
         - ::/0
-      # -- Private, carrier-grade NAT and link-local ranges. On common clusters
-      # they hold the in-cluster pod and service addresses and the cloud
-      # metadata services. Add your cluster's ranges if they differ.
-      deniedCidrs:
-        - 10.0.0.0/8
-        - 172.16.0.0/12
-        - 192.168.0.0/16
-        - 100.64.0.0/10
-        - 169.254.0.0/16
-        - fc00::/7
-        - fe80::/10
+      # -- Ranges excluded in addition to the fixed base, which values cannot
+      # remove: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10,
+      # 169.254.0.0/16, 168.63.129.16/32, fc00::/7, fe80::/10, 64:ff9b::/96 and
+      # 64:ff9b:1::/48. Add your cluster's pod and service ranges if they lie
+      # outside the base, for example global IPv6 pod addresses.
+      extraDeniedCidrs: []
+      # -- The cluster resolver the remote lanes may query on port 53. The
+      # default is the kube-dns pods most distributions run. Add NodeLocal
+      # DNSCache's address (for example 169.254.20.10/32) as an ipBlock when
+      # the cluster uses it. Each entry needs a scoped selector or an ipBlock.
+      dnsTo:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
       # -- Additional egress rules, for example NATS outside this release, a
       # private object-store or upstream endpoint, an egress proxy, or the
       # node-local endpoint that workload identity reads credentials from.
-      # Each entry needs a non-empty `to` (scoped selectors or an ipBlock) and
-      # `ports` (each with a port).
+      # Each entry needs a non-empty `to` (scoped selectors, or an ipBlock with
+      # a prefix length above /0) and `ports` (each with a port, and no range
+      # wider than 60000 ports).
       extraEgress: []
 
   # -- Worker pools (one StatefulSet per enabled queuePool/machineProfile/bundle lane)
