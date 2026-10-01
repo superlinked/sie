@@ -2,7 +2,7 @@
 
 The local profile is the fake adapter. Its load is held open with the fake's
 load latch, so a model stays cold or loading for as long as a test needs. The
-remote profile calls a real SIE app on loopback that serves the fake model.
+remote profile calls a real SIE app on loopback that serves a fake model.
 """
 
 from __future__ import annotations
@@ -61,6 +61,48 @@ profiles:
         upstream_model: sie-fake
 """
 
+UPSTREAM_EXTRACT_MODEL = """\
+sie_id: acme/fake-extract
+package_backed: true
+inputs:
+  text: true
+tasks:
+  extract: {}
+profiles:
+  default:
+    adapter_path: sie_server.adapters.fake.adapter:FakeAdapter
+    max_batch_tokens: 8192
+"""
+
+HYBRID_EXTRACT_MODEL = """\
+sie_id: acme/hybrid-extract
+package_backed: true
+inputs:
+  text: true
+tasks:
+  extract: {{}}
+routing:
+  policy: fallback
+  fallback_profile: remote
+profiles:
+  default:
+    adapter_path: sie_server.adapters.fake.adapter:FakeAdapter
+    max_batch_tokens: 8192
+    adapter_options:
+      loadtime:
+        fault_key: acme/hybrid-extract
+        faults:
+          load_latch_file: {latch}
+          latch_timeout_s: 60
+  remote:
+    adapter_path: sie_server.adapters.remote.sie:SieUpstreamAdapter
+    max_batch_tokens: 8192
+    adapter_options:
+      loadtime:
+        upstream: fake-sie
+        upstream_model: acme/fake-extract
+"""
+
 REMOTE_EVERYTHING_MODEL = """\
 sie_id: acme/remote-all
 remote_backed: true
@@ -88,6 +130,7 @@ profiles:
 """
 
 FORBID = {"X-SIE-Remote": "forbid"}
+JSON = {"Accept": "application/json"}
 UNREACHABLE = "http://127.0.0.1:9"
 DISCLOSURE = json.loads(
     (Path(__file__).resolve().parents[3] / "wire-fixtures" / "serving_disclosure.json").read_text(encoding="utf-8")
@@ -95,14 +138,19 @@ DISCLOSURE = json.loads(
 
 
 @pytest.fixture(autouse=True)
-def _hybrid_encode_allowed(monkeypatch: pytest.MonkeyPatch, upstream_credential: str) -> str:
+def _credential(upstream_credential: str) -> str:
+    return upstream_credential
+
+
+@pytest.fixture
+def hybrid_encode(monkeypatch: pytest.MonkeyPatch) -> None:
     """Lift the configuration gate that refuses hybrid encode until equivalence is shown.
 
-    Encode is the primitive an SIE upstream serves, so the bridge is exercised
-    through it; equivalence is a separate rule with its own tests.
+    Encode lets these tests check the vectors and the encode-only paths;
+    equivalence is a separate rule with its own tests. The extract test runs
+    with the gate in force.
     """
     monkeypatch.setattr(routing_config, "hybrid_equivalence_refusal", lambda config: None)
-    return upstream_credential
 
 
 @pytest.fixture
@@ -165,6 +213,7 @@ def disclosed(response: httpx.Response) -> httpx.Response:
     return response
 
 
+@pytest.mark.usefixtures("hybrid_encode")
 def test_a_cold_model_is_bridged_while_its_local_load_runs_and_then_served_locally(
     sie_upstream: Callable[..., Any],
     remote_app: Callable[..., Any],
@@ -205,6 +254,37 @@ def test_a_cold_model_is_bridged_while_its_local_load_runs_and_then_served_local
     assert len(upstream.seen_authorization) == 2
 
 
+def test_a_cold_extract_model_is_bridged_with_the_configuration_gate_in_force(
+    sie_upstream: Callable[..., Any], remote_app: Callable[..., Any], latch: Path, tmp_path: Path
+) -> None:
+    upstream_models = tmp_path / "upstream-models"
+    upstream_models.mkdir()
+    (upstream_models / "fake-extract.yaml").write_text(UPSTREAM_EXTRACT_MODEL, encoding="utf-8")
+    body = {"items": [{"text": "remote backends"}], "params": {"labels": ["person"]}}
+    with sie_upstream(models_dir=upstream_models) as upstream:
+        with SIEClient(upstream.url) as direct:
+            expected = direct.extract("acme/fake-extract", {"text": "remote backends"}, labels=["person"])
+        app = remote_app(upstream.url, extra_models={"hybrid-extract.yaml": HYBRID_EXTRACT_MODEL.format(latch=latch)})
+        with serving(app, latch) as client:
+            registry = app.state.registry
+            bridged = disclosed(client.post("/v1/extract/acme/hybrid-extract", json=body, headers=JSON))
+            local_load_started = registry.is_loading("acme/hybrid-extract")
+            latch.touch()
+            wait_for(lambda: registry.is_loaded("acme/hybrid-extract"))
+            local = disclosed(client.post("/v1/extract/acme/hybrid-extract", json=body, headers=JSON))
+
+    assert bridged.status_code == 200, bridged.text
+    assert bridged.json()["model"] == "acme/hybrid-extract"
+    assert bridged.json()["items"][0]["entities"] == expected["entities"]
+    assert bridged.headers["x-sie-served-by"] == "remote"
+    assert bridged.headers["x-sie-fallback-reason"] == "model_loading"
+    assert local_load_started
+    assert local.status_code == 200, local.text
+    assert local.headers["x-sie-served-by"] == "local"
+    assert fallback_headers(local) == {}
+
+
+@pytest.mark.usefixtures("hybrid_encode")
 def test_forbid_answers_with_the_local_refusal_and_sends_nothing_upstream(
     sie_upstream: Callable[..., Any], remote_app: Callable[..., Any], latch: Path
 ) -> None:
@@ -226,6 +306,7 @@ def test_forbid_answers_with_the_local_refusal_and_sends_nothing_upstream(
     assert upstream.seen_authorization == []
 
 
+@pytest.mark.usefixtures("hybrid_encode")
 def test_a_failed_remote_attempt_answers_the_local_refusal_and_names_both_outcomes(
     remote_app: Callable[..., Any], latch: Path
 ) -> None:
@@ -248,6 +329,7 @@ def test_a_failed_remote_attempt_answers_the_local_refusal_and_names_both_outcom
         }
 
 
+@pytest.mark.usefixtures("hybrid_encode")
 def test_a_request_that_names_a_profile_is_served_as_written(
     sie_upstream: Callable[..., Any], remote_app: Callable[..., Any], latch: Path
 ) -> None:
@@ -271,6 +353,7 @@ def test_a_request_that_names_a_profile_is_served_as_written(
     assert fallback_headers(remote_variant) == {}
 
 
+@pytest.mark.usefixtures("hybrid_encode")
 def test_with_remote_serving_switched_off_the_policy_is_reported_and_never_bridges(
     sie_upstream: Callable[..., Any], remote_app: Callable[..., Any], latch: Path
 ) -> None:
@@ -360,6 +443,7 @@ def test_forbid_refuses_a_model_served_only_by_an_upstream_on_every_route(
     assert not loaded
 
 
+@pytest.mark.usefixtures("hybrid_encode")
 def test_forbid_refuses_an_explicit_remote_profile(remote_app: Callable[..., Any], latch: Path) -> None:
     app = remote_app(UNREACHABLE, extra_models=hybrid(latch))
     with serving(app, latch) as client:
@@ -369,6 +453,7 @@ def test_forbid_refuses_an_explicit_remote_profile(remote_app: Callable[..., Any
     assert response.json()["detail"]["code"] == "INVALID_INPUT"
 
 
+@pytest.mark.usefixtures("hybrid_encode")
 @pytest.mark.parametrize("value", ["allow", "Forbid", "forbid,forbid"])
 def test_a_remote_header_other_than_forbid_is_refused(remote_app: Callable[..., Any], latch: Path, value: str) -> None:
     app = remote_app(UNREACHABLE, extra_models=hybrid(latch))
