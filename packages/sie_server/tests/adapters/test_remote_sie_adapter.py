@@ -52,6 +52,33 @@ profiles:
 """
 
 
+MIXED_MODEL = """\
+sie_id: acme/mixed
+package_backed: true
+inputs:
+  text: true
+tasks:
+  encode:
+    dense:
+      dim: 384
+profiles:
+  default:
+    adapter_path: sie_server.adapters.fake.adapter:FakeAdapter
+    max_batch_tokens: 8192
+    adapter_options:
+      loadtime:
+        memory_footprint_bytes: 67108864
+        fault_key: acme/mixed
+  remote:
+    adapter_path: sie_server.adapters.remote.sie:SieUpstreamAdapter
+    max_batch_tokens: 8192
+    adapter_options:
+      loadtime:
+        upstream: fake-sie
+        upstream_model: sie-fake
+"""
+
+
 @pytest.fixture(autouse=True)
 def _reset_upstreams(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv(KEY_ENV, CANARY)
@@ -87,10 +114,19 @@ def fake_sie_upstream() -> Iterator[tuple[str, list[str | None]]]:
         thread.join(timeout=10)
 
 
-def local_app(tmp_path: Path, upstream_url: str, *, remote_serving: bool = True, upstream: str = "fake-sie") -> FastAPI:
+def local_app(
+    tmp_path: Path,
+    upstream_url: str,
+    *,
+    remote_serving: bool = True,
+    upstream: str = "fake-sie",
+    extra_models: dict[str, str] | None = None,
+) -> FastAPI:
     models = tmp_path / "models"
     models.mkdir()
     (models / "remote-fake.yaml").write_text(REMOTE_MODEL.format(upstream=upstream), encoding="utf-8")
+    for file_name, text in (extra_models or {}).items():
+        (models / file_name).write_text(text, encoding="utf-8")
     upstreams = tmp_path / "upstreams.yaml"
     upstreams.write_text(
         "upstreams:\n"
@@ -111,12 +147,15 @@ def local_app(tmp_path: Path, upstream_url: str, *, remote_serving: bool = True,
     )
 
 
-def encode_when_loaded(client: TestClient, model: str, text: str) -> httpx.Response:
+def encode_when_loaded(
+    client: TestClient, model: str, text: str, *, params: dict[str, Any] | None = None
+) -> httpx.Response:
+    body: dict[str, Any] = {"items": [{"text": text}]}
+    if params is not None:
+        body["params"] = params
     deadline = time.monotonic() + 30
     while True:
-        response = client.post(
-            f"/v1/encode/{model}", json={"items": [{"text": text}]}, headers={"Accept": "application/json"}
-        )
+        response = client.post(f"/v1/encode/{model}", json=body, headers={"Accept": "application/json"})
         if response.status_code != 503 or time.monotonic() > deadline:
             return response
         time.sleep(0.1)
@@ -160,6 +199,23 @@ def test_a_local_model_discloses_local_serving() -> None:
     assert response.headers["x-sie-served-by"] == "local"
     assert "x-sie-upstream" not in response.headers
     assert listed.json()["routing"] == {"policy": None, "upstream_kind": None}
+
+
+def test_the_served_side_follows_the_model_id_not_a_request_option(tmp_path: Path) -> None:
+    with fake_sie_upstream() as (upstream_url, _):
+        with SIEClient(upstream_url) as upstream:
+            upstream.encode("sie-fake", {"text": "warm"})
+        app = local_app(tmp_path, upstream_url, extra_models={"mixed.yaml": MIXED_MODEL})
+        with TestClient(app) as client:
+            selected = encode_when_loaded(client, "acme/mixed", "mixed", params={"options": {"profile": "remote"}})
+            variant = encode_when_loaded(client, "acme/mixed:remote", "mixed")
+
+    assert selected.status_code == 200, selected.text
+    assert selected.headers["x-sie-served-by"] == "local"
+    assert "x-sie-upstream" not in selected.headers
+    assert variant.status_code == 200, variant.text
+    assert variant.headers["x-sie-served-by"] == "remote"
+    assert variant.headers["x-sie-upstream"] == "fake-sie"
 
 
 def test_the_global_switch_refuses_remote_profiles_and_sends_nothing(tmp_path: Path) -> None:
