@@ -6,8 +6,10 @@ import json
 import logging
 import re
 import threading
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, cast
 
 import orjson
 import yaml
@@ -118,6 +120,32 @@ def _resolved_profile_hash_config(
         resolved["adapter_options"] = _canonical_adapter_options(resolved.get("adapter_options"))
 
     return resolved
+
+
+REMOTE_ADAPTER_MODULE_PREFIX = "sie_server.adapters.remote."
+
+
+def undeclared_upstreams(profiles: dict, profile_names: Iterable[str], declared: frozenset[str]) -> dict[str, object]:
+    """Map each named remote profile whose upstream is not in ``declared`` to the upstream it names.
+
+    A profile is remote when its adapter, after ``extends``, is a remote adapter. Its
+    upstream is ``adapter_options.loadtime.upstream`` after ``extends``, resolved as
+    the worker resolves it.
+    """
+    undeclared: dict[str, object] = {}
+    for name in profile_names:
+        resolved = _resolved_profile_hash_config(profiles, name)
+        if resolved is None:
+            continue
+        adapter_path = resolved["adapter_path"]
+        if not (isinstance(adapter_path, str) and adapter_path.startswith(REMOTE_ADAPTER_MODULE_PREFIX)):
+            continue
+        options = resolved["adapter_options"]
+        loadtime = cast("dict[str, Any]", options).get("loadtime") if isinstance(options, dict) else None
+        upstream = loadtime.get("upstream") if isinstance(loadtime, dict) else None
+        if not isinstance(upstream, str) or upstream not in declared:
+            undeclared[name] = upstream
+    return undeclared
 
 
 _PROFILE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
