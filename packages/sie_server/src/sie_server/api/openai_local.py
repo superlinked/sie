@@ -44,9 +44,16 @@ from sie_server.adapters._generation_base import (
     resolve_reasoning_format,
     thinking_blocks_must_be_hidden,
 )
+from sie_server.adapters.errors import InputTooLongError, UpstreamUnavailableError
 from sie_server.adapters.mlx.generation import MLXGenerationAdapter, normalize_mlx_seed
 from sie_server.adapters.sglang.generation import SGLangGenerationAdapter
-from sie_server.api.helpers import ModelStateChecker, ensure_finite_scores, openai_error_response
+from sie_server.api.helpers import (
+    ModelStateChecker,
+    ensure_finite_scores,
+    openai_error_response,
+    serving_disclosure_headers,
+    upstream_unavailable_exception,
+)
 from sie_server.api.options import resolve_runtime_options
 from sie_server.api.score import score_usage_from_output
 from sie_server.api.validation import validate_machine_profile_header, validate_signed_i64
@@ -70,7 +77,7 @@ from sie_server.processors.strict_grammar import (
     unverifiable_schema_keyword,
 )
 from sie_server.types.grammar import GrammarSpec
-from sie_server.types.inputs import Item, item_size_error
+from sie_server.types.inputs import InvalidInputError, Item, item_size_error
 from sie_server.types.responses import ErrorCode
 
 logger = logging.getLogger(__name__)
@@ -1336,6 +1343,20 @@ async def _rerank(
         )
         try:
             worker_result = await future
+        except UpstreamUnavailableError as exc:
+            logger.warning("rerank for %s was not served by its upstream: %s", model, exc)
+            span.set_attribute("error", f"upstream_{exc.kind}")
+            raise upstream_unavailable_exception(exc, model) from exc
+        except (InputTooLongError, InvalidInputError) as exc:
+            too_long = isinstance(exc, InputTooLongError)
+            span.set_attribute("error", "input_too_long" if too_long else "invalid_input")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": ErrorCode.INPUT_TOO_LONG.value if too_long else "invalid_request",
+                    "message": str(exc),
+                },
+            ) from exc
         except Exception as exc:
             logger.warning("rerank failed for %s", model, exc_info=True)
             raise HTTPException(
@@ -1370,5 +1391,6 @@ async def _rerank(
             "model": getattr(config, "name", None) or registry_key,
             "results": results,
             "usage": usage,
-        }
+        },
+        headers=serving_disclosure_headers(registry, registry_key),
     )

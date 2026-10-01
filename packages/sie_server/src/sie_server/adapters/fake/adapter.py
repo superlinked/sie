@@ -22,6 +22,12 @@ profiles of that one model, addressable as ``sie-fake:<profile>`` via the
 loader's variant expansion. Chat completions return ``invalid_request`` —
 chat-template rendering needs a real tokenizer source; ``/v1/generate``
 (raw prompt) is the supported generation surface.
+
+A model config that declares sparse or multivector dimensions, or an extract
+task, also gets those outputs from the same adapter, and image items are
+accepted wherever text is. With ``synthetic_usage`` set, encode and extract
+report one synthetic token per Unicode code point of an item's text, as score
+always does, and encode reports the images it received.
 """
 
 from __future__ import annotations
@@ -31,6 +37,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -42,8 +49,15 @@ from sie_server.adapters._base_adapter import BaseAdapter
 from sie_server.adapters._generation_base import GenerationAdapter, GenerationChunk
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_NOT_LOADED
-from sie_server.core.inference_output import EncodeOutput, ScoreOutput
+from sie_server.core.inference_output import (
+    EncodeOutput,
+    ExtractItemError,
+    ExtractOutput,
+    ScoreOutput,
+    SparseVector,
+)
 from sie_server.core.oom import ResourceExhausted, ResourceExhaustedError
+from sie_server.types.responses import Classification, DetectedObject, Entity, ErrorCode, Relation
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -259,10 +273,93 @@ def _hash_unit_interval(seed: str) -> float:
     return int.from_bytes(digest[:8], "big") / 2**64
 
 
+_WORD = re.compile(r"\S+")
+_SPARSE_NONZEROS = 8
+_TOKENS_PER_IMAGE = 4
+
+
+def _hash_sparse(seed: str, sparse_dim: int) -> SparseVector:
+    """Up to eight distinct hash-chosen indices below ``sparse_dim``, ascending, with positive values."""
+    digest = hashlib.sha256(f"{seed}\x00sparse".encode()).digest()
+    rng = np.random.default_rng(int.from_bytes(digest[:8], "big"))
+    count = min(_SPARSE_NONZEROS, sparse_dim)
+    indices = np.sort(rng.choice(sparse_dim, size=count, replace=False)).astype(np.int32)
+    return SparseVector(indices=indices, values=(rng.random(count) + 0.01).astype(np.float32))
+
+
+def _hash_multivector(item: Item, multivector_dim: int) -> np.ndarray:
+    """One unit vector per word of the item's text and four per image, at least one."""
+    key = _item_key(item)
+    rows = max(1, len(_WORD.findall(item.text or "")) + _TOKENS_PER_IMAGE * len(item.images or []))
+    vectors = np.stack([_hash_unit_floats(f"{key}\x00token\x00{row}", multivector_dim) for row in range(rows)])
+    return (vectors / np.maximum(np.linalg.norm(vectors, axis=1, keepdims=True), 1e-12)).astype(np.float32)
+
+
+@dataclass(frozen=True, slots=True)
+class _FakeExtraction:
+    entities: list[Entity]
+    classifications: list[Classification]
+    relations: list[Relation]
+    objects: list[DetectedObject]
+    data: dict[str, Any]
+    error: ExtractItemError | None
+
+
+def _hash_extraction(item: Item, labels: list[str]) -> _FakeExtraction:
+    text = item.text or ""
+    images = item.images or []
+    if not text and not images:
+        error = ExtractItemError(code=ErrorCode.INVALID_INPUT.value, message="sie-fake extracts from text or images")
+        return _FakeExtraction(entities=[], classifications=[], relations=[], objects=[], data={}, error=error)
+    key = _item_key(item)
+    words = list(_WORD.finditer(text))
+    entities: list[Entity] = []
+    for label in labels if words else []:
+        word = words[int(_hash_unit_interval(f"{key}\x00{label}") * len(words))]
+        entities.append(
+            Entity(
+                text=word.group(),
+                label=label,
+                score=_hash_unit_interval(f"{key}\x00{label}\x00score"),
+                start=word.start(),
+                end=word.end(),
+                bbox=None,
+            )
+        )
+    relations: list[Relation] = []
+    if len(entities) > 1:
+        relations.append(
+            Relation(
+                head=entities[0]["text"],
+                tail=entities[1]["text"],
+                relation="related_to",
+                score=_hash_unit_interval(f"{key}\x00relation"),
+            )
+        )
+    objects = [
+        DetectedObject(
+            label=labels[0],
+            score=_hash_unit_interval(f"{key}\x00object\x00{index}"),
+            bbox=[0, 0, 1 + int(64 * _hash_unit_interval(f"{key}\x00width\x00{index}")), 1 + index],
+        )
+        for index in range(len(images))
+    ]
+    return _FakeExtraction(
+        entities=entities,
+        classifications=[
+            Classification(label=label, score=_hash_unit_interval(f"{key}\x00class\x00{label}")) for label in labels
+        ],
+        relations=relations,
+        objects=objects,
+        data={"characters": len(text), "images": len(images), "labels": list(labels)},
+        error=None,
+    )
+
+
 class FakeAdapter(BaseAdapter, GenerationAdapter):
     """One weightless fake serving every supported surface: hash-derived
-    dense embeddings (``encode``), pair scores in ``[0, 1)`` (``score``), and
-    a deterministic token stream (``generate``).
+    embeddings (``encode``), pair scores in ``[0, 1)`` (``score``),
+    extractions (``extract``), and a deterministic token stream (``generate``).
 
     All fake catalog cases are profiles of the single ``sie-fake`` model
     (``models/sie-fake.yaml``); non-default profiles are addressable as
@@ -282,8 +379,8 @@ class FakeAdapter(BaseAdapter, GenerationAdapter):
     """
 
     spec: ClassVar[AdapterSpec] = AdapterSpec(
-        inputs=("text",),
-        outputs=("dense", "score", "tokens"),
+        inputs=("text", "image"),
+        outputs=("dense", "sparse", "multivector", "score", "json", "tokens"),
         unload_fields=(),
     )
 
@@ -292,18 +389,24 @@ class FakeAdapter(BaseAdapter, GenerationAdapter):
         model_name_or_path: str | None = None,  # unused; fakes are package-backed
         *,
         dense_dim: int = 384,
+        sparse_dim: int | None = None,
+        multivector_dim: int | None = None,
         max_seq_length: int | None = None,
         compute_precision: str | None = None,  # unused; outputs are float32
         memory_footprint_bytes: int = _DEFAULT_FOOTPRINT_BYTES,
         request_latency_s: float = 0.0,
         default_completion_tokens: int = 32,
         inter_token_latency_s: float = 0.0,
+        synthetic_usage: bool = False,
         faults: dict[str, Any] | None = None,
         fault_key: str | None = None,
         **kwargs: Any,
     ) -> None:
         _ = (model_name_or_path, max_seq_length, compute_precision, kwargs)
         self._dense_dim = dense_dim
+        self._sparse_dim = sparse_dim
+        self._multivector_dim = multivector_dim
+        self._synthetic_usage = synthetic_usage
         self._request_latency_s = request_latency_s
         self._default_completion_tokens = default_completion_tokens
         self._inter_token_latency_s = inter_token_latency_s
@@ -343,7 +446,7 @@ class FakeAdapter(BaseAdapter, GenerationAdapter):
         prepared_items: list[Any] | None = None,
         options: dict[str, Any] | None = None,
     ) -> EncodeOutput:
-        _ = (output_types, instruction, prepared_items, options)
+        _ = (instruction, prepared_items, options)
         if not self._loaded:
             raise RuntimeError(ERR_NOT_LOADED)
         self._fault_runtime.on_dispatch()
@@ -352,7 +455,23 @@ class FakeAdapter(BaseAdapter, GenerationAdapter):
         dense = np.stack([_hash_unit_floats(_item_key(item), self._dense_dim) for item in items])
         norms = np.linalg.norm(dense, axis=1, keepdims=True)
         dense = (dense / np.maximum(norms, 1e-12)).astype(np.float32)
-        return EncodeOutput(dense=dense, is_query=is_query, dense_dim=self._dense_dim)
+        sparse_dim, multivector_dim = self._sparse_dim, self._multivector_dim
+        extra: dict[str, Any] = {}
+        if self._synthetic_usage:
+            extra["input_token_counts"] = [len(item.text or "") for item in items]
+            extra["input_image_counts"] = [len(item.images or []) for item in items]
+        return EncodeOutput(
+            dense=dense,
+            sparse=[_hash_sparse(_item_key(item), sparse_dim) for item in items]
+            if "sparse" in output_types and sparse_dim is not None
+            else None,
+            multivector=[_hash_multivector(item, multivector_dim) for item in items]
+            if "multivector" in output_types and multivector_dim is not None
+            else None,
+            is_query=is_query,
+            dense_dim=self._dense_dim,
+            extra=extra,
+        )
 
     def score(
         self,
@@ -396,6 +515,42 @@ class FakeAdapter(BaseAdapter, GenerationAdapter):
             len(query.text or "") + len(doc.text or "") for query, doc in zip(queries, docs, strict=True)
         ]
         return output
+
+    def extract(
+        self,
+        items: list[Item],
+        *,
+        labels: list[str] | None = None,
+        output_schema: dict[str, Any] | None = None,
+        instruction: str | None = None,
+        options: dict[str, Any] | None = None,
+        prepared_items: list[Any] | None = None,
+    ) -> ExtractOutput:
+        """Extract hash-derived entities, classifications, relations, image objects and data.
+
+        Each label gets one entity, a word of the item's text, and one
+        classification. Two or more entities are related once. Each image gets
+        one object. An item with neither text nor images is a per-item
+        ``INVALID_INPUT`` failure.
+        """
+        _ = (output_schema, instruction, options, prepared_items)
+        if not self._loaded:
+            raise RuntimeError(ERR_NOT_LOADED)
+        self._fault_runtime.on_dispatch()
+        if self._request_latency_s > 0:
+            time.sleep(self._request_latency_s)
+        names = list(labels or ["thing"])
+        results = [_hash_extraction(item, names) for item in items]
+        errors = [result.error for result in results]
+        return ExtractOutput(
+            entities=[result.entities for result in results],
+            classifications=[result.classifications for result in results],
+            relations=[result.relations for result in results],
+            objects=[result.objects for result in results],
+            data=[result.data for result in results],
+            errors=errors if any(error is not None for error in errors) else None,
+            input_token_counts=[len(item.text or "") for item in items] if self._synthetic_usage else None,
+        )
 
     async def generate(
         self,
