@@ -138,7 +138,7 @@ Five hosted GLiGuard calls agreed on all five when this example was written.
 ## What result to expect
 
 `python3 score.py` prints the table above with pooled tp / fp / fn beside each
-row, the pooled F1 differences in the registered comparison with recorded intervals, or this run's intervals when resampling is requested, the pre-registered bars, the price per million prompts
+row, the pooled F1 differences in the registered comparison with recorded intervals and, when resampling is requested, this run's intervals alongside the registered intervals, the pre-registered bars, the price per million prompts
 and the latency check. It ends with:
 
 ```
