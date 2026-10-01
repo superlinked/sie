@@ -9,7 +9,7 @@ On a Linux machine with an NVIDIA GPU and NVIDIA Container Toolkit, start the pu
 ```bash
 docker run --gpus all -p 8080:8080 \
   -v sie-hf-cache:/app/.cache/huggingface \
-  ghcr.io/superlinked/sie-server:0.9.0-cuda12-sglang-vision-extract \
+  ghcr.io/superlinked/sie-server:v0.9.0-cuda12-sglang-vision-extract \
   serve --host 0.0.0.0 --port 8080 --models-dir /app/models \
   --models zai-org/GLM-OCR --preload zai-org/GLM-OCR
 ```
