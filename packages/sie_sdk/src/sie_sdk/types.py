@@ -225,6 +225,17 @@ class RequestMetadata(TypedDict, total=False):
     rate_book_version: str
     execution_identity_sha256: str
     execution_binding_sha256: str
+    #: Which side served the request: ``"local"`` capacity, or a ``"remote"``
+    #: upstream, named in ``upstream``.
+    served_by: Literal["local", "remote"]
+    #: The upstream that served the request, when ``served_by`` is ``"remote"``.
+    upstream: str
+    #: Why a request for the bare model name was served remotely instead of by
+    #: local capacity.
+    fallback_reason: Literal["provisioning", "model_loading", "saturated", "unhealthy"]
+    #: Error code of a remote attempt that failed. The response is then the
+    #: local refusal that the remote attempt was meant to replace.
+    fallback_error: str
 
 
 class EncodeResult(TypedDict, total=False):

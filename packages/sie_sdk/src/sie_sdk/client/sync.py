@@ -124,6 +124,7 @@ from ._shared import (
     MSGPACK_CONTENT_TYPE,
     PROVISIONING_ERROR_CODE,
     RECOMMEND_PATH,
+    REMOTE_HEADER,
     REQUEST_ID_HEADER,
     RESOURCE_EXHAUSTED_ERROR_CODE,
     RESOURCE_EXHAUSTED_MAX_RETRIES,
@@ -421,6 +422,12 @@ class SIEClient:
             sent (default: 150, longer than the gateway's default 120 s
             request deadline). A read timeout is never retried, because the
             server may still be processing the request.
+        remote: ``"forbid"`` sends ``X-SIE-Remote: forbid`` with every request, so
+            no request is served through a remote upstream. A model served
+            locally answers from local capacity, including ``503 MODEL_LOADING``
+            while it loads, and a model served only remotely answers ``400``.
+            ``None`` (default) leaves the choice to the model's routing policy.
+            The setting applies to every call made with this client.
 
     Example:
         >>> client = SIEClient("http://localhost:8080")
@@ -461,6 +468,7 @@ class SIEClient:
         base_url_headers: Mapping[str, str] | None = None,
         connect_timeout_s: float | None = None,
         read_timeout_s: float | None = None,
+        remote: Literal["forbid"] | None = None,
     ) -> None:
         base_url = resolve_base_url(base_url)
         api_key = resolve_api_key(api_key, base_url, control_plane_url)
@@ -508,6 +516,11 @@ class SIEClient:
         }
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
+        if remote is not None:
+            if remote != "forbid":
+                msg = "remote must be 'forbid' or None"
+                raise ValueError(msg)
+            headers[REMOTE_HEADER] = remote
 
         self._headers = headers.copy()
 

@@ -622,6 +622,15 @@ EXECUTION_IDENTITY_SHA256_HEADER = "X-SIE-Execution-Identity-SHA256"
 EXECUTION_BINDING_SHA256_HEADER = "X-SIE-Execution-Binding-SHA256"
 REQUEST_ID_HEADER = "X-SIE-Request-ID"
 CREDITS_DEBITED_HEADER = "X-SIE-Credits-Debited"
+REMOTE_HEADER = "X-SIE-Remote"
+SERVED_BY_HEADER = "X-SIE-Served-By"
+UPSTREAM_HEADER = "X-SIE-Upstream"
+FALLBACK_REASON_HEADER = "X-SIE-Fallback-Reason"
+FALLBACK_ERROR_HEADER = "X-SIE-Fallback-Error"
+SERVED_BY_VALUES = frozenset({"local", "remote"})
+FALLBACK_REASONS = frozenset({"provisioning", "model_loading", "saturated", "unhealthy"})
+UPSTREAM_NAME_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+FALLBACK_ERROR_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
 REQUEST_USAGE_HEADERS = {
     "input_tokens": "X-SIE-Units-Input-Tokens",
     "pairs": "X-SIE-Units-Pairs",
@@ -1062,6 +1071,19 @@ def parse_request_metadata(headers: Any, body: Any = None) -> RequestMetadata | 
         and all(char in "0123456789abcdef" for char in execution_binding_sha256)
     ):
         metadata["execution_binding_sha256"] = execution_binding_sha256
+
+    served_by = _header_value(headers, SERVED_BY_HEADER)
+    if isinstance(served_by, str) and served_by in SERVED_BY_VALUES:
+        metadata["served_by"] = served_by
+    upstream = _header_value(headers, UPSTREAM_HEADER)
+    if isinstance(upstream, str) and UPSTREAM_NAME_PATTERN.fullmatch(upstream):
+        metadata["upstream"] = upstream
+    fallback_reason = _header_value(headers, FALLBACK_REASON_HEADER)
+    if isinstance(fallback_reason, str) and fallback_reason in FALLBACK_REASONS:
+        metadata["fallback_reason"] = fallback_reason
+    fallback_error = _header_value(headers, FALLBACK_ERROR_HEADER)
+    if isinstance(fallback_error, str) and FALLBACK_ERROR_PATTERN.fullmatch(fallback_error):
+        metadata["fallback_error"] = fallback_error
 
     return metadata or None
 

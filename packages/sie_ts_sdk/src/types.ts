@@ -138,6 +138,25 @@ export interface RequestUsage {
 }
 
 /** Optional gateway metadata from the successful terminal response. */
+/** Which side served a request: SIE's own capacity or a remote upstream. */
+export const SERVED_BY_VALUES = ["local", "remote"] as const;
+export type ServedBy = (typeof SERVED_BY_VALUES)[number];
+
+/** Why a request for the bare model name was served through its remote profile. */
+export const FALLBACK_REASONS = [
+  "provisioning",
+  "model_loading",
+  "saturated",
+  "unhealthy",
+] as const;
+export type FallbackReason = (typeof FALLBACK_REASONS)[number];
+
+/** An upstream name, as `X-SIE-Upstream` carries it. */
+export const UPSTREAM_NAME_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+
+/** An SIE error code, as `X-SIE-Fallback-Error` carries it. */
+export const FALLBACK_ERROR_PATTERN = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
+
 export interface RequestMetadata {
   id?: string;
   /** Worker-origin immutable release/runtime identity digest. */
@@ -158,6 +177,17 @@ export interface RequestMetadata {
   creditsDebited?: number;
   /** Immutable rate-book version that rated `creditsDebited`, when reported. */
   rateBookVersion?: string;
+  /** Which side served the request: `local` capacity, or a `remote` upstream named in `upstream`. */
+  servedBy?: ServedBy;
+  /** The upstream that served the request, when `servedBy` is `remote`. */
+  upstream?: string;
+  /** Why a request for the bare model name was served remotely instead of by local capacity. */
+  fallbackReason?: FallbackReason;
+  /**
+   * Error code of a remote attempt that failed. The response is then the
+   * local refusal that the remote attempt was meant to replace.
+   */
+  fallbackError?: string;
 }
 
 /**
@@ -843,6 +873,15 @@ export interface SIEClientOptions {
   controlPlaneUrl?: string;
   /** Org the `connections` namespace operates on (org-scoped by path in the POC). */
   org?: string;
+  /**
+   * `"forbid"` sends `X-SIE-Remote: forbid` with every model request, so no
+   * request is served through a remote upstream. A model served locally
+   * answers from local capacity, including `503 MODEL_LOADING` while it loads,
+   * and a model served only remotely answers `400`. Omitted, the model's
+   * routing policy decides. The setting applies to every call made with this
+   * client.
+   */
+  remote?: "forbid";
 }
 
 /** Optional immutable namespace policy for a PostgreSQL connection. */

@@ -1,0 +1,23 @@
+{
+  "description": "Remote serving: the request header a caller sends to forbid remote serving, and the response headers that say which side served. A server emits the response headers; an SDK reads each into request metadata and drops a value outside its declared values or pattern.",
+  "request_header": {
+    "name": "X-SIE-Remote",
+    "values": ["forbid"]
+  },
+  "response_headers": {
+    "served_by": {"name": "X-SIE-Served-By", "values": ["local", "remote"]},
+    "upstream": {"name": "X-SIE-Upstream", "pattern": "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"},
+    "fallback_reason": {
+      "name": "X-SIE-Fallback-Reason",
+      "values": ["provisioning", "model_loading", "saturated", "unhealthy"]
+    },
+    "fallback_error": {"name": "X-SIE-Fallback-Error", "pattern": "^[A-Za-z][A-Za-z0-9_]{0,63}$"}
+  },
+  "notes": {
+    "served_by": "local or remote. Present on a served response.",
+    "upstream": "The upstream's name, present only when served remotely.",
+    "fallback_reason": "The trigger that sent a request for the bare model name to its remote profile.",
+    "fallback_error": "An SIE error code. Present when the remote attempt failed and the response is the local refusal it was meant to replace.",
+    "metadata_fields": "The Python SDK keeps the keys above as request metadata field names; the TypeScript SDK camelCases them (servedBy, upstream, fallbackReason, fallbackError)."
+  }
+}
