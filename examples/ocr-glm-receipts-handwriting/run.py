@@ -72,7 +72,7 @@ def main() -> int:
                 "finish_reason": "not_exposed",
             }
 
-        with args.out.open("w") as output, ThreadPoolExecutor(max_workers=args.concurrency) as pool:
+        with args.out.open("x") as output, ThreadPoolExecutor(max_workers=args.concurrency) as pool:
             futures = {pool.submit(read, row): row["id"] for row in rows}
             for future in as_completed(futures):
                 ident = futures[future]
