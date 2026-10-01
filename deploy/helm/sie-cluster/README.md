@@ -750,6 +750,59 @@ For emergency or legacy static namespaces that are not backed by either
 gate. Prefer declaring static pools instead, so capped/dynamic pools keep their
 fail-closed isolation behavior.
 
+### Remote backends
+
+A model's remote profile forwards its requests to an upstream: another SIE
+deployment or an OpenAI-compatible endpoint outside this cluster. In a cluster,
+remote profiles run on worker lanes whose bundle is `remote`. The gateway
+routes every remote profile there, through the normal queue, because the
+`remote` bundle outranks `default` for the remote adapters. The gateway holds
+no upstream credential and calls no upstream.
+
+Enable the remote pool and define the upstreams:
+
+```yaml
+upstreams:
+  team-sie:
+    kind: sie
+    base_url: https://sie.example.internal
+    api_key_secret:
+      name: team-sie-upstream
+      key: api-key
+    rate_cap:
+      requests_per_minute: 600
+      max_concurrency: 32
+workers:
+  pools:
+    remote:
+      enabled: true
+```
+
+- Each `upstreams` entry has the fields of the server's upstreams file:
+  `kind` (`sie` or `openai`), `base_url` (https outside loopback, with no
+  credentials, query or fragment), `rate_cap` (required) and an optional
+  `proxy_url`. `api_key_secret` names a Kubernetes Secret and key that you
+  create; the chart rejects a plain string, so a credential cannot be written
+  into values. The chart checks these fields when it renders.
+- Only the `worker` container of a `remote` lane receives the upstreams file
+  (the `<release>-sie-cluster-upstreams` ConfigMap) and the credentials
+  (environment variables read from the Secrets). The worker sidecar, the
+  gateway, sie-config and every other worker lane receive neither, and every
+  other lane runs with remote serving switched off, so it refuses a remote
+  profile even if one reaches it. The chart owns `SIE_UPSTREAMS_FILE`,
+  `SIE_REMOTE_SERVING` and the credential variables, so `extraEnv` cannot set
+  them, and an `extraEnv` entry that reads an upstream's Secret anywhere else
+  fails the render.
+- `workers.remote.serving: false` keeps remote lanes running but refuses every
+  remote profile and sends nothing upstream.
+- A remote lane requests no GPU and runs the `cpu-default` worker image
+  (`imageBundle: default`), which contains the remote adapters. A pool that
+  hosts a `remote` bundle must set `gpu.count: 0`.
+- Workers read their environment at start. After rotating an upstream's
+  Secret, restart the remote lane:
+  `kubectl rollout restart statefulset/<release>-sie-cluster-worker-remote-remote`.
+  A change to `upstreams` restarts it automatically.
+
 ### High availability in one file
 
 `values-ha.yaml` is the tested composition of the durability knobs below with
@@ -1176,6 +1229,9 @@ write access, or of the read token, which every worker sidecar holds.
   cannot write.
 - **Gateway admin token (when set):** every gateway pod and the tooling that
   manages pools.
+- **Upstream credentials (when remote backends are used):** the `worker`
+  container of each `remote` lane, from the Secrets that `upstreams` names.
+  See [Remote backends](#remote-backends).
 
 Anyone who can read Secrets in the release namespace can read all of them.
 Limit Secret read access in that namespace accordingly.

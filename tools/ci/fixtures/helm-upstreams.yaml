@@ -1,0 +1,38 @@
+# Helm `upstreams` values, and the server upstreams file the chart must render
+# from them. tools/ci/tests/test_helm_render.py renders `values` and compares
+# the result with `rendered`; tools/ci/tests/test_helm_upstreams_contract.py
+# loads `rendered` with the server's own parser and requires it to use every
+# upstream field the server defines.
+values:
+  team-sie:
+    kind: sie
+    base_url: https://sie.example.internal/
+    api_key_secret:
+      name: team-sie-upstream
+      key: api-key
+    proxy_url: http://proxy.example.internal:3128
+    rate_cap:
+      requests_per_minute: 600
+      max_concurrency: 32
+  open-host:
+    kind: openai
+    base_url: https://host.example.com/v1
+    rate_cap:
+      requests_per_minute: 300
+      max_concurrency: 16
+rendered:
+  upstreams:
+    team-sie:
+      kind: sie
+      base_url: https://sie.example.internal/
+      api_key_secret: SIE_UPSTREAM_KEY_TEAM_SIE
+      proxy_url: http://proxy.example.internal:3128
+      rate_cap:
+        requests_per_minute: 600
+        max_concurrency: 32
+    open-host:
+      kind: openai
+      base_url: https://host.example.com/v1
+      rate_cap:
+        requests_per_minute: 300
+        max_concurrency: 16

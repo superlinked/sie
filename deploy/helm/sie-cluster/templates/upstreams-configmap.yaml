@@ -1,0 +1,12 @@
+{{- if eq (include "sie-cluster.worker.remoteLaneEnabled" .) "true" }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "sie-cluster.upstreams.configMapName" . }}
+  namespace: {{ include "sie-cluster.namespace" . }}
+  labels:
+    {{- include "sie-cluster.worker.labels" . | nindent 4 }}
+data:
+  upstreams.yaml: |
+    {{- include "sie-cluster.upstreams.file" . | nindent 4 }}
+{{- end }}

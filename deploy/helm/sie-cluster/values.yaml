@@ -430,6 +430,26 @@ machineProfiles:
     machineType: ""
     spot: false
 
+# -- Upstreams for remote profiles: named endpoints outside this deployment
+# that a model's remote profile can name. Only the worker container of a lane
+# whose bundle is `remote` (see workers.pools.remote) receives them. Each entry
+# has the fields of the server's upstreams file: kind (sie or openai),
+# base_url (https outside loopback), rate_cap (requests_per_minute and
+# max_concurrency, required) and an optional proxy_url. api_key_secret names
+# the Kubernetes Secret and key that hold the credential; a credential never
+# goes in values.
+# Example:
+#   team-sie:
+#     kind: sie
+#     base_url: https://sie.example.internal
+#     api_key_secret:
+#       name: team-sie-upstream
+#       key: api-key
+#     rate_cap:
+#       requests_per_minute: 600
+#       max_concurrency: 32
+upstreams: {}
+
 # -- Worker pools configuration (one StatefulSet per enabled queuePool/machineProfile/bundle lane)
 workers:
   # -- Common worker settings
@@ -869,6 +889,13 @@ workers:
     # to open the worker API to everything.
     extraIngress: []
 
+  # -- Remote serving on worker lanes whose bundle is `remote`.
+  remote:
+    # -- Global switch. false keeps remote lanes running but refuses every
+    # remote profile and sends nothing upstream. Every other lane always runs
+    # with remote serving off.
+    serving: true
+
   # -- Worker pools (one StatefulSet per enabled queuePool/machineProfile/bundle lane)
   # Each map entry creates a WorkerGroup family: one StatefulSet + one
   # pre-pull DaemonSet per enabled bundle.
@@ -1120,6 +1147,34 @@ workers:
         default:
           minReplicas: 1
           maxReplicas: 3
+
+    # Remote profiles (CPU, no GPU). The only lane that receives the upstreams
+    # above and their credentials. It runs the cpu-default image, which
+    # contains the remote adapters, with the remote bundle.
+
+    remote:
+      enabled: false
+      machineProfile: cpu
+      gpuType: cpu
+      platform: cpu
+      nodeSelector: {}
+      gpu:
+        count: 0
+        product: ""
+      resources:
+        requests:
+          cpu: "1"
+          memory: "2Gi"
+        limits:
+          cpu: "2"
+          memory: "4Gi"
+      shmSize: 256Mi
+      tolerations: []
+      bundles:
+        remote:
+          imageBundle: default
+          minReplicas: 1
+          maxReplicas: 2
 
 # -- Autoscaling configuration using KEDA ScaledObjects.
 # -- Requires KEDA operator. Set keda.install=true to install KEDA as a sub-chart,

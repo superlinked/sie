@@ -1311,6 +1311,172 @@ consume the same queuePool/machineProfile/bundle tuple.
 {{- end }}
 
 {{/*
+"true" when an enabled worker lane serves the `remote` bundle. Remote lanes are
+the only workers that receive the upstreams file and upstream credentials.
+*/}}
+{{- define "sie-cluster.worker.remoteLaneEnabled" -}}
+{{- $enabled := false -}}
+{{- range $poolName, $pool := .Values.workers.pools -}}
+{{- if $pool.enabled -}}
+{{- range $bundleName, $bundleCfg := $pool.bundles -}}
+{{- if and (eq $bundleName "remote") (dig "enabled" true $bundleCfg) -}}
+{{- $enabled = true -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if $enabled }}true{{ end -}}
+{{- end }}
+
+{{- define "sie-cluster.upstreams.configMapName" -}}
+{{- printf "%s-upstreams" (include "sie-cluster.fullname" .) -}}
+{{- end }}
+
+{{/*
+Environment variable that carries one upstream's credential on remote lanes.
+Upstream names hold no underscore, so the mapping is one to one.
+*/}}
+{{- define "sie-cluster.upstream.keyEnvName" -}}
+{{- printf "SIE_UPSTREAM_KEY_%s" (. | replace "-" "_" | upper) -}}
+{{- end }}
+
+{{/*
+The server's upstreams file, rendered from `upstreams`. Each credential is
+referenced by the name of the environment variable that remote lanes fill from
+the upstream's Secret.
+*/}}
+{{- define "sie-cluster.upstreams.file" -}}
+{{- $rendered := dict -}}
+{{- range $name, $upstream := (default dict .Values.upstreams) -}}
+{{- $rateCap := dict "requests_per_minute" (int64 $upstream.rate_cap.requests_per_minute) "max_concurrency" (int64 $upstream.rate_cap.max_concurrency) -}}
+{{- $entry := dict "kind" $upstream.kind "base_url" $upstream.base_url "rate_cap" $rateCap -}}
+{{- if $upstream.proxy_url -}}
+{{- $_ := set $entry "proxy_url" $upstream.proxy_url -}}
+{{- end -}}
+{{- if $upstream.api_key_secret -}}
+{{- $_ := set $entry "api_key_secret" (include "sie-cluster.upstream.keyEnvName" $name) -}}
+{{- end -}}
+{{- $_ := set $rendered $name $entry -}}
+{{- end -}}
+{{- dict "upstreams" $rendered | toYaml -}}
+{{- end }}
+
+{{/*
+Check one upstream URL the way the server does. Messages never repeat the
+value, because a rejected URL can carry a credential.
+
+Args (dict): url, field, requireTls.
+*/}}
+{{- define "sie-cluster.upstreams.validateUrl" -}}
+{{- $url := .url -}}
+{{- if not (kindIs "string" $url) -}}
+{{- fail (printf "%s must be a URL string" .field) -}}
+{{- end -}}
+{{- if not (regexMatch "^[\\x21-\\x7e]+$" $url) -}}
+{{- fail (printf "%s must be printable ASCII without spaces" .field) -}}
+{{- end -}}
+{{- if or (contains "?" $url) (contains "#" $url) -}}
+{{- fail (printf "%s must not carry a query or a fragment" .field) -}}
+{{- end -}}
+{{- if not (regexMatch "^https?://[^/@]+(/.*)?$" $url) -}}
+{{- fail (printf "%s must be an http or https URL that names a host and carries no credentials" .field) -}}
+{{- end -}}
+{{- if and .requireTls (hasPrefix "http://" $url) (not (regexMatch "^http://(localhost|127\\.[0-9]+\\.[0-9]+\\.[0-9]+|\\[::1\\])(:[0-9]+)?(/.*)?$" $url)) -}}
+{{- fail (printf "%s must use https outside loopback" .field) -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Validate `upstreams` against the server's upstreams file format, and keep each
+upstream's Secret out of every container other than the remote lanes' workers.
+*/}}
+{{- define "sie-cluster.upstreams.validate" -}}
+{{- $root := . -}}
+{{- $upstreams := default dict $root.Values.upstreams -}}
+{{- if not (kindIs "map" $upstreams) -}}
+{{- fail "upstreams must map upstream names to definitions" -}}
+{{- end -}}
+{{- $serving := dig "remote" "serving" true $root.Values.workers -}}
+{{- if not (kindIs "bool" $serving) -}}
+{{- fail "workers.remote.serving must be a boolean" -}}
+{{- end -}}
+{{- $secretNames := list -}}
+{{- range $name, $upstream := $upstreams -}}
+{{- $path := printf "upstreams.%s" $name -}}
+{{- if not (regexMatch "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$" $name) -}}
+{{- fail (printf "upstreams: %q is not an upstream name; use lowercase letters, digits and hyphens, at most 63 characters, starting and ending with a letter or digit" $name) -}}
+{{- end -}}
+{{- if not (kindIs "map" $upstream) -}}
+{{- fail (printf "%s must be a map" $path) -}}
+{{- end -}}
+{{- range $field, $_ := $upstream -}}
+{{- if not (has $field (list "kind" "base_url" "api_key_secret" "rate_cap" "proxy_url")) -}}
+{{- fail (printf "%s.%s is not an upstream field: use kind, base_url, api_key_secret, rate_cap and proxy_url" $path $field) -}}
+{{- end -}}
+{{- end -}}
+{{- if not (has $upstream.kind (list "sie" "openai")) -}}
+{{- fail (printf "%s.kind must be sie or openai" $path) -}}
+{{- end -}}
+{{- include "sie-cluster.upstreams.validateUrl" (dict "url" $upstream.base_url "field" (printf "%s.base_url" $path) "requireTls" true) -}}
+{{- if not (kindIs "invalid" $upstream.proxy_url) -}}
+{{- include "sie-cluster.upstreams.validateUrl" (dict "url" $upstream.proxy_url "field" (printf "%s.proxy_url" $path) "requireTls" false) -}}
+{{- if not (hasPrefix "https://" $upstream.base_url) -}}
+{{- fail (printf "%s.proxy_url requires an https base_url" $path) -}}
+{{- end -}}
+{{- end -}}
+{{- $rateCap := $upstream.rate_cap -}}
+{{- if not (kindIs "map" $rateCap) -}}
+{{- fail (printf "%s.rate_cap is required: set requests_per_minute and max_concurrency" $path) -}}
+{{- end -}}
+{{- range $field, $_ := $rateCap -}}
+{{- if not (has $field (list "requests_per_minute" "max_concurrency")) -}}
+{{- fail (printf "%s.rate_cap.%s is not a rate cap field: use requests_per_minute and max_concurrency" $path $field) -}}
+{{- end -}}
+{{- end -}}
+{{- range $field := list "requests_per_minute" "max_concurrency" -}}
+{{- $limit := index $rateCap $field -}}
+{{- if not (and (or (kindIs "int" $limit) (kindIs "int64" $limit) (kindIs "float64" $limit)) (eq (float64 $limit) (floor (float64 $limit))) (gt (float64 $limit) 0.0)) -}}
+{{- fail (printf "%s.rate_cap.%s must be a positive integer" $path $field) -}}
+{{- end -}}
+{{- end -}}
+{{- if not (kindIs "invalid" $upstream.api_key_secret) -}}
+{{- $secret := $upstream.api_key_secret -}}
+{{- if not (kindIs "map" $secret) -}}
+{{- fail (printf "%s.api_key_secret must name a Kubernetes Secret as {name, key}; a credential never goes in values" $path) -}}
+{{- end -}}
+{{- range $field, $_ := $secret -}}
+{{- if not (has $field (list "name" "key")) -}}
+{{- fail (printf "%s.api_key_secret.%s is not a field: use name and key" $path $field) -}}
+{{- end -}}
+{{- end -}}
+{{- if not (and (kindIs "string" $secret.name) (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" (toString $secret.name)) (le (len (toString $secret.name)) 253)) -}}
+{{- fail (printf "%s.api_key_secret.name must be a Kubernetes Secret name" $path) -}}
+{{- end -}}
+{{- if not (and (kindIs "string" $secret.key) (regexMatch "^[-._a-zA-Z0-9]+$" (toString $secret.key)) (le (len (toString $secret.key)) 253)) -}}
+{{- fail (printf "%s.api_key_secret.key must be a Secret data key" $path) -}}
+{{- end -}}
+{{- $secretNames = append $secretNames $secret.name -}}
+{{- end -}}
+{{- end -}}
+{{- $sources := list (dict "path" "gateway.extraEnv" "entries" $root.Values.gateway.extraEnv) (dict "path" "workers.common.extraEnv" "entries" $root.Values.workers.common.extraEnv) (dict "path" "workers.common.workerSidecar.extraEnv" "entries" $root.Values.workers.common.workerSidecar.extraEnv) -}}
+{{- range $poolName, $pool := $root.Values.workers.pools -}}
+{{- range $bundleName, $bundleCfg := (default dict $pool.bundles) -}}
+{{- if ne $bundleName "remote" -}}
+{{- $sources = append $sources (dict "path" (printf "workers.pools.%s.bundles.%s.extraEnv" $poolName $bundleName) "entries" (dig "extraEnv" list (default dict $bundleCfg))) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- range $source := $sources -}}
+{{- range $entry := (default list $source.entries) -}}
+{{- $secretName := dig "valueFrom" "secretKeyRef" "name" "" $entry -}}
+{{- if and $secretName (has $secretName $secretNames) -}}
+{{- fail (printf "%s reads the upstream Secret %q: only the worker container of a remote lane may hold an upstream credential" $source.path $secretName) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
 MCP edge (Req 12) — the hosted MCP server fronting the cluster's document jobs.
 */}}
 {{- define "sie-cluster.mcpEdge.serviceName" -}}

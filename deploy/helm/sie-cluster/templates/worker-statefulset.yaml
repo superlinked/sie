@@ -1,5 +1,6 @@
 {{- $root := . -}}
 {{- $_ := include "sie-cluster.worker.validateLanes" $root -}}
+{{- $_ := include "sie-cluster.upstreams.validate" $root -}}
 {{/*
 Safety guard: the worker-sidecar container is the production data path (NATS ->
 Rust sidecar -> UDS IPC -> colocated adapter process). The sidecar needs
@@ -32,7 +33,10 @@ fast at render time.
 {{- fail (printf "workers.common.modelReadyTimeoutSec=%d must be lower than the adapter worker liveness budget (%d * %d = %ds); increase workers.common.probes.liveness.failureThreshold/periodSeconds or lower modelReadyTimeoutSec" $modelReadyTimeoutS $workerLivenessFailures $workerLivenessPeriodS $workerLivenessBudgetS) }}
 {{- end }}
 {{- $reservedOtelEnv := include "sie-cluster.otel.reservedEnvNames" $root | fromJsonArray -}}
-{{- $reservedWorkerEnv := concat $reservedOtelEnv (list "SIE_BUNDLE" "SIE_GPU_TYPE" "SIE_MACHINE_PROFILE" "SIE_POOL" "SIE_SGLANG_KERNEL_CACHE_ROOT" "SIE_WORKER_ID") -}}
+{{- $reservedWorkerEnv := concat $reservedOtelEnv (list "SIE_BUNDLE" "SIE_GPU_TYPE" "SIE_MACHINE_PROFILE" "SIE_POOL" "SIE_REMOTE_SERVING" "SIE_SGLANG_KERNEL_CACHE_ROOT" "SIE_UPSTREAMS_FILE" "SIE_WORKER_ID") -}}
+{{- range $upstreamName, $_ := (default dict $root.Values.upstreams) -}}
+{{- $reservedWorkerEnv = append $reservedWorkerEnv (include "sie-cluster.upstream.keyEnvName" $upstreamName) -}}
+{{- end -}}
 {{- /* The SIE_STREAM_* trio is chart-owned on the sidecar for the same
      reason as on the gateway: both create the work streams, first creator
      wins, so the chart renders one value onto both. An extraEnv override
@@ -135,6 +139,13 @@ fast at render time.
 {{- fail "workers.common.kernelCache.storageSize must be non-empty when the kernel cache is enabled" }}
 {{- end }}
 {{- $gpuCount := int $pool.gpu.count }}
+{{- $remoteLane := eq $bundle "remote" }}
+{{- if and $remoteLane (gt $gpuCount 0) }}
+{{- fail (printf "workers.pools.%s.bundles.remote: a remote lane holds upstream credentials and runs no model on an accelerator; set workers.pools.%s.gpu.count to 0" $poolName $poolName) }}
+{{- end }}
+{{- if and $remoteLane (eq $imageBundle "remote") }}
+{{- fail (printf "workers.pools.%s.bundles.remote: no remote worker image is published; set imageBundle: default to run the remote adapters on the %s-default image" $poolName $platform) }}
+{{- end }}
 {{- $poolSidecar := default dict $pool.sidecar }}
 {{- $emulatedChildCount := int (dig "emulatedChildCount" 0 $poolSidecar) }}
 {{- if and (gt $emulatedChildCount 0) (gt $gpuCount 0) }}
@@ -231,6 +242,9 @@ spec:
         sie.superlinked.com/queue-pool: {{ $queuePool | quote }}
       annotations:
         checksum/otel-resource: {{ include "sie-cluster.otel.resourceChecksum" $root | quote }}
+        {{- if $remoteLane }}
+        checksum/upstreams: {{ include "sie-cluster.upstreams.file" $root | sha256sum | quote }}
+        {{- end }}
     spec:
       {{- include "sie-cluster.imagePullSecrets" $root | nindent 6 }}
       {{- if $pool.runtimeClassName }}
@@ -395,6 +409,25 @@ spec:
               value: {{ printf "%s-%s" $platform $bundle | quote }}
             - name: SIE_DEPLOYMENT_ENV
               value: {{ if and $root.Values.telemetry $root.Values.telemetry.deploymentEnv }}{{ $root.Values.telemetry.deploymentEnv | quote }}{{ else }}"production"{{ end }}
+            {{- if $remoteLane }}
+            - name: SIE_REMOTE_SERVING
+              value: {{ ternary "1" "0" (dig "remote" "serving" true $root.Values.workers) | quote }}
+            - name: SIE_UPSTREAMS_FILE
+              value: "/etc/sie/upstreams/upstreams.yaml"
+            {{- range $upstreamName, $upstream := (default dict $root.Values.upstreams) }}
+            {{- with $upstream.api_key_secret }}
+            - name: {{ include "sie-cluster.upstream.keyEnvName" $upstreamName }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .name | quote }}
+                  key: {{ .key | quote }}
+            {{- end }}
+            {{- end }}
+            {{- else }}
+            # Only remote lanes hold upstreams; every other lane refuses a remote profile.
+            - name: SIE_REMOTE_SERVING
+              value: "0"
+            {{- end }}
             {{- if $root.Values.workers.common.workerSidecar.enabled }}
             # worker-sidecar owns the NATS loop; the adapter process
             # exposes the IPC server over a shared Unix socket. The chart fails render
@@ -471,6 +504,11 @@ spec:
             {{- if $root.Values.workers.common.workerSidecar.enabled }}
             - name: sie-ipc
               mountPath: /var/run/sie
+            {{- end }}
+            {{- if $remoteLane }}
+            - name: upstreams
+              mountPath: /etc/sie/upstreams
+              readOnly: true
             {{- end }}
         {{- end }}
         {{- if $root.Values.workers.common.workerSidecar.enabled }}
@@ -766,6 +804,11 @@ spec:
           emptyDir:
             medium: Memory
             sizeLimit: 64Mi
+        {{- end }}
+        {{- if $remoteLane }}
+        - name: upstreams
+          configMap:
+            name: {{ include "sie-cluster.upstreams.configMapName" $root }}
         {{- end }}
 {{- end }}
 {{- end }}

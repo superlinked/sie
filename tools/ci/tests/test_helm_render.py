@@ -1406,3 +1406,252 @@ def test_rendered_nats_cluster_forms_only_with_route_credentials(tmp_path: Path)
             server.terminate()
         for server in servers:
             server.wait(timeout=10)
+
+
+UPSTREAMS_FIXTURE = ROOT / "tools/ci/fixtures/helm-upstreams.yaml"
+UPSTREAMS_CONFIG_MAP = "sie-sie-cluster-upstreams"
+REMOTE_WORKER = ("StatefulSet", "sie-sie-cluster-worker-remote-remote", "worker")
+CREDENTIAL_CANARY = "sk-canary-2f7c9e04b1d3a685"
+
+
+def upstreams_fixture() -> dict:
+    return yaml.safe_load(UPSTREAMS_FIXTURE.read_text(encoding="utf-8"))
+
+
+def remote_pool_values(**pools: dict) -> dict:
+    return {
+        "upstreams": upstreams_fixture()["values"],
+        "workers": {"pools": {"remote": {"enabled": True}, **pools}},
+    }
+
+
+def pod_specs(docs: list[dict]) -> list[tuple[dict, dict]]:
+    specs = []
+    for doc in docs:
+        spec = doc.get("spec") or {}
+        if doc["kind"] == "Pod":
+            specs.append((doc, spec))
+        elif doc["kind"] == "CronJob":
+            specs.append((doc, spec["jobTemplate"]["spec"]["template"]["spec"]))
+        elif isinstance(spec.get("template"), dict) and "spec" in spec["template"]:
+            specs.append((doc, spec["template"]["spec"]))
+    return specs
+
+
+def secret_references(container: dict) -> set[str]:
+    names = {
+        env["valueFrom"]["secretKeyRef"]["name"]
+        for env in container.get("env", [])
+        if "secretKeyRef" in env.get("valueFrom", {})
+    }
+    names.update(source["secretRef"]["name"] for source in container.get("envFrom", []) if "secretRef" in source)
+    return names
+
+
+def containers_with_upstream_access(docs: list[dict], secret_names: set[str]) -> dict[str, set[tuple[str, str, str]]]:
+    access: dict[str, set[tuple[str, str, str]]] = {"secret": set(), "config_map": set(), "file_env": set()}
+    for doc, spec in pod_specs(docs):
+        upstream_volumes = {
+            volume["name"]
+            for volume in spec.get("volumes", [])
+            if volume.get("configMap", {}).get("name") == UPSTREAMS_CONFIG_MAP
+            or volume.get("secret", {}).get("secretName") in secret_names
+        }
+        for container in [*spec.get("initContainers", []), *spec["containers"]]:
+            owner = (doc["kind"], doc["metadata"]["name"], container["name"])
+            if secret_references(container) & secret_names:
+                access["secret"].add(owner)
+            if any(mount["name"] in upstream_volumes for mount in container.get("volumeMounts", [])):
+                access["config_map"].add(owner)
+            if any(env["name"] == "SIE_UPSTREAMS_FILE" for env in container.get("env", [])):
+                access["file_env"].add(owner)
+    return access
+
+
+def test_only_the_remote_lane_worker_receives_upstreams_and_credentials(tmp_path: Path) -> None:
+    docs = rendered_documents(tmp_path, remote_pool_values(l4={"enabled": True}, cpu={"enabled": True}))
+    secret_names = {
+        upstream["api_key_secret"]["name"]
+        for upstream in upstreams_fixture()["values"].values()
+        if "api_key_secret" in upstream
+    }
+
+    access = containers_with_upstream_access(docs, secret_names)
+
+    assert access == {"secret": {REMOTE_WORKER}, "config_map": {REMOTE_WORKER}, "file_env": {REMOTE_WORKER}}
+    assert not [doc for doc in docs if doc["kind"] == "Secret" and doc["metadata"]["name"] in secret_names]
+    remote_serving = env_entries(docs, "SIE_REMOTE_SERVING")
+    assert remote_serving == {
+        "sie-sie-cluster-worker-cpu-default/worker": "0",
+        "sie-sie-cluster-worker-l4-default/worker": "0",
+        "sie-sie-cluster-worker-remote-remote/worker": "1",
+    }
+    remote = container_env(docs, REMOTE_WORKER[1], "worker")
+    assert remote["SIE_UPSTREAMS_FILE"]["value"] == "/etc/sie/upstreams/upstreams.yaml"
+    assert remote["SIE_UPSTREAM_KEY_TEAM_SIE"]["valueFrom"]["secretKeyRef"] == {
+        "name": "team-sie-upstream",
+        "key": "api-key",
+    }
+    (remote_lane,) = [
+        doc for doc in docs if doc["kind"] == "StatefulSet" and doc["metadata"]["name"] == REMOTE_WORKER[1]
+    ]
+    (worker,) = [c for c in remote_lane["spec"]["template"]["spec"]["containers"] if c["name"] == "worker"]
+    assert worker["image"].endswith("-cpu-default")
+    assert "--bundle=remote" in worker["args"]
+    assert "nvidia.com/gpu" not in worker["resources"]["limits"]
+
+
+def test_the_rendered_upstreams_file_matches_the_fixture(tmp_path: Path) -> None:
+    docs = rendered_documents(tmp_path, remote_pool_values())
+
+    (config_map,) = [
+        doc for doc in docs if doc["kind"] == "ConfigMap" and doc["metadata"]["name"] == UPSTREAMS_CONFIG_MAP
+    ]
+
+    assert yaml.safe_load(config_map["data"]["upstreams.yaml"]) == upstreams_fixture()["rendered"]
+
+
+def test_no_upstreams_file_is_rendered_without_a_remote_lane(tmp_path: Path) -> None:
+    docs = rendered_documents(tmp_path, {"upstreams": upstreams_fixture()["values"], **L4_POOL})
+
+    assert not [doc for doc in docs if doc["metadata"]["name"] == UPSTREAMS_CONFIG_MAP]
+    assert env_entries(docs, "SIE_REMOTE_SERVING") == {"sie-sie-cluster-worker-l4-default/worker": "0"}
+
+
+def test_the_global_switch_turns_remote_serving_off_on_remote_lanes(tmp_path: Path) -> None:
+    values = remote_pool_values()
+    values["workers"]["remote"] = {"serving": False}
+
+    docs = rendered_documents(tmp_path, values)
+
+    assert env_entries(docs, "SIE_REMOTE_SERVING") == {"sie-sie-cluster-worker-remote-remote/worker": "0"}
+
+
+def test_changing_an_upstream_restarts_the_remote_lane(tmp_path: Path) -> None:
+    def checksum(values: dict) -> str:
+        (statefulset,) = worker_statefulsets(tmp_path, values)
+        return statefulset["spec"]["template"]["metadata"]["annotations"]["checksum/upstreams"]
+
+    before = remote_pool_values()
+    after = remote_pool_values()
+    after["upstreams"]["open-host"]["base_url"] = "https://other.example.com/v1"
+
+    assert checksum(before) != checksum(after)
+
+
+def upstream(**overrides: object) -> dict:
+    definition: dict = {
+        "kind": "sie",
+        "base_url": "https://sie.example.internal",
+        "rate_cap": {"requests_per_minute": 60, "max_concurrency": 4},
+    }
+    definition.update(overrides)
+    return definition
+
+
+def reads_secret(name: str) -> dict:
+    return {"name": "SOME_KEY", "valueFrom": {"secretKeyRef": {"name": name, "key": "api-key"}}}
+
+
+SECRET_UPSTREAM = {"team": upstream(api_key_secret={"name": "team-upstream", "key": "api-key"})}
+
+
+@pytest.mark.parametrize(
+    ("values", "message"),
+    [
+        (
+            {"workers": {"pools": {"remote": {"enabled": True, "gpu": {"count": 1}}}}},
+            "workers.pools.remote.bundles.remote: a remote lane holds upstream credentials",
+        ),
+        (
+            {
+                "workers": {
+                    "pools": {
+                        "remote": {
+                            "enabled": True,
+                            "bundles": {"remote": {"imageBundle": "remote", "minReplicas": 1, "maxReplicas": 1}},
+                        }
+                    }
+                }
+            },
+            "no remote worker image is published",
+        ),
+        ({"upstreams": {"team": upstream(extra=1)}}, "upstreams.team.extra is not an upstream field"),
+        ({"upstreams": {"team": upstream(kind="grpc")}}, "upstreams.team.kind must be sie or openai"),
+        (
+            {"upstreams": {"team": upstream(base_url=f"http://{CREDENTIAL_CANARY}.example.internal")}},
+            "upstreams.team.base_url must use https outside loopback",
+        ),
+        (
+            {"upstreams": {"team": upstream(base_url=f"https://user:{CREDENTIAL_CANARY}@sie.example.internal")}},
+            "upstreams.team.base_url must be an http or https URL that names a host and carries no credentials",
+        ),
+        (
+            {"upstreams": {"team": upstream(base_url=f"https://sie.example.internal/v1?key={CREDENTIAL_CANARY}")}},
+            "upstreams.team.base_url must not carry a query or a fragment",
+        ),
+        (
+            {"upstreams": {"team": upstream(api_key_secret=CREDENTIAL_CANARY)}},
+            "upstreams.team.api_key_secret must name a Kubernetes Secret as {name, key}",
+        ),
+        (
+            {"upstreams": {"team": upstream(base_url="http://127.0.0.1:8080", proxy_url="http://proxy:3128")}},
+            "upstreams.team.proxy_url requires an https base_url",
+        ),
+        ({"upstreams": {"Team_SIE": upstream()}}, "is not an upstream name"),
+        ({"upstreams": {"team": upstream(rate_cap=None)}}, "upstreams.team.rate_cap is required"),
+        (
+            {"upstreams": {"team": upstream(rate_cap={"requests_per_minute": 0, "max_concurrency": 1})}},
+            "upstreams.team.rate_cap.requests_per_minute must be a positive integer",
+        ),
+        (
+            {"workers": {"common": {"extraEnv": [{"name": "SIE_UPSTREAMS_FILE", "value": "/tmp/upstreams.yaml"}]}}},
+            "workers.common.extraEnv must not override chart-owned variable SIE_UPSTREAMS_FILE",
+        ),
+        (
+            {"workers": {"common": {"extraEnv": [{"name": "SIE_REMOTE_SERVING", "value": "1"}]}}},
+            "workers.common.extraEnv must not override chart-owned variable SIE_REMOTE_SERVING",
+        ),
+        (
+            {"upstreams": SECRET_UPSTREAM, "workers": {"common": {"extraEnv": [reads_secret("team-upstream")]}}},
+            "workers.common.extraEnv reads the upstream Secret",
+        ),
+        (
+            {"upstreams": SECRET_UPSTREAM, "gateway": {"extraEnv": [reads_secret("team-upstream")]}},
+            "gateway.extraEnv reads the upstream Secret",
+        ),
+        (
+            {
+                "upstreams": SECRET_UPSTREAM,
+                "workers": {"common": {"workerSidecar": {"extraEnv": [reads_secret("team-upstream")]}}},
+            },
+            "workers.common.workerSidecar.extraEnv reads the upstream Secret",
+        ),
+        (
+            {
+                "upstreams": SECRET_UPSTREAM,
+                "workers": {
+                    "pools": {
+                        "l4": {
+                            "enabled": True,
+                            "bundles": {
+                                "default": {
+                                    "minReplicas": 0,
+                                    "maxReplicas": 1,
+                                    "extraEnv": [reads_secret("team-upstream")],
+                                }
+                            },
+                        }
+                    }
+                },
+            },
+            "workers.pools.l4.bundles.default.extraEnv reads the upstream Secret",
+        ),
+    ],
+)
+def test_unsafe_remote_configuration_fails_the_render(tmp_path: Path, values: dict, message: str) -> None:
+    result = render_workers(tmp_path, values)
+
+    assert result.returncode != 0
+    assert message in result.stderr
+    assert CREDENTIAL_CANARY not in result.stderr
