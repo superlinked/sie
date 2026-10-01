@@ -7,15 +7,16 @@ it, and hold the harmful ones. This example scores seven screens on the same
 4,768 real user prompts: 2,853 from ToxicChat and 1,915 from Aegis 2.0, each
 labelled harmful or not by people.
 
-SIE Qwen3Guard 4B scored the highest pooled F1 on the harmful class, 82.7%,
-against 75.0% for Claude Haiku 4.5 used as a judge. That is 7.7 points, with a
-95% interval of +5.8 to +9.6. Most of the lead is precision: Qwen3Guard held 84
-good prompts by mistake where Haiku held 424. Its recall is a little lower,
-0.747 against 0.782, so it is more accurate and does not catch more. SIE
-GLiGuard, a 300M classifier at $4.68 per million prompts, scored 77.7%.
+SIE Qwen3Guard 4B scored 82.7% harmful-class F1, against 76.1% for GPT-6 Sol
+and 76.2% for Claude Haiku 4.5 in their measured short-verdict configuration.
+Its lead over Sol is 6.6 points (95% interval 4.8 to 8.4); over Haiku, 6.5
+points (4.7 to 8.3). Qwen3Guard held 84 benign prompts by mistake, compared
+with 159 for Sol and 140 for Haiku. SIE GLiGuard, a 300M classifier at $4.68
+per million prompts, scored 77.7%.
 
 `score.py` re-derives every figure from the recorded answers and checks it
-against [superlinked.com/guardrails](https://superlinked.com/guardrails). The
+against the pinned registered report. The comparison supports the planned
+[guardrails page](https://superlinked.com/guardrails) update. The
 page's sources are in its
 [SOURCES.md](https://superlinked.com/reference/guardrails/SOURCES.md).
 
@@ -23,7 +24,7 @@ page's sources are in its
 | --- | --- | --- | --- | --- | --- |
 | SIE Qwen3Guard 4B (loose) | 0.831 | 0.825 | **82.7%** | 0.925 | 0.747 |
 | SIE Qwen3Guard 4B (strict) | 0.690 | 0.861 | 80.8% | 0.701 | 0.953 |
-| SIE GLiGuard (default 0.5) | 0.641 | 0.844 | **77.7%** | 0.684 | 0.900 |
+| SIE GLiGuard (default 0.5) | 0.641 | 0.844 | 77.7% | 0.684 | 0.900 |
 | SIE GLiGuard (tuned, not shipped) | 0.754 | 0.811 | 79.5% | 0.862 | 0.737 |
 | GPT-6 Sol (short verdict) | 0.647 | 0.800 | **76.1%** | 0.857 | 0.685 |
 | Claude Haiku 4.5 (short verdict) | 0.734 | 0.772 | **76.2%** | 0.871 | 0.677 |
@@ -137,7 +138,7 @@ Five hosted GLiGuard calls agreed on all five when this example was written.
 ## What result to expect
 
 `python3 score.py` prints the table above with pooled tp / fp / fn beside each
-row, the eight pooled F1 differences the page reports with this run's and the
+row, the pooled F1 differences in the registered comparison with this run's and the
 registered intervals, the pre-registered bars, the price per million prompts
 and the latency check. It ends with:
 
