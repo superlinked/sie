@@ -21,6 +21,7 @@ from sie_server.api.ws import (
     compute_bundle_config_view,
 )
 from sie_server.config.model import ModelConfig
+from sie_server.config.routing import validate_model_routing
 from sie_server.config.upstreams import validate_profile_upstreams
 from sie_server.core.encode_pipeline import EncodePipeline, resolve_encode_output_types
 from sie_server.core.extract_cost import (
@@ -739,6 +740,7 @@ class QueueExecutor:
                 for expanded in expand_profile_variants([model_config]).values():
                     validate_no_legacy_scalar_lora_id(name=expanded.sie_id, config=expanded)
                     validate_profile_upstreams(expanded)
+                    validate_model_routing(expanded)
                 configs.append(model_config)
             except (TypeError, ValueError, yaml.YAMLError) as exc:
                 if not model_id:

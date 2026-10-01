@@ -588,6 +588,82 @@ def is_remote_adapter_path(adapter_path: str | None) -> bool:
     return bool(adapter_path) and adapter_path.startswith(REMOTE_ADAPTER_MODULE_PREFIX)
 
 
+RoutingPolicy = Literal["remote_only", "fallback", "threshold"]
+FallbackTrigger = Literal["provisioning", "model_loading", "saturated", "unhealthy"]
+DEFAULT_FALLBACK_TRIGGERS: tuple[FallbackTrigger, ...] = ("provisioning", "model_loading")
+_THRESHOLD_FIELDS = ("wake_above", "sleep_below", "window_s", "cooldown_s")
+
+
+class RoutingConfig(BaseModel):
+    """How a request for the bare model name chooses between the local and the remote profile.
+
+    ``remote_only`` is the policy of a ``remote_backed`` model: every request is
+    served by its remote profile. Under ``fallback`` the local profile serves,
+    and ``fallback_profile`` serves when local capacity refuses for one of
+    ``triggers`` before it accepts the work. Under ``threshold`` the remote
+    profile serves until demand stays above ``wake_above`` for ``window_s``,
+    and serves again once demand stays below ``sleep_below`` for
+    ``cooldown_s``. A request that names a profile is never routed.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    policy: RoutingPolicy
+    fallback_profile: str | None = None
+    triggers: tuple[FallbackTrigger, ...] | None = None
+    wake_above: float | None = Field(default=None, gt=0)
+    sleep_below: float | None = Field(default=None, gt=0)
+    window_s: float | None = Field(default=None, gt=0)
+    cooldown_s: float | None = Field(default=None, gt=0)
+
+    @property
+    def effective_triggers(self) -> frozenset[FallbackTrigger]:
+        """The triggers that serve through ``fallback_profile``: the declared ones, or the default."""
+        if self.policy != "fallback":
+            return frozenset()
+        return frozenset(self.triggers if self.triggers is not None else DEFAULT_FALLBACK_TRIGGERS)
+
+    @model_validator(mode="after")
+    def validate_policy_fields(self) -> "RoutingConfig":
+        declared_threshold = [name for name in _THRESHOLD_FIELDS if getattr(self, name) is not None]
+        if self.policy == "remote_only":
+            extra = [
+                name
+                for name, value in (("fallback_profile", self.fallback_profile), ("triggers", self.triggers))
+                if value is not None
+            ] + declared_threshold
+            if extra:
+                msg = f"routing policy 'remote_only' takes no other field; remove: {', '.join(extra)}"
+                raise ValueError(msg)
+            return self
+        if not self.fallback_profile:
+            msg = f"routing policy '{self.policy}' must name the remote profile in 'fallback_profile'"
+            raise ValueError(msg)
+        if self.policy == "fallback":
+            if declared_threshold:
+                msg = f"routing policy 'fallback' does not use: {', '.join(declared_threshold)}"
+                raise ValueError(msg)
+            if self.triggers is not None:
+                if not self.triggers:
+                    msg = "routing.triggers must name at least one trigger; omit it for the default"
+                    raise ValueError(msg)
+                if len(set(self.triggers)) != len(self.triggers):
+                    msg = "routing.triggers must not repeat a trigger"
+                    raise ValueError(msg)
+            return self
+        if self.triggers is not None:
+            msg = "routing policy 'threshold' does not use 'triggers'"
+            raise ValueError(msg)
+        missing = [name for name in _THRESHOLD_FIELDS if getattr(self, name) is None]
+        if missing:
+            msg = f"routing policy 'threshold' must set: {', '.join(missing)}"
+            raise ValueError(msg)
+        if self.sleep_below is not None and self.wake_above is not None and self.sleep_below >= self.wake_above:
+            msg = "routing.sleep_below must be lower than routing.wake_above"
+            raise ValueError(msg)
+        return self
+
+
 class ResolvedProfile(BaseModel):
     model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
 
@@ -785,6 +861,7 @@ class ModelConfig(BaseModel):
     weights_path: Path | None = None
     package_backed: bool = False
     remote_backed: bool = False
+    routing: RoutingConfig | None = None
     pool: str | None = None
     inputs: InputModalities = InputModalities()
     tasks: Tasks
@@ -872,6 +949,45 @@ class ModelConfig(BaseModel):
                 )
                 raise ValueError(msg)
         return self
+
+    @model_validator(mode="after")
+    def validate_routing(self) -> "ModelConfig":
+        """A routing policy chooses between a local default profile and one remote profile."""
+        routing = self.routing
+        if routing is None:
+            return self
+        if routing.policy == "remote_only":
+            if not self.remote_backed:
+                msg = (
+                    "routing policy 'remote_only' is for a model without local weights; "
+                    "set 'remote_backed: true' and remove 'hf_id', 'weights_path' and 'package_backed'"
+                )
+                raise ValueError(msg)
+            return self
+        if self.remote_backed:
+            msg = f"a 'remote_backed' model has no local profile, so it cannot use routing policy '{routing.policy}'"
+            raise ValueError(msg)
+        if "default" not in self.profiles or is_remote_adapter_path(self._declared_adapter_path("default")):
+            msg = f"routing policy '{routing.policy}' needs a local 'default' profile"
+            raise ValueError(msg)
+        fallback = routing.fallback_profile
+        if fallback == "default" or fallback not in self.profiles:
+            msg = (
+                f"routing.fallback_profile '{fallback}' must name a non-default profile. "
+                f"Available: {[name for name in self.profiles if name != 'default']}"
+            )
+            raise ValueError(msg)
+        if not is_remote_adapter_path(self._declared_adapter_path(fallback)):
+            msg = f"routing.fallback_profile '{fallback}' must be a remote profile"
+            raise ValueError(msg)
+        return self
+
+    def _declared_adapter_path(self, name: str) -> str | None:
+        profile = self.profiles[name]
+        if profile.adapter_path is not None or profile.extends is None:
+            return profile.adapter_path
+        parent = self.profiles.get(profile.extends)
+        return parent.adapter_path if parent is not None else None
 
     def lora_revisions(self) -> dict[str, str | None]:
         """Every LoRA id any profile declares -> its pinned revision (``None`` = unpinned).

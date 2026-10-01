@@ -270,6 +270,7 @@ def _expand_profile_variants(configs: dict[str, ModelConfig]) -> None:
             variant_updates: dict[str, Any] = {
                 "sie_id": variant_id,
                 "profiles": variant_profiles,
+                "routing": None,
             }
             loadtime = resolved.loadtime if resolved is not None else profile.adapter_options.loadtime
             profile_chat_template_kwargs = (

@@ -846,6 +846,36 @@ pool: customer-a
     }
 
     #[test]
+    fn test_model_config_with_a_routing_block_still_parses() {
+        let yaml = r#"
+sie_id: acme/hybrid
+hf_id: acme/hybrid
+routing:
+  policy: fallback
+  fallback_profile: remote
+  triggers: [model_loading, unhealthy]
+profiles:
+  default:
+    adapter_path: "module:Adapter"
+    max_batch_tokens: 4096
+  remote:
+    adapter_path: "sie_server.adapters.remote.sie:SieUpstreamAdapter"
+    max_batch_tokens: 4096
+    adapter_options:
+      loadtime:
+        upstream: team-sie
+        upstream_model: acme/hybrid
+"#;
+        let from_yaml: ModelConfig = serde_yaml::from_str(yaml).unwrap();
+        let value: serde_json::Value = serde_yaml::from_str(yaml).unwrap();
+        let from_json: ModelConfig = serde_json::from_value(value).unwrap();
+        for config in [from_yaml, from_json] {
+            assert_eq!(config.name, "acme/hybrid");
+            assert_eq!(config.profiles.len(), 2);
+        }
+    }
+
+    #[test]
     fn test_profile_output_caps_are_inheritance_resolved_and_route_scoped() {
         let raw: serde_yaml::Value = serde_yaml::from_str(
             r#"

@@ -493,6 +493,111 @@
       "title": "ProfileConfig",
       "type": "object"
     },
+    "RoutingConfig": {
+      "additionalProperties": false,
+      "description": "How a request for the bare model name chooses between the local and the remote profile.\n\n``remote_only`` is the policy of a ``remote_backed`` model: every request is\nserved by its remote profile. Under ``fallback`` the local profile serves,\nand ``fallback_profile`` serves when local capacity refuses for one of\n``triggers`` before it accepts the work. Under ``threshold`` the remote\nprofile serves until demand stays above ``wake_above`` for ``window_s``,\nand serves again once demand stays below ``sleep_below`` for\n``cooldown_s``. A request that names a profile is never routed.",
+      "properties": {
+        "policy": {
+          "enum": [
+            "remote_only",
+            "fallback",
+            "threshold"
+          ],
+          "title": "Policy",
+          "type": "string"
+        },
+        "fallback_profile": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Fallback Profile"
+        },
+        "triggers": {
+          "anyOf": [
+            {
+              "items": {
+                "enum": [
+                  "provisioning",
+                  "model_loading",
+                  "saturated",
+                  "unhealthy"
+                ],
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Triggers"
+        },
+        "wake_above": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Wake Above"
+        },
+        "sleep_below": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sleep Below"
+        },
+        "window_s": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Window S"
+        },
+        "cooldown_s": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cooldown S"
+        }
+      },
+      "required": [
+        "policy"
+      ],
+      "title": "RoutingConfig",
+      "type": "object"
+    },
     "ScoreTask": {
       "additionalProperties": false,
       "properties": {},
@@ -610,6 +715,17 @@
       "default": false,
       "title": "Remote Backed",
       "type": "boolean"
+    },
+    "routing": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RoutingConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     },
     "pool": {
       "anyOf": [

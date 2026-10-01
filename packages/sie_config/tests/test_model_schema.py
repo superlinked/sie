@@ -85,6 +85,21 @@ def test_unknown_keys_are_reported_per_field() -> None:
     ]
 
 
+def test_a_routing_block_passes_and_its_unknown_keys_are_reported() -> None:
+    routing = {"policy": "fallback", "fallback_profile": "remote", "triggers": ["model_loading", "unhealthy"]}
+
+    assert model_config_schema_errors(_model(routing=routing)) == []
+    assert model_config_schema_errors(_model(routing={**routing, "upstream": "team-sie"})) == [
+        {"loc": ["routing", "upstream"], "message": _UNKNOWN}
+    ]
+    assert model_config_schema_errors(_model(routing={**routing, "triggers": ["sometimes"]})) == [
+        {
+            "loc": ["routing", "triggers", 0],
+            "message": "'sometimes' is not one of ['provisioning', 'model_loading', 'saturated', 'unhealthy']",
+        }
+    ]
+
+
 @pytest.mark.parametrize(
     ("field", "value", "loc", "message"),
     [
