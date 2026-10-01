@@ -427,14 +427,12 @@ def score_repeat(calls: Path) -> dict[str, Any]:
         }
         first_path = calls / "e1" / path.name
         first = scored_rows(first_path) if first_path.exists() else {}
-        same = [
-            rid
+        paired = {
+            rid: row
             for rid, row in again.items()
-            if rid in first
-            and first[rid].get("error") is None
-            and not first[rid].get("rejected")
-            and canonical(first[rid]["text"]) == canonical(row["text"])
-        ]
+            if rid in first and first[rid].get("error") is None and not first[rid].get("rejected")
+        }
+        same = [rid for rid, row in paired.items() if canonical(first[rid]["text"]) == canonical(row["text"])]
         totals = sorted(row["total_s"] for row in again.values() if row.get("total_s") is not None)
         ttft = sorted(row["ttft_s"] for row in again.values() if row.get("ttft_s") is not None)
 
@@ -443,7 +441,8 @@ def score_repeat(calls: Path) -> dict[str, Any]:
 
         arms[path.stem] = {
             "n": len(again),
-            "identical": len(same) / max(1, len(again)),
+            "paired_n": len(paired),
+            "identical": len(same) / len(paired) if paired else None,
             "p50_total_s": pick(totals, 0.5),
             "p90_total_s": pick(totals, 0.9),
             "p50_ttft_s": pick(ttft, 0.5),
@@ -515,8 +514,9 @@ def print_repeat(report: dict[str, Any]) -> None:
         def seconds(value: float | None) -> str:
             return "-" if value is None else f"{value:.2f}"
 
+        identical = "n/a" if arm["identical"] is None else pct(arm["identical"])
         print(
-            f"{label(stem):<34} {arm['n']:>8} {pct(arm['identical']):>11} {seconds(arm['p50_total_s']):>7} "
+            f"{label(stem):<34} {arm['n']:>8} {identical:>11} {seconds(arm['p50_total_s']):>7} "
             f"{seconds(arm['p90_total_s']):>7} {seconds(arm['p50_ttft_s']):>18}"
         )
     print()
