@@ -23,6 +23,7 @@ from sie_config.model_registry import (
     ModelRegistry,
     ProfileConflictError,
     parse_model_spec,
+    undeclared_upstreams,
 )
 from sie_config.model_schema import model_config_schema_errors
 from sie_config.nats_publisher import NatsPublisher, PartialPublishError
@@ -372,6 +373,40 @@ def _reject_worker_schema_errors(config: dict[str, Any]) -> None:
         )
 
 
+_UPSTREAM_NAMES_ENV = "SIE_UPSTREAM_NAMES"
+
+
+def _declared_upstream_names() -> frozenset[str] | None:
+    """The upstreams the remote workers define, from a comma-separated list. Unset means unknown."""
+    raw = os.environ.get(_UPSTREAM_NAMES_ENV)
+    if raw is None:
+        return None
+    return frozenset(name for name in (part.strip() for part in raw.split(",")) if name)
+
+
+def _reject_undeclared_upstreams(model_id: str, profiles: dict[str, Any], written: dict[str, Any]) -> None:
+    """Reject with 422 a written remote profile that names an upstream outside ``SIE_UPSTREAM_NAMES``.
+
+    ``profiles`` is the model's profile set after the write, which ``extends`` resolves
+    against. Only the ``written`` profiles are checked.
+    """
+    declared = _declared_upstream_names()
+    if declared is None:
+        return
+    undeclared = undeclared_upstreams(profiles, written, declared)
+    if undeclared:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "validation_error",
+                "details": [
+                    {"message": f"Profile '{name}' of '{model_id}' names an undefined upstream {upstream!r}"}
+                    for name, upstream in undeclared.items()
+                ],
+            },
+        )
+
+
 def _load_filesystem_yaml(models_dir: Any, model_name: str) -> str | None:
     """Load raw YAML for a filesystem-backed model (blocking; call via to_thread).
 
@@ -694,6 +729,12 @@ async def add_model(request: Request) -> Response:
                 ) from e
 
             existing_config = model_registry.get_full_config(model_id)
+            written_profiles = config.get("profiles") or {}
+            _reject_undeclared_upstreams(
+                model_id,
+                {**((existing_config or {}).get("profiles") or {}), **written_profiles},
+                written_profiles,
+            )
             if existing_config:
                 conflicting_fields = []
                 for key, new_value in config.items():
@@ -1117,6 +1158,8 @@ async def replace_model(request: Request, model_id: str) -> Response:
                     status_code=422,
                     detail={"error": "validation_error", "details": [{"message": str(e)}]},
                 ) from e
+            written_profiles = config.get("profiles") or {}
+            _reject_undeclared_upstreams(config["sie_id"], written_profiles, written_profiles)
 
             # Unchanged-content no-op: compare the incoming config against the
             # registry's current merged config. Equal => no epoch bump, no
