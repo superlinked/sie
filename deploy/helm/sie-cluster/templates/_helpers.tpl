@@ -1849,8 +1849,8 @@ credential pasted as a key would otherwise be printed.
 {{- if and (eq (include "sie-cluster.worker.remoteLaneEnabled" $root) "true") (not (dig "networkPolicy" "enabled" false $root.Values.workers)) (ne (include "sie-cluster.worker.remoteNetworkPolicyEnabled" $root) "true") -}}
 {{- fail "a remote lane needs a NetworkPolicy: keep workers.remote.networkPolicy.enabled=true (the default) or set workers.networkPolicy.enabled=true. The worker API has no authentication of its own, so without a NetworkPolicy any pod in the cluster could call a remote lane directly and spend its upstream credentials." -}}
 {{- end -}}
-{{- if and (eq (include "sie-cluster.worker.remoteLaneEnabled" $root) "true") (dig "networkPolicy" "extraIngress" list $root.Values.workers) -}}
-{{- fail "workers.networkPolicy.extraIngress cannot be set while a remote lane is enabled: workers.networkPolicy also selects the remote lane, so every extraIngress source could call it directly and spend its upstream credentials." -}}
+{{- if and (eq (include "sie-cluster.worker.remoteLaneEnabled" $root) "true") (ne (include "sie-cluster.worker.remoteNetworkPolicyEnabled" $root) "true") (dig "networkPolicy" "extraIngress" list $root.Values.workers) -}}
+{{- fail "workers.networkPolicy.extraIngress cannot be set while a remote lane is enabled and workers.remote.networkPolicy.enabled is false: workers.networkPolicy then also selects the remote lane, so every extraIngress source could call it directly and spend its upstream credentials." -}}
 {{- end -}}
 {{- end }}
 

@@ -1655,6 +1655,7 @@ def test_a_remote_lane_refuses_extra_ingress_sources(tmp_path: Path) -> None:
     }
     values = remote_pool_values()
     values["workers"]["networkPolicy"] = {"enabled": True, "extraIngress": [extra]}
+    values["workers"]["remote"] = {"networkPolicy": {"enabled": False}}
 
     result = render_workers(tmp_path, values)
 
