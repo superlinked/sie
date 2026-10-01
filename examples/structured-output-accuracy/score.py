@@ -427,10 +427,22 @@ def score_repeat(calls: Path) -> dict[str, Any]:
         }
         first_path = calls / "e1" / path.name
         first = scored_rows(first_path) if first_path.exists() else {}
+
+        def parseable(text: str) -> bool:
+            try:
+                json.loads(text)
+            except json.JSONDecodeError:
+                return False
+            return True
+
         paired = {
             rid: row
             for rid, row in again.items()
-            if rid in first and first[rid].get("error") is None and not first[rid].get("rejected")
+            if rid in first
+            and first[rid].get("error") is None
+            and not first[rid].get("rejected")
+            and parseable(first[rid]["text"])
+            and parseable(row["text"])
         }
         same = [rid for rid, row in paired.items() if canonical(first[rid]["text"]) == canonical(row["text"])]
         totals = sorted(row["total_s"] for row in again.values() if row.get("total_s") is not None)
