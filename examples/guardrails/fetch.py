@@ -32,7 +32,7 @@ HERE = study.HERE
 EVIDENCE = study.EVIDENCE
 
 DATASET = "superlinked/sie-task-evidence"
-REVISION = "ef30a7ad208c3d51fbbdd07ad1a930399497f935"
+REVISION = "b45775c419e37212cef67f485610eda88ee29491"
 TASK = "guardrails"
 
 API = f"https://huggingface.co/api/datasets/{DATASET}/tree/{REVISION}"
