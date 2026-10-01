@@ -241,6 +241,50 @@ async def test_extract_async_refills_bounded_requests_and_preserves_order(
     assert peak_active == 2
 
 
+def test_max_concurrent_dispatch_matches_the_request_bound(adapter: SGLangVisionExtractAdapter) -> None:
+    assert adapter.max_concurrent_dispatch() == 2
+
+
+@pytest.mark.asyncio
+async def test_extract_async_bound_is_shared_across_concurrent_batches(
+    adapter: SGLangVisionExtractAdapter,
+) -> None:
+    active = 0
+    peak_active = 0
+    release = asyncio.Event()
+    started = 0
+
+    async def generate(prompt: str, *, images: list[ImageInput], **_: Any) -> AsyncIterator[GenerationChunk]:
+        nonlocal active, peak_active, started
+        active += 1
+        started += 1
+        peak_active = max(peak_active, active)
+        await release.wait()
+        active -= 1
+        yield GenerationChunk(
+            text_delta=images[0]["data"].decode(),
+            done=True,
+            finish_reason="stop",
+            prompt_tokens=1,
+            completion_tokens=1,
+        )
+
+    adapter.generate = generate  # ty: ignore[invalid-assignment]
+    batches = [
+        asyncio.create_task(adapter._extract_async("p", [_image(f"{b}{i}") for i in range(2)], max_new_tokens=8))
+        for b in "ab"
+    ]
+    for _ in range(50):
+        if started >= 2:
+            break
+        await asyncio.sleep(0.01)
+    await asyncio.sleep(0.05)
+    assert peak_active == 2
+    release.set()
+    results = await asyncio.gather(*batches)
+    assert [[r.text for r in batch] for batch in results] == [["a0", "a1"], ["b0", "b1"]]
+
+
 @pytest.mark.asyncio
 async def test_extract_async_closes_each_buffered_generation_iterator(
     adapter: SGLangVisionExtractAdapter,
@@ -559,3 +603,14 @@ async def test_aclose_client_runs_on_dedicated_request_loop(adapter: SGLangVisio
         assert adapter._http_client is None
     finally:
         adapter.unload()
+
+
+def test_a_new_request_loop_gets_a_new_request_bound(adapter: SGLangVisionExtractAdapter) -> None:
+    adapter._request_slots = asyncio.Semaphore(1)
+    adapter._start_request_loop()
+    try:
+        assert adapter._request_slots is None
+    finally:
+        loop = adapter._request_loop
+        assert loop is not None
+        loop.call_soon_threadsafe(loop.stop)

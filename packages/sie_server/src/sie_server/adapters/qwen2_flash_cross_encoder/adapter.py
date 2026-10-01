@@ -218,16 +218,18 @@ class Qwen2FlashCrossEncoderAdapter(FlashBaseAdapter):
         )[0]
 
         # Reranking consumes only the configured negative/positive token
-        # logits. Cache those two output-head rows so each request avoids a
-        # full-vocabulary projection.
+        # logits. Cache those two output-head rows, in float32, so each
+        # request avoids a full-vocabulary projection and a per-call cast.
         score_token_ids = torch.tensor(
             [self._no_token_id, self._yes_token_id],
             dtype=torch.long,
             device=device,
         )
         lm_head = self._model.lm_head
-        self._score_weight = lm_head.weight.index_select(0, score_token_ids).detach()
-        self._score_bias = lm_head.bias.index_select(0, score_token_ids).detach() if lm_head.bias is not None else None
+        self._score_weight = lm_head.weight.index_select(0, score_token_ids).detach().float()
+        self._score_bias = (
+            lm_head.bias.index_select(0, score_token_ids).detach().float() if lm_head.bias is not None else None
+        )
 
         # Pre-tokenize templates based on input format
         self._pre_tokenize_templates()
@@ -295,6 +297,10 @@ class Qwen2FlashCrossEncoderAdapter(FlashBaseAdapter):
         Returns:
             [batch_size] float32 scores.
         """
+        # Float32 throughout: in bfloat16, P(yes) has a step of 2**-8 near 1.0,
+        # so every candidate above about 0.996 ties at exactly 1.0 and the
+        # ranking among the most relevant candidates falls back to input order.
+        logits = logits.float()
         no_logits = logits[:, 0]
         yes_logits = logits[:, 1]
 
@@ -302,16 +308,20 @@ class Qwen2FlashCrossEncoderAdapter(FlashBaseAdapter):
             # Stack [no, yes] and apply log-softmax, take P(yes)
             pair = torch.stack([no_logits, yes_logits], dim=-1)  # [B, 2]
             log_probs = torch.nn.functional.log_softmax(pair, dim=-1)
-            return log_probs[:, 1].exp().float()
+            return log_probs[:, 1].exp()
 
         # logit_diff (default)
-        return (yes_logits - no_logits).float()
+        return yes_logits - no_logits
 
     def _project_score_logits(self, last_hidden: torch.Tensor) -> torch.Tensor:
-        """Project last-token states onto only the configured score tokens."""
+        """Project last-token states onto only the configured score tokens, in float32.
+
+        The two score rows are cached in float32 at load. The yes/no logits are
+        the whole score, so they are not rounded to bfloat16.
+        """
         if self._score_weight is None:
             raise RuntimeError(ERR_NOT_LOADED)
-        return torch.nn.functional.linear(last_hidden, self._score_weight, self._score_bias)
+        return torch.nn.functional.linear(last_hidden.float(), self._score_weight, self._score_bias)
 
     def score(
         self,

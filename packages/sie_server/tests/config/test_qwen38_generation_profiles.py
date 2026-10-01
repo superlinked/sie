@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
+from sie_server.core.grammar_routing import resolve_grammar_serving_model
 from sie_server.core.loader import expand_profile_variants, load_model_config
 
 _MODEL_ID = "Qwen/Qwen3.8-27B-FP8"
@@ -51,6 +53,8 @@ def test_qwen38_uses_the_pinned_official_fp8_checkpoint() -> None:
         "h200-256k-no-spec",
         "rtx-pro-6000-256k",
         "rtx-pro-6000-256k-no-spec",
+        "h100-256k-batch",
+        "h100-256k-batch-no-spec",
         "h100-256k-thinking",
         "h100-256k-thinking-no-spec",
         "thinking",
@@ -72,7 +76,7 @@ def test_qwen38_default_is_a_conservative_non_speculative_route() -> None:
     assert default.loadtime["disable_cuda_graph"] is True
     assert default.loadtime["speculative"] == {"enabled": False}
     assert default.loadtime["attention_backend"] == "flashinfer"
-    assert "extra_env" not in default.loadtime
+    assert default.loadtime["extra_env"] == {"SIE_SGLANG_SINGLE_IMAGE_MAX_PIXELS": "3211264"}
     default_args = default.loadtime["extra_launch_args"]
     assert default_args[default_args.index("--mamba-ssm-dtype") + 1] == "float32"
     # Qwen3 structured output is not constrained when thinking is disabled
@@ -154,7 +158,10 @@ def test_qwen38_hardware_launches_keep_fp8_weights_with_tuned_state_precision() 
         assert args[args.index("--page-size") + 1] == "64"
         assert args[args.index("--max-running-requests") + 1] == "1"
         assert args[args.index("--cuda-graph-max-bs-decode") + 1] == "1"
-        assert profile.loadtime["extra_env"] == {"SGLANG_JIT_DEEPGEMM_FAST_WARMUP": "1"}
+        assert profile.loadtime["extra_env"] == {
+            "SGLANG_JIT_DEEPGEMM_FAST_WARMUP": "1",
+            "SIE_SGLANG_SINGLE_IMAGE_MAX_PIXELS": "3211264",
+        }
 
     for profile_name in (
         "h100-256k",
@@ -201,3 +208,105 @@ def test_qwen38_thinking_profiles_are_the_h100_native_shape_without_speculation(
         }
         assert profile.runtime | {"default_sampling": None} == answer_only.runtime | {"default_sampling": None}
         assert profile.kv_budget_tokens == profile.max_batch_tokens == _NATIVE_CONTEXT
+
+
+class _ConfigRegistry:
+    def __init__(self) -> None:
+        self._configs = expand_profile_variants([load_model_config(_MODEL_PATH)])
+
+    def has_model(self, name: str) -> bool:
+        return name in self._configs
+
+    def get_config(self, name: str) -> Any:
+        return self._configs[name]
+
+
+def test_qwen38_h100_batch_profile_is_the_native_no_spec_launch_with_sixteen_graphed_requests() -> None:
+    config = load_model_config(_MODEL_PATH)
+    configs = expand_profile_variants([config])
+    single = config.resolve_profile("h100-256k-no-spec")
+    batch = config.resolve_profile("h100-256k-batch")
+    twin = config.resolve_profile("h100-256k-batch-no-spec")
+
+    assert batch.grammar_profile == "h100-256k-batch-no-spec"
+    assert twin.grammar_profile is None
+    assert twin.loadtime == batch.loadtime
+    assert twin.runtime == batch.runtime
+    assert batch.loadtime["speculative"] == {"enabled": False}
+    assert "disable_cuda_graph" not in batch.loadtime
+    assert batch.adapter_path == _ADAPTER
+    assert batch.kv_budget_tokens == batch.max_batch_tokens == _NATIVE_CONTEXT
+    assert batch.runtime == single.runtime
+
+    # The only launch differences from the single-admission H100 lane: up to
+    # 16 running requests, with decode CUDA graphs captured through batch 16.
+    args = list(batch.loadtime["extra_launch_args"])
+    assert args[args.index("--max-running-requests") + 1] == "16"
+    assert args[args.index("--cuda-graph-max-bs-decode") + 1] == "16"
+    single_args = list(single.loadtime["extra_launch_args"])
+    for flag in ("--max-running-requests", "--cuda-graph-max-bs-decode"):
+        args[args.index(flag) + 1] = single_args[single_args.index(flag) + 1]
+    assert args == single_args
+    assert batch.loadtime | {"extra_launch_args": None} == single.loadtime | {"extra_launch_args": None}
+
+    for name in ("h100-256k-batch", "h100-256k-batch-no-spec"):
+        variant = configs[f"{_MODEL_ID}:{name}"]
+        assert variant.tasks.generate is not None
+        assert variant.tasks.generate.context_length == _NATIVE_CONTEXT
+        assert variant.tasks.generate.max_output_tokens == _NATIVE_OUTPUT_CAP
+        assert variant.tasks.generate.chat_template_kwargs == {"enable_thinking": False}
+
+
+def test_qwen38_h100_batch_grammar_requests_stay_on_the_batch_launch() -> None:
+    registry = _ConfigRegistry()
+
+    assert (
+        resolve_grammar_serving_model(registry, f"{_MODEL_ID}:h100-256k-batch")
+        == f"{_MODEL_ID}:h100-256k-batch-no-spec"
+    )
+    assert (
+        resolve_grammar_serving_model(registry, f"{_MODEL_ID}:h100-256k-batch-no-spec")
+        == f"{_MODEL_ID}:h100-256k-batch-no-spec"
+    )
+
+
+def test_qwen38_reads_one_page_at_document_resolution_with_compact_json() -> None:
+    import json
+
+    from sie_server.adapters.sglang.generation import SGLangGenerationAdapter
+    from sie_server.processors.streaming import _VISION_TOKENS_PER_IMAGE_ESTIMATE, _vision_tokens_for_images
+
+    config = load_model_config(_MODEL_PATH)
+    assert config.tasks.generate is not None
+    window = config.tasks.generate.context_length
+    output_cap = config.tasks.generate.max_output_tokens
+    for name in config.profiles:
+        loadtime = config.resolve_profile(name).loadtime
+        args = loadtime["extra_launch_args"]
+        # The launch bound, which every multi-image request keeps, is unchanged.
+        assert args.count("--mm-process-config") == 1, name
+        image = json.loads(args[args.index("--mm-process-config") + 1])["image"]
+        assert image == {"min_pixels": 65536, "max_pixels": 1003520}, name
+        assert loadtime["extra_env"]["SIE_SGLANG_SINGLE_IMAGE_MAX_PIXELS"] == "3211264", name
+        assert args.count("--constrained-json-disable-any-whitespace") == 1, name
+
+        adapter = SGLangGenerationAdapter.__new__(SGLangGenerationAdapter)
+        adapter._extra_launch_args = list(args)
+        adapter._extra_env = dict(loadtime["extra_env"])
+        assert _vision_tokens_for_images(adapter, 1) == 3136, name
+        for count in (2, 4, 16):
+            assert _vision_tokens_for_images(adapter, count) == count * _VISION_TOKENS_PER_IMAGE_ESTIMATE, name
+
+    # The bare route still fits one full-resolution page and the whole output cap.
+    assert 3136 + output_cap < window
+
+
+def test_qwen38_json_grammars_bound_number_digits() -> None:
+    # XGrammar's unbounded digit runs let a temperature-0 decode loop to the
+    # output cap; every launch, including each grammar twin, bounds them.
+    config = load_model_config(_MODEL_PATH)
+
+    for name in config.profiles:
+        profile = config.resolve_profile(name)
+        assert profile.loadtime["grammar_backend"] == "xgrammar", name
+        assert profile.loadtime["json_number_max_digits"] == 19, name

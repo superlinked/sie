@@ -1,4 +1,6 @@
-data/
-run-output/
+evidence/
+sets/
+runs/
+.venv/
 __pycache__/
-*.pyc
+.ruff_cache/

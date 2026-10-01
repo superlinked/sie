@@ -53,6 +53,7 @@ from sie_server.api.validation import validate_machine_profile_header, validate_
 from sie_server.config.model import validate_chat_template_kwargs
 from sie_server.core.grammar_routing import resolve_grammar_serving_model
 from sie_server.core.inference_output import ScoreOutput
+from sie_server.core.runtime_options import grammar_default_sampling
 from sie_server.core.score_cost import MAX_SCORE_ITEMS, build_score_prepared_items
 from sie_server.core.timing import RequestTiming
 from sie_server.core.video_frames import (
@@ -291,6 +292,14 @@ def _upstream_error_event(
 
 def _response_format_constrains_decoding(response_format: Any) -> bool:
     return isinstance(response_format, dict) and response_format.get("type") not in (None, "text")
+
+
+def _effective_default_sampling(runtime: dict[str, Any], body: dict[str, Any]) -> Any:
+    """Return the profile sampler defaults, or the grammar defaults when ``response_format`` constrains decoding."""
+    default_sampling = runtime.get("default_sampling")
+    if _response_format_constrains_decoding(body.get("response_format")):
+        return grammar_default_sampling(default_sampling)
+    return default_sampling
 
 
 def _strict_response_format_grammar(response_format: Any) -> GrammarSpec | None:
@@ -649,7 +658,7 @@ def _prepare_sglang_body(
 
     profile = config.resolve_profile("default")
     runtime = dict(profile.runtime)
-    default_sampling = runtime.get("default_sampling")
+    default_sampling = _effective_default_sampling(runtime, body)
     if isinstance(default_sampling, dict):
         for config_field, chat_field in _DEFAULT_SAMPLING_TO_CHAT_FIELD.items():
             if config_field in default_sampling and proxied.get(chat_field) is None:

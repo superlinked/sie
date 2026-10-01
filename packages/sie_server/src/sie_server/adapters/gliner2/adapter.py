@@ -17,7 +17,9 @@ from sie_server.adapters._prompt_limit import DEFAULT_MAX_SCHEMA_PROMPT_TOKENS, 
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_REQUIRES_TEXT, ComputePrecision
 from sie_server.adapters._word_window import (
+    MAX_WORD_CHARS,
     SubwordCounter,
+    Window,
     WindowedSplitter,
     plan_forwards,
     quadratic_attention,
@@ -25,7 +27,7 @@ from sie_server.adapters._word_window import (
 )
 from sie_server.adapters.gliner2.words import linear_equivalent
 from sie_server.core.inference_output import ExtractOutput
-from sie_server.types.inputs import Item
+from sie_server.types.inputs import InvalidInputError, Item
 from sie_server.types.responses import Classification, Entity, Relation
 
 _ERR_REQUIRES_LABELS = "GLiNER2 requires labels parameter for extraction"
@@ -62,6 +64,20 @@ _SENTENCE_END = (".", "!", "?")
 # The prompt's own markers, [SEP_TEXT], and the tokenizer's specials.
 _ROW_OVERHEAD_TOKENS = 8
 _DEBERTA_CONFIG = {"model_type": "deberta-v2"}
+# Classification reads a text longer than one window as overlapping windows of
+# the same size (see ``_classification_windows``). A window starts this many
+# words before the end of the one before it, so a sentence cut by one window's
+# edge is read whole by the next.
+_CLASSIFY_OVERLAP_WORDS = 64
+# Most windows one text is classified in: at 512 words a window, 57,408 words.
+# A longer text is rejected with INVALID_INPUT rather than classified in part,
+# since a verdict on part of a text reads as a verdict on all of it.
+_MAX_CLASSIFY_WINDOWS = 128
+# Characters of the rest of a text read to find its next window, doubled until
+# the window ends at least MAX_WORD_CHARS before them (or the text ends), so a
+# window is found without copying the rest of a long text each time.
+_WINDOW_SLICE_CHARS = 16384
+_NON_SPACE = re.compile(r"\S")
 
 
 class GLiNER2Adapter(BaseAdapter):
@@ -82,6 +98,12 @@ class GLiNER2Adapter(BaseAdapter):
     and does not bill, may take at most ``max_prompt_tokens`` tokens (default
     2048), and each label, task name, field name or choice at most 128
     characters; a longer prompt is rejected with ``INVALID_INPUT``.
+
+    gliner2 reads at most ``max_seq_length`` words of a document. Entity,
+    relation and structured extraction read that first window. Classification
+    reads all of a longer text, as overlapping windows of that many words, and
+    pools the windows' results into one (see ``pool_window_classifications``);
+    a text that fits one window is classified exactly as before.
 
     Reference models:
     - fastino/gliner2-base-v1
@@ -104,6 +126,7 @@ class GLiNER2Adapter(BaseAdapter):
         classification_task: str | None = None,
         default_labels: list[str] | None = None,
         multi_label: bool = False,
+        positive_label: str | None = None,
         max_seq_length: int | None = None,
         max_prompt_tokens: int = DEFAULT_MAX_SCHEMA_PROMPT_TOKENS,
         compute_precision: ComputePrecision = "float16",
@@ -122,6 +145,11 @@ class GLiNER2Adapter(BaseAdapter):
                 Request-provided labels take precedence.
             multi_label: Whether the configured classification task may return
                 multiple labels.
+            positive_label: Optional label of a single-label classification
+                that a text takes when any window of it takes that label, such
+                as ``unsafe`` for a guard (see ``pool_window_classifications``).
+                It applies only when the request's labels include it, and may
+                be overridden per request through runtime options.
             max_seq_length: Maximum document and schema input length.
             max_prompt_tokens: Most tokens a request's labels, class labels,
                 relation types or schema fields may take in the task prompt
@@ -137,6 +165,7 @@ class GLiNER2Adapter(BaseAdapter):
         self._classification_task = classification_task
         self._default_labels = self._validate_labels(default_labels) if default_labels is not None else None
         self._multi_label = multi_label
+        self._positive_label = self._validate_positive_label(positive_label, self._default_labels)
         self._max_seq_length = max_seq_length
         self._prompt_limit = PromptLimit("GLiNER2", max_prompt_tokens)
         self._compute_precision = compute_precision
@@ -249,7 +278,8 @@ class GLiNER2Adapter(BaseAdapter):
         self._check_loaded()
         texts = [self._extract_text(item) for item in items]
         # gliner2 reads a bounded window of words: pass it only the prefix holding them.
-        windows = [self._window(text) for text in texts]
+        reads = [self._read(text) for text in texts]
+        windows = [(model_text, subwords) for model_text, subwords, _ in reads]
         model_texts = [model_text for model_text, _ in windows]
         opts = options or {}
         effective_threshold = self._validate_threshold(opts.get("threshold", self._threshold))
@@ -338,18 +368,23 @@ class GLiNER2Adapter(BaseAdapter):
                 raise ValueError("GLiNER2 classification_task must be a non-empty string")
             check_label_chars("GLiNER2", "classification_task", [classification_task])
             check_label_chars("GLiNER2", "labels", normalized_labels)
+            positive_label = self._effective_positive_label(opts, normalized_labels)
             prompt = self._prompt_tokens(
                 [classification_task, *normalized_labels],
                 key=("classification", classification_task, tuple(normalized_labels)),
             )
+            item_windows = [self._classification_windows(text, read) for text, read in zip(texts, reads, strict=True)]
+            if any(len(one) > 1 for one in item_windows):
+                input_token_counts = self._windowed_input_token_counts(texts, item_windows)
             return self._classify(
-                model_texts,
+                item_windows,
                 normalized_labels,
                 task=classification_task,
                 multi_label=multi_label,
+                positive_label=positive_label,
                 threshold=effective_threshold,
                 input_token_counts=input_token_counts,
-                rows=self._row_tokens(windows, prompt),
+                prompt=prompt,
             )
 
         def extract_entities(batch: list[str]) -> list[Any]:
@@ -388,16 +423,23 @@ class GLiNER2Adapter(BaseAdapter):
 
     def _classify(
         self,
-        texts: list[str],
+        item_windows: list[list[tuple[str, int | None]]],
         labels: list[str],
         *,
         task: str,
         multi_label: bool,
+        positive_label: str | None,
         threshold: float,
         input_token_counts: list[int] | None,
-        rows: list[int] | None = None,
+        prompt: int | None,
     ) -> ExtractOutput:
-        """Run one GLiNER2 classification schema and normalize its results."""
+        """Run one GLiNER2 classification schema over each item's windows and normalize its results.
+
+        ``item_windows`` holds each item's windows as ``(model text, subwords)``
+        (one for a text that fits the window gliner2 reads). Every window of
+        every item runs in the same planned batch, and each item's window
+        results are pooled into one (``pool_window_classifications``).
+        """
         tasks = {
             task: {
                 "labels": labels,
@@ -425,19 +467,44 @@ class GLiNER2Adapter(BaseAdapter):
                 max_len=self._max_seq_length,
             )
 
+        flat = [window for windows in item_windows for window in windows]
         with torch.inference_mode():
             raw_results = self._run_planned(
-                texts,
-                rows,
+                [model_text for model_text, _ in flat],
+                self._row_tokens(flat, prompt),
                 classify,
-                rows_per_pass=1 if len(texts) == 1 else _PACKAGE_BATCH_SIZE,
+                rows_per_pass=1 if len(flat) == 1 else _PACKAGE_BATCH_SIZE,
             )
+        if len(raw_results) != len(flat):
+            raise ValueError("GLiNER2 returned results for a different number of items")
 
-        all_classifications = [
-            self._flatten_classifications(result, task=task, threshold=threshold) for result in raw_results
-        ]
+        all_classifications: list[list[Classification]] = []
+        offset = 0
+        for windows in item_windows:
+            window_results = raw_results[offset : offset + len(windows)]
+            offset += len(windows)
+            if len(window_results) == 1:
+                all_classifications.append(
+                    self._flatten_classifications(window_results[0], task=task, threshold=threshold)
+                )
+                continue
+            found = [
+                [
+                    (one["label"], one["score"])
+                    for one in self._flatten_classifications(result, task=task, threshold=0.0)
+                ]
+                for result in window_results
+            ]
+            pooled = pool_window_classifications(
+                found, labels=labels, multi_label=multi_label, positive_label=positive_label
+            )
+            classifications = [
+                Classification(label=label, score=score) for label, score in pooled if score >= threshold
+            ]
+            classifications.sort(key=lambda classification: classification["score"], reverse=True)
+            all_classifications.append(classifications)
         return ExtractOutput(
-            entities=[[] for _ in texts],
+            entities=[[] for _ in item_windows],
             classifications=all_classifications,
             input_token_counts=input_token_counts,
         )
@@ -865,7 +932,12 @@ class GLiNER2Adapter(BaseAdapter):
         return self._window(text)[0]
 
     def _window(self, text: str) -> tuple[str, int | None]:
-        """``(model text, subwords)``: the prefix of ``text`` gliner2 reads the same words from, and their subwords.
+        """``(model text, subwords)`` of ``text``: see ``_read``."""
+        model_text, subwords, _ = self._read(text)
+        return model_text, subwords
+
+    def _read(self, text: str) -> tuple[str, int | None, Window | None]:
+        """``(model text, subwords, window)``: the prefix of ``text`` gliner2 reads the same words from, and their subwords.
 
         gliner2 splits a text into words (with the bounded splitter installed
         at load, which yields only the window it reads) and keeps the first
@@ -878,31 +950,142 @@ class GLiNER2Adapter(BaseAdapter):
         length and the prefix's lowercase starts the lowercased text (a final
         sigma can lowercase differently at the cut). gliner2 2.x splits the
         text as given. The window is read from the text as gliner2 reads it,
-        with the "." it appends to a text without a sentence end. The
-        subwords are None when no bounded splitter is installed.
+        with the "." it appends to a text without a sentence end, and its word
+        offsets index the text as the splitter reads it (lowercased first by
+        gliner2 1.x). The subwords and the window are None when no bounded
+        splitter is installed.
         """
         splitter = self._word_splitter
         if splitter is None:
-            return text, None
+            return text, None, None
         # gliner2 ends a text without a sentence end with ".", and reads that too.
         window = splitter.window(text if text.endswith(_SENTENCE_END) else text + ".", lower=True)
         cut = window.cut
         if cut is None:
-            return text, window.subwords
+            return text, window.subwords, window
         source = text.lower() if self._lower_text_first else text
         if len(source) != len(text):
             # Offsets into the lowercased text do not index this one.
-            return text, window.subwords
+            return text, window.subwords, window
         if cut < len(source) and source[cut].isspace():
             # Keep the separator: gliner2 ends a text without a sentence end with
             # ".", which a URL word (running to whitespace) would absorb.
             cut += 1
         if cut >= len(text):
-            return text, window.subwords
+            return text, window.subwords, window
         prefix = text[:cut]
         if self._lower_text_first and not source.startswith(prefix.lower()):
-            return text, window.subwords
-        return prefix, window.subwords
+            return text, window.subwords, window
+        return prefix, window.subwords, window
+
+    def _classification_windows(
+        self, text: str, first: tuple[str, int | None, Window | None]
+    ) -> list[tuple[str, int | None]]:
+        """The windows ``text`` is classified in, as ``(model text, subwords)``.
+
+        ``first`` is ``_read(text)``, the window gliner2 reads of ``text``. A
+        text all of whose words it reads is one window, the text as before.
+        Otherwise each next window starts at the start of the last
+        ``_CLASSIFY_OVERLAP_WORDS`` words the one before it read (at most half
+        of them, so every window reads new words), and is read as gliner2
+        reads a text starting there: at most ``max_seq_length`` words within
+        the subword budget. A window after the first is cut from the text as
+        the splitter reads it (lowercased first by gliner2 1.x, which
+        lowercases it again to the same text), so that the words' offsets
+        index it.
+
+        Raises:
+            InvalidInputError: The text takes more than ``_MAX_CLASSIFY_WINDOWS`` windows.
+        """
+        model_text, subwords, window = first
+        windows = [(model_text, subwords)]
+        if window is None or window.cut is None:
+            return windows
+        source = text.lower() if self._lower_text_first else text
+        start = 0
+        while True:
+            words = window.words
+            read_end = start + words[-1][2]
+            if _NON_SPACE.search(source, read_end) is None:
+                # Only the "." gliner2 appends, or nothing, is left unread.
+                return windows
+            if len(windows) >= _MAX_CLASSIFY_WINDOWS:
+                raise InvalidInputError(
+                    f"GLiNER2 classifies a text in at most {_MAX_CLASSIFY_WINDOWS} windows of "
+                    f"{self._max_seq_length or _DEFAULT_MAX_WORDS} words; this text needs more. "
+                    "Split it into several items."
+                )
+            shared = min(_CLASSIFY_OVERLAP_WORDS, len(words) // 2)
+            start = start + words[len(words) - shared][1] if shared else read_end
+            model_text, subwords, window = self._read_from(source, start)
+            windows.append((model_text, subwords))
+            if window is None or window.cut is None:
+                return windows
+
+    def _read_from(self, source: str, start: int) -> tuple[str, int | None, Window | None]:
+        """``_read`` of ``source[start:]``, from a slice of it long enough to give the same window.
+
+        The slice grows until the last word the window reads ends at least
+        ``MAX_WORD_CHARS`` characters before the slice does (or the slice
+        reaches the end of ``source``), so no word it reads is cut short by the
+        slice. A word longer than that is read in pieces from its start, so its
+        pieces are the same in the slice as in ``source``.
+        """
+        size = _WINDOW_SLICE_CHARS
+        while True:
+            rest = source[start : start + size]
+            read = self._read(rest)
+            window = read[2]
+            if (
+                start + size >= len(source)
+                or window is None
+                or (window.cut is not None and bool(window.words) and window.words[-1][2] + MAX_WORD_CHARS <= len(rest))
+            ):
+                return read
+            size *= 2
+
+    def _windowed_input_token_counts(
+        self, texts: list[str], item_windows: list[list[tuple[str, int | None]]]
+    ) -> list[int] | None:
+        """Input tokens of each item classified in ``item_windows``.
+
+        A text read in one window is metered as before. A text read in several
+        is metered as the sum of its windows, each as the same text sent alone
+        is metered (its tokens up to ``max_seq_length``), so the words two
+        windows share count twice: the model encodes them twice.
+        """
+        metered = [
+            [text] if len(windows) == 1 else [model_text for model_text, _ in windows]
+            for text, windows in zip(texts, item_windows, strict=True)
+        ]
+        counts = self._doc_input_token_counts([one for parts in metered for one in parts])
+        if counts is None:
+            return None
+        totals = []
+        offset = 0
+        for parts in metered:
+            totals.append(sum(counts[offset : offset + len(parts)]))
+            offset += len(parts)
+        return totals
+
+    def _effective_positive_label(self, options: dict[str, Any], labels: list[str]) -> str | None:
+        """The positive label of this request: a runtime override, else the configured one if among ``labels``."""
+        if "positive_label" in options:
+            return self._validate_positive_label(options["positive_label"], labels)
+        if self._positive_label is not None and self._positive_label in labels:
+            return self._positive_label
+        return None
+
+    @staticmethod
+    def _validate_positive_label(value: object, labels: list[str] | None) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("GLiNER2 positive_label must be a non-empty string")
+        label = value.strip()
+        if labels is not None and label not in labels:
+            raise ValueError("GLiNER2 positive_label must be one of the labels")
+        return label
 
     def _doc_input_token_counts(self, texts: list[str]) -> list[int] | None:
         processor = getattr(self._model, "processor", None)
@@ -972,3 +1155,59 @@ def _last_space(text: str, end: int) -> int | None:
     begin = end // 2
     match = _SPACE_AFTER_TEXT.search(text[begin:end][::-1])
     return None if match is None else end - 1 - match.start()
+
+
+def pool_window_classifications(
+    windows: list[list[tuple[str, float]]],
+    *,
+    labels: list[str],
+    multi_label: bool,
+    positive_label: str | None,
+) -> list[tuple[str, float]]:
+    """One text's classification from the classifications of its windows.
+
+    ``windows`` holds each window's ``(label, confidence)`` pairs as gliner2
+    returns them. A text is taken to have a label when any window of it has
+    the label, so the pooled confidence of a label is its greatest confidence
+    in any window (max pooling), and a label seen only late in a long text is
+    not outweighed by the windows before it.
+
+    A multi-label task (sigmoid per label) returns every label whose
+    confidence reaches the threshold, so a label's greatest confidence over
+    the windows is exact wherever it reaches the threshold; each label is
+    returned with it.
+
+    A single-label task (softmax over the labels) returns only the label a
+    window takes and its probability, and one label is returned for the
+    text, the result of one window:
+
+    * With ``positive_label``: the window taking that label with the highest
+      confidence. When no window takes it and there are two labels, the
+      positive label's probability in a window is one minus the returned
+      one, so the window with the lowest confidence is the one where it is
+      highest. The text's probability of the positive label is then exactly
+      its greatest probability in any window, whichever label is returned.
+    * Otherwise, and with more than two labels when no window takes the
+      positive label (whose probability in a window that took another label
+      gliner2 does not return): the window with the highest confidence, the
+      label with the greatest pooled confidence among those returned.
+
+    Ties go to the earliest window.
+    """
+    if multi_label:
+        best: dict[str, float] = {}
+        for found in windows:
+            for label, score in found:
+                if label not in best or score > best[label]:
+                    best[label] = score
+        return list(best.items())
+    chosen = [found[0] for found in windows if found]
+    if not chosen:
+        return []
+    if positive_label is not None:
+        positive = [one for one in chosen if one[0] == positive_label]
+        if positive:
+            return [max(positive, key=lambda one: one[1])]
+        if len(labels) == 2:
+            return [min(chosen, key=lambda one: one[1])]
+    return [max(chosen, key=lambda one: one[1])]

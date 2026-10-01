@@ -1,248 +1,151 @@
 #!/usr/bin/env python3
-"""Re-derive the published ranks from the recorded run, offline.
+"""Score the recorded visual document search run, or your own, from rankings and ViDoRe's relevance grades.
 
-    python3 fetch.py
-    python3 score.py
+    uv run python score.py                                   # the recorded run, from evidence/
+    uv run python score.py --rankings run-output             # add your own run from run.py
 
-Standard library only. No API key, no network, no inference spend. Both ranks
-come out of evidence/: the text one from the pages' markdown, the visual one
-from the recorded ColPali multivectors.
+For every question it reads each arm's first ten pages and computes two figures:
 
-    python3 score.py --baseline    # the BM25 side alone, from inputs/, no recording
+- nDCG@10, with ViDoRe's graded relevance (1 or 2) as the gain: the benchmark's own metric;
+- right page first: whether the first page has any positive grade.
 
-This fails rather than skipping. A missing file, a page whose bytes no longer
-match their digest, a response that does not match its response_sha256, a
-request the pinned inputs do not rebuild, a page with no recorded multivector, a
-multivector returned twice, a declared width that disagrees with its own values,
-a non-finite score, or a relevant page that falls outside the published rank all
-exit non-zero.
+Each figure is averaged per dataset, then over the six datasets, so every dataset counts equally. SIE's compact
+profile is compared with every other arm by a paired bootstrap (questions resampled within each dataset, 10,000
+draws, seed 20260930) and, on right page first, an exact McNemar test. The recorded figures in evidence/stats.json
+are checked against what this script computes, and it exits non-zero if they differ.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
-from typing import Any
+from pathlib import Path
 
-import retrieval
+import numpy as np
 
-
-def load_calls() -> dict[str, dict[str, Any]]:
-    path = retrieval.EVIDENCE / "calls.json"
-    if not path.exists():
-        raise SystemExit(f"{path} is missing. Run: python3 fetch.py")
-    calls = json.loads(path.read_text(encoding="utf-8"))["calls"]
-    by_slug: dict[str, dict[str, Any]] = {}
-    for call in calls:
-        if call["slug"] in by_slug:
-            raise SystemExit(f"calls.json records {call['slug']!r} twice")
-        by_slug[call["slug"]] = call
-    return by_slug
+HERE = Path(__file__).resolve().parent
+EVIDENCE = HERE / "evidence"
+LEAD = "sie-tomoro-colqwen3-4b-768"
+DATASETS = ("computer_science", "finance_en", "hr", "pharmaceuticals", "energy", "physics")
+DRAWS = 10_000
+SEED = 20260930
 
 
-def check_call(call: dict[str, Any], expected_body: dict[str, Any], manifest: dict[str, Any]) -> None:
-    if call["status"] != 200:
-        raise SystemExit(f"{call['slug']}: recorded status {call['status']}")
-    if call["request"]["body"] != expected_body:
-        raise SystemExit(
-            f"{call['slug']}: the recorded request is not the one the pinned inputs rebuild. "
-            "Either inputs/ changed or the recording is of something else."
-        )
-    expected_url = manifest["endpoint"].rstrip("/") + manifest["path"]
-    if call["request"]["url"] != expected_url:
-        raise SystemExit(f"{call['slug']}: recorded URL {call['request']['url']} is not {expected_url}")
-    digest = retrieval.sha256_bytes(retrieval.compact_json(call["response"]))
-    if digest != call["response_sha256"]:
-        raise SystemExit(f"{call['slug']}: response digest {digest} is not the recorded {call['response_sha256']}")
+def ndcg10(ranked: list[str], grades: dict[str, int]) -> float:
+    dcg = sum(grades.get(page, 0) / math.log2(i + 2) for i, page in enumerate(ranked[:10]))
+    ideal = sorted(grades.values(), reverse=True)[:10]
+    idcg = sum(g / math.log2(i + 2) for i, g in enumerate(ideal))
+    return dcg / idcg if idcg else 0.0
 
 
-def response_items(call: dict[str, Any], expected_ids: list[str]) -> list[dict[str, Any]]:
-    """The response items for one call, bound to that call's own request.
-
-    A response digest proves a response has not been edited. It does not tie
-    the response to the request beside it, so without this a page batch could
-    carry another batch's answers and still satisfy a global coverage check.
-    Comparing the id sequence in order closes that.
-    """
-    items = call["response"]["items"]
-    got = [item.get("id") for item in items]
-    if got != expected_ids:
-        raise SystemExit(
-            f"{call['slug']}: the response does not answer its own request.\n"
-            f"  requested: {', '.join(expected_ids)}\n"
-            f"  returned:  {', '.join(str(value) for value in got)}"
-        )
-    return items
-
-
-def multivector(item: dict[str, Any]) -> list[list[float]]:
-    rows = retrieval.decode_multivector(item["multivector"]["float16_base64"])
-    if len(rows) != item["multivector"]["tokens"]:
-        raise SystemExit(f"{item['id']}: declares {item['multivector']['tokens']} tokens and carries {len(rows)}")
-    if rows and len(rows[0]) != item["multivector"]["dim"]:
-        raise SystemExit(f"{item['id']}: declares width {item['multivector']['dim']} and carries {len(rows[0])}")
-    return rows
-
-
-def score_comparison(
-    comparison: dict[str, Any],
-    pages: list[dict[str, Any]],
-    calls: dict[str, dict[str, Any]],
-    manifest: dict[str, Any],
-    consumed: set[str],
-) -> dict[str, Any]:
-    for page in pages:
-        retrieval.check_page_bytes(page)
-
-    query_slug = f"{comparison['id']}/query"
-    if query_slug not in calls:
-        raise SystemExit(f"calls.json has no query call for {comparison['id']}")
-    check_call(calls[query_slug], retrieval.query_body(comparison), manifest)
-    consumed.add(query_slug)
-    # Exactly one item, carrying the id the request asked for.
-    query_vectors = multivector(response_items(calls[query_slug], [comparison["id"]])[0])
-
-    page_vectors: dict[int, list[list[float]]] = {}
-    batch = 0
-    covered = 0
-    while covered < len(pages):
-        slug = f"{comparison['id']}/pages-{batch:03d}"
-        if slug not in calls:
-            raise SystemExit(f"calls.json stops at {covered} of {len(pages)} pages for {comparison['id']}")
-        chunk = pages[covered : covered + len(calls[slug]["request"]["body"]["items"])]
-        check_call(calls[slug], retrieval.page_body(chunk), manifest)
-        consumed.add(slug)
-        # The ids this batch asked for, in order, taken from the request body
-        # check_call has just proven equal to the one the pinned inputs rebuild.
-        requested = [item["id"] for item in calls[slug]["request"]["body"]["items"]]
-        for item in response_items(calls[slug], requested):
-            corpus_id = int(item["id"])
-            if corpus_id in page_vectors:
-                raise SystemExit(f"{comparison['id']}: page {corpus_id} has two recorded multivectors")
-            page_vectors[corpus_id] = multivector(item)
-        covered += len(chunk)
-        batch += 1
-
-    expected = {page["corpus_id"] for page in pages}
-    if set(page_vectors) != expected:
-        missing = sorted(expected - set(page_vectors))
-        extra = sorted(set(page_vectors) - expected)
-        raise SystemExit(f"{comparison['id']}: missing {missing[:5]}, unexpected {extra[:5]}")
-
-    visual = retrieval.visual_rank(query_vectors, page_vectors)
-    text = retrieval.bm25_rank(comparison["query"], pages)
-    relevant = comparison["relevant_corpus_id"]
-    return {
-        "id": comparison["id"],
-        "label": comparison["label"],
-        "pages": len(pages),
-        "text_rank": [cid for cid, _ in text].index(relevant) + 1,
-        "visual_rank": [cid for cid, _ in visual].index(relevant) + 1,
-        "visual_score": dict(visual)[relevant],
-    }
-
-
-def recorded_results(manifest: dict[str, Any], comparisons: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    """The manifest's own result rows, one per comparison, keyed by id.
-
-    Rejects duplicates, extras and gaps rather than letting a lookup silently
-    pick a row. A slug-keyed list collapsed to a dict keeps the LAST match, so
-    two rows sharing an id would let this check and the ranking check read
-    different rows.
-    """
-    results = manifest.get("results")
-    if not isinstance(results, list):
-        raise SystemExit("manifest.json has no results list, so there is nothing to check the ranks against")
-    by_id: dict[str, dict[str, Any]] = {}
-    for row in results:
-        identifier = row.get("id")
-        if identifier in by_id:
-            raise SystemExit(f"manifest.json records {identifier!r} twice")
-        by_id[identifier] = row
-    wanted = {comparison["id"] for comparison in comparisons}
-    missing = sorted(wanted - set(by_id))
+def per_question(rankings: Path, arm: str, *, warn: bool = False) -> dict[str, dict[str, np.ndarray]] | None:
+    """Scores for an arm with rankings for all six datasets; None, with a warning if asked, for a partial arm."""
+    missing = [rankings / arm / f"{name}.json" for name in DATASETS if not (rankings / arm / f"{name}.json").exists()]
     if missing:
-        raise SystemExit(f"manifest.json has no recorded result for {', '.join(missing)}")
-    extra = sorted(set(by_id) - wanted)
-    if extra:
-        raise SystemExit(f"manifest.json records a result nothing scores: {', '.join(extra)}")
-    return by_id
+        if warn:
+            print(
+                f"Skipping {arm}: the full benchmark needs all six datasets; missing "
+                + ", ".join(str(path) for path in missing),
+                file=sys.stderr,
+            )
+        return None
+    out = {}
+    for name in DATASETS:
+        path = rankings / arm / f"{name}.json"
+        ranking = json.loads(path.read_text())
+        questions = json.loads((EVIDENCE / "questions" / f"{name}.json").read_text())
+        ids = sorted(questions, key=int)
+        nd, top = [], []
+        for q in ids:
+            grades = questions[q]["qrels"]
+            pages = [page for page, _ in ranking[q]]
+            nd.append(ndcg10(pages, grades))
+            top.append(float(grades.get(pages[0], 0) > 0))
+        out[name] = {"ndcg10": np.array(nd), "top1": np.array(top)}
+    return out
 
 
-def check_against_recorded(row: dict[str, Any], expected: dict[str, Any]) -> None:
-    """The ranks derived from calls.json must be the ranks the run recorded.
+def macro(scores: dict[str, dict[str, np.ndarray]], metric: str) -> float:
+    return float(np.mean([scores[d][metric].mean() for d in DATASETS]))
 
-    The two sides are different artifacts: `row` is recomputed here from the
-    multivectors in calls.json and the markdown in inputs/pages.json, while
-    `expected` was written into manifest.json by run.py at run time. That makes
-    this a check on the recording rather than a restatement of it. It is the
-    only check covering the BM25 side, whose markdown no response digest spans.
-    """
-    for key in ("text_rank", "visual_rank", "pages"):
-        if row[key] != expected.get(key if key != "pages" else "candidate_pages"):
-            recorded = expected.get(key if key != "pages" else "candidate_pages")
-            raise SystemExit(f"{row['id']}: derived {key} {row[key]} does not match the recorded {recorded}")
+
+def mcnemar(b: int, c: int) -> float:
+    n = b + c
+    if n == 0:
+        return 1.0
+    return min(1.0, 2 * sum(math.comb(n, i) for i in range(min(b, c) + 1)) / 2**n)
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Reproduce the published ranks from the recorded run")
-    parser.add_argument("--baseline", action="store_true", help="BM25 only, straight from inputs/, no recording read")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--rankings", type=Path, action="append", default=[])
     args = parser.parse_args()
+    if not (EVIDENCE / "manifest.json").exists():
+        print("No evidence/. Run: uv run python fetch.py", file=sys.stderr)
+        return 1
+    manifest = json.loads((EVIDENCE / "manifest.json").read_text())
+    arms: dict[str, dict[str, dict[str, np.ndarray]]] = {}
+    for arm in manifest["arms"]:
+        scores = per_question(EVIDENCE / "rankings", arm)
+        if scores is not None:
+            arms[arm] = scores
+    for extra in args.rankings:
+        for arm_dir in sorted(p for p in extra.iterdir() if p.is_dir()):
+            scores = per_question(extra, arm_dir.name, warn=True)
+            if scores is not None:
+                arms[f"yours:{arm_dir.name}"] = scores
+    n = sum(len(arms[LEAD][d]["ndcg10"]) for d in DATASETS)
+    print(f"ViDoRe v3, {len(DATASETS)} datasets, {n} English questions, every page a candidate\n")
+    print(f"{'arm':44s} {'nDCG@10':>8s} {'right first':>12s}")
+    for arm, scores in arms.items():
+        label = manifest["arms"].get(arm, {}).get("name", arm)
+        print(f"{label[:44]:44s} {100 * macro(scores, 'ndcg10'):8.1f} {100 * macro(scores, 'top1'):11.1f}%")
 
-    comparisons = retrieval.load_comparisons()
-    by_document = retrieval.load_pages()
-
-    if args.baseline:
-        print(f"BM25 over the ViDoRe markdown, k1={retrieval.K1}, b={retrieval.B}\n")
-        print(f"{'comparison':<36}{'pages':>6}{'text rank':>11}")
-        for comparison in comparisons:
-            pages = by_document[comparison["doc_id"]]
-            text = retrieval.bm25_rank(comparison["query"], pages)
-            rank = [cid for cid, _ in text].index(comparison["relevant_corpus_id"]) + 1
-            print(f"{comparison['label']:<36}{len(pages):>6}{rank:>11}")
-        return 0
-
-    manifest_path = retrieval.EVIDENCE / "manifest.json"
-    if not manifest_path.exists():
-        raise SystemExit(f"{manifest_path} is missing. Run: python3 fetch.py")
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if manifest.get("model") != retrieval.MODEL:
-        raise SystemExit(f"manifest names model {manifest.get('model')!r}, this example scores {retrieval.MODEL!r}")
-    if manifest.get("model_revision") != retrieval.MODEL_REVISION:
-        raise SystemExit(
-            f"manifest names model revision {manifest.get('model_revision')!r}, "
-            f"this example scores {retrieval.MODEL_REVISION!r}. Different weights produce different ranks."
-        )
-    calls = load_calls()
-    recorded = recorded_results(manifest, comparisons)
-
-    print(f"{manifest['model']} on {manifest['endpoint']}, recorded {manifest['run_date']}")
-    print(f"BM25 baseline, k1={retrieval.K1}, b={retrieval.B}\n")
-    print(f"{'comparison':<36}{'pages':>6}{'text':>6}{'visual':>8}{'maxsim':>10}")
-
-    rows = []
-    consumed: set[str] = set()
-    for comparison in comparisons:
-        row = score_comparison(comparison, by_document[comparison["doc_id"]], calls, manifest, consumed)
-        check_against_recorded(row, recorded[row["id"]])
-        rows.append(row)
+    print(f"\nSIE compact minus each arm, 95% interval ({DRAWS:,} paired draws within each dataset)")
+    rng = np.random.default_rng(SEED)
+    samples = {
+        d: [rng.integers(0, len(arms[LEAD][d]["ndcg10"]), len(arms[LEAD][d]["ndcg10"])) for _ in range(DRAWS)]
+        for d in DATASETS
+    }
+    recorded = json.loads((EVIDENCE / "stats.json").read_text())["arms"]
+    mismatches = 0
+    for arm, scores in arms.items():
+        if arm == LEAD:
+            continue
+        cells = []
+        for metric in ("ndcg10", "top1"):
+            diff = {d: arms[LEAD][d][metric] - scores[d][metric] for d in DATASETS}
+            point = float(np.mean([diff[d].mean() for d in DATASETS]))
+            boot = np.array([np.mean([diff[d][samples[d][i]].mean() for d in DATASETS]) for i in range(DRAWS)])
+            lo, hi = np.percentile(boot, [2.5, 97.5])
+            cells.append(f"{100 * point:+5.1f} ({100 * lo:+.1f} to {100 * hi:+.1f})")
+        only_lead = sum(int((arms[LEAD][d]["top1"] > scores[d]["top1"]).sum()) for d in DATASETS)
+        only_other = sum(int((scores[d]["top1"] > arms[LEAD][d]["top1"]).sum()) for d in DATASETS)
+        label = manifest["arms"].get(arm, {}).get("name", arm)
         print(
-            f"{row['label']:<36}{row['pages']:>6}{row['text_rank']:>6}{row['visual_rank']:>8}{row['visual_score']:>10.3f}"
+            f"  {label[:42]:42s} nDCG@10 {cells[0]}  right first {cells[1]}  McNemar {only_lead}/{only_other} p={mcnemar(only_lead, only_other):.2g}"
         )
+        if arm in recorded:
+            for metric in ("ndcg10", "top1"):
+                if abs(macro(scores, metric) - recorded[arm][f"{metric}_macro"]) > 1e-9:
+                    mismatches += 1
+                    print(f"    MISMATCH: {arm} {metric} differs from evidence/stats.json", file=sys.stderr)
+    for metric in ("ndcg10", "top1"):
+        if abs(macro(arms[LEAD], metric) - recorded[LEAD][f"{metric}_macro"]) > 1e-9:
+            mismatches += 1
+            print(f"MISMATCH: {LEAD} {metric} differs from evidence/stats.json", file=sys.stderr)
 
-    # A call nothing scores is either evidence for a claim this example does not
-    # make, or a leftover. Either way it does not travel silently.
-    unconsumed = sorted(set(calls) - consumed)
-    if unconsumed:
-        raise SystemExit(f"calls.json holds {len(unconsumed)} call(s) nothing scores: {', '.join(unconsumed[:5])}")
-
-    scored = sum(row["pages"] for row in rows)
-    leading = sum(1 for row in rows if row["visual_rank"] == 1)
-    print()
-    print(f"{len(rows)} comparisons over {scored} pages")
-    print(f"the visual side puts the benchmark page first in {leading} of {len(rows)}")
-    print(f"the text side never does, at best rank {min(row['text_rank'] for row in rows)}")
+    print("\nPer dataset, nDCG@10:")
+    for d in DATASETS:
+        row = "  ".join(
+            f"{manifest['arms'].get(a, {}).get('short', a)} {100 * s[d]['ndcg10'].mean():.1f}" for a, s in arms.items()
+        )
+        print(f"  {d:17s} {row}")
+    if mismatches:
+        return 1
+    print("\nEvery recorded figure in evidence/stats.json matches.")
     return 0
 
 

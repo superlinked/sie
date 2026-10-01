@@ -1,0 +1,23 @@
+[project]
+name = "superlinked-sie-ocr-receipts-handwriting-example"
+version = "0.1.0"
+description = "Read receipt photos and handwritten notes with SIE's LightOnOCR-2-1B, scored against GPT-5.4 mini and self-hosted OCR"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "sie-sdk>=0.6.23,<0.9.0",
+  "huggingface-hub>=0.24",
+  "pillow>=10",
+  "pyarrow>=15",
+]
+
+[tool.uv]
+package = false
+
+[dependency-groups]
+dev = [
+  "ruff>=0.14",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"

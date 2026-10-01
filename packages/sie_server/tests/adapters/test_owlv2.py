@@ -12,9 +12,10 @@ from sie_server.adapters.owlv2.adapter import Owlv2Adapter
 from sie_server.types.inputs import Item
 
 
-def test_load_uses_slow_processor_protocol() -> None:
+def test_load_uses_fast_processor_and_caps_image_side() -> None:
     adapter = Owlv2Adapter("google/owlv2-base-patch16-ensemble", revision="deadbeef")
     mock_processor = MagicMock()
+    mock_processor.image_processor.size = {"height": 960, "width": 960}
     mock_model = MagicMock()
     mock_model.parameters.return_value = iter([MagicMock(dtype="float32")])
 
@@ -26,7 +27,9 @@ def test_load_uses_slow_processor_protocol() -> None:
 
     kwargs = load_processor.call_args.kwargs
     assert kwargs["revision"] == "deadbeef"
-    assert kwargs["use_fast"] is False
+    assert kwargs["use_fast"] is True
+    # Photos far larger than the model input are shrunk before the processor.
+    assert adapter._preprocessor._max_side == 1920
     model_kwargs = load_model.call_args.kwargs
     assert model_kwargs["dtype"] is torch.float32
     assert "torch_dtype" not in model_kwargs

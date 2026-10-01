@@ -1,255 +1,147 @@
 #!/usr/bin/env python3
-"""Re-derive the published figures from the recorded run, offline.
+"""Re-derive the /image-search figures from the recorded run. No key, no network.
 
-    python3 fetch.py
-    python3 score.py
+    uv run python fetch.py      # once: download the recorded evidence
+    uv run python score.py      # rank, count and compare
 
-Standard library only. No API key, no network, no inference spend. Every number
-below comes out of the recorded encode responses in evidence/calls.json.
+Two tests, both recorded on 30 September 2026:
 
-What it measures, over every request in the catalogue:
+1. A held-out product catalogue: 2,573 Amazon Berkeley Objects photos and 309
+   questions such as "brown leather sofa". A result is right when its checked
+   colour, material and product type all equal the question's. score.py ranks
+   every photo for every question from SIE's recorded SigLIP so400m vectors,
+   checks that ranking against the recorded one, and counts how often each
+   product put a right photo first. The other products' rankings are read as
+   recorded; their vectors are not redistributed.
+2. Flickr30k and MS-COCO text-to-image (the Karpathy test splits), scored per
+   caption from each product's recorded rank of the caption's own image.
 
-  ranks first   how often the one photograph matching colour, material and
-                category is the top result, under each of the four request
-                forms. The catalogue is built so that for every request there
-                is also a photograph matching each pair of the three, so first
-                place has to be taken from a near miss rather than from noise.
-
-  median rank   where that photograph lands when it is not first.
-
-This fails rather than skipping. A missing file, an image whose bytes no longer
-match their digest, a response that does not match its response_sha256, a
-request the pinned inputs do not rebuild, an image or query with no recorded
-vector, a vector returned twice, a declared width that disagrees with its own
-values, or a non-finite value all exit non-zero. So does any published figure
-that the recording no longer supports.
+It exits non-zero if anything it recomputes disagrees with the recording.
 """
 
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
 import math
-import statistics
 import sys
 from pathlib import Path
-from typing import Any
 
-import catalogue
+import numpy as np
 
-# Published on https://superlinked.com/image-search. Pinned in the committed
-# source so the scorer compares what it derives from the recording against
-# something the recording cannot move. Editing evidence/ alone will not satisfy
-# this. Filled in from the run; `None` means "not published".
-PUBLISHED: dict[str, int] = {
-    "images": 50,
-    "requests": 24,
-    "first/category": 2,
-    "first/colour-category": 7,
-    "first/material-category": 6,
-    "first/full": 13,
+HERE = Path(__file__).resolve().parent
+EVIDENCE = HERE / "evidence"
+OURS = "sie-siglip-so400m-384-oss"
+# The share of right products first that superlinked.com/image-search and its SOURCES.md state.
+EXPECTED = {
+    OURS: "83.2",
+    "cohere-embed-v4@1024": "84.1",
+    "voyage-mm-3.5@1024": "75.1",
+    "openai-caption-3-small@1024": "53.4",
 }
-
-KIND_ORDER = ("full", "wrong-colour", "wrong-material", "wrong-category", "one-attribute", "unrelated")
-
-
-def load_calls(expected: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    path = catalogue.EVIDENCE / "calls.json"
-    if not path.exists():
-        raise SystemExit(f"{path} is missing. Run: python3 fetch.py")
-    calls = json.loads(path.read_text(encoding="utf-8"))["calls"]
-    by_slug: dict[str, dict[str, Any]] = {}
-    for call in calls:
-        if call["slug"] in by_slug:
-            raise SystemExit(f"calls.json records {call['slug']!r} twice")
-        by_slug[call["slug"]] = call
-    missing = sorted(set(expected) - set(by_slug))
-    if missing:
-        raise SystemExit(f"calls.json is missing {', '.join(missing)}")
-    extra = sorted(set(by_slug) - set(expected))
-    if extra:
-        raise SystemExit(f"calls.json holds a call nothing scores: {', '.join(extra)}")
-    return by_slug
+PAGE_ARMS = list(EXPECTED)
 
 
-def check_call(call: dict[str, Any], expected_body: dict[str, Any], manifest: dict[str, Any]) -> None:
-    if call["status"] != 200:
-        raise SystemExit(f"{call['slug']}: recorded status {call['status']}")
-    if call["request"]["body"] != expected_body:
-        raise SystemExit(
-            f"{call['slug']}: the recorded request is not the one the pinned inputs rebuild. "
-            "Either inputs/ changed or the recording is of something else."
-        )
-    expected_url = manifest["endpoint"].rstrip("/") + manifest["path"]
-    if call["request"]["url"] != expected_url:
-        raise SystemExit(f"{call['slug']}: recorded URL {call['request']['url']} is not {expected_url}")
-    digest = catalogue.sha256_bytes(catalogue.compact_json(call["response"]))
-    if digest != call["response_sha256"]:
-        raise SystemExit(f"{call['slug']}: response digest {digest} is not the recorded {call['response_sha256']}")
-    if call.get("deployment_revision") != manifest.get("deployment_revision"):
-        raise SystemExit(
-            f"{call['slug']}: served deployment revision {call.get('deployment_revision')!r} "
-            f"is not the manifest's {manifest.get('deployment_revision')!r}"
-        )
+def load(path: Path):
+    if path.suffix == ".gz":
+        with gzip.open(path) as handle:
+            return json.loads(handle.read())
+    return json.loads(path.read_text())
 
 
-def vectors(call: dict[str, Any], expected_ids: list[str]) -> dict[str, list[float]]:
-    found: dict[str, list[float]] = {}
-    for item in call["response"]["items"]:
-        if item["id"] in found:
-            raise SystemExit(f"{call['slug']}: {item['id']!r} has two recorded vectors")
-        values = item["dense"]["values"]
-        if item["dense"]["dims"] != len(values):
-            raise SystemExit(f"{item['id']}: declares {item['dense']['dims']} dimensions and carries {len(values)}")
-        if len(values) != catalogue.DIMS:
-            raise SystemExit(f"{item['id']}: {len(values)} dimensions, the model returns {catalogue.DIMS}")
-        if not all(math.isfinite(value) for value in values):
-            raise SystemExit(f"{item['id']}: a returned value is not finite")
-        found[item["id"]] = values
-    absent = [name for name in expected_ids if name not in found]
-    if absent:
-        raise SystemExit(f"{call['slug']}: no recorded vector for {', '.join(absent)}")
-    extra = [name for name in found if name not in expected_ids]
-    if extra:
-        raise SystemExit(f"{call['slug']}: a vector nothing asked for: {', '.join(extra)}")
-    return found
+def normalise(x: np.ndarray) -> np.ndarray:
+    norms = np.linalg.norm(x, axis=1, keepdims=True)
+    norms[norms == 0] = 1.0
+    return x / norms
+
+
+def mcnemar(b: int, c: int) -> float:
+    """Exact two-sided McNemar p for b and c discordant pairs."""
+    n = b + c
+    if n == 0:
+        return 1.0
+    return min(1.0, 2 * sum(math.comb(n, k) for k in range(min(b, c) + 1)) / 2**n)
+
+
+def rank_ours(vectors: Path, image_ids: list[str], question_ids: list[str]) -> dict[str, list[str]]:
+    ids = json.loads((vectors / "images.ids.json").read_text())
+    qids = json.loads((vectors / "texts.ids.json").read_text())
+    if ids != image_ids:
+        raise SystemExit("the image vectors are not in catalogue order")
+    if qids != question_ids:
+        raise SystemExit("the text vectors are not in question order")
+    images = normalise(np.load(vectors / "images.npy").astype(np.float32))
+    texts = normalise(np.load(vectors / "texts.npy").astype(np.float32))
+    sims = texts @ images.T
+    order = np.argsort(-sims, axis=1, kind="stable")[:, :20]
+    return {qid: [ids[j] for j in order[row]] for row, qid in enumerate(qids)}
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--emit", help="write the derived figures as JSON to this path")
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--vectors",
+        type=Path,
+        default=EVIDENCE / "vectors" / "siglip-so400m-384",
+        help="SIE vectors to rank: the recorded ones, or a run.py output directory",
+    )
     args = parser.parse_args()
-
-    manifest_path = catalogue.EVIDENCE / "manifest.json"
-    if not manifest_path.exists():
-        raise SystemExit(f"{manifest_path} is missing. Run: python3 fetch.py")
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if manifest.get("model") != catalogue.MODEL:
-        raise SystemExit(f"manifest names model {manifest.get('model')!r}, this example scores {catalogue.MODEL!r}")
-    if manifest.get("model_revision") != catalogue.MODEL_REVISION:
-        raise SystemExit(
-            f"manifest names model revision {manifest.get('model_revision')!r}, "
-            f"this example scores {catalogue.MODEL_REVISION!r}. Different weights produce different scores."
-        )
-
-    records = catalogue.load_catalogue()
-    queries = catalogue.load_queries()
-    bodies = catalogue.bodies(records, queries)
-    calls = load_calls(bodies)
-    for slug, body in bodies.items():
-        check_call(calls[slug], body, manifest)
-
-    image_vectors: dict[str, list[float]] = {}
-    image_slugs = [name for name in bodies if name != "queries"]
-    batches = catalogue.image_batches(records)
-    if len(image_slugs) != len(batches):
-        raise SystemExit(f"{len(image_slugs)} recorded image calls for {len(batches)} batches of photographs")
-    for slug, batch in zip(image_slugs, batches, strict=True):
-        image_vectors.update(vectors(calls[slug], [record["id"] for record in batch]))
-    if len(image_vectors) != len(records):
-        raise SystemExit(f"{len(image_vectors)} recorded image vectors for {len(records)} photographs")
-
-    items = catalogue.query_items(queries)
-    query_vectors = vectors(calls["queries"], [item["id"] for item in items])
-
-    by_id = {record["id"]: record for record in records}
-    # Every request must have exactly one photograph matching all three
-    # attributes, and at least one matching each pair. Checked before any
-    # figure is derived, because a request without a near miss on some axis
-    # makes "first place was taken from a near miss" false for that request.
-    for query in queries:
-        kinds: dict[str, int] = {}
-        for record in records:
-            kinds[catalogue.competitor_kind(record, query)] = (
-                kinds.get(catalogue.competitor_kind(record, query), 0) + 1
-            )
-        if kinds.get("full", 0) != 1:
-            raise SystemExit(f"{query['id']}: {kinds.get('full', 0)} photographs match all three attributes")
-        for kind in ("wrong-colour", "wrong-material", "wrong-category"):
-            if kinds.get(kind, 0) < 1:
-                raise SystemExit(f"{query['id']}: the catalogue holds no {kind} near miss")
-        if query["target"] not in by_id:
-            raise SystemExit(f"{query['id']}: target {query['target']} is not in the catalogue")
-        if catalogue.competitor_kind(by_id[query["target"]], query) != "full":
-            raise SystemExit(f"{query['id']}: target {query['target']} does not match all three attributes")
-
-    derived: dict[str, Any] = {"images": len(records), "requests": len(queries)}
-    per_form: dict[str, dict[str, Any]] = {}
-    beaten_by: dict[str, int] = {}
-    rows: list[dict[str, Any]] = []
-
-    for form in catalogue.FORMS:
-        positions = []
-        for query in queries:
-            ranked = catalogue.rank(query_vectors[f"{query['id']}/{form}"], image_vectors)
-            order = [name for name, _ in ranked]
-            position = order.index(query["target"]) + 1
-            positions.append(position)
-            if form == "full" and position != 1:
-                beaten = catalogue.competitor_kind(by_id[order[0]], query)
-                beaten_by[beaten] = beaten_by.get(beaten, 0) + 1
-            rows.append(
-                {
-                    "query": query["id"],
-                    "form": form,
-                    "text": catalogue.phrase(form, query["colour"], query["material"], query["category"]),
-                    "target": query["target"],
-                    "rank": position,
-                    "score": dict(ranked)[query["target"]],
-                    "top": order[0],
-                    "top_kind": catalogue.competitor_kind(by_id[order[0]], query),
-                }
-            )
-        first = sum(1 for position in positions if position == 1)
-        per_form[form] = {
-            "first": first,
-            "median_rank": statistics.median(positions),
-            "mean_rank": round(statistics.fmean(positions), 2),
-            "worst_rank": max(positions),
-        }
-        derived[f"first/{form}"] = first
-
-    print(f"{manifest['model']} at revision {manifest['model_revision']}")
-    print(f"{manifest['endpoint']}, recorded {manifest['run_date']}")
-    print()
-    print(f"{len(records)} photographs, {len(queries)} requests, {len(catalogue.FORMS)} forms each, "
-          f"{len(calls)} calls recorded")
-    print()
-    print(f"{'request form':<34}{'ranks first':>12}{'median rank':>13}{'worst':>7}")
-    labels = {
-        "category": "the category alone",
-        "colour-category": "colour and category",
-        "material-category": "material and category",
-        "full": "colour, material and category",
-    }
-    for form in catalogue.FORMS:
-        stats = per_form[form]
-        print(f"  {labels[form]:<32}{stats['first']:>7}/{len(queries):<4}"
-              f"{stats['median_rank']:>13}{stats['worst_rank']:>7}")
-    print()
-    if beaten_by:
-        print("When the full request did not win, what took first place:")
-        for kind in KIND_ORDER:
-            if kind in beaten_by:
-                print(f"  {kind:<16}{beaten_by[kind]}")
-    else:
-        print("The full request took first place for every one of the requests.")
-
-    if args.emit:
-        Path(args.emit).write_text(
-            json.dumps({"derived": derived, "per_form": per_form, "beaten_by": beaten_by, "rows": rows}, indent=1)
-            + "\n",
-            encoding="utf-8",
-        )
-        print(f"\nwrote {args.emit}")
-
-    mismatched = [key for key, value in PUBLISHED.items() if derived.get(key) != value]
-    if mismatched:
-        for key in mismatched:
-            print(f"MISMATCH {key}: recording gives {derived.get(key)}, the page publishes {PUBLISHED[key]}",
-                  file=sys.stderr)
+    if not EVIDENCE.exists():
+        print("No evidence yet: run `python3 fetch.py` first.", file=sys.stderr)
         return 1
-    print("\nEvery published figure matches the recording.")
+
+    catalogue = load(EVIDENCE / "inputs" / "catalogue.json")
+    questions = load(EVIDENCE / "inputs" / "questions.json")
+    names = load(EVIDENCE / "manifest.json")["arms"]
+    rankings = load(EVIDENCE / "rankings" / "e1.json.gz")
+    label = {r["image_id"]: (r["colour"], r["material"], r["type"]) for r in catalogue}
+    print(f"{len(catalogue):,} catalogue photos, {len(questions)} questions\n")
+
+    # 1. Our ranking, recomputed from the vectors, must be the recorded one.
+    ours = rank_ours(args.vectors, [r["image_id"] for r in catalogue], [q["id"] for q in questions])
+    recorded = {qid: [image_id for image_id, _ in rows] for qid, rows in rankings[OURS].items()}
+    recorded_run = args.vectors == EVIDENCE / "vectors" / "siglip-so400m-384"
+    differ = [qid for qid in ours if ours[qid] != recorded[qid][:20]]
+    if recorded_run and differ:
+        print(f"{len(differ)} questions rank differently from the recording, e.g. {differ[:3]}", file=sys.stderr)
+        return 1
+    tops = {arm: {qid: rows[0][0] for qid, rows in arm_rows.items()} for arm, arm_rows in rankings.items()}
+    tops[OURS] = {qid: rows[0] for qid, rows in ours.items()}
+
+    def right(arm: str, q: dict) -> bool:
+        return label[tops[arm][q["id"]]] == (q["colour"], q["material"], q["type"])
+
+    print("The held-out catalogue: a right product ranked first")
+    print(f"  {'product':52s} {'first':>6s} {'share':>7s}")
+    failed = False
+    for arm in rankings:
+        first = sum(right(arm, q) for q in questions)
+        share = f"{100 * first / len(questions):.1f}"
+        mark = ""
+        if recorded_run and arm in EXPECTED and share != EXPECTED[arm]:
+            mark, failed = f"  (the page states {EXPECTED[arm]}%)", True
+        print(f"  {names[arm]:52s} {first:6d} {share:>6s}%{mark}")
+    print(f"\n  Against {names[OURS]} (exact McNemar):")
+    for arm in PAGE_ARMS[1:]:
+        b = sum(right(OURS, q) and not right(arm, q) for q in questions)
+        c = sum(right(arm, q) and not right(OURS, q) for q in questions)
+        print(f"  {names[arm]:52s} ours only {b:3d}, theirs only {c:3d}, p = {mcnemar(b, c):.3g}")
+
+    # 2. Flickr30k and MS-COCO: the caption's own image ranked first.
+    e0 = load(EVIDENCE / "rankings" / "e0.json.gz")
+    print("\nFlickr30k and MS-COCO (Karpathy test splits): the caption's image ranked first")
+    print(f"  {'product':52s} {'Flickr30k':>10s} {'MS-COCO':>8s} {'mean':>7s}")
+    for arm, sets in e0.items():
+        shares = [
+            100 * sum(r == 1 for r in ranks.values()) / len(ranks) for ranks in (sets["e0-flickr"], sets["e0-coco"])
+        ]
+        print(f"  {names.get(arm, arm):52s} {shares[0]:9.1f}% {shares[1]:7.1f}% {sum(shares) / 2:6.1f}%")
+
+    if failed:
+        print("\nA recomputed figure differs from the page.", file=sys.stderr)
+        return 1
+    print("\nEvery figure matches the recording.")
     return 0
 
 

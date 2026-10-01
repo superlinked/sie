@@ -28,6 +28,11 @@ DeBERTa encoders, whose attention materializes score matrices of the square of
 the row length), and within the position table of encoders with absolute
 positions.
 
+``document_windows`` reads a document longer than one window as overlapping
+windows, each of which a model reads whole, and ``merge_window_spans`` maps
+the spans found in them back to the document and merges them (see those
+functions).
+
 ``plan_forwards`` splits a batch into forward passes whose rows times the
 square of their longest row stay within ``ATTENTION_BUDGET``, so that the
 attention memory of a pass stays bounded for a batch of long rows too.
@@ -35,6 +40,7 @@ attention memory of a pass stays bounded for a batch of long rows too.
 
 from __future__ import annotations
 
+import json
 from collections import Counter, OrderedDict
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
@@ -53,6 +59,17 @@ DEBERTA_MAX_DOCUMENT_SUBWORDS = 4096
 ATTENTION_BUDGET = DEBERTA_MAX_DOCUMENT_SUBWORDS * DEBERTA_MAX_DOCUMENT_SUBWORDS
 # Tokens an encoder with absolute positions adds around a document ([CLS], [SEP], position offsets).
 _SPECIAL_POSITIONS = 4
+# Words a window shares with the one before it. GLiNER models find spans of at
+# most 12 words, so an entity cut by one window's edge is whole in its neighbour.
+WINDOW_OVERLAP_WORDS = 64
+# Most windows read of one document (about 40,000 words at 384 words a window).
+# A longer document fails with ``INPUT_TOO_LONG`` rather than being read in part.
+MAX_DOCUMENT_WINDOWS = 128
+# Characters of a document read to find one window, doubled until the window
+# ends this far inside them (or the document ends), so that a window of a long
+# document is found without copying the rest of the document each time.
+_WINDOW_SLICE_CHARS = 16384
+_WINDOW_SLICE_MARGIN = MAX_WORD_CHARS
 # Words are counted in blocks, so reading stops at most one block past the window.
 _READ_BLOCK = 64
 _COUNT_CACHE_SIZE = 16384
@@ -194,6 +211,218 @@ class WindowedSplitter:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class DocumentWindow:
+    """One window of a document: ``text[start:end]`` is read whole."""
+
+    start: int
+    end: int
+    # The end of the last word read.
+    read_end: int
+    # Words shared with the window before, or None for the first window.
+    overlap: int | None
+
+
+def document_windows(
+    text: str,
+    splitter: WindowedSplitter,
+    *,
+    overlap_words: int = WINDOW_OVERLAP_WORDS,
+    max_windows: int = MAX_DOCUMENT_WINDOWS,
+) -> list[DocumentWindow] | None:
+    """The windows ``splitter`` reads ``text`` in, or None when it takes more than ``max_windows``.
+
+    A text read whole is one window of all of it, so a model is given exactly
+    the text it was given before. A longer text is read as successive windows,
+    each ending where ``splitter`` stops reading (``Window.cut``) and each
+    after the first starting at the start of the last ``overlap_words`` words
+    of the one before it (at most half of that window's words, so that every
+    window reads new words).
+    """
+    windows: list[DocumentWindow] = []
+    start = 0
+    overlap: int | None = None
+    while True:
+        window, rest, end = _window_from(text, start, splitter)
+        words = window.words
+        if window.cut is None or not words:
+            read_end = start + (words[-1][2] if words else len(rest))
+            windows.append(DocumentWindow(start, len(text), read_end, overlap))
+            return windows
+        windows.append(DocumentWindow(start, start + end, start + words[-1][2], overlap))
+        if len(windows) >= max_windows:
+            return None
+        shared = min(overlap_words, len(words) // 2)
+        if shared:
+            start += words[len(words) - shared][1]
+        else:
+            # One word read: the next window starts at the first piece not read.
+            following = _second_piece_start(splitter, rest) or _second_piece_start(splitter, text[start:])
+            if not following:
+                raise RuntimeError("a window stopped before the end of a document, but no word follows it")
+            start += following
+        overlap = shared
+
+
+def gliner_windows(model: Any, texts: Sequence[str]) -> list[list[DocumentWindow] | None]:
+    """The windows a loaded ``gliner`` model reads each text in; None for a text needing too many.
+
+    See ``document_windows``. A model without the bounded word splitter of
+    ``bound_gliner_words`` reads each text as one window.
+    """
+    splitter = getattr(getattr(model, "data_processor", None), "words_splitter", None)
+    if not isinstance(splitter, WindowedSplitter):
+        return [[DocumentWindow(0, len(text), len(text), None)] for text in texts]
+    return [document_windows(text, splitter) for text in texts]
+
+
+def window_rows(
+    texts: Sequence[str], plans: Sequence[list[DocumentWindow] | None]
+) -> tuple[list[str], list[int], list[int | None]]:
+    """The text of each window read, the item it belongs to, and its overlap with the window before."""
+    rows: list[str] = []
+    owners: list[int] = []
+    overlaps: list[int | None] = []
+    for index, (text, windows) in enumerate(zip(texts, plans, strict=True)):
+        for window in windows or []:
+            rows.append(text[window.start : window.end])
+            owners.append(index)
+            overlaps.append(window.overlap)
+    return rows, owners, overlaps
+
+
+def window_item_counts(row_counts: Sequence[int] | None, owners: Sequence[int], items: int) -> list[int] | None:
+    """Each item's input tokens: the sum over its windows (0 for an item not read)."""
+    if row_counts is None:
+        return None
+    counts = [0] * items
+    for owner, count in zip(owners, row_counts, strict=True):
+        counts[owner] += count
+    return counts
+
+
+def _second_piece_start(splitter: WindowedSplitter, text: str) -> int | None:
+    second = next(islice(pieces(splitter.splitter(text), text), 1, 2), None)
+    return None if second is None else second[1]
+
+
+def _window_from(text: str, start: int, splitter: WindowedSplitter) -> tuple[Window, str, int]:
+    """The window ``splitter`` reads of ``text[start:]``, the text it was read from, and where the window's text ends.
+
+    Reads a prefix of ``text[start:]`` that grows until the first piece the
+    window does not read ends at least ``_WINDOW_SLICE_MARGIN`` characters
+    before the prefix does: a word splitter matching words by pattern then
+    reads the same pieces up to it as in the whole text, and so the same
+    window. The window's text is ``rest[:cut]`` when that ends inside the
+    prefix, or else the prefix itself (a word too long for the prefix is read
+    in pieces of which the window reads only the first).
+    """
+    size = _WINDOW_SLICE_CHARS
+    while True:
+        rest = text[start : start + size]
+        window = splitter.window(rest)
+        if start + size >= len(text):
+            return window, rest, len(rest) if window.cut is None else window.cut
+        if window.cut is not None and window.words:
+            if window.cut + _WINDOW_SLICE_MARGIN <= len(rest):
+                return window, rest, window.cut
+            following = _piece_end_after(splitter, rest, window.words[-1][2])
+            if following is not None and following + _WINDOW_SLICE_MARGIN <= len(rest):
+                return window, rest, len(rest)
+        size *= 2
+
+
+def _piece_end_after(splitter: WindowedSplitter, text: str, offset: int) -> int | None:
+    """The end of the first piece of ``text`` after ``offset`` (the end of a piece), or None when there is none."""
+    tail = text[offset:]
+    first = next(pieces(splitter.splitter(tail), tail), None)
+    return None if first is None else offset + first[2]
+
+
+def merge_window_spans(
+    windows: Sequence[DocumentWindow],
+    spans: Sequence[Sequence[dict[str, Any]]],
+    text: str,
+    *,
+    flat_ner: bool,
+    multi_label: bool,
+) -> list[dict[str, Any]]:
+    """The spans of a document from the spans found in each of its windows.
+
+    ``spans[i]`` are the spans (``start``, ``end``, ``label``, ``score`` and
+    ``text``) found in ``windows[i]``, with offsets into that window's text.
+    One window's spans are returned as they are. Otherwise offsets are moved
+    to the document; a span reaching a window's edge that the window next to
+    it reads past is dropped when that window found an overlapping span of
+    the same label (the span may have been cut short at the edge, and the
+    other window reads it whole); the same span found twice keeps its highest
+    score; and overlapping spans are resolved as gliner resolves them in one
+    window: highest score first, keeping a span that overlaps none kept
+    (``flat_ner``) or that overlaps none kept without one holding the other,
+    where ``multi_label`` allows one span several labels. Spans are returned
+    in document order.
+    """
+    if len(windows) == 1:
+        return list(spans[0])
+    moved = [
+        [{**span, "start": span["start"] + window.start, "end": span["end"] + window.start} for span in found]
+        for window, found in zip(windows, spans, strict=True)
+    ]
+    best: dict[tuple[int, int, str], dict[str, Any]] = {}
+    for index, (window, found) in enumerate(zip(windows, moved, strict=True)):
+        for span in found:
+            if _cut_at_edge(span, index, window, windows, moved):
+                continue
+            key = (span["start"], span["end"], span["label"])
+            if key not in best or span["score"] > best[key]["score"]:
+                best[key] = {**span, "text": text[span["start"] : span["end"]]}
+    kept: list[dict[str, Any]] = []
+    for span in sorted(best.values(), key=lambda one: -one["score"]):
+        if not any(_conflict(span, other, flat_ner=flat_ner, multi_label=multi_label) for other in kept):
+            kept.append(span)
+    kept.sort(key=lambda one: (one["start"], one["end"]))
+    return kept
+
+
+def _cut_at_edge(
+    span: dict[str, Any],
+    index: int,
+    window: DocumentWindow,
+    windows: Sequence[DocumentWindow],
+    moved: Sequence[Sequence[dict[str, Any]]],
+) -> bool:
+    """Whether a neighbouring window reads ``span`` whole and found an overlapping span of its label there."""
+    neighbours = []
+    if index > 0 and span["start"] <= window.start:
+        neighbours.append(index - 1)
+    if index + 1 < len(windows) and span["end"] >= window.read_end:
+        neighbours.append(index + 1)
+    for other in neighbours:
+        reader = windows[other]
+        if not reader.start <= span["start"] < span["end"] <= reader.read_end:
+            continue
+        if any(
+            found["label"] == span["label"] and found["start"] < span["end"] and span["start"] < found["end"]
+            for found in moved[other]
+        ):
+            return True
+    return False
+
+
+def _conflict(span: dict[str, Any], other: dict[str, Any], *, flat_ner: bool, multi_label: bool) -> bool:
+    """Whether two spans conflict under gliner's overlap rule (``greedy_search``), on character offsets."""
+    if (span["start"], span["end"]) == (other["start"], other["end"]):
+        return not multi_label
+    if span["start"] >= other["end"] or other["start"] >= span["end"]:
+        return False
+    if flat_ner:
+        return True
+    nested = (span["start"] <= other["start"] and other["end"] <= span["end"]) or (
+        other["start"] <= span["start"] and span["end"] <= other["end"]
+    )
+    return not nested
+
+
 class SubwordCounter:
     """Subword counts of words, from ``count`` (a list of words at a time), with the recent ones kept.
 
@@ -285,6 +514,36 @@ def plan_forwards(
     return groups
 
 
+def prefix_space_for_split_words(tokenizer: Any) -> bool:
+    """Let a byte-level BPE tokenizer encode words that are already split.
+
+    ``gliner`` hands its tokenizer pre-split words (``is_split_into_words``).
+    RoBERTa-family fast tokenizers (RoBERTa, Longformer, GPT-2) refuse that
+    unless they were loaded with ``add_prefix_space=True``, which ``gliner``
+    does not pass, so a checkpoint on such an encoder (``numind/NuNER_Zero-4k``
+    on Longformer) failed every request. The tokenizer is switched in place,
+    as its own constructor would with the option set, so the tokens ``gliner``
+    added to it are kept.
+
+    Returns whether the tokenizer was changed.
+    """
+    if getattr(tokenizer, "add_prefix_space", None) is not False:
+        return False
+    backend = getattr(tokenizer, "backend_tokenizer", None)
+    if backend is None:
+        return False
+    from tokenizers import pre_tokenizers
+
+    state = json.loads(backend.pre_tokenizer.__getstate__())
+    if state.get("type") != "ByteLevel":
+        return False
+    state["add_prefix_space"] = True
+    state.pop("type")
+    backend.pre_tokenizer = pre_tokenizers.ByteLevel(**state)
+    tokenizer.add_prefix_space = True
+    return True
+
+
 def bound_gliner_words(model: Any) -> bool:
     """Make a loaded ``gliner`` model read the bounded window of each document.
 
@@ -303,6 +562,7 @@ def bound_gliner_words(model: Any) -> bool:
     encoder_config = getattr(model.config, "encoder_config", None)
     max_words = int(model.config.max_len)
     tokenizer = processor.transformer_tokenizer
+    prefix_space_for_split_words(tokenizer)
     processor.words_splitter = WindowedSplitter(
         processor.words_splitter,
         max_words=max_words,

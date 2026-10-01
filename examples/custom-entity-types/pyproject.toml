@@ -1,0 +1,20 @@
+[project]
+name = "superlinked-sie-custom-entity-types-example"
+version = "0.1.0"
+description = "Extract the entity types you name, with no training: SIE GLiNER against LLMs, AWS Comprehend and spaCy on seven zero-shot NER sets"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "sie-sdk>=0.9.0,<0.10.0",
+]
+
+[tool.uv]
+package = false
+
+[dependency-groups]
+dev = [
+  "ruff>=0.14",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"

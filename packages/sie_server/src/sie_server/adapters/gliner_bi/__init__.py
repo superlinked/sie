@@ -11,15 +11,27 @@ import torch
 from sie_server.adapters._base_adapter import BaseAdapter
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_REQUIRES_TEXT, ComputePrecision
-from sie_server.adapters._word_window import bound_gliner_words, plan_forwards
-from sie_server.core.inference_output import ExtractOutput
+from sie_server.adapters._word_window import (
+    MAX_DOCUMENT_WINDOWS,
+    bound_gliner_words,
+    gliner_windows,
+    merge_window_spans,
+    plan_forwards,
+    window_item_counts,
+    window_rows,
+)
+from sie_server.core.inference_output import ExtractItemError, ExtractOutput
 from sie_server.types.inputs import InvalidInputError, Item
-from sie_server.types.responses import Entity
+from sie_server.types.responses import Entity, ErrorCode
 
 logger = logging.getLogger(__name__)
 
 _ERR_REQUIRES_LABELS = "GLiNER-bi requires labels parameter for extraction"
 _ERR_NO_RELATIONS = "GLiNER bi-encoder models do not extract relations; options.relation_labels is not supported"
+_ERR_TOO_MANY_WINDOWS = (
+    f"GLiNER-bi reads a document in at most {MAX_DOCUMENT_WINDOWS} windows of words; "
+    "split this document into shorter items"
+)
 
 # Maximum number of distinct label-set embeddings to cache.
 _LABEL_CACHE_MAX_SIZE = 64
@@ -46,6 +58,10 @@ class GLiNERBiAdapter(BaseAdapter):
     The key performance feature is that label embeddings can be pre-computed
     and cached via ``encode_labels()`` + ``batch_predict_with_embeds()``,
     giving near-constant inference time regardless of label count.
+
+    A document longer than the model's word window is read whole, as
+    overlapping windows, as the GLiNER adapter reads it (see
+    ``_word_window.document_windows``).
 
     Reference models:
     - knowledgator/gliner-bi-base-v2.0 (Ettin text encoder)
@@ -223,8 +239,16 @@ class GLiNERBiAdapter(BaseAdapter):
         effective_flat_ner = opts.get("flat_ner", self._flat_ner)
         effective_multi_label = opts.get("multi_label", self._multi_label)
         use_precompute = opts.get("precompute_labels", self._precompute_labels)
+        # A document longer than the model's word window is read as several
+        # overlapping windows, each a row of its own.
+        plans = gliner_windows(self._model, texts)
+        rows, owners, overlaps = window_rows(texts, plans)
         # A bi-encoder's row is the document alone, so its metered tokens are its row tokens.
-        input_token_counts = self._doc_input_token_counts(texts, labels)
+        row_counts = self._row_token_counts(rows, labels, overlaps)
+        row_tokens = (
+            self._row_token_counts(rows, labels) if any(overlap is not None for overlap in overlaps) else row_counts
+        )
+        input_token_counts = window_item_counts(row_counts, owners, len(texts))
 
         def predict(batch: list[str]) -> list[Any]:
             if use_precompute:
@@ -245,19 +269,37 @@ class GLiNERBiAdapter(BaseAdapter):
             )
 
         groups = None
-        if input_token_counts is not None and self._quadratic_attention:
-            groups = plan_forwards(input_token_counts, rows_per_pass=_GLINER_BATCH_SIZE)
+        if row_tokens is not None and self._quadratic_attention and rows:
+            groups = plan_forwards(row_tokens, rows_per_pass=_GLINER_BATCH_SIZE)
         with torch.inference_mode():
-            if groups is None:
-                batch_entities = predict(texts)
+            if not rows:
+                row_entities: list[Any] = []
+            elif groups is None:
+                row_entities = predict(rows)
             else:
-                batch_entities: list[Any] = [[] for _ in texts]
+                row_entities = [[] for _ in rows]
                 for group in groups:
-                    group_entities = predict([texts[index] for index in group])
+                    group_entities = predict([rows[index] for index in group])
                     if len(group_entities) != len(group):
                         raise ValueError("GLiNER-bi returned predictions for a different number of items")
                     for index, entities in zip(group, group_entities, strict=True):
-                        batch_entities[index] = entities
+                        row_entities[index] = entities
+
+        item_rows: list[list[int]] = [[] for _ in texts]
+        for position, owner in enumerate(owners):
+            item_rows[owner].append(position)
+        batch_entities = [
+            []
+            if windows is None
+            else merge_window_spans(
+                windows,
+                [row_entities[position] for position in positions],
+                text,
+                flat_ner=bool(effective_flat_ner),
+                multi_label=bool(effective_multi_label),
+            )
+            for text, windows, positions in zip(texts, plans, item_rows, strict=True)
+        ]
 
         # Convert to SIE Entity format (same as GLiNERAdapter)
         all_entities: list[list[Entity]] = []
@@ -275,10 +317,26 @@ class GLiNERBiAdapter(BaseAdapter):
                 )
             all_entities.append(entity_results)
 
-        return ExtractOutput(entities=all_entities, input_token_counts=input_token_counts)
+        errors = None
+        if any(windows is None for windows in plans):
+            errors = [
+                None
+                if windows is not None
+                else ExtractItemError(code=ErrorCode.INPUT_TOO_LONG.value, message=_ERR_TOO_MANY_WINDOWS)
+                for windows in plans
+            ]
+        return ExtractOutput(entities=all_entities, errors=errors, input_token_counts=input_token_counts)
 
     def _doc_input_token_counts(self, texts: list[str], labels: list[str]) -> list[int] | None:
-        """Count the document tokens the bi-encoder actually encodes, per item.
+        """Count the document tokens the bi-encoder encodes of each text, over all its windows."""
+        plans = gliner_windows(self._model, texts)
+        rows, owners, overlaps = window_rows(texts, plans)
+        return window_item_counts(self._row_token_counts(rows, labels, overlaps), owners, len(texts))
+
+    def _row_token_counts(
+        self, texts: list[str], labels: list[str], overlaps: list[int | None] | None = None
+    ) -> list[int] | None:
+        """Count the document tokens the bi-encoder actually encodes, per row.
 
         A bi-encoder encodes labels separately, so its text input is the
         document alone. Delegate word splitting (the bounded splitter installed
@@ -287,6 +345,11 @@ class GLiNERBiAdapter(BaseAdapter):
         retained window, special tokens included, as the GLiNER adapter does.
         Batches match GLiNER inference's default batch size. GLiNER skips
         whitespace-only documents without encoding them, so they count zero.
+
+        ``overlaps[i]`` is None for a row holding the start of a document, or
+        the number of words row ``i`` shares with the window before it; such
+        a row counts neither its special tokens nor those words' subwords, so
+        a document read in several windows counts each of its tokens once.
         """
         processor = getattr(self._model, "data_processor", None)
         prepare_inputs = getattr(self._model, "prepare_inputs", None)
@@ -304,7 +367,19 @@ class GLiNERBiAdapter(BaseAdapter):
             for start in range(0, len(raw_items), 8):
                 raw_batch = processor.collate_raw_batch(raw_items[start : start + 8], entity_types=labels)
                 encoded = processor.tokenize_inputs(raw_batch["tokens"])
-                encoded_counts.extend(int(sum(mask)) for mask in encoded["attention_mask"].tolist())
+                for batch_index, mask in enumerate(encoded["attention_mask"].tolist()):
+                    overlap = None if overlaps is None else overlaps[encoded_positions[start + batch_index]]
+                    if overlap is None:
+                        encoded_counts.append(int(sum(mask)))
+                        continue
+                    word_ids = encoded.word_ids(batch_index)
+                    encoded_counts.append(
+                        sum(
+                            1
+                            for attended, word_id in zip(mask, word_ids, strict=True)
+                            if attended and word_id is not None and word_id >= overlap
+                        )
+                    )
         except Exception:  # noqa: BLE001 -- metering must never fail an extraction
             return None
         if len(encoded_counts) != len(encoded_positions):

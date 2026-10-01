@@ -1,0 +1,24 @@
+[project]
+name = "superlinked-sie-structured-output-accuracy-example"
+version = "0.1.0"
+description = "Value accuracy on the Structured Output Benchmark and fresh NHTSA complaints: SIE against six hosted models"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "sie-sdk>=0.8.0,<0.9.0",
+  "openai>=3.0",
+  "anthropic>=1.0",
+  "jsonschema>=4.0",
+  "pyarrow>=17.0",
+]
+
+[tool.uv]
+package = false
+
+[dependency-groups]
+dev = [
+  "ruff>=0.14",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"

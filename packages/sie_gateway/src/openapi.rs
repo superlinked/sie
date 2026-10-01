@@ -16,6 +16,9 @@ static OPENAPI_DOC: LazyLock<utoipa::openapi::OpenApi> = LazyLock::new(|| {
 static OPENAPI_JSON: LazyLock<String> = LazyLock::new(|| {
     let mut value = serde_json::to_value(&*OPENAPI_DOC).expect("OpenAPI document should serialize");
     apply_gateway_openapi_overrides(&mut value);
+    // Keep the published spec's key order stable and sorted, independent of
+    // serde_json's `preserve_order` insertion order.
+    let value = crate::canonical_json::sorted(&value);
     serde_json::to_string_pretty(&value).expect("OpenAPI document should serialize") + "\n"
 });
 
@@ -427,6 +430,14 @@ fn patch_queue_request_batch_limits(value: &mut Value) {
         .and_then(|properties| properties.get_mut("items"))
     {
         items["maxItems"] = json!(crate::handlers::proxy::MAX_SCORE_ITEMS);
+    }
+
+    if let Some(labels) = schemas
+        .get_mut("ExtractParams")
+        .and_then(|schema| schema.get_mut("properties"))
+        .and_then(|properties| properties.get_mut("labels"))
+    {
+        labels["maxItems"] = json!(crate::handlers::proxy::MAX_EXTRACT_LABELS);
     }
 
     if let Some(variants) = schemas
@@ -4171,6 +4182,11 @@ mod tests {
             spec["components"]["schemas"]["ScoreRequest"]["properties"]["items"]["maxItems"],
             json!(crate::handlers::proxy::MAX_SCORE_ITEMS),
             "ScoreRequest must document the stricter runtime score-item limit",
+        );
+        assert_eq!(
+            spec["components"]["schemas"]["ExtractParams"]["properties"]["labels"]["maxItems"],
+            json!(crate::handlers::proxy::MAX_EXTRACT_LABELS),
+            "ExtractParams must document the runtime label limit",
         );
         let embedding_input_variants = spec["components"]["schemas"]["OpenAIEmbeddingInput"]
             ["oneOf"]

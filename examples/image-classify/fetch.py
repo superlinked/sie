@@ -6,9 +6,9 @@
 Standard library only. No token, no account, no API key. The dataset is public
 and this pulls it anonymously.
 
-Everything lands in evidence/: both pre-registered input files, the display renditions
-of the sixteen pass-or-reject photographs, the recorded calls and the run
-manifest. score.py reads from there and never touches the network.
+Everything lands in evidence/: the photo sets, every recorded answer (the
+vision LLMs and AWS Rekognition), every SIE cosine, the Rekognition label map and
+the published figures. score.py reads from there and never touches the network.
 
 REVISION is a dataset commit, deliberately not `main`, so a later upload cannot
 change what this example scores.
@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import sys
+import tempfile
 import urllib.request
 from pathlib import Path
 
@@ -26,20 +28,43 @@ HERE = Path(__file__).resolve().parent
 EVIDENCE = HERE / "evidence"
 
 DATASET = "superlinked/sie-task-evidence"
-REVISION = "b703dc0e5bd35645fc0923dc13463f4826194e90"
-TASK = "image-classify"
+REVISION = "92feeb4cf95be8654a6f4a68ee06887bc195fbf7"
+TASK = "catalogue-tagging"
 
 API = f"https://huggingface.co/api/datasets/{DATASET}/tree/{REVISION}"
 FILES = f"https://huggingface.co/datasets/{DATASET}/resolve/{REVISION}"
 
-# score.py refuses to run without these. A missing one is a failure, not a skip.
-REQUIRED = ("calls.json", "manifest.json", "inputs/01-grades.json", "inputs/02-pass-reject.json")
+# Every file score.py reads. A listing missing one of these is a failure, not a
+# short download: score.py would otherwise report a clean pass over whatever
+# happened to arrive.
+REQUIRED = (
+    "sets.json",
+    "page-evidence.json",
+    "maps/rekognition-amendment1.json",
+    "answers/rekognition.json.gz",
+    "answers/gpt-6-luna@1024.json.gz",
+    "answers/gpt-5.4-mini@1024.json.gz",
+    "answers/gpt-5.4-mini@512.json.gz",
+    "answers/claude-haiku-4-5@1024.json.gz",
+    "answers/gpt-5.4-nano@512.json.gz",
+    "scores/sie-siglip-so400m-patch14-384.json.gz",
+    "scores/sie-siglip-so400m-patch14-224.json.gz",
+)
+
+
+def git_blob_oid(data: bytes) -> str:
+    """The object id git gives these bytes, which is what the dataset publishes.
+
+    SHA-1 is not chosen here for its strength; it is the identifier the dataset
+    already exposes, so the value can be checked against HuggingFace by hand.
+    """
+    return hashlib.sha1(b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest()
 
 
 def get(url: str) -> bytes:
-    # No Authorization header: the dataset is public and this must work for
-    # a reader who has never signed in to HuggingFace.
-    request = urllib.request.Request(url, headers={"User-Agent": f"sie-examples/{TASK}"})
+    # No Authorization header: the dataset is public and this must work for a
+    # reader who has never signed in to HuggingFace.
+    request = urllib.request.Request(url, headers={"User-Agent": "sie-examples/image-classify"})
     with urllib.request.urlopen(request, timeout=300) as response:
         return response.read()
 
@@ -54,32 +79,59 @@ def listing() -> list[dict]:
 
 def main() -> int:
     print(f"{DATASET} at {REVISION}")
-    total = 0
-    written: set[str] = set()
-    for entry in sorted(listing(), key=lambda item: item["path"]):
-        remote = entry["path"]
-        relative = remote[len(TASK) + 1 :]
-        target = EVIDENCE / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        body = get(f"{FILES}/{remote}")
-        if entry.get("size") is not None and len(body) != entry["size"]:
-            raise SystemExit(f"{remote}: downloaded {len(body)} bytes, the dataset lists {entry['size']}")
-        # Large files are stored with Git LFS, and the listing then carries the
-        # SHA-256 of their content. Check it here rather than only at score time.
-        oid = (entry.get("lfs") or {}).get("oid")
-        if oid and hashlib.sha256(body).hexdigest() != oid:
-            raise SystemExit(f"{remote}: the bytes do not hash to the digest the dataset lists")
-        target.write_bytes(body)
-        written.add(relative)
-        total += len(body)
-        print(f"  {relative} ({len(body)} bytes)")
+    # Download into a staging directory and swap it in only once every required
+    # file has arrived. Writing straight into evidence/ meant a listing missing
+    # a file raised AFTER overwriting some of them, leaving a mixed set from two
+    # revisions that score.py can accept whenever it happens to be internally
+    # consistent.
+    staging = Path(tempfile.mkdtemp(prefix="sie-evidence-", dir=HERE))
+    try:
+        total = 0
+        written: set[str] = set()
+        for entry in sorted(listing(), key=lambda item: item["path"]):
+            remote = entry["path"]
+            relative = remote[len(TASK) + 1 :]
+            target = staging / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            body = get(f"{FILES}/{remote}")
+            if entry.get("size") is not None and len(body) != entry["size"]:
+                raise SystemExit(f"{remote}: downloaded {len(body)} bytes, the dataset lists {entry['size']}")
+            # Every file is checked, by whichever id the dataset publishes for
+            # it: the SHA-256 of the content for a Git LFS file, the git object
+            # id for an ordinary blob. A file the listing gives neither id for
+            # is a failure, not a skip.
+            lfs_oid = (entry.get("lfs") or {}).get("oid")
+            blob_oid = entry.get("oid")
+            if lfs_oid:
+                if hashlib.sha256(body).hexdigest() != lfs_oid:
+                    raise SystemExit(f"{remote}: the bytes do not hash to the LFS digest the dataset lists")
+            elif blob_oid:
+                if git_blob_oid(body) != blob_oid:
+                    raise SystemExit(f"{remote}: the bytes do not match the object id the dataset lists")
+            else:
+                raise SystemExit(f"{remote}: the dataset lists no id for this file, so it cannot be checked")
+            target.write_bytes(body)
+            written.add(relative)
+            total += len(body)
+            print(f"  {relative} ({len(body)} bytes)")
 
-    missing = [name for name in REQUIRED if name not in written]
-    if missing or not any(name.startswith("inputs/display/") for name in written):
-        print("The download is incomplete; score.py would not be scoring the recorded run:", file=sys.stderr)
-        for name in missing or ["inputs/display/*"]:
-            print(f"  missing {name}", file=sys.stderr)
-        return 1
+        missing = [name for name in REQUIRED if name not in written]
+        if missing:
+            print(
+                "The download is incomplete; score.py would not be scoring the recorded run:",
+                file=sys.stderr,
+            )
+            for name in missing:
+                print(f"  missing {name}", file=sys.stderr)
+            return 1
+
+        if EVIDENCE.exists():
+            shutil.rmtree(EVIDENCE)
+        staging.rename(EVIDENCE)
+    finally:
+        # A failure leaves the previous evidence/ untouched and removes the
+        # half-downloaded staging directory rather than leaving it to be found.
+        shutil.rmtree(staging, ignore_errors=True)
 
     print(f"Wrote {total} bytes to {EVIDENCE}")
     print("Now run: python3 score.py")
