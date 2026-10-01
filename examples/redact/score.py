@@ -156,6 +156,10 @@ PUBLISHED_MONTHLY_USD = {
     "llm:claude-haiku-4-5": 725,
     COMPREHEND: 351,
 }
+PUBLISHED_REALTIME_MONTHLY_USD = {
+    "llm:gpt-6-luna": 113,
+    "llm:claude-haiku-4-5": 1450,
+}
 
 # --- the composition -----------------------------------------------------------------------------------------------
 
@@ -583,6 +587,12 @@ def main() -> int:
             extra += "; conservative lower bound, cheapest tier before unit rounding"
         print(f"  {names[arm]:<24} ${usd[arm]:>9,.2f}  (${round(usd[arm]):,})  masked {masked}{extra}")
         check.equal(f"{arm} $ a month (published)", round(usd[arm]), PUBLISHED_MONTHLY_USD[arm])
+        if arm in LLM_LIST_PRICES:
+            check.equal(
+                f"{arm} $ a month (published real-time)",
+                round(at_list[arm]),
+                PUBLISHED_REALTIME_MONTHLY_USD[arm],
+            )
     priced = e2["usd_per_1m_documents"]
     recorded_usd = {
         COMPOSITION: next(v for k, v in priced.items() if k.startswith("sie-composition (")),
