@@ -14,9 +14,9 @@
     "fallback_error": {"name": "X-SIE-Fallback-Error", "pattern": "^[A-Za-z][A-Za-z0-9_]{0,63}$"}
   },
   "notes": {
-    "served_by": "local or remote. Present on a served response.",
+    "served_by": "local or remote. Present on a served response, and local on the local refusal that answers a failed remote attempt.",
     "upstream": "The upstream's name, present only when served remotely.",
-    "fallback_reason": "The trigger that sent a request for the bare model name to its remote profile.",
+    "fallback_reason": "The trigger that sent a request for the bare model name to its remote profile. Also present on the local refusal that answers a failed remote attempt.",
     "fallback_error": "An SIE error code. Present when the remote attempt failed and the response is the local refusal it was meant to replace.",
     "metadata_fields": "The Python SDK keeps the keys above as request metadata field names; the TypeScript SDK camelCases them (servedBy, upstream, fallbackReason, fallbackError)."
   }

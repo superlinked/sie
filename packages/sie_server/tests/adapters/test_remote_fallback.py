@@ -7,6 +7,8 @@ remote profile calls a real SIE app on loopback that serves the fake model.
 
 from __future__ import annotations
 
+import json
+import re
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -87,6 +89,9 @@ profiles:
 
 FORBID = {"X-SIE-Remote": "forbid"}
 UNREACHABLE = "http://127.0.0.1:9"
+DISCLOSURE = json.loads(
+    (Path(__file__).resolve().parents[3] / "wire-fixtures" / "serving_disclosure.json").read_text(encoding="utf-8")
+)
 
 
 @pytest.fixture(autouse=True)
@@ -146,6 +151,20 @@ def fallback_headers(response: httpx.Response) -> dict[str, str]:
     return {name: value for name, value in response.headers.items() if name.startswith("x-sie-fallback-")}
 
 
+def disclosed(response: httpx.Response) -> httpx.Response:
+    """``response``, after checking each disclosure header against ``serving_disclosure.json``."""
+    assert "x-sie-served-by" in response.headers
+    for header in DISCLOSURE["response_headers"].values():
+        value = response.headers.get(header["name"])
+        if value is None:
+            continue
+        if "values" in header:
+            assert value in header["values"], (header["name"], value)
+        else:
+            assert re.fullmatch(header["pattern"], value), (header["name"], value)
+    return response
+
+
 def test_a_cold_model_is_bridged_while_its_local_load_runs_and_then_served_locally(
     sie_upstream: Callable[..., Any],
     remote_app: Callable[..., Any],
@@ -157,15 +176,15 @@ def test_a_cold_model_is_bridged_while_its_local_load_runs_and_then_served_local
         app = remote_app(upstream.url, extra_models=hybrid(latch))
         with serving(app, latch) as client:
             registry = app.state.registry
-            bridged = encode(client, "acme/hybrid")
+            bridged = disclosed(encode(client, "acme/hybrid"))
             local_load_started = registry.is_loading("acme/hybrid")
-            bridged_while_loading = encode(client, "acme/hybrid")
+            bridged_while_loading = disclosed(encode(client, "acme/hybrid"))
             listed = client.get("/v1/models/acme/hybrid")
             upstream_calls = list(upstream.seen_authorization)
 
             latch.touch()
             wait_for(lambda: registry.is_loaded("acme/hybrid"))
-            local = encode(client, "acme/hybrid")
+            local = disclosed(encode(client, "acme/hybrid"))
 
     assert bridged.status_code == 200, bridged.text
     assert bridged.json()["model"] == "acme/hybrid"
@@ -212,8 +231,8 @@ def test_a_failed_remote_attempt_answers_the_local_refusal_and_names_both_outcom
 ) -> None:
     app = remote_app(UNREACHABLE, extra_models=hybrid(latch))
     with serving(app, latch) as client:
-        native = encode(client, "acme/hybrid")
-        openai = client.post("/v1/embeddings", json={"model": "acme/hybrid", "input": "remote backends"})
+        native = disclosed(encode(client, "acme/hybrid"))
+        openai = disclosed(client.post("/v1/embeddings", json={"model": "acme/hybrid", "input": "remote backends"}))
 
     assert native.status_code == 503, native.text
     assert native.json()["detail"]["code"] == "MODEL_LOADING"
@@ -239,7 +258,7 @@ def test_a_request_that_names_a_profile_is_served_as_written(
             by_option = encode(client, "acme/hybrid", options={"profile": "query"})
             by_variant = encode(client, "acme/hybrid:query")
             local_calls = list(upstream.seen_authorization)
-            remote_variant = encode(client, "acme/hybrid:remote")
+            remote_variant = disclosed(encode(client, "acme/hybrid:remote"))
 
     for response in (by_option, by_variant):
         assert response.status_code == 503, response.text

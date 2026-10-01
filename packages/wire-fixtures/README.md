@@ -81,6 +81,10 @@ fixture set. Current consumers:
 - Gateway — `packages/sie_gateway/src/handlers/serving_disclosure.rs`
   (asserts that the `X-SIE-Served-By` and `X-SIE-Upstream` names and the
   served-by values it emits are the ones `serving_disclosure.json` declares).
+- Server — `packages/sie_server/tests/adapters/test_remote_fallback.py` (each
+  disclosure header the single server sends on a response served locally,
+  remotely or through a bridge, and on the local refusal that answers a failed
+  remote attempt, has a value or pattern `serving_disclosure.json` declares).
 - Worker sidecar — `packages/sie_server_sidecar/src/health_publisher.rs`
   (the published key set equals `fields`, minus `omitted_when_empty` when those
   are empty) and gateway — `packages/sie_gateway/src/types/worker.rs` (the
