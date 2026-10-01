@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Download the recorded rerank evidence from a pinned dataset revision.
 
     python3 fetch.py [--dest data]
@@ -10,7 +9,7 @@ REVISION is a commit SHA, never a branch. `main` moves; a SHA does not.
 
 Every downloaded file is checked against a digest before the scorer sees it.
 The chain is anchored in this file: MANIFEST_SHA256 pins manifest.json,
-manifest.json pins calls.json and every input file. A file that is missing or
+manifest.json pins every recording and input file. A file that is missing or
 that fails its digest is a FAILURE, never a skip, and the script exits
 nonzero without writing a partial tree the scorer could mistake for complete.
 
@@ -40,9 +39,9 @@ import urllib.request
 from pathlib import Path
 
 DATASET = "superlinked/sie-task-evidence"
-TASK = "rerank"
-REVISION = "a29afadb98360232f5cd8372d5f784d6dde63edc"
-MANIFEST_SHA256 = "8f180c69052e35898d955e1100e74859bb5c92d0d690e86423fe3fffbbcc9221"
+TASK = "rerank-relevance-rules"
+REVISION = "e5b19d7589fc3a982fcfeeabb071cf833c22455f"
+MANIFEST_SHA256 = "8fe1d86a33ff633890780236387125f6002dde45853f6e7fa53815d6c1c306d4"
 
 BASE = f"https://huggingface.co/datasets/{DATASET}/resolve/{REVISION}/{TASK}"
 HTTP_OK = 200
@@ -51,9 +50,9 @@ MARKER_NAME = ".sie-evidence"
 
 def download(relative_path: str) -> bytes:
     url = f"{BASE}/{relative_path}"
-    request = urllib.request.Request(url, headers={"Accept": "*/*"})  # noqa: S310
+    request = urllib.request.Request(url, headers={"Accept": "*/*"})
     try:
-        with urllib.request.urlopen(request, timeout=120) as response:  # noqa: S310
+        with urllib.request.urlopen(request, timeout=120) as response:
             if response.status != HTTP_OK:
                 raise RuntimeError(f"{url} returned HTTP {response.status}")
             return response.read()
@@ -189,6 +188,9 @@ def main() -> int:
     try:
         (staging / "manifest.json").write_bytes(manifest_bytes)
         for relative_path, expected in sorted(files.items()):
+            path = Path(relative_path)
+            if path.is_absolute() or ".." in path.parts:
+                raise ValueError("Unsafe manifest path")
             payload = download(relative_path)
             actual = digest(payload)
             if actual != expected:
@@ -197,11 +199,6 @@ def main() -> int:
             target = staging / relative_path
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(payload)
-
-        calls_sha = digest((staging / "calls.json").read_bytes())
-        if calls_sha != manifest["calls_sha256"]:
-            print("calls.json does not match the digest in manifest.json", file=sys.stderr)
-            return 1
 
         (staging / MARKER_NAME).write_bytes(marker_bytes())
 
@@ -216,7 +213,7 @@ def main() -> int:
         shutil.rmtree(staging, ignore_errors=True)
 
     print(f"{TASK}: {len(files) + 1} files verified into {args.dest}/ at revision {REVISION}")
-    print(f"{manifest['call_count']} recorded calls in {args.dest}/calls.json")
+    print(f"{manifest['cases']} questions, {manifest['candidates_per_case']} candidates per query")
     return 0
 
 

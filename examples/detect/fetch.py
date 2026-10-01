@@ -1,90 +1,49 @@
 #!/usr/bin/env python3
-"""Download this task's recorded evidence from the pinned dataset revision.
-
-    python3 fetch.py
-
-Standard library only. No token, no account, no API key. The dataset is public
-and this pulls it anonymously.
-
-Everything lands in evidence/: the nine photographs, the labels and hand counts
-registered before the run, the per-box hand review, the recorded calls and the
-run manifest. score.py reads from there and never touches the network.
-
-REVISION is a dataset commit, deliberately not `main`, so a later upload cannot
-change what this example scores.
-"""
+"""Fetch the immutable public RF100-VL evidence without sending model requests."""
 
 from __future__ import annotations
 
 import hashlib
 import json
-import sys
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 EVIDENCE = HERE / "evidence"
-
 DATASET = "superlinked/sie-task-evidence"
-REVISION = "984d3b63f14778862e848f7a1a5e960503d17e47"
-TASK = "detect"
-
-API = f"https://huggingface.co/api/datasets/{DATASET}/tree/{REVISION}"
-FILES = f"https://huggingface.co/datasets/{DATASET}/resolve/{REVISION}"
-
-# score.py refuses to run without these. A missing one is a failure, not a skip.
-REQUIRED = ("calls.json", "manifest.json", "box-review.json", "inputs/inputs.json")
+REVISION = "4dab11f3cd5933c4222d6f304a82221e2fc4a220"
+MANIFEST_SHA256 = "4ea377268746f0b19cb29ab1407f4ccdeb120c77c9218db6a7a0ed7528a312b4"
+BASE = f"https://huggingface.co/datasets/{DATASET}/resolve/{REVISION}/detect"
 
 
-def get(url: str) -> bytes:
-    # No Authorization header: the dataset is public and this must work for
-    # a reader who has never signed in to HuggingFace.
-    request = urllib.request.Request(url, headers={"User-Agent": f"sie-examples/{TASK}"})
-    with urllib.request.urlopen(request, timeout=300) as response:
+def download(name: str) -> bytes:
+    with urllib.request.urlopen(f"{BASE}/{urllib.parse.quote(name, safe='/')}", timeout=90) as response:
         return response.read()
 
 
-def listing() -> list[dict]:
-    entries = json.loads(get(f"{API}/{TASK}?recursive=true"))
-    files = [entry for entry in entries if entry.get("type") == "file"]
-    if not files:
-        raise SystemExit(f"{DATASET} revision {REVISION} has no files under {TASK}/")
-    return files
-
-
 def main() -> int:
-    print(f"{DATASET} at {REVISION}")
-    total = 0
-    written: set[str] = set()
-    for entry in sorted(listing(), key=lambda item: item["path"]):
-        remote = entry["path"]
-        relative = remote[len(TASK) + 1 :]
+    manifest_bytes = download("manifest.json")
+    if hashlib.sha256(manifest_bytes).hexdigest() != MANIFEST_SHA256:
+        raise ValueError("Manifest digest differs from the immutable example pin")
+    manifest = json.loads(manifest_bytes)
+    EVIDENCE.mkdir(exist_ok=True)
+    for name, metadata in manifest["files"].items():
+        relative = Path(name)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ValueError(f"Unsafe manifest path: {name}")
         target = EVIDENCE / relative
+        data = target.read_bytes() if target.exists() else b""
+        if len(data) != metadata["bytes"] or hashlib.sha256(data).hexdigest() != metadata["sha256"]:
+            data = download(name)
+        if len(data) != metadata["bytes"] or hashlib.sha256(data).hexdigest() != metadata["sha256"]:
+            raise ValueError(f"Dataset file digest mismatch: {name}")
         target.parent.mkdir(parents=True, exist_ok=True)
-        body = get(f"{FILES}/{remote}")
-        if entry.get("size") is not None and len(body) != entry["size"]:
-            raise SystemExit(f"{remote}: downloaded {len(body)} bytes, the dataset lists {entry['size']}")
-        # Large files are stored with Git LFS, and the listing then carries the
-        # SHA-256 of their content. Check it here rather than only at score time.
-        oid = (entry.get("lfs") or {}).get("oid")
-        if oid and hashlib.sha256(body).hexdigest() != oid:
-            raise SystemExit(f"{remote}: the bytes do not hash to the digest the dataset lists")
-        target.write_bytes(body)
-        written.add(relative)
-        total += len(body)
-        print(f"  {relative} ({len(body)} bytes)")
-
-    missing = [name for name in REQUIRED if name not in written]
-    if missing or not any(name.startswith("inputs/images/") for name in written):
-        print("The download is incomplete; score.py would not be scoring the recorded run:", file=sys.stderr)
-        for name in missing or ["inputs/images/*"]:
-            print(f"  missing {name}", file=sys.stderr)
-        return 1
-
-    print(f"Wrote {total} bytes to {EVIDENCE}")
-    print("Now run: python3 score.py")
+        target.write_bytes(data)
+    (EVIDENCE / "manifest.json").write_bytes(manifest_bytes)
+    print(f"Verified {len(manifest['files'])} recorded files from {REVISION}")
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())

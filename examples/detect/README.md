@@ -1,153 +1,96 @@
-# Put a box on the object an agent names
+# Find named objects without training a detector
 
-Nine photographs of warehouses, shop shelves and loading docks, sent to
-`IDEA-Research/grounding-dino-base` and `google/owlv2-base-patch16-ensemble`
-with nothing but a list of label strings. The detections behind
-[superlinked.com/detect](https://superlinked.com/detect).
+Send a photograph and the labels to find, then receive pixel boxes from
+`google/owlv2-base-patch16-ensemble` through the SIE SDK. Change the labels
+when the inspection job changes. The model is also available to self-host.
 
-Grounding DINO returned 57 boxes across the nine photographs. 55 sit on the
-object the request asked for and 2 do not: one box labelled `price tag` spans
-the whole soft-drink shelf, and one labelled `pallet jack` sits on a different
-machine. That precision figure is what the page publishes.
+This example reproduces the recorded comparison behind
+[superlinked.com/detect](https://superlinked.com/detect). It uses 2,895 seeded
+test images across the 100 RF100-VL datasets, with each dataset's class names
+as the only prompt. The domains include equipment, retail inventory, aerial
+imagery and scientific images. No arm is fine-tuned for this study.
 
-Recall is the other half, and the page states no figure for it. Those 55 boxes
-cover 52 of 88 hand-counted objects, with 3 of them landing on an object another
-box had already found. The gap is not evenly spread: `person` came back 8 of 8
-and 3 of 3, while `price tag` came back 0 of 11 and `yellow price sign` 1 of 7.
-`score.py` checks the 52 of 88 against the results table in the page's
-[SOURCES.md](https://superlinked.com/reference/detect/SOURCES.md), which is
-where a reader finds it.
+## Reproduce the recorded results
 
-## Where the evidence lives
-
-The code is here. The photographs and the recorded calls are in the
-[`superlinked/sie-task-evidence`](https://huggingface.co/datasets/superlinked/sie-task-evidence)
-dataset on Hugging Face, pinned to a revision in `fetch.py`. So you cannot
-verify this by cloning alone: clone, fetch, then score. What you do not need is
-an API key, or a cent of inference spend, to re-derive the number.
-
-```
-detect/
-  inputs/inputs.json     the labels sent and a hand count of every visible
-                         instance, registered before any model call
-  inputs/images/         the nine photographs as sent, 2,862,730 bytes
-  box-review.json        one verdict per returned box, assigned by hand
-                         after the run
-  calls.json             18 entries: request, response, status, timing
-  manifest.json          endpoint, model ids, served revision, run date, sources
-```
-
-Each request record carries a descriptor naming the image file, its SHA-256 and
-its byte length in place of the base64 it sent. `score.py` hashes the stored
-file against that descriptor and against the digest `inputs.json` pinned before
-the run, and fails if either disagrees. Every file it opens is checked for
-existence first, so a partial fetch is a named failure saying what can no longer
-be checked, never a traceback and never a comparison that quietly does not
-happen.
-
-## Run it
-
-Download the recorded run, then score it. Both steps are standard library only,
-so there is nothing to install and no key to set:
-
-```sh
-python3 fetch.py
-python3 score.py
-```
-
-Expect a per-photo line, then:
-
-```
-Across all 9 recorded photos, 55 of 57 returned boxes sit on the object the request asked for and 2 do not
-Those 55 boxes cover 52 of 88 hand-counted objects, with 3 more on objects already found
-```
-
-`score.py` also checks the four per-photo figures pinned in `PAGE_PER_PHOTO`,
-and that every box on those four is a first box on the object its label names,
-which is what makes a boxes count and a found count the same number there. It
-exits non-zero if any of that, or the headline, is not what it computes.
-
-Look at a request without sending it, and check that this runner is the one
-that sent them:
-
-```sh
-python3 run.py --show javits-pallet-jacks
-python3 run.py --check-requests    # 18 of 18 rebuilt identically
-python3 run.py --verify-images     # 9 of 9 photographs verified
-```
-
-`--check-requests` rebuilds every recorded request with the `run.py` in this
-directory and compares the canonical digests. It is the reason the runner is
-worth shipping: it shows the file here sends what the recording says was sent,
-rather than merely resembling it.
-
-Send the calls yourself, which needs a key and spends credits:
+The code lives here. Licensed inputs, annotations, recorded outputs and usage
+live in the public
+[task-evidence dataset](https://huggingface.co/datasets/superlinked/sie-task-evidence),
+at the immutable revision and manifest digest pinned in `fetch.py` and
+`score.py`. Fetching and scoring send no model requests and require no API key.
 
 ```sh
 uv sync
-SIE_API_KEY=sk-sie-... uv run python run.py --output run-output
+uv run python fetch.py
+uv run python score.py
 ```
 
-`run.py` writes into `run-output/`, never over the downloaded evidence. Your
-boxes will differ from the recorded ones: the served model revision moves. It
-writes no `box-review.json`, because a verdict per box is a hand judgement, not
-something a rerun produces.
+The scorer replays COCO box AP separately for each dataset, then averages the
+100 scores. It also replays paired dataset-bootstrap intervals, verifies the
+recorded token usage, checks every displayed box against its original output,
+and checks the annotated-object hit counts. Altered files, duplicate images,
+missing rows or mismatched published figures cause a nonzero exit.
 
-## How a box is scored
+`--summary-only` verifies the immutable manifest, row identities, recorded
+score means, displayed boxes and prices, while skipping COCO and bootstrap
+replay. It is a quicker integrity check, rather than a replay of raw-box AP.
 
-`score.py` reads two things that one edit cannot move together. The recorded
-responses say what boxes came back. `box-review.json` gives each box one
-verdict, assigned by eye after the run: `hit` is the first box on a counted
-object, `duplicate` is a further box on an object already boxed, and `wrong` is
-a box on something that is not its label. Before counting anything, `score.py`
-matches every reviewed box against a box actually in the response, by label,
-score and rectangle, and fails if a box is reviewed twice, left unreviewed, or
-is not in the response at all. Identities are compared rather than counted, so
-swapping one box for a copy of another does not pass.
+| Arm | Mean box AP | AP50 | Real-time cost per 1,000 images |
+| --- | --- | --- | --- |
+| SIE OWLv2 Base | 11.1% | 19.1% | $0.24 |
+| GPT-6 Luna | 13.3% | 24.4% | $0.15 |
+| GPT-5.4 mini | 5.4% | 13.0% | $1.33 |
+| Claude Haiku 4.5 | 0.9% | 1.8% | $1.95 |
+| OWLv2 Large | 12.2% | 21.2% | Self-hosted cost depends on GPUs |
+| OWLv2 Base, transformers | 10.9% | 18.8% | Self-hosted cost depends on GPUs |
+| Grounding DINO Base | 7.5% | 11.5% | Self-hosted cost depends on GPUs |
+| LLMDet Large | 10.8% | 16.7% | Self-hosted cost depends on GPUs |
 
-The headline is then `hit + duplicate` over all boxes, coverage is `hit` over
-the hand counts, and the per-label `found` figures stated in the review have to
-equal the hits the verdicts produce.
+These are COCO AP percentages, not the percentage of objects found. SIE's
+served OWLv2 beats GPT-5.4 mini and Haiku on both AP and AP50 with positive
+paired 95% intervals. **GPT-6 Luna scores higher and costs less.** The study
+does not establish superiority over general vision models or fixed-taxonomy
+APIs. Different labels and images can change the result.
 
-The hand counts come from `inputs.json` and were registered before the first
-model call, with three candidate photographs dropped beforehand because their
-counts were ambiguous. `score.py` cannot edit them.
+The price comparison uses each provider's recorded tokens and its real-time
+list rates. The displayed SIE price rounds up; competitors round down.
+OpenAI and Anthropic also offer asynchronous Batch rates at half their
+real-time prices. Both are retained in the recorded evidence.
 
-## The inputs are not ours
+## Try a single detection request
 
-Every photograph is third-party. Five are public domain: four U.S. federal
-works, from the Marine Corps, FEMA, the USDA and the Army, and one released by
-its author. The other four are CC BY images from Wikimedia Commons and Flickr,
-three under 2.0 and one under 4.0. None were made by Superlinked and none are
-AI-generated. `manifest.json` records for each one its title, creator, licence,
-the Commons or Flickr page, the URL of the original and the SHA-256 of both the
-original and the JPEG actually sent, along with the resize rule between them.
-Licences vary by source and have not been cleared for reuse beyond quotation
-here; treat the provenance record as the starting point for that, not as a
-clearance.
+Set `SIE_API_KEY` for hosted inference. To use your own SIE server, set
+`SIE_BASE_URL` to its gateway URL. Inspect the request before sending it:
 
-## What this does not establish
+```sh
+uv run python run.py --show countingpills-12
+uv run python run.py --case countingpills-12
+```
 
-- Not a benchmark. Nine photographs chosen to span warehouses, retail shelves
-  and loading docks is a demonstration, not a measurement.
-- Not a claim about your photographs. 55 of 57 is the precision of the boxes
-  that came back on these nine, and it says nothing about the 36 counted
-  objects no box was drawn on.
-- The hand counts and the per-box verdicts are human judgements, made by one
-  person. They were registered before the run and reviewed after it
-  respectively, and `score.py` binds the second to the recorded responses, but
-  neither is an independent ground truth.
-- The OWLv2 calls are recorded and verified here, and are in no published
-  figure. Nothing on the page or in this scorer compares the two models.
-- Not reproducible against the live API. These are recordings, and a rerun goes
-  through a different served revision.
-- All nine photographs are scored here. Which of them the page displays, and on
-  which surface, is the page's decision and is recorded in its own `SOURCES.md`.
+Only the second command sends a paid request. It runs the same OWLv2 checkpoint,
+labels and 0.1 score threshold used by the recorded product check. The runner
+checks the catalog checkpoint before sending the image and reports the distinct
+execution bundle/config digest observed on the response.
 
-  This paragraph used to say which photographs the page draws. It was wrong for
-  weeks, naming six proof cards after the page had gone to three, and every run
-  stayed green throughout, because nothing in this example can reach the page.
-  The claim is removed rather than restated a third time. The numbers this
-  script and the page share are 55 of 57 and the four per-photo figures, and a
-  tamper confirms what that leaves: swapping a pinned photograph for one the
-  page does not display, with its correct figures, exits 0.
+## Data and protocol
+
+RF100-VL source: `LibreYOLO/rf100-vl`, revision
+`1987e22ed542539fb3d0b8a3456455c2725079a1`. Every dataset's recorded MIT licence
+and original project attribution is in `licenses.json`. The export contains the
+sampled test annotations, selected original images, outputs from all completed
+main-set arms, and the sample identities. `protocol.json` records the decision
+rules, coordinate handling, thresholds and price assumptions.
+
+The 30-image cap per dataset and seeded sampling were fixed before the main
+run. LLMs received the same resized images with pixel-coordinate prompts,
+strict schemas and no reasoning effort. Outputs were mapped back to the
+original image. Detector thresholds match their shipped settings. The full
+run, including models that outperform the served model, remains in the
+recorded evidence.
+
+The paired latency check used 200 images after five discarded warmups, one
+request in flight, and the same Modal us-east client location for all three
+services. Median full-response time was 0.716 seconds for hosted OWLv2,
+1.372 for GPT-6 Luna, and 1.245 for GPT-5.4 mini. The SIE/Luna median ratio
+was 0.522 (paired 95% interval 0.492–0.566). The registered requirement for
+a threefold speed claim failed; this example makes no such claim. Full raw
+responses and the protocol are included in the immutable evidence export.

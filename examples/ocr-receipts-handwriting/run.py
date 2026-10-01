@@ -29,6 +29,7 @@ import time
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from urllib.parse import urlsplit
 
 HERE = Path(__file__).resolve().parent
 RUNS = HERE / "runs"
@@ -109,7 +110,11 @@ def main() -> int:
     args = parser.parse_args()
     if args.images is not None and args.images < 1:
         parser.error("--images must be at least 1")
-    if not os.environ.get("SIE_API_KEY"):
+    base_url = os.environ.get("SIE_BASE_URL", "https://api.superlinked.com").rstrip("/")
+    api_key = os.environ.get("SIE_API_KEY")
+    endpoint = urlsplit(base_url)
+    hosted_origin = (endpoint.scheme, endpoint.hostname, endpoint.port or 443) == ("https", "api.superlinked.com", 443)
+    if hosted_origin and not api_key:
         print("Set SIE_API_KEY first (https://superlinked.com/cloud).", file=sys.stderr)
         return 1
 
@@ -120,7 +125,7 @@ def main() -> int:
     for name in args.sets.split(","):
         rows = loaders[name.strip()]()
         photos += rows if args.all else rows[: args.images]
-    client = SIEClient(api_key=os.environ["SIE_API_KEY"], base_url="https://api.superlinked.com", timeout_s=900)
+    client = SIEClient(api_key=api_key, base_url=base_url, timeout_s=900)
 
     def read(photo: dict) -> dict:
         sent = time.perf_counter()

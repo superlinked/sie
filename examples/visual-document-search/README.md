@@ -13,7 +13,7 @@ page's [SOURCES.md](https://superlinked.com/reference/visual-document-search/SOU
 **The benchmark.** [ViDoRe v3](https://arxiv.org/abs/2601.08620) (CC BY 4.0) covers annual reports and 10-K filings,
 FDA slide decks, European Commission reports, a textbook, and French energy and physics documents. It supplies human
 relevance grades for every question. The run uses six public datasets and their English questions: 1,816 questions over
-16,309 pages. Four datasets hold English documents: computer_science, finance_en, hr and pharmaceuticals. Two hold
+11,624 pages. Four datasets hold English documents: computer_science, finance_en, hr and pharmaceuticals. Two hold
 French documents: energy and physics. Every page of a dataset is a candidate for each of its questions.
 
 **The renders.** Every page was rendered once to a JPEG with a 1,650-pixel long side, a US-letter page at 150 dpi.
@@ -86,18 +86,21 @@ revision, and checks every file against the hash the dataset lists. The download
 the recording. It draws its own bootstrap samples, so an interval can differ from the recorded one in the last
 digit. The intervals above are the recorded ones, from `evidence/stats.json`.
 
-To rank the pages yourself, start an SIE server with the model:
+To rank the pages yourself, use a current SIE `main` checkout and follow
+[the contributor setup](../../CONTRIBUTING.md#set-up-a-development-checkout).
+In a separate shell, from that checkout’s repository root, start the GPU server:
 
 ```sh
-pip install "sie-server[local]"
-sie-server serve --device cuda -m TomoroAI/tomoro-colqwen3-embed-4b:compact
+mise exec -- uv run --package sie-server --extra local sie-server serve --device cuda -m TomoroAI/tomoro-colqwen3-embed-4b:compact
 ```
+
+The compact profile is available from source; hosted access is coming soon.
 
 Then run it and score your run beside the recording:
 
 ```sh
 uv run python run.py --smoke                        # 20 questions, a minute: checks the server and the model
-uv run python run.py                                # all six datasets, 16,309 pages
+uv run python run.py                                # all six datasets, 11,624 pages
 uv run python score.py --rankings run-output
 ```
 

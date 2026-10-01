@@ -34,9 +34,9 @@ HERE = Path(__file__).resolve().parent
 EVIDENCE = HERE / "evidence"
 
 DATASET = "superlinked/sie-task-evidence"
-REVISION = "4999a499aed5ea77181973070fa435a616552d80"
+REVISION = "31383ae9986d9dc9edd4e3a06ee9fb40b223d6fb"
 TASK = "redact"
-MANIFEST_SHA256 = "a3a7b8b6c73f20e4bcf99b5adec37ada0ff67f7a57d8b91cf8fac9e0406a6961"
+MANIFEST_SHA256 = "8170519b9ad94c35dd53f2d22d96689d41e9c0e26d9c0fc25bba83230cbee4dc"
 
 API = f"https://huggingface.co/api/datasets/{DATASET}/tree/{REVISION}"
 FILES = f"https://huggingface.co/datasets/{DATASET}/resolve/{REVISION}"
@@ -50,6 +50,7 @@ REQUIRED = (
     "rows/sie__numind__NuNER_Zero.jsonl",
     "rows/presidio.jsonl",
     "rows/privacy-filter.jsonl",
+    "rows/comprehend.jsonl",
     "rows/llm__gpt-6-luna.jsonl",
     "rows/llm__claude-haiku-4-5.jsonl",
     "results/gretel-main_results.json",

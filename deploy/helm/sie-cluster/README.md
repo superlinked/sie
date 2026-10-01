@@ -1078,7 +1078,8 @@ per token:
 - **Generated (default).** With `config.auth.adminTokenSecretName` empty and
   `config.auth.generateAdminToken=true`, the chart creates the Secret
   `<fullname>-config-admin-token` (`sie-cluster-config-admin-token` for the
-  Quick Start release) holding a random 64-character token under
+  Quick Start release, `sie-config-admin-token` with a bundled cloud overlay)
+  holding a random 64-character token under
   `config.auth.adminTokenSecretKey` (`SIE_ADMIN_TOKEN`). When sie-config has an
   admin token, `config.auth.readTokenSecretName` is empty, and
   `config.auth.generateReadToken=true`, it likewise creates
@@ -1108,12 +1109,23 @@ source.
 values files stay valid; the settings above decide the tokens.
 
 Read the generated tokens, the admin token for admin tooling and the read
-token for read-only tooling:
+token for read-only tooling. With `config.auth.adminTokenSecretName` or
+`config.auth.readTokenSecretName` set, that token is in the named Secret
+instead. `<fullname>` is `fullnameOverride` when set, which the bundled cloud
+overlays (`values-aws.yaml`, `values-gke.yaml`, `values-aks.yaml`, and
+`values-ack.yaml`) set to `sie`. Otherwise it is `<release>-<name>`, where
+`<name>` is `nameOverride` or `sie-cluster`, or the release name alone when it
+already contains `<name>`, as in the Quick Start. The result is cut to 63
+characters with no trailing hyphen. The install notes print these commands
+with the rendered names, and `helm get notes <release> -n sie` prints them
+again. Set `FULLNAME` to match, for example `FULLNAME=sie` for an overlay
+install:
 
 ```bash
-kubectl get secret -n sie sie-cluster-config-admin-token \
+FULLNAME=sie-cluster
+kubectl get secret -n sie "${FULLNAME}-config-admin-token" \
   -o jsonpath='{.data.SIE_ADMIN_TOKEN}' | base64 -d
-kubectl get secret -n sie sie-cluster-config-read-token \
+kubectl get secret -n sie "${FULLNAME}-config-read-token" \
   -o jsonpath='{.data.SIE_CONFIG_READ_TOKEN}' | base64 -d
 ```
 
@@ -1203,7 +1215,11 @@ sie-config restarts with a token the others do not hold.
   external secret manager, and set `config.auth.adminTokenSecretName` and
   `config.auth.readTokenSecretName`.
 - **Argo CD with generated tokens:** have Argo CD keep the live tokens by
-  ignoring the Secrets' data both when diffing and when syncing:
+  ignoring the Secrets' data both when diffing and when syncing. The example
+  names the Quick Start release's Secrets. With a bundled cloud overlay, name
+  `sie-config-admin-token` and `sie-config-read-token` instead, and otherwise
+  `<fullname>-config-admin-token` and `<fullname>-config-read-token` (see
+  [sie-config tokens](#sie-config-tokens)):
 
   ```yaml
   spec:

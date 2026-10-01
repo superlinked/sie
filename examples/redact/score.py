@@ -10,7 +10,7 @@ Standard library only. No API key, no network, no inference spend.
 
 The run: 660 documents from the English test split of
 gretelai/synthetic_pii_finance_multilingual, 1,792 in-scope personal-data
-spans, five arms. The figure is coverage recall: the share of in-scope gold
+spans, six arms. The figure is coverage recall: the share of in-scope gold
 spans whose every non-space character sits under the union of an arm's masks,
 whatever label the arm gave it.
 
@@ -102,6 +102,7 @@ ARMS = [
     ("llm:gpt-6-luna", "GPT-6 Luna", "llm__gpt-6-luna.jsonl"),
     ("privacy-filter", "OpenAI Privacy Filter", "privacy-filter.jsonl"),
     ("presidio", "Microsoft Presidio", "presidio.jsonl"),
+    ("comprehend", "AWS Comprehend", "comprehend.jsonl"),
     (f"sie:{FIRST_MODEL}", "SIE GLiNER PII alone, one request", "sie__urchade__gliner_multi_pii-v1.jsonl"),
     (f"sie:{SECOND_MODEL}", "SIE NuNER Zero alone, one request", "sie__numind__NuNER_Zero.jsonl"),
 ]
@@ -114,6 +115,7 @@ PUBLISHED_MASKED = {
     "llm:gpt-6-luna": 1448,
     "privacy-filter": 1214,
     "presidio": 859,
+    "comprehend": 1491,
 }
 PUBLISHED_GOLD = 1792
 PUBLISHED_DOCUMENTS = 660
@@ -124,7 +126,8 @@ MONTHLY_DOCUMENTS = 1_000_000
 SIE_PRICE_PER_1M_TOKENS = {FIRST_MODEL: 0.04, SECOND_MODEL: 0.05}
 SIE_TOKENS = {FIRST_MODEL: 238_605, SECOND_MODEL: 227_727}
 # AWS Comprehend DetectPiiEntities: cheapest tier, per 100-character unit, 3-unit minimum per request,
-# units counted as characters over 100 with no rounding up.
+# units counted as characters over 100 with no rounding up: a conservative lower bound,
+# not the expected bill. AWS rounds units up (550 characters bills six units).
 COMPREHEND_PER_UNIT = 0.000025
 COMPREHEND_MIN_UNITS = 3
 COMPREHEND_CHARS_PER_UNIT = 100
@@ -144,7 +147,7 @@ CONTAINERS = {
     "presidio": {"gpus": 0, "cores": 8, "gib": 16},
     "privacy-filter": {"gpus": 1, "cores": 8, "gib": 32},
 }
-COMPREHEND = "aws-comprehend"
+COMPREHEND = "comprehend"
 PUBLISHED_MONTHLY_USD = {
     COMPOSITION: 32,
     "presidio": 3,
@@ -152,6 +155,10 @@ PUBLISHED_MONTHLY_USD = {
     "llm:gpt-6-luna": 57,
     "llm:claude-haiku-4-5": 725,
     COMPREHEND: 351,
+}
+PUBLISHED_REALTIME_MONTHLY_USD = {
+    "llm:gpt-6-luna": 113,
+    "llm:claude-haiku-4-5": 1450,
 }
 
 # --- the composition -----------------------------------------------------------------------------------------------
@@ -426,7 +433,10 @@ def load_documents(evidence: Path) -> list[dict[str, Any]]:
 
 
 def load_rows(path: Path, documents: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
-    rows = {r["index"]: r for r in read_jsonl(path)}
+    records = read_jsonl(path)
+    rows = {r["index"]: r for r in records}
+    if len(rows) != len(records):
+        raise SystemExit(f"{path}: duplicate document indices")
     if set(rows) != {d["index"] for d in documents}:
         raise SystemExit(f"{path}: rows do not match the {len(documents)} documents")
     return rows
@@ -537,7 +547,9 @@ def main() -> int:
     )
     scoped = [g for d in documents for g in d["scoped"]]
     bound = sum(g["label"] not in NO_COMPREHEND_TYPE for g in scoped) / len(scoped)
-    print(f"In-scope spans with a documented AWS Comprehend type: {pct(bound)} (Comprehend was not measured)")
+    print(
+        f"In-scope spans with a documented AWS Comprehend type: {pct(bound)} (Comprehend also measured on the same documents)"
+    )
     check.equal(
         "Comprehend documented-type bound", round(bound, 12), round(recorded["comprehend_documented_type_bound"], 12)
     )
@@ -565,12 +577,22 @@ def main() -> int:
         check.equal(f"{model} tokens (e2)", e2["sie_tokens"][model], count)
     usd = monthly_usd(documents, rows, e2)
     print()
-    print(f"$ a month for {MONTHLY_DOCUMENTS:,} documents like these:")
+    print(f"$ a month for {MONTHLY_DOCUMENTS:,} documents like these (LLM Batch API; real-time separately):")
+    at_list = monthly_usd(documents, rows, e2, LLM_LIST_PRICES)
     names = {arm: name for arm, name, _ in ARMS} | {COMPOSITION: "SIE", COMPREHEND: "AWS Comprehend"}
     for arm in (COMPOSITION, "presidio", "privacy-filter", "llm:gpt-6-luna", "llm:claude-haiku-4-5", COMPREHEND):
         masked = pct(summary[arm]["coverage_recall"]) if arm in summary else "not measured"
-        print(f"  {names[arm]:<24} ${usd[arm]:>9,.2f}  (${round(usd[arm]):,})  masked {masked}")
+        extra = f"; real-time ${at_list[arm]:,.2f}" if arm in LLM_LIST_PRICES else ""
+        if arm == COMPREHEND:
+            extra += "; conservative lower bound, cheapest tier before unit rounding"
+        print(f"  {names[arm]:<24} ${usd[arm]:>9,.2f}  (${round(usd[arm]):,})  masked {masked}{extra}")
         check.equal(f"{arm} $ a month (published)", round(usd[arm]), PUBLISHED_MONTHLY_USD[arm])
+        if arm in LLM_LIST_PRICES:
+            check.equal(
+                f"{arm} $ a month (published real-time)",
+                round(at_list[arm]),
+                PUBLISHED_REALTIME_MONTHLY_USD[arm],
+            )
     priced = e2["usd_per_1m_documents"]
     recorded_usd = {
         COMPOSITION: next(v for k, v in priced.items() if k.startswith("sie-composition (")),
@@ -580,8 +602,8 @@ def main() -> int:
         "presidio": e2["self_host"]["presidio"]["usd_per_1m_documents"],
         "privacy-filter": e2["self_host"]["privacy-filter"]["usd_per_1m_documents"],
     }
-    # The recording costs the LLMs at standard prices; the page and the table above use batch.
-    at_list = monthly_usd(documents, rows, e2, LLM_LIST_PRICES)
+    # The recording and page cost the LLMs at standard prices; discounted Batch
+    # prices are printed separately, never substituted for the request-path comparison.
     for arm, value in recorded_usd.items():
         got = at_list[arm] if arm in LLM_LIST_PRICES else usd[arm]
         check.equal(f"{arm} $ per 1M documents (recorded)", round(got, 6), round(value, 6))
