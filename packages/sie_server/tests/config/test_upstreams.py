@@ -36,7 +36,8 @@ def test_a_valid_file_defines_both_kinds(tmp_path: Path) -> None:
         "    api_key_secret: TEAM_SIE_KEY\n"
         "    proxy_url: http://proxy.example.internal:3128\n" + RATE_CAP + "  local-openai:\n"
         "    kind: openai\n"
-        "    base_url: http://127.0.0.1:8000/v1\n" + RATE_CAP,
+        "    base_url: http://127.0.0.1:8000/v1\n"
+        "    endpoints: [embeddings]\n" + RATE_CAP,
     )
 
     upstreams = load_upstreams(path)
