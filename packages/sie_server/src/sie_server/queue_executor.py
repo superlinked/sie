@@ -537,15 +537,20 @@ def _wrap_encode_output(output: dict, config: Any) -> dict:
     return wrapped
 
 
-def _rejected_entry_mapping(entry: ReplaceModelConfigEntry, model_id: str) -> dict[str, Any] | None:
-    """Return a rejected export entry as a mapping for hashing, if it names ``model_id``."""
+def _rejected_config_mapping(model_config: str, model_id: str) -> dict[str, Any] | None:
+    """Return a rejected model config as a mapping for hashing, if it names ``model_id``."""
     try:
-        raw = yaml.safe_load(entry.model_config) if entry.model_config.strip() else None
+        raw = yaml.safe_load(model_config) if model_config.strip() else None
     except yaml.YAMLError:
         return None
     if not isinstance(raw, dict) or raw.get("sie_id", model_id) != model_id:
         return None
     return raw
+
+
+def _rejected_entry_mapping(entry: ReplaceModelConfigEntry, model_id: str) -> dict[str, Any] | None:
+    """Return a rejected export entry as a mapping for hashing, if it names ``model_id``."""
+    return _rejected_config_mapping(entry.model_config, model_id)
 
 
 def _parse_exported_model_config(entry: ReplaceModelConfigEntry) -> ModelConfig:
@@ -666,7 +671,14 @@ class QueueExecutor:
             self._view_state_version += 1
 
     async def apply_model_config(self, req: ApplyModelConfigRequest) -> ApplyModelConfigResponse:
-        """Validate and add a bundle-scoped config delta to the local registry."""
+        """Validate and add a bundle-scoped config delta to the local registry.
+
+        A delta whose config this worker rejects is handled like a rejected
+        export entry in :meth:`replace_model_configs`: the model keeps its
+        current registry entries, if any, and the received config is hashed and
+        reported in ``unsupported_models``. A config that cannot be attributed
+        to the notification's model still fails the apply.
+        """
         if not req.bundle_id:
             msg = "bundle_id is required"
             raise ValueError(msg)
@@ -675,21 +687,35 @@ class QueueExecutor:
             raise ValueError(msg)
         self._record_control_plane_adapters(req.bundle_id, req.bundle_adapters)
 
-        raw = yaml.safe_load(req.model_config)
-        if not isinstance(raw, dict):
-            msg = "model_config must decode to a YAML mapping"
-            raise ValueError(msg)
+        try:
+            raw = yaml.safe_load(req.model_config)
+            if not isinstance(raw, dict):
+                msg = "model_config must decode to a YAML mapping"
+                raise ValueError(msg)
 
-        model_config = ModelConfig(**raw)
-        if req.model_id and model_config.sie_id != req.model_id:
-            msg = f"model_id mismatch: notification={req.model_id!r} config={model_config.sie_id!r}"
-            raise ValueError(msg)
+            model_config = ModelConfig(**raw)
+            if req.model_id and model_config.sie_id != req.model_id:
+                msg = f"model_id mismatch: notification={req.model_id!r} config={model_config.sie_id!r}"
+                raise ValueError(msg)
 
-        updated_model_ids = await self._registry.add_config_async(model_config)
-        for model_id in updated_model_ids:
-            self.invalidate_model_descriptor(model_id)
-        if self._rejected_configs.get(req.bundle_id, {}).pop(model_config.sie_id, None) is not None:
+            updated_model_ids = await self._registry.add_config_async(model_config)
+        except (TypeError, ValueError, yaml.YAMLError) as exc:
+            rejected = _rejected_config_mapping(req.model_config, req.model_id) if req.model_id else None
+            if rejected is None:
+                raise
+            logger.warning(
+                "Rejected model config delta %r for bundle %s; keeping its current config, if any: %s",
+                req.model_id,
+                req.bundle_id,
+                exc,
+            )
+            self._rejected_configs.setdefault(req.bundle_id, {})[req.model_id] = rejected
             self._view_state_version += 1
+        else:
+            for model_id in updated_model_ids:
+                self.invalidate_model_descriptor(model_id)
+            if self._rejected_configs.get(req.bundle_id, {}).pop(model_config.sie_id, None) is not None:
+                self._view_state_version += 1
         view = self.bundle_config_view(req.bundle_id)
         return ApplyModelConfigResponse(
             applied=True,

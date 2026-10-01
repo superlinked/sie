@@ -508,7 +508,10 @@ bundle, epoch, and payload size. Accepted deltas are forwarded to the colocated 
 `ApplyModelConfig`, together with the notification's `bundle_adapters` list for
 this bundle when `sie-config` sends one. The backend returns the applied bundle
 config hash and `unsupported_models`, the routable ids that hash covers but the
-backend cannot serve. The sidecar stores the hash and the list together in
+backend cannot serve. A delta whose config the Python backend rejects is not an
+apply failure: the backend keeps the model's current config, hashes the received
+config, and lists the model in `unsupported_models`, as it does for a rejected
+export entry. The sidecar stores the hash and the list together in
 `ConfigApplyState` only when the hash exactly matches a non-empty control-plane
 hash. Before anything is committed, the sidecar adopts the backend's IPC `Ping`
 hash, which never replaces a committed pair. `Ping` carries no list, so its hash

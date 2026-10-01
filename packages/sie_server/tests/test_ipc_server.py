@@ -1031,18 +1031,19 @@ profiles:
         assert worker_telemetry._dimensions(base_id, "rtx-pro-6000") == expected_dimensions
         executor._descriptor_cache[variant_id] = MagicMock()
 
-        with pytest.raises(ValueError, match="legacy scalar"):
-            await executor.apply_model_config(
-                ApplyModelConfigRequest(
-                    bundle_id="sglang",
-                    model_id=base_id,
-                    epoch=8,
-                    bundle_config_hash="from-sie-config",
-                    profiles_added=["default"],
-                    model_config=_qwen_invalid_legacy_lora_yaml(),
-                )
+        resp = await executor.apply_model_config(
+            ApplyModelConfigRequest(
+                bundle_id="sglang",
+                model_id=base_id,
+                epoch=8,
+                bundle_config_hash="from-sie-config",
+                profiles_added=["default"],
+                model_config=_qwen_invalid_legacy_lora_yaml(),
             )
+        )
 
+        assert resp.applied is True
+        assert resp.unsupported_models == [base_id]
         assert registry.has_model(base_id)
         assert registry.has_model(variant_id)
         assert registry._model_filter == {base_id, variant_id}
