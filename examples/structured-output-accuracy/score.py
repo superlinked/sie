@@ -52,7 +52,6 @@ SOB_PARQUET = EVIDENCE / "sob" / "test.parquet"
 # The SHA-256 of manifest.json at the dataset revision fetch.py pins. It lives here, outside the
 # evidence, because a digest inside a file cannot authenticate that file. The manifest in turn carries
 # the SHA-256 of every other file.
-# TODO(before merge): set to the uploaded manifest's SHA-256.
 MANIFEST_SHA256 = "693d966b2edab5836acb570772d3cf1f13be17d7e0da31c24926ddee46d43cf1"
 
 SIE_MODEL = "Qwen/Qwen3.8-27B-FP8"
@@ -423,13 +422,18 @@ def score_repeat(calls: Path) -> dict[str, Any]:
     """The first 100 e1 records sent again, one at a time: same answer twice, and how long it took."""
     arms: dict[str, dict[str, Any]] = {}
     for path in sorted((calls / "repeat").glob("*.jsonl")):
-        again = {rid: row for rid, row in scored_rows(path).items() if row.get("error") is None}
+        again = {
+            rid: row for rid, row in scored_rows(path).items() if row.get("error") is None and not row.get("rejected")
+        }
         first_path = calls / "e1" / path.name
         first = scored_rows(first_path) if first_path.exists() else {}
         same = [
             rid
             for rid, row in again.items()
-            if first.get(rid, {}).get("error") is None and canonical(first[rid]["text"]) == canonical(row["text"])
+            if rid in first
+            and first[rid].get("error") is None
+            and not first[rid].get("rejected")
+            and canonical(first[rid]["text"]) == canonical(row["text"])
         ]
         totals = sorted(row["total_s"] for row in again.values() if row.get("total_s") is not None)
         ttft = sorted(row["ttft_s"] for row in again.values() if row.get("ttft_s") is not None)
