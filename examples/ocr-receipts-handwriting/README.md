@@ -9,17 +9,17 @@ EasyOCR read the same images, and every output was scored by the same rule.
 
 | System | Words read exactly | Handwriting (GNHK) | $ per 1,000 images |
 | --- | --- | --- | --- |
-| SIE LightOnOCR-2-1B | 92.4% | 83.9% | $1.16 |
+| SIE LightOnOCR-2-1B | 92.4% | 83.9% | $1.16 proposed |
 | GPT-5.4 mini | 91.3% | 81.6% | $2.36 |
 | PaddleOCR PP-OCRv5, self-hosted | 81.9% | 54.6% | $0 plus your servers |
 | Tesseract 5, self-hosted | 56.7% | 12.5% | $0 plus your servers |
 | EasyOCR, self-hosted | 55.1% | 15.7% | $0 plus your servers |
 
-LightOnOCR-2-1B reads 1.1 points more words than GPT-5.4 mini (95% interval 0.55 to 1.69,
-paired over images). That is ahead, and under the 2-point margin the study set before the
-run for calling a rival worse, so [superlinked.com/ocr](https://superlinked.com/ocr) says
-"as accurately as". `score.py` re-derives every figure from the recorded run and checks it
-against the page, whose sources are in its
+LightOnOCR-2-1B recovered 1.1 percentage points more reference words than GPT-5.4 mini
+(95% interval 0.55 to 1.69, paired over images). Neither the pre-registered equivalence
+margin of one point nor the superiority threshold of two points passed. This comparison
+measures word recovery, not overall OCR accuracy; extra output lowered precision as
+reported below. `score.py` re-derives the recorded figures, whose sources are in the page's
 [SOURCES.md](https://superlinked.com/reference/ocr/SOURCES.md).
 
 The call is one image in and text out:
@@ -90,6 +90,9 @@ SROIE's receipts are not redistributed, so their text is not in the dataset; the
 per-image counts are. `score.py` pins the manifest's SHA-256, and the manifest pins every
 other file, so a missing or altered file stops the score instead of changing a number.
 
+The recorded hosted charge was $2.00 per 1,000 photos. The $1.16 comparison uses a proposed
+Cloud rate, not a currently billable offer.
+
 ## Run it
 
 Reproduce the published figures. Standard library only, no key:
@@ -106,6 +109,17 @@ export SIE_API_KEY=sk-sie-...
 uv run run.py --images 20
 python3 score.py --rescore runs
 ```
+
+For a self-hosted SIE server, set its endpoint explicitly. A local server with authentication
+disabled does not require an API key:
+
+```sh
+export SIE_BASE_URL=http://localhost:8080
+uv run run.py --images 20
+```
+
+If the server requires authentication, also set `SIE_API_KEY`. The model must be enabled
+on that server.
 
 `--sets cord,gnhk --all` reads all 272 photos the page may show (GNHK is a 1 GB download).
 A score over a few photos is much noisier than the recorded run.
