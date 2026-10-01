@@ -6,5 +6,6 @@ default: false
 # default bundle lists the same adapters so a single server can serve them;
 # this bundle's lower priority makes the gateway pick it whenever both match.
 adapters:
+- sie_server.adapters.remote.openai
 - sie_server.adapters.remote.sie
 deps: {}

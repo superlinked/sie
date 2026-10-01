@@ -441,7 +441,10 @@ const REMOTE_ADAPTER_MODULE_PREFIX: &str = "sie_server.adapters.remote.";
 
 /// The upstream kind each remote adapter module calls. An adapter refuses an
 /// upstream of any other kind when it loads, so the module determines the kind.
-const REMOTE_ADAPTER_UPSTREAM_KINDS: &[(&str, &str)] = &[("sie_server.adapters.remote.sie", "sie")];
+const REMOTE_ADAPTER_UPSTREAM_KINDS: &[(&str, &str)] = &[
+    ("sie_server.adapters.remote.openai", "openai"),
+    ("sie_server.adapters.remote.sie", "sie"),
+];
 
 fn remote_adapter_upstream_kind(module: &str) -> Option<&'static str> {
     REMOTE_ADAPTER_UPSTREAM_KINDS
@@ -1608,12 +1611,20 @@ profiles:
 
     #[test]
     fn test_routing_reports_remote_only_for_a_remote_default_profile() {
-        let entry =
-            entry_with_default_adapter(Some("sie_server.adapters.remote.sie:SieUpstreamAdapter"));
-        assert_eq!(
-            entry.to_model_info_value(false)["routing"],
-            json!({"policy": "remote_only", "upstream_kind": "sie"})
-        );
+        for (adapter_path, kind) in [
+            ("sie_server.adapters.remote.sie:SieUpstreamAdapter", "sie"),
+            (
+                "sie_server.adapters.remote.openai:OpenAIUpstreamAdapter",
+                "openai",
+            ),
+        ] {
+            let entry = entry_with_default_adapter(Some(adapter_path));
+            assert_eq!(
+                entry.to_model_info_value(false)["routing"],
+                json!({"policy": "remote_only", "upstream_kind": kind}),
+                "{adapter_path}"
+            );
+        }
     }
 
     #[test]
