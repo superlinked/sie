@@ -86,12 +86,15 @@ revision, and checks every file against the hash the dataset lists. The download
 the recording. It draws its own bootstrap samples, so an interval can differ from the recorded one in the last
 digit. The intervals above are the recorded ones, from `evidence/stats.json`.
 
-To rank the pages yourself, start an SIE server with the model:
+To rank the pages yourself, use a current SIE `main` checkout and follow
+[the contributor setup](../../CONTRIBUTING.md#set-up-a-development-checkout).
+In a separate shell, from that checkout’s repository root, start the GPU server:
 
 ```sh
-pip install "sie-server[local]"
-sie-server serve --device cuda -m TomoroAI/tomoro-colqwen3-embed-4b:compact
+mise exec -- uv run --package sie-server --extra local sie-server serve --device cuda -m TomoroAI/tomoro-colqwen3-embed-4b:compact
 ```
+
+The compact profile is available from source; hosted access is coming soon.
 
 Then run it and score your run beside the recording:
 
