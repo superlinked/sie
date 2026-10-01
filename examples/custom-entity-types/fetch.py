@@ -140,6 +140,8 @@ def main() -> int:
         # Move the old evidence aside and delete it only once the new set is in place,
         # so a failed rename never leaves no evidence at all.
         backup = EVIDENCE.with_name(EVIDENCE.name + ".old")
+        if backup.exists() and not EVIDENCE.exists():
+            backup.rename(EVIDENCE)
         shutil.rmtree(backup, ignore_errors=True)
         if EVIDENCE.exists():
             EVIDENCE.rename(backup)

@@ -99,7 +99,7 @@ def main() -> int:
             "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in out), encoding="utf-8"
         )
         print(f"  {set_name}: {len(out)} sentences", file=sys.stderr)
-    print(f"Wrote {args.output}. Now run: python3 score.py --rows {args.output.name}")
+    print(f"Wrote {args.output}. Now run: python3 score.py --rows {args.output}")
     return 0
 
 
