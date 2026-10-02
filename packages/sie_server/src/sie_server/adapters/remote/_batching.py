@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from sie_server.adapters.remote._http import RemoteUpstreamError
+from sie_server.config.upstreams import upstream_for_serving
 from sie_server.core.inference_output import ScoreOutput
 
 if TYPE_CHECKING:
@@ -119,7 +120,12 @@ def score_each_request(
     if len(queries) != len(docs):
         raise ValueError(f"queries and docs must be parallel; got {len(queries)} vs {len(docs)}")
     requests = pairs_by_request(queries)
-    with limiter.batch(len(requests)) if limiter is not None else nullcontext():
+    reservation = (
+        limiter.batch(len(requests), concurrency=requests_in_flight(upstream_for_serving(limiter.name)))
+        if limiter is not None
+        else nullcontext()
+    )
+    with reservation:
         answers = call_each(
             executor,
             lambda request: score_request(request.query, [docs[position] for position in request.positions]),

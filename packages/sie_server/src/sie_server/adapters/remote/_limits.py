@@ -51,8 +51,10 @@ _SLOT_RETRY_AFTER_S = 1
 class _Reservation:
     """Requests a batch reserved from one upstream's budget, taken one call at a time."""
 
-    def __init__(self, limiter: UpstreamLimiter, requests: int) -> None:
+    def __init__(self, limiter: UpstreamLimiter, requests: int, slots: int, *, probe: bool) -> None:
         self.limiter = limiter
+        self.slots = threading.BoundedSemaphore(slots)
+        self.probe = probe
         self._remaining = requests
         self._lock = threading.Lock()
 
@@ -94,24 +96,44 @@ class UpstreamLimiter:
         worker_telemetry().upstream_breaker_changed(upstream=name, open=False)
 
     @contextmanager
-    def batch(self, requests: int) -> Iterator[None]:
+    def batch(self, requests: int, *, concurrency: int | None = None) -> Iterator[None]:
         """Reserve ``requests`` calls at once for the calls made inside the block, or refuse them all.
 
         Calls made from threads must run in a copy of the caller's context, as
         :func:`~sie_server.adapters.remote._batching.call_each` runs them.
+        Reserve up to ``concurrency`` in-flight slots for the whole block.
         Reserved calls the block does not make are returned to the budget.
         """
+        if requests < 0 or (concurrency is not None and concurrency < 1):
+            raise ValueError("batch requests must be non-negative and concurrency must be positive")
+        slots = min(requests, self._max_in_flight, concurrency or self._max_in_flight)
         with self._lock:
             now = self._clock()
             self._refuse_while_open(now)
-            self._take(requests, now)
-        reservation = _Reservation(self, requests)
+            if self._open_until is not None and requests > 1:
+                raise self._refusal("breaker_open", _SLOT_RETRY_AFTER_S)
+            if self._in_flight + slots > self._max_in_flight:
+                raise self._refusal("concurrency_cap", _SLOT_RETRY_AFTER_S)
+            probe = self._admit(now) if requests else False
+            try:
+                self._take(requests, now)
+            except UpstreamRefusedError:
+                if probe:
+                    self._probing = False
+                raise
+            self._in_flight += slots
+        reservation = _Reservation(self, requests, slots, probe=probe)
         token = _BATCH.set(reservation)
         try:
             yield
         finally:
             _BATCH.reset(token)
-            self._refund(reservation.unused())
+            unused = reservation.unused()
+            with self._lock:
+                self._in_flight -= slots
+                self._return(unused, self._clock())
+                if probe and unused:
+                    self._probing = False
 
     @contextmanager
     def call(self) -> Iterator[None]:
@@ -125,21 +147,23 @@ class UpstreamLimiter:
         reservation = _BATCH.get()
         prepaid = reservation is not None and reservation.limiter is self and reservation.take()
         probe = False
-        with self._lock:
-            now = self._clock()
-            try:
-                probe = self._admit(now)
-                if self._in_flight >= self._max_in_flight:
-                    raise self._refusal("concurrency_cap", _SLOT_RETRY_AFTER_S)
-                if not prepaid:
+        if prepaid:
+            assert reservation is not None
+            reservation.slots.acquire()
+            probe = reservation.probe
+        else:
+            with self._lock:
+                now = self._clock()
+                try:
+                    probe = self._admit(now)
+                    if self._in_flight >= self._max_in_flight:
+                        raise self._refusal("concurrency_cap", _SLOT_RETRY_AFTER_S)
                     self._take(1, now)
-            except UpstreamRefusedError:
-                if prepaid:
-                    self._return(1, now)
-                if probe:
-                    self._probing = False
-                raise
-            self._in_flight += 1
+                except UpstreamRefusedError:
+                    if probe:
+                        self._probing = False
+                    raise
+                self._in_flight += 1
         failed = False
         try:
             yield
@@ -148,8 +172,12 @@ class UpstreamLimiter:
             raise
         finally:
             with self._lock:
-                self._in_flight -= 1
+                if not prepaid:
+                    self._in_flight -= 1
                 self._record(failed=failed, probe=probe, now=self._clock())
+            if prepaid:
+                assert reservation is not None
+                reservation.slots.release()
 
     def _admit(self, now: float) -> bool:
         """Refuse while the breaker is open; after the cooldown, admit one call as the probe."""
@@ -181,11 +209,6 @@ class UpstreamLimiter:
     def _return(self, requests: int, now: float) -> None:
         self._refill(now)
         self._tokens = min(self._capacity, self._tokens + requests)
-
-    def _refund(self, requests: int) -> None:
-        if requests > 0:
-            with self._lock:
-                self._return(requests, self._clock())
 
     def _refill(self, now: float) -> None:
         self._tokens = min(self._capacity, self._tokens + (now - self._refilled_at) * self._refill_per_s)

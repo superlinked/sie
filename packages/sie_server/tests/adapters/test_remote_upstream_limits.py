@@ -200,6 +200,36 @@ def test_a_call_over_the_concurrency_cap_is_refused_at_once_and_spends_nothing(
     assert str(refusal) == "upstream 'team-sie' is busy: its concurrency cap is reached"
 
 
+def test_a_batch_reserves_concurrency_before_any_item_is_sent(limiter: Callable[..., UpstreamLimiter]) -> None:
+    budget = limiter(concurrency=4)
+    with budget.call(), pytest.raises(UpstreamRefusedError, match="concurrency cap"), budget.batch(4):
+        pytest.fail("a refused batch must not send any requests")
+
+
+def test_reserved_batch_slots_cannot_be_taken_by_another_caller(limiter: Callable[..., UpstreamLimiter]) -> None:
+    budget = limiter(concurrency=2)
+    with budget.batch(4):
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            assert executor.submit(refused, budget, "concurrency_cap").result().retry_after_s == 1
+        for _ in range(4):
+            call(budget)
+    call(budget)
+
+
+def test_a_half_open_breaker_refuses_a_multi_request_batch_before_sending(
+    limiter: Callable[..., UpstreamLimiter],
+    clock: Clock,
+) -> None:
+    breaker = limiter(failures=1, cooldown_s=60)
+    fail(breaker)
+    clock.advance(60)
+    with pytest.raises(UpstreamRefusedError, match="circuit breaker"), breaker.batch(2):
+        pytest.fail("only one probe may be sent")
+    with breaker.batch(1):
+        call(breaker)
+    call(breaker)
+
+
 def test_consecutive_failures_within_the_window_open_the_breaker_for_the_cooldown(
     limiter: Callable[..., UpstreamLimiter], clock: Clock, events: Events
 ) -> None:

@@ -180,7 +180,9 @@ class SieUpstreamAdapter(BaseAdapter):
         if instruction is not None:
             params["instruction"] = instruction
         wire_items = [_wire_item(item) for item in items]
-        with upstream_limiter(self._upstream_name).batch(len(wire_items)):
+        with upstream_limiter(self._upstream_name).batch(
+            len(wire_items), concurrency=requests_in_flight(upstream_for_serving(self._upstream_name))
+        ):
             encoded = call_each(executor, lambda wire_item: self._encode_one(wire_item, params, requested), wire_items)
         extra: dict[str, Any] = {}
         token_counts = _reported([None if answer.usage is None else answer.usage.input_tokens for answer in encoded])
@@ -250,7 +252,9 @@ class SieUpstreamAdapter(BaseAdapter):
         if forwarded := _forwarded_options(options):
             params["options"] = forwarded
         wire_items = [_wire_item(item) for item in items]
-        with upstream_limiter(self._upstream_name).batch(len(wire_items)):
+        with upstream_limiter(self._upstream_name).batch(
+            len(wire_items), concurrency=requests_in_flight(upstream_for_serving(self._upstream_name))
+        ):
             extracted = call_each(executor, lambda wire_item: self._extract_one(wire_item, params), wire_items)
         errors = [answer.error for answer in extracted]
         return ExtractOutput(
