@@ -2627,7 +2627,7 @@ def _routing_write_config() -> dict:
     return {
         "sie_id": "acme/routing",
         "hf_id": "acme/routing",
-        "tasks": {"generate": {"context_length": 8192, "max_output_tokens": 64}},
+        "tasks": {"extract": {}},
         "profiles": {
             "default": {
                 "adapter_path": "sie_server.adapters.bert_flash:BertFlashAdapter",
@@ -2699,6 +2699,21 @@ class TestConfigAPIRoutingValidation:
         assert response.json()["detail"]["error"] == "validation_error"
         writer.assert_not_called()
         assert app.state.model_registry.get_full_config("acme/routing") is None
+        assert app.state.config_store.read_epoch() == 0
+        app.state.nats_publisher.publish_config_notification.assert_not_called()
+
+    @pytest.mark.parametrize("method", ["POST", "PUT"])
+    def test_generation_fallback_is_refused_without_write_effects(
+        self, app_client: tuple[FastAPI, TestClient], method: str
+    ) -> None:
+        app, client = app_client
+        config = _routing_write_config()
+        config["tasks"] = {"generate": {"context_length": 8192, "max_output_tokens": 64}}
+        path = "/v1/configs/models" if method == "POST" else "/v1/configs/models/acme/routing"
+        response = client.request(method, path, content=yaml.safe_dump(config))
+        assert response.status_code == 422
+        assert "generate" in str(response.json())
+        assert app.state.config_store.read_model("acme/routing") is None
         assert app.state.config_store.read_epoch() == 0
         app.state.nats_publisher.publish_config_notification.assert_not_called()
 
