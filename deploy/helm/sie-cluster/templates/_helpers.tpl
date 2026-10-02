@@ -1570,6 +1570,38 @@ credential pasted as a key would otherwise be printed.
 {{- with include "sie-cluster.config.adminTokenSecretName" $root -}}
 {{- $chartSecretKeys = append $chartSecretKeys (dict "owner" "the sie-config admin token" "ref" (printf "%s/%s" . (include "sie-cluster.config.adminTokenSecretKey" $root))) -}}
 {{- end -}}
+{{- $oauthSecret := $root.Values.auth.oauth2Proxy.secret -}}
+{{- with $oauthSecret.name -}}
+{{- $secretName := . -}}
+{{- range $keyField := list "clientIDKey" "clientSecretKey" "cookieSecretKey" -}}
+{{- $chartSecretKeys = append $chartSecretKeys (dict "owner" (printf "auth.oauth2Proxy.secret.%s" $keyField) "ref" (printf "%s/%s" $secretName (index $oauthSecret $keyField))) -}}
+{{- end -}}
+{{- end -}}
+{{- $betterStack := $root.Values.observability.otel.collector.betterStack -}}
+{{- with $betterStack.existingSecret -}}
+{{- $chartSecretKeys = append $chartSecretKeys (dict "owner" "observability.otel.collector.betterStack.existingSecret" "ref" (printf "%s/%s" . $betterStack.tokenKey)) -}}
+{{- end -}}
+{{- $mcp := $root.Values.mcpEdge -}}
+{{- if or $mcp.connectorSecrets $mcp.existingSecretName -}}
+{{- $chartSecretKeys = append $chartSecretKeys (dict "owner" "the MCP connector secrets" "ref" (printf "%s/connector-secrets" (include "sie-cluster.mcpEdge.secretName" $root))) -}}
+{{- end -}}
+{{- with $mcp.clusterApiKey.existingSecretName -}}
+{{- $chartSecretKeys = append $chartSecretKeys (dict "owner" "mcpEdge.clusterApiKey.existingSecretName" "ref" (printf "%s/%s" . $mcp.clusterApiKey.secretKey)) -}}
+{{- end -}}
+{{- $tls := include "sie-cluster.ingressTlsConfig" $root | fromYaml -}}
+{{- $tlsSecrets := list (dict "owner" "the ingress TLS certificate" "name" $tls.secretName) (dict "owner" "the MCP ingress TLS certificate" "name" (printf "%s-tls" (include "sie-cluster.mcpEdge.serviceName" $root))) -}}
+{{- $rootCA := dig "selfSigned" "rootCA" dict $tls -}}
+{{- $namespace := include "sie-cluster.namespace" $root -}}
+{{- if eq (default $namespace $rootCA.namespace) $namespace -}}
+{{- $tlsSecrets = append $tlsSecrets (dict "owner" "the ingress root CA" "name" $rootCA.secretName) -}}
+{{- end -}}
+{{- range $tlsSecret := $tlsSecrets -}}
+{{- if $tlsSecret.name -}}
+{{- range $key := list "tls.crt" "tls.key" -}}
+{{- $chartSecretKeys = append $chartSecretKeys (dict "owner" $tlsSecret.owner "ref" (printf "%s/%s" $tlsSecret.name $key)) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
 {{- if include "sie-cluster.nats.authEnabled" $root -}}
 {{- $components := include "sie-cluster.nats.authComponents" $root | fromJsonArray -}}
 {{- if dig "config" "cluster" "enabled" false $root.Values.nats -}}
@@ -1580,7 +1612,20 @@ credential pasted as a key would otherwise be printed.
 {{- $chartSecretKeys = append $chartSecretKeys (dict "owner" (printf "the NATS %s password" $component) "ref" (printf "%s/password" $natsSecret)) -}}
 {{- end -}}
 {{- end -}}
+{{- $upstreamsSecretName := include "sie-cluster.upstreams.secretName" $root -}}
+{{- $upstreamsFileRef := printf "%s/upstreams.yaml" $upstreamsSecretName -}}
+{{- if $upstreams -}}
+{{- range $chartSecretKey := $chartSecretKeys -}}
+{{- if eq $chartSecretKey.ref $upstreamsFileRef -}}
+{{- fail (printf "%s reads the upstreams file: only the worker container of a remote lane may hold upstream configuration" $chartSecretKey.owner) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- $chartSecretKeys = append $chartSecretKeys (dict "owner" "the upstreams file" "ref" $upstreamsFileRef) -}}
 {{- $secretNames := list -}}
+{{- if $upstreams -}}
+{{- $secretNames = append $secretNames $upstreamsSecretName -}}
+{{- end -}}
 {{- $position := 0 -}}
 {{- range $name, $upstream := $upstreams -}}
 {{- $position = add1 $position -}}

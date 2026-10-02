@@ -1713,6 +1713,75 @@ SECRET_UPSTREAM = {"team": upstream(api_key_secret={"name": "team-upstream", "ke
 
 
 @pytest.mark.parametrize(
+    ("path", "key_path", "key"),
+    [
+        ("auth.oauth2Proxy.secret.name", "auth.oauth2Proxy.secret.clientIDKey", "api-key"),
+        ("auth.oauth2Proxy.secret.name", "auth.oauth2Proxy.secret.clientSecretKey", "api-key"),
+        ("auth.oauth2Proxy.secret.name", "auth.oauth2Proxy.secret.cookieSecretKey", "api-key"),
+        (
+            "observability.otel.collector.betterStack.existingSecret",
+            "observability.otel.collector.betterStack.tokenKey",
+            "api-key",
+        ),
+        ("mcpEdge.existingSecretName", None, "connector-secrets"),
+        ("mcpEdge.clusterApiKey.existingSecretName", "mcpEdge.clusterApiKey.secretKey", "api-key"),
+        ("ingress.tlsConfig.secretName", None, "tls.key"),
+        ("ingress.tlsConfig.secretName", None, "tls.crt"),
+        ("ingress.tlsConfig.selfSigned.rootCA.secretName", None, "tls.key"),
+    ],
+)
+def test_other_chart_credentials_cannot_share_an_upstream_key(
+    tmp_path: Path,
+    path: str,
+    key_path: str | None,
+    key: str,
+) -> None:
+    values: dict = {"upstreams": {"team": upstream(api_key_secret={"name": "team-upstream", "key": key})}}
+    entries = [(path, "team-upstream")]
+    if key_path is not None:
+        entries.append((key_path, key))
+    for dotted_path, value in entries:
+        parts = dotted_path.split(".")
+        current = values
+        for part in parts[:-1]:
+            current = current.setdefault(part, {})
+        current[parts[-1]] = value
+
+    result = render_workers(tmp_path, values)
+
+    assert result.returncode != 0
+    assert "name the same Secret key" in result.stderr
+
+
+def test_gateway_extra_env_cannot_read_the_generated_upstreams_file(tmp_path: Path) -> None:
+    values = remote_pool_values()
+    values["gateway"] = {"extraEnv": [reads_secret(UPSTREAMS_SECRET)]}
+
+    result = render_workers(tmp_path, values)
+
+    assert result.returncode != 0
+    assert "gateway.extraEnv reads the upstream Secret" in result.stderr
+
+
+def test_the_generated_upstreams_file_cannot_be_used_as_an_api_key(tmp_path: Path) -> None:
+    values = {"upstreams": {"team": upstream(api_key_secret={"name": UPSTREAMS_SECRET, "key": "upstreams.yaml"})}}
+
+    result = render_workers(tmp_path, values)
+
+    assert result.returncode != 0
+    assert "the upstreams file name the same Secret key" in result.stderr
+
+
+def test_the_mcp_ingress_certificate_cannot_be_sent_upstream(tmp_path: Path) -> None:
+    values = {"upstreams": {"team": upstream(api_key_secret={"name": "sie-sie-cluster-mcp-tls", "key": "tls.key"})}}
+
+    result = render_workers(tmp_path, values)
+
+    assert result.returncode != 0
+    assert "the MCP ingress TLS certificate name the same Secret key" in result.stderr
+
+
+@pytest.mark.parametrize(
     ("values", "message"),
     [
         (
