@@ -169,6 +169,8 @@ def validate_routing_config(config: dict[str, Any]) -> None:
             raise ValueError(
                 "routing policy 'fallback' cannot serve encode or score until remote equivalence is proven"
             )
+        if tasks.get("generate") is not None:
+            raise ValueError("routing policy 'fallback' cannot serve generate until remote adapters produce tokens")
 
     profiles = config.get("profiles") or {}
     if not isinstance(profiles, dict):

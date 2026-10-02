@@ -95,6 +95,7 @@ def test_partial_append_body_passes() -> None:
         "threshold",
         "encode",
         "score",
+        "generate",
         "remote_backed_fallback",
         "remote_only_fields",
         "remote_only_local",
@@ -117,7 +118,7 @@ def test_routing_guard_agrees_with_worker(case: str) -> None:
     }
     config = _model(
         hf_id="acme/bert",
-        tasks={"generate": {"context_length": 8192, "max_output_tokens": 64}},
+        tasks={"extract": {}},
         profiles={
             "default": {"adapter_path": _ADAPTER, "max_batch_tokens": 4096, "kv_budget_tokens": 4096},
             "remote": remote,
@@ -176,6 +177,8 @@ def test_routing_guard_agrees_with_worker(case: str) -> None:
         config["tasks"]["encode"] = {"dense": {"dim": 384}}
     elif case == "score":
         config["tasks"]["score"] = {}
+    elif case == "generate":
+        config["tasks"]["generate"] = {"context_length": 8192, "max_output_tokens": 64}
     elif case in {"dangling_parent", "chained_parent", "cyclic_parent"}:
         profiles["remote"] = {"extends": "parent"}
         if case != "dangling_parent":
@@ -288,3 +291,24 @@ class TestConfigApiRejectsWorkerInvalidBodies:
         assert resp.status_code == 422
         assert resp.json()["detail"]["details"] == [{"loc": ["description"], "message": _UNKNOWN}]
         assert client.get("/v1/configs/models/acme/bert").status_code == 404
+
+
+def test_config_service_refuses_generation_fallback_before_remote_token_support() -> None:
+    config = _model(
+        hf_id="acme/bert",
+        tasks={"generate": {"context_length": 8192, "max_output_tokens": 64}},
+        profiles={
+            "default": {"adapter_path": _ADAPTER, "max_batch_tokens": 4096, "kv_budget_tokens": 4096},
+            "remote": {
+                "adapter_path": "sie_server.adapters.remote.sie:SieUpstreamAdapter",
+                "max_batch_tokens": 8192,
+                "kv_budget_tokens": 4096,
+                "adapter_options": {"loadtime": {"upstream": "team-sie", "upstream_model": "org/name"}},
+            },
+        },
+        routing={"policy": "fallback", "fallback_profile": "remote"},
+    )
+    with pytest.raises(ValueError, match="tokens"):
+        validate_model_routing(ModelConfig.model_validate(config))
+    with pytest.raises(ValueError, match="routing.*generate"):
+        validate_routing_config(config)
