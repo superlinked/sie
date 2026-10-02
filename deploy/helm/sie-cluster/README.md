@@ -890,8 +890,10 @@ destination:
   from that range. Admit the specific endpoint range, not the whole block: the
   Alibaba Cloud metadata service is also in it, at 100.100.100.200.
 - **Pod identity through a node-local endpoint.** GKE Workload Identity reads
-  credentials from the GKE metadata server (169.254.169.254, port 80) and EKS
-  Pod Identity from its agent (169.254.170.23, port 80). The policy blocks both,
+  credentials from the GKE metadata server: 169.254.169.254 on TCP port 80
+  with Dataplane V2, or 169.254.169.252 on TCP port 988 without Dataplane V2.
+  EKS Pod Identity reads them from its agent (169.254.170.23, port 80).
+  The policy blocks these endpoints,
   so a remote lane given an identity through
   `workers.remote.serviceAccount.annotations` cannot obtain it until you admit
   that one address and port. EKS IRSA, AKS workload identity and Alibaba Cloud
@@ -901,6 +903,8 @@ destination:
 - **An OTLP endpoint other than this release's collector or Tempo**, inside or
   outside the cluster. Without a rule, the remote lanes' telemetry is dropped.
 - **A NodeLocal DNSCache**: add its address to `dnsTo` as an `ipBlock`.
+
+For GKE Workload Identity with Dataplane V2:
 
 ```yaml
 workers:
@@ -914,6 +918,9 @@ workers:
             - port: 80
               protocol: TCP
 ```
+
+Without Dataplane V2, use `cidr: 169.254.169.252/32` and `port: 988` instead,
+as described in the [GKE Workload Identity documentation](https://docs.cloud.google.com/kubernetes-engine/docs/concepts/workload-identity).
 
 Admit 169.254.169.254 only where it serves workload identity, as on GKE with
 Workload Identity enabled. On nodes without it, this address serves the node's
