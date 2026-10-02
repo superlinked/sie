@@ -71,6 +71,7 @@ from sie_server.adapters.remote._http import (
     sse_data,
 )
 from sie_server.adapters.remote._limits import upstream_limiter
+from sie_server.adapters.remote._openai_chat import ChatStreamParser
 from sie_server.config.upstreams import Upstream, UpstreamConfigError, UpstreamKind, upstream_for_serving
 from sie_server.core.inference_output import EncodeOutput, ExtractItemError, ExtractOutput, ScoreOutput, SparseVector
 from sie_server.core.postprocessor_registry import POSTPROCESSOR_OPTION_KEYS
@@ -336,6 +337,72 @@ class SieUpstreamAdapter(BaseAdapter, GenerationAdapter):
         if self._async_client is None:
             self._async_client = upstream_client(self._upstream)
         return self._async_client
+
+    def _chat_request(self, body: dict[str, Any], *, stream: bool) -> tuple[httpx.AsyncClient, httpx.Request]:
+        """Pin the chat endpoint and model; exact usage is required internally."""
+        client = self._generation_client()
+        forwarded = {**body, "model": self._upstream_model, "stream": stream}
+        if stream:
+            forwarded["stream_options"] = {"include_usage": True}
+        else:
+            forwarded.pop("stream_options", None)
+        request = client.build_request(
+            "POST",
+            "/v1/chat/completions",
+            json=forwarded,
+            headers={"Accept": "text/event-stream" if stream else "application/json", "Accept-Encoding": "identity"},
+            timeout=httpx.Timeout(
+                GENERATION_READ_TIMEOUT_S, connect=_CONNECT_TIMEOUT_S, write=_GENERATION_WRITE_TIMEOUT_S
+            ),
+        )
+        return client, request
+
+    async def chat_completion(
+        self, body: dict[str, Any], *, requested_model: str, max_response_bytes: int = 32 << 20
+    ) -> dict[str, Any]:
+        """Return one bounded, normalized chat answer with exact upstream usage."""
+        parser = ChatStreamParser(requested_model, choices=1 if body.get("n") is None else body["n"])
+        client, request = self._chat_request(body, stream=False)
+        async with open_stream(
+            client, request, upstream=self._upstream_name, error_body_timeout_s=REQUEST_DEADLINE_S
+        ) as response:
+            if response.headers.get("content-type", "").partition(";")[0].strip().lower() != "application/json":
+                raise RemoteUpstreamError("upstream did not return a chat answer")
+            raw = bytearray()
+            async for chunk in response.aiter_raw():
+                if len(raw) + len(chunk) > min(max_response_bytes, _MAX_STREAM_BYTES):
+                    raise RemoteUpstreamError("upstream chat answer exceeds the size limit")
+                raw.extend(chunk)
+            return parser.completion(bytes(raw))
+
+    async def chat_completion_stream(
+        self, body: dict[str, Any], *, requested_model: str, max_response_bytes: int = 32 << 20
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Yield normalized events; upstream failures after output are final."""
+        parser = ChatStreamParser(requested_model, choices=1 if body.get("n") is None else body["n"])
+        client, request = self._chat_request(body, stream=True)
+        yielded = False
+        try:
+            async with open_stream(
+                client, request, upstream=self._upstream_name, error_body_timeout_s=REQUEST_DEADLINE_S
+            ) as response:
+                if response.headers.get("content-type", "").partition(";")[0].strip().lower() != "text/event-stream":
+                    raise RemoteUpstreamError("upstream did not stream its chat answer")
+                async for data in sse_data(
+                    response,
+                    max_event_bytes=min(_MAX_EVENT_BYTES, max_response_bytes),
+                    max_total_bytes=min(_MAX_STREAM_BYTES, max_response_bytes),
+                ):
+                    event = parser.parse(data)
+                    if event is None:
+                        return
+                    yielded = True
+                    yield event
+                parser.finish()
+        except UpstreamUnavailableError:
+            if yielded:
+                raise RemoteUpstreamError("the upstream failed during chat generation") from None
+            raise
 
     def encode(
         self,

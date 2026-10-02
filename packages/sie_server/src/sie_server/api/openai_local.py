@@ -8,7 +8,9 @@ directly in either the Apple-Silicon or CUDA image.
   Apple Silicon and SGLang on CUDA. Chat templating, streaming, tool parsing,
   and structured output remain owned by that already-loaded child. The proxy
   pins the request to the child's loopback URL and served model identity; a
-  client cannot select another upstream.
+  client cannot select another upstream. Remote generation profiles use their
+  adapter's normalized chat methods instead; the operator-configured upstream
+  owns chat rendering, and the worker retains validation and output policy.
 - ``/v1/rerank`` wraps the in-process score adapter in the Cohere/OpenAI rerank
   shape (``{query, documents, top_n}`` -> ``{results: [{index, relevance_score}]}``).
 
@@ -35,8 +37,10 @@ import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from sie_sdk.queue_types import denormalize_model_id
+from starlette.types import Receive, Scope, Send
 
 from sie_server.adapters._generation_base import (
+    GenerationAdapter,
     GenerationUnsupportedFieldError,
     ReasoningFormat,
     ThinkingBlockStripper,
@@ -46,6 +50,7 @@ from sie_server.adapters._generation_base import (
 )
 from sie_server.adapters.errors import InputTooLongError, UpstreamUnavailableError
 from sie_server.adapters.mlx.generation import MLXGenerationAdapter, normalize_mlx_seed
+from sie_server.adapters.remote._http import RemoteUpstreamError
 from sie_server.adapters.sglang.generation import SGLangGenerationAdapter
 from sie_server.api.helpers import (
     ModelStateChecker,
@@ -58,8 +63,10 @@ from sie_server.api.routing import error_code, fallback_refusal, remote_routing,
 from sie_server.api.score import score_usage_from_output
 from sie_server.api.validation import validate_machine_profile_header, validate_signed_i64
 from sie_server.config.model import validate_chat_template_kwargs
+from sie_server.config.upstreams import RemoteServingDisabledError
 from sie_server.core.grammar_routing import resolve_grammar_serving_model
 from sie_server.core.inference_output import ScoreOutput
+from sie_server.core.loader import serves_remotely
 from sie_server.core.runtime_options import grammar_default_sampling
 from sie_server.core.score_cost import MAX_SCORE_ITEMS, build_score_prepared_items
 from sie_server.core.timing import RequestTiming
@@ -628,17 +635,15 @@ def _merge_stops(request_stop: Any, configured: Any) -> Any:
     return merged
 
 
-def _prepare_sglang_body(
+def _prepare_chat_body(
     body: dict[str, Any],
     *,
     config: Any,
-    adapter: SGLangGenerationAdapter,
     max_completion_tokens: int | None,
     max_tokens: int | None,
     seed: int | None,
 ) -> dict[str, Any]:
     proxied = dict(body)
-    proxied["model"] = adapter.served_model_name
     # SIE owns these edge-only identifiers; do not send unknown metadata into
     # the engine process.
     proxied.pop("safety_identifier", None)
@@ -695,6 +700,26 @@ def _prepare_sglang_body(
     if merged_template_kwargs:
         proxied["chat_template_kwargs"] = merged_template_kwargs
 
+    return proxied
+
+
+def _prepare_sglang_body(
+    body: dict[str, Any],
+    *,
+    config: Any,
+    adapter: SGLangGenerationAdapter,
+    max_completion_tokens: int | None,
+    max_tokens: int | None,
+    seed: int | None,
+) -> dict[str, Any]:
+    proxied = _prepare_chat_body(
+        body,
+        config=config,
+        max_completion_tokens=max_completion_tokens,
+        max_tokens=max_tokens,
+        seed=seed,
+    )
+    proxied["model"] = adapter.served_model_name
     # The public contract is final-answer-only. Ask the child parser to split
     # reasoning from visible content, then strip that private field again on
     # both response paths below. Raw-tag fallback covers models with no parser.
@@ -969,7 +994,168 @@ async def _stream_strict_violation(
     return await _strict_output_violation(grammar, completed)
 
 
-# -- /v1/chat/completions (proxy to the managed generation child) ------------
+class _RemoteChatStreamingResponse(StreamingResponse):
+    """Own the primed iterator even if ASGI disconnects before body delivery."""
+
+    def __init__(self, iterator: AsyncIterator[bytes], first: bytes, *, headers: dict[str, str]) -> None:
+        self._remote_iterator = iterator
+
+        async def body() -> AsyncIterator[bytes]:
+            yield first
+            async for event in iterator:
+                yield event
+
+        super().__init__(body(), media_type="text/event-stream", headers=headers)
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            await aclose_with_error_precedence(
+                self._remote_iterator, outcome_selected=True, context="remote chat response"
+            )
+
+
+def _check_remote_chat_usage(payload: dict[str, Any], body: dict[str, Any], config: Any) -> None:
+    usage = payload.get("usage")
+    if usage is None:
+        return  # The adapter requires exact usage before clean exhaustion.
+    cap = body.get("max_completion_tokens", body.get("max_tokens"))
+    choices = body.get("n") or 1
+    prompt = usage["prompt_tokens"]
+    completion = usage["completion_tokens"]
+    context = config.tasks.generate.context_length
+    if prompt > context or completion > min(cap, context - prompt) * choices:
+        raise RemoteUpstreamError("upstream chat usage exceeded the configured token bounds")
+
+
+async def _remote_chat_events(
+    iterator: AsyncIterator[dict[str, Any]],
+    *,
+    body: dict[str, Any],
+    requested_model: str,
+    config: Any,
+    adapter: GenerationAdapter,
+    strict_grammar: GrammarSpec | None,
+) -> AsyncIterator[bytes]:
+    states: dict[int, ThinkingBlockStripper] = {}
+    strict_contents: dict[int, list[str]] = {}
+    strict_tool_choices: set[int] = set()
+    delivered = False
+    received = 0
+    include_usage = bool((body.get("stream_options") or {}).get("include_usage"))
+    try:
+        async for payload in iterator:
+            _check_remote_chat_usage(payload, body, config)
+            sanitized = _sanitize_chat_payload(
+                payload,
+                requested_model=requested_model,
+                hide_thinking_blocks=thinking_blocks_must_be_hidden(config),
+                initial_inside_thinking=False,
+                reasoning_format=resolve_reasoning_format(config, adapter),
+                states=states,
+                terminal=False,
+            )
+            if strict_grammar is not None:
+                violation = await _stream_strict_violation(
+                    sanitized, strict_grammar, contents=strict_contents, tool_choices=strict_tool_choices
+                )
+                if violation is not None:
+                    if not delivered:
+                        raise HTTPException(
+                            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                            detail={"code": MODEL_OUTPUT_PARSE_ERROR, "message": violation},
+                        )
+                    yield _upstream_error_event(violation, code=MODEL_OUTPUT_PARSE_ERROR, error_type="server_error")
+                    return
+            if not include_usage:
+                sanitized.pop("usage", None)
+                if not sanitized["choices"]:
+                    continue
+            encoded = json.dumps(sanitized, separators=(",", ":"), ensure_ascii=False).encode()
+            received += len(encoded)
+            if received > _MAX_CHAT_RESPONSE_BYTES:
+                raise RemoteUpstreamError("upstream chat response exceeded the byte limit")
+            delivered = True
+            yield b"data: " + encoded + b"\n\n"
+        yield b"data: [DONE]\n\n"
+    except (RemoteUpstreamError, UpstreamUnavailableError):
+        if not delivered:
+            raise
+        yield _upstream_error_event()
+    finally:
+        await aclose_with_error_precedence(iterator, outcome_selected=True, context="remote chat adapter")
+
+
+async def _remote_chat_response(
+    adapter: GenerationAdapter,
+    body: dict[str, Any],
+    *,
+    requested_model: str,
+    config: Any,
+    stream: bool,
+    headers: dict[str, str],
+    strict_grammar: GrammarSpec | None,
+) -> Response:
+    try:
+        if stream:
+            iterator = _remote_chat_events(
+                adapter.chat_completion_stream(
+                    body, requested_model=requested_model, max_response_bytes=_MAX_CHAT_RESPONSE_BYTES
+                ),
+                body=body,
+                requested_model=requested_model,
+                config=config,
+                adapter=adapter,
+                strict_grammar=strict_grammar,
+            )
+            # Decide a pre-output refusal before committing the HTTP 200.
+            first = await anext(iterator)
+            return _RemoteChatStreamingResponse(
+                iterator, first, headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", **headers}
+            )
+        payload = await adapter.chat_completion(
+            body, requested_model=requested_model, max_response_bytes=_MAX_CHAT_RESPONSE_BYTES
+        )
+        _check_remote_chat_usage(payload, body, config)
+        payload = _sanitize_chat_payload(
+            payload,
+            requested_model=requested_model,
+            hide_thinking_blocks=thinking_blocks_must_be_hidden(config),
+            initial_inside_thinking=False,
+            reasoning_format=resolve_reasoning_format(config, adapter),
+            terminal=True,
+        )
+        if len(json.dumps(payload, ensure_ascii=False).encode()) > _MAX_CHAT_RESPONSE_BYTES:
+            raise RemoteUpstreamError("upstream chat response exceeded the byte limit")
+        if strict_grammar is not None:
+            violation = await _strict_output_violation(strict_grammar, _completed_choice_contents(payload))
+            if violation is not None:
+                return _strict_output_error_response(violation)
+        return JSONResponse(content=payload, headers=headers)
+    except GenerationUnsupportedFieldError as exc:
+        raise _bad_request(str(exc), param=exc.param, code="unsupported_field") from exc
+    except UpstreamUnavailableError as exc:
+        raise upstream_unavailable_exception(exc, requested_model) from exc
+    except (InputTooLongError, InvalidInputError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": ErrorCode.INPUT_TOO_LONG.value if isinstance(exc, InputTooLongError) else "invalid_request",
+                "message": "the upstream refused the chat input",
+            },
+        ) from exc
+    except RemoteServingDisabledError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"code": ErrorCode.QUEUE_FULL.value, "message": "remote serving is unavailable"},
+            headers={"Retry-After": "1"},
+        ) from exc
+    except RemoteUpstreamError:
+        return _upstream_error_response()
+
+
+# -- /v1/chat/completions (managed child or remote generation adapter) -------
 
 
 @router.post("/chat/completions", response_model=None)
@@ -1073,15 +1259,51 @@ async def _chat_completions(
                 )
             # The child decodes video on its event loop; bound that work here.
             await asyncio.to_thread(_probe_chat_videos, videos)
-        if str(device).startswith("cuda"):
+        remote_chat = serves_remotely(config)
+        if str(device).startswith("cuda") or remote_chat:
             _validate_cuda_chat_body(body)
         else:
             _validate_mlx_chat_body(body)
+        if remote_chat:
+            options = body.get("stream_options")
+            if options is not None and (
+                not isinstance(options, dict)
+                or bool(options.keys() - {"include_usage"})
+                or ("include_usage" in options and not isinstance(options["include_usage"], bool))
+            ):
+                raise _bad_request("'stream_options' must contain only boolean 'include_usage'", param="stream_options")
+            for message in messages:
+                content = message.get("content")
+                if isinstance(content, list) and any(
+                    part.get("type") not in {"text", "input_text"} for part in content
+                ):
+                    raise _bad_request(
+                        "remote chat does not support media messages",
+                        param="messages",
+                        code="unsupported_field",
+                    )
 
         route = await route_request(http_request, requested_key, span, serving_key=registry_key)
 
         adapter = registry.get(route.key)
         registry.touch_lru(route.key)
+        if remote_chat and isinstance(adapter, GenerationAdapter):
+            proxied = _prepare_chat_body(
+                body,
+                config=config,
+                max_completion_tokens=max_completion_tokens,
+                max_tokens=max_tokens,
+                seed=seed,
+            )
+            return await _remote_chat_response(
+                adapter,
+                proxied,
+                requested_model=model,
+                config=config,
+                stream=bool(stream_opt),
+                headers=route.headers(),
+                strict_grammar=strict_grammar,
+            )
         slot: asyncio.Semaphore | None = None
         reasoning_parser: str | None = None
         if isinstance(adapter, MLXGenerationAdapter) and not str(device).startswith("cuda"):
