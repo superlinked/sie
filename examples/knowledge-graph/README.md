@@ -110,8 +110,9 @@ asked for, and a displayed edge with no recorded reading.
 - **Not an accuracy rate.** Eight edges over the four paragraphs outside the
   hero is far too small to support a percentage, and the ten paragraphs were
   chosen to be readable rather than sampled from anything.
-- **Not that offsets pin a relation.** GLiNER2 names each end of a relation by
-  its text, not by an offset, and returns at most one span per text and label.
+- **Not that offsets pin a relation.** The recorded SIE relation results name
+  each endpoint by text, without an offset. Their entity results have at most
+  one span per text and label.
   Where a paragraph mentions the same text twice, the relation does not say
   which mention it means, and no threshold changes that. The task page marks
   every occurrence in that case rather than choosing one.
