@@ -20,6 +20,7 @@ codes ``MODEL_LOAD_FAILED``, ``ACCOUNT_STATE_UNAVAILABLE`` and
 
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 import time
@@ -162,7 +163,7 @@ def failure_for_transport_error(exc: httpx.HTTPError, *, upstream: str) -> Excep
 
 @asynccontextmanager
 async def open_stream(
-    client: httpx.AsyncClient, request: httpx.Request, *, upstream: str
+    client: httpx.AsyncClient, request: httpx.Request, *, upstream: str, error_body_timeout_s: float
 ) -> AsyncIterator[httpx.Response]:
     """Send ``request`` to ``upstream`` and hold its streamed answer open for the block.
 
@@ -184,7 +185,9 @@ async def open_stream(
             if response.status_code >= 400:
                 raise failure_for_status(
                     response.status_code,
-                    upstream_error_code(response.headers, await _read_error_body_async(response)),
+                    upstream_error_code(
+                        response.headers, await _read_error_body_async(response, timeout_s=error_body_timeout_s)
+                    ),
                     parse_retry_after(response.headers.get("retry-after")),
                     upstream=upstream,
                 )
@@ -327,18 +330,19 @@ def _read_body(response: httpx.Response, *, upstream: str, max_bytes: int, deadl
     return b"".join(chunks)
 
 
-async def _read_error_body_async(response: httpx.Response) -> bytes:
+async def _read_error_body_async(response: httpx.Response, *, timeout_s: float) -> bytes:
     if _is_compressed(response):
         return b""
     chunks: list[bytes] = []
     size = 0
     try:
-        async for chunk in response.aiter_raw():
-            size += len(chunk)
-            if size > _ERROR_BODY_MAX_BYTES:
-                return b""
-            chunks.append(chunk)
-    except httpx.HTTPError:
+        async with asyncio.timeout(timeout_s):
+            async for chunk in response.aiter_raw():
+                size += len(chunk)
+                if size > _ERROR_BODY_MAX_BYTES:
+                    return b""
+                chunks.append(chunk)
+    except (httpx.HTTPError, TimeoutError):
         return b""
     return b"".join(chunks)
 

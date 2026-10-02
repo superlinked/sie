@@ -1178,6 +1178,30 @@ class ModelConfig(BaseModel):
         # are a hard error pointing at the calibration deliverable.
         if self.tasks.generate is not None:
             for name, profile in self.profiles.items():
+                parent = self.profiles[profile.extends] if profile.extends is not None else None
+                effective_output_cap = (
+                    profile.max_output_tokens
+                    if profile.max_output_tokens is not None
+                    else parent.max_output_tokens
+                    if parent is not None
+                    else None
+                )
+                if effective_output_cap is not None:
+                    effective_loadtime = profile.adapter_options.loadtime or (
+                        parent.adapter_options.loadtime if parent is not None else {}
+                    )
+                    effective_context = effective_loadtime.get(
+                        "max_seq_length",
+                        self.tasks.generate.context_length,
+                    )
+                    if effective_output_cap > effective_context:
+                        msg = (
+                            f"Profile '{name}' on generation model '{self.sie_id}' sets "
+                            f"max_output_tokens={effective_output_cap}, exceeding its "
+                            f"context_length={effective_context}"
+                        )
+                        raise ValueError(msg)
+
                 if is_remote_adapter_path(self._declared_adapter_path(name)):
                     continue
                 effective_budget: int | None
@@ -1217,29 +1241,6 @@ class ModelConfig(BaseModel):
                     parent=self.profiles[profile.extends] if profile.extends is not None else None,
                 )
 
-                parent = self.profiles[profile.extends] if profile.extends is not None else None
-                effective_output_cap = (
-                    profile.max_output_tokens
-                    if profile.max_output_tokens is not None
-                    else parent.max_output_tokens
-                    if parent is not None
-                    else None
-                )
-                if effective_output_cap is not None:
-                    effective_loadtime = profile.adapter_options.loadtime or (
-                        parent.adapter_options.loadtime if parent is not None else {}
-                    )
-                    effective_context = effective_loadtime.get(
-                        "max_seq_length",
-                        self.tasks.generate.context_length,
-                    )
-                    if effective_output_cap > effective_context:
-                        msg = (
-                            f"Profile '{name}' on generation model '{self.sie_id}' sets "
-                            f"max_output_tokens={effective_output_cap}, exceeding its "
-                            f"context_length={effective_context}"
-                        )
-                        raise ValueError(msg)
         return self
 
     @model_validator(mode="after")

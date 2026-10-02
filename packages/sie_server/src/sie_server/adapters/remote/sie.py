@@ -295,7 +295,9 @@ class SieUpstreamAdapter(BaseAdapter, GenerationAdapter):
         yielded = False
         seen_text = False
         try:
-            async with open_stream(client, request, upstream=self._upstream_name) as response:
+            async with open_stream(
+                client, request, upstream=self._upstream_name, error_body_timeout_s=REQUEST_DEADLINE_S
+            ) as response:
                 if response.headers.get("content-type", "").partition(";")[0].strip().lower() != "text/event-stream":
                     raise RemoteUpstreamError("upstream did not stream its answer")
                 async for data in sse_data(

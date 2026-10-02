@@ -1,3 +1,4 @@
+import asyncio
 import json
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
@@ -8,7 +9,9 @@ import pytest
 import yaml
 from sie_sdk import SIEClient
 from sie_server.adapters._generation_base import GenerationCapacityError, GenerationChunk, GenerationDrainingError
+from sie_server.adapters.remote import sie as remote_sie
 from sie_server.adapters.remote._http import RemoteUpstreamError
+from sie_server.adapters.remote._limits import upstream_limiter
 from sie_server.adapters.remote.sie import SieUpstreamAdapter
 from sie_server.api.generate import _generation_http_exception
 from sie_server.config.upstreams import RemoteServingDisabledError, Upstream, install_upstreams
@@ -58,6 +61,39 @@ async def adapter() -> AsyncIterator[SieUpstreamAdapter]:
 def answer_with(adapter: SieUpstreamAdapter, handler: Callable[[httpx.Request], httpx.Response]) -> None:
     assert adapter._upstream is not None
     adapter._async_client = upstream_client(adapter._upstream, transport=httpx.MockTransport(handler))
+
+
+@pytest.mark.parametrize("trickle", [False, True])
+async def test_error_body_has_a_total_deadline_and_releases_the_slot(
+    adapter: SieUpstreamAdapter, monkeypatch: pytest.MonkeyPatch, trickle: bool
+) -> None:
+    monkeypatch.setattr(remote_sie, "REQUEST_DEADLINE_S", 0.03)
+
+    class SlowError(GenerationStream):
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            while True:
+                if trickle:
+                    await asyncio.sleep(0.005)
+                    yield b"private upstream detail"
+                else:
+                    await asyncio.Event().wait()
+
+    stream = SlowError([])
+    requests: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(503, headers={"Retry-After": "19", "X-SIE-Error-Code": "MODEL_LOADING"}, stream=stream)
+
+    answer_with(adapter, respond)
+    async with asyncio.timeout(1):
+        with pytest.raises(GenerationDrainingError) as raised:
+            _ = [chunk async for chunk in adapter.generate("prompt", max_new_tokens=9)]
+    assert raised.value.retry_after_s == 19
+    assert "private" not in str(raised.value)
+    assert stream.closed
+    assert len(requests) == 1
+    assert upstream_limiter("generation-test")._in_flight == 0
 
 
 async def test_generation_forwards_the_native_request_and_exact_usage(adapter: SieUpstreamAdapter) -> None:
