@@ -19,6 +19,7 @@ HERE = Path(__file__).resolve().parent
 
 
 def read_public_file(name: str, max_bytes: int) -> bytes:
+    """Read a size-bounded file from the pinned public HTTPS location."""
     with urllib.request.urlopen(f"{BASE}/{name}", timeout=60) as response:  # noqa: S310 - Pinned HTTPS origin.
         data = response.read(max_bytes + 1)
     if len(data) > max_bytes:
@@ -27,6 +28,7 @@ def read_public_file(name: str, max_bytes: int) -> bytes:
 
 
 def load_manifest(data: bytes) -> dict:
+    """Authenticate the immutable manifest before accepting its flat file list."""
     if hashlib.sha256(data).hexdigest() != MANIFEST_SHA256:
         raise ValueError("Evidence manifest hash mismatch")
     manifest = json.loads(data)
@@ -36,6 +38,7 @@ def load_manifest(data: bytes) -> dict:
 
 
 def verify_file(name: str, data: bytes, expected: dict) -> None:
+    """Require the declared byte size and SHA-256 for an allowed file."""
     if name not in FILES:
         raise ValueError(f"Unexpected evidence file: {name}")
     if len(data) != expected["bytes"]:
@@ -45,6 +48,7 @@ def verify_file(name: str, data: bytes, expected: dict) -> None:
 
 
 def fetch(output: Path) -> None:
+    """Download and verify the whole packet before replacing local files."""
     manifest_bytes = read_public_file("manifest.json", 64 * 1024)
     manifest = load_manifest(manifest_bytes)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -63,6 +67,7 @@ def fetch(output: Path) -> None:
 
 
 def main() -> None:
+    """Fetch the pinned packet into the requested local directory."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=HERE / "data")
     args = parser.parse_args()

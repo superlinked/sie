@@ -18,14 +18,17 @@ FRESH_DOCUMENTS = 770
 def load_evidence(root: Path) -> tuple[dict, list[dict]]:
     """Verify every declared file before using the published counts."""
     manifest = load_manifest((root / "manifest.json").read_bytes())
+    verified = {}
     for name, expected in manifest["files"].items():
-        verify_file(name, (root / name).read_bytes(), expected)
-    summary = json.loads((root / "summary.json").read_text())
-    rows = [json.loads(line) for line in (root / "counts.jsonl").read_text().splitlines()]
+        data = (root / name).read_bytes()
+        verify_file(name, data, expected)
+        verified[name] = data
+    summary = json.loads(verified["summary.json"])
+    rows = [json.loads(line) for line in verified["counts.jsonl"].splitlines()]
     identities = {(row["arm"], row["document_id"]) for row in rows}
     if len(identities) != len(rows):
         raise ValueError("Duplicate arm/document pair")
-    inputs = [json.loads(line) for line in (root / "inputs.jsonl").read_text().splitlines()]
+    inputs = [json.loads(line) for line in verified["inputs.jsonl"].splitlines()]
     documents = {row["document_id"]: row for row in inputs}
     if len(documents) != FULL_DOCUMENTS or len(inputs) != FULL_DOCUMENTS:
         raise ValueError("Expected exactly 800 distinct input documents")
@@ -42,6 +45,7 @@ def load_evidence(root: Path) -> tuple[dict, list[dict]]:
 
 
 def aggregate(rows: list[dict], arm: str, fresh: bool) -> dict:
+    """Average one complete model scope while retaining every failed reply."""
     selected = [row for row in rows if row["arm"] == arm and (not fresh or row["fresh"])]
     expected_n = FRESH_DOCUMENTS if fresh else FULL_DOCUMENTS
     if len(selected) != expected_n:
@@ -64,6 +68,7 @@ def aggregate(rows: list[dict], arm: str, fresh: bool) -> dict:
 
 
 def replay(root: Path) -> dict:
+    """Recompute both scopes and require every aggregate to match the recording."""
     summary, rows = load_evidence(root)
     results = {scope: {arm: aggregate(rows, arm, scope == "fresh") for arm in ARMS} for scope in ("full", "fresh")}
     mapping = {
@@ -94,6 +99,7 @@ def replay(root: Path) -> dict:
 
 
 def main() -> None:
+    """Print the verified count replay and its saved decision metadata."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--evidence", type=Path, default=HERE / "data")
     args = parser.parse_args()

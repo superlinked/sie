@@ -70,7 +70,9 @@ uv run --no-project --with 'sie-sdk>=0.7.3,<0.8' python run.py \
 
 The trial uses the study's common strict-schema conversion: every property is
 required, leaf values may be null, and unsupported source-schema constraints
-are omitted. It sends temperature 0, presence penalty 0, a 4,096-token cap,
+are omitted. Referenced property schemas must be inlined; `$ref` is rejected.
+String enums retain their non-null choices while the nullable branch allows null.
+It sends temperature 0, presence penalty 0, a 4,096-token cap,
 one image and the exact profile. A new document call is a trial, not a replay
 of the frozen benchmark. The endpoint may be a remote self-hosted server;
 `SIE_API_KEY` supplies its credential when required.

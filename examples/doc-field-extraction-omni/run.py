@@ -20,6 +20,8 @@ SYSTEM = (
 
 def strict_schema(schema: dict[str, Any]) -> dict[str, Any]:
     """The study's shared schema conversion: required keys, nullable leaves."""
+    if "$ref" in schema:
+        raise ValueError("Schema references are unsupported; inline the referenced property schema")
     kind = schema.get("type")
     if kind == "enum" or (kind is None and "enum" in schema):
         kind = "string"
@@ -42,12 +44,17 @@ def strict_schema(schema: dict[str, Any]) -> dict[str, Any]:
         return {"anyOf": [output, {"type": "null"}]}
     output["type"] = kind or "string"
     enum = schema.get("enum") or schema.get("emum")
-    if enum and all(isinstance(value, str) for value in enum):
-        output["enum"] = list(enum)
+    if enum:
+        choices = [value for value in enum if value is not None]
+        if not choices:
+            raise ValueError("A string enum needs at least one non-null choice")
+        if all(isinstance(value, str) for value in choices):
+            output["enum"] = choices
     return {"anyOf": [output, {"type": "null"}]}
 
 
 def media_type(data: bytes) -> str:
+    """Identify the supported image format from its signature."""
     if data.startswith(b"\x89PNG\r\n\x1a\n"):
         return "image/png"
     if data.startswith(b"\xff\xd8\xff"):
@@ -56,6 +63,7 @@ def media_type(data: bytes) -> str:
 
 
 def build_body(image: bytes, schema: dict[str, Any], *, show: bool = False) -> dict[str, Any]:
+    """Build the study's one-image request, optionally replacing bytes with their hash."""
     if schema.get("type") != "object":
         raise ValueError("The document schema must have an object root")
     mime = media_type(image)
@@ -76,6 +84,7 @@ def build_body(image: bytes, schema: dict[str, Any], *, show: bool = False) -> d
 
 
 def main() -> None:
+    """Inspect a request offline or send one optional document trial."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--image", type=Path, required=True)
     parser.add_argument("--schema", type=Path, required=True)
@@ -84,7 +93,7 @@ def main() -> None:
         "--show", action="store_true", help="Print the request with image bytes replaced by a hash; no SDK or network"
     )
     args = parser.parse_args()
-    body = build_body(args.image.read_bytes(), json.loads(args.schema.read_text()), show=args.show)
+    body = build_body(args.image.read_bytes(), json.loads(args.schema.read_text(encoding="utf-8")), show=args.show)
     if args.show:
         print(json.dumps({"model": MODEL, **body}, indent=2))
         return
