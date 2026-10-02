@@ -2386,3 +2386,49 @@ def test_unsafe_remote_network_policy_values_fail_the_render(
 )
 def test_no_remote_network_policy_without_a_remote_lane_or_when_disabled(tmp_path: Path, values: dict) -> None:
     assert remote_network_policy(rendered_documents(tmp_path, values)) is None
+
+
+INVALID_POLICY_CIDRS = [
+    "2001:db8::/129",
+    "2001:db8::/999",
+    "2001:::1/64",
+    "2001:db8::1::2/64",
+    "1:2:3:4:5:6:7:8:9/64",
+    "1:2:3:4:5:6:7/64",
+    "::ffff:999.2.3.4/128",
+    "999.2.3.4/32",
+    "10.0.0.0/33",
+]
+
+
+@pytest.mark.parametrize("cidr", INVALID_POLICY_CIDRS)
+@pytest.mark.parametrize("surface", ["extraDeniedCidrs", "extraEgress"])
+def test_remote_policy_rejects_invalid_cidrs(tmp_path: Path, cidr: str, surface: str) -> None:
+    values = remote_pool_values()
+    policy = (
+        {"extraDeniedCidrs": [cidr]}
+        if surface == "extraDeniedCidrs"
+        else {"extraEgress": [{"to": [{"ipBlock": {"cidr": cidr}}], "ports": [{"port": 443}]}]}
+    )
+    values["workers"]["remote"] = {"networkPolicy": policy}
+
+    result = render_workers(tmp_path, values)
+
+    assert result.returncode != 0
+    assert surface in result.stderr
+    assert "CIDR" in result.stderr
+
+
+@pytest.mark.parametrize("cidr", ["::/128", "2001:db8::/64", "1:2:3:4:5:6:7:8/128", "::ffff:192.0.2.1/128"])
+def test_remote_policy_accepts_valid_ipv6_cidrs(tmp_path: Path, cidr: str) -> None:
+    values = remote_pool_values()
+    values["workers"]["remote"] = {
+        "networkPolicy": {
+            "extraDeniedCidrs": [cidr],
+            "extraEgress": [{"to": [{"ipBlock": {"cidr": cidr}}], "ports": [{"port": 443}]}],
+        }
+    }
+
+    result = render_workers(tmp_path, values)
+
+    assert result.returncode == 0, result.stderr

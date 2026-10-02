@@ -1372,9 +1372,8 @@ followed by workers.remote.networkPolicy.extraDeniedCidrs.
 {{- if not (and (kindIs "string" $cidr) (regexMatch "^[0-9A-Fa-f:.]+/[0-9]{1,3}$" $cidr)) -}}
 {{- fail (printf "workers.remote.networkPolicy.extraDeniedCidrs[%d] must be a CIDR" $index) -}}
 {{- end -}}
-{{- if not (contains ":" $cidr) -}}
-{{- $_ := include "sie-cluster.cidr.ipv4" (dict "cidr" $cidr "field" (printf "workers.remote.networkPolicy.extraDeniedCidrs[%d]" $index)) -}}
-{{- end -}}
+{{- $validator := ternary "sie-cluster.cidr.ipv6" "sie-cluster.cidr.ipv4" (contains ":" $cidr) -}}
+{{- $_ := include $validator (dict "cidr" $cidr "field" (printf "workers.remote.networkPolicy.extraDeniedCidrs[%d]" $index)) -}}
 {{- $denied = append $denied $cidr -}}
 {{- end -}}
 {{- toJson $denied -}}
@@ -1392,6 +1391,40 @@ Args (dict): cidr, field.
 {{- $parts := regexSplit "[./]" .cidr -1 -}}
 {{- $ip := add (mul (atoi (index $parts 0)) 16777216) (mul (atoi (index $parts 1)) 65536) (mul (atoi (index $parts 2)) 256) (atoi (index $parts 3)) -}}
 {{- dict "ip" $ip "prefix" (atoi (index $parts 4)) | toJson -}}
+{{- end }}
+
+{{/*
+Validate an IPv6 CIDR and return its prefix as JSON. IPv4 tails occupy two
+hextets; :: must compress at least one. Args (dict): cidr, field.
+*/}}
+{{- define "sie-cluster.cidr.ipv6" -}}
+{{- $field := .field -}}
+{{- if not (and (kindIs "string" .cidr) (regexMatch "^[0-9A-Fa-f:.]+/(12[0-8]|1[01][0-9]|[1-9]?[0-9])$" .cidr)) -}}
+{{- fail (printf "%s must be an IPv6 CIDR" $field) -}}
+{{- end -}}
+{{- $cidrParts := splitList "/" .cidr -}}
+{{- $address := first $cidrParts -}}
+{{- if contains "." $address -}}
+{{- $tail := last (splitList ":" $address) -}}
+{{- $_ := include "sie-cluster.cidr.ipv4" (dict "cidr" (printf "%s/32" $tail) "field" $field) -}}
+{{- $address = printf "%sffff:ffff" (trimSuffix $tail $address) -}}
+{{- end -}}
+{{- $parts := splitList "::" $address -}}
+{{- $groups := list -}}
+{{- range $part := $parts -}}
+{{- if $part -}}
+{{- $groups = concat $groups (splitList ":" $part) -}}
+{{- end -}}
+{{- end -}}
+{{- range $group := $groups -}}
+{{- if not (regexMatch "^[0-9A-Fa-f]{1,4}$" $group) -}}
+{{- fail (printf "%s must be an IPv6 CIDR" $field) -}}
+{{- end -}}
+{{- end -}}
+{{- if not (or (and (eq (len $parts) 1) (eq (len $groups) 8)) (and (eq (len $parts) 2) (lt (len $groups) 8))) -}}
+{{- fail (printf "%s must be an IPv6 CIDR" $field) -}}
+{{- end -}}
+{{- dict "prefix" (atoi (last $cidrParts)) | toJson -}}
 {{- end }}
 
 {{/*
@@ -1431,6 +1464,8 @@ prefix length is above 0. Args (dict): peers, path.
 {{- if or (not $cidr) (regexMatch "/0+$" (trim $cidr)) -}}
 {{- fail (printf "%s[%d] admits every address: give the ipBlock a prefix length above 0." $path $index) -}}
 {{- end -}}
+{{- $validator := ternary "sie-cluster.cidr.ipv6" "sie-cluster.cidr.ipv4" (contains ":" $cidr) -}}
+{{- $_ := include $validator (dict "cidr" $cidr "field" (printf "%s[%d].ipBlock.cidr" $path $index)) -}}
 {{- $scoped = true -}}
 {{- end -}}
 {{- end -}}
