@@ -2476,3 +2476,55 @@ def test_remote_policy_rejects_mapped_addresses_and_host_bits(tmp_path: Path, ci
     assert result.returncode != 0
     assert surface in result.stderr
     assert "CIDR" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "peer",
+    [
+        {"ipBlock": {"cidr": "203.0.113.0/24"}, "podSelector": {"matchLabels": {"app": "proxy"}}},
+        {"ipBlock": {"cidr": "203.0.113.0/24"}, "namespaceSelector": {"matchLabels": {"name": "proxy"}}},
+    ],
+)
+def test_remote_policy_rejects_ipblock_mixed_with_selectors(tmp_path: Path, peer: dict) -> None:
+    values = remote_pool_values()
+    values["workers"]["remote"] = {"networkPolicy": {"extraEgress": [{"to": [peer], "ports": [{"port": 443}]}]}}
+    assert "cannot combine ipBlock" in render_error(tmp_path, values)
+
+
+@pytest.mark.parametrize(
+    "port",
+    [
+        {"port": -1},
+        {"port": 65536},
+        {"port": 443.5},
+        {"port": 443, "endPort": 0},
+        {"port": 443, "endPort": 65536},
+        {"port": 443, "endPort": 442},
+    ],
+)
+def test_remote_policy_rejects_invalid_numeric_ports(tmp_path: Path, port: dict) -> None:
+    values = remote_pool_values()
+    values["workers"]["remote"] = {
+        "networkPolicy": {"extraEgress": [{"to": [{"ipBlock": {"cidr": "203.0.113.0/24"}}], "ports": [port]}]}
+    }
+    assert "extraEgress[0].ports[0]" in render_error(tmp_path, values)
+
+
+def test_remote_policy_accepts_combined_selectors_and_a_named_port(tmp_path: Path) -> None:
+    values = remote_pool_values()
+    values["workers"]["remote"] = {
+        "networkPolicy": {
+            "extraEgress": [
+                {
+                    "to": [
+                        {
+                            "podSelector": {"matchLabels": {"app": "proxy"}},
+                            "namespaceSelector": {"matchLabels": {"name": "proxy"}},
+                        }
+                    ],
+                    "ports": [{"port": "https"}],
+                }
+            ]
+        }
+    }
+    assert render_workers(tmp_path, values).returncode == 0

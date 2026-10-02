@@ -1491,6 +1491,9 @@ prefix length is above 0. Args (dict): peers, path.
 {{- range $index, $peer := .peers -}}
 {{- $scoped := false -}}
 {{- if kindIs "map" $peer -}}
+{{- if and (hasKey $peer "ipBlock") (or (hasKey $peer "podSelector") (hasKey $peer "namespaceSelector")) -}}
+{{- fail (printf "%s[%d] cannot combine ipBlock with podSelector or namespaceSelector." $path $index) -}}
+{{- end -}}
 {{- range $selectorKey := list "podSelector" "namespaceSelector" -}}
 {{- $selector := index $peer $selectorKey -}}
 {{- if and (kindIs "map" $selector) (or $selector.matchLabels $selector.matchExpressions) -}}
@@ -1523,6 +1526,12 @@ ports. Args (dict): ports, path.
 {{- if not (and (kindIs "map" $port) $port.port) -}}
 {{- fail (printf "%s[%d] admits every port: set port." $path $index) -}}
 {{- end -}}
+{{- $numeric := or (kindIs "int" $port.port) (kindIs "int64" $port.port) (kindIs "float64" $port.port) -}}
+{{- if $numeric -}}
+{{- if not (and (eq (float64 $port.port) (floor (float64 $port.port))) (ge (float64 $port.port) 1.0) (le (float64 $port.port) 65535.0)) -}}
+{{- fail (printf "%s[%d].port must be an integer between 1 and 65535." $path $index) -}}
+{{- end -}}
+{{- end -}}
 {{- if not (kindIs "invalid" $port.endPort) -}}
 {{- $integral := list -}}
 {{- range $value := list $port.port $port.endPort -}}
@@ -1533,6 +1542,12 @@ ports. Args (dict): ports, path.
 {{- end -}}
 {{- if not (index $integral 1) -}}
 {{- fail (printf "%s[%d].endPort must be an integer." $path $index) -}}
+{{- end -}}
+{{- if or (lt (int64 $port.endPort) 1) (gt (int64 $port.endPort) 65535) -}}
+{{- fail (printf "%s[%d].endPort must be between 1 and 65535." $path $index) -}}
+{{- end -}}
+{{- if lt (int64 $port.endPort) (int64 $port.port) -}}
+{{- fail (printf "%s[%d].endPort must be at least port." $path $index) -}}
 {{- end -}}
 {{- if gt (sub (int64 $port.endPort) (int64 $port.port)) 60000 -}}
 {{- fail (printf "%s[%d] spans nearly every port: list the ports instead." $path $index) -}}
