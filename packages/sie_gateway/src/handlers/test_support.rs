@@ -164,6 +164,7 @@ impl WorkDispatcher for RecordingDispatcher {
         _admission_pool: &str,
         endpoint: &str,
         _model: &str,
+        _display_model: &str,
         _engine: &str,
         _bundle_config_hash: &str,
         items: Vec<rmpv::Value>,
