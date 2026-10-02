@@ -310,5 +310,5 @@ def test_config_service_refuses_generation_fallback_before_remote_token_support(
     )
     with pytest.raises(ValueError, match="tokens"):
         validate_model_routing(ModelConfig.model_validate(config))
-    with pytest.raises(ValueError, match="routing.*generate"):
+    with pytest.raises(ValueError, match=r"routing.*generate"):
         validate_routing_config(config)
