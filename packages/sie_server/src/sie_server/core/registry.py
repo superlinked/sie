@@ -1794,7 +1794,7 @@ class ModelRegistry:
         """
         if name in self._loaded and name not in self._unloading:
             return True
-        if self.is_failed(name):
+        if name in self._loading or self.is_failed(name):
             return False
         return await self._load_recording_failure(name, device)
 

@@ -118,6 +118,36 @@ async def test_a_remote_profile_loads_while_the_local_model_is_still_loading(tmp
         await registry.unload_all_async()
 
 
+async def test_load_now_does_not_wait_for_and_retry_a_failing_background_load(tmp_path: Path) -> None:
+    registry = registry_for(tmp_path, model_config("acme/hybrid"))
+    entered = threading.Event()
+    release = threading.Event()
+
+    def fail_load(*_args: Any, **_kwargs: Any) -> None:
+        entered.set()
+        assert release.wait(TIMEOUT_S)
+        raise RuntimeError("injected background load failure")
+
+    try:
+        with patch("sie_server.core.model_loader.load_adapter", side_effect=fail_load) as load:
+            assert await registry.start_load_async("acme/hybrid", device="cpu")
+            await wait_until(entered.is_set)
+
+            assert not await asyncio.wait_for(registry.load_now("acme/hybrid", device="cpu"), 0.5)
+
+            release.set()
+            await wait_until(lambda: not registry.is_loading("acme/hybrid"))
+            assert not await registry.load_now("acme/hybrid", device="cpu")
+            assert load.call_count == 1
+            failure = registry.get_failure("acme/hybrid")
+            assert failure is not None
+            assert failure.attempts == 1
+    finally:
+        release.set()
+        await wait_until(lambda: not registry.is_loading("acme/hybrid"))
+        await registry.unload_all_async()
+
+
 async def test_a_remote_profile_of_a_model_with_weights_downloads_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
