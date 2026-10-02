@@ -4,8 +4,8 @@
     python3 score.py
 
 Reads everything from evidence/, which `python3 fetch.py` downloads: the
-pinned paragraphs, the recorded calls and the hand review. Prints the five
-figures the /knowledge-graph task page publishes.
+pinned paragraphs, the recorded calls and the hand review. Prints the figures
+for the recorded study's original five-case display selection.
 
 Every check is fail-closed. A paragraph whose text no longer matches its
 digest, a candidate with a missing call, a response that does not match its
@@ -39,6 +39,57 @@ def expected_url(manifest: dict[str, Any], model: str) -> str:
     return manifest["endpoint"].rstrip("/") + path
 
 
+def verify_projection(recorded: dict[tuple[str, str], Any]) -> None:
+    """Verify the Large view retains each matching call from the pinned source."""
+    projection = graph.read_json(graph.EVIDENCE / "projection.json")
+    source_bytes = (graph.EVIDENCE / "canonical-calls.json").read_bytes()
+    if graph.sha256_bytes(source_bytes) != projection["source"]["sha256"]:
+        raise InputError("canonical-calls.json does not match its pinned source digest")
+    source = graph.read_json(graph.EVIDENCE / "canonical-calls.json")
+    source_by_slug = {entry["slug"]: entry for entry in source["calls"]}
+    if len(source_by_slug) != len(source["calls"]) or len(source["calls"]) != projection["source"]["calls"]:
+        raise InputError("canonical source call identities or total disagree with the projection")
+    projected_by_slug = {entry["slug"]: entry for entry in recorded.values()}
+    links = {entry["projected_slug"]: entry for entry in projection["calls"]}
+    if len(links) != len(projection["calls"]) or set(links) != set(projected_by_slug):
+        raise InputError("projection must map every scored call exactly once")
+    selected_sources = {entry["slug"] for entry in source["calls"] if entry["request"]["model"] == projection["model"]}
+    if {link["source_slug"] for link in links.values()} != selected_sources:
+        raise InputError("projection must retain every source call for its model")
+    for slug, link in links.items():
+        entry = projected_by_slug[slug]
+        original = source_by_slug[link["source_slug"]]
+        request = original["request"]
+        value = original["response"]["value"]
+        expected_request = {
+            "method": request["method"],
+            "url": request["endpoint"].rstrip("/") + request["path"],
+            "model": request["model"],
+            "body": request["body"],
+        }
+        if len(value["items"]) != 1 or entry["response"] != {"model": value["model"], "item": value["items"][0]}:
+            raise InputError(f"{slug}: projected model result differs from the source")
+        if entry["request"] != expected_request or (entry["candidate"], entry["kind"]) != (
+            original["case"],
+            original["kind"],
+        ):
+            raise InputError(f"{slug}: projected request differs from the source")
+        if entry["status"] != original["http_status"] or original["status"] != "ok":
+            raise InputError(f"{slug}: source HTTP status differs")
+        if entry["headers"] != original["headers"] or entry["timing"] != original["timing"]:
+            raise InputError(f"{slug}: projected usage headers or timing differ from the source")
+        if (
+            entry["model_hf_revision"] != original["model_revision"]
+            or entry["model_revision"] != original["headers"]["x-sie-model-revision"]
+        ):
+            raise InputError(f"{slug}: projected model revision differs from the source")
+        if (
+            entry["source_entry_sha256"] != original["entry_sha256"]
+            or link["source_entry_sha256"] != original["entry_sha256"]
+        ):
+            raise InputError(f"{slug}: source entry digest differs")
+
+
 def load_recorded(manifest: dict[str, Any], model: str) -> dict[tuple[str, str], Any]:
     """Recorded calls keyed by (candidate, kind), rejecting duplicates."""
     doc = graph.read_json(graph.CALLS_PATH)
@@ -65,6 +116,7 @@ def load_recorded(manifest: dict[str, Any], model: str) -> dict[tuple[str, str],
     if observed_revisions != allowed:
         unused = sorted(allowed - observed_revisions)
         raise InputError(f"manifest names revision {unused[0]}, which no recorded call used")
+    verify_projection(recorded)
     return recorded
 
 
@@ -111,11 +163,10 @@ def resolve(candidates_doc: dict[str, Any], recorded: dict[tuple[str, str], Any]
 # that file claims, written out so the scorer can hold each displayed edge to
 # it. Sixteen edges: eleven across the proof paragraphs and five in the hero.
 #
-# The page's claim is that a person read every edge it shows. Checking only the
-# flagged triples left that claim unenforced, so a displayed edge nobody had
-# read would have scored clean. Narrowing a schema removes edges from a run and
-# never adds one, which is why this set is a superset of what any later run can
-# display, and why an edge outside it means a person has not read it.
+# Checking only flagged triples would leave review coverage unenforced. The
+# current recording's selected edges are a subset of these reviewed triples;
+# that is checked below rather than assumed from its narrower request labels.
+# A future result outside this set requires another reading before it can pass.
 REVIEWED_EDGES = frozenset(
     {
         ("flex-credit-facility", "Citibank, N.A.", "administrative agent of", "Flex Ltd."),
@@ -238,10 +289,12 @@ def main() -> int:
     for row in summary["not_shown"]:
         print(f"{row['id']:<24} {'not shown':<22} {'':>8} {row['edges']:>6}   {row['reason']}")
     print()
-    print(f"{summary['candidates_recorded']} paragraphs recorded, {summary['candidates_shown']} shown on the page")
+    print(
+        f"{summary['candidates_recorded']} paragraphs recorded, {summary['candidates_shown']} in the original display selection"
+    )
     print(
         f"{summary['proof_edges']} edges across the {len(summary['displayed']) - 1} proof paragraphs "
-        f"and {summary['hero_edges']} in the hero graph, {summary['edges_drawn']} drawn in total"
+        f"and {summary['hero_edges']} in the original hero, {summary['edges_drawn']} selected in total"
     )
     return 0
 

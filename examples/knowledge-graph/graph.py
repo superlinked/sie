@@ -134,7 +134,7 @@ def relations_body(candidate: dict[str, Any], entities: list[dict[str, Any]]) ->
 
 
 def shown(doc: dict[str, Any]) -> list[dict[str, Any]]:
-    """The candidates the task page renders: the hero, then the proof paragraphs.
+    """The frozen study's original display selection: hero, then proof paragraphs.
 
     Proof candidates come back in the order they sit in candidates.json, which
     is not the order the page lays them out. Nothing counted here depends on it.

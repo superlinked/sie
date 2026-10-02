@@ -32,9 +32,10 @@ import sys
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from sie_sdk import SIEClient
+if TYPE_CHECKING:
+    from sie_sdk import SIEClient
 
 import graph
 
@@ -133,6 +134,8 @@ def main() -> int:
     api_key = os.environ.get("SIE_API_KEY", "").strip()
     if not api_key:
         raise SystemExit("Set SIE_API_KEY. To check the published figures without a key, run score.py instead.")
+
+    from sie_sdk import SIEClient
 
     client = SIEClient(os.environ.get("SIE_BASE_URL", graph.ENDPOINT), api_key=api_key, timeout_s=900)
     base_url = client.base_url.rstrip("/")

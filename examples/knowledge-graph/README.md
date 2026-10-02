@@ -10,12 +10,14 @@ want, such as acquired, subsidiary of and develops. What comes back is a graph
 whose nodes carry character offsets into the paragraph, so every node points at
 the text it came from.
 
-The run is already recorded. The twenty requests and the entities and relations
-they returned live in the public HuggingFace dataset
+The run is already recorded. Forty calls cover ten paragraphs through GLiNER2
+Large and Base. This example scores the twenty Large calls, each projected from
+the unchanged full recording with its request, result, headers and timing.
+Both forms live in the public HuggingFace dataset
 [superlinked/sie-task-evidence](https://huggingface.co/datasets/superlinked/sie-task-evidence),
 pinned to one revision by `fetch.py`. Download it and you can re-derive the
-published counts with **no API key and no inference spend**. Those are the same
-values behind the figures on
+recorded counts with **no API key and no inference spend**. The current Large
+results support the examples on
 [superlinked.com/knowledge-graph](https://superlinked.com/knowledge-graph), whose
 sources are in its [SOURCES.md](https://superlinked.com/reference/knowledge-graph/SOURCES.md).
 
@@ -66,18 +68,30 @@ SIE_API_KEY=sk-sie-... uv run python run.py --output run-output
 `score.py` prints a row per paragraph and ends with:
 
 ```
-10 paragraphs recorded, 5 shown on the page
-8 edges across the 4 proof paragraphs and 5 in the hero graph, 13 drawn in total
+10 paragraphs recorded, 5 in the original display selection
+8 edges across the 4 proof paragraphs and 5 in the original hero, 13 selected in total
 ```
 
-13 drawn is the figure the task page publishes. The scorer counts every
-displayed paragraph after the hero as a proof paragraph, and the page lays one
-of the five out as its playground, so the 8 and the 5 split the same 13 the
-page draws.
+These counts describe the frozen five-case page-role manifest. The current
+page highlights Flex's credit agreement, Ford's vehicle recall and Tarsus's
+acquisition filing. The original selection remains reproducible; it is not an
+aggregate accuracy claim.
 
-The five paragraphs the page leaves out are printed too, each with the edge
-count and the reason it was not displayed. Four of the five returned two edges
-or fewer, and the fifth comes from a filing another task page already uses.
+`canonical-calls.json` retains all forty original calls, including the recorded
+usage headers and original digest scopes. `calls.json` is a Large-only per-item
+projection for this example. `projection.json` pins the full recording's byte
+digest and maps each projected call to its original entry. The scorer refuses
+a changed source file or a projection whose requests, results, headers,
+timings or model revisions differ from that source.
+
+The two Flex calls each meter 92 input tokens. A hosted estimate must price
+both calls at the current published Large rate and round each terminal event
+as the credit book requires. The historical credits in a recording do not
+establish a current list price.
+
+The five paragraphs outside that original selection are printed too, each with
+the edge count and the recorded selection reason. Four returned two edges or
+fewer, and the fifth comes from a filing another task page already used.
 
 `score.py` fails rather than skipping. It refuses a paragraph whose text no
 longer matches its digest, a candidate with a missing call, a response that
@@ -90,9 +104,9 @@ asked for, and a displayed edge with no recorded reading.
 
 - **Not that the graph is correct.** Nothing mechanical checks these edges.
   Every relation the model returns carries a confidence score and no
-  correctness signal, and a high score is not evidence the paragraph says it. A
-  graph built from this output without a person reading the source will contain
-  claims the source does not make.
+  correctness signal, and a high score is not evidence the paragraph says it.
+  Check each returned relation against the retained source before using it as
+  a verified fact.
 - **Not an accuracy rate.** Eight edges over the four paragraphs outside the
   hero is far too small to support a percentage, and the ten paragraphs were
   chosen to be readable rather than sampled from anything.
@@ -104,14 +118,10 @@ asked for, and a displayed edge with no recorded reading.
 - **Not a benchmark.** The recorded `duration_ms` values are provenance. One
   call took 15.8 seconds against about 0.5 seconds for every other, which is
   the shape of a cold model load rather than a measurement of anything.
-- **Not bound to the website.** The same run backs the fixtures in
-  `superlinked/sie-web` under
-  `apps/site/tests/fixtures/reference/knowledge-graph/`, which is what that
-  repository's CI checks. Nothing automatically ties the two copies together,
-  so they could drift.
-- **Not a guarantee the dataset is unchanged.** `fetch.py` pins a dataset
-  revision rather than `main`, so a later upload cannot silently change what
-  you score. It does not prove the revision holds what it held yesterday.
+- **Not a check of the current website.** `projection.json` identifies the
+  immutable public source recording from `superlinked/sie-web`. Its byte
+  digest ties the downloaded data to that recording; scoring it does not fetch
+  or inspect a later website deployment.
 
 ## Inputs
 
@@ -120,10 +130,9 @@ text, the URL and SHA-256 of the document it was taken from, and a note saying
 how the paragraph was derived from that document. Sources are SEC EDGAR
 filings, NHTSA recall reports and FDA recall notices, all public records.
 
-Each candidate also records `page_role`, which says whether the task page shows
-it and why. `score.py` reads the counts off those roles, so the "5 shown" and
-"8 proof edges" figures come from the pinned data rather than from anything
-the display trims.
+Each candidate also records `page_role`, the original selection and its reason.
+`score.py` reads the counts off those frozen roles, so the five-case selection
+and eight proof edges come from pinned data rather than the current display.
 
 `evidence/inputs/review.json` holds the readings. `score.py` checks each
 flagged triple against the recorded relations, so the review cannot flag an
