@@ -440,9 +440,14 @@ async def test_input_too_long_preflight_preserves_code_param_and_skips_admission
 
 
 @pytest.mark.asyncio
-async def test_typed_capacity_raised_by_iterator_keeps_retryable_code(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("retry_after_s", [None, 19])
+async def test_typed_capacity_raised_by_iterator_keeps_retryable_code(
+    monkeypatch: pytest.MonkeyPatch, retry_after_s: int | None
+) -> None:
     nc = AsyncMock()
-    adapter = _PreflightGenAdapter(GenerationCapacityError("scheduler full"), raise_during_generate=True)
+    adapter = _PreflightGenAdapter(
+        GenerationCapacityError("scheduler full", retry_after_s=retry_after_s), raise_during_generate=True
+    )
     registry = _make_registry(adapter)
     registry.engine_config = EngineConfig.model_validate({"oom_recovery": {"retry_after_s": 12}})
     registry.get_config.return_value = _make_generation_config()
@@ -454,7 +459,7 @@ async def test_typed_capacity_raised_by_iterator_keeps_retryable_code(monkeypatc
     terminal = _decode_chunks(nc)[-1]
     assert terminal["error"]["code"] == "RESOURCE_EXHAUSTED"
     assert terminal["error"]["message"] == "scheduler full"
-    assert terminal["error"]["retry_after_s"] == 12
+    assert terminal["error"]["retry_after_s"] == (retry_after_s if retry_after_s is not None else 12)
     assert adapter.close_calls == 1
 
 

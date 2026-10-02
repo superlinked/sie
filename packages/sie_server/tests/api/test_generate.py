@@ -1693,12 +1693,15 @@ class TestGenerateEndpoint:
         assert sentinel not in response.text
 
     @pytest.mark.parametrize(
-        ("error", "code", "retry_after"),
+        ("error", "code", "retry_after", "stream_retry_after"),
         [
-            (GenerationCapacityError("scheduler full"), "RESOURCE_EXHAUSTED", "5"),
-            (GenerationDrainingError("scheduler draining"), "MODEL_LOADING", "5"),
+            (GenerationCapacityError("scheduler full"), "RESOURCE_EXHAUSTED", "5", 5),
+            (GenerationDrainingError("scheduler draining"), "MODEL_LOADING", "5", None),
+            (GenerationCapacityError("upstream busy", retry_after_s=19), "RESOURCE_EXHAUSTED", "19", 19),
+            (GenerationDrainingError("upstream loading", retry_after_s=23), "MODEL_LOADING", "23", 23),
         ],
     )
+    @pytest.mark.parametrize("stream", [False, True])
     def test_typed_capacity_after_preflight_remains_retryable(
         self,
         client: TestClient,
@@ -1706,18 +1709,26 @@ class TestGenerateEndpoint:
         error: GenerationError,
         code: str,
         retry_after: str,
+        stream_retry_after: int | None,
+        stream: bool,
     ) -> None:
         adapter = _PreflightAdapter(error, raise_during_generate=True)
         registry.get.return_value = adapter
 
         response = client.post(
             "/v1/generate/Qwen__Qwen3-4B-Instruct",
-            json={"prompt": "Hi", "max_new_tokens": 8},
+            json={"prompt": "Hi", "max_new_tokens": 8, "stream": stream},
         )
 
-        assert response.status_code == 503
-        assert response.json()["detail"]["code"] == code
-        assert response.headers["retry-after"] == retry_after
+        if stream:
+            assert response.status_code == 200
+            events = _sse_events(response.text)
+            assert events[-1]["error"]["code"] == code
+            assert events[-1]["error"].get("retry_after_s") == stream_retry_after
+        else:
+            assert response.status_code == 503
+            assert response.json()["detail"]["code"] == code
+            assert response.headers["retry-after"] == retry_after
         assert adapter.events == ["preflight", "generate"]
 
     def test_generation_capacity_uses_configured_resource_exhausted_retry_hint(

@@ -11,7 +11,7 @@ from sie_server.adapters._generation_base import GenerationCapacityError, Genera
 from sie_server.adapters.remote._http import RemoteUpstreamError
 from sie_server.adapters.remote.sie import SieUpstreamAdapter
 from sie_server.api.generate import _generation_http_exception
-from sie_server.config.upstreams import Upstream, UpstreamConfigError, install_upstreams
+from sie_server.config.upstreams import RemoteServingDisabledError, Upstream, install_upstreams
 from sie_server.core.upstream_client import upstream_client
 
 
@@ -215,6 +215,6 @@ async def test_a_loaded_generation_client_stops_sending_when_remote_serving_is_d
     assert len([chunk async for chunk in adapter.generate("prompt", max_new_tokens=9)]) == 1
     assert adapter._upstream is not None
     install_upstreams({"generation-test": adapter._upstream}, remote_serving=False)
-    with pytest.raises(UpstreamConfigError):
+    with pytest.raises(RemoteServingDisabledError):
         _ = [chunk async for chunk in adapter.generate("prompt", max_new_tokens=9)]
     assert len(requests) == 1
