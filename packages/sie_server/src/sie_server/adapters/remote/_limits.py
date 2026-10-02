@@ -109,12 +109,12 @@ class UpstreamLimiter:
         slots = min(requests, self._max_in_flight, concurrency or self._max_in_flight)
         with self._lock:
             now = self._clock()
-            self._refuse_while_open(now)
+            self._refuse_while_open(now, requests=requests)
             if self._open_until is not None and requests > 1:
-                raise self._refusal("breaker_open", _SLOT_RETRY_AFTER_S)
+                raise self._refusal("breaker_open", _SLOT_RETRY_AFTER_S, requests=requests)
             if self._in_flight + slots > self._max_in_flight:
-                raise self._refusal("concurrency_cap", _SLOT_RETRY_AFTER_S)
-            probe = self._admit(now) if requests else False
+                raise self._refusal("concurrency_cap", _SLOT_RETRY_AFTER_S, requests=requests)
+            probe = self._admit(now, requests=requests) if requests else False
             try:
                 self._take(requests, now)
             except UpstreamRefusedError:
@@ -179,31 +179,31 @@ class UpstreamLimiter:
                 assert reservation is not None
                 reservation.slots.release()
 
-    def _admit(self, now: float) -> bool:
+    def _admit(self, now: float, *, requests: int = 1) -> bool:
         """Refuse while the breaker is open; after the cooldown, admit one call as the probe."""
         if self._open_until is None:
             return False
         if now < self._open_until:
-            raise self._refusal("breaker_open", self._open_until - now)
+            raise self._refusal("breaker_open", self._open_until - now, requests=requests)
         if self._probing:
-            raise self._refusal("breaker_open", _SLOT_RETRY_AFTER_S)
+            raise self._refusal("breaker_open", _SLOT_RETRY_AFTER_S, requests=requests)
         self._probing = True
         return True
 
-    def _refuse_while_open(self, now: float) -> None:
+    def _refuse_while_open(self, now: float, *, requests: int = 1) -> None:
         if self._open_until is None:
             return
         if now < self._open_until:
-            raise self._refusal("breaker_open", self._open_until - now)
+            raise self._refusal("breaker_open", self._open_until - now, requests=requests)
         if self._probing:
-            raise self._refusal("breaker_open", _SLOT_RETRY_AFTER_S)
+            raise self._refusal("breaker_open", _SLOT_RETRY_AFTER_S, requests=requests)
 
     def _take(self, requests: int, now: float) -> None:
         self._refill(now)
         affordable = self._tokens >= requests or (requests > self._capacity and self._tokens >= self._capacity)
         if not affordable:
             missing = min(float(requests), self._capacity) - self._tokens
-            raise self._refusal("rate_cap", missing / self._refill_per_s)
+            raise self._refusal("rate_cap", missing / self._refill_per_s, requests=requests)
         self._tokens -= requests
 
     def _return(self, requests: int, now: float) -> None:
@@ -244,8 +244,8 @@ class UpstreamLimiter:
         self._open_until = None
         worker_telemetry().upstream_breaker_changed(upstream=self.name, open=False)
 
-    def _refusal(self, refusal: UpstreamRefusal, wait_s: float) -> UpstreamRefusedError:
-        worker_telemetry().upstream_refused(upstream=self.name, refusal=refusal)
+    def _refusal(self, refusal: UpstreamRefusal, wait_s: float, *, requests: int = 1) -> UpstreamRefusedError:
+        worker_telemetry().upstream_refused(upstream=self.name, refusal=refusal, requests=requests)
         retry_after_s = min(RETRY_AFTER_MAX_S, max(RETRY_AFTER_MIN_S, math.ceil(wait_s)))
         return UpstreamRefusedError(self.name, refusal, retry_after_s=retry_after_s)
 

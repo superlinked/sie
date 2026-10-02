@@ -49,8 +49,8 @@ class Events:
         self.refused: list[tuple[str, str]] = []
         self.breaker: list[tuple[str, bool]] = []
 
-    def upstream_refused(self, *, upstream: object, refusal: object) -> None:
-        self.refused.append((str(upstream), str(refusal)))
+    def upstream_refused(self, *, upstream: object, refusal: object, requests: int = 1) -> None:
+        self.refused.extend([(str(upstream), str(refusal))] * requests)
 
     def upstream_breaker_changed(self, *, upstream: object, open: bool) -> None:
         self.breaker.append((str(upstream), open))
@@ -575,3 +575,27 @@ def test_the_queue_path_redelivers_a_refused_item_after_the_wait(refusal: str) -
     outcome = _inference_exception_outcome(item, UpstreamRefusedError(UPSTREAM, refusal, retry_after_s=40))  # type: ignore[arg-type]
 
     assert (outcome.disposition, outcome.nak_delay_ms, outcome.error) == ("nak_retry", 40_000, None)
+
+
+@pytest.mark.parametrize("reason", ["rate_cap", "concurrency_cap", "breaker_open", "half_open", "probe_active"])
+def test_batch_refusal_counts_every_unsent_call(
+    limiter: Callable[..., UpstreamLimiter], clock: Clock, events: Events, reason: str
+) -> None:
+    budget = limiter(rpm=4, concurrency=4, failures=1, cooldown_s=60)
+    with ExitStack() as held:
+        if reason == "rate_cap":
+            call(budget)
+            call(budget)
+        elif reason == "concurrency_cap":
+            held.enter_context(budget.call())
+            held.enter_context(budget.call())
+        else:
+            fail(budget)
+            if reason in {"half_open", "probe_active"}:
+                clock.advance(60)
+            if reason == "probe_active":
+                held.enter_context(budget.call())
+        with pytest.raises(UpstreamRefusedError), budget.batch(3):
+            pytest.fail("refused calls must not be sent")
+    expected = "breaker_open" if reason in {"half_open", "probe_active"} else reason
+    assert events.refused == [(UPSTREAM, expected)] * 3

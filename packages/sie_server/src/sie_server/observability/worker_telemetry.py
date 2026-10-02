@@ -405,7 +405,7 @@ class WorkerTelemetryFacade(Protocol):
         duration_s: object,
     ) -> None: ...
 
-    def upstream_refused(self, *, upstream: object, refusal: object) -> None: ...
+    def upstream_refused(self, *, upstream: object, refusal: object, requests: int = 1) -> None: ...
 
     def upstream_breaker_changed(self, *, upstream: object, open: bool) -> None: ...
 
@@ -1045,8 +1045,12 @@ class WorkerTelemetry:
             },
         )
 
-    def upstream_refused(self, *, upstream: object, refusal: object) -> None:
-        self._upstream_refusals.add(1, {**_upstream_attributes(upstream), "reason": _enum(refusal, _UPSTREAM_REFUSALS)})
+    def upstream_refused(self, *, upstream: object, refusal: object, requests: int = 1) -> None:
+        if (count := _positive_int(requests)) is None:
+            return
+        self._upstream_refusals.add(
+            count, {**_upstream_attributes(upstream), "reason": _enum(refusal, _UPSTREAM_REFUSALS)}
+        )
 
     def upstream_breaker_changed(self, *, upstream: object, open: bool) -> None:
         attributes = _upstream_attributes(upstream)

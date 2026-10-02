@@ -701,3 +701,13 @@ def test_overflow_breaker_gauge_stays_open_until_every_breaker_closes(
     last = "overflow-b" if closed_first == "overflow-a" else "overflow-a"
     telemetry.upstream_breaker_changed(upstream=last, open=False)
     assert overflow_value() == 0
+
+
+def test_upstream_refusal_counter_counts_calls_in_a_batch(
+    active_telemetry: tuple[wt.WorkerTelemetry, InMemoryMetricReader, MeterProvider],
+) -> None:
+    telemetry, reader, _provider = active_telemetry
+    telemetry.upstream_refused(upstream="batch-upstream", refusal="rate_cap", requests=7)
+    telemetry.upstream_refused(upstream="batch-upstream", refusal="rate_cap")
+    points = _points(_metric_map(reader.get_metrics_data())[wt.UPSTREAM_REFUSALS_METRIC_NAME])
+    assert sum(point.value for point in points) == 8
