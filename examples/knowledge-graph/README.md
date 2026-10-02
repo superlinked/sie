@@ -120,8 +120,8 @@ asked for, and a displayed edge with no recorded reading.
   call took 15.8 seconds against about 0.5 seconds for every other, which is
   the shape of a cold model load rather than a measurement of anything.
 - **Not a check of the current website.** `projection.json` identifies the
-  immutable public source recording from `superlinked/sie-web`. Its byte
-  digest ties the downloaded data to that recording; scoring it does not fetch
+  full recording within the pinned public dataset. Its byte digest ties the
+  scored projection to that recording; scoring it does not fetch
   or inspect a later website deployment.
 
 ## Inputs
