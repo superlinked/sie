@@ -11,6 +11,7 @@ values:
       name: team-sie-upstream
       key: api-key
     proxy_url: http://proxy.example.internal:3128
+    breaker: {failures: 3, window_s: 12.5, cooldown_s: 45}
     rate_cap:
       requests_per_minute: 600
       max_concurrency: 32
@@ -31,6 +32,7 @@ rendered:
       base_url: https://sie.example.internal/
       api_key_secret: SIE_UPSTREAM_KEY_TEAM_SIE
       proxy_url: http://proxy.example.internal:3128
+      breaker: {failures: 3, window_s: 12.5, cooldown_s: 45}
       rate_cap:
         requests_per_minute: 600
         max_concurrency: 32
@@ -101,3 +103,16 @@ definitions:
   - {accepted: false, upstream: {kind: openai, endpoints: [chat], strip_params: [user, user]}}
   - {accepted: false, upstream: {kind: openai, endpoints: [chat], strip_params: [p0, p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p13, p14, p15, p16, p17, p18, p19, p20, p21, p22, p23, p24, p25, p26, p27, p28, p29, p30, p31, p32]}}
   - {accepted: false, upstream: {kind: openai, endpoints: [chat], set_params: {user: x}, strip_params: [user]}}
+
+  - {accepted: true, upstream: {kind: sie, breaker: {failures: 3, window_s: 12.5, cooldown_s: 45}}}
+  - {accepted: true, upstream: {kind: sie, breaker: {}}}
+  - {accepted: true, upstream: {kind: sie, breaker: {window_s: 0.5}}}
+  - {accepted: false, upstream: {kind: sie, breaker: null}}
+  - {accepted: false, upstream: {kind: sie, breaker: {unexpected: 3}}}
+  - {accepted: false, upstream: {kind: sie, breaker: {failures: 0}}}
+  - {accepted: false, upstream: {kind: sie, breaker: {failures: 1.5}}}
+  - {accepted: false, upstream: {kind: sie, breaker: {failures: 1001}}}
+  - {accepted: false, upstream: {kind: sie, breaker: {window_s: -1}}}
+  - {accepted: false, upstream: {kind: sie, breaker: {window_s: 3601}}}
+  - {accepted: false, upstream: {kind: sie, breaker: {cooldown_s: 0}}}
+  - {accepted: false, upstream: {kind: sie, breaker: {cooldown_s: 3601}}}

@@ -435,7 +435,8 @@ machineProfiles:
 # whose bundle is `remote` (see workers.pools.remote) receives them. Each entry
 # has the fields of the server's upstreams file: kind (sie or openai),
 # base_url (https outside loopback), rate_cap (requests_per_minute and
-# max_concurrency, required) and an optional proxy_url. api_key_secret names
+# max_concurrency, required), optional breaker (failures, window_s, cooldown_s),
+# and an optional proxy_url. api_key_secret names
 # the Kubernetes Secret and key that hold the credential; a credential never
 # goes in values.
 # Example:
@@ -448,6 +449,7 @@ machineProfiles:
 #     rate_cap:
 #       requests_per_minute: 600
 #       max_concurrency: 32
+#     breaker: {failures: 5, window_s: 30, cooldown_s: 60}
 upstreams: {}
 
 # -- Worker pools configuration (one StatefulSet per enabled queuePool/machineProfile/bundle lane)

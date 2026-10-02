@@ -1371,7 +1371,7 @@ the upstream's Secret.
 {{- if $upstream.proxy_url -}}
 {{- $_ := set $entry "proxy_url" $upstream.proxy_url -}}
 {{- end -}}
-{{- range $field := list "endpoints" "set_params" "strip_params" -}}
+{{- range $field := list "endpoints" "set_params" "strip_params" "breaker" -}}
 {{- with index $upstream $field -}}
 {{- $_ := set $entry $field . -}}
 {{- end -}}
@@ -1644,8 +1644,8 @@ credential pasted as a key would otherwise be printed.
 {{- $fieldPosition := 0 -}}
 {{- range $field, $_ := $upstream -}}
 {{- $fieldPosition = add1 $fieldPosition -}}
-{{- if not (has $field (list "kind" "base_url" "api_key_secret" "rate_cap" "proxy_url" "endpoints" "set_params" "strip_params")) -}}
-{{- fail (printf "%s: field %d, counting in name order, is not an upstream field; use kind, base_url, api_key_secret, rate_cap, proxy_url, endpoints, set_params and strip_params" $path $fieldPosition) -}}
+{{- if not (has $field (list "kind" "base_url" "api_key_secret" "rate_cap" "proxy_url" "endpoints" "set_params" "strip_params" "breaker")) -}}
+{{- fail (printf "%s: field %d, counting in name order, is not an upstream field; use kind, base_url, api_key_secret, rate_cap, proxy_url, endpoints, set_params, strip_params and breaker" $path $fieldPosition) -}}
 {{- end -}}
 {{- end -}}
 {{- if not (has $upstream.kind (list "sie" "openai")) -}}
@@ -1674,6 +1674,27 @@ credential pasted as a key would otherwise be printed.
 {{- $limit := index $rateCap $field -}}
 {{- if not (and (or (kindIs "int" $limit) (kindIs "int64" $limit) (kindIs "float64" $limit)) (eq (float64 $limit) (floor (float64 $limit))) (gt (float64 $limit) 0.0)) -}}
 {{- fail (printf "%s.rate_cap.%s must be a positive integer" $path $field) -}}
+{{- end -}}
+{{- end -}}
+{{- if hasKey $upstream "breaker" -}}
+{{- $breaker := $upstream.breaker -}}
+{{- if not (kindIs "map" $breaker) -}}
+{{- fail (printf "%s.breaker must map failures, window_s and cooldown_s" $path) -}}
+{{- end -}}
+{{- $fieldPosition = 0 -}}
+{{- range $field, $limit := $breaker -}}
+{{- $fieldPosition = add1 $fieldPosition -}}
+{{- if not (has $field (list "failures" "window_s" "cooldown_s")) -}}
+{{- fail (printf "%s.breaker: field %d, counting in name order, is not a breaker field" $path $fieldPosition) -}}
+{{- end -}}
+{{- $maximum := ternary 1000.0 3600.0 (eq $field "failures") -}}
+{{- $numeric := or (kindIs "int" $limit) (kindIs "int64" $limit) (kindIs "float64" $limit) -}}
+{{- if not (and $numeric (gt (float64 $limit) 0.0) (le (float64 $limit) $maximum)) -}}
+{{- fail (printf "%s.breaker.%s must be positive and at most %g" $path $field $maximum) -}}
+{{- end -}}
+{{- if and (eq $field "failures") (ne (float64 $limit) (floor (float64 $limit))) -}}
+{{- fail (printf "%s.breaker.failures must be an integer" $path) -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 {{- if not (kindIs "invalid" $upstream.api_key_secret) -}}
