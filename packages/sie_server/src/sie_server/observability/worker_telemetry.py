@@ -484,6 +484,8 @@ class WorkerTelemetry:
     """Canonical engine instruments backed by one injected OTel meter."""
 
     def __init__(self, meter: Meter) -> None:
+        self._overflow_breakers_lock = Lock()
+        self._open_overflow_breakers: set[tuple[str, str]] = set()
         self._queue_duration = meter.create_histogram(
             QUEUE_DURATION_METRIC_NAME,
             unit="s",
@@ -1047,7 +1049,19 @@ class WorkerTelemetry:
         self._upstream_refusals.add(1, {**_upstream_attributes(upstream), "reason": _enum(refusal, _UPSTREAM_REFUSALS)})
 
     def upstream_breaker_changed(self, *, upstream: object, open: bool) -> None:
-        self._upstream_breaker_open.set(1 if open else 0, _upstream_attributes(upstream))
+        attributes = _upstream_attributes(upstream)
+        if attributes["upstream"] != _OTHER:
+            self._upstream_breaker_open.set(1 if open else 0, attributes)
+            return
+        lane = attributes["lane"]
+        identity = (lane, str(upstream))
+        with self._overflow_breakers_lock:
+            if open:
+                self._open_overflow_breakers.add(identity)
+            else:
+                self._open_overflow_breakers.discard(identity)
+            any_open = any(breaker_lane == lane for breaker_lane, _ in self._open_overflow_breakers)
+            self._upstream_breaker_open.set(1 if any_open else 0, attributes)
 
     @staticmethod
     def _generation_stream_attributes(model: object, grammar: object) -> dict[str, str]:

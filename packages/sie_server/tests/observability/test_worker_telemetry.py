@@ -675,3 +675,29 @@ def test_service_version_uses_explicit_deployment_revision(monkeypatch: pytest.M
     assert wt.worker_resource_attributes()["service.version"] == "a" * 40
     monkeypatch.setenv("OTEL_SERVICE_VERSION", "  ")
     assert "service.version" not in wt.worker_resource_attributes()
+
+
+@pytest.mark.parametrize("closed_first", ["overflow-a", "overflow-b"])
+def test_overflow_breaker_gauge_stays_open_until_every_breaker_closes(
+    active_telemetry: tuple[wt.WorkerTelemetry, InMemoryMetricReader, MeterProvider],
+    monkeypatch: pytest.MonkeyPatch,
+    closed_first: str,
+) -> None:
+    telemetry, reader, _provider = active_telemetry
+    monkeypatch.setattr(wt, "_admitted_upstreams", {f"upstream-{i}" for i in range(wt._MAX_UPSTREAMS)})
+    for name in ("overflow-a", "overflow-b"):
+        telemetry.upstream_breaker_changed(upstream=name, open=True)
+    telemetry.upstream_breaker_changed(upstream=closed_first, open=False)
+
+    def overflow_value() -> int:
+        points = _points(_metric_map(reader.get_metrics_data())[wt.UPSTREAM_BREAKER_OPEN_METRIC_NAME])
+        assert len(points) == 1
+        assert points[0].attributes["upstream"] == "other"
+        return points[0].value
+
+    assert overflow_value() == 1
+    telemetry.upstream_breaker_changed(upstream="never-opened", open=False)
+    assert overflow_value() == 1
+    last = "overflow-b" if closed_first == "overflow-a" else "overflow-a"
+    telemetry.upstream_breaker_changed(upstream=last, open=False)
+    assert overflow_value() == 0
