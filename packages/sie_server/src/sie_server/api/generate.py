@@ -691,9 +691,12 @@ def _generation_http_exception(error: GenerationError, registry: ModelRegistry |
             code=client_safe_generation_error_code(error.code),
         )
     if isinstance(error, GenerationCapacityError):
-        retry_after = (
-            "5" if isinstance(error, GenerationDrainingError) else str(oom_retry_after_from_registry(registry))
-        )
+        if error.retry_after_s is not None:
+            retry_after = str(error.retry_after_s)
+        elif isinstance(error, GenerationDrainingError):
+            retry_after = "5"
+        else:
+            retry_after = str(oom_retry_after_from_registry(registry))
         return HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail={
@@ -888,14 +891,17 @@ async def _stream_generate_events(
         }
         if (param := client_safe_generation_error_param(exc)) is not None:
             error["param"] = param
+        retry_after_s = exc.retry_after_s if isinstance(exc, GenerationCapacityError) else None
+        if retry_after_s is None:
+            retry_after_s = oom_retry_after_s
         if (
             isinstance(exc, GenerationCapacityError)
-            and not isinstance(exc, GenerationDrainingError)
-            and isinstance(oom_retry_after_s, int)
-            and not isinstance(oom_retry_after_s, bool)
-            and 1 <= oom_retry_after_s <= _MAX_RETRY_AFTER_S
+            and (not isinstance(exc, GenerationDrainingError) or exc.retry_after_s is not None)
+            and isinstance(retry_after_s, int)
+            and not isinstance(retry_after_s, bool)
+            and 1 <= retry_after_s <= _MAX_RETRY_AFTER_S
         ):
-            error["retry_after_s"] = oom_retry_after_s
+            error["retry_after_s"] = retry_after_s
         err = {
             "request_id": request_id,
             "seq": seq,

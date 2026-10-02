@@ -91,9 +91,16 @@ class GenerationInputTooLongError(GenerationError):
 
 
 class GenerationCapacityError(GenerationError):
-    """The generation backend is temporarily at bounded capacity."""
+    """The generation backend is temporarily at bounded capacity.
+
+    ``retry_after_s`` is the backend's own wait, when it gave one.
+    """
 
     code = "RESOURCE_EXHAUSTED"
+
+    def __init__(self, message: str = "", *, retry_after_s: int | None = None) -> None:
+        super().__init__(message)
+        self.retry_after_s = retry_after_s
 
 
 class GenerationDrainingError(GenerationCapacityError):

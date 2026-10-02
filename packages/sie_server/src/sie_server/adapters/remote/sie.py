@@ -4,7 +4,8 @@ The profile names an upstream from the server's startup configuration and the
 model id the upstream serves. ``encode``, ``score`` and ``extract`` forward text
 and image items to the upstream's native routes in the SDK's msgpack wire
 format, and every output shape comes back: dense, sparse and multivector
-vectors, scores, and extractions. Loading makes no outbound call, holds no
+vectors, scores, and extractions. ``generate`` streams a prompt through the
+upstream's native ``/v1/generate``. Loading makes no outbound call, holds no
 weights and uses no accelerator.
 
 Usage is the upstream's own count. One upstream request is sent for each item
@@ -25,8 +26,10 @@ plus ``REQUEST_DEADLINE_S`` plus one read timeout.
 
 from __future__ import annotations
 
+import asyncio
+import json
 import math
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -37,8 +40,21 @@ import numpy as np
 from sie_sdk._msgpack import packb, unpackb
 
 from sie_server.adapters._base_adapter import BaseAdapter
+from sie_server.adapters._generation_base import (
+    FinishReason,
+    GenerationAdapter,
+    GenerationCapacityError,
+    GenerationChunk,
+    GenerationDrainingError,
+    GenerationInputTooLongError,
+    GenerationInvalidRequestError,
+    GenerationPreflightResult,
+    GenerationUnsupportedFieldError,
+    client_safe_generation_error_code,
+)
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_NOT_LOADED
+from sie_server.adapters.errors import RETRY_AFTER_MAX_S, RETRY_AFTER_MIN_S, InputTooLongError, UpstreamUnavailableError
 from sie_server.adapters.remote._batching import (
     RequestScores,
     UpstreamUsage,
@@ -46,17 +62,25 @@ from sie_server.adapters.remote._batching import (
     requests_in_flight,
     score_each_request,
 )
-from sie_server.adapters.remote._http import RemoteUpstreamError, send_bounded
+from sie_server.adapters.remote._http import (
+    DEFAULT_RETRY_AFTER_S,
+    RemoteUpstreamError,
+    generation_error,
+    open_stream,
+    send_bounded,
+    sse_data,
+)
 from sie_server.adapters.remote._limits import upstream_limiter
-from sie_server.config.upstreams import UpstreamConfigError, UpstreamKind, upstream_for_serving
+from sie_server.config.upstreams import Upstream, UpstreamConfigError, UpstreamKind, upstream_for_serving
 from sie_server.core.inference_output import EncodeOutput, ExtractItemError, ExtractOutput, ScoreOutput, SparseVector
 from sie_server.core.postprocessor_registry import POSTPROCESSOR_OPTION_KEYS
-from sie_server.core.upstream_client import upstream_sync_client
+from sie_server.core.upstream_client import upstream_client, upstream_sync_client
 from sie_server.types.inputs import InvalidInputError, media_bytes
 from sie_server.types.responses import Classification, DetectedObject, Entity, ErrorCode, Relation
 
 if TYPE_CHECKING:
-    from sie_server.types.inputs import Item
+    from sie_server.types.grammar import GrammarSpec
+    from sie_server.types.inputs import ImageInput, Item, VideoInput
 
 _MSGPACK = "application/msgpack"
 REQUEST_DEADLINE_S = 60.0
@@ -68,8 +92,13 @@ _SCORE_ENTRY_BYTES = 256
 _LARGEST_RESPONSE_BYTES = 64 << 20
 _MAX_REPORTED_COUNT = 1 << 32
 _MAX_DATA_DEPTH = 64
+GENERATION_READ_TIMEOUT_S = 300.0
+_GENERATION_WRITE_TIMEOUT_S = 30.0
+_MAX_EVENT_BYTES = 1 << 20
+_MAX_STREAM_BYTES = 64 << 20
+_FINISH_REASONS: frozenset[FinishReason] = frozenset({"stop", "length", "cancelled", "error", "tool_calls"})
 _ENCODE_OUTPUTS = ("dense", "sparse", "multivector")
-_PRIMITIVES = {"encode": "an encode", "score": "a score", "extract": "an extract"}
+_PRIMITIVES = {"encode": "an encode", "score": "a score", "extract": "an extract", "generate": "a generate"}
 _LOCAL_OPTION_KEYS = POSTPROCESSOR_OPTION_KEYS | {
     "profile",
     "lora",
@@ -83,6 +112,19 @@ _ITEM_ERRORS = {
     ErrorCode.INPUT_TOO_LONG.value: "the upstream refused this item as too long",
 }
 _ITEM_FAILED = "the upstream could not extract from this item"
+
+
+@dataclass(frozen=True, slots=True)
+class _GenerationEvent:
+    text: str
+    done: bool
+    logprobs: tuple[dict[str, Any], ...] | None
+    finish_reason: FinishReason | None = None
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    cached_tokens: int | None = None
+    error_code: str | None = None
+    retry_after_s: int = DEFAULT_RETRY_AFTER_S
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,12 +146,12 @@ class _Extracted:
     usage: UpstreamUsage | None
 
 
-class SieUpstreamAdapter(BaseAdapter):
-    """Serve ``encode``, ``score`` and ``extract`` for a remote profile from an SIE upstream."""
+class SieUpstreamAdapter(BaseAdapter, GenerationAdapter):
+    """Serve ``encode``, ``score``, ``extract`` and ``generate`` for a remote profile from an SIE upstream."""
 
     spec: ClassVar[AdapterSpec] = AdapterSpec(
         inputs=("text", "image"),
-        outputs=("dense", "sparse", "multivector", "score", "json"),
+        outputs=("dense", "sparse", "multivector", "score", "json", "tokens"),
         unload_fields=(),
     )
 
@@ -132,7 +174,10 @@ class SieUpstreamAdapter(BaseAdapter):
         self._dense_dim = dense_dim
         self._sparse_dim = sparse_dim
         self._multivector_dim = multivector_dim
+        self._upstream: Upstream | None = None
         self._client: httpx.Client | None = None
+        self._async_client: httpx.AsyncClient | None = None
+        self._closing: asyncio.Task[None] | None = None
         self._executor: ThreadPoolExecutor | None = None
         self._device: str | None = None
 
@@ -144,11 +189,18 @@ class SieUpstreamAdapter(BaseAdapter):
         upstream = upstream_for_serving(self._upstream_name)
         if upstream.kind is not UpstreamKind.SIE:
             raise UpstreamConfigError(f"upstream {self._upstream_name!r} is not of kind 'sie'")
+        self._upstream = upstream
         self._client = upstream_sync_client(upstream)
         self._executor = ThreadPoolExecutor(
             max_workers=requests_in_flight(upstream), thread_name_prefix=f"sie-upstream-{self._upstream_name}"
         )
         self._device = device
+
+    async def aclose_client(self) -> None:
+        """Close the generation client on the event loop that used it."""
+        client, self._async_client = self._async_client, None
+        if client is not None:
+            await client.aclose()
 
     def unload(self) -> None:
         executor, self._executor = self._executor, None
@@ -157,7 +209,125 @@ class SieUpstreamAdapter(BaseAdapter):
         client, self._client = self._client, None
         if client is not None:
             client.close()
+        async_client, self._async_client = self._async_client, None
+        if async_client is not None:
+            try:
+                self._closing = asyncio.get_running_loop().create_task(async_client.aclose())
+            except RuntimeError:
+                self._closing = None
+        self._upstream = None
         super().unload()
+
+    def preflight_generate(
+        self,
+        parameters: Mapping[str, Any],
+        *,
+        stream: bool,
+    ) -> GenerationPreflightResult | None:
+        _ = stream
+        _refuse_unforwarded(parameters)
+        return None
+
+    async def generate(
+        self,
+        prompt: str,
+        *,
+        max_new_tokens: int,
+        temperature: float = 1.0,
+        top_p: float = 1.0,
+        stop: list[str] | None = None,
+        frequency_penalty: float | None = None,
+        presence_penalty: float | None = None,
+        top_k: int | None = None,
+        repetition_penalty: float | None = None,
+        min_new_tokens: int | None = None,
+        grammar: GrammarSpec | None = None,
+        seed: int | None = None,
+        logit_bias: dict[str, float] | None = None,
+        logprobs: bool = False,
+        top_logprobs: int | None = None,
+        images: list[ImageInput] | None = None,
+        videos: list[VideoInput] | None = None,
+    ) -> AsyncIterator[GenerationChunk]:
+        """Stream the upstream's ``/v1/generate`` answer to ``prompt``, one chunk per upstream event.
+
+        Nothing is retried. A failure before the first chunk raises a
+        generation error carrying the upstream retry wait.
+        A failure after it is final.
+        """
+        _refuse_unforwarded({"images": images, "videos": videos, "repetition_penalty": repetition_penalty})
+        body: dict[str, Any] = {
+            "prompt": prompt,
+            "max_new_tokens": max_new_tokens,
+            "temperature": temperature,
+            "top_p": top_p,
+            "stream": True,
+        }
+        optional = {
+            "stop": stop,
+            "frequency_penalty": frequency_penalty,
+            "presence_penalty": presence_penalty,
+            "seed": seed,
+            "logit_bias": logit_bias,
+            "grammar": None if grammar is None else _grammar_wire(grammar),
+        }
+        body.update({key: value for key, value in optional.items() if value is not None})
+        if logprobs:
+            body["logprobs"] = True
+            if top_logprobs is not None:
+                body["top_logprobs"] = top_logprobs
+        sampling = {
+            key: value for key, value in (("top_k", top_k), ("min_new_tokens", min_new_tokens)) if value is not None
+        }
+        if sampling:
+            body["options"] = {"default_sampling": sampling}
+        client = self._generation_client()
+        request = client.build_request(
+            "POST",
+            f"/v1/generate/{quote(self._upstream_model.replace('/', '__'), safe=':')}",
+            json=body,
+            headers={"Accept": "text/event-stream", "Accept-Encoding": "identity"},
+            timeout=httpx.Timeout(
+                GENERATION_READ_TIMEOUT_S, connect=_CONNECT_TIMEOUT_S, write=_GENERATION_WRITE_TIMEOUT_S
+            ),
+        )
+        _check_route(client.base_url, request, "generate")
+        yielded = False
+        seen_text = False
+        try:
+            async with open_stream(client, request, upstream=self._upstream_name) as response:
+                if response.headers.get("content-type", "").partition(";")[0].strip().lower() != "text/event-stream":
+                    raise RemoteUpstreamError("upstream did not stream its answer")
+                async for data in sse_data(
+                    response, max_event_bytes=_MAX_EVENT_BYTES, max_total_bytes=_MAX_STREAM_BYTES
+                ):
+                    if data == b"[DONE]":
+                        break
+                    event = _generation_event(data)
+                    if event.done:
+                        yield _terminal_chunk(event, yielded=yielded, seen_text=seen_text)
+                        return
+                    yield GenerationChunk(
+                        text_delta=event.text, is_first=bool(event.text) and not seen_text, logprobs=event.logprobs
+                    )
+                    yielded = True
+                    seen_text = seen_text or bool(event.text)
+            raise RemoteUpstreamError("upstream stream ended before its terminal event")
+        except UpstreamUnavailableError as error:
+            if yielded:
+                raise RemoteUpstreamError("the upstream failed during generation") from None
+            raise generation_error(error) from None
+        except InputTooLongError:
+            raise GenerationInputTooLongError("the upstream refused the prompt as too long") from None
+        except InvalidInputError:
+            raise GenerationInvalidRequestError("prompt", "the upstream refused the request") from None
+
+    def _generation_client(self) -> httpx.AsyncClient:
+        if self._upstream is None:
+            raise RuntimeError(ERR_NOT_LOADED)
+        if self._async_client is None:
+            self._async_client = upstream_client(self._upstream)
+        return self._async_client
 
     def encode(
         self,
@@ -321,9 +491,7 @@ class SieUpstreamAdapter(BaseAdapter):
             headers={"Content-Type": _MSGPACK, "Accept": _MSGPACK, "Accept-Encoding": "identity"},
             timeout=httpx.Timeout(READ_TIMEOUT_S, connect=_CONNECT_TIMEOUT_S),
         )
-        route_prefix = client.base_url.raw_path.rstrip(b"/") + f"/v1/{primitive}/".encode()
-        if not request.url.raw_path.startswith(route_prefix):
-            raise RemoteUpstreamError(f"the upstream model id does not form {_PRIMITIVES[primitive]} path")
+        _check_route(client.base_url, request, primitive)
         body = send_bounded(
             client, request, upstream=self._upstream_name, max_bytes=max_bytes, deadline_s=REQUEST_DEADLINE_S
         )
@@ -383,6 +551,158 @@ class SieUpstreamAdapter(BaseAdapter):
                 f"the model declares {self._multivector_dim}"
             )
         return _finite(vectors)
+
+
+def _check_route(base_url: httpx.URL, request: httpx.Request, primitive: str) -> None:
+    """Refuse a request whose path leaves the primitive's route under the upstream's base URL."""
+    if not request.url.raw_path.startswith(base_url.raw_path.rstrip(b"/") + f"/v1/{primitive}/".encode()):
+        raise RemoteUpstreamError(f"the upstream model id does not form {_PRIMITIVES[primitive]} path")
+
+
+def _refuse_unforwarded(parameters: Mapping[str, Any]) -> None:
+    """Refuse generation inputs a prompt-level upstream call cannot carry faithfully."""
+    for field in ("images", "videos"):
+        if parameters.get(field):
+            raise GenerationUnsupportedFieldError(field, f"a remote SIE profile does not forward {field} with a prompt")
+    if parameters.get("repetition_penalty") is not None:
+        raise GenerationUnsupportedFieldError("repetition_penalty")
+
+
+def _grammar_wire(grammar: GrammarSpec) -> dict[str, Any]:
+    wire: dict[str, Any] = {grammar.kind: grammar.value}
+    if grammar.label is not None:
+        wire["label"] = grammar.label
+    if grammar.strict is not None:
+        wire["strict"] = grammar.strict
+    return wire
+
+
+def _malformed_event() -> RemoteUpstreamError:
+    return RemoteUpstreamError("upstream sent a malformed generation event")
+
+
+def _generation_event(data: bytes) -> _GenerationEvent:
+    """One upstream generation event, validated field by field."""
+    try:
+        event = json.loads(data)
+    except (UnicodeDecodeError, ValueError):
+        raise _malformed_event() from None
+    if not isinstance(event, dict):
+        raise _malformed_event()
+    done = event.get("done")
+    text = event.get("text_delta", "")
+    if not isinstance(done, bool) or not isinstance(text, str):
+        raise _malformed_event()
+    logprobs = event.get("logprobs")
+    if logprobs is not None:
+        if not isinstance(logprobs, list):
+            raise _malformed_event()
+        logprobs = tuple(_logprob(entry, nested=True) for entry in logprobs)
+    if not done:
+        return _GenerationEvent(text=text, done=False, logprobs=logprobs or None)
+    finish_reason = event.get("finish_reason")
+    if not isinstance(finish_reason, str) or finish_reason not in _FINISH_REASONS:
+        raise _malformed_event()
+    usage = event.get("usage")
+    if usage is None and finish_reason not in {"error", "cancelled"}:
+        raise RemoteUpstreamError("upstream did not report generation usage")
+    prompt_tokens = completion_tokens = cached_tokens = None
+    if usage is not None:
+        if not isinstance(usage, dict):
+            raise RemoteUpstreamError("upstream reported malformed usage")
+        prompt_tokens = _count(usage.get("prompt_tokens"))
+        completion_tokens = _count(usage.get("completion_tokens"))
+        details = usage.get("prompt_tokens_details")
+        if details is not None:
+            if not isinstance(details, dict):
+                raise RemoteUpstreamError("upstream reported malformed usage")
+            cached_tokens = _count(details.get("cached_tokens"))
+            if cached_tokens > prompt_tokens:
+                raise RemoteUpstreamError("upstream reported malformed usage")
+    error = event.get("error")
+    error_code = None
+    retry_after_s = DEFAULT_RETRY_AFTER_S
+    if error is not None or finish_reason == "error":
+        code = error.get("code") if isinstance(error, dict) else None
+        error_code = client_safe_generation_error_code(code if isinstance(code, str) else None)
+        wait = error.get("retry_after_s") if isinstance(error, dict) else None
+        if isinstance(wait, int) and not isinstance(wait, bool) and RETRY_AFTER_MIN_S <= wait <= RETRY_AFTER_MAX_S:
+            retry_after_s = wait
+    return _GenerationEvent(
+        text=text,
+        done=True,
+        logprobs=logprobs or None,
+        finish_reason=finish_reason,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        cached_tokens=cached_tokens,
+        error_code=error_code,
+        retry_after_s=retry_after_s,
+    )
+
+
+def _logprob(entry: Any, *, nested: bool) -> dict[str, Any]:
+    """One OpenAI-shape token log-probability: a token, a finite log-probability and its bytes."""
+    if not isinstance(entry, dict) or not isinstance(entry.get("token"), str):
+        raise _malformed_event()
+    logprob: dict[str, Any] = {
+        "token": entry["token"],
+        "logprob": _number(entry.get("logprob"), "upstream sent a malformed generation event"),
+    }
+    raw_bytes = entry.get("bytes")
+    if raw_bytes is not None:
+        if not isinstance(raw_bytes, list) or not all(
+            isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 255 for value in raw_bytes
+        ):
+            raise _malformed_event()
+        logprob["bytes"] = list(raw_bytes)
+    else:
+        logprob["bytes"] = None
+    if nested:
+        top = entry.get("top_logprobs", [])
+        if not isinstance(top, list):
+            raise _malformed_event()
+        logprob["top_logprobs"] = [_logprob(alternative, nested=False) for alternative in top]
+    return logprob
+
+
+def _terminal_chunk(event: _GenerationEvent, *, yielded: bool, seen_text: bool) -> GenerationChunk:
+    """The terminal chunk for the upstream's terminal event, or the retryable error it amounts to.
+
+    An upstream that reports, before any output, that the model is loading,
+    that it is busy, or that the prompt is too long, raises the matching
+    generation error. Any other upstream error ends the generation with an
+    allowlisted code and fixed text.
+    """
+    if event.error_code is None:
+        return GenerationChunk(
+            text_delta=event.text,
+            done=True,
+            is_first=bool(event.text) and not seen_text,
+            finish_reason=event.finish_reason,
+            prompt_tokens=event.prompt_tokens,
+            completion_tokens=event.completion_tokens,
+            cached_tokens=event.cached_tokens,
+            logprobs=event.logprobs,
+        )
+    if not yielded and not event.text:
+        if event.error_code == "MODEL_LOADING":
+            raise GenerationDrainingError("the upstream is not ready, please retry", retry_after_s=event.retry_after_s)
+        if event.error_code == "RESOURCE_EXHAUSTED":
+            raise GenerationCapacityError("the upstream is busy, please retry", retry_after_s=event.retry_after_s)
+        if event.error_code == "INPUT_TOO_LONG":
+            raise GenerationInputTooLongError("the upstream refused the prompt as too long")
+    return GenerationChunk(
+        text_delta=event.text,
+        done=True,
+        is_first=bool(event.text) and not seen_text,
+        finish_reason="error",
+        prompt_tokens=event.prompt_tokens,
+        completion_tokens=event.completion_tokens,
+        cached_tokens=event.cached_tokens,
+        error_code=event.error_code,
+        error_message=f"the upstream ended generation with {event.error_code}",
+    )
 
 
 def _forwarded_options(options: dict[str, Any] | None) -> dict[str, Any]:

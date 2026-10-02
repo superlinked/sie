@@ -1171,13 +1171,15 @@ class ModelConfig(BaseModel):
                 raise ValueError(msg)
 
         # KV-budget admission control. For models declaring
-        # ``tasks.generate``, every profile (after parent merge) must
-        # provide a positive ``kv_budget_tokens``. The actual
+        # ``tasks.generate``, every local profile (after parent merge) must
+        # provide a positive ``kv_budget_tokens``. Remote profiles hold no local KV cache. The actual
         # calibrated value lands in the calibration follow-up; until then operators may
         # carry a placeholder in YAML but missing/non-positive values
         # are a hard error pointing at the calibration deliverable.
         if self.tasks.generate is not None:
             for name, profile in self.profiles.items():
+                if is_remote_adapter_path(self._declared_adapter_path(name)):
+                    continue
                 effective_budget: int | None
                 if profile.extends is not None:
                     parent = self.profiles[profile.extends]

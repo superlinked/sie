@@ -4269,10 +4269,12 @@ def _compute_ttft_ms(publish_at: float, first_text_at: float | None) -> float | 
 
 
 def _generation_error_retry_after_s(error: GenerationError, registry: Any) -> int | None:
-    """Return the configured hint only for a true OOM-capacity refusal."""
-    if isinstance(error, GenerationDrainingError):
-        return None
+    """Return the backend's own wait or the configured OOM hint, for a capacity refusal only."""
     if isinstance(error, GenerationCapacityError):
+        if error.retry_after_s is not None:
+            return error.retry_after_s
+        if isinstance(error, GenerationDrainingError):
+            return None
         return oom_retry_after_from_registry(registry)
     return None
 
