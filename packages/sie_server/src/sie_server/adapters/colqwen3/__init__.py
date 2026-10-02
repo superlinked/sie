@@ -16,7 +16,7 @@ from sie_server.adapters._types import ComputePrecision
 from sie_server.adapters._vision_patch_embed import rebind_vision_patch_embed
 from sie_server.core.inference_output import EncodeOutput
 from sie_server.core.postprocessor import MuveraConfig, MuveraPostprocessor
-from sie_server.types.inputs import decode_image
+from sie_server.types.inputs import InvalidInputError, decode_image
 
 if TYPE_CHECKING:
     from PIL import Image as PILImage
@@ -73,11 +73,18 @@ class ColQwen3Adapter(BaseAdapter):
             trust_remote_code: Required for ColQwen3 (custom processor + model classes).
             revision: Optional HuggingFace revision/branch/commit SHA to pin when
                 loading model artifacts. Forwarded to ``from_pretrained(..., revision=...)``.
-            max_seq_length: Ignored — ColQwen3 uses dynamic sequence length.
+            max_seq_length: Optional cap on the processed text sequence, including
+                processor-added tokens. Longer sequences are rejected without truncation.
             muvera_config: Optional MUVERA configuration (passed to postprocessor).
             token_dim: Per-token embedding dimension (320 for ColQwen3).
             max_num_visual_tokens: Cap on visual tokens per image (passed to processor).
         """
+        if max_seq_length is not None and (
+            isinstance(max_seq_length, bool) or not isinstance(max_seq_length, int) or max_seq_length <= 0
+        ):
+            msg = "max_seq_length must be a positive integer"
+            raise ValueError(msg)
+        self._max_seq_length = max_seq_length
         self._model_name_or_path = str(model_name_or_path)
         self._normalize = normalize
         self._compute_precision = compute_precision
@@ -224,20 +231,25 @@ class ColQwen3Adapter(BaseAdapter):
 
         if is_query:
             multivector_list: list[np.ndarray] = []
+            input_token_counts: list[int] = []
             for item in items:
                 if item.text is None:
                     raise ValueError(_ERR_NO_INPUT)
-                multivector_list.append(self._encode_text(item.text))
+                multivector, token_count = self._encode_text(item.text)
+                multivector_list.append(multivector)
+                input_token_counts.append(token_count)
             return EncodeOutput(
                 multivector=multivector_list,
                 batch_size=len(items),
                 is_query=is_query,
                 multivector_token_dim=self._multivector_dim,
+                extra={"input_token_counts": input_token_counts, "input_image_counts": [0] * len(items)},
             )
 
         # Preallocate by index so output order matches input order regardless of
         # text/image mix, and so multi-image items collapse to one multivector.
         results: list[np.ndarray | None] = [None] * len(items)
+        input_token_counts = [0] * len(items)
         all_images: list[PILImage.Image] = []
         image_slots: list[tuple[int, int]] = []  # (item_idx, image_count)
         for idx, item in enumerate(items):
@@ -247,7 +259,7 @@ class ColQwen3Adapter(BaseAdapter):
                 all_images.extend(images)
                 image_slots.append((idx, len(images)))
             elif item.text is not None:
-                results[idx] = self._encode_text(item.text)
+                results[idx], input_token_counts[idx] = self._encode_text(item.text)
             else:
                 raise ValueError(_ERR_NO_INPUT)
 
@@ -267,6 +279,7 @@ class ColQwen3Adapter(BaseAdapter):
             batch_size=len(items),
             is_query=is_query,
             multivector_token_dim=self._multivector_dim,
+            extra={"input_token_counts": input_token_counts} if any(item.text is not None for item in items) else {},
         )
 
     # ------------------------------------------------------------------
@@ -316,7 +329,7 @@ class ColQwen3Adapter(BaseAdapter):
     # Text encoding
     # ------------------------------------------------------------------
 
-    def _encode_text(self, text: str) -> np.ndarray:
+    def _encode_text(self, text: str) -> tuple[np.ndarray, int]:
         """Encode a single text query."""
         assert self._model is not None
         assert self._processor is not None
@@ -327,6 +340,10 @@ class ColQwen3Adapter(BaseAdapter):
                 return_tensors="pt",
                 padding="longest",
             )
+        token_count = int(inputs["input_ids"].shape[-1])
+        if self._max_seq_length is not None and token_count > self._max_seq_length:
+            msg = f"ColQwen3 processed text sequence has {token_count} tokens, exceeding max_seq_length={self._max_seq_length}"
+            raise InvalidInputError(msg)
         inputs = {k: v.to(self._device) for k, v in inputs.items() if hasattr(v, "to")}
 
         with self._forward_lock, torch.inference_mode():
@@ -342,7 +359,7 @@ class ColQwen3Adapter(BaseAdapter):
         if self._device and self._device.startswith("cuda"):
             torch.cuda.empty_cache()
 
-        return result
+        return result, token_count
 
     # ------------------------------------------------------------------
     # Scoring
