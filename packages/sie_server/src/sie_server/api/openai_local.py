@@ -51,7 +51,6 @@ from sie_server.api.helpers import (
     ModelStateChecker,
     ensure_finite_scores,
     openai_error_response,
-    serving_disclosure_headers,
     upstream_unavailable_exception,
 )
 from sie_server.api.options import resolve_runtime_options

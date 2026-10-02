@@ -12,7 +12,6 @@ from sie_server.api.helpers import (
     ResponseBuilder,
     ensure_finite_scores,
     oom_retry_after_from_registry,
-    serving_disclosure_headers,
 )
 from sie_server.api.options import resolve_runtime_options
 from sie_server.api.routing import remote_routing, route_request

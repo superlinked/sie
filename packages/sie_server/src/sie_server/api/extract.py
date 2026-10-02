@@ -11,7 +11,6 @@ from sie_server.api.helpers import (
     RequestParser,
     ResponseBuilder,
     oom_retry_after_from_registry,
-    serving_disclosure_headers,
     validated_total,
 )
 from sie_server.api.options import resolve_runtime_options
