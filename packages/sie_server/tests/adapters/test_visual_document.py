@@ -24,7 +24,7 @@ from sie_server.adapters.colqwen3 import ColQwen3Adapter
 from sie_server.adapters.colsmol import ColSmolAdapter
 from sie_server.adapters.nemo_colembed import NemoColEmbedAdapter
 from sie_server.core.preprocessor import ImagePreprocessor
-from sie_server.types.inputs import Item
+from sie_server.types.inputs import InvalidInputError, Item
 
 
 class _BorrowGuard:
@@ -309,6 +309,73 @@ class TestColQwen3Adapter:
             compute_precision="bfloat16",
         )
 
+    @pytest.fixture
+    def processed_adapter(self, adapter: ColQwen3Adapter) -> ColQwen3Adapter:
+        def process(*, text: list[str], **kwargs: Any) -> dict[str, torch.Tensor]:
+            count = len(text[0].strip().split()) + 2 + 10
+            return {"input_ids": torch.arange(count).reshape(1, count)}
+
+        def forward(**batch: Any) -> Any:
+            count = batch["input_ids"].shape[-1]
+            return SimpleNamespace(embeddings=torch.tensor([3.0, 4.0, 0.0, 0.0]).repeat(1, count, 1))
+
+        adapter._processor = MagicMock(side_effect=process)
+        adapter._model = MagicMock(side_effect=forward)
+        adapter._device = "cpu"
+        return adapter
+
+    @pytest.mark.parametrize("is_query", [True, False])
+    def test_processed_text_usage_and_vectors(self, processed_adapter: ColQwen3Adapter, is_query: bool) -> None:
+        items = [Item(text=" alpha beta "), Item(text=""), Item(text="one")]
+        out = processed_adapter.encode(items, ["multivector"], is_query=is_query)
+
+        assert out.extra["input_token_counts"] == [14, 12, 13]
+        assert out.multivector is not None
+        assert [mv.shape for mv in out.multivector] == [(14, 4), (12, 4), (13, 4)]
+        for mv in out.multivector:
+            np.testing.assert_allclose(mv, np.tile([0.6, 0.8, 0.0, 0.0], (len(mv), 1)), atol=1e-7)
+        assert processed_adapter._processor.call_count == 3
+        assert processed_adapter._model.call_count == 3
+        assert [call.kwargs for call in processed_adapter._processor.call_args_list] == [
+            {"text": [item.text], "return_tensors": "pt", "padding": "longest"} for item in items
+        ]
+
+    def test_query_ignores_submitted_images(self, processed_adapter: ColQwen3Adapter) -> None:
+        processed_adapter._load_images = MagicMock(side_effect=AssertionError("query must not decode images"))
+        out = processed_adapter.encode(
+            [Item(text="alpha beta", images=[{"data": b"ignored"}]), Item(text="")],
+            ["multivector"],
+            is_query=True,
+        )
+        assert out.extra["input_token_counts"] == [14, 12]
+        assert out.extra["input_image_counts"] == [0, 0]
+        processed_adapter._load_images.assert_not_called()
+
+    def test_processed_cap_boundary(self, processed_adapter: ColQwen3Adapter) -> None:
+        processed_adapter._max_seq_length = 13
+        out = processed_adapter.encode([Item(text="one")], ["multivector"], is_query=True)
+        assert out.extra["input_token_counts"] == [13]
+        processed_adapter._model.assert_called_once()
+
+    @pytest.mark.parametrize("is_query", [True, False])
+    def test_over_cap_rejects_before_transfer_and_forward(
+        self, processed_adapter: ColQwen3Adapter, is_query: bool
+    ) -> None:
+        processed_adapter._max_seq_length = 12
+        ids = MagicMock(shape=(1, 13))
+        processed_adapter._processor.side_effect = None
+        processed_adapter._processor.return_value = {"input_ids": ids}
+        with pytest.raises(InvalidInputError, match=r"13 tokens.*max_seq_length=12"):
+            processed_adapter.encode([Item(text="one")], ["multivector"], is_query=is_query)
+        processed_adapter._processor.assert_called_once()
+        ids.to.assert_not_called()
+        processed_adapter._model.assert_not_called()
+
+    @pytest.mark.parametrize("cap", [0, -1, True, 1.5, "4"])
+    def test_invalid_processed_cap(self, cap: Any) -> None:
+        with pytest.raises(ValueError, match="max_seq_length must be a positive integer"):
+            ColQwen3Adapter("stub/model", max_seq_length=cap)
+
     def test_capabilities(self, adapter: ColQwen3Adapter) -> None:
         """Adapter reports correct capabilities."""
         caps = adapter.capabilities
@@ -363,8 +430,8 @@ class TestColQwen3Adapter:
         def fake_encode_images(images: list[Any]) -> list[np.ndarray]:
             return [np.full((2, 4), float(i + 100), dtype=np.float32) for i, _ in enumerate(images)]
 
-        def fake_encode_text(text: str) -> np.ndarray:
-            return np.full((1, 4), float(hash(text) % 1000), dtype=np.float32)
+        def fake_encode_text(text: str) -> tuple[np.ndarray, int]:
+            return np.full((1, 4), float(hash(text) % 1000), dtype=np.float32), len(text) + 10
 
         adapter._load_images = fake_load_images  # type: ignore[method-assign]
         adapter._encode_images = fake_encode_images  # type: ignore[method-assign]
@@ -386,6 +453,7 @@ class TestColQwen3Adapter:
         assert out.multivector[1][0, 0] == float(hash("b") % 1000)
         assert out.multivector[2][0, 0] == 101.0
         assert out.multivector[3][0, 0] == float(hash("d") % 1000)
+        assert out.extra["input_token_counts"] == [0, 11, 0, 11]
 
     def test_encode_multi_image_item_concatenates_seq_dim(self, adapter: ColQwen3Adapter) -> None:
         """A single item with N images yields one mv with seq = sum of per-image seqs."""
@@ -412,6 +480,18 @@ class TestColQwen3Adapter:
         assert mv[0, 0] == 1.0
         assert mv[3, 0] == 2.0
         assert mv[8, 0] == 3.0
+        assert "input_token_counts" not in out.extra
+
+    def test_captioned_images_do_not_process_text(self, processed_adapter: ColQwen3Adapter) -> None:
+        processed_adapter._load_images = MagicMock(return_value=[MagicMock()])
+        image_vectors = np.ones((7, 4), dtype=np.float32)
+        processed_adapter._encode_images = MagicMock(return_value=[image_vectors])
+        out = processed_adapter.encode([Item(text="ignored caption", images=[{"data": b"x"}])], ["multivector"])
+        assert out.extra["input_token_counts"] == [0]
+        assert out.multivector is not None
+        np.testing.assert_array_equal(out.multivector[0], image_vectors)
+        processed_adapter._processor.assert_not_called()
+        processed_adapter._model.assert_not_called()
 
     def test_colqwen3_processor_call_holds_tokenizer_lock(self, adapter: ColQwen3Adapter) -> None:
         """The processor call runs under ``_tokenizer_lock`` (#2098).
