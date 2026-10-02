@@ -26,6 +26,7 @@ from sie_server.queue_executor import QueueExecutor
 LOCAL_ADAPTER = "sie_server.adapters.fake.adapter:FakeAdapter"
 REMOTE_ADAPTER = "sie_server.adapters.remote.sie:SieUpstreamAdapter"
 DECLARED_OUTPUTS_MODULE = "sie_server.adapters.remote.declared_outputs"
+ENCODE_REMOTE = f"{DECLARED_OUTPUTS_MODULE}:EncodeRemoteAdapter"
 EXTRACT_REMOTE = f"{DECLARED_OUTPUTS_MODULE}:ExtractRemoteAdapter"
 GENERATE_REMOTE = f"{DECLARED_OUTPUTS_MODULE}:GenerateRemoteAdapter"
 FALLBACK = {"policy": "fallback", "fallback_profile": "remote"}
@@ -81,6 +82,13 @@ def remote_backed(*, routing: Any = None) -> dict[str, Any]:
     return spec
 
 
+class EncodeRemoteAdapter(BaseAdapter):
+    spec = AdapterSpec(inputs=("text",), outputs=("dense",), unload_fields=())
+
+    def encode(self, *args: Any, **kwargs: Any) -> Any:
+        raise NotImplementedError
+
+
 class ExtractRemoteAdapter(BaseAdapter):
     spec = AdapterSpec(inputs=("text",), outputs=("json",), unload_fields=())
 
@@ -95,6 +103,7 @@ class GenerateRemoteAdapter(BaseAdapter):
 @pytest.fixture(autouse=True)
 def _declared_outputs_module(monkeypatch: pytest.MonkeyPatch) -> None:
     module = ModuleType(DECLARED_OUTPUTS_MODULE)
+    module.EncodeRemoteAdapter = EncodeRemoteAdapter  # type: ignore[attr-defined]
     module.ExtractRemoteAdapter = ExtractRemoteAdapter  # type: ignore[attr-defined]
     module.GenerateRemoteAdapter = GenerateRemoteAdapter  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, DECLARED_OUTPUTS_MODULE, module)
@@ -298,7 +307,8 @@ def test_hybrid_generation_is_allowed() -> None:
     ids=["extract-through-an-encode-adapter", "sparse-through-a-dense-adapter"],
 )
 def test_a_remote_profile_must_produce_every_declared_output(tasks: dict[str, Any], uncovered: str) -> None:
-    config = ModelConfig.model_validate(hybrid(tasks=tasks))
+    profiles = {"default": local_profile(), "remote": remote_profile(ENCODE_REMOTE)}
+    config = ModelConfig.model_validate(hybrid(tasks=tasks, profiles=profiles))
 
     refusal = remote_output_refusal(config)
 
@@ -307,8 +317,9 @@ def test_a_remote_profile_must_produce_every_declared_output(tasks: dict[str, An
 
 
 def test_an_extract_model_with_an_encode_only_remote_profile_is_refused() -> None:
+    profiles = {"default": local_profile(), "remote": remote_profile(ENCODE_REMOTE)}
     with pytest.raises(ValueError, match="which remote profile 'remote' does not produce"):
-        validate_model_routing(ModelConfig.model_validate(hybrid(tasks=EXTRACT)))
+        validate_model_routing(ModelConfig.model_validate(hybrid(tasks=EXTRACT, profiles=profiles)))
 
 
 @pytest.mark.parametrize(
