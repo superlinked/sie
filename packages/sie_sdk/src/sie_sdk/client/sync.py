@@ -1216,7 +1216,7 @@ class SIEClient:
             is_query: Whether this is a query embedding (vs document). Affects some models
                      that use asymmetric encoding (e.g., BGE, E5). Default: None (model default).
             options: Runtime options dict. Can include "profile" to select a named profile,
-                    or individual options like "muvera", "normalize", etc.
+                    or individual options like "muvera", "smve", "normalize", etc.
             gpu: Target GPU type (e.g., "l4", "a100-80gb"). Routes request to workers
                 with matching GPU. Required when using the gateway with multiple GPU pools.
             wait_for_capacity: When True (default), auto-retry transient "not

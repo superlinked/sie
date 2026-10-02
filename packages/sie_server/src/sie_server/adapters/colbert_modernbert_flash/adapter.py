@@ -89,6 +89,7 @@ class ColBERTModernBERTFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
         query_prefix: str = "",
         doc_prefix: str = "",
         muvera_config: dict[str, Any] | None = None,
+        smve_config: dict[str, Any] | None = None,
         revision: str | None = None,
         cuda_graphs: str | bool = "off",
         fused_rope: bool = False,
@@ -110,6 +111,8 @@ class ColBERTModernBERTFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
             doc_prefix: Prefix to prepend to documents.
             muvera_config: MUVERA configuration dict with keys like num_repetitions,
                 num_simhash_projections, normalize. Used for FDE postprocessing.
+            smve_config: SMVE configuration dict with keys like width and k. Used for
+                sparse (SMVE) postprocessing.
             revision: Optional HuggingFace revision/branch/commit SHA to pin when
                 loading the tokenizer, model, and Dense-chain artifacts.
                 Forwarded to ``from_pretrained(..., revision=...)``.
@@ -144,6 +147,7 @@ class ColBERTModernBERTFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
         self._query_prefix = query_prefix
         self._doc_prefix = doc_prefix
         self._muvera_config = muvera_config
+        self._smve_config = smve_config
 
         self._model: Any = None
         self._tokenizer: PreTrainedTokenizerFast | None = None
@@ -738,16 +742,20 @@ class ColBERTModernBERTFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
         return texts
 
     def get_postprocessors(self) -> dict[str, Any] | None:
-        """Return MUVERA postprocessor for converting multivector to dense.
+        """Return the MUVERA (multivector to dense) and SMVE (multivector to sparse) postprocessors.
 
         Returns:
-            Dict with "muvera" key mapping to MuveraPostprocessor instance.
+            Dict with "muvera" and "smve" keys mapping to the postprocessor instances.
         """
-        from sie_server.core.postprocessor import MuveraConfig, MuveraPostprocessor
+        from sie_server.core.postprocessor import MuveraConfig, MuveraPostprocessor, SmveConfig, SmvePostprocessor
 
-        # Build MuveraConfig from loadtime options or use defaults
+        # Build both configs from loadtime options or use defaults
         if self._muvera_config:
             config = MuveraConfig(**self._muvera_config)
         else:
             config = MuveraConfig()
-        return {"muvera": MuveraPostprocessor(token_dim=self._token_dim, config=config)}
+        smve = SmveConfig(**self._smve_config) if self._smve_config else SmveConfig()
+        return {
+            "muvera": MuveraPostprocessor(token_dim=self._token_dim, config=config),
+            "smve": SmvePostprocessor(token_dim=self._token_dim, config=smve, device=self._device),
+        }
