@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 from sie_sdk._msgpack import packb
 from sie_server.adapters.errors import UpstreamRefusedError, UpstreamUnavailableError
 from sie_server.adapters.remote import _limits
+from sie_server.adapters.remote import openai as remote_openai
 from sie_server.adapters.remote import sie as remote_sie
 from sie_server.adapters.remote._batching import call_each
 from sie_server.adapters.remote._http import RemoteUpstreamError
@@ -214,6 +215,13 @@ def test_reserved_batch_slots_cannot_be_taken_by_another_caller(limiter: Callabl
         for _ in range(4):
             call(budget)
     call(budget)
+
+
+def test_a_batch_reserves_only_its_executor_width(limiter: Callable[..., UpstreamLimiter]) -> None:
+    budget = limiter(concurrency=4)
+    with budget.call(), budget.batch(10, concurrency=3):
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            call_each(executor, lambda _index: call(budget), list(range(10)))
 
 
 def test_a_half_open_breaker_refuses_a_multi_request_batch_before_sending(
@@ -435,6 +443,66 @@ def test_a_batch_over_the_budget_is_refused_before_any_item_is_sent(
 
     assert len(recorder.requests) == 8
     assert (raised.value.refusal, raised.value.retry_after_s) == ("rate_cap", 6)
+
+
+def test_a_batch_under_concurrency_contention_sends_no_items(
+    adapter_over: Callable[..., remote_sie.SieUpstreamAdapter],
+) -> None:
+    recorder = Recorder(dense_answer)
+    adapter = adapter_over(recorder)
+    with upstream_limiter(UPSTREAM).call():
+        with pytest.raises(UpstreamRefusedError, match="concurrency cap"):
+            adapter.encode([Item(text=str(index)) for index in range(4)], ["dense"])
+    assert recorder.requests == []
+
+
+@pytest.mark.parametrize("operation", ["encode", "score"])
+@pytest.mark.parametrize("refusal", ["rate_cap", "concurrency_cap", "breaker_open"])
+def test_openai_batches_are_refused_before_any_item_is_sent(
+    monkeypatch: pytest.MonkeyPatch,
+    clock: Clock,
+    operation: str,
+    refusal: str,
+) -> None:
+    upstream = Upstream.model_validate(
+        {
+            "kind": "openai",
+            "base_url": "https://openai.example.internal/v1",
+            "endpoints": ["embeddings", "rerank"],
+            "rate_cap": {"requests_per_minute": 2, "max_concurrency": 2},
+            "breaker": {"failures": 1, "cooldown_s": 60},
+        }
+    )
+    budget = UpstreamLimiter(UPSTREAM, upstream, clock=clock)
+    install_upstreams({UPSTREAM: upstream})
+    monkeypatch.setitem(_limits._LIMITERS, UPSTREAM, (upstream, budget))
+    recorder = Recorder(lambda _request: httpx.Response(502))
+    monkeypatch.setattr(
+        remote_openai,
+        "upstream_sync_client",
+        lambda config: upstream_sync_client(config, transport=httpx.MockTransport(recorder)),
+    )
+    adapter = remote_openai.OpenAIUpstreamAdapter(upstream=UPSTREAM, upstream_model="test-model", dense_dim=4)
+    try:
+        adapter.load("cpu")
+        with ExitStack() as held:
+            if refusal == "rate_cap":
+                call(budget)
+            elif refusal == "concurrency_cap":
+                held.enter_context(budget.call())
+            else:
+                fail(budget)
+                clock.advance(60)
+            with pytest.raises(UpstreamRefusedError) as raised:
+                if operation == "encode":
+                    adapter.encode([Item(text="a"), Item(text="b")], ["dense"])
+                else:
+                    adapter.score_pairs([Item(text="q1"), Item(text="q2")], [Item(text="a"), Item(text="b")])
+            assert raised.value.refusal == refusal
+            assert recorder.requests == []
+    finally:
+        adapter.unload()
+        install_upstreams({})
 
 
 def test_a_score_batch_reserves_one_request_per_api_request(

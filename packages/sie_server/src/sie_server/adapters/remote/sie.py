@@ -228,7 +228,14 @@ class SieUpstreamAdapter(BaseAdapter):
             )
             return RequestScores(scores=_scores(decoded, len(request_docs)), usage=_usage(decoded))
 
-        return score_each_request(executor, queries, docs, score_request, limiter=upstream_limiter(self._upstream_name))
+        return score_each_request(
+            executor,
+            queries,
+            docs,
+            score_request,
+            limiter=upstream_limiter(self._upstream_name),
+            concurrency=requests_in_flight(upstream_for_serving(self._upstream_name)),
+        )
 
     def extract(
         self,

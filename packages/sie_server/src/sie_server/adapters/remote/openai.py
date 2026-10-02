@@ -46,6 +46,7 @@ from sie_server.adapters.remote._batching import (
     score_each_request,
 )
 from sie_server.adapters.remote._http import RemoteUpstreamError, send_bounded
+from sie_server.adapters.remote._limits import upstream_limiter
 from sie_server.config.upstreams import (
     Upstream,
     UpstreamConfigError,
@@ -155,7 +156,8 @@ class OpenAIUpstreamAdapter(BaseAdapter):
         texts = extract_texts(
             items, instruction, is_query=is_query, query_template=query_template, doc_template=opts.get("doc_template")
         )
-        embedded = call_each(executor, lambda text: self._embed_one(upstream, text), texts)
+        with upstream_limiter(self._upstream_name).batch(len(texts), concurrency=requests_in_flight(upstream)):
+            embedded = call_each(executor, lambda text: self._embed_one(upstream, text), texts)
         try:
             dense = np.concatenate([vector for vector, _ in embedded])
         except ValueError:
@@ -211,7 +213,14 @@ class OpenAIUpstreamAdapter(BaseAdapter):
             )
             return RequestScores(scores=_rerank_scores(answer, len(documents)), usage=_usage(answer))
 
-        return score_each_request(executor, queries, docs, score_request)
+        return score_each_request(
+            executor,
+            queries,
+            docs,
+            score_request,
+            limiter=upstream_limiter(self._upstream_name),
+            concurrency=requests_in_flight(upstream),
+        )
 
     def extract(
         self,
