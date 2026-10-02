@@ -2518,6 +2518,7 @@ class ModelRegistry:
                     accepted[name] = config
             for name, config in new_configs.items():
                 validate_no_legacy_scalar_lora_id(name=name, config=config)
+                validate_model_routing(config)
 
             async with self._get_load_admission_lock():
                 removed = set(self._configs) - set(new_configs)

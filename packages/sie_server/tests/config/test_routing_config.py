@@ -401,3 +401,18 @@ async def test_a_config_snapshot_rejects_only_the_refused_entry(caplog: pytest.L
     assert not registry.has_model("acme/encode")
     assert "acme/encode" not in response.applied_models
     assert "Model 'acme/encode' would serve encode from both" in caplog.text
+
+
+async def test_authoritative_replacement_refuses_unsupported_remote_outputs_without_changing_registry() -> None:
+    registry = ModelRegistry(models_dir=None)
+    existing = ModelConfig.model_validate(hybrid(sie_id="acme/kept", routing=None))
+    registry.add_config(existing)
+    profiles = {"default": local_profile(), "remote": remote_profile(ENCODE_REMOTE)}
+    refused = ModelConfig.model_validate(hybrid(tasks=EXTRACT, profiles=profiles))
+
+    with pytest.raises(ValueError, match="which remote profile 'remote' does not produce"):
+        await registry.replace_configs_async([refused])
+
+    assert registry.has_model("acme/kept")
+    assert not registry.has_model("acme/hybrid")
+    assert not registry.has_model("acme/hybrid:remote")
