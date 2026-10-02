@@ -1531,8 +1531,9 @@ class ModelRegistry:
                 if serves_remotely(config):
                     # No weights and no device memory: no placement, admission or
                     # eviction, and never registered with a memory manager.
+                    metadata_device = device if device in self._devices else self._devices[0]
                     loaded = await self._loader.load_remote_async(
-                        name, config, self._model_dirs.get(name, Path()), device
+                        name, config, self._model_dirs.get(name, Path()), metadata_device
                     )
                     async with self._get_config_update_lock(), lock:
                         if not _model_configs_semantically_equal(self._configs.get(name), config):

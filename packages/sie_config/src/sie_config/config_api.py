@@ -24,6 +24,7 @@ from sie_config.model_registry import (
     ProfileConflictError,
     parse_model_spec,
     undeclared_upstreams,
+    validate_routing_config,
 )
 from sie_config.model_schema import model_config_schema_errors
 from sie_config.nats_publisher import NatsPublisher, PartialPublishError
@@ -852,6 +853,14 @@ async def add_model(request: Request) -> Response:
                     merged_config["profiles"] = merged_profiles
                 else:
                     merged_config = dict(config)
+
+                try:
+                    validate_routing_config(merged_config)
+                except ValueError as e:
+                    raise HTTPException(
+                        status_code=422,
+                        detail={"error": "validation_error", "details": [{"message": str(e)}]},
+                    ) from e
 
                 config_yaml = yaml.dump(merged_config, default_flow_style=False, sort_keys=False)
 

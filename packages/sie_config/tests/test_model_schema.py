@@ -1,3 +1,4 @@
+import copy
 import json
 from pathlib import Path
 
@@ -8,9 +9,10 @@ from fastapi.testclient import TestClient
 from jsonschema import Draft202012Validator
 from sie_config.config_api import router as config_router
 from sie_config.config_store import ConfigStore
-from sie_config.model_registry import ModelRegistry
+from sie_config.model_registry import ModelRegistry, validate_routing_config
 from sie_config.model_schema import SCHEMA_PATH, _without_required, model_config_schema_errors
 from sie_server.config.model import ModelConfig
+from sie_server.config.routing import validate_model_routing
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _REGENERATE = (
@@ -72,6 +74,121 @@ def test_partial_schema_preserves_required_named_properties_and_literal_data() -
 
 def test_partial_append_body_passes() -> None:
     assert model_config_schema_errors(_model()) == []
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "valid_fallback",
+        "valid_triggers",
+        "inherited_fallback",
+        "remote_only",
+        "unknown_policy",
+        "missing_fallback",
+        "default_fallback",
+        "local_fallback",
+        "missing_default",
+        "remote_default",
+        "empty_triggers",
+        "duplicate_triggers",
+        "threshold_field",
+        "threshold",
+        "encode",
+        "score",
+        "remote_backed_fallback",
+        "remote_only_fields",
+        "remote_only_local",
+        "remote_only_weights",
+        "remote_only_hf",
+        "remote_only_revision",
+        "remote_only_package",
+        "remote_only_not_backed",
+        "dangling_parent",
+        "chained_parent",
+        "cyclic_parent",
+    ],
+)
+def test_routing_guard_agrees_with_worker(case: str) -> None:
+    remote = {
+        "adapter_path": "sie_server.adapters.remote.sie:SieUpstreamAdapter",
+        "max_batch_tokens": 8192,
+        "kv_budget_tokens": 4096,
+        "adapter_options": {"loadtime": {"upstream": "team-sie", "upstream_model": "org/name"}},
+    }
+    config = _model(
+        hf_id="acme/bert",
+        tasks={"generate": {"context_length": 8192, "max_output_tokens": 64}},
+        profiles={
+            "default": {"adapter_path": _ADAPTER, "max_batch_tokens": 4096, "kv_budget_tokens": 4096},
+            "remote": remote,
+        },
+        routing={"policy": "fallback", "fallback_profile": "remote"},
+    )
+    routing = config["routing"]
+    profiles = config["profiles"]
+    if case == "valid_triggers":
+        routing["triggers"] = ["unhealthy", "saturated"]
+    elif case == "inherited_fallback":
+        profiles["parent"] = copy.deepcopy(remote)
+        profiles["remote"] = {"extends": "parent"}
+    elif case.startswith("remote_only") or case == "remote_backed_fallback":
+        config.pop("hf_id")
+        config["remote_backed"] = True
+        profiles["default"] = copy.deepcopy(remote)
+        if case != "remote_backed_fallback":
+            config["routing"] = {"policy": "remote_only"}
+        if case == "remote_only_fields":
+            config["routing"]["triggers"] = []
+        elif case == "remote_only_local":
+            profiles["remote"]["adapter_path"] = _ADAPTER
+        elif case == "remote_only_weights":
+            config["weights_path"] = "/synthetic/weights"
+        elif case == "remote_only_hf":
+            config["hf_id"] = "acme/bert"
+        elif case == "remote_only_revision":
+            config["hf_revision"] = "0" * 40
+        elif case == "remote_only_package":
+            config["package_backed"] = True
+        elif case == "remote_only_not_backed":
+            config.pop("remote_backed")
+            config["hf_id"] = "acme/bert"
+    elif case == "unknown_policy":
+        routing["policy"] = "unknown"
+    elif case == "missing_fallback":
+        routing.pop("fallback_profile")
+    elif case == "default_fallback":
+        routing["fallback_profile"] = "default"
+    elif case == "local_fallback":
+        profiles["remote"]["adapter_path"] = _ADAPTER
+    elif case == "missing_default":
+        profiles.pop("default")
+    elif case == "remote_default":
+        profiles["default"] = copy.deepcopy(remote)
+    elif case == "empty_triggers":
+        routing["triggers"] = []
+    elif case == "duplicate_triggers":
+        routing["triggers"] = ["model_loading", "model_loading"]
+    elif case == "threshold_field":
+        routing["wake_above"] = 1
+    elif case == "threshold":
+        routing.update(policy="threshold", wake_above=2, sleep_below=1, window_s=1, cooldown_s=1)
+    elif case == "encode":
+        config["tasks"]["encode"] = {"dense": {"dim": 384}}
+    elif case == "score":
+        config["tasks"]["score"] = {}
+    elif case in {"dangling_parent", "chained_parent", "cyclic_parent"}:
+        profiles["remote"] = {"extends": "parent"}
+        if case != "dangling_parent":
+            profiles["parent"] = {"extends": "remote" if case == "cyclic_parent" else "default"}
+
+    try:
+        worker = ModelConfig.model_validate(config)
+        validate_model_routing(worker)
+    except ValueError:
+        with pytest.raises(ValueError, match=r"routing|remote_backed"):
+            validate_routing_config(config)
+    else:
+        validate_routing_config(config)
 
 
 def test_unknown_keys_are_reported_per_field() -> None:

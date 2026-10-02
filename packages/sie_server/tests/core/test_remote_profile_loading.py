@@ -15,7 +15,7 @@ import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import yaml
@@ -23,6 +23,8 @@ from sie_server.adapters.remote.sie import SieUpstreamAdapter
 from sie_server.config.model import AdapterOptions, EmbeddingDim, EncodeTask, ModelConfig, ProfileConfig, Tasks
 from sie_server.config.upstreams import Upstream, install_upstreams
 from sie_server.core.encode_pipeline import EncodePipeline
+from sie_server.core.load_errors import DevicePlacementError
+from sie_server.core.model_loader import LoadedModel
 from sie_server.core.registry import ModelRegistry
 from sie_server.core.worker.types import WorkerDrainedError
 from sie_server.types.inputs import Item
@@ -277,3 +279,57 @@ async def test_a_remote_profile_does_not_occupy_a_device_group() -> None:
         assert registry.is_loaded("acme/remote")
     finally:
         await registry.unload_all_async()
+
+
+@pytest.mark.parametrize("device", ["cuda", "cuda:1"])
+@pytest.mark.parametrize("phantom", [False, True])
+@pytest.mark.parametrize("claimed", [False, True])
+async def test_remote_lifecycle_keeps_configured_device_accounting(device: str, phantom: bool, claimed: bool) -> None:
+    registry = ModelRegistry(device="cuda", devices=["cuda:0", "cuda:1"])
+    registry.add_config(ModelConfig.model_validate(model_config("acme/hybrid")))
+    name = "acme/hybrid:remote"
+    if phantom:
+        registry._memory_manager_for_device("cuda")
+    for manager in registry.memory_managers.values():
+        manager.check_pressure = MagicMock(return_value=False)  # type: ignore[method-assign]
+    if claimed:
+        registry._device_claims = {"cuda:0": "owner", "cuda:1": "owner"}
+    before_managers = registry.memory_managers
+    before_order = dict(registry._device_order)
+    before_claims = dict(registry._device_claims)
+    adapter = MagicMock()
+
+    async def loaded_remote(_name: str, config: ModelConfig, _model_dir: Path, metadata_device: str) -> LoadedModel:
+        return LoadedModel(config=config, adapter=adapter, device=metadata_device)
+
+    loader = AsyncMock(side_effect=loaded_remote)
+    with (
+        patch.object(registry._loader, "load_remote_async", loader),
+        patch.object(registry._loader, "unregister"),
+    ):
+        try:
+            assert await registry.load_async(name, device=device) is adapter
+            assert registry._loaded[name].device == (device if device == "cuda:1" else "cuda:0")
+            assert registry.get(name) is adapter
+            registry.touch_lru(name)
+            await registry.unload_async(name)
+            assert await registry.start_load_async(name, device=device)
+            await wait_until(lambda: registry.is_loaded(name) and not registry.is_loading(name))
+            registry.touch_lru(name)
+            await registry.unload_async(name)
+
+            assert registry.memory_managers == before_managers
+            assert registry._device_order == before_order
+            assert registry._device_claims == before_claims
+            assert all(manager.get_model_info(name) is None for manager in registry.memory_managers.values())
+            assert loader.await_count == 2
+            if claimed:
+                with pytest.raises(DevicePlacementError, match="No device is available"):
+                    registry._select_device_for_model("cuda")
+            else:
+                registry._device_claims["cuda:0"] = "owner"
+                assert registry._select_device_for_model("cuda") == "cuda:1"
+                if not phantom:
+                    assert registry._resolve_load_device("cuda") == "cuda:1"
+        finally:
+            await registry.unload_all_async()

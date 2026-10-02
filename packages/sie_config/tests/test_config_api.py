@@ -1,8 +1,10 @@
 import asyncio
+import copy
 import logging
 import tempfile
 import threading
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
@@ -13,6 +15,7 @@ from sie_config import config_api
 from sie_config.config_api import router as config_router
 from sie_config.config_store import ConfigStore
 from sie_config.model_registry import ModelRegistry
+from sie_config.nats_publisher import NatsPublisher
 
 
 def _create_test_app(
@@ -2618,3 +2621,190 @@ class TestConfigAPIReplace:
         # The first model still exists; the second was never (mis)written under the key.
         assert self.client.get("/v1/configs/models/idemx/first").status_code == 200
         assert self.client.get("/v1/configs/models/idemx/second").status_code == 404
+
+
+def _routing_write_config() -> dict:
+    return {
+        "sie_id": "acme/routing",
+        "hf_id": "acme/routing",
+        "tasks": {"generate": {"context_length": 8192, "max_output_tokens": 64}},
+        "profiles": {
+            "default": {
+                "adapter_path": "sie_server.adapters.bert_flash:BertFlashAdapter",
+                "max_batch_tokens": 4096,
+                "kv_budget_tokens": 4096,
+            },
+            "remote": {
+                "adapter_path": "sie_server.adapters.remote.sie:SieUpstreamAdapter",
+                "max_batch_tokens": 4096,
+                "kv_budget_tokens": 4096,
+                "adapter_options": {"loadtime": {"upstream": "team-sie", "upstream_model": "org/name"}},
+            },
+        },
+        "routing": {"policy": "fallback", "fallback_profile": "remote"},
+    }
+
+
+class TestConfigAPIRoutingValidation:
+    @pytest.fixture
+    def app_client(self, tmp_path: Path) -> tuple[FastAPI, TestClient]:
+        bundles, models = tmp_path / "bundles", tmp_path / "models"
+        bundles.mkdir()
+        models.mkdir()
+        _write_bundle(bundles, "default", ["sie_server.adapters.bert_flash", "sie_server.adapters.remote.sie"])
+        app = _create_test_app(bundles, models, str(tmp_path / "store"))
+        publisher = MagicMock(spec=NatsPublisher)
+        publisher.connected = True
+        publisher.router_id = "test-publisher"
+        publisher.publish_config_notification = AsyncMock()
+        app.state.nats_publisher = publisher
+        return app, TestClient(app)
+
+    @pytest.mark.parametrize("method", ["POST", "PUT"])
+    @pytest.mark.parametrize(
+        "routing",
+        [
+            {},
+            {"policy": "remote_only"},
+            {"policy": "remote_only", "fallback_profile": "remote"},
+            {"policy": "fallback"},
+            {"policy": "fallback", "fallback_profile": "missing"},
+            {"policy": "fallback", "fallback_profile": "default"},
+            {"policy": "fallback", "fallback_profile": "remote", "triggers": []},
+            {"policy": "fallback", "fallback_profile": "remote", "triggers": ["unhealthy", "unhealthy"]},
+            {"policy": "fallback", "fallback_profile": "remote", "wake_above": 1},
+            {
+                "policy": "threshold",
+                "fallback_profile": "remote",
+                "wake_above": 2,
+                "sleep_below": 1,
+                "window_s": 1,
+                "cooldown_s": 1,
+            },
+        ],
+    )
+    def test_invalid_routing_has_no_write_effects(
+        self, app_client: tuple[FastAPI, TestClient], monkeypatch: pytest.MonkeyPatch, method: str, routing: dict
+    ) -> None:
+        app, client = app_client
+        config = _routing_write_config()
+        config["routing"] = routing
+        writer = MagicMock(wraps=app.state.config_store.write_model)
+        monkeypatch.setattr(app.state.config_store, "write_model", writer)
+        path = "/v1/configs/models" if method == "POST" else "/v1/configs/models/acme/routing"
+
+        response = client.request(method, path, content=yaml.safe_dump(config))
+
+        assert response.status_code == 422
+        assert response.json()["detail"]["error"] == "validation_error"
+        writer.assert_not_called()
+        assert app.state.model_registry.get_full_config("acme/routing") is None
+        assert app.state.config_store.read_epoch() == 0
+        app.state.nats_publisher.publish_config_notification.assert_not_called()
+
+    def test_valid_partial_append_preserves_routing_tasks_and_default(
+        self, app_client: tuple[FastAPI, TestClient]
+    ) -> None:
+        app, client = app_client
+        original = _routing_write_config()
+        assert client.post("/v1/configs/models", content=yaml.safe_dump(original)).status_code == 201
+        append = {"sie_id": original["sie_id"], "profiles": {"variant": {"extends": "remote"}}}
+
+        response = client.post("/v1/configs/models", content=yaml.safe_dump(append))
+
+        assert response.status_code == 201
+        stored = yaml.safe_load(app.state.config_store.read_model(original["sie_id"]))
+        assert stored["routing"] == original["routing"]
+        assert stored["tasks"] == original["tasks"]
+        assert stored["profiles"]["default"] == original["profiles"]["default"]
+        assert set(stored["profiles"]) == {"default", "remote", "variant"}
+        assert app.state.model_registry.get_full_config(original["sie_id"]) == stored
+
+    @pytest.mark.parametrize("inherited_task", [False, True])
+    def test_append_rejects_hybrid_encoding_from_effective_tasks(
+        self, app_client: tuple[FastAPI, TestClient], inherited_task: bool
+    ) -> None:
+        app, client = app_client
+        original = _routing_write_config()
+        if inherited_task:
+            original.pop("routing")
+            original["tasks"] = {"encode": {"dense": {"dim": 384}}}
+        else:
+            original.pop("tasks")
+        assert client.post("/v1/configs/models", content=yaml.safe_dump(original)).status_code == 201
+        before = app.state.config_store.read_model(original["sie_id"])
+        app.state.nats_publisher.publish_config_notification.reset_mock()
+        append = {"sie_id": original["sie_id"], "profiles": {"variant": {"extends": "remote"}}}
+        if inherited_task:
+            append["routing"] = {"policy": "fallback", "fallback_profile": "remote"}
+        else:
+            append["tasks"] = {"encode": {"dense": {"dim": 384}}}
+
+        response = client.post("/v1/configs/models", content=yaml.safe_dump(append))
+
+        assert response.status_code == 422
+        assert app.state.config_store.read_model(original["sie_id"]) == before
+        assert app.state.model_registry.get_full_config(original["sie_id"]) == original
+        assert app.state.config_store.read_epoch() == 1
+        app.state.nats_publisher.publish_config_notification.assert_not_called()
+
+    def test_metadata_conflict_still_precedes_new_invalid_routing(self, app_client: tuple[FastAPI, TestClient]) -> None:
+        app, client = app_client
+        original = _routing_write_config()
+        original.pop("routing")
+        assert client.post("/v1/configs/models", content=yaml.safe_dump(original)).status_code == 201
+        append = {
+            "sie_id": original["sie_id"],
+            "hf_id": "acme/different",
+            "profiles": {"variant": {"extends": "remote"}},
+            "routing": {"policy": "remote_only"},
+        }
+
+        response = client.post("/v1/configs/models", content=yaml.safe_dump(append))
+
+        assert response.status_code == 409
+        assert response.json()["detail"]["conflicting_fields"] == ["hf_id"]
+        assert app.state.model_registry.get_full_config(original["sie_id"]) == original
+        assert app.state.config_store.read_epoch() == 1
+        with pytest.raises(ValueError, match="remote_backed"):
+            app.state.model_registry.add_model_config(append)
+        assert app.state.model_registry.get_full_config(original["sie_id"]) == original
+
+    def test_disk_merged_omitted_task_is_checked_before_persistence(
+        self, app_client: tuple[FastAPI, TestClient], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        app, client = app_client
+        original = _routing_write_config()
+        original.pop("tasks")
+        assert client.post("/v1/configs/models", content=yaml.safe_dump(original)).status_code == 201
+        disk = {**copy.deepcopy(original), "tasks": {"encode": {"dense": {"dim": 384}}}}
+        disk_yaml = yaml.safe_dump(disk)
+        app.state.config_store.write_model(original["sie_id"], disk_yaml)
+        writer = MagicMock(wraps=app.state.config_store.write_model)
+        monkeypatch.setattr(app.state.config_store, "write_model", writer)
+        app.state.nats_publisher.publish_config_notification.reset_mock()
+        append = {"sie_id": original["sie_id"], "profiles": {"variant": {"extends": "remote"}}}
+
+        response = client.post("/v1/configs/models", content=yaml.safe_dump(append))
+
+        assert response.status_code == 422
+        writer.assert_not_called()
+        assert app.state.config_store.read_model(original["sie_id"]) == disk_yaml
+        assert app.state.model_registry.get_full_config(original["sie_id"]) == original
+        assert app.state.config_store.read_epoch() == 1
+        app.state.nats_publisher.publish_config_notification.assert_not_called()
+
+    def test_replacement_does_not_rescue_fallback_from_stored_profiles(
+        self, app_client: tuple[FastAPI, TestClient]
+    ) -> None:
+        app, client = app_client
+        original = _routing_write_config()
+        assert client.post("/v1/configs/models", content=yaml.safe_dump(original)).status_code == 201
+        replacement = copy.deepcopy(original)
+        replacement["profiles"].pop("remote")
+
+        response = client.put("/v1/configs/models/acme/routing", content=yaml.safe_dump(replacement))
+
+        assert response.status_code == 422
+        assert app.state.model_registry.get_full_config(original["sie_id"]) == original
+        assert app.state.config_store.read_epoch() == 1

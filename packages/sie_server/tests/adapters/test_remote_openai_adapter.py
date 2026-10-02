@@ -319,7 +319,8 @@ def test_rerank_sends_one_call_per_request_and_keeps_each_documents_score(
     assert scores == pytest.approx({key: relevance("red apple", text) for key, text in documents.items()}, rel=1e-6)
     assert response.json()["usage"]["input_tokens"] == word_count("red apple", *documents.values())
     [call] = fake_openai.calls
-    assert sorted(call["body"].pop("documents")) == sorted(documents.values())
+    sent_documents = call["body"].pop("documents")
+    assert sorted(sent_documents) == sorted(documents.values())
     assert call["body"] == {"model": UPSTREAM_MODEL, "query": "red apple", "top_n": 3, **OPERATOR_FIELDS}
 
 

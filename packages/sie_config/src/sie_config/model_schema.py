@@ -3,7 +3,8 @@
 ``model_config.schema.json`` is the JSON Schema of the worker's
 ``sie_server.config.model.ModelConfig``; a test keeps it equal to the worker
 model. Only unknown keys and value types are enforced: ``required`` is dropped
-because append-only writes carry partial bodies, and cross-field rules stay
+because append-only writes carry partial bodies. The registry separately checks
+routing semantics on the effective configuration; other cross-field rules stay
 with the worker. JSON types apply strictly, so values pydantic's lax mode would
 coerce (a quoted number, a boolean in an integer field) are rejected.
 """

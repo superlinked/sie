@@ -125,6 +125,86 @@ def _resolved_profile_hash_config(
 REMOTE_ADAPTER_MODULE_PREFIX = "sie_server.adapters.remote."
 
 
+def validate_routing_config(config: dict[str, Any]) -> None:
+    """Reject routing a worker cannot serve, without requiring a full append body."""
+    routing = config.get("routing")
+    if routing is None:
+        return
+    if not isinstance(routing, dict):
+        raise ValueError("routing must set a recognized policy")
+    policy = routing.get("policy")
+    if not isinstance(policy, str) or policy not in {"remote_only", "fallback", "threshold"}:
+        raise ValueError("routing must set a recognized policy")
+    if policy == "threshold":
+        raise ValueError("routing policy 'threshold' is not available yet")
+
+    threshold_fields = ("wake_above", "sleep_below", "window_s", "cooldown_s")
+    if policy == "remote_only":
+        if any(routing.get(key) is not None for key in ("fallback_profile", "triggers", *threshold_fields)):
+            raise ValueError("routing policy 'remote_only' takes no other policy field")
+        if not config.get("remote_backed"):
+            raise ValueError("routing policy 'remote_only' requires 'remote_backed: true'")
+        if any(config.get(key) is not None for key in ("hf_id", "weights_path", "hf_revision")) or config.get(
+            "package_backed"
+        ):
+            raise ValueError("a 'remote_backed' model must not declare local weights")
+    else:
+        if config.get("remote_backed"):
+            raise ValueError("a 'remote_backed' model cannot use routing policy 'fallback'")
+        if any(routing.get(key) is not None for key in threshold_fields):
+            raise ValueError("routing policy 'fallback' takes no threshold field")
+        triggers = routing.get("triggers")
+        if triggers is not None:
+            allowed = {"provisioning", "model_loading", "saturated", "unhealthy"}
+            if not isinstance(triggers, list | tuple) or not triggers:
+                raise ValueError("routing.triggers must name at least one trigger; omit it for the default")
+            if any(not isinstance(trigger, str) or trigger not in allowed for trigger in triggers):
+                raise ValueError("routing.triggers contains an unsupported trigger")
+            if len(set(triggers)) != len(triggers):
+                raise ValueError("routing.triggers must not repeat a trigger")
+        tasks = config.get("tasks") or {}
+        if not isinstance(tasks, dict):
+            raise ValueError("routing tasks must be a mapping")
+        if any(tasks.get(task) is not None for task in ("encode", "score")):
+            raise ValueError(
+                "routing policy 'fallback' cannot serve encode or score until remote equivalence is proven"
+            )
+
+    profiles = config.get("profiles") or {}
+    if not isinstance(profiles, dict):
+        raise ValueError("routing profiles must be mappings")
+    adapters: dict[str, object] = {}
+    for name, profile in profiles.items():
+        if not isinstance(profile, dict):
+            raise ValueError("routing profiles must be mappings")
+        parent_name = profile.get("extends")
+        if parent_name is not None:
+            parent = profiles.get(parent_name)
+            if not isinstance(parent, dict):
+                raise ValueError("routing profiles must extend a defined parent")
+            if parent.get("extends") is not None:
+                raise ValueError("routing profiles must not use chained or cyclic inheritance")
+        resolved = _resolved_profile_hash_config(profiles, name)
+        if resolved is None:
+            raise ValueError("routing profile inheritance cannot be resolved")
+        adapters[name] = resolved["adapter_path"]
+
+    remote = {
+        name
+        for name, adapter in adapters.items()
+        if isinstance(adapter, str) and adapter.startswith(REMOTE_ADAPTER_MODULE_PREFIX)
+    }
+    if policy == "remote_only":
+        if not profiles or remote != set(profiles):
+            raise ValueError("every profile of a 'remote_backed' model must use a remote adapter")
+    else:
+        if "default" not in profiles or "default" in remote:
+            raise ValueError("routing policy 'fallback' needs a local 'default' profile")
+        fallback = routing.get("fallback_profile")
+        if not isinstance(fallback, str) or fallback == "default" or fallback not in remote:
+            raise ValueError("routing.fallback_profile must name a non-default remote profile")
+
+
 def undeclared_upstreams(profiles: dict, profile_names: Iterable[str], declared: frozenset[str]) -> dict[str, object]:
     """Map each named remote profile whose upstream is not in ``declared`` to the upstream it names.
 
@@ -1216,6 +1296,17 @@ class ModelRegistry:
         else:
             created_profiles = list(profiles.keys())  # type: ignore
 
+        stored_config = self._model_full_configs.get(sie_id, {})
+        effective_config = {**config, **stored_config}
+        effective_profiles = dict(effective_config.get("profiles") or {})
+        effective_profiles.update({name: profiles[name] for name in created_profiles})
+        effective_config["profiles"] = effective_profiles
+        metadata_conflict = any(
+            key != "profiles" and key in stored_config and stored_config[key] != value for key, value in config.items()
+        )
+        if not metadata_conflict:
+            validate_routing_config(effective_config)
+
         # Compute the post-apply adapter set so bundle mappings reflect
         # the hypothetical new state. This is a pure computation on a
         # local copy — no self._* mutation.
@@ -1324,6 +1415,8 @@ class ModelRegistry:
             new_full_config["profiles"] = merged_profiles_full
             if "sie_id" not in new_full_config:
                 new_full_config["sie_id"] = sie_id
+
+            validate_routing_config(new_full_config)
 
             new_adapter_modules_set = _adapter_modules_for_profiles(merged_profiles_full)
             route_adapter_modules = _base_route_adapter_modules(merged_profiles_full)
@@ -1485,6 +1578,8 @@ class ModelRegistry:
         if unroutable:
             msg = f"Adapter(s) not in any known bundle: {', '.join(sorted(unroutable))}"
             raise ValueError(msg)
+
+        validate_routing_config(config)
 
     def validate_model_config_replacement(self, config: dict) -> None:
         """Validate a wholesale replacement without mutating registry state."""
