@@ -1390,7 +1390,15 @@ Args (dict): cidr, field.
 {{- end -}}
 {{- $parts := regexSplit "[./]" .cidr -1 -}}
 {{- $ip := add (mul (atoi (index $parts 0)) 16777216) (mul (atoi (index $parts 1)) 65536) (mul (atoi (index $parts 2)) 256) (atoi (index $parts 3)) -}}
-{{- dict "ip" $ip "prefix" (atoi (index $parts 4)) | toJson -}}
+{{- $prefix := atoi (index $parts 4) -}}
+{{- $scale := 1 -}}
+{{- range until (int (sub 32 $prefix)) -}}
+{{- $scale = mul $scale 2 -}}
+{{- end -}}
+{{- if ne (mod $ip $scale) 0 -}}
+{{- fail (printf "%s must be an IPv4 CIDR with a network address" .field) -}}
+{{- end -}}
+{{- dict "ip" $ip "prefix" $prefix | toJson -}}
 {{- end }}
 
 {{/*
@@ -1406,8 +1414,8 @@ hextets; :: must compress at least one. Args (dict): cidr, field.
 {{- $address := first $cidrParts -}}
 {{- if contains "." $address -}}
 {{- $tail := last (splitList ":" $address) -}}
-{{- $_ := include "sie-cluster.cidr.ipv4" (dict "cidr" (printf "%s/32" $tail) "field" $field) -}}
-{{- $address = printf "%sffff:ffff" (trimSuffix $tail $address) -}}
+{{- $v4 := include "sie-cluster.cidr.ipv4" (dict "cidr" (printf "%s/32" $tail) "field" $field) | fromJson -}}
+{{- $address = printf "%s%x:%x" (trimSuffix $tail $address) (int (div (int64 $v4.ip) 65536)) (int (mod (int64 $v4.ip) 65536)) -}}
 {{- end -}}
 {{- $parts := splitList "::" $address -}}
 {{- $groups := list -}}
@@ -1424,7 +1432,37 @@ hextets; :: must compress at least one. Args (dict): cidr, field.
 {{- if not (or (and (eq (len $parts) 1) (eq (len $groups) 8)) (and (eq (len $parts) 2) (lt (len $groups) 8))) -}}
 {{- fail (printf "%s must be an IPv6 CIDR" $field) -}}
 {{- end -}}
-{{- dict "prefix" (atoi (last $cidrParts)) | toJson -}}
+{{- if eq (len $parts) 2 -}}
+{{- $expanded := regexFindAll "[0-9A-Fa-f]+" (first $parts) -1 -}}
+{{- range until (int (sub 8 (len $groups))) -}}
+{{- $expanded = append $expanded "0" -}}
+{{- end -}}
+{{- $groups = concat $expanded (regexFindAll "[0-9A-Fa-f]+" (last $parts) -1) -}}
+{{- end -}}
+{{- $digits := dict "0" 0 "1" 1 "2" 2 "3" 3 "4" 4 "5" 5 "6" 6 "7" 7 "8" 8 "9" 9 "a" 10 "b" 11 "c" 12 "d" 13 "e" 14 "f" 15 -}}
+{{- $values := list -}}
+{{- range $group := $groups -}}
+{{- $value := 0 -}}
+{{- range $digit := splitList "" (lower $group) -}}
+{{- $value = add (mul $value 16) (get $digits $digit) -}}
+{{- end -}}
+{{- $values = append $values $value -}}
+{{- end -}}
+{{- if and (eq (index $values 0) 0) (eq (index $values 1) 0) (eq (index $values 2) 0) (eq (index $values 3) 0) (eq (index $values 4) 0) (eq (index $values 5) 65535) -}}
+{{- fail (printf "%s must be an IPv6 CIDR without an IPv4-mapped address" $field) -}}
+{{- end -}}
+{{- $prefix := atoi (last $cidrParts) -}}
+{{- range $index, $value := $values -}}
+{{- $bits := max 0 (min 16 (sub $prefix (mul $index 16))) -}}
+{{- $scale := 1 -}}
+{{- range until (int (sub 16 $bits)) -}}
+{{- $scale = mul $scale 2 -}}
+{{- end -}}
+{{- if ne (mod $value $scale) 0 -}}
+{{- fail (printf "%s must be an IPv6 CIDR with a network address" $field) -}}
+{{- end -}}
+{{- end -}}
+{{- dict "prefix" $prefix | toJson -}}
 {{- end }}
 
 {{/*

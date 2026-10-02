@@ -862,7 +862,9 @@ NetworkPolicy.
   (fe80::/10), and the NAT64 prefixes (64:ff9b::/96, 64:ff9b:1::/48). Add more
   with `extraDeniedCidrs`. Each IPv4 entry of `allowedCidrs` excludes the denied
   ranges inside it, an entry inside a denied range fails the render, and the
-  only IPv6 entry is `::/0`.
+  only IPv6 entry is `::/0`. A denial equal to an allowed range also fails.
+  Every CIDR must use its network address; IPv4-mapped IPv6 addresses are
+  rejected because Kubernetes treats them as IPv4.
 
 **What the policy does not do.** NetworkPolicy matches addresses and ports, not
 host names. The remote lanes can reach any address outside the denied ranges on

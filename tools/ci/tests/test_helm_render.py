@@ -2419,7 +2419,7 @@ def test_remote_policy_rejects_invalid_cidrs(tmp_path: Path, cidr: str, surface:
     assert "CIDR" in result.stderr
 
 
-@pytest.mark.parametrize("cidr", ["::/128", "2001:db8::/64", "1:2:3:4:5:6:7:8/128", "::ffff:192.0.2.1/128"])
+@pytest.mark.parametrize("cidr", ["::/128", "2001:db8::/64", "1:2:3:4:5:6:7:8/128", "2001:db8::192.0.2.1/128"])
 def test_remote_policy_accepts_valid_ipv6_cidrs(tmp_path: Path, cidr: str) -> None:
     values = remote_pool_values()
     values["workers"]["remote"] = {
@@ -2432,3 +2432,47 @@ def test_remote_policy_accepts_valid_ipv6_cidrs(tmp_path: Path, cidr: str) -> No
     result = render_workers(tmp_path, values)
 
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [
+        {"allowedCidrs": ["10.0.0.0/8"]},
+        {"allowedCidrs": ["10.1.2.3/8"]},
+        {"extraDeniedCidrs": ["0.0.0.0/0"]},
+        {"extraDeniedCidrs": ["::/0"]},
+        {"extraDeniedCidrs": ["0:0:0:0:0:0:0:0/0"]},
+        {"allowedCidrs": ["192.0.2.0/24"], "extraDeniedCidrs": ["192.0.2.32/24"]},
+    ],
+)
+def test_remote_policy_rejects_an_allowed_range_covered_by_a_denial(tmp_path: Path, policy: dict) -> None:
+    values = remote_pool_values()
+    values["workers"]["remote"] = {"networkPolicy": policy}
+    result = render_workers(tmp_path, values)
+    assert result.returncode != 0
+    assert re.search(r"lies inside the denied range|CIDR with a network address", result.stderr)
+
+
+@pytest.mark.parametrize(
+    "cidr",
+    [
+        "::ffff:192.0.2.1/128",
+        "::ffff:c000:201/128",
+        "0:0:0:0:0:FFFF:C000:0201/128",
+        "203.0.113.1/24",
+        "2001:db8::1/64",
+    ],
+)
+@pytest.mark.parametrize("surface", ["extraDeniedCidrs", "extraEgress"])
+def test_remote_policy_rejects_mapped_addresses_and_host_bits(tmp_path: Path, cidr: str, surface: str) -> None:
+    values = remote_pool_values()
+    policy = (
+        {"extraDeniedCidrs": [cidr]}
+        if surface == "extraDeniedCidrs"
+        else {"extraEgress": [{"to": [{"ipBlock": {"cidr": cidr}}], "ports": [{"port": 443}]}]}
+    )
+    values["workers"]["remote"] = {"networkPolicy": policy}
+    result = render_workers(tmp_path, values)
+    assert result.returncode != 0
+    assert surface in result.stderr
+    assert "CIDR" in result.stderr

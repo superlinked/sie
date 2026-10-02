@@ -32,16 +32,22 @@
 {{- if ne $cidr "::/0" }}
 {{- fail (printf "%s: the only IPv6 entry is ::/0, which carries every denied IPv6 range as an exception. Admit a narrower IPv6 destination with extraEgress." $field) }}
 {{- end }}
+{{- range $deniedCidr := $deniedV6 }}
+{{- $denied := include "sie-cluster.cidr.ipv6" (dict "cidr" $deniedCidr "field" "a denied range") | fromJson }}
+{{- if eq (int $denied.prefix) 0 }}
+{{- fail (printf "%s lies inside the denied range %s. Admit a private destination with extraEgress." $field $deniedCidr) }}
+{{- end }}
+{{- end }}
 {{- $allowed = append $allowed (dict "cidr" $cidr "except" $deniedV6) }}
 {{- else }}
 {{- $block := include "sie-cluster.cidr.ipv4" (dict "cidr" $cidr "field" $field) | fromJson }}
 {{- $except := list }}
 {{- range $deniedCidr := $deniedV4 }}
 {{- $denied := include "sie-cluster.cidr.ipv4" (dict "cidr" $deniedCidr "field" "a denied range") | fromJson }}
-{{- if eq (include "sie-cluster.cidr.ipv4Within" (dict "inner" $denied "outer" $block)) "true" }}
-{{- $except = append $except $deniedCidr }}
-{{- else if eq (include "sie-cluster.cidr.ipv4Within" (dict "inner" $block "outer" $denied)) "true" }}
+{{- if eq (include "sie-cluster.cidr.ipv4Within" (dict "inner" $block "outer" $denied)) "true" }}
 {{- fail (printf "%s lies inside the denied range %s. Admit a private destination with extraEgress." $field $deniedCidr) }}
+{{- else if eq (include "sie-cluster.cidr.ipv4Within" (dict "inner" $denied "outer" $block)) "true" }}
+{{- $except = append $except $deniedCidr }}
 {{- end }}
 {{- end }}
 {{- $allowed = append $allowed (dict "cidr" $cidr "except" $except) }}

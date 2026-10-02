@@ -934,7 +934,8 @@ workers:
       # remove: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10,
       # 169.254.0.0/16, 168.63.129.16/32, fc00::/7, fe80::/10, 64:ff9b::/96 and
       # 64:ff9b:1::/48. Add your cluster's pod and service ranges if they lie
-      # outside the base, for example global IPv6 pod addresses.
+      # outside the base, for example global IPv6 pod addresses. Every CIDR
+      # must use its network address; IPv4-mapped IPv6 addresses are rejected.
       extraDeniedCidrs: []
       # -- The cluster resolver the remote lanes may query on port 53. The
       # default is the kube-dns pods most distributions run. Add NodeLocal
