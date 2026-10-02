@@ -1996,3 +1996,25 @@ def test_the_chart_judges_each_definition_as_the_server_does(tmp_path: Path, cas
     else:
         assert result.returncode != 0
         assert "upstreams.team" in result.stderr
+
+
+@pytest.mark.parametrize("key", [".dockerconfigjson", ".dockercfg"])
+def test_image_pull_credentials_cannot_be_sent_to_an_upstream(tmp_path: Path, key: str) -> None:
+    values = remote_pool_values()
+    values["global"] = {"imagePullSecrets": ["registry-credentials"]}
+    values["upstreams"] = {"team": upstream(api_key_secret={"name": "registry-credentials", "key": key})}
+
+    result = render_workers(tmp_path, values)
+
+    assert result.returncode != 0
+    assert "global.imagePullSecrets name the same Secret key" in result.stderr
+
+
+def test_an_image_pull_secret_may_hold_a_separate_upstream_key(tmp_path: Path) -> None:
+    values = remote_pool_values()
+    values["global"] = {"imagePullSecrets": ["registry-credentials"]}
+    values["upstreams"] = {"team": upstream(api_key_secret={"name": "registry-credentials", "key": "upstream-key"})}
+
+    result = render_workers(tmp_path, values)
+
+    assert result.returncode == 0, result.stderr

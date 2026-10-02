@@ -1570,6 +1570,11 @@ credential pasted as a key would otherwise be printed.
 {{- with include "sie-cluster.config.adminTokenSecretName" $root -}}
 {{- $chartSecretKeys = append $chartSecretKeys (dict "owner" "the sie-config admin token" "ref" (printf "%s/%s" . (include "sie-cluster.config.adminTokenSecretKey" $root))) -}}
 {{- end -}}
+{{- range $secretName := $root.Values.global.imagePullSecrets -}}
+{{- range $key := list ".dockerconfigjson" ".dockercfg" -}}
+{{- $chartSecretKeys = append $chartSecretKeys (dict "owner" "global.imagePullSecrets" "ref" (printf "%s/%s" $secretName $key)) -}}
+{{- end -}}
+{{- end -}}
 {{- $oauthSecret := $root.Values.auth.oauth2Proxy.secret -}}
 {{- with $oauthSecret.name -}}
 {{- $secretName := . -}}
