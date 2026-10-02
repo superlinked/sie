@@ -1796,7 +1796,13 @@ class ModelRegistry:
             return True
         if name in self._loading or self.is_failed(name):
             return False
-        return await self._load_recording_failure(name, device)
+        # Claim before the first await, as background loads do, so callers
+        # waiting for a config update cannot queue duplicate inline loads.
+        self._loading.add(name)
+        try:
+            return await self._load_recording_failure(name, device)
+        finally:
+            self._loading.discard(name)
 
     async def _load_recording_failure(self, name: str, device: str) -> bool:
         """Run ``load_async``, clearing a recorded failure on success and recording one on failure."""

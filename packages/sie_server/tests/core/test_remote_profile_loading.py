@@ -363,3 +363,52 @@ async def test_remote_lifecycle_keeps_configured_device_accounting(device: str, 
                     assert registry._resolve_load_device("cuda") == "cuda:1"
         finally:
             await registry.unload_all_async()
+
+
+async def test_concurrent_inline_loads_do_not_retry_a_recorded_failure(tmp_path: Path) -> None:
+    registry = registry_for(tmp_path, model_config("acme/local"))
+    name = "acme/local:remote"
+    loader = AsyncMock(side_effect=RuntimeError("remote load failed"))
+
+    async def inline_load(started: asyncio.Event) -> bool:
+        started.set()
+        return await registry.load_now(name, "cpu")
+
+    with patch.object(registry._loader, "load_remote_async", loader):
+        try:
+            async with registry._get_config_update_lock():
+                first_started, second_started = asyncio.Event(), asyncio.Event()
+                first = asyncio.create_task(inline_load(first_started))
+                await first_started.wait()
+                second = asyncio.create_task(inline_load(second_started))
+                await second_started.wait()
+            assert await asyncio.wait_for(asyncio.gather(first, second), TIMEOUT_S) == [False, False]
+            assert loader.await_count == 1
+            assert registry.get_failure(name).attempts == 1
+            assert not registry.is_loading(name)
+        finally:
+            await registry.unload_all_async()
+
+
+async def test_cancelled_inline_load_clears_its_loading_claim(tmp_path: Path) -> None:
+    registry = registry_for(tmp_path, model_config("acme/local"))
+    name = "acme/local:remote"
+    started = asyncio.Event()
+
+    async def inline_load() -> bool:
+        started.set()
+        return await registry.load_now(name, "cpu")
+
+    try:
+        async with registry._get_config_update_lock():
+            task = asyncio.create_task(inline_load())
+            await started.wait()
+            assert registry.is_loading(name)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        assert not registry.is_loading(name)
+        assert registry.get_failure(name) is None
+        assert await registry.load_now(name, "cpu")
+    finally:
+        await registry.unload_all_async()
