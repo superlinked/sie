@@ -264,6 +264,8 @@ export interface ModelCapabilities {
 export interface ProfileInfo {
   /** Whether this profile is served for a bare (un-suffixed) model id */
   is_default?: boolean;
+  /** Immutable local-profile digest; absent/null when it cannot be identified. */
+  identity?: string | null;
 }
 
 /**

@@ -310,6 +310,8 @@ class ProfileInfo(TypedDict, total=False):
     """
 
     is_default: bool
+    identity: str | None
+    """Versioned immutable local-profile digest; absent/null when it cannot be identified."""
 
 
 class ModelLoadError(TypedDict, total=False):

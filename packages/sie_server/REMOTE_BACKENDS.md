@@ -173,3 +173,22 @@ host allowlist when you need to restrict traffic to declared hosts.
 
 See [Moving to self-hosted serving](MIGRATING_TO_SELF_HOSTED.md) for a migration
 that keeps the application model name stable.
+
+## Local profile identity
+
+The single-node model detail and catalog responses include
+`profiles.<name>.identity`, a versioned digest or `null`. Version 1 conservatively
+identifies revision-pinned native BGE-M3 profiles. It includes model/tokenizer pins,
+resolved profile settings, engine configuration, device/platform, serving
+Python sources, installed inference-library versions and current Torch
+precision/determinism settings. Alias names and
+inheritance do not change a profile with identical resolved settings.
+
+Local weight paths, mutable revisions, custom/checkpoint code, child engines,
+unidentified precision and LoRA-bearing models report `null`. SentenceTransformers
+and CrossEncoder require verified checkpoint module metadata: disabling
+`trust_remote_code` alone does not identify installed checkpoint-selected code. FlagEmbedding
+BGE-M3 cannot identify its effective revision; flash/LoRA and other engines need
+additional runtime evidence. An identity is a descriptor, not a numerical
+measurement. Hybrid routing remains refused until upstream comparison and
+measured equivalence gates are delivered; this field alone does not activate it.

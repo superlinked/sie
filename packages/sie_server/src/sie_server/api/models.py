@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 from sie_server.config.model import ModelConfig, RoutingPolicy, is_remote_adapter_path
 from sie_server.config.upstreams import installed_upstreams
 from sie_server.core.model_suggestions import suggestion_suffix
+from sie_server.core.profile_identity import local_profile_identity
 from sie_server.types.responses import ErrorCode
 
 if TYPE_CHECKING:
@@ -23,6 +24,8 @@ class ProfileInfo(BaseModel):
     """Information about a profile."""
 
     is_default: bool = False
+    identity: str | None = None
+    """Versioned immutable local-profile digest, or None when it cannot be identified."""
 
 
 class ModelLoadError(BaseModel):
@@ -218,6 +221,9 @@ async def list_models(http_request: Request) -> ModelsListResponse:
         profiles = {
             pname: ProfileInfo(
                 is_default=(pname == "default"),
+                identity=local_profile_identity(
+                    config, pname, device=registry.device, engine_config=registry.engine_config
+                ),
             )
             for pname in config.profiles
         }
@@ -274,6 +280,9 @@ async def get_model(model: str, http_request: Request) -> ModelInfo:
     profiles = {
         pname: ProfileInfo(
             is_default=(pname == "default"),
+            identity=local_profile_identity(
+                config, pname, device=registry.device, engine_config=registry.engine_config
+            ),
         )
         for pname in config.profiles
     }

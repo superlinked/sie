@@ -385,3 +385,34 @@ class TestModelRevisionField:
         by_name = {m["name"]: m for m in rev_client.get("/v1/models").json()["models"]}
         assert by_name["pinned"]["revision"] == self._SHA
         assert by_name["unpinned"]["revision"] is None
+
+
+def test_pinned_builtin_profile_exposes_same_identity_in_list_and_detail(
+    client: TestClient,
+    mock_registry: MagicMock,
+) -> None:
+    model = _make_config(
+        "model-a",
+        "weights/model",
+        dense_dim=1024,
+        adapter_path="sie_server.adapters.bge_m3:BGEM3Adapter",
+    )
+    data = model.model_dump()
+    data["hf_revision"] = "a" * 40
+    data["profiles"]["default"]["compute_precision"] = "float32"
+    data["profiles"]["default"]["adapter_options"] = {"loadtime": {"trust_remote_code": False}}
+    model = ModelConfig.model_validate(data)
+    mock_registry.device = "cpu"
+    mock_registry.engine_config = None
+    mock_registry.get_config = lambda _name: model
+    detail = client.get("/v1/models/model-a").json()
+    listed = client.get("/v1/models").json()["models"][0]
+    value = detail["profiles"]["default"]["identity"]
+    assert value.startswith("v1:sha256:")
+    assert len(value) == len("v1:sha256:") + 64
+    assert listed["profiles"]["default"]["identity"] == value
+    assert "adapter_options" not in detail["profiles"]["default"]
+
+
+def test_unpinned_profile_reports_no_identity(client: TestClient) -> None:
+    assert client.get("/v1/models/model-a").json()["profiles"]["default"]["identity"] is None

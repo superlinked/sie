@@ -2417,6 +2417,17 @@
             "type": "boolean",
             "title": "Is Default",
             "default": false
+          },
+          "identity": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Identity"
           }
         },
         "type": "object",
