@@ -24,7 +24,7 @@ import numpy as np
 import yaml
 from sie_sdk import SIEClient
 from sie_sdk.client.errors import RequestError, SIEError
-from sie_sdk.types import Item
+from sie_sdk.types import DEFAULT_OUTPUT_DTYPE, Item
 from sie_server.config.equivalence import (
     EquivalenceRecord,
     ProbeCase,
@@ -42,6 +42,7 @@ from sie_server.core.tokenizer import load_tokenizer
 _MAX_CONFIG_BYTES = 1 << 20
 _MAX_CONTEXT = 32_768
 _MIN_CONTEXT = 2
+_HASH_LENGTH = 64
 _MATRIX_NDIM = 2
 _PREFIX = "Represent this text for retrieval:"
 _SCORE_QUERY = "relevant documents for search"
@@ -56,8 +57,11 @@ class _Case:
     is_query: bool = False
 
 
-def _cases(tokenizer: Any, context: int) -> list[_Case]:
-    def count(text: str) -> int:
+def _cases(tokenizer: Any, context: int, *, default_instruction: str | None = None) -> list[_Case]:
+    def count(text: str, instruction: str | None = None) -> int:
+        prefix = default_instruction if instruction is None else instruction
+        if prefix is not None:
+            text = f"{prefix} {text}"
         return len(tokenizer.encode(text, add_special_tokens=True))
 
     # Binary-search a deterministic synthetic text. Use the actual pinned
@@ -83,6 +87,8 @@ def _cases(tokenizer: Any, context: int) -> list[_Case]:
         ("boundary_before", (before,), None, False),
         ("boundary_after", (after,), None, False),
         ("query_prefix", (short,), _PREFIX, True),
+        ("query_default", (short,), None, True),
+        ("empty_prefix", (short,), "", False),
         ("document_prefix", (f"{_PREFIX} {short}",), None, False),
         (
             "score_scale",
@@ -97,7 +103,7 @@ def _cases(tokenizer: Any, context: int) -> list[_Case]:
         ),
     ]
     result = [
-        _Case(category, texts, tuple(count(text) for text in texts), instruction, is_query)
+        _Case(category, texts, tuple(count(text, instruction) for text in texts), instruction, is_query)
         for category, texts, instruction, is_query in requests
     ]
     if result[2].token_counts[0] > context or result[3].token_counts[0] <= context:
@@ -171,9 +177,10 @@ def _request(
     *,
     profile: str,
     upstream: str,
+    local_instance: str,
 ) -> tuple[str, Any]:
     common: dict[str, Any] = {
-        "options": {"profile": profile},
+        "options": {**config.resolve_profile("default").runtime, "profile": profile},
         "instruction": case.instruction,
         "wait_for_capacity": False,
         "provision_timeout_s": 60.0,
@@ -190,7 +197,12 @@ def _request(
             rows = [result]
         else:
             result = client.encode(
-                config.sie_id, items, output_types=cast("Any", sorted(outputs)), is_query=case.is_query, **common
+                config.sie_id,
+                items,
+                output_types=cast("Any", sorted(outputs)),
+                output_dtype=DEFAULT_OUTPUT_DTYPE,
+                is_query=case.is_query,
+                **common,
             )
             rows = cast("list[Any]", result)
         if not isinstance(rows, list) or len(rows) != (1 if operation == "score" else len(items)):
@@ -200,8 +212,12 @@ def _request(
             expected = "local" if profile == "default" else "remote"
             if evidence.get("served_by") != expected or (expected == "remote" and evidence.get("upstream") != upstream):
                 raise ValueError("probe serving provenance is missing or differs")
+            if evidence.get("runtime_instance_id") != local_instance:
+                raise ValueError("probe serving runtime instance differs")
         return "ok", result
     except RequestError as error:
+        if (error.request or {}).get("runtime_instance_id") != local_instance:
+            raise ValueError("probe refusal runtime instance differs") from None
         code = (error.code or "").upper()
         if error.status_code == HTTPStatus.BAD_REQUEST and code in ("INVALID_INPUT", "INPUT_TOO_LONG"):
             return "input_too_long" if code == "INPUT_TOO_LONG" else "invalid_input", None
@@ -218,10 +234,22 @@ def run_probe(
     resolved = config.resolve_profile(profile)
     if profile == "default" or not is_remote_adapter_path(resolved.adapter_path):
         raise ValueError("probe requires an explicit remote profile")
+    if resolved.runtime.keys() - config.resolve_profile("default").runtime.keys():
+        raise ValueError("remote profile adds runtime defaults absent from the fallback contract")
+    default_runtime = config.resolve_profile("default").runtime
+    if default_runtime.get("output_dtype", DEFAULT_OUTPUT_DTYPE) != DEFAULT_OUTPUT_DTYPE:
+        raise ValueError("probe requires the default float32 output dtype")
     upstream_name, upstream_model = resolved.loadtime["upstream"], resolved.loadtime["upstream_model"]
     upstream = upstreams[upstream_name]
     before = local.get_model(config.sie_id)
     identity = (before.get("profiles") or {}).get("default", {}).get("identity")
+    local_instance = (before.get("profiles") or {}).get("default", {}).get("runtime_instance_id")
+    if (
+        not isinstance(local_instance, str)
+        or len(local_instance) != _HASH_LENGTH
+        or any(char not in "0123456789abcdef" for char in local_instance)
+    ):
+        raise ValueError("probe requires a direct worker runtime instance")
     expected_remote = remote_profile_contract_digest(config, profile, upstreams)
     if (
         expected_remote is None
@@ -241,11 +269,22 @@ def run_probe(
         selected_outputs = {output for output in outputs if (output == "score") == (operation == "score")}
         if not selected_outputs:
             continue
-        for case in _cases(tokenizer, config.max_sequence_length):
+        for case in _cases(
+            tokenizer, config.max_sequence_length, default_instruction=default_runtime.get("instruction")
+        ):
             if operation == "encode" and case.category == "score_scale":
                 continue
             observations = [
-                _request(client, config, case, operation, selected_outputs, profile=selected, upstream=upstream_name)
+                _request(
+                    client,
+                    config,
+                    case,
+                    operation,
+                    selected_outputs,
+                    profile=selected,
+                    upstream=upstream_name,
+                    local_instance=local_instance,
+                )
                 for client, selected in ((local, "default"), (local, "default"), (remote, profile))
             ]
             outcomes = tuple(observation[0] for observation in observations)
@@ -284,9 +323,11 @@ def run_probe(
                 )
             )
     after = local.get_model(config.sie_id)
-    if (after.get("profiles") or {}).get("default", {}).get("identity") != identity or (
-        after.get("profiles") or {}
-    ).get(profile, {}).get("remote_contract_sha256") != expected_remote:
+    if (
+        (after.get("profiles") or {}).get("default", {}).get("runtime_instance_id") != local_instance
+        or (after.get("profiles") or {}).get("default", {}).get("identity") != identity
+        or (after.get("profiles") or {}).get(profile, {}).get("remote_contract_sha256") != expected_remote
+    ):
         raise ValueError("local execution changed during the probe")
     return EquivalenceRecord(
         measured_at=datetime.now(UTC),
@@ -299,6 +340,9 @@ def run_probe(
         ),
         remote_contract_sha256=expected_remote,
         local_observation_sha256=canonical_digest({"identity": identity, "revision": before.get("revision")}),
+        runtime_options_sha256=canonical_digest(dict(config.resolve_profile("default").runtime)),
+        output_dtype="float32",
+        local_instance_id=local_instance,
         local_identity=identity,
         model=config.sie_id,
         remote_profile=profile,

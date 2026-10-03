@@ -50,6 +50,8 @@ _PARAM_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
 _MAX_PARAMS = 32
 _MAX_PARAM_DEPTH = 8
 _MAX_SET_PARAMS_BYTES = 16 << 10
+_MAX_EQUIVALENCE_MODEL_LENGTH = 256
+_MAX_EQUIVALENCE_PATH_LENGTH = 4096
 
 RESERVED_UPSTREAM_PARAMS = frozenset(
     {
@@ -247,6 +249,31 @@ class Breaker(BaseModel):
     cooldown_s: float = Field(default=60.0, gt=0, le=3600)
 
 
+class EquivalencePolicy(BaseModel):
+    """Operator-owned records for hybrid embedding/scoring admission."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+
+    max_age_s: int = Field(gt=0, le=86400, strict=True)
+    record_files: dict[str, str] = Field(min_length=1, max_length=256)
+
+    @field_validator("record_files")
+    @classmethod
+    def _record_files(cls, value: dict[str, str]) -> dict[str, str]:
+        if any(
+            not name
+            or len(name) > _MAX_EQUIVALENCE_MODEL_LENGTH
+            or not path
+            or len(path) > _MAX_EQUIVALENCE_PATH_LENGTH
+            or not Path(path).is_absolute()
+            for name, path in value.items()
+        ):
+            raise UpstreamConfigError(
+                "equivalence record names must be bounded; file paths must be bounded and absolute"
+            )
+        return value
+
+
 class Upstream(BaseModel):
     """One named upstream from the startup configuration."""
 
@@ -266,6 +293,8 @@ class Upstream(BaseModel):
     """For kind ``openai``: request fields added to every call, in place of any value the server sends."""
     strip_params: frozenset[str] = frozenset()
     """For kind ``openai``: request fields removed from every call."""
+    equivalence: EquivalencePolicy | None = Field(default=None, repr=False)
+    """For kind ``openai``: local files containing exact-model measured evidence."""
 
     @field_validator("base_url")
     @classmethod
@@ -327,6 +356,8 @@ class Upstream(BaseModel):
     @model_validator(mode="after")
     def _openai_fields(self) -> Upstream:
         if self.kind is UpstreamKind.SIE:
+            if self.equivalence is not None:
+                raise UpstreamConfigError("kind sie uses immutable identity, not OpenAI equivalence records")
             declared = [name for name in ("endpoints", "set_params", "strip_params") if getattr(self, name)]
             if declared:
                 raise UpstreamConfigError(f"kind sie takes no {' or '.join(declared)}")

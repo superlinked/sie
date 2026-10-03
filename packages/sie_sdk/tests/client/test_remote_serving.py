@@ -190,7 +190,13 @@ def test_a_local_refusal_after_a_failed_remote_attempt_carries_both_outcomes() -
         ("X-SIE-Fallback-Reason", "sometimes"),
         ("X-SIE-Fallback-Error", "not a code"),
         ("X-SIE-Fallback-Error", "1CODE"),
+        ("X-SIE-Runtime-Instance", "A" * 64),
+        ("X-SIE-Runtime-Instance", "a" * 65),
     ],
 )
 def test_a_disclosure_value_outside_its_contract_is_dropped(header: str, value: str) -> None:
     assert parse_request_metadata({header: value}) is None
+
+
+def test_worker_instance_provenance_survives_sdk_metadata_parsing() -> None:
+    assert parse_request_metadata({"X-SIE-Runtime-Instance": "a" * 64}) == {"runtime_instance_id": "a" * 64}

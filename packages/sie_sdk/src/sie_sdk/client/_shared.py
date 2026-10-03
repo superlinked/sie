@@ -1073,6 +1073,9 @@ def parse_request_metadata(headers: Any, body: Any = None) -> RequestMetadata | 
         metadata["execution_binding_sha256"] = execution_binding_sha256
 
     served_by = _header_value(headers, SERVED_BY_HEADER)
+    runtime_instance = _header_value(headers, "X-SIE-Runtime-Instance")
+    if isinstance(runtime_instance, str) and re.fullmatch(r"[0-9a-f]{64}", runtime_instance):
+        metadata["runtime_instance_id"] = runtime_instance
     if isinstance(served_by, str) and served_by in SERVED_BY_VALUES:
         metadata["served_by"] = served_by
     upstream = _header_value(headers, UPSTREAM_HEADER)

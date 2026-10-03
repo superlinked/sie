@@ -18,6 +18,7 @@ from sie_server.config.equivalence import (
     EquivalenceRecord,
     ErrorMeasurement,
     ProbeCase,
+    canonical_digest,
     measure_values,
     remote_profile_contract_digest,
 )
@@ -40,7 +41,16 @@ def record(*, outputs: frozenset[str] = frozenset({"dense"})) -> EquivalenceReco
         selected = {value for value in outputs if (value == "score") == (operation == "score")}
         if not selected:
             continue
-        categories = ["short", "long", "boundary_before", "boundary_after", "query_prefix", "document_prefix"]
+        categories = [
+            "short",
+            "long",
+            "boundary_before",
+            "boundary_after",
+            "query_prefix",
+            "query_default",
+            "empty_prefix",
+            "document_prefix",
+        ]
         if operation == "score":
             categories.append("score_scale")
         for category in categories:
@@ -59,7 +69,7 @@ def record(*, outputs: frozenset[str] = frozenset({"dense"})) -> EquivalenceReco
     return EquivalenceRecord.model_validate_json(
         json.dumps(
             {
-                "version": 1,
+                "version": 2,
                 "measured_at": NOW.isoformat(),
                 "upstream_name": "upstream",
                 "upstream_model": "vendor/model",
@@ -68,6 +78,9 @@ def record(*, outputs: frozenset[str] = frozenset({"dense"})) -> EquivalenceReco
                 "probe_sources_sha256": "d" * 64,
                 "remote_contract_sha256": "d" * 64,
                 "local_observation_sha256": "e" * 64,
+                "runtime_options_sha256": "f" * 64,
+                "output_dtype": "float32",
+                "local_instance_id": "a" * 64,
                 "local_identity": "v1:sha256:" + "f" * 64,
                 "model": "local/model",
                 "remote_profile": "remote",
@@ -179,9 +192,16 @@ class _Tokenizer:
         return [1] * (len(text.split()) + (2 if add_special_tokens else 0))
 
 
-@pytest.mark.parametrize(("remote_offset", "contract_mismatch"), [(0.0, False), (0.01, False), (0.0, True)])
+@pytest.mark.parametrize(
+    ("remote_offset", "contract_mismatch", "instance_mismatch"),
+    [(0.0, False, None), (0.01, False, None), (0.0, True, None), (0.0, False, "local"), (0.0, False, "remote")],
+)
 def test_full_cli_runs_real_sdk_transport_and_only_writes_evidence(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, remote_offset: float, contract_mismatch: bool
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    remote_offset: float,
+    contract_mismatch: bool,
+    instance_mismatch: str | None,
 ) -> None:
     requests: list[tuple[dict[str, Any], bool]] = []
     remote_contract: str | None = None
@@ -195,7 +215,7 @@ def test_full_cli_runs_real_sdk_transport_and_only_writes_evidence(
                         "revision": "a" * 40,
                         "max_sequence_length": 32,
                         "profiles": {
-                            "default": {"identity": "v1:sha256:" + "f" * 64},
+                            "default": {"identity": "v1:sha256:" + "f" * 64, "runtime_instance_id": "a" * 64},
                             "remote": {"remote_contract_sha256": remote_contract},
                         },
                     }
@@ -219,6 +239,8 @@ def test_full_cli_runs_real_sdk_transport_and_only_writes_evidence(
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
             self.send_header("X-SIE-Served-By", "remote" if remote else "local")
+            mismatch = instance_mismatch == ("remote" if remote else "local")
+            self.send_header("X-SIE-Runtime-Instance", ("b" if mismatch else "a") * 64)
             if remote:
                 self.send_header("X-SIE-Upstream", "upstream")
             self.end_headers()
@@ -244,11 +266,14 @@ profiles:
     adapter_path: sie_server.adapters.bge_m3:BGEM3Adapter
     max_batch_tokens: 8192
     compute_precision: float32
+    adapter_options:
+      runtime: {normalize: true}
   remote:
     adapter_path: sie_server.adapters.remote.openai:OpenAIUpstreamAdapter
     max_batch_tokens: 8192
     adapter_options:
       loadtime: {upstream: upstream, upstream_model: vendor/model}
+      runtime: {normalize: false}
 """
     )
     upstream_file = tmp_path / "upstreams.yaml"
@@ -290,17 +315,37 @@ profiles:
         assert not requests
         assert not output.exists()
         return
+    if instance_mismatch:
+        assert result == 2
+        assert len(requests) == (3 if instance_mismatch == "remote" else 1)
+        assert not output.exists()
+        return
     assert result == (0 if remote_offset == 0 else 1)
     evidence = EquivalenceRecord.model_validate_json(output.read_bytes())
     assert evidence.passed == (remote_offset == 0)
-    assert len(requests) == 18
-    assert [forbid for _, forbid in requests] == [True, True, False] * 6
-    assert [body["params"]["options"]["profile"] for body, _ in requests] == ["default", "default", "remote"] * 6
+    assert evidence.version == 2
+    assert evidence.runtime_options_sha256 == canonical_digest({"normalize": True})
+    assert all(body["params"]["options"]["normalize"] is True for body, _ in requests)
+    assert all(body["params"]["output_dtype"] == "float32" for body, _ in requests)
+    assert len(requests) == 24
+    assert [forbid for _, forbid in requests] == [True, True, False] * 8
+    assert [body["params"]["options"]["profile"] for body, _ in requests] == ["default", "default", "remote"] * 8
     serialized = output.read_text()
     assert "retrieval " not in serialized
     assert "Represent this text" not in serialized
     assert 'values"' in serialized  # Measurement count, never vector contents.
     assert "1.01" not in serialized
+
+
+def test_boundary_counts_include_actual_default_and_empty_instructions() -> None:
+    tokenizer = _Tokenizer()
+    cases = probe._cases(tokenizer, 64, default_instruction="profile prefix")
+    for case in cases:
+        prefix = "profile prefix" if case.instruction is None else case.instruction
+        assert case.token_counts == tuple(
+            len(tokenizer.encode(f"{prefix} {text}", add_special_tokens=True)) for text in case.texts
+        )
+    assert cases[2].token_counts[0] <= 64 < cases[3].token_counts[0]
 
 
 def test_sparse_layout_and_score_order_are_compared_by_identity() -> None:

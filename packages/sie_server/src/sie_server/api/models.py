@@ -7,7 +7,7 @@ from sie_server.config.equivalence import remote_profile_contract_digest
 from sie_server.config.model import ModelConfig, RoutingPolicy, is_remote_adapter_path
 from sie_server.config.upstreams import installed_upstreams
 from sie_server.core.model_suggestions import suggestion_suffix
-from sie_server.core.profile_identity import local_profile_identity
+from sie_server.core.profile_identity import local_profile_identity, runtime_instance_id
 from sie_server.types.responses import ErrorCode
 
 if TYPE_CHECKING:
@@ -29,6 +29,8 @@ class ProfileInfo(BaseModel):
     """Versioned immutable local-profile digest, or None when it cannot be identified."""
     remote_contract_sha256: str | None = None
     """Digest binding the model/profile to this server's operator-defined upstream."""
+    runtime_instance_id: str | None = None
+    """Opaque serving-process identity; numerical probe records cannot cross workers or restarts."""
 
 
 class ModelLoadError(BaseModel):
@@ -228,6 +230,9 @@ async def list_models(http_request: Request) -> ModelsListResponse:
                     config, pname, device=registry.device, engine_config=registry.engine_config
                 ),
                 remote_contract_sha256=remote_profile_contract_digest(config, pname, installed_upstreams()),
+                runtime_instance_id=runtime_instance_id()
+                if not is_remote_adapter_path(config.resolve_profile(pname).adapter_path)
+                else None,
             )
             for pname in config.profiles
         }
@@ -288,6 +293,9 @@ async def get_model(model: str, http_request: Request) -> ModelInfo:
                 config, pname, device=registry.device, engine_config=registry.engine_config
             ),
             remote_contract_sha256=remote_profile_contract_digest(config, pname, installed_upstreams()),
+            runtime_instance_id=runtime_instance_id()
+            if not is_remote_adapter_path(config.resolve_profile(pname).adapter_path)
+            else None,
         )
         for pname in config.profiles
     }

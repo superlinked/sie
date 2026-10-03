@@ -21,6 +21,7 @@ from sie_server.api.serialization import MsgPackResponse
 from sie_server.api.validation import validate_machine_profile_header
 from sie_server.config.model import ModelConfig
 from sie_server.core.encode_pipeline import EncodePipeline, resolve_encode_output_types
+from sie_server.core.profile_identity import runtime_instance_id
 from sie_server.core.timing import RequestTiming
 from sie_server.core.worker import QueueFullError
 from sie_server.observability.tracing import tracer
@@ -319,7 +320,14 @@ async def encode(
                 },
             ) from e
 
-        route = await route_request(http_request, model, span, profile=profile_name, queued_items=len(request.items))
+        route = await route_request(
+            http_request,
+            model,
+            span,
+            profile=profile_name,
+            queued_items=len(request.items),
+            request_options={**(request_options or {}), "output_dtype": output_dtype},
+        )
 
         # Check if LoRA is specified and ensure it's loaded
         lora = options.get("lora_id")
@@ -429,4 +437,5 @@ async def encode(
         # Build response headers and return
         headers = ResponseBuilder.build_headers(timing)
         headers.update(route.headers())
+        headers["X-SIE-Runtime-Instance"] = runtime_instance_id()
         return ResponseBuilder.build_response(response, accept, headers, convert_for_json=True)

@@ -19,6 +19,7 @@ from functools import lru_cache
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import numpy as np
 import sie_sdk
@@ -44,6 +45,13 @@ _INFERENCE_DISTRIBUTIONS = (
     "sglang",
     "tensorrt-llm",
 )
+
+_RUNTIME_NONCE = uuid4().hex
+
+
+def runtime_instance_id() -> str:
+    """Opaque process identity; restarts and forks require a fresh local probe."""
+    return hashlib.sha256(f"{os.getpid()}:{_RUNTIME_NONCE}".encode()).hexdigest()
 
 
 # These adapters execute in this Python process and consume the loader's

@@ -10,6 +10,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from sie_server.adapters._generation_base import GenerationAdapter
+from sie_server.config.engine import EngineConfig
+from sie_server.config.hybrid_admission import openai_equivalence_refusal
 from sie_server.config.model import ModelConfig
 from sie_server.core.loader import expand_profile_variants, resolve_adapter_class
 
@@ -67,7 +69,9 @@ def remote_output_refusal(config: ModelConfig) -> str | None:
     )
 
 
-def validate_model_routing(config: ModelConfig) -> None:
+def validate_model_routing(
+    config: ModelConfig, *, device: str | None = None, engine_config: EngineConfig | None = None
+) -> None:
     """Refuse a routing block this server cannot honour. Raises ``ValueError``."""
     routing = config.routing
     if routing is None:
@@ -75,6 +79,10 @@ def validate_model_routing(config: ModelConfig) -> None:
     if routing.policy == "threshold":
         msg = f"Model '{config.sie_id}': routing policy 'threshold' is not available yet"
         raise ValueError(msg)
-    refusal = hybrid_equivalence_refusal(config) or remote_output_refusal(config)
+    refusal = hybrid_equivalence_refusal(config)
+    if refusal is not None and device is not None:
+        reason = openai_equivalence_refusal(config, device=device, engine_config=engine_config)
+        refusal = f"{refusal}: {reason}" if reason is not None else None
+    refusal = refusal or remote_output_refusal(config)
     if refusal is not None:
         raise ValueError(refusal)

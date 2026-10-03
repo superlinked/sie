@@ -112,6 +112,16 @@ describe("remote serving", () => {
     expect(sentHeaders()[fixture.request_header.name]).toBeUndefined();
   });
 
+  it.each(["a".repeat(64), "A".repeat(64), "a".repeat(65)])(
+    "validates serving worker instance provenance %s",
+    async (value) => {
+      mockFetch.mockResolvedValueOnce(reply("encode", { "X-SIE-Runtime-Instance": value }));
+      const client = new SIEClient("http://localhost:8080");
+      const request = await call(client, "encode");
+      expect(request?.runtimeInstanceId).toBe(value === "a".repeat(64) ? value : undefined);
+    },
+  );
+
   it.each(OPERATIONS)(
     "a remotely served %s result names the upstream and the reason",
     async (operation) => {

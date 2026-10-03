@@ -1614,6 +1614,7 @@ async def _rerank(
             span,
             profile=options_raw.get("profile") if options_raw else None,
             queued_items=len(doc_items),
+            request_options=options_raw,
         )
 
         timing = RequestTiming()

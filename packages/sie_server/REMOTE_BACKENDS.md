@@ -39,10 +39,11 @@ weights or accelerator.
 Single-node `fallback` is available for extraction-only models and for models
 with local and remote generation profiles whose remote profile produces every
 declared output (see [Single-node generation fallback](#single-node-generation-fallback)).
-A request that names a profile bypasses the bare-model policy. Hybrid `encode`
-and `score` remain refused at configuration load until identity or equivalence
-proof can be checked. `threshold` is also refused. Cluster remote profiles use
-the queue, but cluster fallback is still being built.
+A request that names a profile bypasses the bare-model policy, including an
+explicit `default`. Single-node OpenAI hybrid `encode` and `score` require the
+operator-owned equivalence admission described below. SIE hybrid identity
+comparison and `threshold` remain separate deliveries. Cluster remote profiles
+use the queue, but cluster fallback is still being built.
 
 ## Single-node embedding example
 
@@ -200,16 +201,17 @@ and CrossEncoder require verified checkpoint module metadata: disabling
 `trust_remote_code` alone does not identify installed checkpoint-selected code. FlagEmbedding
 BGE-M3 cannot identify its effective revision; flash/LoRA and other engines need
 additional runtime evidence. An identity is a descriptor, not a numerical
-measurement. Hybrid routing remains refused until upstream comparison and
-measured equivalence gates are delivered; this field alone does not activate it.
+measurement. This field alone does not activate hybrid routing: OpenAI profiles
+need passing numerical evidence, and the SIE upstream comparison is still pending.
 
 
 ## Measuring remote equivalence
 
-An encode/score comparison runs through the Python SDK against one SIE server
+An encode/score comparison runs through the Python SDK against one direct SIE worker
 that has both the local default profile and an explicit remote profile. Keep
 hybrid routing disabled while measuring. The server must expose a non-null
-local identity and `profiles.<remote>.remote_contract_sha256`; the latter binds
+local identity, `profiles.default.runtime_instance_id` and
+`profiles.<remote>.remote_contract_sha256`; the latter binds
 its installed endpoint, model serving configuration, credential reference and request
 transforms to the operator files supplied to the probe. Credential values are
 never included. Version 1 local identities currently support native BGE-M3 only.
@@ -230,18 +232,24 @@ The API key argument names an environment variable; omit it for a server that
 does not require authentication. The output path must be new. Each case makes
 two local calls with remote serving forbidden, followed by one explicit remote
 call. Cases cover short and long inputs, both sides of the pinned tokenizer's
-truncation boundary, query and document instruction prefixes, and score scale
+truncation boundary including the local instruction prefix, query and document
+instruction prefixes, default query instructions, empty prefixes, and score scale
 when scoring is declared. All declared encode/score outputs must be measured.
 Generation is outside this numerical probe. The routing policy is excluded from
 the model digest, so evidence can be measured before enabling hybrid routing;
-all local and remote profile settings remain bound.
+all local and remote profile settings remain bound. Version 2 records bind the
+local profile's runtime options and float32 output explicitly. Both measured
+profiles receive those same local runtime options; remote-only runtime defaults
+are refused because a fallback would not apply them. Older records must be remeasured.
 
 A pass requires matching layouts and finite values whose maximum absolute
 error against both local runs does not exceed the difference measured between
 those local runs. Identical local runs require identical remote values. Matching
 boundary input refusals are recorded; a suite of refusals cannot establish
 numerical equivalence. Endpoint/model contracts and local identity must remain
-unchanged throughout the probe.
+unchanged throughout the probe. Every local and remote observation, including
+input refusals, must come from the same worker process identified by the initial
+metadata. A load balancer mixing workers cannot produce admissible evidence.
 
 Exit status is `0` for passing evidence, `1` for a measured failure, or `2` when
 valid evidence could not be produced. Records contain input hashes, token
@@ -249,8 +257,53 @@ counts, serving identities, contract hashes and measured errors; they contain
 no inputs, vectors or credential values. They carry a measurement timestamp so
 an admission gate can reject stale or future evidence. Remeasure after changes
 to weights, serving settings, software, endpoint or request transforms.
-This delivery produces evidence; hybrid routing still requires its runtime
-admission gate and does not become enabled by writing a record.
+Writing a record does not activate hybrid routing; activation also requires
+deployment-owned admission policy and a model routing update.
+
+## Admitting measured OpenAI fallback
+
+For an OpenAI upstream, declare the absolute evidence path in its startup YAML:
+
+```yaml
+upstreams:
+  vendor:
+    kind: openai
+    base_url: https://vendor.example/v1
+    endpoints: [embeddings]
+    rate_cap: {requests_per_minute: 600, max_concurrency: 8}
+    equivalence:
+      max_age_s: 3600
+      record_files:
+        BAAI/bge-m3: /absolute/path/bge-m3-equivalence.json
+```
+
+The map keys are local catalog model IDs. The referenced file must contain a
+passing version 2 record for that exact model, local identity, worker process,
+remote profile, endpoint/model contract and all declared numerical outputs.
+The age is a strict integer from 1 to 86400 seconds. Paths and proof authority
+come only from startup upstream configuration; model API requests cannot supply
+or install records. SIE upstreams refuse this policy and require their own
+immutable identity comparison instead.
+
+Boot with `routing: {policy: always_local}` and both profiles configured. Run the
+probe against that direct worker, writing to the declared evidence path, then
+change the model YAML to `routing: {policy: fallback, fallback_profile: remote}`.
+Model-config hot reload admits the change in the same process. All profile
+settings must stay unchanged between measurement and activation. An immutable
+native BGE-M3 local profile is currently required; unidentified engines remain closed.
+
+Every bridge rechecks the record and its age before loading or calling the remote
+profile. Expired, missing, failed or mismatched evidence preserves the original
+local refusal and retry hint while starting local warm-up. Valid local requests
+with unmeasured runtime overrides or non-float32 output also remain local;
+explicit profiles still serve as requested. Rejection of one exported model
+retains its current local configuration without blocking unrelated updates.
+
+Records are bound to the measured worker process. After a worker restart,
+disable hybrid routing before startup, re-probe and activate through hot reload
+again. Starting directly from a hybrid YAML with an old process-bound record is
+refused. This conservative first admission path requires one record per worker
+process; it does not enable gateway fallback or a fleet-wide evidence rollout.
 
 
 ## Single-node generation fallback

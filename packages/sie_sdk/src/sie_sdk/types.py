@@ -225,6 +225,8 @@ class RequestMetadata(TypedDict, total=False):
     rate_book_version: str
     execution_identity_sha256: str
     execution_binding_sha256: str
+    runtime_instance_id: str
+    #: Opaque local worker process used by numerical equivalence probes.
     #: Which side served the request: ``"local"`` capacity, or a ``"remote"``
     #: upstream, named in ``upstream``.
     served_by: Literal["local", "remote"]
@@ -312,6 +314,7 @@ class ProfileInfo(TypedDict, total=False):
     is_default: bool
     identity: str | None
     remote_contract_sha256: str | None
+    runtime_instance_id: str | None
     """Versioned immutable local-profile digest; absent/null when it cannot be identified."""
 
 

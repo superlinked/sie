@@ -20,7 +20,15 @@ from sie_server.config.model import ModelConfig
 from sie_server.config.upstreams import Upstream, UpstreamKind
 
 ProbeCategory = Literal[
-    "short", "long", "boundary_before", "boundary_after", "query_prefix", "document_prefix", "score_scale"
+    "short",
+    "long",
+    "boundary_before",
+    "boundary_after",
+    "query_prefix",
+    "query_default",
+    "empty_prefix",
+    "document_prefix",
+    "score_scale",
 ]
 ProbeOperation = Literal["encode", "score"]
 ProbeOutput = Literal["dense", "sparse", "multivector", "score"]
@@ -28,7 +36,18 @@ ProbeOutcome = Literal["ok", "invalid_input", "input_too_long", "shape_mismatch"
 _HASH_PATTERN = r"^[0-9a-f]{64}$"
 _MAX_VALUES = 100_000_000
 _MAX_TOKENS = 100_000
-_CATEGORIES = frozenset({"short", "long", "boundary_before", "boundary_after", "query_prefix", "document_prefix"})
+_CATEGORIES = frozenset(
+    {
+        "short",
+        "long",
+        "boundary_before",
+        "boundary_after",
+        "query_prefix",
+        "query_default",
+        "empty_prefix",
+        "document_prefix",
+    }
+)
 
 
 def canonical_digest(value: Any) -> str:
@@ -45,7 +64,7 @@ def model_contract_digest(config: ModelConfig) -> str:
 
 def upstream_contract_digest(upstream: Upstream) -> str:
     """Bind endpoint, tenant credential reference and operator request transforms."""
-    return canonical_digest(upstream.model_dump(mode="json", exclude={"rate_cap", "breaker"}))
+    return canonical_digest(upstream.model_dump(mode="json", exclude={"rate_cap", "breaker", "equivalence"}))
 
 
 def remote_profile_contract_digest(
@@ -140,7 +159,7 @@ class ProbeCase(BaseModel):
 class EquivalenceRecord(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
-    version: Literal[1] = 1
+    version: Literal[2] = 2
     measured_at: AwareDatetime
     upstream_name: str = Field(min_length=1, max_length=128)
     upstream_model: str = Field(min_length=1, max_length=256)
@@ -149,13 +168,16 @@ class EquivalenceRecord(BaseModel):
     probe_sources_sha256: str = Field(pattern=_HASH_PATTERN)
     remote_contract_sha256: str = Field(pattern=_HASH_PATTERN)
     local_observation_sha256: str = Field(pattern=_HASH_PATTERN)
+    runtime_options_sha256: str = Field(pattern=_HASH_PATTERN)
+    output_dtype: Literal["float32"]
+    local_instance_id: str = Field(pattern=_HASH_PATTERN)
     local_identity: str = Field(pattern=r"^v1:sha256:[0-9a-f]{64}$")
     model: str = Field(min_length=1, max_length=256)
     local_profile: str = "default"
     remote_profile: str = Field(min_length=1, max_length=128)
     context_length: int = Field(gt=1, le=100_000)
     outputs: frozenset[ProbeOutput] = Field(min_length=1, max_length=4)
-    cases: tuple[ProbeCase, ...] = Field(min_length=6, max_length=16)
+    cases: tuple[ProbeCase, ...] = Field(min_length=8, max_length=20)
 
     @model_validator(mode="after")
     def complete_suite(self) -> EquivalenceRecord:
@@ -187,7 +209,7 @@ class EquivalenceRecord(BaseModel):
         return all(case.passed for case in self.cases) and all(
             case.outcomes == ("ok", "ok", "ok")
             for case in self.cases
-            if case.category in ("short", "long", "score_scale")
+            if case.category in ("short", "long", "score_scale", "query_default", "empty_prefix")
         )
 
     def is_fresh(self, *, max_age_s: int, now: datetime | None = None) -> bool:

@@ -583,7 +583,7 @@ class ModelRegistry:
         for name, config in self._configs.items():
             validate_no_legacy_scalar_lora_id(name=name, config=config)
             validate_profile_upstreams(config)
-            validate_model_routing(config)
+            validate_model_routing(config, device=self._device, engine_config=self._engine_config)
 
         self._config_version += 1
 
@@ -2430,7 +2430,7 @@ class ModelRegistry:
         # Multi-LoRA generation (``loadtime.lora_paths``) is unaffected.
         validate_no_legacy_scalar_lora_id(name=config.sie_id, config=config)
         validate_profile_upstreams(config)
-        validate_model_routing(config)
+        validate_model_routing(config, device=self._device, engine_config=self._engine_config)
 
     def _apply_config_entry(self, config: ModelConfig, model_dir: Path | None = None) -> None:
         base_id = (
@@ -2499,12 +2499,14 @@ class ModelRegistry:
 
         update_lock = self._get_config_update_lock()
         async with update_lock:
+            retained_names: set[str] = set()
             if retained_models:
                 snapshot_bases = {_config_base_name(name, config) for name, config in new_configs.items()}
                 for name, config in self._configs.items():
                     base_name = _config_base_name(name, config)
                     if base_name in retained_models and base_name not in snapshot_bases and name not in new_configs:
                         new_configs[name] = config
+                        retained_names.add(name)
 
             if self._pool_name is not None:
                 accepted: dict[str, ModelConfig] = {}
@@ -2518,7 +2520,11 @@ class ModelRegistry:
                     accepted[name] = config
             for name, config in new_configs.items():
                 validate_no_legacy_scalar_lora_id(name=name, config=config)
-                validate_model_routing(config)
+                # These exact current entries were retained after an exported
+                # update was refused. Expiring admission must stop the bridge,
+                # not reject unrelated changes in the same snapshot.
+                if name not in retained_names:
+                    validate_model_routing(config, device=self._device, engine_config=self._engine_config)
 
             async with self._get_load_admission_lock():
                 removed = set(self._configs) - set(new_configs)

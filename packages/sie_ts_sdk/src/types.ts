@@ -163,6 +163,8 @@ export interface RequestMetadata {
   executionIdentitySha256?: string;
   /** Stable release/deployment binding shared by placement variants. */
   executionBindingSha256?: string;
+  /** Opaque local worker process used by numerical equivalence probes. */
+  runtimeInstanceId?: string;
   usage?: RequestUsage;
   /**
    * Exact committed debit — the authoritative charge for this request.
@@ -268,6 +270,7 @@ export interface ProfileInfo {
   identity?: string | null;
   /** Operator-bound upstream/model/profile contract digest. */
   remote_contract_sha256?: string | null;
+  runtime_instance_id?: string | null;
 }
 
 /**

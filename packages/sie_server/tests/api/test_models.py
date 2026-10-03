@@ -414,6 +414,10 @@ def test_pinned_builtin_profile_exposes_same_identity_in_list_and_detail(
     assert value.startswith("v1:sha256:")
     assert len(value) == len("v1:sha256:") + 64
     assert listed["profiles"]["default"]["identity"] == value
+    instance = detail["profiles"]["default"]["runtime_instance_id"]
+    assert len(instance) == 64
+    assert all(char in "0123456789abcdef" for char in instance)
+    assert listed["profiles"]["default"]["runtime_instance_id"] == instance
     assert "adapter_options" not in detail["profiles"]["default"]
 
 

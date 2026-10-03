@@ -18,6 +18,7 @@ from sie_server.api.routing import remote_routing, route_request
 from sie_server.api.serialization import MsgPackResponse
 from sie_server.api.validation import validate_machine_profile_header
 from sie_server.core.inference_output import ScoreOutput
+from sie_server.core.profile_identity import runtime_instance_id
 from sie_server.core.score_cost import build_score_prepared_items_timed
 from sie_server.core.worker import QueueFullError, WorkerResult
 from sie_server.observability.tracing import tracer
@@ -251,6 +252,7 @@ async def score(
             span,
             profile=request.options.get("profile") if request.options else None,
             queued_items=len(items),
+            request_options=request.options,
         )
 
         # Score using worker with batching
@@ -319,4 +321,5 @@ async def score(
         # Build response headers and return
         headers = ResponseBuilder.build_headers(timing)
         headers.update(route.headers())
+        headers["X-SIE-Runtime-Instance"] = runtime_instance_id()
         return ResponseBuilder.build_response(response, accept, headers)

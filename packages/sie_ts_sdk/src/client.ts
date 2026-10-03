@@ -476,6 +476,10 @@ function parseRequestMetadata(headers: Headers, body?: unknown): RequestMetadata
     metadata.executionBindingSha256 = executionBindingSha256;
   }
   const servedBy = headers.get("x-sie-served-by");
+  const runtimeInstance = headers.get("x-sie-runtime-instance");
+  if (runtimeInstance !== null && /^[0-9a-f]{64}$/.test(runtimeInstance)) {
+    metadata.runtimeInstanceId = runtimeInstance;
+  }
   if (servedBy !== null && (SERVED_BY_VALUES as readonly string[]).includes(servedBy)) {
     metadata.servedBy = servedBy as ServedBy;
   }
