@@ -10,9 +10,10 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use axum::extract::Request;
 use axum::http::{Extensions, HeaderMap, HeaderName, HeaderValue, StatusCode};
+use axum::response::Response;
 
 use crate::server::AppState;
-use crate::types::model::ServedBy;
+use crate::types::model::{FallbackTrigger, ServedBy};
 
 pub(crate) const SERVED_BY_HEADER: HeaderName = HeaderName::from_static("x-sie-served-by");
 pub(crate) const UPSTREAM_HEADER: HeaderName = HeaderName::from_static("x-sie-upstream");
@@ -49,9 +50,13 @@ impl ServingDisclosure {
 
     /// Record that the request carrying `extensions` is dispatched to `model`.
     pub(crate) fn record(state: &AppState, extensions: &Extensions, model: &str) {
+        Self::record_evidence(extensions, state.model_registry.served_by(model));
+    }
+
+    /// Record disclosure paired with the immutable execution evidence.
+    pub(crate) fn record_evidence(extensions: &Extensions, served_by: Option<ServedBy>) {
         if let Some(disclosure) = extensions.get::<Self>() {
-            *disclosure.0.lock().unwrap_or_else(PoisonError::into_inner) =
-                state.model_registry.served_by(model);
+            *disclosure.0.lock().unwrap_or_else(PoisonError::into_inner) = served_by;
         }
     }
 
@@ -87,6 +92,77 @@ impl ServingDisclosure {
     }
 }
 
+/// One request's original pre-acceptance refusal, retained through its bridge.
+/// It is not a retry counter: a request may install exactly one remote attempt.
+#[derive(Clone, Default)]
+pub(crate) struct FallbackAttempt(Arc<Mutex<Option<LocalRefusal>>>);
+
+struct LocalRefusal {
+    response: Response,
+    reason: &'static str,
+}
+
+impl FallbackAttempt {
+    pub(crate) fn install(req: &mut Request) -> Self {
+        if let Some(existing) = req.extensions().get::<Self>() {
+            return existing.clone();
+        }
+        let attempt = Self::default();
+        req.extensions_mut().insert(attempt.clone());
+        attempt
+    }
+
+    /// Retain the response before any local work has been accepted.
+    pub(crate) fn begin(&self, response: Response, trigger: FallbackTrigger) -> bool {
+        let mut original = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if original.is_some() {
+            return false;
+        }
+        let reason = match trigger {
+            FallbackTrigger::Provisioning => "provisioning",
+            FallbackTrigger::ModelLoading => "model_loading",
+            FallbackTrigger::Saturated => "saturated",
+            FallbackTrigger::Unhealthy => "unhealthy",
+        };
+        *original = Some(LocalRefusal { response, reason });
+        true
+    }
+
+    pub(crate) fn active(&self) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_some()
+    }
+
+    /// Called after normal disclosure stamping and before HTTP success/output.
+    /// A failed bridge preserves the original body and Retry-After verbatim.
+    pub(crate) fn finish(&self, mut response: Response) -> Response {
+        let Some(mut original) = self.0.lock().unwrap_or_else(PoisonError::into_inner).take()
+        else {
+            return response;
+        };
+        let reason = HeaderValue::from_static(original.reason);
+        if response.status().is_success() {
+            response
+                .headers_mut()
+                .insert("x-sie-fallback-reason", reason);
+            return response;
+        }
+        let failure = if response.status().is_client_error() {
+            "INVALID_INPUT"
+        } else {
+            "INFERENCE_ERROR"
+        };
+        let headers = original.response.headers_mut();
+        headers.insert(SERVED_BY_HEADER, HeaderValue::from_static("local"));
+        headers.remove(UPSTREAM_HEADER);
+        headers.insert("x-sie-fallback-reason", reason);
+        headers.insert("x-sie-fallback-error", HeaderValue::from_static(failure));
+        original.response
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -98,6 +174,466 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    async fn buffered_surface(
+        gateway: &TestGateway,
+        surface: &str,
+        options: serde_json::Value,
+    ) -> Response {
+        let state = State(Arc::clone(&gateway.state));
+        let model = if options.get("profile").is_some() {
+            "default:/acme/chat"
+        } else {
+            "acme/chat"
+        };
+        match surface {
+            "native" => {
+                proxy_request(
+                    state,
+                    json_request(
+                        "/v1/generate/acme/chat",
+                        json!({"prompt":"hello", "max_new_tokens":4, "options":options}),
+                    ),
+                    "generate",
+                )
+                .await
+            }
+            "chat" => {
+                proxy_chat(
+                    state,
+                    json_request(
+                        "/v1/chat/completions",
+                        json!({"model":model, "messages":[{"role":"user","content":"hello"}]}),
+                    ),
+                )
+                .await
+            }
+            "completions" => {
+                proxy_completions(
+                    state,
+                    json_request(
+                        "/v1/completions",
+                        json!({"model":model, "prompt":"hello", "max_tokens":4}),
+                    ),
+                )
+                .await
+            }
+            "responses" => {
+                proxy_responses(
+                    state,
+                    json_request("/v1/responses", json!({"model":model, "input":"hello"})),
+                )
+                .await
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[tokio::test]
+    async fn all_buffered_cluster_fallback_surfaces_warm_before_bridging_and_leave_loaded_models_local(
+    ) {
+        let config = format!(
+            "{HYBRID_GENERATE_MODEL}\nrouting:\n  policy: fallback\n  fallback_profile: remote\n"
+        );
+        for loaded in [false, true] {
+            let gateway = TestGateway::new(&[&config]).await;
+            gateway
+                .add_verified_worker(
+                    "local-1",
+                    LOCAL_LANE,
+                    if loaded { &["acme/chat"] } else { &[] },
+                )
+                .await;
+            gateway
+                .add_verified_worker("remote-1", REMOTE_LANE, &[])
+                .await;
+            for surface in ["native", "chat", "completions", "responses"] {
+                let response = buffered_surface(&gateway, surface, json!({})).await;
+                assert_eq!(
+                    response.status(),
+                    StatusCode::OK,
+                    "{surface}, loaded={loaded}"
+                );
+                if loaded {
+                    assert_eq!(stamped(&response), (Some("local"), None));
+                } else {
+                    assert_eq!(response.headers()["x-sie-fallback-reason"], "model_loading");
+                }
+            }
+            let expected = if loaded {
+                vec![dispatched("generate", LOCAL_LANE, "acme/chat"); 4]
+            } else {
+                [
+                    dispatched("load", LOCAL_LANE, "acme/chat"),
+                    dispatched("generate", REMOTE_LANE, "acme/chat:remote"),
+                ]
+                .into_iter()
+                .cycle()
+                .take(8)
+                .collect()
+            };
+            assert_eq!(gateway.dispatcher.dispatched(), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn all_buffered_cluster_fallback_surfaces_preserve_explicit_default_and_failed_load_refusal(
+    ) {
+        let config = format!(
+            "{HYBRID_GENERATE_MODEL}\nrouting:\n  policy: fallback\n  fallback_profile: remote\n"
+        );
+        let gateway = TestGateway::new(&[&config]).await;
+        gateway
+            .add_verified_worker("remote-1", REMOTE_LANE, &[])
+            .await;
+        for surface in ["native", "chat", "completions", "responses"] {
+            let response = buffered_surface(&gateway, surface, json!({"profile":"default"})).await;
+            assert_eq!(
+                response.status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "{surface}"
+            );
+            assert!(!response.headers().contains_key("x-sie-fallback-reason"));
+        }
+        assert!(gateway.dispatcher.dispatched().is_empty());
+        gateway
+            .add_verified_worker("local-1", LOCAL_LANE, &[])
+            .await;
+        gateway.dispatcher.refuse_model_loads();
+        for surface in ["native", "chat", "completions", "responses"] {
+            let response = buffered_surface(&gateway, surface, json!({})).await;
+            assert_eq!(
+                response.status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "{surface}"
+            );
+            assert_eq!(response.headers()["retry-after"], "5");
+            assert!(!response.headers().contains_key("x-sie-fallback-error"));
+        }
+        assert_eq!(
+            gateway.dispatcher.dispatched(),
+            vec![dispatched("load", LOCAL_LANE, "acme/chat"); 4]
+        );
+    }
+
+    #[tokio::test]
+    async fn all_buffered_cluster_fallback_surfaces_restore_original_cold_refusal_after_remote_failure(
+    ) {
+        let config = format!(
+            "{HYBRID_GENERATE_MODEL}\nrouting:\n  policy: fallback\n  fallback_profile: remote\n"
+        );
+        let gateway = TestGateway::new(&[&config]).await;
+        gateway
+            .add_verified_worker("remote-1", REMOTE_LANE, &[])
+            .await;
+        gateway.dispatcher.refuse_generation();
+        for surface in ["native", "chat", "completions", "responses"] {
+            let response = buffered_surface(&gateway, surface, json!({})).await;
+            assert_eq!(
+                response.status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "{surface}"
+            );
+            assert_eq!(response.headers()["retry-after"], "60");
+            assert_eq!(
+                response.headers()["x-sie-fallback-error"],
+                "INFERENCE_ERROR"
+            );
+            assert_eq!(stamped(&response), (Some("local"), None));
+            let body = axum::body::to_bytes(response.into_body(), 8192)
+                .await
+                .unwrap();
+            assert!(!String::from_utf8_lossy(&body).contains("private upstream failure"));
+        }
+    }
+
+    #[tokio::test]
+    async fn buffered_cluster_fallback_rejects_model_output_limits_before_warming_or_dispatch() {
+        let config = format!(
+            "{}\nrouting:\n  policy: fallback\n  fallback_profile: remote\n",
+            HYBRID_GENERATE_MODEL.replace("generate: {}", "generate:\n    max_output_tokens: 1")
+        );
+        for unloaded in [false, true] {
+            let gateway = TestGateway::new(&[&config]).await;
+            gateway
+                .add_verified_worker("remote-1", REMOTE_LANE, &[])
+                .await;
+            if unloaded {
+                gateway
+                    .add_verified_worker("local-1", LOCAL_LANE, &[])
+                    .await;
+            }
+            for surface in ["native", "chat", "completions", "responses"] {
+                let response = buffered_surface(&gateway, surface, json!({})).await;
+                assert_eq!(
+                    response.status(),
+                    StatusCode::BAD_REQUEST,
+                    "{surface}, unloaded={unloaded}"
+                );
+                assert!(!response.headers().contains_key("x-sie-fallback-reason"));
+            }
+            assert!(gateway.dispatcher.dispatched().is_empty());
+            assert!(gateway.state.demand_tracker.active_lanes().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn native_cluster_fallback_bridges_a_cold_model_and_retains_local_pending_demand() {
+        let config = format!(
+            "{HYBRID_GENERATE_MODEL}\nrouting:\n  policy: fallback\n  fallback_profile: remote\n"
+        );
+        let gateway = TestGateway::new(&[&config]).await;
+        gateway
+            .add_verified_worker("remote-1", REMOTE_LANE, &[])
+            .await;
+        let response = proxy_request(
+            State(Arc::clone(&gateway.state)),
+            json_request(
+                "/v1/generate/acme/chat",
+                json!({"prompt":"hello", "max_new_tokens":4}),
+            ),
+            "generate",
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(stamped(&response), (Some("remote"), Some("team-sie")));
+        assert_eq!(response.headers()["x-sie-fallback-reason"], "provisioning");
+        assert_eq!(
+            gateway.dispatcher.dispatched(),
+            vec![dispatched("generate", REMOTE_LANE, "acme/chat:remote")]
+        );
+        assert!(gateway
+            .state
+            .demand_tracker
+            .active_lanes()
+            .iter()
+            .any(|lane| lane.machine_profile() == "l4"));
+    }
+
+    #[tokio::test]
+    async fn native_cluster_fallback_keeps_explicit_default_local_for_json_and_msgpack() {
+        let config = format!(
+            "{HYBRID_GENERATE_MODEL}\nrouting:\n  policy: fallback\n  fallback_profile: remote\n"
+        );
+        let gateway = TestGateway::new(&[&config]).await;
+        gateway
+            .add_verified_worker("remote-1", REMOTE_LANE, &[])
+            .await;
+        let body = json!({"prompt":"hello", "max_new_tokens":4, "options":{"profile":"default"}});
+        for msgpack in [false, true] {
+            let request = Request::builder()
+                .method(Method::POST)
+                .uri("/v1/generate/acme/chat")
+                .header(
+                    "content-type",
+                    if msgpack {
+                        "application/msgpack"
+                    } else {
+                        "application/json"
+                    },
+                )
+                .body(Body::from(if msgpack {
+                    rmp_serde::to_vec_named(&body).unwrap()
+                } else {
+                    serde_json::to_vec(&body).unwrap()
+                }))
+                .unwrap();
+            let refused =
+                proxy_request(State(Arc::clone(&gateway.state)), request, "generate").await;
+            assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert!(!refused.headers().contains_key("x-sie-fallback-reason"));
+        }
+        assert!(gateway.dispatcher.dispatched().is_empty());
+    }
+
+    #[tokio::test]
+    async fn compatibility_cluster_fallback_routes_the_remote_profile_without_changing_display_model(
+    ) {
+        let config = format!(
+            "{HYBRID_GENERATE_MODEL}\nrouting:\n  policy: fallback\n  fallback_profile: remote\n"
+        );
+        let gateway = TestGateway::new(&[&config]).await;
+        gateway
+            .add_verified_worker("remote-1", REMOTE_LANE, &[])
+            .await;
+        let state = || State(Arc::clone(&gateway.state));
+        let chat = proxy_chat(
+            state(),
+            json_request(
+                "/v1/chat/completions",
+                json!({"model":"acme/chat", "messages":[{"role":"user", "content":"hello"}]}),
+            ),
+        )
+        .await;
+        let completions = proxy_completions(
+            state(),
+            json_request(
+                "/v1/completions",
+                json!({"model":"acme/chat", "prompt":"hello", "max_tokens":4}),
+            ),
+        )
+        .await;
+        let responses = proxy_responses(
+            state(),
+            json_request(
+                "/v1/responses",
+                json!({"model":"acme/chat", "input":"hello"}),
+            ),
+        )
+        .await;
+        for response in [chat, completions, responses] {
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()["x-sie-fallback-reason"], "provisioning");
+            assert_eq!(stamped(&response), (Some("remote"), Some("team-sie")));
+            let body = axum::body::to_bytes(response.into_body(), 8192)
+                .await
+                .unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(value["model"], "acme/chat");
+        }
+        assert_eq!(
+            gateway.dispatcher.dispatched(),
+            vec![dispatched("generate", REMOTE_LANE, "acme/chat:remote"); 3]
+        );
+    }
+
+    #[tokio::test]
+    async fn native_cluster_fallback_preserves_an_explicit_bundle_route() {
+        let config = format!(
+            "{HYBRID_GENERATE_MODEL}\nrouting:\n  policy: fallback\n  fallback_profile: remote\n"
+        );
+        let gateway = TestGateway::new(&[&config]).await;
+        gateway
+            .add_verified_worker("remote-1", REMOTE_LANE, &[])
+            .await;
+        let refused = proxy_request(
+            State(Arc::clone(&gateway.state)),
+            json_request(
+                "/v1/generate/default:/acme/chat",
+                json!({"prompt":"hello", "max_new_tokens":4}),
+            ),
+            "generate",
+        )
+        .await;
+        assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(!refused.headers().contains_key("x-sie-fallback-reason"));
+        assert!(gateway.dispatcher.dispatched().is_empty());
+    }
+
+    #[tokio::test]
+    async fn native_cluster_fallback_durably_warms_an_unloaded_local_model_before_remote_execution()
+    {
+        let config = format!(
+            "{HYBRID_GENERATE_MODEL}\nrouting:\n  policy: fallback\n  fallback_profile: remote\n"
+        );
+        let gateway = TestGateway::new(&[&config]).await;
+        gateway
+            .add_verified_worker("local-1", LOCAL_LANE, &[])
+            .await;
+        gateway
+            .add_verified_worker("remote-1", REMOTE_LANE, &[])
+            .await;
+        let response = proxy_request(
+            State(Arc::clone(&gateway.state)),
+            json_request(
+                "/v1/generate/acme/chat",
+                json!({"prompt":"hello", "max_new_tokens":4}),
+            ),
+            "generate",
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["x-sie-fallback-reason"], "model_loading");
+        assert_eq!(
+            gateway.dispatcher.dispatched(),
+            vec![
+                dispatched("load", LOCAL_LANE, "acme/chat"),
+                dispatched("generate", REMOTE_LANE, "acme/chat:remote")
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn native_cluster_fallback_refuses_older_remote_workers_and_honors_caller_forbid() {
+        let config = format!(
+            "{HYBRID_GENERATE_MODEL}\nrouting:\n  policy: fallback\n  fallback_profile: remote\n"
+        );
+        let gateway = TestGateway::new(&[&config]).await;
+        gateway.add_worker("remote-old", REMOTE_LANE, &[]).await;
+        let request = || {
+            json_request(
+                "/v1/generate/acme/chat",
+                json!({"prompt":"hello", "max_new_tokens":4}),
+            )
+        };
+        let refused = proxy_request(State(Arc::clone(&gateway.state)), request(), "generate").await;
+        assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(refused.headers()["retry-after"], "60");
+        assert_eq!(refused.headers()["x-sie-fallback-error"], "INFERENCE_ERROR");
+        assert_eq!(stamped(&refused), (Some("local"), None));
+        let mut forbidden = request();
+        forbidden
+            .headers_mut()
+            .insert(REMOTE_HEADER, HeaderValue::from_static("forbid"));
+        let refused = proxy_request(State(Arc::clone(&gateway.state)), forbidden, "generate").await;
+        assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(!refused.headers().contains_key("x-sie-fallback-reason"));
+        assert!(gateway.dispatcher.dispatched().is_empty());
+    }
+
+    #[tokio::test]
+    async fn failed_bridge_preserves_original_refusal_body_and_retry_without_echoing_remote_errors()
+    {
+        let attempt = FallbackAttempt::default();
+        let mut original =
+            (StatusCode::SERVICE_UNAVAILABLE, "original local refusal").into_response();
+        original
+            .headers_mut()
+            .insert("retry-after", HeaderValue::from_static("60"));
+        assert!(attempt.begin(original, FallbackTrigger::Provisioning));
+        assert!(!attempt.begin(
+            StatusCode::SERVICE_UNAVAILABLE.into_response(),
+            FallbackTrigger::Unhealthy
+        ));
+        let remote = (StatusCode::BAD_GATEWAY, "private upstream failure").into_response();
+        let restored = attempt.finish(remote);
+        assert_eq!(restored.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(restored.headers()["retry-after"], "60");
+        assert_eq!(restored.headers()["x-sie-served-by"], "local");
+        assert_eq!(restored.headers()["x-sie-fallback-reason"], "provisioning");
+        assert_eq!(
+            restored.headers()["x-sie-fallback-error"],
+            "INFERENCE_ERROR"
+        );
+        assert!(!restored.headers().contains_key("x-sie-upstream"));
+        assert_eq!(
+            axum::body::to_bytes(restored.into_body(), 1024)
+                .await
+                .unwrap(),
+            "original local refusal"
+        );
+    }
+
+    #[test]
+    fn successful_bridge_keeps_remote_disclosure_and_never_carries_a_failure() {
+        let attempt = FallbackAttempt::default();
+        assert!(attempt.begin(
+            StatusCode::SERVICE_UNAVAILABLE.into_response(),
+            FallbackTrigger::ModelLoading
+        ));
+        let mut remote = StatusCode::OK.into_response();
+        remote
+            .headers_mut()
+            .insert(SERVED_BY_HEADER, HeaderValue::from_static("remote"));
+        remote
+            .headers_mut()
+            .insert(UPSTREAM_HEADER, HeaderValue::from_static("team-sie"));
+        let response = attempt.finish(remote);
+        assert_eq!(response.headers()[SERVED_BY_HEADER], "remote");
+        assert_eq!(response.headers()[UPSTREAM_HEADER], "team-sie");
+        assert_eq!(response.headers()["x-sie-fallback-reason"], "model_loading");
+        assert!(!response.headers().contains_key("x-sie-fallback-error"));
+    }
 
     #[test]
     fn remote_control_rejects_ambiguous_and_unrecognized_header_bytes() {

@@ -10,8 +10,8 @@ use tracing::{debug, error, info, warn};
 
 use crate::types::bundle::{engine_adapter_prefixes, BundleInfo, DEFAULT_ENGINE, KNOWN_ENGINES};
 use crate::types::model::{
-    remote_adapter_upstream_kind, CanonicalProfile, ModelConfig, ModelEntry, ModelInfoExtras,
-    ProfileConfig, RoutingPolicy, ServedBy,
+    remote_adapter_upstream_kind, CanonicalProfile, FallbackTrigger, ModelConfig, ModelEntry,
+    ModelInfoExtras, ProfileConfig, RoutingPolicy, ServedBy,
 };
 
 #[derive(Debug)]
@@ -204,6 +204,19 @@ impl ModelRegistryGeneration {
     pub fn compute_bundle_config_hash_for_pool(&self, bundle_id: &str, pool_name: &str) -> String {
         ModelRegistry::bundle_config_hash_for_pool(&self.snapshot, bundle_id, pool_name)
     }
+}
+
+/// The remote profile and worker contract chosen from one registry snapshot.
+/// Numerical hybrid models remain closed until fleet equivalence is admitted.
+#[derive(Clone, Debug)]
+pub(crate) struct RemoteFallbackPlan {
+    pub model: String,
+    pub bundle: String,
+    pub pool: String,
+    pub engine: String,
+    pub config_hash: String,
+    pub revision: Option<String>,
+    pub served_by: ServedBy,
 }
 
 pub struct ModelRegistry {
@@ -1676,6 +1689,63 @@ impl ModelRegistry {
         snap.models.get(&canonical).map(ModelEntry::served_by)
     }
 
+    /// Resolve only a bare local model's configured and enabled bridge.
+    /// The route, disclosure and exact worker hash share one snapshot; caller
+    /// profile selectors and numerical models cannot acquire this authority.
+    pub(crate) fn remote_fallback_plan(
+        &self,
+        model: &str,
+        trigger: FallbackTrigger,
+    ) -> Option<RemoteFallbackPlan> {
+        if model.contains(':') {
+            return None;
+        }
+        let snap = self.snapshot.load();
+        let canonical = Self::canonical_model_name(&snap, model)?;
+        let local = snap.models.get(&canonical)?;
+        let routing = local.info_extras.routing.as_ref()?;
+        if !routing.permits(trigger)
+            || local.canonical_profile != "default"
+            || !matches!(local.served_by(), ServedBy::Local)
+            || local.info_extras.outputs.iter().any(|output| {
+                matches!(
+                    output.as_str(),
+                    "dense" | "sparse" | "multivector" | "score"
+                )
+            })
+        {
+            return None;
+        }
+        let remote_name = format!(
+            "{}:{}",
+            local.canonical_base_model,
+            routing.fallback_profile()?
+        );
+        let remote = snap.models.get(&remote_name)?;
+        let served_by = remote.served_by();
+        if !matches!(served_by, ServedBy::Remote { .. }) {
+            return None;
+        }
+        let bundle = remote.bundles.first()?.clone();
+        let pool = Self::entry_pool_name(remote).to_string();
+        let config_hash = snap
+            .bundle_pool_config_hashes
+            .get(&(bundle.clone(), pool.clone()))?
+            .clone();
+        if config_hash.is_empty() {
+            return None;
+        }
+        Some(RemoteFallbackPlan {
+            model: remote_name,
+            engine: snap.bundles.get(&bundle)?.engine.clone(),
+            bundle,
+            pool,
+            config_hash,
+            revision: Self::immutable_model_revision(remote),
+            served_by,
+        })
+    }
+
     pub fn get_model_pool_name(&self, model: &str) -> Option<String> {
         let snap = self.snapshot.load();
         let canonical = Self::canonical_model_name(&snap, model)?;
@@ -2974,6 +3044,59 @@ mod tests {
             .routing
             .unwrap()
             .permits(crate::types::model::FallbackTrigger::Unhealthy));
+    }
+
+    #[test]
+    fn fallback_plan_requires_bare_model_trigger_and_fresh_remote_contract() {
+        let (_dir, registry, mut config) = remote_routing_fixture();
+        config.tasks = Some(serde_yaml::from_str("generate: {}\n").unwrap());
+        config.routing = Some(
+            serde_json::from_value(serde_json::json!({
+                "policy":"fallback", "fallback_profile":"remote"
+            }))
+            .unwrap(),
+        );
+        registry.add_model_config(config.clone()).unwrap();
+        let plan = registry
+            .remote_fallback_plan("ACME/HYBRID", FallbackTrigger::Provisioning)
+            .unwrap();
+        assert_eq!(plan.model, "acme/hybrid:remote");
+        assert!(!plan.config_hash.is_empty());
+        assert!(matches!(plan.served_by, ServedBy::Remote { .. }));
+        assert!(registry
+            .remote_fallback_plan("acme/hybrid:remote", FallbackTrigger::Provisioning)
+            .is_none());
+        assert!(registry
+            .remote_fallback_plan("acme/hybrid:default", FallbackTrigger::Provisioning)
+            .is_none());
+        assert!(registry
+            .remote_fallback_plan("acme/hybrid", FallbackTrigger::Saturated)
+            .is_none());
+        assert!(registry
+            .remote_fallback_plan("acme/hybrid", FallbackTrigger::Unhealthy)
+            .is_none());
+        config.routing = None;
+        registry
+            .replace_model_configs_authoritative(vec![config])
+            .unwrap();
+        assert!(registry
+            .remote_fallback_plan("acme/hybrid", FallbackTrigger::Provisioning)
+            .is_none());
+    }
+
+    #[test]
+    fn fallback_plan_never_treats_numerical_dimensions_as_fleet_equivalence() {
+        let (_dir, registry, mut config) = remote_routing_fixture();
+        config.routing = Some(
+            serde_json::from_value(serde_json::json!({
+                "policy":"fallback", "fallback_profile":"remote"
+            }))
+            .unwrap(),
+        );
+        registry.add_model_config(config).unwrap();
+        assert!(registry
+            .remote_fallback_plan("acme/hybrid", FallbackTrigger::Provisioning)
+            .is_none());
     }
 
     #[test]

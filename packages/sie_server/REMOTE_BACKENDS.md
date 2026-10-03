@@ -49,8 +49,9 @@ A request that names a profile bypasses the bare-model policy, including an
 explicit `default`. Single-node OpenAI hybrid `encode` and `score` require the
 operator-owned equivalence admission described below. SIE hybrid encode and
 score require the fresh identity admission described below; `threshold` remains
-a separate delivery. Cluster remote profiles
-use the queue, but cluster fallback is still being built.
+a separate delivery. Cluster remote profiles use the queue. Buffered cluster
+generation fallback is described below; other cluster bridge surfaces remain
+separate deliveries.
 
 ## Single-node embedding example
 
@@ -372,6 +373,28 @@ Streaming native generation and completions, like chat, read their first event
 before committing HTTP success. If the bridge fails before output, the response
 retains the original local refusal and retry delay and discloses the fallback
 error. After the first event the stream reports failure without replaying work.
-An explicitly named remote profile is served directly. Cluster fallback still
-requires the gateway routing and refusal-restoration delivery; admitting the
-model configuration does not make a gateway bridge requests by itself.
+An explicitly named remote profile is served directly.
+
+
+## Cluster buffered generation fallback
+
+A bare generation model with `routing: {policy: fallback, fallback_profile: remote}`
+can bridge `provisioning` and `model_loading` refusals on native generation,
+chat, completions and supported buffered Responses. Explicit profiles, bundle
+pins, machine or pool overrides, and `X-SIE-Remote: forbid` retain their selected
+route. Deployment-governed routes require separate admission.
+
+Cold capacity retains local pending demand. An available local worker whose
+model is unloaded receives load-only work, and the gateway waits for broker
+acceptance before attempting remote generation. If load acceptance fails, the
+caller receives the local loading refusal. A loaded local model serves locally.
+
+The remote attempt pins a fresh worker with the exact current configuration
+hash and positive versioned execution capability. It cannot retry on the ordinary
+pool subject. Remote failure restores the original local refusal body and
+`Retry-After`, with `X-SIE-Fallback-Reason` and a bounded
+`X-SIE-Fallback-Error`; success discloses the remote profile's upstream. The
+customer model name remains the requested model.
+
+Streaming, extraction, numerical fleet equivalence, and opt-in saturation or
+unhealthy spill are not activated by this buffered generation path.

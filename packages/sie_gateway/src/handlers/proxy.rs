@@ -36,11 +36,12 @@ use crate::state::demand_tracker::PhysicalLane;
 use crate::state::model_registry::{ModelRegistry, ResolveError};
 use crate::state::pool_manager::{normalize_pool_name, PoolManager, DEFAULT_POOL_NAME};
 use crate::state::worker_registry::{QueueRoute, WorkerRegistry};
+use crate::types::model::FallbackTrigger;
 use crate::types::AuditEntry;
 
 use crate::middleware::auth::{extract_bearer_token, mask_token};
 
-use super::serving_disclosure::{remote_forbidden, ServingDisclosure};
+use super::serving_disclosure::{remote_forbidden, FallbackAttempt, ServingDisclosure};
 
 const GATEWAY_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -1822,9 +1823,40 @@ fn governed_profile_and_pool(
     })
 }
 
+/// Keep caller profile intent before options normalization removes `default`.
+#[derive(Clone)]
+struct ExplicitProfileSelector;
+
+fn native_request_has_profile_selector(body: &[u8], msgpack: bool) -> bool {
+    if msgpack {
+        rmp_serde::from_slice::<rmpv::Value>(body)
+            .ok()
+            .and_then(|value| {
+                let map = value.as_map()?;
+                let options = rmpv_map_get(map, "options")?.as_map()?;
+                Some(rmpv_map_get(options, "profile").is_some())
+            })
+            .unwrap_or(false)
+    } else {
+        serde_json::from_slice::<serde_json::Value>(body)
+            .ok()
+            .is_some_and(|value| {
+                value
+                    .get("options")
+                    .and_then(|options| options.get("profile"))
+                    .is_some()
+            })
+    }
+}
+
+/// A gateway-owned bridge selector; callers cannot create request extensions.
+#[derive(Clone)]
+struct RemoteFallbackOverride(crate::state::model_registry::RemoteFallbackPlan);
+
 /// The routing decision for a request: canonical model name, serving bundle,
 /// and engine. Produced by [`resolve_routing`].
 struct RoutingResult {
+    caller_selected_route: bool,
     model_name: String,
     dispatch_model: String,
     bundle: String,
@@ -1886,6 +1918,7 @@ async fn resolve_routing(
         resolve_model_spec_with_aliases(&state.config.model_aliases, &model, |m| {
             state.model_registry.resolve_canonical_model_name(m)
         });
+    let caller_selected_route = !bundle_override.is_empty() || model_name.contains(':');
     // #1841 org-scoped visibility: a custom model hidden from this caller is
     // treated as ABSENT — the identical MODEL_NOT_FOUND 404 the dispatcher emits
     // for an unknown model — so there is no cross-org existence oracle. Decided on
@@ -1938,12 +1971,25 @@ async fn resolve_routing(
     {
         debug_assert_eq!(route.engine, "sealed");
         return Ok(RoutingResult {
+            caller_selected_route,
             dispatch_model: model_name.clone(),
             model_name,
             bundle: route.bundle,
             engine: route.engine,
             gpu: route.machine_profile,
             pool_name: route.pool,
+            gpu_configured: true,
+        });
+    }
+    if let Some(RemoteFallbackOverride(plan)) = ext.get::<RemoteFallbackOverride>() {
+        return Ok(RoutingResult {
+            caller_selected_route,
+            model_name,
+            dispatch_model: plan.model.clone(),
+            bundle: plan.bundle.clone(),
+            engine: plan.engine.clone(),
+            gpu: String::new(),
+            pool_name: plan.pool.clone(),
             gpu_configured: true,
         });
     }
@@ -2150,6 +2196,7 @@ async fn resolve_routing(
     };
 
     Ok(RoutingResult {
+        caller_selected_route,
         model_name,
         dispatch_model,
         bundle,
@@ -2158,6 +2205,131 @@ async fn resolve_routing(
         pool_name,
         gpu_configured,
     })
+}
+
+/// Shared OSS admission for a bridge. Deployment-governed routes retain
+/// their own authority until they explicitly admit a remote physical route.
+#[allow(clippy::too_many_arguments)]
+fn fallback_plan_for_request(
+    state: &AppState,
+    headers: &HeaderMap,
+    ext: &axum::http::Extensions,
+    model: &str,
+    allowed: bool,
+    explicit_bundle: &str,
+    trigger: FallbackTrigger,
+) -> Option<crate::state::model_registry::RemoteFallbackPlan> {
+    let attempt = ext.get::<FallbackAttempt>()?;
+    if !allowed
+        || !explicit_bundle.is_empty()
+        || attempt.active()
+        || ext.get::<ExplicitProfileSelector>().is_some()
+        || remote_forbidden(headers).unwrap_or(true)
+        || state.model_access_policy.is_some()
+        || ["x-sie-machine-profile", "x-sie-pool", "x-sie-engine"]
+            .iter()
+            .any(|name| headers.contains_key(*name))
+        || !state
+            .work_publisher
+            .as_ref()
+            .is_some_and(|publisher| publisher.supports_execution_authority_v1())
+    {
+        return None;
+    }
+    state.model_registry.remote_fallback_plan(model, trigger)
+}
+
+/// Broker acceptance of load-only work is required before model-loading
+/// fallback; the pending marker remains until real local traffic takes over.
+async fn warm_local_model(
+    state: &AppState,
+    publisher: &dyn WorkDispatcher,
+    lane: &PhysicalLane,
+    target: publisher::PublishTarget,
+    engine: &str,
+    hash: &str,
+) -> bool {
+    state.demand_tracker.record(lane);
+    matches!(
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let (_, durability) = publisher.publish_model_load(target, engine, hash).await?;
+            durability.wait().await.map_err(DispatchError::Other)
+        })
+        .await,
+        Ok(Ok(()))
+    )
+}
+
+fn model_loading_refusal(endpoint: &str) -> Response {
+    let mut refusal = endpoint_error_response(
+        endpoint,
+        StatusCode::SERVICE_UNAVAILABLE,
+        MODEL_LOADING_ERROR_CODE,
+        oai_type::SERVER_ERROR,
+        MODEL_LOADING_ERROR_CODE,
+        None,
+        "Local model is loading",
+    );
+    refusal.headers_mut().insert(
+        "retry-after",
+        HeaderValue::from_static(MODEL_LOADING_RETRY_AFTER),
+    );
+    refusal
+}
+
+/// Begin one buffered generation bridge only at a typed pre-dispatch refusal.
+/// Fleet numerical and streaming admission are separately gated; no failure
+/// after a work item was published reaches this helper.
+#[allow(clippy::result_large_err, clippy::too_many_arguments)]
+fn native_fallback_plan(
+    state: &AppState,
+    req: &Request,
+    endpoint: &str,
+    model: &str,
+    parsed: Option<&(Vec<rmpv::Value>, publisher::WorkParams)>,
+    trigger: FallbackTrigger,
+) -> Option<crate::state::model_registry::RemoteFallbackPlan> {
+    let buffered_generation = endpoint == "generate"
+        && parsed.is_some_and(|(_, params)| {
+            params
+                .generate
+                .as_ref()
+                .is_some_and(|generate| !generate.stream)
+        });
+    fallback_plan_for_request(
+        state,
+        req.headers(),
+        req.extensions(),
+        model,
+        buffered_generation,
+        "",
+        trigger,
+    )
+}
+
+#[allow(clippy::result_large_err, clippy::too_many_arguments)]
+fn begin_native_fallback(
+    state: &AppState,
+    req: &mut Request,
+    endpoint: &str,
+    model: &str,
+    parsed: Option<&(Vec<rmpv::Value>, publisher::WorkParams)>,
+    refusal: Response,
+    trigger: FallbackTrigger,
+) -> Result<(), Response> {
+    let Some(plan) = native_fallback_plan(state, req, endpoint, model, parsed, trigger) else {
+        return Err(refusal);
+    };
+    let attempt = req
+        .extensions()
+        .get::<FallbackAttempt>()
+        .expect("plan requires a request-owned attempt");
+    assert!(
+        attempt.begin(refusal, trigger),
+        "request-owned bridge begins once synchronously"
+    );
+    req.extensions_mut().insert(RemoteFallbackOverride(plan));
+    Ok(())
 }
 
 pub(crate) async fn proxy_request(
@@ -2171,6 +2343,7 @@ pub(crate) async fn proxy_request(
         return response;
     }
     let disclosure = ServingDisclosure::install(&mut req);
+    let fallback = FallbackAttempt::install(&mut req);
     let provisioning_surface = provisioning_surface_for_endpoint(endpoint);
 
     // Keep the pre-generation queue hot path untouched for encode /
@@ -2226,7 +2399,7 @@ pub(crate) async fn proxy_request(
         )
         .await;
         disclosure.stamp(response.status(), response.headers_mut());
-        response
+        fallback.finish(response)
     }
     .instrument(proxy_span)
     .await
@@ -2272,6 +2445,9 @@ async fn proxy_request_inner(
             Ok(parsed) => parsed,
             Err(error) => return queue_parse_error_response(endpoint, error),
         };
+        if native_request_has_profile_selector(&body_bytes, is_msgpack) {
+            req.extensions_mut().insert(ExplicitProfileSelector);
+        }
         let intent = if params
             .generate
             .as_ref()
@@ -2290,6 +2466,7 @@ async fn proxy_request_inner(
     };
 
     let RoutingResult {
+        caller_selected_route,
         model_name,
         dispatch_model,
         bundle,
@@ -2310,6 +2487,9 @@ async fn proxy_request_inner(
         Ok(r) => r,
         Err(resp) => return *resp,
     };
+    if caller_selected_route {
+        req.extensions_mut().insert(ExplicitProfileSelector);
+    }
     ServingDisclosure::record(&state, req.extensions(), &dispatch_model);
 
     if let Some((items, params)) = governed_generate_parsed.as_ref() {
@@ -2389,6 +2569,23 @@ async fn proxy_request_inner(
     let (bundle_config_hash, model_revision, uses_catalog_scope, served_by) = state
         .model_registry
         .serving_execution_evidence(&bundle, &hash_pool, &dispatch_model);
+    ServingDisclosure::record_evidence(req.extensions(), served_by.clone());
+    if let Some(RemoteFallbackOverride(plan)) = req.extensions().get::<RemoteFallbackOverride>() {
+        if plan.config_hash != bundle_config_hash
+            || served_by.as_ref() != Some(&plan.served_by)
+            || plan.revision != model_revision
+        {
+            return endpoint_error_response(
+                endpoint,
+                StatusCode::SERVICE_UNAVAILABLE,
+                err_code::QUEUE_UNAVAILABLE,
+                oai_type::SERVER_ERROR,
+                oai_code::TRANSPORT_FAILURE,
+                None,
+                "Bridge execution evidence changed before dispatch",
+            );
+        }
+    }
     if let Some(response) = remote_control_response(
         endpoint,
         req.headers(),
@@ -2445,7 +2642,32 @@ async fn proxy_request_inner(
             return build_pool_not_found_response_for_surface(&pool, provisioning_surface);
         }
         PoolResolution::Provisioning => {
-            return build_provisioning_response_for_surface(&gpu, &bundle, provisioning_surface);
+            let refusal =
+                build_provisioning_response_for_surface(&gpu, &bundle, provisioning_surface);
+            match begin_native_fallback(
+                &state,
+                &mut req,
+                endpoint,
+                &model_name,
+                governed_generate_parsed.as_ref(),
+                refusal,
+                FallbackTrigger::Provisioning,
+            ) {
+                Err(refusal) => return refusal,
+                Ok(()) => {
+                    if let Some(body) = governed_generate_body {
+                        *req.body_mut() = Body::from(body);
+                    }
+                    return Box::pin(proxy_request_inner(
+                        state,
+                        req,
+                        endpoint,
+                        provisioning_surface,
+                        inbound_publish_cx,
+                    ))
+                    .await;
+                }
+            }
         }
     };
     let effective_pool = &effective_route.pool_name;
@@ -2485,9 +2707,93 @@ async fn proxy_request_inner(
         return resp;
     }
 
+    if native_fallback_plan(
+        &state,
+        &req,
+        endpoint,
+        &model_name,
+        governed_generate_parsed.as_ref(),
+        FallbackTrigger::ModelLoading,
+    )
+    .is_some()
+    {
+        let admitted = state
+            .pool_manager
+            .admitted_worker_names_for_capped_lane(
+                &admission_pool,
+                effective_machine_profile,
+                &bundle,
+            )
+            .await;
+        let loaded = state.registry.ring_snapshot_for_admitted(
+            &dispatch_model,
+            effective_pool,
+            effective_machine_profile,
+            &bundle,
+            &bundle_config_hash,
+            admitted.as_ref(),
+        );
+        if loaded.is_empty() {
+            if let Ok(target) = execution_authority_target(
+                &state,
+                &dispatch_model,
+                effective_pool,
+                effective_machine_profile,
+                &bundle,
+                &bundle_config_hash,
+                &admission_pool,
+            )
+            .await
+            {
+                let refusal = model_loading_refusal(endpoint);
+                if !warm_local_model(
+                    &state,
+                    work_publisher.as_ref(),
+                    &physical_lane,
+                    target,
+                    &engine,
+                    &bundle_config_hash,
+                )
+                .await
+                {
+                    return refusal;
+                }
+                match begin_native_fallback(
+                    &state,
+                    &mut req,
+                    endpoint,
+                    &model_name,
+                    governed_generate_parsed.as_ref(),
+                    refusal,
+                    FallbackTrigger::ModelLoading,
+                ) {
+                    Err(refusal) => return refusal,
+                    Ok(()) => {
+                        if let Some(body) = governed_generate_body {
+                            *req.body_mut() = Body::from(body);
+                        }
+                        return Box::pin(proxy_request_inner(
+                            state,
+                            req,
+                            endpoint,
+                            provisioning_surface,
+                            inbound_publish_cx,
+                        ))
+                        .await;
+                    }
+                }
+            }
+        }
+    }
+
     let batch_target = if endpoint == "generate" {
         None
-    } else if remote_forbidden(req.headers()).unwrap_or(false) {
+    } else if remote_forbidden(req.headers()).unwrap_or(false)
+        || req
+            .extensions()
+            .get::<FallbackAttempt>()
+            .is_some_and(FallbackAttempt::active)
+    {
         match execution_authority_target(
             &state,
             &dispatch_model,
@@ -2540,7 +2846,11 @@ async fn proxy_request_inner(
         }
     };
 
-    let require_execution_authority_v1 = remote_forbidden(req.headers()).unwrap_or(false);
+    let require_execution_authority_v1 = remote_forbidden(req.headers()).unwrap_or(false)
+        || req
+            .extensions()
+            .get::<FallbackAttempt>()
+            .is_some_and(FallbackAttempt::active);
     let token_id = extract_bearer_token(req.headers())
         .map(|t| mask_token(&t))
         .unwrap_or_default();
@@ -2725,6 +3035,40 @@ fn unsupported_streaming_response(
     )
 }
 
+/// Reject configured output limits before demand, load-only work or bridging.
+fn generation_token_cap_response(
+    state: &AppState,
+    model: &str,
+    requested: u32,
+    field: &'static str,
+    profile: Option<&str>,
+) -> Option<Response> {
+    let info = state.model_registry.get_model_info(model)?;
+    let cap = profile
+        .and_then(|name| {
+            info.info_extras
+                .profile_max_output_tokens
+                .get(name)
+                .copied()
+        })
+        .or_else(|| info.effective_max_output_tokens())?;
+    if cap == 0 || requested <= cap {
+        return None;
+    }
+    Some(
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json_openai_error(
+                format!("{field} ({requested}) exceeds model max_output_tokens ({cap})"),
+                oai_type::INVALID_REQUEST,
+                Some(field),
+                oai_code::INVALID_REQUEST,
+            )),
+        )
+            .into_response(),
+    )
+}
+
 fn validate_native_generate_pre_admission(
     state: &AppState,
     display_model: &str,
@@ -2758,6 +3102,20 @@ fn validate_native_generate_pre_admission(
                 .into_response(),
         );
     };
+
+    if let Some(response) = generation_token_cap_response(
+        state,
+        model,
+        generate.max_new_tokens,
+        "max_new_tokens",
+        params
+            .options
+            .as_ref()
+            .and_then(|options| options.get("profile"))
+            .and_then(Value::as_str),
+    ) {
+        return Some(response);
+    }
 
     if let Some(response) =
         unsupported_streaming_response(&state.model_registry, model, display_model, generate.stream)
@@ -6909,6 +7267,7 @@ pub(crate) fn resolve_model_and_bundle(
 /// machine profile, effective pool, bundle config hash, the bound work
 /// publisher, plus audit fields. Produced by [`resolve_generation_route`].
 struct ResolvedRoute {
+    dispatch_model: String,
     require_execution_authority_v1: bool,
     physical_lane: PhysicalLane,
     bundle: String,
@@ -6938,8 +7297,20 @@ async fn resolve_generation_route(
     request_intent: GenerationRequestIntent,
     explicit_bundle_override: &str,
     ext: &axum::http::Extensions,
+    bridge_allowed: bool,
+    token_limit: (u32, &'static str),
     metric_labels_slot: Option<&telemetry::MetricLabelsSlot>,
 ) -> Result<ResolvedRoute, Response> {
+    let bridge = ext.get::<RemoteFallbackOverride>();
+    let dispatch_model = bridge.map_or(dispatch_model, |RemoteFallbackOverride(plan)| {
+        plan.model.as_str()
+    });
+    let bundle = bridge.map_or(bundle, |RemoteFallbackOverride(plan)| plan.bundle.as_str());
+    if let Some(response) =
+        generation_token_cap_response(state, dispatch_model, token_limit.0, token_limit.1, None)
+    {
+        return Err(response);
+    }
     // #1841 sealed dispatch: an org-registered custom model routes to its own
     // sealed sandbox, not a catalog bundle. Force the synthetic (gpu, pool) =
     // ("sealed", "sealed") so `resolve_effective_pool` below matches the registered
@@ -7002,6 +7373,8 @@ async fn resolve_generation_route(
     } else if let Some(route) = governed.as_ref() {
         let route = governed_profile_and_pool(state, hdr, route)?;
         (route.gpu, route.pool_name, route.gpu_configured)
+    } else if let Some(RemoteFallbackOverride(plan)) = bridge {
+        (String::new(), plan.pool.clone(), true)
     } else {
         match resolve_profile_and_pool(state, hdr, customer_model).await {
             Ok(ProfilePoolRoute {
@@ -7086,6 +7459,23 @@ async fn resolve_generation_route(
     let (bundle_config_hash, model_revision, uses_catalog_scope, served_by) = state
         .model_registry
         .serving_execution_evidence(&bundle, &hash_pool, dispatch_model);
+    ServingDisclosure::record_evidence(ext, served_by.clone());
+    if let Some(RemoteFallbackOverride(plan)) = bridge {
+        if plan.config_hash != bundle_config_hash
+            || served_by.as_ref() != Some(&plan.served_by)
+            || plan.revision != model_revision
+        {
+            return Err(endpoint_error_response(
+                "generate",
+                StatusCode::SERVICE_UNAVAILABLE,
+                err_code::QUEUE_UNAVAILABLE,
+                oai_type::SERVER_ERROR,
+                oai_code::TRANSPORT_FAILURE,
+                None,
+                "Bridge execution evidence changed before dispatch",
+            ));
+        }
+    }
     if let Some(response) =
         remote_control_response("generate", hdr, served_by.as_ref(), &bundle_config_hash)
     {
@@ -7143,7 +7533,38 @@ async fn resolve_generation_route(
             ));
         }
         PoolResolution::Provisioning => {
-            return Err(build_openai_provisioning_response(&gpu, &bundle));
+            let refusal = build_openai_provisioning_response(&gpu, &bundle);
+            let attempt = ext.get::<FallbackAttempt>();
+            let plan = fallback_plan_for_request(
+                state,
+                hdr,
+                ext,
+                customer_model,
+                bridge_allowed,
+                explicit_bundle_override,
+                FallbackTrigger::Provisioning,
+            );
+            let Some(plan) = plan else {
+                return Err(refusal);
+            };
+            let attempt = attempt.expect("bridge requires request record");
+            assert!(attempt.begin(refusal, FallbackTrigger::Provisioning));
+            let mut remote_ext = ext.clone();
+            remote_ext.insert(RemoteFallbackOverride(plan.clone()));
+            return Box::pin(resolve_generation_route(
+                state,
+                hdr,
+                &plan.bundle,
+                customer_model,
+                &plan.model,
+                request_intent,
+                "",
+                &remote_ext,
+                false,
+                token_limit,
+                metric_labels_slot,
+            ))
+            .await;
         }
     };
     let effective_pool = effective_route.pool_name;
@@ -7195,6 +7616,80 @@ async fn resolve_generation_route(
         return Err(resp);
     }
 
+    if let Some(plan) = fallback_plan_for_request(
+        state,
+        hdr,
+        ext,
+        customer_model,
+        bridge_allowed,
+        explicit_bundle_override,
+        FallbackTrigger::ModelLoading,
+    ) {
+        let admitted = state
+            .pool_manager
+            .admitted_worker_names_for_capped_lane(
+                &admission_pool,
+                &effective_machine_profile,
+                &bundle,
+            )
+            .await;
+        let loaded = state.registry.ring_snapshot_for_admitted(
+            dispatch_model,
+            &effective_pool,
+            &effective_machine_profile,
+            &bundle,
+            &bundle_config_hash,
+            admitted.as_ref(),
+        );
+        if loaded.is_empty() {
+            if let Ok(target) = execution_authority_target(
+                state,
+                dispatch_model,
+                &effective_pool,
+                &effective_machine_profile,
+                &bundle,
+                &bundle_config_hash,
+                &admission_pool,
+            )
+            .await
+            {
+                let refusal = model_loading_refusal("generate");
+                if !warm_local_model(
+                    state,
+                    work_publisher_arc.as_ref(),
+                    &physical_lane,
+                    target,
+                    &engine,
+                    &bundle_config_hash,
+                )
+                .await
+                {
+                    return Err(refusal);
+                }
+                let attempt = ext
+                    .get::<FallbackAttempt>()
+                    .expect("plan requires a request record");
+                assert!(attempt.begin(refusal, FallbackTrigger::ModelLoading));
+                let mut remote_ext = ext.clone();
+                remote_ext.insert(RemoteFallbackOverride(plan.clone()));
+                return Box::pin(resolve_generation_route(
+                    state,
+                    hdr,
+                    &plan.bundle,
+                    customer_model,
+                    &plan.model,
+                    request_intent,
+                    "",
+                    &remote_ext,
+                    false,
+                    token_limit,
+                    metric_labels_slot,
+                ))
+                .await;
+            }
+        }
+    }
+
     let token_id = extract_bearer_token(hdr)
         .map(|t| mask_token(&t))
         .unwrap_or_default();
@@ -7205,7 +7700,8 @@ async fn resolve_generation_route(
         .unwrap_or(-1);
 
     Ok(ResolvedRoute {
-        require_execution_authority_v1: remote_forbidden(hdr).unwrap_or(false),
+        dispatch_model: dispatch_model.to_string(),
+        require_execution_authority_v1: remote_forbidden(hdr).unwrap_or(false) || bridge.is_some(),
         physical_lane,
         bundle,
         gpu,
@@ -7330,6 +7826,7 @@ pub async fn proxy_chat(State(state): State<Arc<AppState>>, mut req: Request) ->
     }
     check_sdk_version(req.headers());
     let disclosure = ServingDisclosure::install(&mut req);
+    let fallback = FallbackAttempt::install(&mut req);
     let metric_labels_slot = req
         .extensions()
         .get::<telemetry::MetricLabelsSlot>()
@@ -7365,7 +7862,7 @@ pub async fn proxy_chat(State(state): State<Arc<AppState>>, mut req: Request) ->
     async move {
         let mut response = proxy_chat_inner(state, req, metric_labels_slot).await;
         disclosure.stamp(response.status(), response.headers_mut());
-        response
+        fallback.finish(response)
     }
     .instrument(chat_span)
     .await
@@ -7427,7 +7924,10 @@ async fn proxy_chat_inner(
             Ok(mb) => mb,
             Err(resp) => return resp,
         };
-    let (explicit_bundle_override, _) = parse_model_spec(&params.model);
+    let (explicit_bundle_override, _) =
+        resolve_model_spec_with_aliases(&state.config.model_aliases, &params.model, |model| {
+            state.model_registry.resolve_canonical_model_name(model)
+        });
 
     // Grammar routing (follow-up: chat-path gate ordering). Resolve the model's
     // declared ``grammar_profile`` variant and compute the DISPATCH id BEFORE the
@@ -7502,23 +8002,6 @@ async fn proxy_chat_inner(
                     )
                         .into_response();
                 }
-            }
-        }
-        if let Some(cap) = info.effective_max_output_tokens() {
-            if cap > 0 && params.max_new_tokens > cap {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(json_openai_error(
-                        format!(
-                            "max_completion_tokens ({}) exceeds model max_output_tokens ({cap})",
-                            params.max_new_tokens
-                        ),
-                        oai_type::INVALID_REQUEST,
-                        Some("max_completion_tokens"),
-                        oai_code::INVALID_REQUEST,
-                    )),
-                )
-                    .into_response();
             }
         }
         if let Some(g) = params.grammar.as_ref() {
@@ -7657,6 +8140,7 @@ async fn proxy_chat_inner(
     // -- headers → GPU/pool routing, effective-pool selection, publisher bind.
     //    Shared with /v1/completions via resolve_generation_route.
     let ResolvedRoute {
+        dispatch_model,
         require_execution_authority_v1,
         physical_lane,
         bundle,
@@ -7683,6 +8167,8 @@ async fn proxy_chat_inner(
         },
         &explicit_bundle_override,
         &parts.extensions,
+        !params.stream && !native_request_has_profile_selector(&body_bytes, false),
+        (params.max_new_tokens, "max_completion_tokens"),
         metric_labels_slot.as_ref(),
     )
     .await
@@ -8254,9 +8740,10 @@ pub async fn proxy_completions(State(state): State<Arc<AppState>>, mut req: Requ
         return response;
     }
     let disclosure = ServingDisclosure::install(&mut req);
+    let fallback = FallbackAttempt::install(&mut req);
     let mut response = proxy_completions_inner(state, req).await;
     disclosure.stamp(response.status(), response.headers_mut());
-    response
+    fallback.finish(response)
 }
 
 async fn proxy_completions_inner(state: Arc<AppState>, req: Request) -> Response {
@@ -8312,7 +8799,10 @@ async fn proxy_completions_inner(state: Arc<AppState>, req: Request) -> Response
             Err(resp) => return resp,
         };
     ServingDisclosure::record(&state, &parts.extensions, &model_name);
-    let (explicit_bundle_override, _) = parse_model_spec(&params.model);
+    let (explicit_bundle_override, _) =
+        resolve_model_spec_with_aliases(&state.config.model_aliases, &params.model, |model| {
+            state.model_registry.resolve_canonical_model_name(model)
+        });
 
     if let Some(response) = unsupported_streaming_response(
         &state.model_registry,
@@ -8324,6 +8814,7 @@ async fn proxy_completions_inner(state: Arc<AppState>, req: Request) -> Response
     }
 
     let ResolvedRoute {
+        dispatch_model,
         require_execution_authority_v1,
         physical_lane,
         bundle,
@@ -8346,6 +8837,8 @@ async fn proxy_completions_inner(state: Arc<AppState>, req: Request) -> Response
         GenerationRequestIntent::Default,
         &explicit_bundle_override,
         &parts.extensions,
+        !params.stream && !native_request_has_profile_selector(&body_bytes, false),
+        (params.max_new_tokens, "max_tokens"),
         metric_labels_slot.as_ref(),
     )
     .await
@@ -8371,7 +8864,7 @@ async fn proxy_completions_inner(state: Arc<AppState>, req: Request) -> Response
             model: model_name.clone(),
             // /v1/completions does not accept grammar, so it never routes:
             // dispatch == display.
-            dispatch_model: model_name.clone(),
+            dispatch_model: dispatch_model.clone(),
             bundle: bundle.clone(),
             engine: engine.clone(),
             gpu: effective_machine_profile.clone(),
@@ -8391,7 +8884,7 @@ async fn proxy_completions_inner(state: Arc<AppState>, req: Request) -> Response
         work_publisher_arc,
         &physical_lane,
         &model_name,
-        &model_name,
+        &dispatch_model,
         &bundle,
         &engine,
         &effective_machine_profile,
@@ -8916,9 +9409,10 @@ pub async fn proxy_responses(State(state): State<Arc<AppState>>, mut req: Reques
         return response;
     }
     let disclosure = ServingDisclosure::install(&mut req);
+    let fallback = FallbackAttempt::install(&mut req);
     let mut response = proxy_responses_inner(state, req).await;
     disclosure.stamp(response.status(), response.headers_mut());
-    response
+    fallback.finish(response)
 }
 
 async fn proxy_responses_inner(state: Arc<AppState>, req: Request) -> Response {
@@ -8974,8 +9468,12 @@ async fn proxy_responses_inner(state: Arc<AppState>, req: Request) -> Response {
             Err(resp) => return resp,
         };
     ServingDisclosure::record(&state, &parts.extensions, &model_name);
-    let (explicit_bundle_override, _) = parse_model_spec(&params.model);
+    let (explicit_bundle_override, _) =
+        resolve_model_spec_with_aliases(&state.config.model_aliases, &params.model, |model| {
+            state.model_registry.resolve_canonical_model_name(model)
+        });
     let ResolvedRoute {
+        dispatch_model,
         require_execution_authority_v1,
         physical_lane,
         bundle,
@@ -8998,6 +9496,8 @@ async fn proxy_responses_inner(state: Arc<AppState>, req: Request) -> Response {
         GenerationRequestIntent::Default,
         &explicit_bundle_override,
         &parts.extensions,
+        !native_request_has_profile_selector(&body_bytes, false),
+        (params.max_new_tokens, "max_output_tokens"),
         metric_labels_slot.as_ref(),
     )
     .await
@@ -9015,9 +9515,7 @@ async fn proxy_responses_inner(state: Arc<AppState>, req: Request) -> Response {
         work_publisher_arc,
         &physical_lane,
         &model_name,
-        // /v1/responses does not accept grammar, so it never routes:
-        // dispatch == display.
-        &model_name,
+        &dispatch_model,
         &bundle,
         &engine,
         &effective_machine_profile,

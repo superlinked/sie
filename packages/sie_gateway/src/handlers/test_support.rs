@@ -2,6 +2,7 @@
 //! dispatcher that records what it publishes and answers every request.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -107,12 +108,21 @@ impl Dispatched {
 /// A dispatcher that records every publish and answers it at once.
 #[derive(Default)]
 pub(crate) struct RecordingDispatcher {
+    load_refused: AtomicBool,
+    generate_refused: AtomicBool,
     dispatched: Mutex<Vec<Dispatched>>,
 }
 
 impl RecordingDispatcher {
     pub(crate) fn dispatched(&self) -> Vec<Dispatched> {
         self.dispatched.lock().unwrap().clone()
+    }
+
+    pub(crate) fn refuse_model_loads(&self) {
+        self.load_refused.store(true, Ordering::SeqCst);
+    }
+    pub(crate) fn refuse_generation(&self) {
+        self.generate_refused.store(true, Ordering::SeqCst);
     }
 
     fn record(&self, dispatched: Dispatched) {
@@ -158,6 +168,25 @@ fn terminal_chunk_collector(
 
 #[async_trait::async_trait]
 impl WorkDispatcher for RecordingDispatcher {
+    fn supports_execution_authority_v1(&self) -> bool {
+        true
+    }
+
+    async fn publish_model_load(
+        &self,
+        target: PublishTarget,
+        _engine: &str,
+        hash: &str,
+    ) -> Result<(String, DispatchDurability), DispatchError> {
+        assert!(!hash.is_empty());
+        assert!(matches!(target, PublishTarget::VerifiedWorker { .. }));
+        self.record(Dispatched::new("load", &target));
+        if self.load_refused.load(Ordering::SeqCst) {
+            return Err(DispatchError::Other("load was not durably accepted".into()));
+        }
+        Ok(("load-1".into(), DispatchDurability::accepted()))
+    }
+
     async fn publish_work(
         self: Arc<Self>,
         target: PublishTarget,
@@ -212,6 +241,9 @@ impl WorkDispatcher for RecordingDispatcher {
         ),
         String,
     > {
+        if self.generate_refused.load(Ordering::SeqCst) {
+            return Err("private upstream failure".into());
+        }
         self.record(Dispatched::new("generate", &target));
         let (rx, _tap) = terminal_chunk_collector(display_model, bundle_config_hash);
         Ok((
@@ -350,8 +382,30 @@ impl TestGateway {
 
     /// Register a healthy worker on `lane` that reports `loaded` as loaded.
     pub(crate) async fn add_worker(&self, name: &str, lane: (&str, &str, &str), loaded: &[&str]) {
+        self.add_worker_with_authority(name, lane, loaded, false)
+            .await;
+    }
+
+    pub(crate) async fn add_verified_worker(
+        &self,
+        name: &str,
+        lane: (&str, &str, &str),
+        loaded: &[&str],
+    ) {
+        self.add_worker_with_authority(name, lane, loaded, true)
+            .await;
+    }
+
+    async fn add_worker_with_authority(
+        &self,
+        name: &str,
+        lane: (&str, &str, &str),
+        loaded: &[&str],
+        authority: bool,
+    ) {
         let (pool, machine_profile, bundle) = lane;
         let status = WorkerStatusMessage {
+            supports_execution_authority_v1: authority,
             name: name.to_string(),
             ready: true,
             gpu_count: 1,
