@@ -18,10 +18,10 @@ remaining work.
 | `openai` | Dense text embeddings at `/embeddings` and Cohere-shape reranking at `/rerank` |
 
 Native SIE generation uses the upstream's `/v1/generate` endpoint, with exact
-terminal usage. See [PR #523](https://github.com/superlinked/sie/pull/523) for
-single-node chat-level serving through an SIE upstream. OpenAI-compatible
-remote chat and completions are separate work; declaring an endpoint alone
-does not implement generation.
+terminal usage. Single-node `/v1/chat/completions` serving also forwards to the
+SIE upstream's chat endpoint. Queue-mode chat and OpenAI-provider chat and
+completions remain separate work; declaring an endpoint alone does not
+implement generation.
 
 A remote-backed model has only remote profiles. Its bare name serves remotely;
 `routing: {policy: remote_only}` makes that policy explicit. It needs no local
