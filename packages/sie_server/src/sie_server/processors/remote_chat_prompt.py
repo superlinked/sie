@@ -162,7 +162,9 @@ async def prepare_rendered_chat(
         )
     if tools:
         chunks = parse_tool_call_stream(
-            chunks, tool_call_format=_tool_format(config), parallel_tool_calls=body.get("parallel_tool_calls") is not False
+            chunks,
+            tool_call_format=_tool_format(config),
+            parallel_tool_calls=body.get("parallel_tool_calls") is not False,
         )
     chunks = bound_generation(chunks, resolve_generation_timeouts(config, None))
     return _events(chunks, body, requested_model)
