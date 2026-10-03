@@ -372,3 +372,24 @@ def test_cached_serving_switch_refusal_is_a_sanitized_503(remote_chat: tuple, st
     assert response.status_code == 503
     assert response.json()["error"]["code"] == "QUEUE_FULL"
     assert not requests
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("reasoning_field", ["reasoning_content", "reasoning"])
+def test_remote_reasoning_is_not_exposed_in_logprobs(remote_chat: tuple, streaming: bool, reasoning_field: str) -> None:
+    client, _, _, _ = remote_chat
+    raw = completion()
+    raw["choices"][0]["message"][reasoning_field] = "PRIVATE_REASONING"
+    raw["choices"][0]["logprobs"] = {"content": [{"token": "PRIVATE_REASONING", "logprob": -0.5}]}
+    if streaming:
+        chunks = events()
+        chunks[0]["choices"][0]["delta"][reasoning_field] = "PRIVATE_REASONING"
+        chunks[0]["choices"][0]["logprobs"] = raw["choices"][0]["logprobs"]
+        answer_with(
+            remote_chat, httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=ChatStream(chunks))
+        )
+    else:
+        answer_with(remote_chat, json_response(200, raw))
+    response = client.post("/v1/chat/completions", json={**BODY, "stream": streaming, "logprobs": True})
+    assert response.status_code == 200
+    assert "PRIVATE_REASONING" not in response.text

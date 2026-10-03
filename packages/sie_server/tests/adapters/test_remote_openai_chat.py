@@ -280,3 +280,16 @@ def test_invalid_and_oversized_events_never_expose_upstream_errors(data: bytes) 
     with pytest.raises(RemoteUpstreamError) as raised:
         ChatStreamParser("model").parse(data)
     assert "secret" not in str(raised.value)
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("reasoning_field", ["reasoning_content", "reasoning"])
+def test_discarded_reasoning_cannot_leak_through_logprobs(stream: bool, reasoning_field: str) -> None:
+    raw = choice(stream=stream, **{reasoning_field: "private reasoning"})
+    raw["logprobs"] = {"content": [{"token": "private reasoning", "logprob": -0.5}]}
+    parser = ChatStreamParser("model")
+    payload = wire([raw], usage=USAGE)
+    result = parser.parse(payload) if stream else parser.completion(payload)
+    assert result is not None
+    assert result["choices"][0]["logprobs"] is None
+    assert "private reasoning" not in json.dumps(result)

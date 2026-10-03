@@ -255,7 +255,8 @@ class ChatStreamParser:
             if not stream and reason is None:
                 raise _invalid()
             field = "delta" if stream else "message"
-            message = _message(choice.get(field), stream=stream)
+            raw_message = choice.get(field)
+            message = _message(raw_message, stream=stream)
             tools = message.get("tool_calls", [])
             if stream:
                 self._track_tools(index, tools, finished=reason is not None, require_tools=reason == "tool_calls")
@@ -263,7 +264,12 @@ class ChatStreamParser:
                 raise _invalid()
             result = {"index": index, field: message, "finish_reason": reason}
             if "logprobs" in choice:
-                result["logprobs"] = _logprobs(choice["logprobs"])
+                # Reasoning is omitted from the normalized message. Its token
+                # probabilities must be omitted with it, before losing that evidence.
+                has_reasoning = any(
+                    raw_message.get(key) not in (None, "") for key in ("reasoning_content", "reasoning")
+                )
+                result["logprobs"] = None if has_reasoning else _logprobs(choice["logprobs"])
             if reason is not None:
                 self._finished.add(index)
             clean.append(result)
