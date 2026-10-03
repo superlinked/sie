@@ -63,9 +63,9 @@ use crate::dispatcher::{Dispatcher, QueuedMessage};
 use crate::latency::{FetchExpiryController, LatencyTracker};
 use crate::log_util::ErrChain;
 use crate::nats_consumer::{
-    connect, ensure_stream_and_consumer, ensure_worker_stream_and_consumer,
-    reconcile_stream_and_consumer, reconcile_worker_stream_and_consumer, work_cancel_tombstone_ttl,
-    NatsConsumer,
+    connect, ensure_authority_stream_and_consumer, ensure_stream_and_consumer,
+    ensure_worker_stream_and_consumer, reconcile_stream_and_consumer,
+    reconcile_worker_stream_and_consumer, work_cancel_tombstone_ttl, NatsConsumer,
 };
 use crate::payload_store::{create_payload_store, with_telemetry as payload_store_with_telemetry};
 use crate::pool_admission::PoolAdmissionGate;
@@ -562,6 +562,8 @@ pub async fn run(config: WorkerConfig) -> anyhow::Result<()> {
             bundle_config_hash: config_apply_state.bundle_config_hash(),
             unsupported_models: config_apply_state.unsupported_models(),
             loaded_models: Arc::clone(&loaded_models),
+            execution_authority_v1: worker_pool.execution_authority_v1(),
+            authority_consumer_ready: Arc::clone(&generation_direct_dispatch.authority_active),
             runtime_state: Arc::clone(&runtime_state),
             interval: Duration::from_millis(config.health_publish_interval_ms),
         })
@@ -956,6 +958,7 @@ pub async fn run_local(config: WorkerConfig) -> anyhow::Result<()> {
 #[derive(Default)]
 struct GenerationDirectHandles {
     pull: Option<JoinHandle<()>>,
+    authority_pull: Option<JoinHandle<()>>,
     generation_cancel: Option<JoinHandle<()>>,
     batch_cancel: Option<JoinHandle<()>>,
     work_cancel: Option<JoinHandle<()>>,
@@ -977,6 +980,7 @@ struct GenerationDirectDispatch {
     pool_admission: Option<Arc<PoolAdmissionGate>>,
     worker_pool: Arc<AdapterWorkerPool>,
     active: Arc<AtomicBool>,
+    authority_active: Arc<AtomicBool>,
     batch_cancel_state: BatchCancelState,
     request_cancel_state: RequestCancelState,
     handles: Mutex<GenerationDirectHandles>,
@@ -1009,6 +1013,7 @@ impl GenerationDirectDispatch {
             pool_admission,
             worker_pool,
             active,
+            authority_active: Arc::new(AtomicBool::new(false)),
             batch_cancel_state,
             request_cancel_state,
             handles: Mutex::new(GenerationDirectHandles::default()),
@@ -1034,6 +1039,15 @@ impl GenerationDirectDispatch {
                 return Err(e);
             }
         };
+
+        let authority_consumer =
+            match ensure_authority_stream_and_consumer(&self.jetstream, &self.config).await {
+                Ok(consumer) => consumer,
+                Err(e) => {
+                    self.active.store(false, Ordering::Release);
+                    return Err(e.into());
+                }
+            };
 
         let work_cancel = match spawn_work_cancel_subscriber(
             self.nats_client.clone(),
@@ -1091,8 +1105,29 @@ impl GenerationDirectDispatch {
             Arc::clone(&self.shutdown),
         );
 
+        let authority_dispatcher = Arc::clone(&self.dispatcher);
+        let authority_shutdown = Arc::clone(&self.shutdown);
+        let authority_fetch_ctrl = self.fetch_ctrl.clone();
+        let authority_latency_tracker = Arc::clone(&self.latency_tracker);
+        let authority_pool_admission = self.pool_admission.clone();
+        let authority_active = Arc::clone(&self.authority_active);
+        let authority_pull = tokio::spawn(async move {
+            let _ready = AuthorityConsumerReady(Arc::clone(&authority_active));
+            authority_active.store(true, Ordering::Release);
+            run_pull_loop(
+                &NatsConsumer::new(authority_consumer),
+                authority_dispatcher,
+                authority_shutdown,
+                &authority_fetch_ctrl,
+                authority_latency_tracker,
+                authority_pool_admission,
+            )
+            .await;
+        });
+
         let mut handles = self.handles.lock().await;
         handles.pull = Some(pull);
+        handles.authority_pull = Some(authority_pull);
         handles.generation_cancel = Some(generation_cancel);
         handles.batch_cancel = Some(batch_cancel);
         handles.work_cancel = Some(work_cancel);
@@ -1105,6 +1140,7 @@ impl GenerationDirectDispatch {
             let mut guard = self.handles.lock().await;
             GenerationDirectHandles {
                 pull: guard.pull.take(),
+                authority_pull: guard.authority_pull.take(),
                 generation_cancel: guard.generation_cancel.take(),
                 batch_cancel: guard.batch_cancel.take(),
                 work_cancel: guard.work_cancel.take(),
@@ -1112,6 +1148,12 @@ impl GenerationDirectDispatch {
         };
 
         if let Some(h) = handles.pull {
+            if !h.is_finished() {
+                h.abort();
+            }
+            let _ = h.await;
+        }
+        if let Some(h) = handles.authority_pull {
             if !h.is_finished() {
                 h.abort();
             }
@@ -1129,6 +1171,14 @@ impl GenerationDirectDispatch {
             h.abort();
             let _ = h.await;
         }
+    }
+}
+
+struct AuthorityConsumerReady(Arc<AtomicBool>);
+
+impl Drop for AuthorityConsumerReady {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
     }
 }
 
@@ -1165,6 +1215,9 @@ fn spawn_nats_consumer_reconciler(
                         error = %e,
                         "nats-consumer: worker direct-dispatch reconcile failed"
                     ),
+                }
+                if let Err(e) = ensure_authority_stream_and_consumer(&jetstream, &config).await {
+                    warn!(error = %e, "nats-consumer: execution authority stream/durable reconcile failed");
                 }
             }
         }

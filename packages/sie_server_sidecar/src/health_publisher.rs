@@ -41,6 +41,7 @@
 //! [`WorkerStatusMessage`]: https://github.com/superlinked/sie/blob/main/packages/sie_gateway/src/types/worker.rs
 //! [`resolve_queue_route`]: https://github.com/superlinked/sie/blob/main/packages/sie_gateway/src/state/worker_registry.rs
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::time::Duration;
@@ -113,6 +114,10 @@ pub struct HealthPublisherConfig {
     /// Models the colocated backend reports as loaded. Updated by the IPC
     /// heartbeat, not by config apply.
     pub loaded_models: SharedLoadedModels,
+    /// Positive only when every backend child supports the method fence.
+    pub execution_authority_v1: Arc<AtomicBool>,
+    /// The versioned pull consumer must also be running.
+    pub authority_consumer_ready: Arc<AtomicBool>,
     /// Runtime pressure/capacity gauges mirrored into the heartbeat payload.
     pub runtime_state: Arc<RuntimeState>,
     /// How often to publish. Defaults to [`DEFAULT_PUBLISH_INTERVAL`].
@@ -144,6 +149,7 @@ struct WorkerStatusPayload<'a> {
     name: &'a str,
     ready: bool,
     terminated: bool,
+    supports_execution_authority_v1: bool,
     gpu_count: i32,
     total_gpu_slots: i32,
     ready_gpu_slots: i32,
@@ -222,6 +228,11 @@ fn encode_payload(
         name: &config.worker_id,
         ready,
         terminated,
+        supports_execution_authority_v1: ready
+            && !terminated
+            && !hash.is_empty()
+            && config.execution_authority_v1.load(Ordering::Acquire)
+            && config.authority_consumer_ready.load(Ordering::Acquire),
         gpu_count: config.gpu_count,
         total_gpu_slots,
         ready_gpu_slots,
@@ -415,6 +426,8 @@ mod tests {
             bundle_config_hash: Arc::new(RwLock::new("hash-abc".into())),
             unsupported_models: Arc::new(RwLock::new(Vec::new())),
             loaded_models: Arc::new(RwLock::new(Vec::new())),
+            execution_authority_v1: Arc::new(AtomicBool::new(false)),
+            authority_consumer_ready: Arc::new(AtomicBool::new(false)),
             runtime_state: Arc::new(RuntimeState::new()),
             interval: DEFAULT_PUBLISH_INTERVAL,
         }
@@ -430,6 +443,29 @@ mod tests {
     }
 
     #[test]
+    fn authority_health_requires_every_positive_prerequisite() {
+        for missing in ["none", "backend", "consumer", "hash", "ready", "terminated"] {
+            let c = cfg();
+            c.execution_authority_v1
+                .store(missing != "backend", Ordering::Release);
+            c.authority_consumer_ready
+                .store(missing != "consumer", Ordering::Release);
+            if missing == "hash" {
+                c.bundle_config_hash.write().unwrap().clear();
+            }
+            let payload: serde_json::Value = serde_json::from_slice(
+                &encode_payload(&c, missing != "ready", missing == "terminated").unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                payload["supports_execution_authority_v1"],
+                missing == "none",
+                "{missing}"
+            );
+        }
+    }
+
+    #[test]
     fn payload_roundtrips_to_gateway_shape() {
         // Serialises to the exact field set
         // `WorkerStatusMessage::deserialize` reads — every
@@ -441,6 +477,7 @@ mod tests {
                 name: &c.worker_id,
                 ready: true,
                 terminated: false,
+                supports_execution_authority_v1: false,
                 gpu_count: c.gpu_count,
                 total_gpu_slots: 1,
                 ready_gpu_slots: 1,
@@ -487,6 +524,7 @@ mod tests {
                 name: &c.worker_id,
                 ready: true,
                 terminated: false,
+                supports_execution_authority_v1: false,
                 gpu_count: c.gpu_count,
                 total_gpu_slots: 1,
                 ready_gpu_slots: 1,

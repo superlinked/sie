@@ -364,6 +364,28 @@ impl WorkerConfig {
             crate::subject::normalize_model_id(&self.worker_id)
         )
     }
+
+    pub fn authority_stream_name(&self) -> String {
+        format!(
+            "WORK_AUTHORITY_V1_{}",
+            crate::subject::normalize_model_id(&self.worker_id)
+        )
+    }
+
+    pub fn authority_consumer_name(&self) -> String {
+        format!(
+            "authority-v1-{}",
+            crate::subject::normalize_model_id(&self.worker_id)
+        )
+    }
+
+    pub fn authority_subject_filter(&self) -> String {
+        format!(
+            "{}.{}",
+            self.worker_subject_filter(),
+            crate::subject::EXECUTION_AUTHORITY_V1_TOKEN
+        )
+    }
 }
 
 #[cfg(test)]

@@ -125,6 +125,17 @@ impl InferenceBackend for PythonIpcBackend {
             .map_err(map_ipc_error)
     }
 
+    async fn run_batch_with_execution_authority_v1(
+        &self,
+        req: RunBatchRequest,
+        budget: Option<Duration>,
+    ) -> Result<BatchOutcome, BackendError> {
+        self.ipc
+            .run_batch_with_execution_authority_v1(req, budget)
+            .await
+            .map_err(map_ipc_error)
+    }
+
     async fn drain(&self, deadline_ms: u64) {
         match self.ipc.drain(deadline_ms).await {
             Ok(resp) => debug!(

@@ -52,9 +52,10 @@ use crate::ipc_types::{
     SetPinnedModelsResponse, SignalGenerateCancelRequest, SignalGenerateCancelResponse,
     WorkerCapabilitiesRequest, WorkerCapabilitiesResponse, IPC_VERSION, METHOD_APPLY_MODEL_CONFIG,
     METHOD_DRAIN, METHOD_ENSURE_MODEL_READY, METHOD_PING, METHOD_PROCESS_ENCODE_BATCH,
-    METHOD_PROCESS_EXTRACT_BATCH, METHOD_PROCESS_GENERATE, METHOD_PROCESS_SCORE_BATCH,
-    METHOD_REPLACE_MODEL_CONFIGS, METHOD_RUN_BATCH, METHOD_SET_PINNED_MODELS,
-    METHOD_SIGNAL_GENERATE_CANCEL, METHOD_WORKER_CAPABILITIES,
+    METHOD_PROCESS_EXTRACT_BATCH, METHOD_PROCESS_GENERATE,
+    METHOD_PROCESS_GENERATE_WITH_EXECUTION_AUTHORITY_V1, METHOD_PROCESS_SCORE_BATCH,
+    METHOD_REPLACE_MODEL_CONFIGS, METHOD_RUN_BATCH, METHOD_RUN_BATCH_WITH_EXECUTION_AUTHORITY_V1,
+    METHOD_SET_PINNED_MODELS, METHOD_SIGNAL_GENERATE_CANCEL, METHOD_WORKER_CAPABILITIES,
 };
 use crate::log_util::ErrChain;
 use crate::observability::metrics::SidecarTelemetry;
@@ -905,7 +906,38 @@ impl IpcClient {
     pub async fn process_generate<F, Fut>(
         &self,
         req: ProcessGenerateRequest,
+        on_event: F,
+    ) -> Result<(), IpcError>
+    where
+        F: FnMut(GenerateEvent) -> Fut,
+        Fut: std::future::Future<Output = Result<(), IpcError>>,
+    {
+        self.process_generate_method(req, on_event, METHOD_PROCESS_GENERATE)
+            .await
+    }
+
+    pub async fn process_generate_with_execution_authority_v1<F, Fut>(
+        &self,
+        req: ProcessGenerateRequest,
+        on_event: F,
+    ) -> Result<(), IpcError>
+    where
+        F: FnMut(GenerateEvent) -> Fut,
+        Fut: std::future::Future<Output = Result<(), IpcError>>,
+    {
+        self.process_generate_method(
+            req,
+            on_event,
+            METHOD_PROCESS_GENERATE_WITH_EXECUTION_AUTHORITY_V1,
+        )
+        .await
+    }
+
+    async fn process_generate_method<F, Fut>(
+        &self,
+        req: ProcessGenerateRequest,
         mut on_event: F,
+        method: &'static str,
     ) -> Result<(), IpcError>
     where
         F: FnMut(GenerateEvent) -> Fut,
@@ -914,7 +946,7 @@ impl IpcClient {
         let request_id = self.next_id();
         let envelope = RequestEnvelope {
             version: IPC_VERSION,
-            method: METHOD_PROCESS_GENERATE,
+            method,
             request_id: request_id.clone(),
             accepts_ipc_response_chunks_v1: false,
             body: req,
@@ -929,7 +961,7 @@ impl IpcClient {
             Ok(()) => "ok",
             Err(e) => error_label(e),
         };
-        self.record_rpc(METHOD_PROCESS_GENERATE, start, label);
+        self.record_rpc(method, start, label);
         result
     }
 
@@ -1060,6 +1092,19 @@ impl IpcClient {
     ) -> Result<BatchOutcome, IpcError> {
         self.call_with_timeout(METHOD_RUN_BATCH, req, self.run_batch_timeout(budget))
             .await
+    }
+
+    pub async fn run_batch_with_execution_authority_v1(
+        &self,
+        req: RunBatchRequest,
+        budget: Option<Duration>,
+    ) -> Result<BatchOutcome, IpcError> {
+        self.call_with_timeout(
+            METHOD_RUN_BATCH_WITH_EXECUTION_AUTHORITY_V1,
+            req,
+            self.run_batch_timeout(budget),
+        )
+        .await
     }
 
     fn run_batch_timeout(&self, budget: Option<Duration>) -> Duration {
@@ -1292,6 +1337,74 @@ mod tests {
             client.run_batch_timeout(Some(Duration::from_secs(95))),
             Duration::from_secs(95)
         );
+    }
+
+    #[tokio::test]
+    async fn authority_methods_reject_old_backend_without_legacy_retry() {
+        let path = short_sock_path();
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&calls);
+        let server = spawn_echo_async(path.clone(), move |bytes| {
+            let req: rmpv::Value = rmp_serde::from_slice(&bytes).unwrap();
+            let field = |name| {
+                req.as_map()
+                    .unwrap()
+                    .iter()
+                    .find(|(key, _)| key.as_str() == Some(name))
+                    .unwrap()
+                    .1
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            };
+            let method = field("method");
+            let request_id = field("request_id");
+            recorded.lock().unwrap().push(method);
+            async move {
+                rmp_serde::to_vec_named(&serde_json::json!({
+                    "version": IPC_VERSION,
+                    "request_id": request_id,
+                    "ok": false,
+                    "body": null,
+                    "error": "unknown method",
+                }))
+                .unwrap()
+            }
+        })
+        .await;
+        let client = IpcClient::new(&path);
+        let result = client
+            .run_batch_with_execution_authority_v1(
+                RunBatchRequest {
+                    model_id: "m".into(),
+                    batch_id: 1,
+                    lora_key: String::new(),
+                    total_cost: 1,
+                    items: Vec::new(),
+                    accepts_batched_f16_multivectors: true,
+                },
+                None,
+            )
+            .await;
+        assert!(matches!(result, Err(IpcError::Server(_))));
+        let result = client
+            .process_generate_with_execution_authority_v1(
+                ProcessGenerateRequest {
+                    model_id: "m".into(),
+                    work_item_msgpack: Vec::new(),
+                },
+                |_| async { panic!("old backend must not produce a generation event") },
+            )
+            .await;
+        assert!(matches!(result, Err(IpcError::Server(_))));
+        assert_eq!(
+            *calls.lock().unwrap(),
+            [
+                METHOD_RUN_BATCH_WITH_EXECUTION_AUTHORITY_V1,
+                METHOD_PROCESS_GENERATE_WITH_EXECUTION_AUTHORITY_V1,
+            ]
+        );
+        server.abort();
     }
 
     #[tokio::test]

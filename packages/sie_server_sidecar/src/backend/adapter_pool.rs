@@ -65,6 +65,7 @@ impl AdapterWorkerChild {
 /// Shared pool state used by the backend, heartbeat, config fanout, and
 /// generation cancel fanout.
 pub struct AdapterWorkerPool {
+    execution_authority_v1: Arc<AtomicBool>,
     children: Vec<Arc<AdapterWorkerChild>>,
     placements: Mutex<HashMap<String, usize>>,
     pinned_models: Mutex<HashSet<String>>,
@@ -106,6 +107,7 @@ impl AdapterWorkerPool {
             "AdapterWorkerPool requires at least one IPC socket"
         );
         let pool = Arc::new(Self {
+            execution_authority_v1: Arc::new(AtomicBool::new(false)),
             children,
             placements: Mutex::new(HashMap::new()),
             pinned_models: Mutex::new(HashSet::new()),
@@ -129,6 +131,10 @@ impl AdapterWorkerPool {
         self.children.len()
     }
 
+    pub fn execution_authority_v1(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.execution_authority_v1)
+    }
+
     pub fn pinned_assignment_revision(&self) -> u64 {
         self.pinned_assignment_revision.load(Ordering::Acquire)
     }
@@ -144,16 +150,32 @@ impl AdapterWorkerPool {
         &self,
         timestamp_ms: f64,
     ) -> Vec<(usize, Result<PingResponse, IpcError>)> {
-        let out = join_all(self.children.iter().map(|child| async move {
+        self.execution_authority_v1.store(false, Ordering::Release);
+        let results = join_all(self.children.iter().map(|child| async move {
             let result = child.ipc.ping(timestamp_ms).await;
             if result.as_ref().is_ok_and(|resp| resp.ready) {
                 self.mark_child_ready_from_health_success(child);
             } else {
                 child.ready.store(false, Ordering::Release);
             }
-            (child.index, result)
+            let supports_authority = result.as_ref().is_ok_and(|resp| resp.ready)
+                && tokio::time::timeout(Duration::from_secs(2), child.ipc.worker_capabilities())
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+                    .is_some_and(|resp| resp.supports_execution_authority_v1);
+            (child.index, result, supports_authority)
         }))
         .await;
+        self.execution_authority_v1.store(
+            !self.config_quarantined.load(Ordering::Acquire)
+                && results.iter().all(|(_, _, supports)| *supports),
+            Ordering::Release,
+        );
+        let out = results
+            .into_iter()
+            .map(|(index, result, _)| (index, result))
+            .collect();
         self.runtime_state
             .worker_gpu_slots_ready
             .set(self.ready_child_count() as i64);
@@ -161,12 +183,17 @@ impl AdapterWorkerPool {
     }
 
     pub async fn worker_capabilities(&self) -> Result<WorkerCapabilitiesResponse, IpcError> {
-        let mut combined = WorkerCapabilitiesResponse::default();
+        let mut combined = WorkerCapabilitiesResponse {
+            supports_execution_authority_v1: true,
+            ..Default::default()
+        };
         let mut any_success = false;
         let mut last_err = None;
         for child in &self.children {
             match child.ipc.worker_capabilities().await {
                 Ok(resp) => {
+                    combined.supports_execution_authority_v1 &=
+                        resp.supports_execution_authority_v1;
                     any_success = true;
                     self.mark_child_ready_from_health_success(child);
                     combined.has_generation_models |= resp.has_generation_models;
@@ -177,6 +204,7 @@ impl AdapterWorkerPool {
                     }
                 }
                 Err(e) => {
+                    combined.supports_execution_authority_v1 = false;
                     child.ready.store(false, Ordering::Release);
                     last_err = Some(e);
                 }
@@ -349,11 +377,32 @@ impl AdapterWorkerPool {
         F: FnMut(GenerateEvent) -> Fut,
         Fut: std::future::Future<Output = Result<(), IpcError>>,
     {
+        self.process_generate_with_authority(req, on_event, false)
+            .await
+    }
+
+    pub async fn process_generate_with_authority<F, Fut>(
+        &self,
+        req: ProcessGenerateRequest,
+        on_event: F,
+        require_authority: bool,
+    ) -> Result<(), IpcError>
+    where
+        F: FnMut(GenerateEvent) -> Fut,
+        Fut: std::future::Future<Output = Result<(), IpcError>>,
+    {
         self.ensure_not_config_quarantined()?;
         let model_id = req.model_id.clone();
         let child = self.child_for_model(&model_id);
         let _inflight_guard = ChildInflightGuard::enter(Arc::clone(&child));
-        let result = child.ipc.process_generate(req, on_event).await;
+        let result = if require_authority {
+            child
+                .ipc
+                .process_generate_with_execution_authority_v1(req, on_event)
+                .await
+        } else {
+            child.ipc.process_generate(req, on_event).await
+        };
         match &result {
             Ok(()) => self.mark_child_call_succeeded(&child),
             Err(_) => {
@@ -838,6 +887,20 @@ impl InferenceBackend for AdapterWorkerPool {
         .map_err(map_ipc_error)
     }
 
+    async fn run_batch_with_execution_authority_v1(
+        &self,
+        req: RunBatchRequest,
+        budget: Option<Duration>,
+    ) -> Result<BatchOutcome, BackendError> {
+        let model_id = req.model_id.clone();
+        let child = self.child_for_model(&model_id);
+        self.run_child_batch(model_id, child, |ipc| async move {
+            ipc.run_batch_with_execution_authority_v1(req, budget).await
+        })
+        .await
+        .map_err(map_ipc_error)
+    }
+
     async fn drain(&self, deadline_ms: u64) {
         for (index, result) in self.drain_all(deadline_ms).await {
             match result {
@@ -924,6 +987,127 @@ mod tests {
             .worker_gpu_slots_ready
             .set(pool.ready_child_count() as i64);
         pool
+    }
+
+    async fn spawn_capability_worker(
+        path: PathBuf,
+        supports: Arc<AtomicBool>,
+    ) -> tokio::task::JoinHandle<()> {
+        let listener = UnixListener::bind(path).unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let supports = Arc::clone(&supports);
+                tokio::spawn(async move {
+                    loop {
+                        let mut length = [0_u8; 4];
+                        if socket.read_exact(&mut length).await.is_err() {
+                            return;
+                        }
+                        let mut bytes = vec![0; u32::from_be_bytes(length) as usize];
+                        if socket.read_exact(&mut bytes).await.is_err() {
+                            return;
+                        }
+                        let request: serde_json::Value = rmp_serde::from_slice(&bytes).unwrap();
+                        let method = request["method"].as_str().unwrap();
+                        let capable = supports.load(Ordering::Acquire);
+                        let body = match method {
+                            "Ping" => Some(
+                                serde_json::json!({"timestamp_ms": 0.0, "worker_id": "child", "ready": true}),
+                            ),
+                            "WorkerCapabilities" if capable => {
+                                Some(serde_json::json!({"supports_execution_authority_v1": true}))
+                            }
+                            "WorkerCapabilities" => Some(serde_json::json!({})),
+                            "RunBatchWithExecutionAuthorityV1" if capable => {
+                                Some(serde_json::json!({"outcomes": []}))
+                            }
+                            _ => None,
+                        };
+                        let response = rmp_serde::to_vec_named(&serde_json::json!({
+                            "version": crate::ipc_types::IPC_VERSION,
+                            "request_id": request["request_id"],
+                            "ok": body.is_some(),
+                            "error": if body.is_none() { Some("unknown method") } else { None },
+                            "body": body,
+                        }))
+                        .unwrap();
+                        if socket
+                            .write_all(&(response.len() as u32).to_be_bytes())
+                            .await
+                            .is_err()
+                            || socket.write_all(&response).await.is_err()
+                        {
+                            return;
+                        }
+                    }
+                });
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn every_child_must_support_authority_and_old_replacement_cannot_downgrade() {
+        let dir = tempfile::Builder::new()
+            .prefix("sie-a-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let new_path = dir.path().join("new.sock");
+        let old_path = dir.path().join("old.sock");
+        let old_supports = Arc::new(AtomicBool::new(false));
+        let new_server =
+            spawn_capability_worker(new_path.clone(), Arc::new(AtomicBool::new(true))).await;
+        let old_server = spawn_capability_worker(old_path.clone(), Arc::clone(&old_supports)).await;
+        let pool = pool_with_paths(&[new_path.clone(), old_path.clone()]);
+        pool.ping_all(0.0).await;
+        assert_eq!(pool.ready_child_count(), 2);
+        assert!(!pool.execution_authority_v1().load(Ordering::Acquire));
+        assert!(
+            !pool
+                .worker_capabilities()
+                .await
+                .unwrap()
+                .supports_execution_authority_v1
+        );
+        old_supports.store(true, Ordering::Release);
+        pool.ping_all(0.0).await;
+        assert!(pool.execution_authority_v1().load(Ordering::Acquire));
+
+        // Health is still positive when the placed child becomes an older
+        // backend. The per-call discriminator must independently refuse it.
+        pool.placements.lock().unwrap().insert("m".into(), 1);
+        old_supports.store(false, Ordering::Release);
+        let result = pool
+            .run_batch_with_execution_authority_v1(
+                RunBatchRequest {
+                    model_id: "m".into(),
+                    batch_id: 1,
+                    lora_key: String::new(),
+                    total_cost: 1,
+                    items: Vec::new(),
+                    accepts_batched_f16_multivectors: true,
+                },
+                None,
+            )
+            .await;
+        assert!(matches!(result, Err(BackendError::Transient(_))));
+        pool.ping_all(0.0).await;
+        assert!(!pool.execution_authority_v1().load(Ordering::Acquire));
+
+        let unavailable = pool_with_paths(&[new_path, dir.path().join("missing.sock")]);
+        unavailable.ping_all(0.0).await;
+        assert!(!unavailable.execution_authority_v1().load(Ordering::Acquire));
+        assert!(
+            !unavailable
+                .worker_capabilities()
+                .await
+                .unwrap()
+                .supports_execution_authority_v1
+        );
+        new_server.abort();
+        old_server.abort();
     }
 
     fn pool_with_paths(paths: &[PathBuf]) -> Arc<AdapterWorkerPool> {

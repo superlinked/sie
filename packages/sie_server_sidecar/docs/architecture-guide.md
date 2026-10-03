@@ -344,9 +344,28 @@ backend advertises support, while Candle remains closed until it implements
 the same contract. Capability discovery cannot replace the method fence: a
 backend child can restart after its last positive capability response.
 
-These entrypoints prepare the backend boundary; current producers still use
-the existing methods. Gateway activation also requires a distinct versioned
-worker-direct queue subject and consumer that older sidecars cannot receive.
+Authority work uses the worker-direct subject with an eighth token,
+`execution-authority-v1`. The sidecar creates `WORK_AUTHORITY_V1_<worker>` and
+`authority-v1-<worker>` separately from its ordinary pool/direct stream and
+consumer. The stream retains the existing bounded age, message and delivery
+limits. Older six-token pool and seven-token direct filters cannot receive this
+work or change the authority consumer when reconciling their own streams.
+Redelivery preserves the subject and rechecks the live configuration hash.
+
+The sidecar derives the required contract from that subject. Before readiness
+or fetching offloaded inputs, it requires a nonempty matching hash, live config
+authority, and positively verified backend support. Numeric work also requires
+the complete scheduler lifecycle; its scheduler batches are partitioned by
+execution contract so older empty-hash work cannot invalidate verified work.
+Batch and generation dispatch use the updated-only IPC methods, preserving the
+final locked execution checks. The sidecar's health capability requires every
+ready backend child to report support and the authority pull consumer to run.
+Missing or unavailable children close that admission signal. The method fence
+still applies independently if a backend changes after the last health probe.
+
+Current gateway producers use the existing queue subjects. Gateway activation
+must select positively capable workers and publish only on the versioned
+subject for verified work.
 Every publish and retry must retain both fences, with no legacy pool or IPC
 fallback. A missing, stale, unsupported, or unavailable authority refuses work
 before inputs execute. This extends the queue contract while preserving the

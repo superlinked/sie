@@ -226,6 +226,18 @@ pub trait InferenceBackend: Send + Sync {
         self.run_batch(req).await
     }
 
+    /// Verified work must never fall back to an older backend method.
+    async fn run_batch_with_execution_authority_v1(
+        &self,
+        _req: RunBatchRequest,
+        _budget: Option<Duration>,
+    ) -> Result<BatchOutcome, BackendError> {
+        Err(BackendError::UnsupportedModel(format!(
+            "execution authority unsupported on {}",
+            self.name()
+        )))
+    }
+
     /// Graceful shutdown. Called once when the worker has stopped
     /// pulling from NATS. Backends should:
     ///

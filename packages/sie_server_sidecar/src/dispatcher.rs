@@ -53,7 +53,9 @@ use crate::scheduler::{
     ProductionSchedulerRegistry, SchedulerItem, SchedulerMeta,
 };
 use crate::shutdown::Shutdown;
-use crate::subject::{extract_model_id, is_worker_direct_work_subject};
+use crate::subject::{
+    extract_model_id, is_worker_direct_work_subject, requires_execution_authority_v1,
+};
 use crate::tokenize::TokenizerRegistry;
 use crate::work_deadline::{
     apparent_age_ms, unix_now_s, ClockSkewSignal, DeadlineStatus, WorkDeadlinePolicy,
@@ -666,6 +668,18 @@ pub struct Dispatcher {
 }
 
 impl Dispatcher {
+    fn execution_authority_is_available(&self, wi: &WorkItem, needs_scheduler: bool) -> bool {
+        !wi.bundle_config_hash.is_empty()
+            && self.config_apply_state.is_some()
+            && unknown_bundle_config_hash(std::iter::once(wi), self.config_apply_state.as_deref())
+                .is_none()
+            && self
+                .worker_pool
+                .execution_authority_v1()
+                .load(Ordering::Acquire)
+            && (!needs_scheduler || (self.scheduler_registry.is_some() && self.shutdown.is_some()))
+    }
+
     /// Construct with a default-sized concurrency semaphore from env.
     ///
     /// `scheduler_registry` + `shutdown` together gate the scheduler
@@ -1268,6 +1282,21 @@ impl Dispatcher {
             };
             match rmp_serde::from_slice::<WorkItem>(&msg.payload) {
                 Ok(mut wi) => {
+                    // This contract is derived from the consumer's versioned
+                    // subject, never an additive payload field an old worker
+                    // could ignore. Refuse before readiness or payload fetch.
+                    if requires_execution_authority_v1(&msg.subject)
+                        && !self.execution_authority_is_available(&wi, wi.operation != "generate")
+                    {
+                        nak_one_with_reason(
+                            &Delivery::Nats(msg, admission_permit, None),
+                            base_delay_ms,
+                            &self.runtime_state.telemetry,
+                            "execution_authority_unavailable",
+                        )
+                        .await;
+                        continue;
+                    }
                     if !reply_subject_is_safe(&wi.reply_subject) {
                         // ACK-to-drop (not NAK): the subject is attacker-
                         // controlled; retrying just amplifies the attempt.
@@ -1466,6 +1495,18 @@ impl Dispatcher {
             (!wi.profile_id.trim().is_empty()).then(|| wi.profile_id.trim().to_string());
         let delivery = DeliveryContext::from_message(&msg);
         let base_delay_ms = base_nak_delay_ms();
+        if requires_execution_authority_v1(&msg.subject)
+            && !self.execution_authority_is_available(&wi, false)
+        {
+            nak_msg_with_reason(
+                &msg,
+                base_delay_ms,
+                &self.runtime_state.telemetry,
+                "execution_authority_unavailable",
+            )
+            .await;
+            return;
+        }
         info!(
             work_item_id = %wi.work_item_id,
             request_id = %wi.request_id,
@@ -1982,9 +2023,10 @@ impl Dispatcher {
         // cancellation — would be entirely absent from the age distribution.
         record_work_item_ages(&self.runtime_state.telemetry, std::iter::once(&wi));
         self.runtime_state.inflight_batches.inc();
+        let requires_authority = requires_execution_authority_v1(&msg.subject);
         let result = self
             .worker_pool
-            .process_generate(
+            .process_generate_with_authority(
                 ProcessGenerateRequest {
                     model_id: model_id.clone(),
                     work_item_msgpack,
@@ -2010,6 +2052,7 @@ impl Dispatcher {
                         .map_err(|e| IpcError::Server(e.to_string()))
                     }
                 },
+                requires_authority,
             )
             .await;
         decrement_gauge(&self.runtime_state.inflight_batches, 1);
@@ -2205,6 +2248,13 @@ impl Dispatcher {
         let group_started = Instant::now();
         let group_size = items.len();
         let base_delay_ms = base_nak_delay_ms();
+        if items.iter().any(|(wi, delivery)| {
+            delivery.requires_execution_authority_v1()
+                && !self.execution_authority_is_available(wi, true)
+        }) {
+            nak_all(&items, base_delay_ms, &self.runtime_state.telemetry).await;
+            return Ok(());
+        }
         if let Some((expected_hash, unknown_hash_count)) = unknown_bundle_config_hash(
             items.iter().map(|(wi, _)| wi),
             self.config_apply_state.as_deref(),
@@ -5064,6 +5114,65 @@ async fn process_scheduler_batch(
     batch: crate::scheduler::FormattedBatch<SchedulerItem, SchedulerMeta>,
     role: WaveRole,
 ) {
+    assert_eq!(
+        batch.items.len(),
+        batch.metadata.len(),
+        "FormattedBatch items and metadata must stay aligned"
+    );
+    // Keep the execution contracts separate even when the scheduler coalesces
+    // a verified request with an older producer's empty-hash work. The legacy
+    // sibling must not invalidate or downgrade the verified request's RPC.
+    let flush_reason = batch.flush_reason;
+    let mut partitions = [
+        crate::scheduler::FormattedBatch {
+            items: Vec::new(),
+            metadata: Vec::new(),
+            total_cost: 0,
+            flush_reason,
+        },
+        crate::scheduler::FormattedBatch {
+            items: Vec::new(),
+            metadata: Vec::new(),
+            total_cost: 0,
+            flush_reason,
+        },
+    ];
+    for (item, meta) in batch.items.into_iter().zip(batch.metadata) {
+        let index = usize::from(!meta.delivery.requires_execution_authority_v1());
+        partitions[index].total_cost += item.cost();
+        partitions[index].items.push(item);
+        partitions[index].metadata.push(meta);
+    }
+    let mut partition_role = role;
+    for partition in partitions {
+        if partition.items.is_empty() {
+            continue;
+        }
+        process_scheduler_contract_batch(
+            model_id,
+            dispatcher,
+            scheduler,
+            op,
+            lora.clone(),
+            partition,
+            partition_role,
+        )
+        .await;
+        // Both RPCs retain one wave/pipeline permit. Preserve its Primary/Drain
+        // roles and the configured controller cadence across the two RPCs.
+        partition_role = WaveRole::Drain;
+    }
+}
+
+async fn process_scheduler_contract_batch(
+    model_id: &str,
+    dispatcher: &Arc<Dispatcher>,
+    scheduler: &Arc<ProductionScheduler>,
+    op: SchedOp,
+    lora: crate::scheduler::LoraKey,
+    batch: crate::scheduler::FormattedBatch<SchedulerItem, SchedulerMeta>,
+    role: WaveRole,
+) {
     if batch.items.is_empty() {
         return;
     }
@@ -5327,11 +5436,22 @@ async fn process_scheduler_batch(
     // the backend roundtrip.
     let dispatch_started_at = Instant::now();
 
-    let outcome = match dispatcher
-        .backend
-        .run_batch_with_budget(req, run_batch_budget)
-        .await
-    {
+    let requires_authority = batch
+        .metadata
+        .iter()
+        .any(|meta| meta.delivery.requires_execution_authority_v1());
+    let result = if requires_authority {
+        dispatcher
+            .backend
+            .run_batch_with_execution_authority_v1(req, run_batch_budget)
+            .await
+    } else {
+        dispatcher
+            .backend
+            .run_batch_with_budget(req, run_batch_budget)
+            .await
+    };
+    let outcome = match result {
         Ok(o) => o,
         Err(e) => {
             dispatcher.runtime_state.inflight_batches.dec();
@@ -6742,6 +6862,65 @@ mod tests {
             context: async_nats::jetstream::new(client),
         };
         Delivery::Nats(message, None, None)
+    }
+
+    async fn authority_test_delivery() -> Delivery {
+        let mut delivery = unacknowledgeable_nats_delivery().await;
+        if let Delivery::Nats(message, ..) = &mut delivery {
+            message.message.subject =
+                "sie.work.test.machine.bundle.cold.worker.execution-authority-v1".into();
+        }
+        delivery
+    }
+
+    #[tokio::test]
+    async fn stale_authority_generation_refuses_before_readiness_or_payload_fetch() {
+        let backend = LoadingModelBackend::new("cold");
+        let mut dispatcher = dispatcher_with_backend(backend.clone());
+        Arc::get_mut(&mut dispatcher).unwrap().config_apply_state =
+            Some(Arc::new(ConfigApplyState::new("fresh".into())));
+        dispatcher
+            .worker_pool
+            .execution_authority_v1()
+            .store(true, Ordering::Release);
+        let mut work = wi("verified", 0, "cold", "generate");
+        work.bundle_config_hash = "stale".into();
+        work.payload_ref = Some("must-not-fetch".into());
+        let Delivery::Nats(message, permit, _) = authority_test_delivery().await else {
+            unreachable!()
+        };
+        dispatcher
+            .handle_generate_item(work, QueuedMessage::new(message, permit))
+            .await;
+        assert_eq!(backend.probes.load(Ordering::SeqCst), 0);
+        assert!(backend.encoded_models().is_empty());
+    }
+
+    #[tokio::test]
+    async fn half_wired_scheduler_cannot_downgrade_verified_numeric_work() {
+        let backend = LoadingModelBackend::new("cold");
+        let mut dispatcher = dispatcher_with_backend(backend.clone());
+        let mutable = Arc::get_mut(&mut dispatcher).unwrap();
+        mutable.config_apply_state = Some(Arc::new(ConfigApplyState::new("fresh".into())));
+        mutable.scheduler_registry = Some(Arc::new(ProductionSchedulerRegistry::new(
+            crate::scheduler::BatchConfig::from_env_or_default(),
+        )));
+        mutable.shutdown = None;
+        dispatcher
+            .worker_pool
+            .execution_authority_v1()
+            .store(true, Ordering::Release);
+        let mut work = wi("verified", 0, "cold", "encode");
+        work.bundle_config_hash = "fresh".into();
+        dispatcher
+            .dispatch_decoded(
+                vec![(work, authority_test_delivery().await)],
+                1,
+                Instant::now(),
+            )
+            .await;
+        assert_eq!(backend.probes.load(Ordering::SeqCst), 0);
+        assert!(backend.encoded_models().is_empty());
     }
 
     #[tokio::test(start_paused = true)]

@@ -3352,5 +3352,84 @@ async fn ensure_paths_reconcile_stream_discard_policy_to_new() {
         );
     }
 
+    // Verified work lives on a separately named, bounded stream. Replacing
+    // this worker with an older binary can only reconcile its pool/direct
+    // streams; it cannot make those old filters receive the verified work.
+    let authority =
+        sie_server_sidecar::nats_consumer::ensure_authority_stream_and_consumer(&js, &config)
+            .await
+            .expect("authority stream and consumer");
+    let subject = config.authority_subject_filter().replace('*', "model");
+    js.publish(subject.clone(), "verified-work".into())
+        .await
+        .unwrap()
+        .await
+        .unwrap();
+    sie_server_sidecar::nats_consumer::ensure_stream_and_consumer(&js, &config)
+        .await
+        .unwrap();
+    sie_server_sidecar::nats_consumer::ensure_worker_stream_and_consumer(&js, &config)
+        .await
+        .unwrap();
+    for name in [config.stream_name(), config.worker_stream_name()] {
+        assert_eq!(
+            js.get_stream(name)
+                .await
+                .unwrap()
+                .info()
+                .await
+                .unwrap()
+                .state
+                .messages,
+            0
+        );
+    }
+    let mut stream = js.get_stream(config.authority_stream_name()).await.unwrap();
+    let info = stream.info().await.unwrap();
+    assert_eq!(info.config.subjects, [config.authority_subject_filter()]);
+    assert!(info.config.max_messages > 0);
+    assert!(!info.config.max_age.is_zero());
+    assert_eq!(info.state.messages, 1);
+    let mut messages = authority
+        .stream()
+        .max_messages_per_batch(1)
+        .expires(Duration::from_millis(100))
+        .messages()
+        .await
+        .unwrap();
+    let delivery = timeout(Duration::from_secs(3), messages.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(delivery.subject.as_str(), subject);
+    delivery
+        .ack_with(async_nats::jetstream::AckKind::Nak(None))
+        .await
+        .unwrap();
+    drop(messages);
+
+    // A newer worker may resume the same durable and recheck live authority.
+    // Redelivery stays on the authority contract rather than the legacy pool.
+    let resumed =
+        sie_server_sidecar::nats_consumer::ensure_authority_stream_and_consumer(&js, &config)
+            .await
+            .unwrap();
+    let mut messages = resumed
+        .stream()
+        .max_messages_per_batch(1)
+        .expires(Duration::from_millis(100))
+        .messages()
+        .await
+        .unwrap();
+    let redelivery = timeout(Duration::from_secs(3), messages.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(redelivery.subject.as_str(), subject);
+    assert!(redelivery.info().unwrap().delivered >= 2);
+    redelivery.double_ack().await.unwrap();
+
     drop(nats);
 }

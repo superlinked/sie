@@ -601,9 +601,36 @@ pub async fn ensure_worker_stream_and_consumer(
     js: &JsContext,
     config: &WorkerConfig,
 ) -> Result<PullConsumer, NatsSetupError> {
-    let stream_name = config.worker_stream_name();
-    let subject = config.worker_subject_filter();
-    let consumer_name = config.worker_consumer_name();
+    ensure_direct_stream_and_consumer(js, config, false).await
+}
+
+/// Separate, bounded durable authority stream; older worker reconciliation
+/// only knows its ordinary stream and cannot broaden this consumer's filter.
+pub async fn ensure_authority_stream_and_consumer(
+    js: &JsContext,
+    config: &WorkerConfig,
+) -> Result<PullConsumer, NatsSetupError> {
+    ensure_direct_stream_and_consumer(js, config, true).await
+}
+
+async fn ensure_direct_stream_and_consumer(
+    js: &JsContext,
+    config: &WorkerConfig,
+    authority_v1: bool,
+) -> Result<PullConsumer, NatsSetupError> {
+    let (stream_name, subject, consumer_name) = if authority_v1 {
+        (
+            config.authority_stream_name(),
+            config.authority_subject_filter(),
+            config.authority_consumer_name(),
+        )
+    } else {
+        (
+            config.worker_stream_name(),
+            config.worker_subject_filter(),
+            config.worker_consumer_name(),
+        )
+    };
     let desired_max_age = Duration::from_secs(generation_stream_max_age_secs());
 
     let desired_storage = stream_storage();

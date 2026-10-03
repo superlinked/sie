@@ -120,6 +120,10 @@ pub enum Delivery {
 }
 
 impl Delivery {
+    pub fn requires_execution_authority_v1(&self) -> bool {
+        matches!(self, Self::Nats(msg, ..) if crate::subject::requires_execution_authority_v1(&msg.subject))
+    }
+
     /// True when this delivery arrived worker-directly rather than via the
     /// pool subject: a NATS message on a worker-specific direct-dispatch
     /// subject, or any local-ingest delivery (the caller addressed THIS
