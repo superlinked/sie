@@ -468,6 +468,9 @@ def _validate_cuda_chat_body(body: dict[str, Any]) -> None:
 
 
 def _validate_common_chat_body(body: dict[str, Any]) -> None:
+    response_format = body.get("response_format")
+    if response_format is not None and not isinstance(response_format, dict):
+        raise _bad_request("'response_format' must be an object", param="response_format")
     n = body.get("n")
     if n is not None and (isinstance(n, bool) or not isinstance(n, int) or not (1 <= n <= _MAX_CHAT_CHOICES)):
         raise _bad_request(f"'n' must be an integer in [1, {_MAX_CHAT_CHOICES}]", param="n")

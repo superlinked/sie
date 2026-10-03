@@ -815,3 +815,15 @@ def test_native_upstream_prompt_reasoning_ownership_across_surfaces(remote_chat,
     assert '"error"' not in response.text
     assert len(requests) == 1
     assert stream.closed
+
+
+@pytest.mark.parametrize("response_format", ["json", ["json"], 1, True, False, [], ""])
+@pytest.mark.parametrize("cold", [False, True])
+def test_invalid_response_format_fails_before_template_load_or_dispatch(remote_chat, response_format, cold) -> None:
+    client, _, _, requests = remote_chat
+    registry = _cold_generation_bridge(remote_chat) if cold else client.app.state.registry
+    response = client.post("/v1/chat/completions", json={**BODY, "response_format": response_format})
+    assert response.status_code == 400, response.text
+    assert response.json()["error"]["param"] == "response_format"
+    assert not requests
+    registry.start_load_async.assert_not_awaited()
