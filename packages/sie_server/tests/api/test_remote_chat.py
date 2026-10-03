@@ -1,6 +1,7 @@
 import asyncio
 import json
 from collections.abc import AsyncIterator, Callable, Iterator
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -20,6 +21,7 @@ from sie_server.config.model import ModelConfig
 from sie_server.config.upstreams import Upstream, install_upstreams
 from sie_server.core.loader import expand_profile_variants
 from sie_server.core.upstream_client import upstream_client
+from sie_server.processors import remote_chat_prompt
 
 MODEL = "caller/model"
 SAFE_MODEL = "caller__model"
@@ -725,3 +727,91 @@ def test_empty_chat_tools_cannot_satisfy_a_required_choice(remote_chat: tuple, c
     assert response.json()["error"]["param"] == "tool_choice"
     assert not requests
     registry.start_load_async.assert_not_awaited()
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_onboarded_direct_chat_uses_raw_template_without_chat_dispatch(
+    remote_chat, monkeypatch: pytest.MonkeyPatch, stream: bool
+) -> None:
+    client, adapter, config, requests = remote_chat
+    data = config.model_dump()
+    data.update(remote_backed=False, hf_id="onboarded/model", hf_revision="a" * 40)
+    data["profiles"]["default"]["adapter_options"]["runtime"] = {}
+    onboarded = ModelConfig.model_validate(data)
+    client.app.state.registry.get_config.return_value = onboarded
+    monkeypatch.setattr(
+        remote_chat_prompt,
+        "_tokenizer",
+        lambda *args: SimpleNamespace(
+            chat_template="template", apply_chat_template=lambda *args, **kwargs: "owned prompt"
+        ),
+    )
+    if isinstance(adapter, OpenAIUpstreamAdapter):
+        raw_events = [
+            {"choices": [{"index": 0, "text": "answer", "finish_reason": None}]},
+            {"choices": [{"index": 0, "text": "", "finish_reason": "stop"}], "usage": USAGE},
+            "[DONE]",
+        ]
+        path = "/prefix/v1/completions"
+    else:
+        raw_events = [
+            {"text_delta": "answer", "done": False},
+            {"text_delta": "", "done": True, "finish_reason": "stop", "usage": USAGE},
+        ]
+        path = "/prefix/v1/generate/operator__model"
+    upstream_stream = ChatStream(raw_events)
+    answer_with(remote_chat, httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=upstream_stream))
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            **BODY,
+            "max_tokens": 32,
+            "max_completion_tokens": None,
+            "stream": stream,
+            "stream_options": {"include_usage": True},
+        },
+    )
+    assert response.status_code == 200
+    assert len(requests) == 1
+    assert requests[0].url.path == path
+    assert json.loads(requests[0].content)["prompt"] == "owned prompt"
+    sent = json.loads(requests[0].content)
+    assert sent.get("max_tokens", sent.get("max_new_tokens")) == 32
+    assert response.headers["X-SIE-Served-By"] == "remote"
+    assert "answer" in response.text
+    assert "owned prompt" not in response.text
+    assert '"error"' not in response.text
+    assert upstream_stream.closed
+    if not stream:
+        assert response.json()["choices"][0]["message"]["content"] == "answer"
+        assert response.json()["usage"] == USAGE
+    else:
+        assert response.text.endswith("data: [DONE]\n\n")
+
+
+@pytest.mark.parametrize(("surface", "streaming"), [entry for entry in _GENERATION_SURFACES if entry[0] != "chat"])
+def test_native_upstream_prompt_reasoning_ownership_across_surfaces(remote_chat, surface, streaming) -> None:
+    client, adapter, config, requests = remote_chat
+    config.profiles["default"].adapter_options.runtime.clear()
+    config.tasks.generate.chat_template_kwargs = {"enable_thinking": False}
+    text = "answer<think>PRIVATE_BLOCK</think>tail"
+    if isinstance(adapter, OpenAIUpstreamAdapter):
+        frames = [
+            {"choices": [{"index": 0, "text": "PRIVATE_PROMPT</think>" + text, "finish_reason": None}]},
+            {"choices": [{"index": 0, "text": "", "finish_reason": "stop"}], "usage": USAGE},
+            "[DONE]",
+        ]
+    else:
+        frames = [{"text_delta": text, "done": False}, {"done": True, "finish_reason": "stop", "usage": USAGE}]
+    stream = ChatStream(frames)
+    answer_with(remote_chat, httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=stream))
+    path, request = _generation_request(surface, stream=streaming)
+    request["input" if surface == "responses" else "prompt"] = "owned prompt<think>"
+    response = client.post(path, json=request)
+    assert response.status_code == 200, response.text
+    assert "answer" in response.text
+    assert "tail" in response.text
+    assert "PRIVATE" not in response.text
+    assert '"error"' not in response.text
+    assert len(requests) == 1
+    assert stream.closed

@@ -555,3 +555,45 @@ async def test_onboarded_without_local_template_uses_chat(remote: tuple, monkeyp
     assert chunks[-1]["finish_reason"] == "stop"
     assert remote[3][0].url.path.endswith("/chat/completions")
     tokenizer.assert_awaited_once()
+
+
+async def test_onboarded_strict_tools_keep_declared_chat(remote: tuple, monkeypatch: pytest.MonkeyPatch) -> None:
+    adapter, proc, _nc, requests = remote
+    if isinstance(adapter, OpenAIUpstreamAdapter):
+        assert adapter._upstream is not None
+        upstream = adapter._upstream.model_copy(update={"endpoints": frozenset({"chat", "completions"})})
+        adapter.unload()
+        install_upstreams({"queued-chat": upstream})
+        adapter.load("cpu")
+    config_data = proc._registry.get_config(MODEL).model_dump()
+    config_data.update({"remote_backed": False, "hf_id": "local/model"})
+    proc._registry.get_config.return_value = ModelConfig.model_validate(config_data)
+    tokenizer = AsyncMock(side_effect=AssertionError("strict tools must retain chat ownership"))
+    monkeypatch.setattr(proc, "_get_tokenizer", tokenizer)
+    tool = {**TOOL, "function": {**TOOL["function"], "strict": True}}
+    respond(remote)
+    _msg, chunks = await run(remote, tools=[tool])
+    assert chunks[-1]["finish_reason"] == "stop"
+    assert requests[0].url.path.endswith("/chat/completions")
+    assert json.loads(requests[0].content)["tools"][0]["function"]["strict"] is True
+    tokenizer.assert_not_awaited()
+
+
+@pytest.mark.parametrize("remote", ["sie"], indirect=True)
+async def test_onboarded_native_sie_preserves_already_suppressed_answer(remote: tuple, monkeypatch) -> None:
+    _adapter, proc, _nc, requests = remote
+    config_data = proc._registry.get_config(MODEL).model_dump()
+    config_data.update({"remote_backed": False, "hf_id": "local/model"})
+    config_data["tasks"]["generate"]["chat_template_kwargs"] = {"enable_thinking": False}
+    proc._registry.get_config.return_value = ModelConfig.model_validate(config_data)
+    monkeypatch.setattr(proc, "_get_tokenizer", AsyncMock(return_value=MagicMock(chat_template="local-template")))
+    monkeypatch.setattr(proc, "_render_chat_template", AsyncMock(return_value="LOCALLY RENDERED<think>"))
+    monkeypatch.setattr(proc, "_check_context_length", AsyncMock(return_value=None))
+    respond(
+        remote,
+        frames=[{"text_delta": "answer", "done": False}, {"done": True, "finish_reason": "stop", "usage": USAGE}],
+    )
+    _msg, chunks = await run(remote)
+    assert "".join(chunk.get("text_delta", "") for chunk in chunks) == "answer"
+    assert chunks[-1]["finish_reason"] == "stop"
+    assert requests[0].url.path.endswith("/generate/operator__model")

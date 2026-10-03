@@ -23,14 +23,20 @@ SIE upstream's chat endpoint. OpenAI profiles require the corresponding
 `chat` or `completions` endpoint declaration. Both generation modes require
 exact final usage and bounded responses; streaming cancellation closes the
 upstream call. Queued remote-backed chat uses the upstream chat endpoint without
-loading a local tokenizer. An onboarded queued OpenAI model prefers its local
-chat template and raw completions when that endpoint is declared; strict JSON
-Schema requests, enforced tool choices, multiple choices, and chat-only
+loading a local tokenizer. Single-node and queued onboarded models prefer their
+local chat template and tool parser through native SIE generation or declared
+OpenAI raw completions. Strict JSON Schema requests, strict tool schemas,
+enforced tool choices, multiple choices, and chat-only
 deployments use upstream chat. Native raw completions refuse
 media, grammar and nonstandard sampling fields they cannot enforce; strict
 JSON Schema output is supported through chat and verified locally. Queued chat
 preserves tools, tool choice, choice indices and usage; unsupported media, local
 chat-template kwargs and nonstandard sampling fields fail before dispatch.
+Single-node chat retains upstream chat ownership for request fields the raw
+generation contract cannot represent, including MLX sampling and role mapping.
+Selection completes before dispatch; a started raw request is never retried as
+chat. Native SIE already suppresses private reasoning from its rendered prompt;
+the receiving worker preserves its answer and strips any explicit private blocks.
 
 A remote-backed model has only remote profiles. Its bare name serves remotely;
 `routing: {policy: remote_only}` makes that policy explicit. It needs no local

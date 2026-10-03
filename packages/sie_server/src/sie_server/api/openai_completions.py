@@ -39,6 +39,7 @@ from sie_server.adapters._generation_base import (
     suppress_thinking_blocks,
     thinking_blocks_must_be_hidden,
 )
+from sie_server.adapters.remote.sie import SieUpstreamAdapter
 from sie_server.api.generate import _generation_http_exception
 from sie_server.api.helpers import ModelStateChecker, check_sdk_version
 from sie_server.api.routing import fallback_refusal, remote_routing, route_request
@@ -743,7 +744,8 @@ async def completions(
                 reasoning_format = resolve_reasoning_format(config, adapter)
                 chunks = suppress_thinking_blocks(
                     chunks,
-                    start_inside=reasoning_starts_in_prompt(params.prompt, reasoning_format),
+                    start_inside=not isinstance(adapter, SieUpstreamAdapter)
+                    and reasoning_starts_in_prompt(params.prompt, reasoning_format),
                     reasoning_format=reasoning_format,
                 )
             if params.stream:

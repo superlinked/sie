@@ -41,6 +41,7 @@ from sie_sdk.queue_types import denormalize_model_id
 
 from sie_server.adapters._generation_base import (
     GenerationAdapter,
+    GenerationError,
     GenerationUnsupportedFieldError,
     ReasoningFormat,
     ThinkingBlockStripper,
@@ -52,7 +53,12 @@ from sie_server.adapters.errors import InputTooLongError, UpstreamUnavailableErr
 from sie_server.adapters.mlx.generation import MLXGenerationAdapter, normalize_mlx_seed
 from sie_server.adapters.remote._http import RemoteUpstreamError
 from sie_server.adapters.sglang.generation import SGLangGenerationAdapter
-from sie_server.api.generate import _validate_logit_bias, _validate_logprobs, _validate_schema_shape
+from sie_server.api.generate import (
+    _generation_http_exception,
+    _validate_logit_bias,
+    _validate_logprobs,
+    _validate_schema_shape,
+)
 from sie_server.api.helpers import (
     ModelStateChecker,
     ensure_finite_scores,
@@ -69,7 +75,7 @@ from sie_server.config.upstreams import RemoteServingDisabledError
 from sie_server.core.grammar_routing import resolve_grammar_serving_model
 from sie_server.core.inference_output import ScoreOutput
 from sie_server.core.loader import serves_remotely
-from sie_server.core.runtime_options import grammar_default_sampling
+from sie_server.core.runtime_options import GenerationTimeoutError, grammar_default_sampling
 from sie_server.core.score_cost import MAX_SCORE_ITEMS, build_score_prepared_items
 from sie_server.core.timing import RequestTiming
 from sie_server.core.video_frames import (
@@ -79,6 +85,7 @@ from sie_server.core.video_frames import (
     sniff_video_container,
 )
 from sie_server.observability.tracing import tracer
+from sie_server.processors.remote_chat_prompt import collect_rendered_chat, prepare_rendered_chat
 from sie_server.processors.streaming import _decode_data_uri_image
 from sie_server.processors.strict_grammar import (
     MODEL_OUTPUT_PARSE_ERROR,
@@ -730,6 +737,8 @@ def _prepare_chat_body(
     # SIE owns these edge-only identifiers; do not send unknown metadata into
     # the engine process.
     proxied.pop("safety_identifier", None)
+    if proxied.get("parallel_tool_calls") is None:
+        proxied.pop("parallel_tool_calls", None)
 
     cap = config.tasks.generate.max_output_tokens
     requested_cap = max_completion_tokens if max_completion_tokens is not None else max_tokens
@@ -746,6 +755,7 @@ def _prepare_chat_body(
         proxied.pop("max_tokens", None)
         effective_cap = max_completion_tokens
     else:
+        proxied.pop("max_completion_tokens", None)
         proxied["max_tokens"] = max_tokens if max_tokens is not None else cap
         effective_cap = proxied["max_tokens"]
     if seed is not None:
@@ -1142,7 +1152,7 @@ async def _remote_chat_events(
             delivered = True
             yield b"data: " + encoded + b"\n\n"
         yield b"data: [DONE]\n\n"
-    except (RemoteUpstreamError, UpstreamUnavailableError):
+    except (RemoteUpstreamError, UpstreamUnavailableError, GenerationError, GenerationTimeoutError):
         if not delivered:
             raise
         yield _upstream_error_event()
@@ -1170,9 +1180,14 @@ async def _remote_chat_response(
     strict_grammar: GrammarSpec | None,
 ) -> Response:
     try:
+        rendered = await prepare_rendered_chat(
+            adapter, body, config=config, requested_model=requested_model, max_response_bytes=_MAX_CHAT_RESPONSE_BYTES
+        )
         if stream:
             iterator = _remote_chat_events(
-                adapter.chat_completion_stream(
+                rendered
+                if rendered is not None
+                else adapter.chat_completion_stream(
                     body, requested_model=requested_model, max_response_bytes=_MAX_CHAT_RESPONSE_BYTES
                 ),
                 body=body,
@@ -1185,8 +1200,12 @@ async def _remote_chat_response(
             return await prefetched_sse_response(
                 iterator, headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", **headers}
             )
-        payload = await adapter.chat_completion(
-            body, requested_model=requested_model, max_response_bytes=_MAX_CHAT_RESPONSE_BYTES
+        payload = (
+            await collect_rendered_chat(rendered)
+            if rendered is not None
+            else await adapter.chat_completion(
+                body, requested_model=requested_model, max_response_bytes=_MAX_CHAT_RESPONSE_BYTES
+            )
         )
         _check_remote_chat_usage(payload, body, config)
         payload = _sanitize_chat_payload(
@@ -1204,8 +1223,12 @@ async def _remote_chat_response(
             if violation is not None:
                 return _strict_output_error_response(violation)
         return JSONResponse(content=payload, headers=headers)
-    except GenerationUnsupportedFieldError as exc:
-        raise _bad_request(str(exc), param=exc.param, code="unsupported_field") from exc
+    except GenerationError as exc:
+        raise _generation_http_exception(exc) from exc
+    except GenerationTimeoutError:
+        raise HTTPException(
+            status_code=504, detail={"code": "generation_timeout", "message": "remote generation timed out"}
+        ) from None
     except UpstreamUnavailableError as exc:
         raise upstream_unavailable_exception(exc, requested_model) from exc
     except (InputTooLongError, InvalidInputError) as exc:

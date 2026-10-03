@@ -1882,6 +1882,7 @@ class StreamingProcessor:
                 (config is not None and config.remote_backed)
                 or params.grammar is not None
                 or tool_choice_mode in ("required", "named")
+                or any(tool.get("function", {}).get("strict") is True for tool in effective_tools or ())
                 or (params.n is not None and params.n > 1)
                 or (isinstance(adapter, OpenAIUpstreamAdapter) and not adapter.supports_raw_completions)
             )
@@ -1987,6 +1988,7 @@ class StreamingProcessor:
             prompt_str = params.input.prompt
         thinking_starts_in_prompt = (
             not remote_chat
+            and not isinstance(adapter, SieUpstreamAdapter)
             and suppress_thinking
             and reasoning_starts_in_prompt(
                 prompt_str,

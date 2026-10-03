@@ -78,6 +78,7 @@ from sie_server.adapters._generation_base import (
     suppress_thinking_blocks,
     thinking_blocks_must_be_hidden,
 )
+from sie_server.adapters.remote.sie import SieUpstreamAdapter
 from sie_server.api.helpers import ModelStateChecker, oom_retry_after_from_registry, read_bounded_request_body
 from sie_server.api.routing import remote_routing, route_request
 from sie_server.api.streaming_response import prefetched_sse_response
@@ -1275,9 +1276,13 @@ async def generate(
                 code=ErrorCode.MODEL_NOT_FOUND.value,
             )
         reasoning_format = resolve_reasoning_format(config, adapter)
-        thinking_starts_in_prompt = suppress_thinking and reasoning_starts_in_prompt(
-            generation_prompt,
-            reasoning_format,
+        thinking_starts_in_prompt = (
+            suppress_thinking
+            and not isinstance(adapter, SieUpstreamAdapter)
+            and reasoning_starts_in_prompt(
+                generation_prompt,
+                reasoning_format,
+            )
         )
 
         generation_parameters = _native_adapter_generate_parameters(
