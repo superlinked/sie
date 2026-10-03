@@ -230,7 +230,8 @@ async def test_the_queue_worker_redelivers_an_item_its_cold_upstream_refused(
     assert refused.disposition == "nak_retry"
     assert refused.nak_delay_ms == 5_000
     assert refused.error is None
-    assert refused.error_code is None
+    assert refused.error_code == "QUEUE_FULL"
+    assert refused.retry_after_s == 5
     assert served.disposition == "publish_and_ack", served.error
 
 
@@ -246,7 +247,8 @@ async def test_the_queue_worker_redelivers_an_item_its_unreachable_upstream_neve
 
     assert outcome.disposition == "nak_retry"
     assert outcome.nak_delay_ms == 5_000, "the upstream's wait, which is longer than the base delay"
-    assert outcome.error_code is None
+    assert outcome.error_code == "QUEUE_FULL"
+    assert outcome.retry_after_s == 5
 
 
 async def test_the_queue_worker_publishes_a_final_upstream_error(
