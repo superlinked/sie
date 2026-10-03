@@ -826,4 +826,4 @@ def test_invalid_response_format_fails_before_template_load_or_dispatch(remote_c
     assert response.status_code == 400, response.text
     assert response.json()["error"]["param"] == "response_format"
     assert not requests
-    registry.start_load_async.assert_not_awaited()
+    registry.start_load_async.assert_not_called()
