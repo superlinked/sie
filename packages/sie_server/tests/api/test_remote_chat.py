@@ -418,7 +418,9 @@ def test_native_remote_stream_refusal_precedes_http_success(remote_chat: tuple, 
             headers={"retry-after": "19"},
         ),
     )
-    response = client.post(f"/v1/generate/{SAFE_MODEL}", json={"prompt": "question", "max_new_tokens": 8, "stream": True})
+    response = client.post(
+        f"/v1/generate/{SAFE_MODEL}", json={"prompt": "question", "max_new_tokens": 8, "stream": True}
+    )
     assert response.status_code == status, response.text
     assert "text/event-stream" not in response.headers["content-type"]
     assert "private" not in response.text
@@ -438,7 +440,9 @@ def test_native_remote_failure_after_output_remains_a_stream_error(remote_chat: 
     )
     stream = ChatStream([first], disconnect=True)
     answer_with(remote_chat, httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=stream))
-    response = client.post(f"/v1/generate/{SAFE_MODEL}", json={"prompt": "question", "max_new_tokens": 8, "stream": True})
+    response = client.post(
+        f"/v1/generate/{SAFE_MODEL}", json={"prompt": "question", "max_new_tokens": 8, "stream": True}
+    )
     assert response.status_code == 200, response.text
     assert "answer" in response.text
     assert '"finish_reason": "error"' in response.text
