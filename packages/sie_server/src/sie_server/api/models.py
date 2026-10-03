@@ -3,6 +3,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
+from sie_server.config.equivalence import remote_profile_contract_digest
 from sie_server.config.model import ModelConfig, RoutingPolicy, is_remote_adapter_path
 from sie_server.config.upstreams import installed_upstreams
 from sie_server.core.model_suggestions import suggestion_suffix
@@ -26,6 +27,8 @@ class ProfileInfo(BaseModel):
     is_default: bool = False
     identity: str | None = None
     """Versioned immutable local-profile digest, or None when it cannot be identified."""
+    remote_contract_sha256: str | None = None
+    """Digest binding the model/profile to this server's operator-defined upstream."""
 
 
 class ModelLoadError(BaseModel):
@@ -224,6 +227,7 @@ async def list_models(http_request: Request) -> ModelsListResponse:
                 identity=local_profile_identity(
                     config, pname, device=registry.device, engine_config=registry.engine_config
                 ),
+                remote_contract_sha256=remote_profile_contract_digest(config, pname, installed_upstreams()),
             )
             for pname in config.profiles
         }
@@ -283,6 +287,7 @@ async def get_model(model: str, http_request: Request) -> ModelInfo:
             identity=local_profile_identity(
                 config, pname, device=registry.device, engine_config=registry.engine_config
             ),
+            remote_contract_sha256=remote_profile_contract_digest(config, pname, installed_upstreams()),
         )
         for pname in config.profiles
     }

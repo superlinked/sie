@@ -311,6 +311,7 @@ class ProfileInfo(TypedDict, total=False):
 
     is_default: bool
     identity: str | None
+    remote_contract_sha256: str | None
     """Versioned immutable local-profile digest; absent/null when it cannot be identified."""
 
 

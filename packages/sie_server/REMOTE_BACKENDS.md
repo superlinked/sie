@@ -192,3 +192,52 @@ BGE-M3 cannot identify its effective revision; flash/LoRA and other engines need
 additional runtime evidence. An identity is a descriptor, not a numerical
 measurement. Hybrid routing remains refused until upstream comparison and
 measured equivalence gates are delivered; this field alone does not activate it.
+
+
+## Measuring remote equivalence
+
+An encode/score comparison runs through the Python SDK against one SIE server
+that has both the local default profile and an explicit remote profile. Keep
+hybrid routing disabled while measuring. The server must expose a non-null
+local identity and `profiles.<remote>.remote_contract_sha256`; the latter binds
+its installed endpoint, model serving configuration, credential reference and request
+transforms to the operator files supplied to the probe. Credential values are
+never included. Version 1 local identities currently support native BGE-M3 only.
+
+From the locked public workspace, run:
+
+```bash
+mise exec -- uv run --frozen --project . python tools/remote_equivalence.py \
+  --model-file /path/to/model.yaml \
+  --upstreams-file /path/to/upstreams.yaml \
+  --local-url https://sie.example.com \
+  --api-key-env SIE_PROBE_API_KEY \
+  --remote-profile remote \
+  --output /path/to/new-evidence.json
+```
+
+The API key argument names an environment variable; omit it for a server that
+does not require authentication. The output path must be new. Each case makes
+two local calls with remote serving forbidden, followed by one explicit remote
+call. Cases cover short and long inputs, both sides of the pinned tokenizer's
+truncation boundary, query and document instruction prefixes, and score scale
+when scoring is declared. All declared encode/score outputs must be measured.
+Generation is outside this numerical probe. The routing policy is excluded from
+the model digest, so evidence can be measured before enabling hybrid routing;
+all local and remote profile settings remain bound.
+
+A pass requires matching layouts and finite values whose maximum absolute
+error against both local runs does not exceed the difference measured between
+those local runs. Identical local runs require identical remote values. Matching
+boundary input refusals are recorded; a suite of refusals cannot establish
+numerical equivalence. Endpoint/model contracts and local identity must remain
+unchanged throughout the probe.
+
+Exit status is `0` for passing evidence, `1` for a measured failure, or `2` when
+valid evidence could not be produced. Records contain input hashes, token
+counts, serving identities, contract hashes and measured errors; they contain
+no inputs, vectors or credential values. They carry a measurement timestamp so
+an admission gate can reject stale or future evidence. Remeasure after changes
+to weights, serving settings, software, endpoint or request transforms.
+This delivery produces evidence; hybrid routing still requires its runtime
+admission gate and does not become enabled by writing a record.

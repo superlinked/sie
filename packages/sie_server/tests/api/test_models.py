@@ -4,7 +4,9 @@ from unittest.mock import MagicMock
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sie_server.api import models as models_api
 from sie_server.api.models import router as models_router
+from sie_server.config.equivalence import remote_profile_contract_digest
 from sie_server.config.model import (
     EmbeddingDim,
     EncodeTask,
@@ -14,6 +16,7 @@ from sie_server.config.model import (
     ProfileConfig,
     Tasks,
 )
+from sie_server.config.upstreams import Upstream
 from sie_server.core.load_errors import LoadErrorClass, LoadFailure
 from sie_server.core.registry import ModelRegistry
 
@@ -416,3 +419,37 @@ def test_pinned_builtin_profile_exposes_same_identity_in_list_and_detail(
 
 def test_unpinned_profile_reports_no_identity(client: TestClient) -> None:
     assert client.get("/v1/models/model-a").json()["profiles"]["default"]["identity"] is None
+
+
+@pytest.mark.parametrize("base_url", ["https://first.example/v1", "https://second.example/v1"])
+def test_remote_contract_metadata_binds_the_installed_upstream(
+    client: TestClient, mock_registry: MagicMock, monkeypatch: pytest.MonkeyPatch, base_url: str
+) -> None:
+    config = mock_registry.get_config("model-a")
+    config.profiles["remote"] = ProfileConfig(
+        adapter_path="sie_server.adapters.remote.openai:OpenAIUpstreamAdapter",
+        max_batch_tokens=8192,
+        adapter_options={"loadtime": {"upstream": "vendor", "upstream_model": "vendor/model"}},
+    )
+    upstream = Upstream.model_validate(
+        {
+            "kind": "openai",
+            "base_url": base_url,
+            "endpoints": ["embeddings"],
+            "api_key_secret": "SECRET_ENV_REFERENCE",
+            "rate_cap": {"requests_per_minute": 600, "max_concurrency": 32},
+        }
+    )
+    monkeypatch.setattr(models_api, "installed_upstreams", lambda: {"vendor": upstream})
+    expected = remote_profile_contract_digest(config, "remote", {"vendor": upstream})
+    assert expected is not None
+    detail = client.get("/v1/models/model-a").json()
+    listed = client.get("/v1/models").json()["models"][0]
+    for value in (detail, listed):
+        assert value["profiles"]["remote"]["remote_contract_sha256"] == expected
+        assert value["profiles"]["default"]["remote_contract_sha256"] is None
+        assert base_url not in str(value)
+        assert "SECRET_ENV_REFERENCE" not in str(value)
+    different = upstream.model_copy(update={"base_url": "https://other.example/v1"})
+    assert remote_profile_contract_digest(config, "remote", {"vendor": different}) != expected
+    assert remote_profile_contract_digest(config, "remote", {}) is None

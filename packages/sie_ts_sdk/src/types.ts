@@ -266,6 +266,8 @@ export interface ProfileInfo {
   is_default?: boolean;
   /** Immutable local-profile digest; absent/null when it cannot be identified. */
   identity?: string | null;
+  /** Operator-bound upstream/model/profile contract digest. */
+  remote_contract_sha256?: string | null;
 }
 
 /**

@@ -2428,6 +2428,17 @@
               }
             ],
             "title": "Identity"
+          },
+          "remote_contract_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Remote Contract Sha256"
           }
         },
         "type": "object",
