@@ -32,6 +32,8 @@ from sie_server.core.worker.types import WorkerResult
 from sie_server.ipc_server import IpcServer, IpcServerError
 from sie_server.ipc_types import (
     IPC_VERSION,
+    METHOD_PROCESS_GENERATE_WITH_EXECUTION_AUTHORITY_V1,
+    METHOD_RUN_BATCH_WITH_EXECUTION_AUTHORITY_V1,
     ApplyModelConfigRequest,
     BatchOutcome,
     IpcResponseChunkV1,
@@ -45,6 +47,7 @@ from sie_server.ipc_types import (
     RunBatchRequest,
     SetPinnedModelsRequest,
     SignalGenerateCancelRequest,
+    WorkerCapabilitiesResponse,
 )
 from sie_server.observability import worker_telemetry
 from sie_server.queue_executor import QueueExecutor
@@ -413,6 +416,106 @@ class _CapturingWriter:
 
     async def drain(self) -> None:
         return None
+
+
+@pytest.mark.parametrize("op", ["encode", "score", "extract"])
+@pytest.mark.parametrize("authority", ["valid", "stale", "missing", "empty", "decoy"])
+async def test_authority_batch_method_never_falls_back_to_unpinned_execution(
+    monkeypatch: pytest.MonkeyPatch, op: str, authority: str
+) -> None:
+    server, _, expected = _pinned_execution_server(monkeypatch)
+    inference = AsyncMock(return_value=BatchOutcome(outcomes=[]))
+    monkeypatch.setattr(server._executor, f"process_{op}_batch", inference)
+    payload = {
+        "work_item_id": "req.0",
+        "request_id": "req",
+        "item_index": 0,
+        "total_items": 1,
+        "timestamp": 1.0,
+        "bundle_config_hash": {"valid": expected, "stale": "stale", "missing": None, "empty": "", "decoy": None}[
+            authority
+        ],
+        "item": {"text": "secret-input"},
+        "query_item": {"text": "query"},
+        "score_items": [{"text": "doc"}],
+    }
+    item = {"op": op, op: payload, "work_item_id": "req.0", "request_id": "req", "item_index": 0}
+    if authority == "decoy":
+        item["score" if op != "score" else "encode"] = {**payload, "bundle_config_hash": expected}
+    writer = _CapturingWriter()
+    await server._dispatch_frame(
+        msgpack.packb(
+            {
+                "version": IPC_VERSION,
+                "method": METHOD_RUN_BATCH_WITH_EXECUTION_AUTHORITY_V1,
+                "request_id": "req",
+                "body": {
+                    "model_id": "Qwen/Qwen3.6-27B",
+                    "batch_id": 1,
+                    "lora_key": "",
+                    "total_cost": 1,
+                    "items": [item],
+                },
+            },
+            use_bin_type=True,
+        ),
+        cast("asyncio.StreamWriter", writer),
+    )
+    await asyncio.gather(*server._inflight)
+    response = _decode_written_frames(writer)[0]
+    if authority == "valid":
+        assert response["ok"] is True
+        inference.assert_awaited_once()
+    else:
+        inference.assert_not_awaited()
+        if authority == "stale":
+            assert response["body"]["outcomes"][0]["disposition"] == "nak_retry"
+        else:
+            assert response["ok"] is False
+            assert "requires a nonempty hash" in response["error"]
+
+
+@pytest.mark.parametrize("authority", ["valid", "stale", "missing", "empty"])
+async def test_authority_generation_method_requires_live_hash_before_processor(
+    monkeypatch: pytest.MonkeyPatch, authority: str
+) -> None:
+    server, _, expected = _pinned_execution_server(monkeypatch)
+    inference = AsyncMock()
+    monkeypatch.setattr(server, "_process_generate", inference)
+    writer = _CapturingWriter()
+    await server._run_method(
+        METHOD_PROCESS_GENERATE_WITH_EXECUTION_AUTHORITY_V1,
+        "req",
+        {
+            "model_id": "Qwen/Qwen3.6-27B",
+            "work_item_msgpack": msgpack.packb(
+                {
+                    "model_id": "Qwen/Qwen3.6-27B",
+                    "bundle_config_hash": {"valid": expected, "stale": "stale", "missing": None, "empty": ""}[
+                        authority
+                    ],
+                    "generate": {"prompt": "secret-input"},
+                },
+                use_bin_type=True,
+            ),
+        },
+        cast("asyncio.StreamWriter", writer),
+    )
+    if authority == "valid":
+        inference.assert_awaited_once()
+    else:
+        inference.assert_not_awaited()
+        frames = _decode_written_frames(writer)
+        if authority == "stale":
+            assert [frame["body"]["kind"] for frame in frames] == ["nak", "done"]
+        else:
+            assert frames[0]["ok"] is False
+            assert "requires a nonempty generation hash" in frames[0]["error"]
+
+
+def test_legacy_capability_response_does_not_authorize_execution() -> None:
+    response = msgspec.convert({"has_generation_models": True}, type=WorkerCapabilitiesResponse)
+    assert response.supports_execution_authority_v1 is False
 
 
 def _decode_written_frames(writer: _CapturingWriter) -> list[dict]:
@@ -2592,6 +2695,7 @@ class TestGenerationSidecarIpc:
 
         assert resp["ok"] is True
         assert resp["body"] == {
+            "supports_execution_authority_v1": True,
             "has_generation_models": True,
             "generation_models": ["z-generate/model"],
             "supported_models": ["encode/model", "z-generate/model"],

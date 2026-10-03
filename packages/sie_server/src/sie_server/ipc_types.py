@@ -62,6 +62,10 @@ METHOD_SIGNAL_GENERATE_CANCEL = "SignalGenerateCancel"
 # contract for focused IPC parity tests and Python-framed callers.
 # Direct ``sie-server`` HTTP execution does not use this IPC boundary.
 METHOD_RUN_BATCH = "RunBatch"
+# These distinct methods require live configuration authority. Older backends
+# reject the method before processing inputs, even after a child restart.
+METHOD_RUN_BATCH_WITH_EXECUTION_AUTHORITY_V1 = "RunBatchWithExecutionAuthorityV1"
+METHOD_PROCESS_GENERATE_WITH_EXECUTION_AUTHORITY_V1 = "ProcessGenerateWithExecutionAuthorityV1"
 METHOD_APPLY_MODEL_CONFIG = "ApplyModelConfig"
 METHOD_REPLACE_MODEL_CONFIGS = "ReplaceModelConfigs"
 METHOD_SET_PINNED_MODELS = "SetPinnedModels"
@@ -263,6 +267,7 @@ class WorkerCapabilitiesRequest(msgspec.Struct):
 
 
 class WorkerCapabilitiesResponse(msgspec.Struct):
+    supports_execution_authority_v1: bool = False
     has_generation_models: bool = False
     generation_models: list[str] = msgspec.field(default_factory=list)
     supported_models: list[str] = msgspec.field(default_factory=list)

@@ -187,6 +187,7 @@ impl IpcServer {
                 let supported_models = self.backend.supported_models();
                 let loaded_models = self.backend.loaded_models();
                 WorkerCapabilitiesResponse {
+                    supports_execution_authority_v1: false,
                     has_generation_models: false,
                     generation_models: Vec::new(),
                     supported_models: supported_models.clone(),

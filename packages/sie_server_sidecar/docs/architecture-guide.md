@@ -324,12 +324,33 @@ The Rust and Python protocol copies define the same method names:
 - `WorkerCapabilities`
 - `SignalGenerateCancel`
 - `RunBatch`
+- `RunBatchWithExecutionAuthorityV1`
+- `ProcessGenerateWithExecutionAuthorityV1`
 - `ApplyModelConfig`
 - `ReplaceModelConfigs`
 - `Drain`
 
 `tools/check_ipc_types_parity.py` checks the Rust protocol schema against
 `packages/sie_server/src/sie_server/ipc_types.py`.
+
+### Execution authority protocol amendment (#415)
+
+Verified execution uses the two `WithExecutionAuthorityV1` methods. They
+require a nonempty configuration hash for every batch item or generation work
+item and retain the live Python execution lease described above. An old backend
+rejects these unknown methods before inference. The backend capability
+`supports_execution_authority_v1` defaults to false when absent; the Python
+backend advertises support, while Candle remains closed until it implements
+the same contract. Capability discovery cannot replace the method fence: a
+backend child can restart after its last positive capability response.
+
+These entrypoints prepare the backend boundary; current producers still use
+the existing methods. Gateway activation also requires a distinct versioned
+worker-direct queue subject and consumer that older sidecars cannot receive.
+Every publish and retry must retain both fences, with no legacy pool or IPC
+fallback. A missing, stale, unsupported, or unavailable authority refuses work
+before inputs execute. This extends the queue contract while preserving the
+gateway's queue-only ownership and worker-owned inference.
 
 Non-streaming backend responses use one physical frame while the serialized
 response is at most 32 MiB. For a larger response, the sidecar explicitly sets

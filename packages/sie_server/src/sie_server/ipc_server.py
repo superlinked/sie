@@ -30,9 +30,11 @@ from sie_server.ipc_types import (
     METHOD_PROCESS_ENCODE_BATCH,
     METHOD_PROCESS_EXTRACT_BATCH,
     METHOD_PROCESS_GENERATE,
+    METHOD_PROCESS_GENERATE_WITH_EXECUTION_AUTHORITY_V1,
     METHOD_PROCESS_SCORE_BATCH,
     METHOD_REPLACE_MODEL_CONFIGS,
     METHOD_RUN_BATCH,
+    METHOD_RUN_BATCH_WITH_EXECUTION_AUTHORITY_V1,
     METHOD_SET_PINNED_MODELS,
     METHOD_SIGNAL_GENERATE_CANCEL,
     METHOD_WORKER_CAPABILITIES,
@@ -429,6 +431,8 @@ class IpcServer:
             METHOD_PROCESS_EXTRACT_BATCH,
             METHOD_RUN_BATCH,
             METHOD_PROCESS_GENERATE,
+            METHOD_RUN_BATCH_WITH_EXECUTION_AUTHORITY_V1,
+            METHOD_PROCESS_GENERATE_WITH_EXECUTION_AUTHORITY_V1,
         ):
             if self._drain_event.is_set():
                 await self._send_error(writer, request_id, "draining")
@@ -488,11 +492,12 @@ class IpcServer:
         import msgspec  # noqa: PLC0415
 
         try:
-            if method == METHOD_PROCESS_GENERATE:
+            if method in (METHOD_PROCESS_GENERATE, METHOD_PROCESS_GENERATE_WITH_EXECUTION_AUTHORITY_V1):
                 await self._handle_process_generate(
                     msgspec.convert(body, ProcessGenerateRequest),
                     request_id=request_id,
                     writer=writer,
+                    require_authority=method == METHOD_PROCESS_GENERATE_WITH_EXECUTION_AUTHORITY_V1,
                 )
                 return
             if method == METHOD_PING:
@@ -507,12 +512,15 @@ class IpcServer:
                 resp_body = await self._handle_process_score(msgspec.convert(body, ProcessScoreBatchRequest))
             elif method == METHOD_PROCESS_EXTRACT_BATCH:
                 resp_body = await self._handle_process_extract(msgspec.convert(body, ProcessExtractBatchRequest))
-            elif method == METHOD_RUN_BATCH:
+            elif method in (METHOD_RUN_BATCH, METHOD_RUN_BATCH_WITH_EXECUTION_AUTHORITY_V1):
                 # Rust scheduler drove the batch formation; we just fan
                 # the items into the existing
                 # per-op handlers. See adapter_call_loop.py for the
                 # full fallback matrix.
-                resp_body = await self._handle_run_batch(msgspec.convert(body, RunBatchRequest))
+                resp_body = await self._handle_run_batch(
+                    msgspec.convert(body, RunBatchRequest),
+                    require_authority=method == METHOD_RUN_BATCH_WITH_EXECUTION_AUTHORITY_V1,
+                )
             elif method == METHOD_APPLY_MODEL_CONFIG:
                 resp_body = await self._handle_apply_model_config(msgspec.convert(body, ApplyModelConfigRequest))
             elif method == METHOD_REPLACE_MODEL_CONFIGS:
@@ -690,13 +698,15 @@ class IpcServer:
                 return self._config_retry(req.items)
             return await self._executor.process_extract_batch(req)
 
-    async def _handle_run_batch(self, req: RunBatchRequest) -> BatchOutcome:
-        hashes = (
-            payload.bundle_config_hash
-            for item in req.items
-            if (payload := {"encode": item.encode, "score": item.score, "extract": item.extract}.get(item.op))
-            is not None
-        )
+    async def _handle_run_batch(self, req: RunBatchRequest, *, require_authority: bool = False) -> BatchOutcome:
+        payloads = [
+            {"encode": item.encode, "score": item.score, "extract": item.extract}.get(item.op) for item in req.items
+        ]
+        if require_authority and (
+            not payloads or any(payload is None or not payload.bundle_config_hash for payload in payloads)
+        ):
+            raise IpcServerError("execution authority requires a nonempty hash for every batch item")
+        hashes = (payload.bundle_config_hash for payload in payloads if payload is not None)
         async with self._execution_config(req.model_id, hashes) as valid:
             if not valid:
                 return self._config_retry(req.items)
@@ -770,6 +780,7 @@ class IpcServer:
 
         generation_models.sort()
         return WorkerCapabilitiesResponse(
+            supports_execution_authority_v1=True,
             has_generation_models=bool(generation_models),
             generation_models=generation_models,
             supported_models=supported_models,
@@ -791,6 +802,7 @@ class IpcServer:
         *,
         request_id: str,
         writer: asyncio.StreamWriter,
+        require_authority: bool = False,
     ) -> None:
         work_item = msgpack.unpackb(req.work_item_msgpack, raw=False)
         if not isinstance(work_item, dict):
@@ -798,6 +810,8 @@ class IpcServer:
         expected_hash = work_item.get("bundle_config_hash")
         if expected_hash is not None and not isinstance(expected_hash, str):
             raise IpcServerError("generation bundle_config_hash must be a string")
+        if require_authority and not expected_hash:
+            raise IpcServerError("execution authority requires a nonempty generation hash")
         async with self._execution_config(req.model_id, [expected_hash]) as valid:
             # Gateway generation routing already selects the grammar profile.
             # Those routing fields are not part of the bundle hash; a worker

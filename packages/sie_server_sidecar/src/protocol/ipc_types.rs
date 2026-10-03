@@ -42,6 +42,9 @@ pub const METHOD_SIGNAL_GENERATE_CANCEL: &str = "SignalGenerateCancel";
 /// for backends that don't implement `run_batch` and for unit tests
 /// that don't wire a scheduler.
 pub const METHOD_RUN_BATCH: &str = "RunBatch";
+pub const METHOD_RUN_BATCH_WITH_EXECUTION_AUTHORITY_V1: &str = "RunBatchWithExecutionAuthorityV1";
+pub const METHOD_PROCESS_GENERATE_WITH_EXECUTION_AUTHORITY_V1: &str =
+    "ProcessGenerateWithExecutionAuthorityV1";
 pub const METHOD_APPLY_MODEL_CONFIG: &str = "ApplyModelConfig";
 pub const METHOD_REPLACE_MODEL_CONFIGS: &str = "ReplaceModelConfigs";
 pub const METHOD_SET_PINNED_MODELS: &str = "SetPinnedModels";
@@ -434,6 +437,8 @@ pub struct WorkerCapabilitiesRequest {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct WorkerCapabilitiesResponse {
+    #[serde(default)]
+    pub supports_execution_authority_v1: bool,
     #[serde(default)]
     pub has_generation_models: bool,
     #[serde(default)]
