@@ -2277,8 +2277,8 @@ fn model_loading_refusal(endpoint: &str) -> Response {
     refusal
 }
 
-/// Begin one buffered generation bridge only at a typed pre-dispatch refusal.
-/// Fleet numerical and streaming admission are separately gated; no failure
+/// Begin one generation bridge only at a typed pre-dispatch refusal.
+/// Fleet numerical admission remains separately gated; no failure
 /// after a work item was published reaches this helper.
 #[allow(clippy::result_large_err, clippy::too_many_arguments)]
 fn native_fallback_plan(
@@ -2289,19 +2289,14 @@ fn native_fallback_plan(
     parsed: Option<&(Vec<rmpv::Value>, publisher::WorkParams)>,
     trigger: FallbackTrigger,
 ) -> Option<crate::state::model_registry::RemoteFallbackPlan> {
-    let buffered_generation = endpoint == "generate"
-        && parsed.is_some_and(|(_, params)| {
-            params
-                .generate
-                .as_ref()
-                .is_some_and(|generate| !generate.stream)
-        });
+    let generation =
+        endpoint == "generate" && parsed.is_some_and(|(_, params)| params.generate.is_some());
     fallback_plan_for_request(
         state,
         req.headers(),
         req.extensions(),
         model,
-        buffered_generation,
+        generation,
         "",
         trigger,
     )
@@ -2412,6 +2407,10 @@ async fn proxy_request_inner(
     provisioning_surface: ProvisioningSurface,
     inbound_publish_cx: Option<opentelemetry::Context>,
 ) -> Response {
+    let prefetch_first_output = req
+        .extensions()
+        .get::<FallbackAttempt>()
+        .is_some_and(FallbackAttempt::active);
     // Native generation routing depends on request intent (default vs grammar),
     // including in the no-policy OSS composition where grammar selects a
     // profile-qualified model. Inspect the bounded body once before worker
@@ -2923,6 +2922,7 @@ async fn proxy_request_inner(
         model_revision.as_deref(),
         batch_target,
         require_execution_authority_v1,
+        prefetch_first_output,
         &physical_lane,
     );
     // Scope an OTel context over the publish so the work-item envelope
@@ -3229,6 +3229,7 @@ async fn queue_mode_proxy(
     model_revision: Option<&str>,
     batch_target: Option<publisher::PublishTarget>,
     require_execution_authority_v1: bool,
+    prefetch_first_output: bool,
     physical_lane: &PhysicalLane,
 ) -> Response {
     // Parse body once, extract items + params (avoids double parse)
@@ -3285,6 +3286,7 @@ async fn queue_mode_proxy(
         };
         if params.generate.as_ref().is_some_and(|params| params.stream) {
             return super::sse::build_sse_response(super::sse::SseParams {
+                prefetch_first_output,
                 state,
                 work_publisher: work_publisher_arc,
                 physical_lane: physical_lane.clone(),
@@ -8167,7 +8169,7 @@ async fn proxy_chat_inner(
         },
         &explicit_bundle_override,
         &parts.extensions,
-        !params.stream && !native_request_has_profile_selector(&body_bytes, false),
+        !native_request_has_profile_selector(&body_bytes, false),
         (params.max_new_tokens, "max_completion_tokens"),
         metric_labels_slot.as_ref(),
     )
@@ -8194,6 +8196,10 @@ async fn proxy_chat_inner(
     // arrives instead of being aggregated.
     if stream {
         return super::sse::build_sse_response(super::sse::SseParams {
+            prefetch_first_output: parts
+                .extensions
+                .get::<FallbackAttempt>()
+                .is_some_and(FallbackAttempt::active),
             state: state.as_ref(),
             work_publisher: work_publisher_arc,
             physical_lane: physical_lane.clone(),
@@ -8837,7 +8843,7 @@ async fn proxy_completions_inner(state: Arc<AppState>, req: Request) -> Response
         GenerationRequestIntent::Default,
         &explicit_bundle_override,
         &parts.extensions,
-        !params.stream && !native_request_has_profile_selector(&body_bytes, false),
+        !native_request_has_profile_selector(&body_bytes, false),
         (params.max_new_tokens, "max_tokens"),
         metric_labels_slot.as_ref(),
     )
@@ -8858,6 +8864,10 @@ async fn proxy_completions_inner(state: Arc<AppState>, req: Request) -> Response
     // (completions rejects n>1), so no per-candidate interleave.
     if stream {
         return super::sse::build_sse_response(super::sse::SseParams {
+            prefetch_first_output: parts
+                .extensions
+                .get::<FallbackAttempt>()
+                .is_some_and(FallbackAttempt::active),
             state: state.as_ref(),
             work_publisher: work_publisher_arc,
             physical_lane: physical_lane.clone(),

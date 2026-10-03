@@ -378,6 +378,118 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn streaming_cluster_fallback_commits_only_after_first_valid_event() {
+        let config = format!(
+            "{HYBRID_GENERATE_MODEL}\nrouting:\n  policy: fallback\n  fallback_profile: remote\n"
+        );
+        for surface in ["native", "chat", "completions"] {
+            for unloaded in [false, true] {
+                for failure in [None, Some(false), Some(true)] {
+                    let gateway = TestGateway::new(&[&config]).await;
+                    gateway
+                        .add_verified_worker("remote-1", REMOTE_LANE, &[])
+                        .await;
+                    if unloaded {
+                        gateway
+                            .add_verified_worker("local-1", LOCAL_LANE, &[])
+                            .await;
+                    }
+                    if let Some(after_output) = failure {
+                        gateway.dispatcher.fail_stream(after_output);
+                    }
+                    let state = State(Arc::clone(&gateway.state));
+                    let response = match surface {
+                    "native" => proxy_request(state, json_request("/v1/generate/acme/chat", json!({"prompt":"hello","max_new_tokens":4,"stream":true})), "generate").await,
+                    "chat" => proxy_chat(state, json_request("/v1/chat/completions", json!({"model":"acme/chat","messages":[{"role":"user","content":"hello"}],"stream":true}))).await,
+                    "completions" => proxy_completions(state, json_request("/v1/completions", json!({"model":"acme/chat","prompt":"hello","max_tokens":4,"stream":true}))).await,
+                    _ => unreachable!(),
+                };
+                    if failure == Some(false) {
+                        assert_eq!(
+                            response.status(),
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "{surface}"
+                        );
+                        assert_eq!(
+                            response.headers()["retry-after"],
+                            if unloaded { "5" } else { "60" }
+                        );
+                        assert_eq!(stamped(&response), (Some("local"), None));
+                        assert_eq!(
+                            response.headers()["x-sie-fallback-error"],
+                            "INFERENCE_ERROR"
+                        );
+                    } else {
+                        assert_eq!(response.status(), StatusCode::OK, "{surface}");
+                        assert_eq!(stamped(&response), (Some("remote"), Some("team-sie")));
+                        assert_eq!(response.headers()["content-type"], "text/event-stream");
+                        assert!(!response.headers().contains_key("x-sie-fallback-error"));
+                    }
+                    let body = axum::body::to_bytes(response.into_body(), 8192)
+                        .await
+                        .unwrap();
+                    let body = String::from_utf8_lossy(&body);
+                    assert!(!body.contains("private upstream failure"));
+                    if failure == Some(true) {
+                        assert!(body.contains("ok"));
+                        assert!(body.contains("inference_error"), "{surface}: {body}");
+                        assert!(body.contains("[DONE]"));
+                    }
+                    assert_eq!(
+                        gateway.dispatcher.dispatched(),
+                        if unloaded {
+                            vec![
+                                dispatched("load", LOCAL_LANE, "acme/chat"),
+                                dispatched("generate", REMOTE_LANE, "acme/chat:remote"),
+                            ]
+                        } else {
+                            vec![dispatched("generate", REMOTE_LANE, "acme/chat:remote")]
+                        }
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn streaming_cluster_fallback_restores_refusal_for_terminal_only_failures() {
+        let config = format!(
+            "{HYBRID_GENERATE_MODEL}\nrouting:\n  policy: fallback\n  fallback_profile: remote\n"
+        );
+        for surface in ["native", "chat", "completions"] {
+            for reason in ["cancelled", "error"] {
+                let gateway = TestGateway::new(&[&config]).await;
+                gateway
+                    .add_verified_worker("remote-1", REMOTE_LANE, &[])
+                    .await;
+                gateway.dispatcher.fail_stream_terminal(reason);
+                let state = State(Arc::clone(&gateway.state));
+                let response = match surface {
+                    "native" => proxy_request(state, json_request("/v1/generate/acme/chat", json!({"prompt":"hello","max_new_tokens":4,"stream":true})), "generate").await,
+                    "chat" => proxy_chat(state, json_request("/v1/chat/completions", json!({"model":"acme/chat","messages":[{"role":"user","content":"hello"}],"stream":true}))).await,
+                    "completions" => proxy_completions(state, json_request("/v1/completions", json!({"model":"acme/chat","prompt":"hello","max_tokens":4,"stream":true}))).await,
+                    _ => unreachable!(),
+                };
+                assert_eq!(
+                    response.status(),
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "{surface}, {reason}"
+                );
+                assert_eq!(response.headers()["retry-after"], "60");
+                assert_eq!(
+                    response.headers()["x-sie-fallback-error"],
+                    "INFERENCE_ERROR"
+                );
+                assert_eq!(stamped(&response), (Some("local"), None));
+                assert_eq!(
+                    gateway.dispatcher.dispatched(),
+                    vec![dispatched("generate", REMOTE_LANE, "acme/chat:remote")]
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn native_cluster_fallback_bridges_a_cold_model_and_retains_local_pending_demand() {
         let config = format!(
             "{HYBRID_GENERATE_MODEL}\nrouting:\n  policy: fallback\n  fallback_profile: remote\n"

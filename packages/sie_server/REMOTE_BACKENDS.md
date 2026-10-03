@@ -49,7 +49,7 @@ A request that names a profile bypasses the bare-model policy, including an
 explicit `default`. Single-node OpenAI hybrid `encode` and `score` require the
 operator-owned equivalence admission described below. SIE hybrid encode and
 score require the fresh identity admission described below; `threshold` remains
-a separate delivery. Cluster remote profiles use the queue. Buffered cluster
+a separate delivery. Cluster remote profiles use the queue. Cluster
 generation fallback is described below; other cluster bridge surfaces remain
 separate deliveries.
 
@@ -376,11 +376,12 @@ error. After the first event the stream reports failure without replaying work.
 An explicitly named remote profile is served directly.
 
 
-## Cluster buffered generation fallback
+## Cluster generation fallback
 
 A bare generation model with `routing: {policy: fallback, fallback_profile: remote}`
 can bridge `provisioning` and `model_loading` refusals on native generation,
-chat, completions and supported buffered Responses. Explicit profiles, bundle
+chat, completions and supported buffered Responses. Native generation, chat
+and completions also support streaming bridges. Explicit profiles, bundle
 pins, machine or pool overrides, and `X-SIE-Remote: forbid` retain their selected
 route. Deployment-governed routes require separate admission.
 
@@ -396,5 +397,11 @@ pool subject. Remote failure restores the original local refusal body and
 `X-SIE-Fallback-Error`; success discloses the remote profile's upstream. The
 customer model name remains the requested model.
 
-Streaming, extraction, numerical fleet equivalence, and opt-in saturation or
-unhealthy spill are not activated by this buffered generation path.
+A streaming bridge waits for its first valid event before returning HTTP success.
+A worker error, cancelled/failed terminal, transport failure or durability failure
+before output restores the local refusal. Once an event is ready, subsequent
+errors remain in the stream, with cleanup and no replay of inference. Explicit
+profiles keep ordinary streaming behavior.
+
+Extraction, numerical fleet equivalence, and opt-in saturation or unhealthy
+spill are not activated by this generation path.

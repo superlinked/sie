@@ -110,6 +110,9 @@ impl Dispatched {
 pub(crate) struct RecordingDispatcher {
     load_refused: AtomicBool,
     generate_refused: AtomicBool,
+    stream_error: AtomicBool,
+    stream_mid_error: AtomicBool,
+    stream_terminal_failure: Mutex<Option<&'static str>>,
     dispatched: Mutex<Vec<Dispatched>>,
 }
 
@@ -123,6 +126,15 @@ impl RecordingDispatcher {
     }
     pub(crate) fn refuse_generation(&self) {
         self.generate_refused.store(true, Ordering::SeqCst);
+    }
+
+    pub(crate) fn fail_stream(&self, after_output: bool) {
+        self.stream_error.store(true, Ordering::SeqCst);
+        self.stream_mid_error.store(after_output, Ordering::SeqCst);
+    }
+
+    pub(crate) fn fail_stream_terminal(&self, reason: &'static str) {
+        *self.stream_terminal_failure.lock().unwrap() = Some(reason);
     }
 
     fn record(&self, dispatched: Dispatched) {
@@ -149,13 +161,35 @@ fn terminal_chunk_collector(
     oneshot::Receiver<StreamOutcome>,
     broadcast::Receiver<ChunkEnvelope>,
 ) {
+    stream_chunk_collector(display_model, bundle_config_hash, false, false, None)
+}
+
+fn stream_chunk_collector(
+    display_model: &str,
+    bundle_config_hash: &str,
+    fail: bool,
+    after_output: bool,
+    terminal_failure: Option<&str>,
+) -> (
+    oneshot::Receiver<StreamOutcome>,
+    broadcast::Receiver<ChunkEnvelope>,
+) {
     let (tx, rx) = oneshot::channel();
     let mut collector = StreamCollector::new(tx, display_model.to_string(), "default".to_string());
     let tap = collector.install_chunk_tap();
+    if fail && after_output {
+        let delta = serde_json::from_value(json!({
+            "kind":"chunk", "request_id":"request-1", "attempt_id":"attempt-1",
+            "seq":0, "text_delta":"ok", "done":false, "is_first":true,
+        }))
+        .unwrap();
+        assert_eq!(collector.apply(delta), ChunkApplied::Delta);
+    }
     let terminal = serde_json::from_value(json!({
         "kind": "chunk", "request_id": "request-1", "attempt_id": "attempt-1",
-        "seq": 0, "text_delta": "ok", "done": true, "is_first": true,
-        "finish_reason": "stop",
+        "seq": u64::from(fail && after_output), "text_delta": if fail || terminal_failure.is_some() {""} else {"ok"}, "done": true, "is_first": !(fail && after_output),
+        "finish_reason": terminal_failure.unwrap_or(if fail {"error"} else {"stop"}),
+        "error": if fail {json!({"code":"inference_error","message":"private upstream failure"})} else {json!(null)},
         "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
         "executed_bundle_config_hash": bundle_config_hash,
     }))
@@ -272,7 +306,16 @@ impl WorkDispatcher for RecordingDispatcher {
         String,
     > {
         self.record(Dispatched::new("generate", &target));
-        let (rx, tap) = terminal_chunk_collector(display_model, bundle_config_hash);
+        if self.generate_refused.load(Ordering::SeqCst) {
+            return Err("private upstream failure".into());
+        }
+        let (rx, tap) = stream_chunk_collector(
+            display_model,
+            bundle_config_hash,
+            self.stream_error.load(Ordering::SeqCst),
+            self.stream_mid_error.load(Ordering::SeqCst),
+            *self.stream_terminal_failure.lock().unwrap(),
+        );
         Ok((
             "request-1".to_string(),
             rx,

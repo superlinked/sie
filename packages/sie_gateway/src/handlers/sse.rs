@@ -53,6 +53,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::observability::lifecycle::{ErrorClass, Lifecycle, Outcome};
+use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use opentelemetry::trace::FutureExt;
@@ -91,6 +92,8 @@ pub enum SseEndpoint {
 /// Parameters passed from the chat / generate handler to
 /// :func:`build_sse_response`.
 pub struct SseParams<'a> {
+    /// A bridge retains HTTP refusal authority until a valid event is ready.
+    pub prefetch_first_output: bool,
     pub state: &'a AppState,
     pub work_publisher: Arc<dyn WorkDispatcher>,
     pub physical_lane: PhysicalLane,
@@ -124,6 +127,7 @@ pub struct SseParams<'a> {
 /// a final error chunk + ``[DONE]``.
 pub async fn build_sse_response(params: SseParams<'_>) -> Response {
     let SseParams {
+        prefetch_first_output,
         state,
         work_publisher,
         physical_lane,
@@ -307,6 +311,9 @@ pub async fn build_sse_response(params: SseParams<'_>) -> Response {
     // than a synthetic timeout.
     let (event_tx, event_rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(256);
 
+    let (first_output_tx, first_output_rx) = tokio::sync::oneshot::channel();
+    let first_output = prefetch_first_output.then_some(first_output_tx);
+
     let driver_publisher = Arc::clone(&work_publisher);
     let driver_request_id = request_id.clone();
     let driver_model = model.clone();
@@ -325,6 +332,7 @@ pub async fn build_sse_response(params: SseParams<'_>) -> Response {
     tokio::spawn(
         async move {
             run_sse_driver(SseDriverArgs {
+                first_output,
                 event_tx,
                 chunk_rx,
                 outcome_rx,
@@ -350,6 +358,27 @@ pub async fn build_sse_response(params: SseParams<'_>) -> Response {
         }
         .with_context(context),
     );
+
+    if prefetch_first_output {
+        match first_output_rx.await {
+            Ok(Ok(())) => {}
+            outcome => {
+                let status = match outcome {
+                    Ok(Err(status)) => status,
+                    _ => StatusCode::SERVICE_UNAVAILABLE,
+                };
+                // Only a request-owned bridge enables this gate. Its outer
+                // handler restores the original local refusal and retry hint.
+                return (
+                    status,
+                    axum::Json(json!({"error": {
+                        "code": "transport_failure", "message": "Bridge failed before output"
+                    }})),
+                )
+                    .into_response();
+            }
+        }
+    }
 
     let stream = ReceiverStream::new(event_rx);
     let sse = Sse::new(stream).keep_alive(KeepAlive::default());
@@ -385,7 +414,10 @@ pub async fn build_sse_response(params: SseParams<'_>) -> Response {
     response
 }
 
+type FirstOutputGate = Option<tokio::sync::oneshot::Sender<Result<(), StatusCode>>>;
+
 struct SseDriverArgs {
+    first_output: FirstOutputGate,
     event_tx: tokio::sync::mpsc::Sender<Result<Event, Infallible>>,
     chunk_rx: broadcast::Receiver<ChunkEnvelope>,
     outcome_rx: tokio::sync::oneshot::Receiver<StreamOutcome>,
@@ -537,6 +569,7 @@ async fn run_sse_driver(args: SseDriverArgs) {
 
 async fn run_sse_driver_with_lifecycle(args: SseDriverArgs, mut lifecycle: Option<Lifecycle>) {
     let SseDriverArgs {
+        mut first_output,
         event_tx,
         mut chunk_rx,
         outcome_rx,
@@ -649,7 +682,8 @@ async fn run_sse_driver_with_lifecycle(args: SseDriverArgs, mut lifecycle: Optio
         // Cheap early-fire to mirror `run_streaming_generate`.
         let now = tokio::time::Instant::now();
         if now >= overall_deadline {
-            send_error_chunk(
+            send_error_chunk_before_output(
+                &mut first_output,
                 &event_tx,
                 &endpoint,
                 &stream_chat_id,
@@ -733,7 +767,8 @@ async fn run_sse_driver_with_lifecycle(args: SseDriverArgs, mut lifecycle: Optio
                 );
                 continue;
             }
-            send_error_chunk(
+            send_error_chunk_before_output(
+                &mut first_output,
                 &event_tx,
                 &endpoint,
                 &stream_chat_id,
@@ -753,7 +788,8 @@ async fn run_sse_driver_with_lifecycle(args: SseDriverArgs, mut lifecycle: Optio
         }
         if let Some(la) = last_chunk_at {
             if la.elapsed() >= inter_chunk_timeout {
-                send_error_chunk(
+                send_error_chunk_before_output(
+                    &mut first_output,
                     &event_tx,
                     &endpoint,
                     &stream_chat_id,
@@ -789,7 +825,8 @@ async fn run_sse_driver_with_lifecycle(args: SseDriverArgs, mut lifecycle: Optio
                 match completion {
                     Ok(Ok(())) => None,
                     Ok(Err(error)) => {
-                        send_error_chunk(
+                        send_error_chunk_before_output(
+                    &mut first_output,
                             &event_tx,
                             &endpoint,
                             &stream_chat_id,
@@ -806,7 +843,8 @@ async fn run_sse_driver_with_lifecycle(args: SseDriverArgs, mut lifecycle: Optio
                         return;
                     }
                     Err(_) => {
-                        send_error_chunk(
+                        send_error_chunk_before_output(
+                    &mut first_output,
                             &event_tx,
                             &endpoint,
                             &stream_chat_id,
@@ -877,7 +915,8 @@ async fn run_sse_driver_with_lifecycle(args: SseDriverArgs, mut lifecycle: Optio
                             // the stream) instead of a generic
                             // transport_failure. Same error shape as the
                             // worker-error chunk path below.
-                            send_synthetic_error_chunk(
+                            send_synthetic_error_chunk_before_output(
+                    &mut first_output,
                                 &event_tx,
                                 &endpoint,
                                 &stream_chat_id,
@@ -942,7 +981,8 @@ async fn run_sse_driver_with_lifecycle(args: SseDriverArgs, mut lifecycle: Optio
                     succeeded = stream_succeeded,
                     "SSE consumer lagged behind chunk tap; response is incomplete"
                 );
-                send_error_chunk(
+                send_error_chunk_before_output(
+                    &mut first_output,
                     &event_tx,
                     &endpoint,
                     &stream_chat_id,
@@ -975,7 +1015,8 @@ async fn run_sse_driver_with_lifecycle(args: SseDriverArgs, mut lifecycle: Optio
                 // arm — guard against a double `[DONE]` by checking
                 // `first_seen`.
                 if !first_seen {
-                    send_error_chunk(
+                    send_error_chunk_before_output(
+                        &mut first_output,
                         &event_tx,
                         &endpoint,
                         &stream_chat_id,
@@ -1032,7 +1073,8 @@ async fn run_sse_driver_with_lifecycle(args: SseDriverArgs, mut lifecycle: Optio
             {
                 TerminalDurabilityWait::Confirmed => {}
                 TerminalDurabilityWait::Failed(error) => {
-                    send_error_chunk(
+                    send_error_chunk_before_output(
+                        &mut first_output,
                         &event_tx,
                         &endpoint,
                         &stream_chat_id,
@@ -1057,7 +1099,8 @@ async fn run_sse_driver_with_lifecycle(args: SseDriverArgs, mut lifecycle: Optio
                     return;
                 }
                 TerminalDurabilityWait::MonitorStopped => {
-                    send_error_chunk(
+                    send_error_chunk_before_output(
+                        &mut first_output,
                         &event_tx,
                         &endpoint,
                         &stream_chat_id,
@@ -1094,7 +1137,8 @@ async fn run_sse_driver_with_lifecycle(args: SseDriverArgs, mut lifecycle: Optio
                     return;
                 }
                 TerminalDurabilityWait::OverallTimeout => {
-                    send_error_chunk(
+                    send_error_chunk_before_output(
+                        &mut first_output,
                         &event_tx,
                         &endpoint,
                         &stream_chat_id,
@@ -1170,6 +1214,23 @@ async fn run_sse_driver_with_lifecycle(args: SseDriverArgs, mut lifecycle: Optio
             role_emitted.insert(chunk.choice_index);
         }
         if !skip_forward {
+            if let Some(gate) = first_output.take() {
+                let ready = match chunk.error.as_ref() {
+                    Some(error) => Err(crate::handlers::proxy::worker_error_http_status(
+                        error.client_safe_code(),
+                    )),
+                    None if chunk.done
+                        && matches!(
+                            chunk.finish_reason.as_deref(),
+                            Some("cancelled" | "error")
+                        ) =>
+                    {
+                        Err(StatusCode::SERVICE_UNAVAILABLE)
+                    }
+                    None => Ok(()),
+                };
+                let _ = gate.send(ready);
+            }
             let ev = Event::default().data(event_body.to_string());
             if !send_event(&event_tx, ev).await {
                 // Client disconnected — fire the cancel deterministically
@@ -1523,6 +1584,47 @@ fn worker_error_value(error: &ChunkError, include_openai_type: bool) -> Value {
         object.insert("retry_after_s".to_string(), json!(retry_after_s));
     }
     Value::Object(object)
+}
+
+/// Preserve the bridge's pre-output HTTP refusal before enqueuing an error event.
+#[allow(clippy::too_many_arguments)]
+async fn send_error_chunk_before_output(
+    first_output: &mut FirstOutputGate,
+    tx: &tokio::sync::mpsc::Sender<Result<Event, Infallible>>,
+    endpoint: &SseEndpoint,
+    chat_id: &str,
+    created: u64,
+    model: &str,
+    request_id: &str,
+    code: &str,
+    message: &str,
+) {
+    if let Some(gate) = first_output.take() {
+        let _ = gate.send(Err(StatusCode::SERVICE_UNAVAILABLE));
+    }
+    send_error_chunk(
+        tx, endpoint, chat_id, created, model, request_id, code, message,
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn send_synthetic_error_chunk_before_output(
+    first_output: &mut FirstOutputGate,
+    tx: &tokio::sync::mpsc::Sender<Result<Event, Infallible>>,
+    endpoint: &SseEndpoint,
+    chat_id: &str,
+    created: u64,
+    model: &str,
+    request_id: &str,
+    error: &ChunkError,
+) {
+    if let Some(gate) = first_output.take() {
+        let _ = gate.send(Err(crate::handlers::proxy::worker_error_http_status(
+            error.client_safe_code(),
+        )));
+    }
+    send_synthetic_error_chunk(tx, endpoint, chat_id, created, model, request_id, error).await;
 }
 
 /// Emit a synthesized error chunk (gateway-side timeout or
@@ -2081,6 +2183,7 @@ mod tests {
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(8);
 
         let args = SseDriverArgs {
+            first_output: None,
             event_tx,
             chunk_rx,
             outcome_rx,
@@ -2335,6 +2438,7 @@ mod tests {
             let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(4);
 
             run_sse_driver(SseDriverArgs {
+                first_output: None,
                 event_tx,
                 chunk_rx,
                 outcome_rx,
