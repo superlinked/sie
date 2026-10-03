@@ -49,4 +49,12 @@ Step-by-step install and first experiment:
 
 ## Next
 
-Wire SIE and run one sweep: [SIE integration](./sie-integration.md).
+Before the host CLI / SIE handoff, export the URI the startup script printed
+(leave `.env` placeholders unchanged for Atlas Local):
+
+```bash
+# value also printed by ./start-services.sh --mongodb-local
+export MONGODB_URI="mongodb://localhost:27017/rag_params_finder?directConnection=true"
+```
+
+Then wire SIE and run one sweep: [SIE integration](./sie-integration.md).
