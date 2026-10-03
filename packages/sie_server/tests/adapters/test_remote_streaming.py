@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import AsyncIterator
 
 import httpx
@@ -47,3 +48,34 @@ async def test_sse_bounds_the_whole_stream() -> None:
     assert await anext(iterator) == b"a"
     with pytest.raises(RemoteUpstreamError, match="stream exceeds"):
         await anext(iterator)
+
+
+async def test_cr_terminated_event_is_delivered_while_upstream_stays_open() -> None:
+    class HeldOpen(BytesStream):
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            yield b"data: ready\r\r"
+            await asyncio.Event().wait()
+
+    response = httpx.Response(200, stream=HeldOpen([]))
+    iterator = sse_data(response, max_event_bytes=100, max_total_bytes=100)
+    try:
+        async with asyncio.timeout(0.5):
+            assert await anext(iterator) == b"ready"
+    finally:
+        await iterator.aclose()
+        await response.aclose()
+
+
+async def test_fragmented_long_line_and_many_short_lines() -> None:
+    value = b"a" * 65_536
+    wire = b"data: " + value + b"\n\n"
+    chunks = [wire[index : index + 1] for index in range(len(wire))]
+    chunks.append(b"data: b\n\n" * 4096)
+    response = httpx.Response(200, stream=BytesStream(chunks))
+    events = [data async for data in sse_data(response, max_event_bytes=70_000, max_total_bytes=120_000)]
+    assert events == [value] + [b"b"] * 4096
+
+
+async def test_lf_after_a_cr_terminated_nonempty_fragment_is_not_discarded() -> None:
+    response = httpx.Response(200, stream=BytesStream([b"data: one\rdata: two", b"\n\n"]))
+    assert [data async for data in sse_data(response, max_event_bytes=100, max_total_bytes=100)] == [b"one\ntwo"]

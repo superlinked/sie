@@ -198,6 +198,9 @@ class SieUpstreamAdapter(BaseAdapter, GenerationAdapter):
 
     async def aclose_client(self) -> None:
         """Close the generation client on the event loop that used it."""
+        if self._closing is not None:
+            await self._closing
+            self._closing = None
         client, self._async_client = self._async_client, None
         if client is not None:
             await client.aclose()
@@ -209,12 +212,15 @@ class SieUpstreamAdapter(BaseAdapter, GenerationAdapter):
         client, self._client = self._client, None
         if client is not None:
             client.close()
-        async_client, self._async_client = self._async_client, None
-        if async_client is not None:
+        if self._async_client is not None:
             try:
-                self._closing = asyncio.get_running_loop().create_task(async_client.aclose())
+                loop = asyncio.get_running_loop()
             except RuntimeError:
-                self._closing = None
+                # Keep the loop-bound client for the awaitable teardown path.
+                pass
+            else:
+                async_client, self._async_client = self._async_client, None
+                self._closing = loop.create_task(async_client.aclose())
         self._upstream = None
         super().unload()
 

@@ -254,3 +254,24 @@ async def test_a_loaded_generation_client_stops_sending_when_remote_serving_is_d
     with pytest.raises(RemoteServingDisabledError):
         _ = [chunk async for chunk in adapter.generate("prompt", max_new_tokens=9)]
     assert len(requests) == 1
+
+
+async def test_sync_unload_retains_async_client_until_loop_teardown(adapter: SieUpstreamAdapter) -> None:
+    answer_with(adapter, lambda _request: httpx.Response(200))
+    client = adapter._async_client
+    assert client is not None
+    await asyncio.to_thread(adapter.unload)
+    assert adapter._async_client is client
+    await adapter.aclose_client()
+    assert client.is_closed
+    assert adapter._async_client is None
+
+
+async def test_awaitable_teardown_drains_a_scheduled_close(adapter: SieUpstreamAdapter) -> None:
+    answer_with(adapter, lambda _request: httpx.Response(200))
+    client = adapter._async_client
+    assert client is not None
+    adapter.unload()
+    await adapter.aclose_client()
+    assert client.is_closed
+    assert adapter._closing is None

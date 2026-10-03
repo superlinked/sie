@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import re
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -201,43 +202,43 @@ async def open_stream(
 
 
 async def sse_data(response: httpx.Response, *, max_event_bytes: int, max_total_bytes: int) -> AsyncIterator[bytes]:
-    """Read SSE data under wire-size caps; discard any unterminated final event."""
+    """Read bounded SSE events, scanning new bytes once and dispatching CR immediately."""
     pending = bytearray()
     data: list[bytes] = []
     event_bytes = received = 0
+    skip_lf = False
     async for chunk in response.aiter_raw():
         received += len(chunk)
         if received > max_total_bytes:
             raise RemoteUpstreamError("upstream stream exceeds the size limit")
-        pending.extend(chunk)
-        while pending:
-            ends = [index for byte in (b"\n", b"\r") if (index := pending.find(byte)) >= 0]
-            if not ends:
-                break
-            end = min(ends)
-            if pending[end] == 13 and end + 1 == len(pending):
-                break
-            width = 2 if pending[end : end + 2] == b"\r\n" else 1
-            event_bytes += end + width
+        start = 0
+        if skip_lf and chunk:
+            start = int(chunk[0] == 10)
+            skip_lf = False
+        origin = start
+        for ending in re.finditer(rb"\r\n?|\n", chunk[origin:]):
+            end = origin + ending.start()
+            # CRLF is one line ending, including when split across chunks.
+            pending.extend(chunk[start:end])
+            event_bytes += len(pending) + 1
             if event_bytes > max_event_bytes:
                 raise RemoteUpstreamError("upstream sent an event over the size limit")
-            line = bytes(pending[:end])
-            del pending[: end + width]
+            line = bytes(pending)
+            pending.clear()
+            next_start = origin + ending.end()
+            start = next_start
+            skip_lf = next_start == len(chunk) and chunk[next_start - 1] == 13
             if not line:
                 if data:
                     yield b"\n".join(data)
                 data, event_bytes = [], 0
-                continue
-            field, _, value = line.partition(b":")
-            if field == b"data":
-                data.append(value.removeprefix(b" "))
+            else:
+                field, _, value = line.partition(b":")
+                if field == b"data":
+                    data.append(value.removeprefix(b" "))
+        pending.extend(chunk[start:])
         if event_bytes + len(pending) > max_event_bytes:
             raise RemoteUpstreamError("upstream sent an event over the size limit")
-    if pending == b"\r" and data:
-        # A trailing CR can complete the empty line of a final event.
-        if event_bytes + 1 > max_event_bytes:
-            raise RemoteUpstreamError("upstream sent an event over the size limit")
-        yield b"\n".join(data)
 
 
 def generation_error(error: UpstreamUnavailableError) -> GenerationError:
