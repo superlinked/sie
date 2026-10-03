@@ -36,11 +36,13 @@ A remote-backed model has only remote profiles. Its bare name serves remotely;
 `routing: {policy: remote_only}` makes that policy explicit. It needs no local
 weights or accelerator.
 
-Single-node `fallback` is available for extraction-only models. A request that
-names a profile bypasses the bare-model policy. Hybrid `encode` and `score`
-remain refused at configuration load until identity or equivalence proof can
-be checked. Generation fallback and `threshold` are also refused. Cluster
-remote profiles use the queue, but cluster fallback is still being built.
+Single-node `fallback` is available for extraction-only models and for models
+with local and remote generation profiles whose remote profile produces every
+declared output (see [Single-node generation fallback](#single-node-generation-fallback)).
+A request that names a profile bypasses the bare-model policy. Hybrid `encode`
+and `score` remain refused at configuration load until identity or equivalence
+proof can be checked. `threshold` is also refused. Cluster remote profiles use
+the queue, but cluster fallback is still being built.
 
 ## Single-node embedding example
 
