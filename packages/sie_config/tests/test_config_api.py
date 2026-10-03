@@ -2703,7 +2703,7 @@ class TestConfigAPIRoutingValidation:
         app.state.nats_publisher.publish_config_notification.assert_not_called()
 
     @pytest.mark.parametrize("method", ["POST", "PUT"])
-    def test_generation_fallback_is_refused_without_write_effects(
+    def test_generation_fallback_is_accepted_and_persisted(
         self, app_client: tuple[FastAPI, TestClient], method: str
     ) -> None:
         app, client = app_client
@@ -2711,11 +2711,13 @@ class TestConfigAPIRoutingValidation:
         config["tasks"] = {"generate": {"context_length": 8192, "max_output_tokens": 64}}
         path = "/v1/configs/models" if method == "POST" else "/v1/configs/models/acme/routing"
         response = client.request(method, path, content=yaml.safe_dump(config))
-        assert response.status_code == 422
-        assert "generate" in str(response.json())
-        assert app.state.config_store.read_model("acme/routing") is None
-        assert app.state.config_store.read_epoch() == 0
-        app.state.nats_publisher.publish_config_notification.assert_not_called()
+        assert response.status_code == (201 if method == "POST" else 200), response.text
+        stored = yaml.safe_load(app.state.config_store.read_model("acme/routing"))
+        assert stored["tasks"] == config["tasks"]
+        assert stored["routing"] == config["routing"]
+        assert app.state.model_registry.get_full_config("acme/routing") == stored
+        assert app.state.config_store.read_epoch() == 1
+        app.state.nats_publisher.publish_config_notification.assert_awaited_once()
 
     def test_valid_partial_append_preserves_routing_tasks_and_default(
         self, app_client: tuple[FastAPI, TestClient]
