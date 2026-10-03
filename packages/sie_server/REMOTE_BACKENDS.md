@@ -183,7 +183,15 @@ The single-node model detail and catalog responses include
 identifies revision-pinned native BGE-M3 profiles. It includes model/tokenizer pins,
 resolved profile settings, engine configuration, device/platform, serving
 Python sources, installed inference-library versions and current Torch
-precision/determinism settings. Alias names and
+precision/determinism settings. Hardware observations include the kernel,
+CPU model/features and selected instruction capability, plus the observed CUDA
+device properties and installed NVIDIA driver revision for CUDA execution.
+Numerical library builds, observed BLAS kernel/thread selection and environment
+settings also participate. Apple Accelerate is bound to the installed OS
+version/build. Observed BLAS kernels are limited to OpenBLAS/BLIS; wrapper
+backends and libraries without kernel facts report `null`, including MKL.
+Unknown hardware or numerical libraries report `null`;
+configured device labels are insufficient. Alias names and
 inheritance do not change a profile with identical resolved settings.
 
 Local weight paths, mutable revisions, custom/checkpoint code, child engines,
