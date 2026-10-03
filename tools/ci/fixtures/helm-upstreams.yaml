@@ -25,6 +25,9 @@ values:
     set_params:
       provider: {data_collection: deny}
     strip_params: [user]
+    equivalence:
+      max_age_s: 300
+      record_files: {local/model: /proofs/local-model.json}
 rendered:
   upstreams:
     team-sie:
@@ -46,6 +49,9 @@ rendered:
       set_params:
         provider: {data_collection: deny}
       strip_params: [user]
+      equivalence:
+        max_age_s: 300
+        record_files: {local/model: /proofs/local-model.json}
 # URLs the chart and the server must judge alike: `tls: true` checks a
 # base_url, which needs https outside loopback, and `tls: false` a proxy_url.
 # tools/ci/tests/test_helm_render.py renders each one, and
@@ -116,3 +122,21 @@ definitions:
   - {accepted: false, upstream: {kind: sie, breaker: {window_s: 3601}}}
   - {accepted: false, upstream: {kind: sie, breaker: {cooldown_s: 0}}}
   - {accepted: false, upstream: {kind: sie, breaker: {cooldown_s: 3601}}}
+  - {accepted: true, upstream: {kind: openai, endpoints: [embeddings], equivalence: {max_age_s: 60, record_files: {local/model: /proof.json}}}}
+  - {accepted: true, upstream: {kind: sie, equivalence: null}}
+  - {accepted: true, upstream: {kind: openai, endpoints: [embeddings], equivalence: null}}
+  - {accepted: false, upstream: {kind: sie, equivalence: {max_age_s: 60, record_files: {local/model: /proof.json}}}}
+  - {accepted: false, upstream: {kind: openai, endpoints: [embeddings], equivalence: {}}}
+  - {accepted: false, upstream: {kind: openai, endpoints: [embeddings], equivalence: []}}
+  - {accepted: false, upstream: {kind: openai, endpoints: [embeddings], equivalence: {max_age_s: 0, record_files: {local/model: /proof.json}}}}
+  - {accepted: false, upstream: {kind: openai, endpoints: [embeddings], equivalence: {max_age_s: 86401, record_files: {local/model: /proof.json}}}}
+  - {accepted: false, upstream: {kind: openai, endpoints: [embeddings], equivalence: {max_age_s: true, record_files: {local/model: /proof.json}}}}
+  - {accepted: false, upstream: {kind: openai, endpoints: [embeddings], equivalence: {max_age_s: "60", record_files: {local/model: /proof.json}}}}
+  - {accepted: false, upstream: {kind: openai, endpoints: [embeddings], equivalence: {max_age_s: 1.5, record_files: {local/model: /proof.json}}}}
+  - {accepted: false, upstream: {kind: openai, endpoints: [embeddings], equivalence: {record_files: {local/model: /proof.json}}}}
+  - {accepted: false, upstream: {kind: openai, endpoints: [embeddings], equivalence: {max_age_s: 60}}}
+  - {accepted: false, upstream: {kind: openai, endpoints: [embeddings], equivalence: {max_age_s: 60, record_files: {}}}}
+  - {accepted: false, upstream: {kind: openai, endpoints: [embeddings], equivalence: {max_age_s: 60, record_files: {local/model: relative}}}}
+  - {accepted: false, upstream: {kind: openai, endpoints: [embeddings], equivalence: {max_age_s: 60, record_files: {"": /proof.json}}}}
+  - {accepted: false, upstream: {kind: openai, endpoints: [embeddings], equivalence: {max_age_s: 60, record_files: {local/model: 5}}}}
+  - {accepted: false, upstream: {kind: openai, endpoints: [embeddings], equivalence: {max_age_s: 60, record_files: {local/model: /proof.json}, unexpected: true}}}
