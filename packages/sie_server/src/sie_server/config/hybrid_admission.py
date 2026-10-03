@@ -52,6 +52,8 @@ def openai_equivalence_refusal(
     now: datetime | None = None,
 ) -> str | None:
     """Return a fixed refusal reason, or ``None`` for passing current evidence."""
+    if device == "cuda" or (device.startswith("cuda:") and not device.partition(":")[2].isdigit()):
+        return "hybrid execution device is ambiguous"
     routing = config.routing
     if routing is None or routing.policy not in {"fallback", "threshold"}:
         return "model does not declare a hybrid policy"

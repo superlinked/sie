@@ -768,7 +768,9 @@ class QueueExecutor:
                     validate_no_legacy_scalar_lora_id(name=expanded.sie_id, config=expanded)
                     validate_profile_upstreams(expanded)
                     validate_model_routing(
-                        expanded, device=self._registry.device, engine_config=self._registry.engine_config
+                        expanded,
+                        device=self._registry.profile_execution_device(expanded.sie_id),
+                        engine_config=self._registry.engine_config,
                     )
                 configs.append(model_config)
             except (TypeError, ValueError, yaml.YAMLError) as exc:

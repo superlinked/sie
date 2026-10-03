@@ -411,3 +411,26 @@ def test_top_level_encode_dtype_keeps_cold_request_local(admission: tuple, dtype
     assert response.headers["Retry-After"] == "5"
     registry.start_load_async.assert_awaited_once_with(config.sie_id, "cpu")
     registry.get_worker.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("device", "devices", "expected"),
+    [
+        ("cpu", None, "cpu"),
+        ("cuda", None, None),
+        ("cuda", ["cuda:0"], "cuda:0"),
+        ("cuda:0", ["cuda:0", "cuda:1"], None),
+    ],
+)
+def test_hybrid_device_authority_requires_stable_placement(
+    device: str, devices: list[str] | None, expected: str | None
+) -> None:
+    registry = ModelRegistry(device=device, devices=devices, enable_hot_reload=False)
+    assert registry.profile_execution_device("local/model") == expected
+    registry._loaded["local/model"] = SimpleNamespace(device="cuda:9")
+    assert registry.profile_execution_device("local/model") is None
+
+
+def test_family_level_cuda_cannot_admit_hybrid(admission) -> None:
+    config, _, _, _ = admission
+    assert hybrid_admission.openai_equivalence_refusal(config, device="cuda") == "hybrid execution device is ambiguous"

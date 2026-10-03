@@ -406,6 +406,7 @@ def test_pinned_builtin_profile_exposes_same_identity_in_list_and_detail(
     data["profiles"]["default"]["adapter_options"] = {"loadtime": {"trust_remote_code": False}}
     model = ModelConfig.model_validate(data)
     mock_registry.device = "cpu"
+    mock_registry.profile_execution_device.return_value = "cpu"
     mock_registry.engine_config = None
     mock_registry.get_config = lambda _name: model
     detail = client.get("/v1/models/model-a").json()

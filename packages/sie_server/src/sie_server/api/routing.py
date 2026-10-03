@@ -279,7 +279,10 @@ async def _bridge(
             if hybrid_request_refusal(config, request_options) is not None:
                 raise ValueError("hybrid request differs from its measured contract")
             await asyncio.to_thread(
-                validate_model_routing, config, device=registry.device, engine_config=registry.engine_config
+                validate_model_routing,
+                config,
+                device=registry.profile_execution_device(config.sie_id),
+                engine_config=registry.engine_config,
             )
         except ValueError:
             replacement = route.refusal_after(status.HTTP_503_SERVICE_UNAVAILABLE, ErrorCode.INFERENCE_ERROR.value)

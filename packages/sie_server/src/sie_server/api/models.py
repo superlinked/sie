@@ -227,7 +227,10 @@ async def list_models(http_request: Request) -> ModelsListResponse:
             pname: ProfileInfo(
                 is_default=(pname == "default"),
                 identity=local_profile_identity(
-                    config, pname, device=registry.device, engine_config=registry.engine_config
+                    config,
+                    pname,
+                    device=registry.profile_execution_device(name if pname == "default" else f"{name}:{pname}") or "",
+                    engine_config=registry.engine_config,
                 ),
                 remote_contract_sha256=remote_profile_contract_digest(config, pname, installed_upstreams()),
                 runtime_instance_id=runtime_instance_id()
@@ -290,7 +293,10 @@ async def get_model(model: str, http_request: Request) -> ModelInfo:
         pname: ProfileInfo(
             is_default=(pname == "default"),
             identity=local_profile_identity(
-                config, pname, device=registry.device, engine_config=registry.engine_config
+                config,
+                pname,
+                device=registry.profile_execution_device(model if pname == "default" else f"{model}:{pname}") or "",
+                engine_config=registry.engine_config,
             ),
             remote_contract_sha256=remote_profile_contract_digest(config, pname, installed_upstreams()),
             runtime_instance_id=runtime_instance_id()

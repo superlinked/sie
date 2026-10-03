@@ -583,7 +583,9 @@ class ModelRegistry:
         for name, config in self._configs.items():
             validate_no_legacy_scalar_lora_id(name=name, config=config)
             validate_profile_upstreams(config)
-            validate_model_routing(config, device=self._device, engine_config=self._engine_config)
+            validate_model_routing(
+                config, device=self.profile_execution_device(config.sie_id), engine_config=self._engine_config
+            )
 
         self._config_version += 1
 
@@ -701,6 +703,22 @@ class ModelRegistry:
     def devices(self) -> list[str]:
         """Return concrete devices available for whole-model placement."""
         return list(self._devices)
+
+    def profile_execution_device(self, name: str) -> str | None:
+        """Return a stable concrete identity device, or refuse movable placement.
+
+        Hybrid proof currently supports one configured device. A loaded model
+        outside that placement cannot borrow the configured device's proof.
+        """
+        if len(self._devices) != 1:
+            return None
+        device = self._devices[0]
+        if _device_family(device) == "cuda" and (":" not in device or not device.partition(":")[2].isdigit()):
+            return None
+        loaded = self._loaded.get(name)
+        if loaded is not None and loaded.device != device:
+            return None
+        return device
 
     def _memory_manager_for_device(self, device: str) -> MemoryManager:
         manager = self._memory_managers.get(device)
@@ -2430,7 +2448,9 @@ class ModelRegistry:
         # Multi-LoRA generation (``loadtime.lora_paths``) is unaffected.
         validate_no_legacy_scalar_lora_id(name=config.sie_id, config=config)
         validate_profile_upstreams(config)
-        validate_model_routing(config, device=self._device, engine_config=self._engine_config)
+        validate_model_routing(
+            config, device=self.profile_execution_device(config.sie_id), engine_config=self._engine_config
+        )
 
     def _apply_config_entry(self, config: ModelConfig, model_dir: Path | None = None) -> None:
         base_id = (
@@ -2524,7 +2544,9 @@ class ModelRegistry:
                 # update was refused. Expiring admission must stop the bridge,
                 # not reject unrelated changes in the same snapshot.
                 if name not in retained_names:
-                    validate_model_routing(config, device=self._device, engine_config=self._engine_config)
+                    validate_model_routing(
+                        config, device=self.profile_execution_device(config.sie_id), engine_config=self._engine_config
+                    )
 
             async with self._get_load_admission_lock():
                 removed = set(self._configs) - set(new_configs)

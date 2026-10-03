@@ -303,7 +303,10 @@ Records are bound to the measured worker process. After a worker restart,
 disable hybrid routing before startup, re-probe and activate through hot reload
 again. Starting directly from a hybrid YAML with an old process-bound record is
 refused. This conservative first admission path requires one record per worker
-process; it does not enable gateway fallback or a fleet-wide evidence rollout.
+process with one configured concrete device (`cuda:0`, rather than `cuda`,
+for a CUDA worker). Multiple devices or a model loaded outside that placement
+cannot report an admission identity or use the proof. It does not enable
+gateway fallback or a fleet-wide evidence rollout.
 
 
 ## Single-node generation fallback
