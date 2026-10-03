@@ -4271,6 +4271,18 @@
                 "null"
               ]
             }
+          },
+          {
+            "description": "Require local serving through a current worker execution fence. A selected remote profile returns 400; no verified local worker returns retryable 503. Duplicate or other values return 400.",
+            "in": "header",
+            "name": "X-SIE-Remote",
+            "required": false,
+            "schema": {
+              "enum": [
+                "forbid"
+              ],
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
@@ -4568,6 +4580,18 @@
                 "null"
               ]
             }
+          },
+          {
+            "description": "Require local serving through a current worker execution fence. A selected remote profile returns 400; no verified local worker returns retryable 503. Duplicate or other values return 400.",
+            "in": "header",
+            "name": "X-SIE-Remote",
+            "required": false,
+            "schema": {
+              "enum": [
+                "forbid"
+              ],
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
@@ -4783,6 +4807,20 @@
       "post": {
         "description": "OpenAI-compatible legacy Completions. Strict allow-list parser: unknown top-level fields reject with 400 `unsupported_field`. `stream: true` is supported (SSE `text_completion`). Known-rejected fields: `echo`, `suffix`, `logprobs`, `best_of`, `n > 1`, batched array `prompt` — each rejects with 400 `unsupported_field`. The response body no longer carries the always-null `logprobs` field.",
         "operationId": "proxy_completions",
+        "parameters": [
+          {
+            "description": "Require local serving through a current worker execution fence. A selected remote profile returns 400; no verified local worker returns retryable 503. Duplicate or other values return 400.",
+            "in": "header",
+            "name": "X-SIE-Remote",
+            "required": false,
+            "schema": {
+              "enum": [
+                "forbid"
+              ],
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -5366,6 +5404,18 @@
                 "null"
               ]
             }
+          },
+          {
+            "description": "Require local serving through a current worker execution fence. A selected remote profile returns 400; no verified local worker returns retryable 503. Duplicate or other values return 400.",
+            "in": "header",
+            "name": "X-SIE-Remote",
+            "required": false,
+            "schema": {
+              "enum": [
+                "forbid"
+              ],
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
@@ -5681,6 +5731,18 @@
                 "string",
                 "null"
               ]
+            }
+          },
+          {
+            "description": "Require local serving through a current worker execution fence. A selected remote profile returns 400; no verified local worker returns retryable 503. Duplicate or other values return 400.",
+            "in": "header",
+            "name": "X-SIE-Remote",
+            "required": false,
+            "schema": {
+              "enum": [
+                "forbid"
+              ],
+              "type": "string"
             }
           }
         ],
@@ -6029,6 +6091,18 @@
                 "null"
               ]
             }
+          },
+          {
+            "description": "Require local serving through a current worker execution fence. A selected remote profile returns 400; no verified local worker returns retryable 503. Duplicate or other values return 400.",
+            "in": "header",
+            "name": "X-SIE-Remote",
+            "required": false,
+            "schema": {
+              "enum": [
+                "forbid"
+              ],
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
@@ -6375,6 +6449,18 @@
                 "string",
                 "null"
               ]
+            }
+          },
+          {
+            "description": "Require local serving through a current worker execution fence. A selected remote profile returns 400; no verified local worker returns retryable 503. Duplicate or other values return 400.",
+            "in": "header",
+            "name": "X-SIE-Remote",
+            "required": false,
+            "schema": {
+              "enum": [
+                "forbid"
+              ],
+              "type": "string"
             }
           }
         ],
@@ -7136,6 +7222,18 @@
                 "null"
               ]
             }
+          },
+          {
+            "description": "Require local serving through a current worker execution fence. A selected remote profile returns 400; no verified local worker returns retryable 503. Duplicate or other values return 400.",
+            "in": "header",
+            "name": "X-SIE-Remote",
+            "required": false,
+            "schema": {
+              "enum": [
+                "forbid"
+              ],
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
@@ -7266,6 +7364,20 @@
       "post": {
         "description": "OpenAI Responses API (MVP). Strict allow-list parser: unknown top-level fields reject with 400 `unsupported_field`. `input` is either a string prompt OR an array of `{role, content}` messages. Known-rejected fields: `tools`, `tool_choice`, `previous_response_id`, `reasoning`, `background`, `metadata`, `instructions` — each rejects with 400 `unsupported_field`. `stream: true` is rejected (Responses SSE is deferred). Multimodal image content parts reject with 400 `unsupported_field` on the array form.",
         "operationId": "proxy_responses",
+        "parameters": [
+          {
+            "description": "Require local serving through a current worker execution fence. A selected remote profile returns 400; no verified local worker returns retryable 503. Duplicate or other values return 400.",
+            "in": "header",
+            "name": "X-SIE-Remote",
+            "required": false,
+            "schema": {
+              "enum": [
+                "forbid"
+              ],
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -7648,6 +7760,18 @@
                 "null"
               ]
             }
+          },
+          {
+            "description": "Require local serving through a current worker execution fence. A selected remote profile returns 400; no verified local worker returns retryable 503. Duplicate or other values return 400.",
+            "in": "header",
+            "name": "X-SIE-Remote",
+            "required": false,
+            "schema": {
+              "enum": [
+                "forbid"
+              ],
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
@@ -7985,6 +8109,18 @@
                 "string",
                 "null"
               ]
+            }
+          },
+          {
+            "description": "Require local serving through a current worker execution fence. A selected remote profile returns 400; no verified local worker returns retryable 503. Duplicate or other values return 400.",
+            "in": "header",
+            "name": "X-SIE-Remote",
+            "required": false,
+            "schema": {
+              "enum": [
+                "forbid"
+              ],
+              "type": "string"
             }
           }
         ],
