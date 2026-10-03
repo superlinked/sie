@@ -82,6 +82,12 @@ def validate_model_routing(
         msg = f"Model '{config.sie_id}': routing policy 'threshold' is not available yet"
         raise ValueError(msg)
     refusal = hybrid_equivalence_refusal(config)
+    if refusal is not None and routing.fallback_profile is not None:
+        # Dispatch expands live fields. A reused mutable Python config must
+        # not authorize those fields with an older resolved-profile cache.
+        for name in ("default", routing.fallback_profile):
+            if config.resolve_profile(name) != config._resolve_profile_uncached(name):
+                raise ValueError("hybrid profile settings changed after resolution; reconstruct the model config")
     if refusal is not None and device is not None:
         profile = config.resolve_profile(routing.fallback_profile or "default")
         upstream_name = profile.loadtime.get("upstream")

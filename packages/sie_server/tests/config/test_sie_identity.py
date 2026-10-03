@@ -340,3 +340,19 @@ async def test_bridge_rechecks_expired_identity_and_preserves_warmup_and_refusal
         assert route.upstream == "team"
     registry.start_load_async.assert_awaited_once_with(config.sie_id, "cpu")
     registry.load_now.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("section", "key", "value"),
+    [("runtime", "normalize", False), ("loadtime", "upstream_model", "different/model:stable")],
+)
+def test_reused_mutated_config_cannot_admit_stale_profile_metadata(remote, section, key, value) -> None:
+    config = model()
+    registry = ModelRegistry(device="cpu", enable_hot_reload=False)
+    registry.add_config(config)
+    getattr(config.profiles["remote"].adapter_options, section)[key] = value
+    with pytest.raises(ValueError, match="settings changed after resolution"):
+        registry.add_config(config)
+    with pytest.raises(ValueError, match="settings changed after resolution"):
+        validate_model_routing(config, device="cpu")
+    assert len(remote[1]) == 1
