@@ -2923,6 +2923,80 @@ impl WorkPublisher {
         });
     }
 
+    /// Queue a model load without input, inference or a result collector.
+    ///
+    /// The sidecar ACKs `load` after readiness and emits no result. Durability
+    /// here confirms only broker acceptance; worker health remains the source
+    /// of readiness. No local-ingest transport is involved.
+    #[allow(dead_code)] // Called by the subsequent cluster fallback routing delivery.
+    pub async fn publish_model_load(
+        &self,
+        target: PublishTarget,
+        engine: &str,
+        bundle_config_hash: &str,
+    ) -> Result<(String, DispatchDurability), String> {
+        self.ensure_stream(target.pool()).await?;
+        self.check_backpressure(target.pool())?;
+        let request_id = uuid::Uuid::now_v7().to_string();
+        let work_item_id = canonical_work_item_id(&request_id, 0);
+        let reply_subject = format!("_INBOX.{}.{}", self.router_id, request_id);
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs_f64();
+        let item = WorkItemRef {
+            work_item_id: &work_item_id,
+            request_id: &request_id,
+            item_index: 0,
+            total_items: 1,
+            operation: "load",
+            model_id: target.model(),
+            profile_id: "default",
+            display_model: None,
+            engine,
+            pool_name: target.pool(),
+            admission_pool: "",
+            machine_profile: target.machine_profile(),
+            item: None,
+            payload_ref: None,
+            output_types: None,
+            instruction: None,
+            is_query: false,
+            options: None,
+            query_item: None,
+            query_payload_ref: None,
+            score_items: None,
+            labels: None,
+            output_schema: None,
+            generate: None,
+            routing_key: None,
+            prompt_cache_key: None,
+            bundle_config_hash,
+            router_id: &self.router_id,
+            reply_subject: &reply_subject,
+            timestamp,
+            deadline: Some(timestamp + self.result_timeout.as_secs_f64()),
+            accepts_result_chunks: false,
+            traceparent: None,
+            tracestate: None,
+        };
+        let encoded = rmp_serde::to_vec_named(&item)
+            .map_err(|_| "model load envelope could not be encoded".to_string())?;
+        let ack = self
+            .jetstream
+            .publish(target.subject(), encoded.into())
+            .await
+            .map_err(|_| "model load could not be published".to_string())?;
+        let durability = DispatchDurability::from_future(async move {
+            tokio::time::timeout(PUBLISH_ACK_COMPLETION_TIMEOUT, ack)
+                .await
+                .map_err(|_| "model load publish acknowledgement timed out".to_string())?
+                .map(|_| ())
+                .map_err(|_| "model load publish acknowledgement failed".to_string())
+        });
+        Ok((request_id, durability))
+    }
+
     /// Decompose a request into work items and publish to JetStream.
     #[allow(clippy::too_many_arguments)]
     pub async fn publish_work(
@@ -9036,6 +9110,179 @@ mod tests {
             root_parts[3], "01",
             "root gateway.publish span should be sampled"
         );
+    }
+
+    #[tokio::test]
+    async fn load_only_publish_is_durable_without_inputs_or_result_collectors() {
+        let Ok(url) = std::env::var("NATS_URL") else {
+            assert_ne!(
+                std::env::var("SIE_RUN_NATS_PUBLISHER_TEST").as_deref(),
+                Ok("1"),
+                "mandatory publisher tests require NATS_URL"
+            );
+            return;
+        };
+        let client = async_nats::connect(url)
+            .await
+            .expect("test NATS connection");
+        let pool = format!("itload{}", uuid::Uuid::now_v7().simple());
+        let publisher = Arc::new(WorkPublisher::new(
+            jetstream::new(client.clone()),
+            "load-gateway".to_string(),
+            Arc::new(crate::queue::payload_store::DisabledPayloadStore),
+            Duration::from_secs(60),
+            1024,
+            WorkStreamConfig {
+                max_age: Duration::from_secs(300),
+                storage: jetstream::stream::StorageType::Memory,
+                num_replicas: 1,
+            },
+        ));
+        let context = jetstream::new(client.clone());
+        let mut stream = context
+            .get_or_create_stream(jetstream::stream::Config {
+                name: stream_name(&pool),
+                subjects: vec![format!("sie.work.{pool}.*.*.*")],
+                retention: jetstream::stream::RetentionPolicy::WorkQueue,
+                storage: jetstream::stream::StorageType::Memory,
+                max_age: Duration::from_secs(300),
+                max_messages: 100_000,
+                discard: jetstream::stream::DiscardPolicy::New,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        stream
+            .create_consumer(jetstream::consumer::pull::Config {
+                durable_name: Some("warm-worker".into()),
+                filter_subject: format!("sie.work.{pool}.*.*.*"),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        // Direct work belongs to the worker stream, never the pool stream.
+        let worker_stream_name = format!("WORK_WORKER_{pool}");
+        let worker_stream = context
+            .get_or_create_stream(jetstream::stream::Config {
+                name: worker_stream_name.clone(),
+                subjects: vec![format!("sie.work.{pool}.l4.default.*.warm-worker")],
+                retention: jetstream::stream::RetentionPolicy::WorkQueue,
+                storage: jetstream::stream::StorageType::Memory,
+                max_age: Duration::from_secs(300),
+                discard: jetstream::stream::DiscardPolicy::New,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        worker_stream
+            .create_consumer(jetstream::consumer::pull::Config {
+                durable_name: Some("warm-worker".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let mut subscriber = client
+            .subscribe(format!("sie.work.{pool}.>"))
+            .await
+            .unwrap();
+        client.flush().await.unwrap();
+        for worker in [false, true] {
+            let pool_target = PublishTarget::Pool {
+                pool: pool.clone(),
+                machine_profile: "l4".into(),
+                bundle: "default".into(),
+                model: "acme/warm".into(),
+            };
+            let target = if worker {
+                PublishTarget::Worker {
+                    pool: pool.clone(),
+                    machine_profile: "l4".into(),
+                    bundle: "default".into(),
+                    model: "acme/warm".into(),
+                    worker_id: "warm-worker".into(),
+                }
+            } else {
+                pool_target
+            };
+            let expected_subject = target.subject();
+            let (request_id, durability) =
+                crate::queue::dispatch::WorkDispatcher::publish_model_load(
+                    publisher.as_ref(),
+                    target,
+                    "pytorch",
+                    "exact-config-hash",
+                )
+                .await
+                .unwrap();
+            durability
+                .wait()
+                .await
+                .expect("load publish acknowledgement");
+            let message = tokio::time::timeout(Duration::from_secs(2), subscriber.next())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(message.subject.as_str(), expected_subject);
+            let item: WorkItem = rmp_serde::from_slice(&message.payload).unwrap();
+            assert_eq!(item.operation, "load");
+            assert_eq!(item.model_id, "acme/warm");
+            assert_eq!(item.profile_id, "default");
+            assert_eq!(item.request_id, request_id);
+            assert_eq!(item.work_item_id, canonical_work_item_id(&request_id, 0));
+            assert_eq!((item.item_index, item.total_items), (0, 1));
+            assert_eq!(item.bundle_config_hash, "exact-config-hash");
+            assert_eq!(item.engine, "pytorch");
+            assert_eq!(item.machine_profile, "l4");
+            assert_eq!(item.pool_name, pool);
+            assert_eq!(item.router_id, "load-gateway");
+            assert!(item.reply_subject.starts_with("_INBOX.load-gateway."));
+            assert_eq!(item.deadline.unwrap() - item.timestamp, 60.0);
+            assert!(item.item.is_none() && item.payload_ref.is_none());
+            assert!(item.query_item.is_none() && item.query_payload_ref.is_none());
+            assert!(item.score_items.is_none() && item.generate.is_none());
+            assert!(item.options.is_none() && item.output_types.is_none());
+            assert!(!item.accepts_result_chunks);
+            assert!(publisher.pending_results.is_empty() && publisher.pending_streams.is_empty());
+            assert!(publisher.offloaded_payload_keys.is_empty());
+        }
+        // A broker rejection must fail durability with fixed text and must
+        // not leave caller-result or payload state behind.
+        let mut bounded = stream.info().await.unwrap().config.clone();
+        bounded.max_message_size = 1;
+        context.update_stream(bounded).await.unwrap();
+        let target = PublishTarget::Pool {
+            pool: pool.clone(),
+            machine_profile: "l4".into(),
+            bundle: "default".into(),
+            model: "acme/warm".into(),
+        };
+        let (_, durability) = publisher
+            .publish_model_load(target, "pytorch", "exact-config-hash")
+            .await
+            .unwrap();
+        assert_eq!(
+            durability.wait().await.unwrap_err(),
+            "model load publish acknowledgement failed"
+        );
+        assert_eq!(stream.info().await.unwrap().state.messages, 1);
+        assert_eq!(
+            context
+                .get_stream(&worker_stream_name)
+                .await
+                .unwrap()
+                .cached_info()
+                .state
+                .messages,
+            1
+        );
+        assert!(publisher.pending_results.is_empty() && publisher.pending_streams.is_empty());
+        assert!(publisher.offloaded_payload_keys.is_empty());
+
+        context.delete_stream(worker_stream_name).await.unwrap();
+        jetstream::new(client)
+            .delete_stream(stream_name(&pool))
+            .await
+            .unwrap();
     }
 
     /// NATS-gated: a work item carries `display_model` only when the caller
