@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import re
 import sys
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -14,6 +14,7 @@ import pytest
 import yaml
 from pydantic import ValidationError
 from sie_server.adapters._base_adapter import BaseAdapter
+from sie_server.adapters._generation_base import GenerationAdapter, GenerationChunk
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.config.model import ModelConfig
 from sie_server.config.routing import hybrid_equivalence_refusal, remote_output_refusal, validate_model_routing
@@ -96,8 +97,11 @@ class ExtractRemoteAdapter(BaseAdapter):
         raise NotImplementedError
 
 
-class GenerateRemoteAdapter(BaseAdapter):
+class GenerateRemoteAdapter(BaseAdapter, GenerationAdapter):
     spec = AdapterSpec(inputs=("text",), outputs=("tokens",), unload_fields=())
+
+    async def generate(self, *args: Any, **kwargs: Any) -> AsyncIterator[GenerationChunk]:
+        yield GenerationChunk(text_delta="", done=True, finish_reason="stop")
 
 
 @pytest.fixture(autouse=True)
@@ -296,6 +300,19 @@ def test_hybrid_generation_is_supported_with_pre_output_fallback_handling() -> N
     }
 
     validate_model_routing(ModelConfig.model_validate(hybrid(tasks=GENERATE, profiles=profiles)))
+
+
+def test_declaring_tokens_does_not_make_an_adapter_a_generation_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    class TokenOnlyAdapter(BaseAdapter):
+        spec = AdapterSpec(inputs=("text",), outputs=("tokens",), unload_fields=())
+
+    monkeypatch.setattr(sys.modules[DECLARED_OUTPUTS_MODULE], "GenerateRemoteAdapter", TokenOnlyAdapter)
+    profiles = {
+        "default": local_profile(kv_budget_tokens=4096),
+        "remote": remote_profile(GENERATE_REMOTE, kv_budget_tokens=4096),
+    }
+    with pytest.raises(ValueError, match="requires a GenerationAdapter"):
+        validate_model_routing(ModelConfig.model_validate(hybrid(tasks=GENERATE, profiles=profiles)))
 
 
 @pytest.mark.parametrize(
