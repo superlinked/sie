@@ -157,6 +157,11 @@ class OpenAIUpstreamAdapter(BaseAdapter, GenerationAdapter):
     def upstream_name(self) -> str:
         return self._upstream_name
 
+    @property
+    def supports_raw_completions(self) -> bool:
+        """Whether this deployment accepts locally rendered chat prompts."""
+        return self._upstream is not None and UpstreamEndpoint.COMPLETIONS in self._upstream.endpoints
+
     async def aclose_client(self) -> None:
         """Close the loop-bound generation client during awaitable registry teardown."""
         if self._closing is not None:

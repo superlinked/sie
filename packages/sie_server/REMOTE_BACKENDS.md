@@ -15,17 +15,22 @@ remaining work.
 | Upstream | Operations on `main` |
 | --- | --- |
 | `sie` | Native `encode` (dense, sparse and multivector), `score`, `extract`, and buffered or streaming `generate`; supported image inputs for non-generation primitives |
-| `openai` | Dense text embeddings at `/embeddings`, Cohere-shape reranking at `/rerank`, single-node chat at `/chat/completions`, and native prompt generation through `/completions` |
+| `openai` | Dense text embeddings at `/embeddings`, Cohere-shape reranking at `/rerank`, chat at `/chat/completions`, and native prompt generation through `/completions` |
 
 Native SIE generation uses the upstream's `/v1/generate` endpoint, with exact
-terminal usage. Single-node `/v1/chat/completions` serving also forwards to the
+terminal usage. Single-node and queued `/v1/chat/completions` serving also forward to the
 SIE upstream's chat endpoint. OpenAI profiles require the corresponding
 `chat` or `completions` endpoint declaration. Both generation modes require
 exact final usage and bounded responses; streaming cancellation closes the
-upstream call. Queue-mode chat and selecting raw prompt rendering for
-onboarded chat models remain separate work. Native raw completions refuse
+upstream call. Queued remote-backed chat uses the upstream chat endpoint without
+loading a local tokenizer. An onboarded queued OpenAI model prefers its local
+chat template and raw completions when that endpoint is declared; strict JSON
+Schema requests, enforced tool choices, multiple choices, and chat-only
+deployments use upstream chat. Native raw completions refuse
 media, grammar and nonstandard sampling fields they cannot enforce; strict
-JSON Schema output is supported through single-node chat and verified locally.
+JSON Schema output is supported through chat and verified locally. Queued chat
+preserves tools, tool choice, choice indices and usage; unsupported media, local
+chat-template kwargs and nonstandard sampling fields fail before dispatch.
 
 A remote-backed model has only remote profiles. Its bare name serves remotely;
 `routing: {policy: remote_only}` makes that policy explicit. It needs no local
