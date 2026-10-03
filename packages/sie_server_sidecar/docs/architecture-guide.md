@@ -69,19 +69,18 @@ Message settlement:
 - Malformed subjects and bad msgpack payloads are NAKed.
 - Unknown operations publish per-item error outcomes when reply publication
   succeeds.
-- A `load` work item carries no input. It only asks the worker to load its
-  model: it goes through the same admission, config and readiness checks as
-  other work for that model, and once `EnsureModelReady` reports the model
-  ready it is ACKed without running and without publishing a result. The
-  gateway sends one for a model that a healthy lane has not loaded.
-- A work item that carries `fallback_reason` is one the gateway sent to a
-  remote profile in place of a local route that refused it, and the gateway
-  answers its caller with that local refusal if this attempt fails. Such an
-  item is never redelivered: where the backend asks for a retry
-  (`nak_retry`), the sidecar publishes a retryable error result instead, with
-  the outcome's `error_code` (`QUEUE_FULL` when it has none) and its
-  `retry_after_s` (the NAK delay rounded up to seconds when it has none), and
-  ACKs the item.
+- A `load` work item carries no input. It goes through the same admission,
+  config and readiness checks as other work for that model. Once
+  `EnsureModelReady` reports ready, it is ACKed without inference or a result.
+  This is the worker-side warm-up primitive; the gateway does not yet produce
+  these items.
+- A work item may carry `fallback_reason` for a future gateway remote fallback
+  attempt. If the backend returns `nak_retry`, the sidecar publishes an error
+  result with the outcome's `error_code` (`QUEUE_FULL` when absent) and
+  `retry_after_s` (the NAK delay rounded up to seconds when absent), then ACKs
+  after successful publication. Ordinary items retain NAK behavior. Admission,
+  config/readiness barriers and failed result publication retain their existing
+  retry behavior; this does not yet provide the full cluster fallback contract.
 - An outcome's optional `retry_after_s` is published on the `WorkResult`
   unchanged; the gateway uses it as `Retry-After` for a `QUEUE_FULL` or
   `RESOURCE_EXHAUSTED` answer.

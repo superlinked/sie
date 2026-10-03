@@ -62,7 +62,8 @@ class WorkItem(_WorkItemRequired, total=False):
             after which no caller waits for this item. Absent when unknown.
         fallback_reason: Present when the gateway sent the item to a remote profile in place of
             a local route that refused it; names the refusal. The worker answers such an item
-            once and never redelivers it.
+            with an error result when the backend requests a retry. Admission and
+            readiness barriers retain their existing retry behavior.
     """
 
     bundle_config_hash: str

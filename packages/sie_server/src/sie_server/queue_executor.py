@@ -2227,6 +2227,8 @@ def _upstream_nak_outcome(bi: EncodeBatchItem | ScoreBatchItem | ExtractBatchIte
         item_index=bi.item_index,
         disposition="nak_retry",
         nak_delay_ms=int(delay_s * 1000),
+        error_code=ErrorCode.QUEUE_FULL.value,
+        retry_after_s=retry_after_s,
     )
 
 

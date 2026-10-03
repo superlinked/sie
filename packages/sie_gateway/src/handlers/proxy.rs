@@ -9258,25 +9258,27 @@ fn build_terminal_client_error_response(
     resp
 }
 
+/// The longest valid retry hint the failed results carry, if any.
+fn longest_worker_retry_after(errors: &[&publisher::WorkResult]) -> Option<u16> {
+    errors
+        .iter()
+        .filter_map(|result| result.retry_after_s)
+        .filter(|seconds| (1..=60).contains(seconds))
+        .max()
+        .map(|seconds| seconds as u16)
+}
+
 /// Build a ``503 + <code>`` response that mirrors the worker-side HTTP
 /// contract (see ``packages/sie_server/src/sie_server/api/helpers.py``).
 ///
 ///   * status:  503 Service Unavailable
 ///   * body:    ``{"error": {"code": <code>, "message": <upstream message>}}``
-///   * headers: ``Retry-After: 5``, ``X-SIE-Error-Code: <code>``, plus the
+///   * headers: a bounded worker ``Retry-After`` hint (default 5),
+///     ``X-SIE-Error-Code: <code>``, plus the
 ///     standard ``X-SIE-*`` version pair.
 ///
 /// The worker is **not** marked unhealthy — these codes are transient
 /// per-request signals, not worker-health signals.
-/// The longest retry hint the failed results carry, if any.
-fn longest_worker_retry_after(errors: &[&publisher::WorkResult]) -> Option<u16> {
-    errors
-        .iter()
-        .filter_map(|result| result.retry_after_s)
-        .max()
-        .map(|seconds| u16::try_from(seconds).unwrap_or(u16::MAX))
-}
-
 fn build_retryable_error_response(
     code: &'static str,
     message: &str,
@@ -19178,6 +19180,18 @@ mod tests {
             headers.get("x-sie-error-code").unwrap(),
             LORA_LOADING_ERROR_CODE
         );
+    }
+
+    #[test]
+    fn invalid_worker_retry_hints_do_not_hide_valid_ones() {
+        let mut valid = _err_result(Some("QUEUE_FULL"), "upstream busy");
+        valid.retry_after_s = Some(9);
+        let mut invalid = _err_result(Some("QUEUE_FULL"), "upstream busy");
+        for hint in [0, 61, u32::MAX] {
+            invalid.retry_after_s = Some(hint);
+            assert_eq!(longest_worker_retry_after(&[&valid, &invalid]), Some(9));
+            assert_eq!(longest_worker_retry_after(&[&invalid]), None);
+        }
     }
 
     #[tokio::test]

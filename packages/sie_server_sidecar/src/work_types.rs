@@ -101,8 +101,8 @@ pub struct WorkItem {
     pub deadline: Option<f64>,
     /// Set by the gateway when it sent the item to a remote profile in place
     /// of a local route that refused it; names the refusal. Someone is
-    /// waiting to answer with that local refusal, so the item is answered
-    /// once and never redelivered.
+    /// waiting to answer with that local refusal, so backend NakRetry outcomes
+    /// are published as refusals and ACKed after successful publication.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback_reason: Option<String>,
 }

@@ -17,12 +17,14 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+import msgspec
 import numpy as np
 import pytest
 import uvicorn
 from fastapi import Request
 from sie_sdk import SIEClient
 from sie_sdk._msgpack import unpackb
+from sie_server.adapters.errors import UpstreamUnavailableError
 from sie_server.app.app_factory import AppFactory
 from sie_server.app.app_state_config import AppStateConfig
 from sie_server.config.upstreams import Upstream, install_upstreams
@@ -34,7 +36,7 @@ from sie_server.ipc_types import (
     ReplaceModelConfigEntry,
     ReplaceModelConfigsRequest,
 )
-from sie_server.queue_executor import QueueExecutor
+from sie_server.queue_executor import QueueExecutor, _inference_exception_outcome
 
 MODELS_DIR = Path(__file__).resolve().parents[1] / "models"
 KEY_ENV = "REMOTE_QUEUE_PATH_TEST_KEY"
@@ -163,3 +165,25 @@ async def test_a_remote_lane_worker_serves_a_remote_backed_model_through_the_que
     assert outcome.disposition == "publish_and_ack", outcome.error
     np.testing.assert_allclose(dense_values(outcome), expected, rtol=1e-6)
     assert seen_authorization == [f"Bearer {CANARY}"]
+
+
+@pytest.mark.parametrize("kind", ["busy", "unavailable", "not_ready"])
+def test_remote_refusal_preserves_retry_hint_on_the_ipc_wire(kind: Any) -> None:
+    item = EncodeBatchItem(
+        work_item_id="req.0",
+        request_id="req",
+        item_index=0,
+        total_items=1,
+        timestamp=time.time(),
+        item={"text": "remote lane"},
+    )
+    outcome = _inference_exception_outcome(
+        item, UpstreamUnavailableError("fake-sie", kind, retry_after_s=9, reason="unavailable")
+    )
+    decoded = msgspec.msgpack.decode(msgspec.msgpack.encode(outcome), type=ItemOutcome)
+    assert decoded.disposition == "nak_retry"
+    assert decoded.error_code == "QUEUE_FULL"
+    assert decoded.retry_after_s == 9
+    assert decoded.nak_delay_ms is not None
+    assert decoded.nak_delay_ms >= 9_000
+    assert decoded.error is None
