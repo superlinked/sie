@@ -713,6 +713,8 @@ class ModelRegistry:
         if len(self._devices) != 1:
             return None
         device = self._devices[0]
+        if self._resolve_load_device(self._device) != device:
+            return None
         if _device_family(device) == "cuda" and (":" not in device or not device.partition(":")[2].isdigit()):
             return None
         loaded = self._loaded.get(name)

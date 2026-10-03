@@ -420,6 +420,9 @@ def test_top_level_encode_dtype_keeps_cold_request_local(admission: tuple, dtype
         ("cuda", None, None),
         ("cuda", ["cuda:0"], "cuda:0"),
         ("cuda:0", ["cuda:0", "cuda:1"], None),
+        ("cuda:0", ["cuda:1"], None),
+        ("cpu", ["cuda:0"], None),
+        ("cuda", ["cuda:1"], "cuda:1"),
     ],
 )
 def test_hybrid_device_authority_requires_stable_placement(
