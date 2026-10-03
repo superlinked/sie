@@ -14,6 +14,8 @@ pub struct ModelInfoExtras {
     /// of worker/gateway parity and is absent for unpinned or package-backed
     /// models.
     pub revision: Option<String>,
+    /// Bare-model policy; explicit profile variants never apply it.
+    pub routing: Option<RoutingConfig>,
     /// Per-request hard cap on ``max_new_tokens``. Mirrors
     /// ``tasks.generate.max_output_tokens`` from the model YAML; absent
     /// when the model has no ``generate`` task or the field was not
@@ -123,6 +125,10 @@ impl ModelInfoExtras {
             .and_then(|value| value.as_str())
             .filter(|value| !value.is_empty())
             .map(str::to_owned);
+
+        extras.routing = raw
+            .get("routing")
+            .and_then(|value| serde_yaml::from_value(value.clone()).ok());
 
         let tasks = raw.get("tasks");
         if let Some(enc) = tasks.and_then(|t| match t.get("encode")? {
@@ -343,7 +349,7 @@ impl ModelInfoExtras {
     }
 
     pub fn from_model_config(config: &ModelConfig) -> Self {
-        match serde_yaml::to_value(config) {
+        let mut extras = match serde_yaml::to_value(config) {
             Ok(v) => Self::from_yaml_raw(&v),
             Err(_) => Self {
                 inputs: vec!["text".to_string()],
@@ -351,6 +357,7 @@ impl ModelInfoExtras {
                 dims: HashMap::new(),
                 max_sequence_length: config.max_sequence_length,
                 revision: None,
+                routing: None,
                 max_output_tokens: None,
                 profile_max_output_tokens: HashMap::new(),
                 grammar_capabilities: None,
@@ -364,7 +371,11 @@ impl ModelInfoExtras {
                 lora_adapters: None,
                 profile_lora_adapters: None,
             },
-        }
+        };
+        // Preserve even programmatically constructed policy for registry
+        // validation; a failed best-effort YAML decode must not erase it.
+        extras.routing = config.routing.clone();
+        extras
     }
 
     /// Whether the model can serve vision *generation* on
@@ -385,12 +396,155 @@ impl ModelInfoExtras {
     }
 }
 
+/// Bare-model policy, carrying no endpoint, credential or admission evidence.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(try_from = "RoutingFields")]
+pub struct RoutingConfig {
+    pub policy: RoutingPolicy,
+    pub fallback_profile: Option<String>,
+    pub triggers: Option<Vec<FallbackTrigger>>,
+    pub wake_above: Option<f64>,
+    pub sleep_below: Option<f64>,
+    pub window_s: Option<f64>,
+    pub cooldown_s: Option<f64>,
+}
+
+/// The worker's model_dump includes null unused fields; accept those while
+/// refusing non-null fields belonging to another policy and unknown fields.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RoutingFields {
+    policy: RoutingPolicy,
+    #[serde(default)]
+    fallback_profile: Option<String>,
+    #[serde(default)]
+    triggers: Option<Vec<FallbackTrigger>>,
+    #[serde(default)]
+    wake_above: Option<f64>,
+    #[serde(default)]
+    sleep_below: Option<f64>,
+    #[serde(default)]
+    window_s: Option<f64>,
+    #[serde(default)]
+    cooldown_s: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RoutingPolicy {
+    RemoteOnly,
+    Fallback,
+    Threshold,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FallbackTrigger {
+    Provisioning,
+    ModelLoading,
+    Saturated,
+    Unhealthy,
+}
+
+impl TryFrom<RoutingFields> for RoutingConfig {
+    type Error = String;
+    fn try_from(fields: RoutingFields) -> Result<Self, Self::Error> {
+        let routing = Self {
+            policy: fields.policy,
+            fallback_profile: fields.fallback_profile,
+            triggers: fields.triggers,
+            wake_above: fields.wake_above,
+            sleep_below: fields.sleep_below,
+            window_s: fields.window_s,
+            cooldown_s: fields.cooldown_s,
+        };
+        routing.validate()?;
+        Ok(routing)
+    }
+}
+
+impl RoutingConfig {
+    pub fn policy_name(&self) -> &'static str {
+        match self.policy {
+            RoutingPolicy::RemoteOnly => "remote_only",
+            RoutingPolicy::Fallback => "fallback",
+            RoutingPolicy::Threshold => "threshold",
+        }
+    }
+
+    pub fn fallback_profile(&self) -> Option<&str> {
+        self.fallback_profile.as_deref()
+    }
+
+    #[allow(dead_code)] // Consumed by subsequent cluster fallback dispatch.
+    pub fn permits(&self, trigger: FallbackTrigger) -> bool {
+        self.policy == RoutingPolicy::Fallback
+            && self.triggers.as_ref().map_or(
+                matches!(
+                    trigger,
+                    FallbackTrigger::Provisioning | FallbackTrigger::ModelLoading
+                ),
+                |triggers| triggers.contains(&trigger),
+            )
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        let bounds = [
+            self.wake_above,
+            self.sleep_below,
+            self.window_s,
+            self.cooldown_s,
+        ];
+        if bounds
+            .iter()
+            .flatten()
+            .any(|value| !value.is_finite() || *value <= 0.0)
+        {
+            return Err("routing threshold bounds must be finite and positive".into());
+        }
+        match self.policy {
+            RoutingPolicy::RemoteOnly => {
+                if self.fallback_profile.is_some()
+                    || self.triggers.is_some()
+                    || bounds.iter().any(Option::is_some)
+                {
+                    return Err("remote_only routing takes no other field".into());
+                }
+            }
+            RoutingPolicy::Fallback | RoutingPolicy::Threshold => {
+                if self.fallback_profile.as_deref().is_none_or(str::is_empty) {
+                    return Err("routing must name a nonempty fallback profile".into());
+                }
+                if self.policy == RoutingPolicy::Fallback {
+                    if bounds.iter().any(Option::is_some) {
+                        return Err("fallback routing takes no threshold bounds".into());
+                    }
+                    if self.triggers.as_ref().is_some_and(|triggers| {
+                        triggers.is_empty()
+                            || triggers.iter().collect::<HashSet<_>>().len() != triggers.len()
+                    }) {
+                        return Err("routing triggers must be nonempty and unique".into());
+                    }
+                } else if self.triggers.is_some()
+                    || bounds.iter().any(Option::is_none)
+                    || self.sleep_below >= self.wake_above
+                {
+                    return Err("threshold routing needs ordered bounds and no triggers".into());
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ModelConfig {
     #[serde(alias = "sie_id")]
     pub name: String,
     #[serde(default)]
     pub hf_revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing: Option<RoutingConfig>,
     #[serde(default)]
     pub adapter_module: Option<String>,
     #[serde(default)]
@@ -446,7 +600,7 @@ const REMOTE_ADAPTER_UPSTREAM_KINDS: &[(&str, &str)] = &[
     ("sie_server.adapters.remote.sie", "sie"),
 ];
 
-fn remote_adapter_upstream_kind(module: &str) -> Option<&'static str> {
+pub(crate) fn remote_adapter_upstream_kind(module: &str) -> Option<&'static str> {
     REMOTE_ADAPTER_UPSTREAM_KINDS
         .iter()
         .find(|(candidate, _)| *candidate == module)
@@ -533,11 +687,21 @@ impl ModelEntry {
         })
     }
 
-    /// ``routing`` on a ``/v1/models`` entry, by the single server's rule: a
-    /// route whose default profile uses a remote adapter is ``remote_only``.
-    /// The gateway holds no upstream configuration, so the upstream kind is the
-    /// one the adapter module speaks.
+    /// Configured bare-model policy on ``/v1/models``; explicit variants carry
+    /// no policy. Without a routing block, a remote default is ``remote_only``.
+    /// The upstream kind is derived from the adapter, never an endpoint or key.
     fn routing_value(&self) -> Value {
+        if let Some(routing) = &self.info_extras.routing {
+            let profile_name = routing.fallback_profile().unwrap_or("default");
+            let kind = self
+                .profile_configs
+                .get(profile_name)
+                .and_then(|profile| profile.adapter_path.as_deref())
+                .and_then(|path| {
+                    remote_adapter_upstream_kind(path.split(':').next().unwrap_or(path))
+                });
+            return json!({ "policy": routing.policy_name(), "upstream_kind": kind });
+        }
         match self.default_adapter_module() {
             Some(module) if module.starts_with(REMOTE_ADAPTER_MODULE_PREFIX) => json!({
                 "policy": "remote_only",
@@ -913,6 +1077,63 @@ pool: customer-a
     }
 
     #[test]
+    fn remote_routing_accepts_worker_null_fields_and_default_triggers() {
+        for policy in ["remote_only", "fallback"] {
+            let wire = json!({"policy": policy, "fallback_profile":
+                if policy == "fallback" { Some("remote") } else { None },
+                "triggers": null, "wake_above": null, "sleep_below": null,
+                "window_s": null, "cooldown_s": null});
+            let routing: RoutingConfig = serde_json::from_value(wire).unwrap();
+            assert_eq!(
+                routing.permits(FallbackTrigger::Provisioning),
+                policy == "fallback"
+            );
+            assert_eq!(
+                routing.permits(FallbackTrigger::ModelLoading),
+                policy == "fallback"
+            );
+            assert!(!routing.permits(FallbackTrigger::Saturated));
+            assert!(!routing.permits(FallbackTrigger::Unhealthy));
+        }
+    }
+
+    #[test]
+    fn remote_routing_refuses_malformed_or_cross_policy_authority() {
+        for wire in [
+            json!({"policy":"unknown"}),
+            json!({"policy":"remote_only", "triggers":[]}),
+            json!({"policy":"remote_only", "fallback_profile":"remote"}),
+            json!({"policy":"fallback"}),
+            json!({"policy":"fallback", "fallback_profile":""}),
+            json!({"policy":"fallback", "fallback_profile":"remote", "triggers":[]}),
+            json!({"policy":"fallback", "fallback_profile":"remote", "triggers":["provisioning","provisioning"]}),
+            json!({"policy":"fallback", "fallback_profile":"remote", "triggers":["always"]}),
+            json!({"policy":"fallback", "fallback_profile":"remote", "wake_above":1}),
+            json!({"policy":"fallback", "fallback_profile":"remote", "upstream":"caller-endpoint"}),
+            json!({"policy":"threshold", "fallback_profile":"remote"}),
+            json!({"policy":"threshold", "fallback_profile":"remote", "wake_above":2,
+                "sleep_below":2, "window_s":1, "cooldown_s":1}),
+            json!({"policy":"threshold", "fallback_profile":"remote", "wake_above":2,
+                "sleep_below":1, "window_s":0, "cooldown_s":1}),
+            json!({"policy":"threshold", "fallback_profile":"remote", "wake_above":2,
+                "sleep_below":1, "window_s":1, "cooldown_s":1, "triggers":["provisioning"]}),
+        ] {
+            assert!(
+                serde_json::from_value::<RoutingConfig>(wire.clone()).is_err(),
+                "{wire}"
+            );
+        }
+        assert!(serde_yaml::from_str::<RoutingConfig>(
+            "policy: threshold\nfallback_profile: remote\nwake_above: .inf\nsleep_below: 1\nwindow_s: 1\ncooldown_s: 1\n"
+        ).is_err());
+        let threshold: RoutingConfig = serde_json::from_value(json!({"policy":"threshold",
+            "fallback_profile":"remote", "wake_above":2, "sleep_below":1,
+            "window_s":1, "cooldown_s":1}))
+        .unwrap();
+        assert!(!threshold.permits(FallbackTrigger::Provisioning));
+    }
+
+    #[test]
     fn test_model_config_with_a_routing_block_still_parses() {
         let yaml = r#"
 sie_id: acme/hybrid
@@ -938,6 +1159,14 @@ profiles:
         let from_json: ModelConfig = serde_json::from_value(value).unwrap();
         for config in [from_yaml, from_json] {
             assert_eq!(config.name, "acme/hybrid");
+            let routing = config.routing.as_ref().unwrap();
+            assert_eq!(routing.policy, RoutingPolicy::Fallback);
+            assert!(routing.permits(FallbackTrigger::ModelLoading));
+            assert!(routing.permits(FallbackTrigger::Unhealthy));
+            assert!(!routing.permits(FallbackTrigger::Provisioning));
+            let wire = serde_json::to_value(&config).unwrap();
+            let roundtrip: ModelConfig = serde_json::from_value(wire).unwrap();
+            assert_eq!(roundtrip.routing, config.routing);
             assert_eq!(config.profiles.len(), 2);
         }
     }
@@ -1016,6 +1245,7 @@ profiles: {}
         let config = ModelConfig {
             name: "test/model".into(),
             hf_revision: Some("0123456789abcdef0123456789abcdef01234567".into()),
+            routing: None,
             adapter_module: Some("mod".into()),
             default_bundle: None,
             pool: Some("customer-a".into()),

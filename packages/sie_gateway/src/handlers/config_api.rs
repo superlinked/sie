@@ -782,6 +782,7 @@ mod tests {
             .add_model_config(ModelConfig {
                 name: model_id.to_string(),
                 hf_revision: None,
+                routing: None,
                 adapter_module: None,
                 default_bundle: None,
                 pool: None,
@@ -1081,6 +1082,7 @@ mod tests {
         let _ = state.model_registry.add_model_config(ModelConfig {
             name: "empty/model".to_string(),
             hf_revision: None,
+            routing: None,
             adapter_module: None,
             default_bundle: None,
             pool: None,

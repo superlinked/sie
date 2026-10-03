@@ -15221,6 +15221,7 @@ mod tests {
             .add_model_config(ModelConfig {
                 name: "org/h".to_string(),
                 hf_revision: None,
+                routing: None,
                 adapter_module: None,
                 default_bundle: None,
                 pool: None,
@@ -18667,6 +18668,7 @@ mod tests {
             .add_model_config(ModelConfig {
                 name: "org/slow".to_string(),
                 hf_revision: None,
+                routing: None,
                 adapter_module: None,
                 default_bundle: None,
                 pool: None,
@@ -21945,6 +21947,7 @@ mod tests {
             .add_model_config(ModelConfig {
                 name: "org/buffered".to_string(),
                 hf_revision: None,
+                routing: None,
                 adapter_module: None,
                 default_bundle: None,
                 pool: None,
@@ -22007,6 +22010,7 @@ mod tests {
             .add_model_config(ModelConfig {
                 name: "org/g".to_string(),
                 hf_revision: None,
+                routing: None,
                 adapter_module: None,
                 default_bundle: None,
                 pool: None,
@@ -22089,6 +22093,7 @@ mod tests {
             .add_model_config(ModelConfig {
                 name: "org/plain".to_string(),
                 hf_revision: None,
+                routing: None,
                 adapter_module: None,
                 default_bundle: None,
                 pool: None,
@@ -22155,6 +22160,7 @@ mod tests {
             .add_model_config(ModelConfig {
                 name: "org/g2".to_string(),
                 hf_revision: None,
+                routing: None,
                 adapter_module: None,
                 default_bundle: None,
                 pool: None,
@@ -22217,6 +22223,7 @@ mod tests {
             .add_model_config(ModelConfig {
                 name: "org/g3".to_string(),
                 hf_revision: None,
+                routing: None,
                 adapter_module: None,
                 default_bundle: None,
                 pool: None,
@@ -25644,6 +25651,7 @@ mod tests {
             dims: std::collections::HashMap::new(),
             max_sequence_length: None,
             revision: None,
+            routing: None,
             max_output_tokens: None,
             profile_max_output_tokens: std::collections::HashMap::new(),
             grammar_capabilities: None,

@@ -284,6 +284,7 @@ fn worker_only_model_info(name: &str, loaded: bool) -> Value {
             dims: HashMap::new(),
             max_sequence_length: None,
             revision: None,
+            routing: None,
             max_output_tokens: None,
             profile_max_output_tokens: HashMap::new(),
             grammar_capabilities: None,
@@ -445,6 +446,7 @@ mod route_tests {
             .add_model_config(ModelConfig {
                 name: model_id.to_string(),
                 hf_revision: None,
+                routing: None,
                 adapter_module: None,
                 default_bundle: None,
                 pool: None,
@@ -493,6 +495,7 @@ mod route_tests {
             .add_model_config(ModelConfig {
                 name: model_id.to_string(),
                 hf_revision: None,
+                routing: None,
                 adapter_module: None,
                 default_bundle: None,
                 pool: None,
@@ -527,6 +530,7 @@ mod route_tests {
             .add_model_config(ModelConfig {
                 name: model_id.to_string(),
                 hf_revision: None,
+                routing: None,
                 adapter_module: None,
                 default_bundle: None,
                 pool: None,
@@ -663,6 +667,7 @@ mod route_tests {
             .add_model_config(ModelConfig {
                 name: model_id.to_string(),
                 hf_revision: None,
+                routing: None,
                 adapter_module: None,
                 default_bundle: None,
                 pool: None,
@@ -1272,6 +1277,7 @@ mod route_tests {
             .add_model_config(ModelConfig {
                 name: model_id.to_string(),
                 hf_revision: None,
+                routing: None,
                 adapter_module: None,
                 default_bundle: None,
                 pool: None,

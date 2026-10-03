@@ -10,7 +10,8 @@ use tracing::{debug, error, info, warn};
 
 use crate::types::bundle::{engine_adapter_prefixes, BundleInfo, DEFAULT_ENGINE, KNOWN_ENGINES};
 use crate::types::model::{
-    CanonicalProfile, ModelConfig, ModelEntry, ModelInfoExtras, ProfileConfig, ServedBy,
+    remote_adapter_upstream_kind, CanonicalProfile, ModelConfig, ModelEntry, ModelInfoExtras,
+    ProfileConfig, RoutingPolicy, ServedBy,
 };
 
 #[derive(Debug)]
@@ -600,6 +601,7 @@ impl ModelRegistry {
         // (see ``base_grammar_profile``), so a sibling variant such as
         // ``…:a100-40gb`` still reroutes to ``{base}:{grammar_profile}``.
         narrowed.grammar_profile = None;
+        narrowed.routing = None;
         narrowed.profile_parents.clear();
         if let Some(map) = base.profile_lora_adapters.as_ref() {
             let scoped = map.get(profile_name).cloned().unwrap_or_default();
@@ -707,7 +709,51 @@ impl ModelRegistry {
             info_extras,
         };
         Self::validate_profile_grammar_fallbacks(&entry)?;
+        Self::validate_remote_routing(&entry)?;
         Ok(entry)
+    }
+
+    fn validate_remote_routing(entry: &ModelEntry) -> Result<(), String> {
+        let Some(routing) = &entry.info_extras.routing else {
+            return Ok(());
+        };
+        routing.validate()?;
+        if matches!(routing.policy, RoutingPolicy::Threshold) {
+            return Err("routing policy threshold is not available yet".into());
+        }
+        let profile_kind = |name: &str| {
+            entry
+                .profile_configs
+                .get(name)
+                .and_then(|profile| profile.adapter_path.as_deref())
+                .and_then(|path| {
+                    remote_adapter_upstream_kind(path.split(':').next().unwrap_or(path))
+                })
+        };
+        if matches!(routing.policy, RoutingPolicy::RemoteOnly) {
+            if profile_kind("default").is_none()
+                || entry
+                    .profile_configs
+                    .keys()
+                    .any(|profile| profile_kind(profile).is_none())
+            {
+                return Err("remote_only routing requires a remote default profile".into());
+            }
+            return Ok(());
+        }
+        if !entry.profile_configs.contains_key("default")
+            || matches!(entry.served_by(), ServedBy::Remote { .. })
+        {
+            return Err("fallback routing requires a local default profile".into());
+        }
+        let profile = routing
+            .fallback_profile()
+            .expect("hybrid routing names a profile");
+        Self::validate_profile_name(profile)?;
+        if profile == "default" || profile_kind(profile).is_none() {
+            return Err("fallback routing requires a non-default remote profile".into());
+        }
+        Ok(())
     }
 
     fn validate_profile_grammar_fallbacks(entry: &ModelEntry) -> Result<(), String> {
@@ -2445,6 +2491,20 @@ impl ModelRegistry {
         let incoming_pool = Self::normalize_model_pool(config.pool.as_deref())?;
 
         if let Some(existing) = snap.models.get_mut(sie_id) {
+            if let Some(routing) = &config.routing {
+                if existing
+                    .info_extras
+                    .routing
+                    .as_ref()
+                    .is_some_and(|stored| stored != routing)
+                    && !authoritative
+                {
+                    return Err(
+                        "routing policy already exists with different config (append-only)".into(),
+                    );
+                }
+                existing.info_extras.routing = Some(routing.clone());
+            }
             if config.pool.is_some() && existing.pool != incoming_pool {
                 return Err(format!(
                     "Pool on model '{}' already exists with different value (append-only)",
@@ -2563,6 +2623,7 @@ impl ModelRegistry {
         let mut affected_model_names = vec![sie_id.clone()];
         if let Some(base_entry) = snap.models.get(sie_id).cloned() {
             Self::validate_profile_grammar_fallbacks(&base_entry)?;
+            Self::validate_remote_routing(&base_entry)?;
             let old_variants: Vec<String> = snap
                 .models
                 .keys()
@@ -2723,6 +2784,181 @@ mod tests {
         }
     }
 
+    fn remote_routing_fixture() -> (TempDir, ModelRegistry, ModelConfig) {
+        let (dir, bundles, models) = create_test_dirs();
+        fs::write(bundles.join("default.yaml"),
+            "name: default\npriority: 10\nadapters:\n  - sie_server.adapters.bge_m3\n  - sie_server.adapters.remote.sie\n").unwrap();
+        let registry = ModelRegistry::new(&bundles, &models, true);
+        let config = serde_json::from_value(serde_json::json!({
+            "sie_id":"acme/hybrid", "profiles": {
+                "default":{"adapter_path":"sie_server.adapters.bge_m3:BgeM3Adapter"},
+                "remote":{"adapter_path":"sie_server.adapters.remote.sie:SieUpstreamAdapter",
+                    "adapter_options":{"loadtime":{"upstream":"team-sie", "upstream_model":"acme/hybrid:default"}}},
+                "local":{"extends":"default"}
+            }
+        })).unwrap();
+        (dir, registry, config)
+    }
+
+    #[test]
+    fn remote_routing_policy_survives_snapshots_and_is_scoped_to_bare_model() {
+        let (_dir, registry, mut config) = remote_routing_fixture();
+        config.routing = Some(
+            serde_json::from_value(serde_json::json!({
+            "policy":"fallback", "fallback_profile":"remote"}))
+            .unwrap(),
+        );
+        registry
+            .replace_model_configs_authoritative(vec![config.clone()])
+            .unwrap();
+        let base = registry.get_model_info("acme/hybrid").unwrap();
+        assert_eq!(
+            base.to_model_info_value(false)["routing"],
+            serde_json::json!({
+            "policy":"fallback", "upstream_kind":"sie"})
+        );
+        assert!(matches!(base.served_by(), ServedBy::Local));
+        let explicit = registry.get_model_info("acme/hybrid:local").unwrap();
+        assert!(explicit.info_extras.routing.is_none());
+        assert!(explicit.to_model_info_value(false)["routing"]["policy"].is_null());
+        let remote = registry.get_model_info("acme/hybrid:remote").unwrap();
+        assert!(remote.info_extras.routing.is_none());
+        assert_eq!(
+            remote.to_model_info_value(false)["routing"]["policy"],
+            "remote_only"
+        );
+
+        config.routing.as_mut().unwrap().triggers =
+            Some(vec![crate::types::model::FallbackTrigger::Unhealthy]);
+        registry
+            .replace_model_configs_authoritative(vec![config.clone()])
+            .unwrap();
+        assert!(registry
+            .get_model_info("acme/hybrid")
+            .unwrap()
+            .info_extras
+            .routing
+            .unwrap()
+            .permits(crate::types::model::FallbackTrigger::Unhealthy));
+        config.routing = None;
+        registry
+            .replace_model_configs_authoritative(vec![config])
+            .unwrap();
+        assert!(registry
+            .get_model_info("acme/hybrid")
+            .unwrap()
+            .info_extras
+            .routing
+            .is_none());
+    }
+
+    #[test]
+    fn remote_routing_constructed_invalid_policy_is_not_silently_erased() {
+        let (_dir, registry, mut config) = remote_routing_fixture();
+        config.routing = Some(
+            serde_json::from_value(serde_json::json!({
+            "policy":"fallback", "fallback_profile":"remote"}))
+            .unwrap(),
+        );
+        config.routing.as_mut().unwrap().triggers = Some(vec![]);
+        assert!(registry
+            .replace_model_configs_authoritative(vec![config.clone()])
+            .is_err());
+        assert!(registry.list_models().is_empty());
+        config.routing.as_mut().unwrap().triggers = None;
+        config.profiles.get_mut("default").unwrap().adapter_path =
+            Some("sie_server.adapters.remote.unknown:Adapter".into());
+        assert!(ModelRegistry::model_entry_from_config(&config).is_err());
+        config.profiles.clear();
+        config.profiles.insert(
+            "default".into(),
+            profile(
+                Some("sie_server.adapters.remote.sie:SieUpstreamAdapter"),
+                Some(4096),
+                None,
+            ),
+        );
+        config.routing =
+            Some(serde_json::from_value(serde_json::json!({"policy":"remote_only"})).unwrap());
+        registry.add_model_config(config).unwrap();
+        assert_eq!(
+            registry
+                .get_model_info("acme/hybrid")
+                .unwrap()
+                .to_model_info_value(false)["routing"]["policy"],
+            "remote_only"
+        );
+    }
+
+    #[test]
+    fn remote_routing_invalid_delta_keeps_last_snapshot_and_triggers() {
+        let (_dir, registry, mut config) = remote_routing_fixture();
+        registry.add_model_config(config.clone()).unwrap();
+        for target in ["default", "missing", "local", "bad/name"] {
+            config.routing = Some(
+                serde_json::from_value(serde_json::json!({
+                "policy":"fallback", "fallback_profile":target}))
+                .unwrap(),
+            );
+            assert!(registry.add_model_config(config.clone()).is_err());
+            assert!(registry
+                .replace_model_configs_authoritative(vec![config.clone()])
+                .is_err());
+            assert!(registry
+                .get_model_info("acme/hybrid")
+                .unwrap()
+                .info_extras
+                .routing
+                .is_none());
+        }
+        config.routing = Some(
+            serde_json::from_value(serde_json::json!({
+            "policy":"threshold", "fallback_profile":"remote", "wake_above":2,
+            "sleep_below":1, "window_s":1, "cooldown_s":1}))
+            .unwrap(),
+        );
+        assert!(registry
+            .add_model_config(config.clone())
+            .unwrap_err()
+            .contains("not available"));
+        config.routing = Some(
+            serde_json::from_value(serde_json::json!({
+            "policy":"remote_only"}))
+            .unwrap(),
+        );
+        assert!(registry.add_model_config(config.clone()).is_err());
+        config.routing = Some(
+            serde_json::from_value(serde_json::json!({
+            "policy":"fallback", "fallback_profile":"remote"}))
+            .unwrap(),
+        );
+        registry.add_model_config(config.clone()).unwrap();
+        config.routing = None;
+        registry.add_model_config(config.clone()).unwrap();
+        assert!(registry
+            .get_model_info("acme/hybrid")
+            .unwrap()
+            .info_extras
+            .routing
+            .is_some());
+        config.routing = Some(
+            serde_json::from_value(serde_json::json!({
+            "policy":"fallback", "fallback_profile":"remote", "triggers":["unhealthy"]}))
+            .unwrap(),
+        );
+        assert!(registry
+            .add_model_config(config)
+            .unwrap_err()
+            .contains("append-only"));
+        assert!(!registry
+            .get_model_info("acme/hybrid")
+            .unwrap()
+            .info_extras
+            .routing
+            .unwrap()
+            .permits(crate::types::model::FallbackTrigger::Unhealthy));
+    }
+
     #[test]
     fn test_empty_registry() {
         let (_dir, bundles_dir, models_dir) = create_test_dirs();
@@ -2831,6 +3067,7 @@ mod tests {
             .add_model_config(ModelConfig {
                 name: "org/x".to_string(),
                 hf_revision: None,
+                routing: None,
                 adapter_module: None,
                 default_bundle: None,
                 pool: None,
@@ -2944,6 +3181,7 @@ mod tests {
             .add_model_config(ModelConfig {
                 name: "org/g".to_string(),
                 hf_revision: None,
+                routing: None,
                 adapter_module: None,
                 default_bundle: None,
                 pool: None,
@@ -3037,6 +3275,7 @@ mod tests {
             .add_model_config(ModelConfig {
                 name: "org/scoped-only".to_string(),
                 hf_revision: None,
+                routing: None,
                 adapter_module: None,
                 default_bundle: None,
                 pool: None,
@@ -3341,6 +3580,7 @@ profiles:
             .add_model_config(ModelConfig {
                 name: "org/n".to_string(),
                 hf_revision: None,
+                routing: None,
                 adapter_module: None,
                 default_bundle: None,
                 pool: None,
@@ -3392,6 +3632,7 @@ profiles:
             .add_model_config(ModelConfig {
                 name: "org/unsafe-global-target".to_string(),
                 hf_revision: None,
+                routing: None,
                 adapter_module: None,
                 default_bundle: None,
                 pool: None,
@@ -3415,6 +3656,7 @@ profiles:
             .add_model_config(ModelConfig {
                 name: "org/mismatch".to_string(),
                 hf_revision: None,
+                routing: None,
                 adapter_module: None,
                 default_bundle: None,
                 pool: None,
@@ -3440,6 +3682,7 @@ profiles:
             .add_model_config(ModelConfig {
                 name: "org/mode-mismatch".to_string(),
                 hf_revision: None,
+                routing: None,
                 adapter_module: None,
                 default_bundle: None,
                 pool: None,
@@ -3466,6 +3709,7 @@ profiles:
             .add_model_config(ModelConfig {
                 name: "org/output-cap-mismatch".to_string(),
                 hf_revision: None,
+                routing: None,
                 adapter_module: None,
                 default_bundle: None,
                 pool: None,
@@ -3492,6 +3736,7 @@ profiles:
             .add_model_config(ModelConfig {
                 name: "org/kv-budget-mismatch".to_string(),
                 hf_revision: None,
+                routing: None,
                 adapter_module: None,
                 default_bundle: None,
                 pool: None,
@@ -3518,6 +3763,7 @@ profiles:
             .add_model_config(ModelConfig {
                 name: "org/chained-fallback".to_string(),
                 hf_revision: None,
+                routing: None,
                 adapter_module: None,
                 default_bundle: None,
                 pool: None,
@@ -3608,6 +3854,7 @@ profiles:
             .add_model_config(ModelConfig {
                 name: "org/g".to_string(),
                 hf_revision: None,
+                routing: None,
                 adapter_module: None,
                 default_bundle: None,
                 pool: None,
@@ -3678,6 +3925,7 @@ profiles:
             .add_model_config(ModelConfig {
                 name: "org/x".to_string(),
                 hf_revision: None,
+                routing: None,
                 adapter_module: None,
                 default_bundle: None,
                 pool: None,
@@ -3844,6 +4092,7 @@ profiles:
             .add_model_config(ModelConfig {
                 name: "org/profile-only".to_string(),
                 hf_revision: Some("0123456789abcdef0123456789abcdef01234567".to_string()),
+                routing: None,
                 adapter_module: None,
                 default_bundle: None,
                 pool: None,
@@ -4264,6 +4513,7 @@ profiles:
             .add_model_config(ModelConfig {
                 name: "org/broken".to_string(),
                 hf_revision: None,
+                routing: None,
                 adapter_module: None,
                 default_bundle: None,
                 pool: None,
@@ -4326,6 +4576,7 @@ profiles:
                     let cfg = ModelConfig {
                         name: name.clone(),
                         hf_revision: None,
+                        routing: None,
                         adapter_module: None,
                         default_bundle: None,
                         pool: None,
@@ -4578,6 +4829,7 @@ adapters:
         let config = ModelConfig {
             name: "test/model".to_string(),
             hf_revision: None,
+            routing: None,
             adapter_module: None,
             default_bundle: None,
             pool: None,
@@ -4652,6 +4904,7 @@ adapters:
             .add_model_config(ModelConfig {
                 name: "test/model".to_string(),
                 hf_revision: None,
+                routing: None,
                 adapter_module: None,
                 default_bundle: None,
                 pool: None,
@@ -4710,6 +4963,7 @@ encode:
             .add_model_config(ModelConfig {
                 name: "test/model".to_string(),
                 hf_revision: None,
+                routing: None,
                 adapter_module: None,
                 default_bundle: None,
                 pool: None,
@@ -4760,6 +5014,7 @@ encode:
             .add_model_config(ModelConfig {
                 name: "test/generator".to_string(),
                 hf_revision: None,
+                routing: None,
                 adapter_module: None,
                 default_bundle: None,
                 pool: None,
@@ -4793,6 +5048,7 @@ encode:
                 .add_model_config(ModelConfig {
                     name: "test/generator".to_string(),
                     hf_revision: None,
+                    routing: None,
                     adapter_module: None,
                     default_bundle: None,
                     pool: None,
@@ -4865,6 +5121,7 @@ adapters:
             .add_model_config(ModelConfig {
                 name: "test/model".to_string(),
                 hf_revision: None,
+                routing: None,
                 adapter_module: None,
                 default_bundle: None,
                 pool: None,
@@ -4918,6 +5175,7 @@ encode:
             .add_model_config(ModelConfig {
                 name: "test/model".to_string(),
                 hf_revision: None,
+                routing: None,
                 adapter_module: None,
                 default_bundle: None,
                 pool: None,
@@ -4942,6 +5200,7 @@ encode:
         ModelConfig {
             name: "test/model".to_string(),
             hf_revision: None,
+            routing: None,
             adapter_module: None,
             default_bundle: None,
             pool: None,
@@ -5543,6 +5802,7 @@ adapters:
         let seed = ModelConfig {
             name: "test/model".to_string(),
             hf_revision: None,
+            routing: None,
             adapter_module: None,
             default_bundle: None,
             pool: None,
@@ -5605,6 +5865,7 @@ adapters:
         let delta = ModelConfig {
             name: "test/model".to_string(),
             hf_revision: None,
+            routing: None,
             adapter_module: None,
             default_bundle: None,
             pool: None,
@@ -6088,6 +6349,7 @@ profiles:
             .add_model_config(ModelConfig {
                 name: "org/revisioned".to_string(),
                 hf_revision: Some("89abcdef0123456789abcdef0123456789abcdef".to_string()),
+                routing: None,
                 adapter_module: None,
                 default_bundle: None,
                 pool: None,
@@ -6407,6 +6669,7 @@ adapters:
                 let config = ModelConfig {
                     name: format!("race/model-{i}"),
                     hf_revision: None,
+                    routing: None,
                     adapter_module: None,
                     default_bundle: None,
                     pool: None,
@@ -6640,6 +6903,7 @@ profiles:
         ModelConfig {
             name: name.to_string(),
             hf_revision: None,
+            routing: None,
             adapter_module: None,
             default_bundle: None,
             pool: None,

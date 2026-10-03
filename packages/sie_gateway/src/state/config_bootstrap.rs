@@ -903,6 +903,7 @@ mod tests {
         ModelConfig {
             name: name.to_string(),
             hf_revision: None,
+            routing: None,
             adapter_module: None,
             default_bundle: None,
             pool: None,
