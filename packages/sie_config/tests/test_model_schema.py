@@ -293,7 +293,7 @@ class TestConfigApiRejectsWorkerInvalidBodies:
         assert client.get("/v1/configs/models/acme/bert").status_code == 404
 
 
-def test_config_service_refuses_generation_fallback_before_pre_output_handling() -> None:
+def test_config_service_accepts_generation_fallback_with_pre_output_handling() -> None:
     config = _model(
         hf_id="acme/bert",
         tasks={"generate": {"context_length": 8192, "max_output_tokens": 64}},
@@ -308,7 +308,5 @@ def test_config_service_refuses_generation_fallback_before_pre_output_handling()
         },
         routing={"policy": "fallback", "fallback_profile": "remote"},
     )
-    with pytest.raises(ValueError, match=r"routing.*generate"):
-        validate_model_routing(ModelConfig.model_validate(config))
-    with pytest.raises(ValueError, match=r"routing.*generate"):
-        validate_routing_config(config)
+    validate_model_routing(ModelConfig.model_validate(config))
+    validate_routing_config(config)
