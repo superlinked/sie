@@ -2980,13 +2980,18 @@ impl WorkPublisher {
             traceparent: None,
             tracestate: None,
         };
-        let encoded = rmp_serde::to_vec_named(&item)
-            .map_err(|_| "model load envelope could not be encoded".to_string())?;
+        let encoded = rmp_serde::to_vec_named(&item).map_err(|error| {
+            warn!(error = %error, "failed to encode model load envelope");
+            "model load envelope could not be encoded".to_string()
+        })?;
         let ack = self
             .jetstream
             .publish(target.subject(), encoded.into())
             .await
-            .map_err(|_| "model load could not be published".to_string())?;
+            .map_err(|error| {
+                warn!(error = %error.kind(), "failed to publish model load envelope");
+                "model load could not be published".to_string()
+            })?;
         let durability = DispatchDurability::from_future(async move {
             tokio::time::timeout(PUBLISH_ACK_COMPLETION_TIMEOUT, ack)
                 .await
