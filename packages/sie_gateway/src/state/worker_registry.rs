@@ -206,6 +206,7 @@ impl WorkerRegistry {
                     machine_profile: String::new(),
                     bundle: "default".to_string(),
                     bundle_config_hash: String::new(),
+                    supports_execution_authority_v1: false,
                     models: Vec::new(),
                     queue_depth: 0,
                     pending_cost: 0,
@@ -235,6 +236,7 @@ impl WorkerRegistry {
                 msg.bundle.clone()
             };
             w.bundle_config_hash = msg.bundle_config_hash.clone();
+            w.supports_execution_authority_v1 = msg.supports_execution_authority_v1;
             let overflow = msg.unsupported_models.len() > MAX_UNSUPPORTED_MODELS;
             if overflow && !w.unsupported_overflow {
                 tracing::warn!(
@@ -777,6 +779,41 @@ impl WorkerRegistry {
         }
     }
 
+    /// Select only a fresh, positively capable worker for verified direct dispatch.
+    /// The versioned subject keeps the execution fence even after a worker rollback.
+    pub fn execution_authority_worker(
+        &self,
+        model: &str,
+        pool: &str,
+        machine_profile: &str,
+        bundle: &str,
+        expected_hash: &str,
+        admitted_worker_names: Option<&HashSet<String>>,
+    ) -> Option<String> {
+        if expected_hash.is_empty() {
+            return None;
+        }
+        let snap = self.snapshot.load();
+        snap.by_bundle
+            .get(&bundle.to_lowercase())?
+            .iter()
+            .find(|w| {
+                w.eligible_for_dispatch()
+                && w.supports_execution_authority_v1
+                && w.last_heartbeat.elapsed() <= self.heartbeat_timeout
+                && w.bundle_config_hash == expected_hash
+                && w.pool_name.eq_ignore_ascii_case(pool)
+                && w.machine_profile.eq_ignore_ascii_case(machine_profile)
+                && w.supports_model(model)
+                && worker_allowed_by_admission(w, admitted_worker_names)
+                // Avoid subject normalization collisions and ambiguous worker identities.
+                && !w.name.is_empty()
+                && w.name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+                && snap.all_healthy.iter().filter(|other| other.name == w.name).count() == 1
+            })
+            .map(|w| w.name.clone())
+    }
+
     pub async fn get_models(&self) -> HashMap<String, Vec<String>> {
         let snap = self.snapshot.load();
         let mut models: HashMap<String, Vec<String>> = HashMap::new();
@@ -929,6 +966,7 @@ mod tests {
     use crate::types::WorkerStatusMessage;
     fn make_msg(ready: bool) -> WorkerStatusMessage {
         WorkerStatusMessage {
+            supports_execution_authority_v1: false,
             name: "worker-1".into(),
             ready,
             gpu_count: 1,
@@ -1188,6 +1226,7 @@ mod tests {
     async fn test_update_worker_compact_field_fallback() {
         let reg = registry();
         let msg = WorkerStatusMessage {
+            supports_execution_authority_v1: false,
             name: "w-compact".into(),
             ready: true,
             gpu_count: 1,
@@ -1224,6 +1263,7 @@ mod tests {
     async fn test_update_worker_compact_fields_none_defaults_to_zero() {
         let reg = registry();
         let msg = WorkerStatusMessage {
+            supports_execution_authority_v1: false,
             name: "w-none".into(),
             ready: true,
             gpu_count: 1,
@@ -1312,6 +1352,74 @@ mod tests {
         let reg = registry();
         reg.mark_unhealthy("http://nonexistent:8080").await;
         assert!(reg.workers().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn verified_worker_selection_requires_fresh_positive_authority_and_admission() {
+        let reg = registry();
+        let mut good = make_msg(true);
+        good.pool_name = "tenant".into();
+        good.supports_execution_authority_v1 = true;
+        let pick = |hash: &str, names: Option<&HashSet<String>>| {
+            reg.execution_authority_worker(
+                "BAAI/bge-m3",
+                "tenant",
+                "l4-spot",
+                "default",
+                hash,
+                names,
+            )
+        };
+        reg.update_worker("w1", good.clone()).await;
+        assert_eq!(pick("abc123", None).as_deref(), Some("worker-1"));
+        assert!(pick("", None).is_none());
+        assert!(pick("different", None).is_none());
+        assert!(pick("abc123", Some(&HashSet::new())).is_none());
+        let admitted = HashSet::from(["worker-1".to_string()]);
+        assert!(pick("abc123", Some(&admitted)).is_some());
+        for case in 0..7 {
+            let mut bad = good.clone();
+            match case {
+                0 => bad.supports_execution_authority_v1 = false,
+                1 => bad.ready = false,
+                2 => bad.saturated = true,
+                3 => bad.ready_gpu_slots = Some(0),
+                4 => bad.unsupported_models = vec!["BAAI/bge-m3".into()],
+                5 => bad.name = "worker.1".into(),
+                _ => bad.bundle_config_hash.clear(),
+            }
+            reg.update_worker("w1", bad).await;
+            assert!(pick("abc123", None).is_none(), "case {case}");
+        }
+        reg.update_worker("w1", good.clone()).await;
+        let mut duplicate = good;
+        duplicate.pool_name = "another-tenant".into();
+        reg.update_worker("w2", duplicate).await;
+        assert!(pick("abc123", None).is_none(), "duplicate worker identity");
+    }
+
+    #[tokio::test]
+    async fn verified_selection_refuses_stale_snapshot_before_heartbeat_sweep() {
+        let reg = registry();
+        let mut msg = make_msg(true);
+        msg.pool_name = "tenant".into();
+        msg.supports_execution_authority_v1 = true;
+        reg.update_worker("w1", msg).await;
+        let mut workers = reg.workers.write().await;
+        workers.get_mut("w1").unwrap().last_heartbeat =
+            Instant::now() - reg.heartbeat_timeout - Duration::from_secs(1);
+        reg.rebuild_snapshot(&workers);
+        drop(workers);
+        assert!(reg
+            .execution_authority_worker(
+                "BAAI/bge-m3",
+                "tenant",
+                "l4-spot",
+                "default",
+                "abc123",
+                None
+            )
+            .is_none());
     }
 
     // ── check_heartbeats ───────────────────────────────────────────
@@ -1797,6 +1905,7 @@ mod tests {
         models: &[&str],
     ) -> WorkerStatusMessage {
         WorkerStatusMessage {
+            supports_execution_authority_v1: false,
             name: "w".into(),
             ready,
             gpu_count: 1,

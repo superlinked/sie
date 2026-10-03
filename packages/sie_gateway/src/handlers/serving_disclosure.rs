@@ -17,6 +17,21 @@ use crate::types::model::ServedBy;
 pub(crate) const SERVED_BY_HEADER: HeaderName = HeaderName::from_static("x-sie-served-by");
 pub(crate) const UPSTREAM_HEADER: HeaderName = HeaderName::from_static("x-sie-upstream");
 
+pub(crate) const REMOTE_HEADER: &str = "x-sie-remote";
+
+/// Absent means ordinary serving; the sole explicit value is `forbid`.
+/// Refuse duplicates and non-UTF8/unknown values without echoing their bytes.
+pub(crate) fn remote_forbidden(headers: &HeaderMap) -> Result<bool, &'static str> {
+    let mut values = headers.get_all(REMOTE_HEADER).iter();
+    let Some(value) = values.next() else {
+        return Ok(false);
+    };
+    if values.next().is_some() || value.as_bytes() != b"forbid" {
+        return Err("X-SIE-Remote accepts only one value: 'forbid'");
+    }
+    Ok(true)
+}
+
 /// The side a request was dispatched to, recorded by the route that resolved it.
 #[derive(Clone, Default)]
 pub(crate) struct ServingDisclosure(Arc<Mutex<Option<ServedBy>>>);
@@ -83,6 +98,28 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn remote_control_rejects_ambiguous_and_unrecognized_header_bytes() {
+        let mut headers = HeaderMap::new();
+        assert_eq!(remote_forbidden(&headers), Ok(false));
+        headers.insert(REMOTE_HEADER, HeaderValue::from_static("forbid"));
+        assert_eq!(remote_forbidden(&headers), Ok(true));
+        headers.append(REMOTE_HEADER, HeaderValue::from_static("forbid"));
+        assert!(remote_forbidden(&headers).is_err());
+        for value in [
+            b"FORBID".as_slice(),
+            b"allow",
+            b"forbid, forbid",
+            b"",
+            b"\xff",
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(REMOTE_HEADER, HeaderValue::from_bytes(value).unwrap());
+            assert!(remote_forbidden(&headers).is_err());
+        }
+    }
+
     use crate::handlers::proxy::{
         proxy_chat, proxy_completions, proxy_openai_embeddings, proxy_request, proxy_responses,
     };

@@ -152,6 +152,18 @@ A caller can narrow that permission with `X-SIE-Remote: forbid`, or
 remote-backed model has no local alternative, so forbidding remote serving
 returns a client error.
 
+On the gateway, `forbid` selects only a fresh worker that advertises the
+versioned execution fence for the current configuration. The request stays on
+that worker's updated-only queue and backend IPC method; it never retries on an
+ordinary pool subject or older backend method. Missing worker support returns
+`503` with `Retry-After: 5`. Custom gateway dispatch transports remain closed
+unless they explicitly implement this contract. Rolling back a worker or backend
+therefore refuses verified work before inference. Explicit remote profiles are
+refused with `400`. Model ids that cannot round-trip through the current queue
+subject encoding (including literal `__` and `_dot_` collisions) are refused for
+verified dispatch. Workers reject any verified subject/payload model mismatch
+before readiness or payload retrieval.
+
 Responses disclose `X-SIE-Served-By` and, when remote, `X-SIE-Upstream`.
 Single-node fallback adds `X-SIE-Fallback-Reason`; a failed remote attempt
 returns the original local refusal and `X-SIE-Fallback-Error`. The SDK exposes

@@ -1732,12 +1732,27 @@ impl ModelRegistry {
     /// The scope bit reports whether the hash is governed by a known catalog
     /// model. Proxy paths use it to reject a missing known hash instead of
     /// treating it as the legacy unknown/sealed wildcard.
+    #[cfg(test)]
     pub fn bundle_execution_evidence(
         &self,
         bundle_id: &str,
         pool_name: &str,
         model: &str,
     ) -> (String, Option<String>, bool) {
+        let (hash, revision, catalog, _) =
+            self.serving_execution_evidence(bundle_id, pool_name, model);
+        (hash, revision, catalog)
+    }
+
+    /// Serving side and worker execution hash from one immutable snapshot.
+    /// Request egress guards must use this pair together: a config reload may
+    /// not pair a local classification with a later remote profile's hash.
+    pub fn serving_execution_evidence(
+        &self,
+        bundle_id: &str,
+        pool_name: &str,
+        model: &str,
+    ) -> (String, Option<String>, bool, Option<ServedBy>) {
         let snap = self.snapshot.load();
         let canonical = Self::canonical_model_name(&snap, model);
         let uses_catalog_scope = canonical.is_some();
@@ -1752,10 +1767,12 @@ impl ModelRegistry {
             .get(&(bundle_id.to_string(), pool_name))
             .cloned()
             .unwrap_or_default();
-        let revision = canonical
-            .and_then(|canonical| snap.models.get(&canonical))
-            .and_then(Self::immutable_model_revision);
-        (bundle_config_hash, revision, uses_catalog_scope)
+        let entry = canonical
+            .as_ref()
+            .and_then(|canonical| snap.models.get(canonical));
+        let revision = entry.and_then(Self::immutable_model_revision);
+        let served_by = entry.map(ModelEntry::served_by);
+        (bundle_config_hash, revision, uses_catalog_scope, served_by)
     }
 
     /// Resolve one connector encode identity from a single registry snapshot.

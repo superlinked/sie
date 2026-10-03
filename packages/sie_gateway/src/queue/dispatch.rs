@@ -174,6 +174,13 @@ impl From<String> for DispatchError {
 /// full behavioural documentation.
 #[async_trait]
 pub trait WorkDispatcher: Send + Sync {
+    /// Opt in only when every initial dispatch and internal retry preserves
+    /// VerifiedWorker and its nonempty hash through the versioned worker fence.
+    /// Custom transports and wrappers remain closed until they implement it.
+    fn supports_execution_authority_v1(&self) -> bool {
+        false
+    }
+
     /// Request readiness without inference. Only transports whose worker
     /// settlement supports no-result load items may implement this operation.
     #[allow(dead_code)] // Called by the subsequent cluster fallback routing delivery.
@@ -359,6 +366,10 @@ pub trait WorkDispatcher: Send + Sync {
 
 #[async_trait]
 impl WorkDispatcher for WorkPublisher {
+    fn supports_execution_authority_v1(&self) -> bool {
+        true
+    }
+
     async fn publish_model_load(
         &self,
         target: PublishTarget,

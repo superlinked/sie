@@ -30,6 +30,8 @@ pub struct WorkerState {
     pub machine_profile: String,
     pub bundle: String,
     pub bundle_config_hash: String,
+    /// Positive support for the versioned queue and backend execution fence.
+    pub supports_execution_authority_v1: bool,
     pub models: Vec<String>,
     pub queue_depth: i32,
     pub pending_cost: i64,
@@ -208,6 +210,8 @@ pub struct WorkerStatusMessage {
     #[serde(default)]
     pub bundle_config_hash: String,
     #[serde(default)]
+    pub supports_execution_authority_v1: bool,
+    #[serde(default)]
     pub loaded_models: Vec<String>,
     #[serde(default)]
     pub models: Vec<ModelStatus>,
@@ -280,6 +284,7 @@ mod tests {
             machine_profile: "l4".into(),
             bundle: "default".into(),
             bundle_config_hash: String::new(),
+            supports_execution_authority_v1: false,
             models: vec![],
             queue_depth: 0,
             pending_cost: 0,

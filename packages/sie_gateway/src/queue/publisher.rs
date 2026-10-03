@@ -178,6 +178,9 @@ impl TokenBucket {
 /// fields into `WorkItemRef`); it is not used on the JetStream wire.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct WorkParams {
+    /// Gateway-only dispatch contract; never an additive worker payload flag.
+    #[serde(skip)]
+    pub require_execution_authority_v1: bool,
     pub output_types: Option<Vec<String>>,
     pub instruction: Option<String>,
     pub is_query: bool,
@@ -1914,6 +1917,14 @@ pub enum PublishTarget {
         model: String,
         worker_id: String,
     },
+    /// Updated-only direct dispatch. Older worker consumers cannot receive it.
+    VerifiedWorker {
+        pool: String,
+        machine_profile: String,
+        bundle: String,
+        model: String,
+        worker_id: String,
+    },
     /// Pool fan-out — any worker subscribed to
     /// `sie.work.{pool}.{machine_profile}.{bundle}.*` can pick it up.
     Pool {
@@ -1935,6 +1946,16 @@ impl PublishTarget {
                 model,
                 worker_id,
             } => work_subject_worker(pool, machine_profile, bundle, model, worker_id),
+            PublishTarget::VerifiedWorker {
+                pool,
+                machine_profile,
+                bundle,
+                model,
+                worker_id,
+            } => format!(
+                "{}.execution-authority-v1",
+                work_subject_worker(pool, machine_profile, bundle, model, worker_id)
+            ),
             PublishTarget::Pool {
                 pool,
                 machine_profile,
@@ -1944,6 +1965,30 @@ impl PublishTarget {
         }
     }
 
+    fn pool_fallback_subject(&self) -> Option<String> {
+        (!matches!(self, Self::VerifiedWorker { .. })).then(|| self.as_pool_fallback().subject())
+    }
+
+    pub(crate) fn verified_model_is_unambiguous(model: &str) -> bool {
+        normalize_model_id(model)
+            .replace("__", "/")
+            .replace("_dot_", ".")
+            == model
+    }
+
+    fn validate_execution_contract(&self, params: &WorkParams, hash: &str) -> Result<(), String> {
+        let verified = matches!(self, Self::VerifiedWorker { .. });
+        if (params.require_execution_authority_v1 && !verified)
+            || (verified && (hash.is_empty() || !Self::verified_model_is_unambiguous(self.model())))
+        {
+            return Err(
+                "Verified local dispatch requires a versioned worker target and execution hash"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+
     /// Stable metric label describing the target kind. Wired up to
     /// publish-side metrics in a follow-up; carried in the API
     /// surface now so future callers don't have to extend `PublishTarget`.
@@ -1951,6 +1996,7 @@ impl PublishTarget {
     pub fn label(&self) -> &'static str {
         match self {
             PublishTarget::Worker { .. } => "worker",
+            PublishTarget::VerifiedWorker { .. } => "verified_worker",
             PublishTarget::Pool { .. } => "pool",
         }
     }
@@ -1961,6 +2007,7 @@ impl PublishTarget {
     #[allow(dead_code)]
     pub fn as_pool_fallback(&self) -> PublishTarget {
         match self {
+            PublishTarget::VerifiedWorker { .. } => self.clone(),
             PublishTarget::Worker {
                 pool,
                 machine_profile,
@@ -1984,19 +2031,26 @@ impl PublishTarget {
 
     pub fn model(&self) -> &str {
         match self {
-            PublishTarget::Worker { model, .. } | PublishTarget::Pool { model, .. } => model,
+            PublishTarget::Worker { model, .. }
+            | PublishTarget::VerifiedWorker { model, .. }
+            | PublishTarget::Pool { model, .. } => model,
         }
     }
 
     pub fn pool(&self) -> &str {
         match self {
-            PublishTarget::Worker { pool, .. } | PublishTarget::Pool { pool, .. } => pool,
+            PublishTarget::Worker { pool, .. }
+            | PublishTarget::VerifiedWorker { pool, .. }
+            | PublishTarget::Pool { pool, .. } => pool,
         }
     }
 
     pub fn machine_profile(&self) -> &str {
         match self {
             PublishTarget::Worker {
+                machine_profile, ..
+            }
+            | PublishTarget::VerifiedWorker {
                 machine_profile, ..
             }
             | PublishTarget::Pool {
@@ -2007,7 +2061,9 @@ impl PublishTarget {
 
     pub fn bundle(&self) -> &str {
         match self {
-            PublishTarget::Worker { bundle, .. } | PublishTarget::Pool { bundle, .. } => bundle,
+            PublishTarget::Worker { bundle, .. }
+            | PublishTarget::VerifiedWorker { bundle, .. }
+            | PublishTarget::Pool { bundle, .. } => bundle,
         }
     }
 
@@ -3077,6 +3133,7 @@ impl WorkPublisher {
         ),
         String,
     > {
+        target.validate_execution_contract(params, bundle_config_hash)?;
         validate_queue_request_item_count(items.len())?;
         let ack_count = initial_publish_ack_count(endpoint, items.len());
         let pool = target.pool().to_string();
@@ -3108,9 +3165,9 @@ impl WorkPublisher {
 
         let subject = target.subject();
         let (pool_fallback_subject, direct_fallback_worker_id) = match (&target, endpoint) {
-            (PublishTarget::Worker { .. }, "generate") | (PublishTarget::Pool { .. }, _) => {
-                (None, None)
-            }
+            (PublishTarget::Worker { .. }, "generate")
+            | (PublishTarget::VerifiedWorker { .. }, _)
+            | (PublishTarget::Pool { .. }, _) => (None, None),
             (PublishTarget::Worker { worker_id, .. }, _) => (
                 Some(target.as_pool_fallback().subject()),
                 Some(worker_id.clone()),
@@ -3637,6 +3694,7 @@ impl WorkPublisher {
         ),
         String,
     > {
+        target.validate_execution_contract(params, bundle_config_hash)?;
         let model = target.model().to_string();
         let pool = target.pool().to_string();
         let machine_profile = target.machine_profile().to_string();
@@ -3655,7 +3713,7 @@ impl WorkPublisher {
         let request_id = uuid::Uuid::now_v7().to_string();
         let reply_subject = format!("_INBOX.{}.{}", self.router_id, request_id);
         let subject = target.subject();
-        let pool_fallback_subject = target.as_pool_fallback().subject();
+        let pool_fallback_subject = target.pool_fallback_subject();
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -3668,7 +3726,7 @@ impl WorkPublisher {
         // Metric labels surface the requested (display) id, never the
         // ``:no-spec`` dispatch variant (#1324).
         collector.display_model = display_model.to_string();
-        collector.pool_fallback_subject = Some(pool_fallback_subject.clone());
+        collector.pool_fallback_subject = pool_fallback_subject.clone();
         collector.lane_reservation = lane_reservation;
         // Capture the activity handle before the collector moves into
         // ``pending_streams`` so the caller never has to re-look it up
@@ -3789,6 +3847,7 @@ impl WorkPublisher {
         ),
         String,
     > {
+        target.validate_execution_contract(params, bundle_config_hash)?;
         let model = target.model().to_string();
         let pool = target.pool().to_string();
         let machine_profile = target.machine_profile().to_string();
@@ -3805,7 +3864,7 @@ impl WorkPublisher {
         let request_id = uuid::Uuid::now_v7().to_string();
         let reply_subject = format!("_INBOX.{}.{}", self.router_id, request_id);
         let subject = target.subject();
-        let pool_fallback_subject = target.as_pool_fallback().subject();
+        let pool_fallback_subject = target.pool_fallback_subject();
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -3819,7 +3878,7 @@ impl WorkPublisher {
         // Metric labels surface the requested (display) id, never the
         // ``:no-spec`` dispatch variant (#1324).
         collector.display_model = display_model.to_string();
-        collector.pool_fallback_subject = Some(pool_fallback_subject.clone());
+        collector.pool_fallback_subject = pool_fallback_subject.clone();
         collector.lane_reservation = lane_reservation;
         let chunk_rx = collector.install_chunk_tap();
         self.pending_streams.insert(request_id.clone(), collector);
@@ -5415,6 +5474,51 @@ pub fn encode_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn verified_target_keeps_both_fences_and_rejects_legacy_downgrade() {
+        let verified = PublishTarget::VerifiedWorker {
+            pool: "tenant".into(),
+            machine_profile: "l4".into(),
+            bundle: "default".into(),
+            model: "Org/model:local".into(),
+            worker_id: "worker-1".into(),
+        };
+        assert_eq!(
+            verified.subject(),
+            "sie.work.tenant.l4.default.Org__model:local.worker-1.execution-authority-v1"
+        );
+        assert!(verified.pool_fallback_subject().is_none());
+        for model in ["Org__model", "Org/model_dot_v1", "Org/model*bad"] {
+            assert!(!PublishTarget::verified_model_is_unambiguous(model));
+        }
+        assert!(PublishTarget::verified_model_is_unambiguous(
+            "Org/model.v1:local"
+        ));
+        assert_eq!(verified.as_pool_fallback().subject(), verified.subject());
+        let params = WorkParams {
+            require_execution_authority_v1: true,
+            ..Default::default()
+        };
+        assert!(verified
+            .validate_execution_contract(&params, "hash")
+            .is_ok());
+        assert!(verified.validate_execution_contract(&params, "").is_err());
+        let legacy = PublishTarget::Pool {
+            pool: "tenant".into(),
+            machine_profile: "l4".into(),
+            bundle: "default".into(),
+            model: "Org/model:local".into(),
+        };
+        assert!(legacy.validate_execution_contract(&params, "hash").is_err());
+        assert!(legacy
+            .validate_execution_contract(&WorkParams::default(), "")
+            .is_ok());
+        assert!(serde_json::to_value(params)
+            .unwrap()
+            .get("require_execution_authority_v1")
+            .is_none());
+    }
 
     /// Two lanes on one pool, differing only in machine profile. The pool-wide
     /// check cannot tell them apart — the whole point of B5's first half.
@@ -9543,6 +9647,7 @@ mod tests {
         let cx = crate::observability::propagation::extract_context_from_headers(&headers);
 
         let params = WorkParams {
+            require_execution_authority_v1: false,
             output_types: None,
             instruction: None,
             is_query: false,
@@ -9823,6 +9928,7 @@ mod tests {
         client.flush().await.expect("flush subscription");
 
         let params = WorkParams {
+            require_execution_authority_v1: false,
             output_types: None,
             instruction: None,
             is_query: false,

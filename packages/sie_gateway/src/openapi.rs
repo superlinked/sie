@@ -400,6 +400,7 @@ fn apply_gateway_openapi_overrides(value: &mut Value) {
 
     inject_inference_msgpack_content(paths);
     inject_inference_response_headers(paths);
+    inject_remote_control_header(paths);
     inject_bearer_auth_error_responses(paths);
     annotate_slash_bearing_path_parameters(paths);
 }
@@ -1398,6 +1399,38 @@ fn merge_headers(response: &mut Value, headers: &Value) {
         .expect("OpenAPI response headers should be an object");
     for (name, value) in header_map {
         headers.entry(name.clone()).or_insert(value.clone());
+    }
+}
+
+fn inject_remote_control_header(paths: &mut serde_json::Map<String, Value>) {
+    for path in [
+        "/v1/encode/{model}",
+        "/v1/score/{model}",
+        "/v1/extract/{model}",
+        "/v1/generate/{model}",
+        "/v1/embeddings",
+        "/v1/rerank",
+        "/v2/rerank",
+        "/v1/chat/completions",
+        "/v1/completions",
+        "/v1/responses",
+        "/v1/audio/transcriptions",
+    ] {
+        let Some(operation) = paths
+            .get_mut(path)
+            .and_then(|p| p.get_mut("post"))
+            .and_then(Value::as_object_mut)
+        else {
+            continue;
+        };
+        let parameters = operation
+            .entry("parameters")
+            .or_insert_with(|| json!([]))
+            .as_array_mut()
+            .expect("parameters array");
+        parameters.push(json!({"name":"X-SIE-Remote","in":"header","required":false,
+            "schema":{"type":"string","enum":["forbid"]},
+            "description":"Require local serving through a current worker execution fence. A selected remote profile returns 400; no verified local worker returns retryable 503. Duplicate or other values return 400."}));
     }
 }
 

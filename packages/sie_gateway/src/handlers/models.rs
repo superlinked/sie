@@ -681,6 +681,7 @@ mod route_tests {
 
     fn worker_msg(name: &str, loaded_models: Vec<String>) -> WorkerStatusMessage {
         WorkerStatusMessage {
+            supports_execution_authority_v1: false,
             name: name.into(),
             gpu_count: 1,
             total_gpu_slots: None,

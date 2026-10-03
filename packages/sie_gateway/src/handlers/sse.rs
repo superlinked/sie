@@ -156,7 +156,23 @@ pub async fn build_sse_response(params: SseParams<'_>) -> Response {
             raw_for_debug: None,
         },
     };
-    let (target, pool_fallback_lane_worker_count) = if resolved_key.hash.is_none() {
+    let (target, pool_fallback_lane_worker_count) = if work_params.require_execution_authority_v1 {
+        let target = match super::proxy::execution_authority_target(
+            state,
+            &dispatch_model,
+            &pool,
+            &gpu,
+            &bundle,
+            &bundle_config_hash,
+            &admission_pool,
+        )
+        .await
+        {
+            Ok(target) => target,
+            Err(response) => return *response,
+        };
+        (target, 0)
+    } else if resolved_key.hash.is_none() {
         (
             publisher::PublishTarget::Pool {
                 pool: pool.clone(),

@@ -20,8 +20,9 @@ use crate::http_error::{
 use crate::server::AppState;
 
 use super::proxy::{
-    is_openai_compat_forwarded_header, is_openai_compat_inner_request_header,
-    is_valid_compat_model_id, proxy_request, translate_inner_compat_error,
+    invalid_remote_header_response, is_openai_compat_forwarded_header,
+    is_openai_compat_inner_request_header, is_valid_compat_model_id, proxy_request,
+    translate_inner_compat_error,
 };
 
 const MAX_AUDIO_FILE_BYTES: usize = 24 * 1024 * 1024;
@@ -584,6 +585,9 @@ pub async fn proxy_openai_transcription(
     State(state): State<Arc<AppState>>,
     req: Request,
 ) -> Response {
+    if let Some(response) = invalid_remote_header_response("generate", req.headers()) {
+        return response;
+    }
     if req
         .headers()
         .get(header::CONTENT_LENGTH)
@@ -646,10 +650,8 @@ pub async fn proxy_openai_transcription(
         .method(Method::POST)
         .uri(uri)
         .version(version);
-    for (name, value) in copy_inner_headers(&inbound_headers) {
-        if let Some(name) = name {
-            builder = builder.header(name, value);
-        }
+    for (name, value) in copy_inner_headers(&inbound_headers).iter() {
+        builder = builder.header(name, value);
     }
     let mut inner_request = match builder.body(Body::from(body)) {
         Ok(request) => request,
@@ -844,6 +846,8 @@ mod tests {
             header::CONTENT_TYPE,
             HeaderValue::from_static("multipart/form-data; boundary=test"),
         );
+        inbound.append("x-sie-remote", HeaderValue::from_static("forbid"));
+        inbound.append("x-sie-remote", HeaderValue::from_static("forbid"));
         let inner = copy_inner_headers(&inbound);
         assert_eq!(
             inner.get(header::CONTENT_TYPE).unwrap(),
@@ -853,6 +857,16 @@ mod tests {
         assert_eq!(inner.get(header::AUTHORIZATION).unwrap(), "Bearer test");
         assert!(inner.contains_key("traceparent"));
         assert!(!inner.contains_key(header::COOKIE));
+        let mut builder = Request::builder();
+        for (name, value) in inner.iter() {
+            builder = builder.header(name, value);
+        }
+        let forwarded = builder.body(Body::empty()).unwrap();
+        assert_eq!(
+            forwarded.headers().get_all("x-sie-remote").iter().count(),
+            2
+        );
+        assert!(invalid_remote_header_response("generate", forwarded.headers()).is_some());
 
         let mut native = HeaderMap::new();
         native.insert("x-sie-request-id", HeaderValue::from_static("req-1"));

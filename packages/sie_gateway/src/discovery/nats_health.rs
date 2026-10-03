@@ -296,6 +296,7 @@ mod tests {
 
     fn status(ready: bool) -> WorkerStatusMessage {
         WorkerStatusMessage {
+            supports_execution_authority_v1: false,
             name: "worker-1".into(),
             ready,
             gpu_count: 1,

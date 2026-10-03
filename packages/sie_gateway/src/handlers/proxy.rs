@@ -40,7 +40,7 @@ use crate::types::AuditEntry;
 
 use crate::middleware::auth::{extract_bearer_token, mask_token};
 
-use super::serving_disclosure::ServingDisclosure;
+use super::serving_disclosure::{remote_forbidden, ServingDisclosure};
 
 const GATEWAY_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -2167,6 +2167,9 @@ pub(crate) async fn proxy_request(
 ) -> Response {
     // SDK version skew detection
     check_sdk_version(req.headers());
+    if let Some(response) = invalid_remote_header_response(endpoint, req.headers()) {
+        return response;
+    }
     let disclosure = ServingDisclosure::install(&mut req);
     let provisioning_surface = provisioning_surface_for_endpoint(endpoint);
 
@@ -2383,9 +2386,17 @@ async fn proxy_request_inner(
         let requested_pool = normalize_pool_name(&pool_name);
         return build_pool_not_found_response_for_surface(&requested_pool, provisioning_surface);
     };
-    let (bundle_config_hash, model_revision, uses_catalog_scope) = state
+    let (bundle_config_hash, model_revision, uses_catalog_scope, served_by) = state
         .model_registry
-        .bundle_execution_evidence(&bundle, &hash_pool, &dispatch_model);
+        .serving_execution_evidence(&bundle, &hash_pool, &dispatch_model);
+    if let Some(response) = remote_control_response(
+        endpoint,
+        req.headers(),
+        served_by.as_ref(),
+        &bundle_config_hash,
+    ) {
+        return response;
+    }
     if !catalog_execution_hash_is_ready(&bundle_config_hash, uses_catalog_scope) {
         return endpoint_error_response(
             endpoint,
@@ -2476,6 +2487,35 @@ async fn proxy_request_inner(
 
     let batch_target = if endpoint == "generate" {
         None
+    } else if remote_forbidden(req.headers()).unwrap_or(false) {
+        match execution_authority_target(
+            &state,
+            &dispatch_model,
+            effective_pool,
+            effective_machine_profile,
+            &bundle,
+            &bundle_config_hash,
+            &admission_pool,
+        )
+        .await
+        {
+            Ok(target) => Some(target),
+            Err(_) => {
+                let mut response = endpoint_error_response(
+                    endpoint,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    err_code::QUEUE_UNAVAILABLE,
+                    oai_type::SERVER_ERROR,
+                    oai_code::TRANSPORT_FAILURE,
+                    None,
+                    "No current worker can verify local execution",
+                );
+                response
+                    .headers_mut()
+                    .insert("retry-after", axum::http::HeaderValue::from_static("5"));
+                return response;
+            }
+        }
     } else {
         match batch_publish_target(
             &state,
@@ -2500,6 +2540,7 @@ async fn proxy_request_inner(
         }
     };
 
+    let require_execution_authority_v1 = remote_forbidden(req.headers()).unwrap_or(false);
     let token_id = extract_bearer_token(req.headers())
         .map(|t| mask_token(&t))
         .unwrap_or_default();
@@ -2571,6 +2612,7 @@ async fn proxy_request_inner(
         &bundle_config_hash,
         model_revision.as_deref(),
         batch_target,
+        require_execution_authority_v1,
         &physical_lane,
     );
     // Scope an OTel context over the publish so the work-item envelope
@@ -2828,16 +2870,19 @@ async fn queue_mode_proxy(
     bundle_config_hash: &str,
     model_revision: Option<&str>,
     batch_target: Option<publisher::PublishTarget>,
+    require_execution_authority_v1: bool,
     physical_lane: &PhysicalLane,
 ) -> Response {
     // Parse body once, extract items + params (avoids double parse)
-    let (items, params) = match preparsed {
+    let (items, mut params) = match preparsed {
         Some(parsed) => parsed,
         None => match parse_queue_request(body_bytes, is_msgpack_in, endpoint) {
             Ok(parsed) => parsed,
             Err(error) => return queue_parse_error_response(endpoint, error),
         },
     };
+
+    params.require_execution_authority_v1 = require_execution_authority_v1;
 
     if items.is_empty() && endpoint != "score" && endpoint != "generate" {
         return endpoint_error_response(
@@ -3536,6 +3581,142 @@ fn endpoint_error_response(
     }
 }
 
+/// Bind a verified contract to one fresh eligible worker; never use a pool subject.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn execution_authority_target(
+    state: &AppState,
+    model: &str,
+    pool: &str,
+    machine_profile: &str,
+    bundle: &str,
+    hash: &str,
+    admission_pool: &str,
+) -> Result<publisher::PublishTarget, Box<Response>> {
+    if !publisher::PublishTarget::verified_model_is_unambiguous(model)
+        || !state
+            .work_publisher
+            .as_ref()
+            .is_some_and(|publisher| publisher.supports_execution_authority_v1())
+    {
+        let mut response = endpoint_error_response(
+            "generate",
+            StatusCode::SERVICE_UNAVAILABLE,
+            err_code::QUEUE_UNAVAILABLE,
+            oai_type::SERVER_ERROR,
+            oai_code::TRANSPORT_FAILURE,
+            None,
+            "The dispatch transport cannot verify local execution",
+        );
+        response
+            .headers_mut()
+            .insert("retry-after", axum::http::HeaderValue::from_static("5"));
+        return Err(Box::new(response));
+    }
+    let admitted = state
+        .pool_manager
+        .admitted_worker_names_for_capped_lane(admission_pool, machine_profile, bundle)
+        .await;
+    if let Some(worker_id) = state.registry.execution_authority_worker(
+        model,
+        pool,
+        machine_profile,
+        bundle,
+        hash,
+        admitted.as_ref(),
+    ) {
+        return Ok(publisher::PublishTarget::VerifiedWorker {
+            pool: pool.to_string(),
+            machine_profile: machine_profile.to_string(),
+            bundle: bundle.to_string(),
+            model: model.to_string(),
+            worker_id,
+        });
+    }
+    let mut response = endpoint_error_response(
+        "generate",
+        StatusCode::SERVICE_UNAVAILABLE,
+        err_code::QUEUE_UNAVAILABLE,
+        oai_type::SERVER_ERROR,
+        oai_code::TRANSPORT_FAILURE,
+        None,
+        "No current worker can verify local execution",
+    );
+    response
+        .headers_mut()
+        .insert("retry-after", axum::http::HeaderValue::from_static("5"));
+    Err(Box::new(response))
+}
+
+/// Refuse egress against the same serving snapshot as the pinned work hash.
+fn remote_control_response(
+    endpoint: &str,
+    headers: &axum::http::HeaderMap,
+    served_by: Option<&crate::types::model::ServedBy>,
+    execution_hash: &str,
+) -> Option<Response> {
+    let refusal = match remote_forbidden(headers) {
+        Ok(false) => return None,
+        Err(message) => (
+            StatusCode::BAD_REQUEST,
+            INVALID_INPUT_ERROR_CODE,
+            oai_type::INVALID_REQUEST,
+            oai_code::INVALID_REQUEST,
+            message,
+        ),
+        Ok(true) => match served_by {
+            Some(crate::types::model::ServedBy::Local) if !execution_hash.is_empty() => {
+                return None
+            }
+            Some(crate::types::model::ServedBy::Remote { .. }) => (
+                StatusCode::BAD_REQUEST,
+                INVALID_INPUT_ERROR_CODE,
+                oai_type::INVALID_REQUEST,
+                oai_code::INVALID_REQUEST,
+                "X-SIE-Remote: forbid refuses the selected remote profile",
+            ),
+            _ => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                err_code::QUEUE_UNAVAILABLE,
+                oai_type::SERVER_ERROR,
+                oai_code::TRANSPORT_FAILURE,
+                "Local serving cannot be verified while model configuration converges",
+            ),
+        },
+    };
+    let mut response = endpoint_error_response(
+        endpoint,
+        refusal.0,
+        refusal.1,
+        refusal.2,
+        refusal.3,
+        Some("X-SIE-Remote"),
+        refusal.4,
+    );
+    if refusal.0 == StatusCode::SERVICE_UNAVAILABLE {
+        response
+            .headers_mut()
+            .insert("retry-after", axum::http::HeaderValue::from_static("5"));
+    }
+    Some(response)
+}
+
+pub(crate) fn invalid_remote_header_response(
+    endpoint: &str,
+    headers: &axum::http::HeaderMap,
+) -> Option<Response> {
+    remote_forbidden(headers).err().map(|message| {
+        endpoint_error_response(
+            endpoint,
+            StatusCode::BAD_REQUEST,
+            INVALID_INPUT_ERROR_CODE,
+            oai_type::INVALID_REQUEST,
+            oai_code::INVALID_REQUEST,
+            Some("X-SIE-Remote"),
+            message,
+        )
+    })
+}
+
 fn dispatch_rejection_response(endpoint: &str, error: &DispatchError) -> Option<Response> {
     let mut response = match error {
         DispatchError::PayloadTooLarge(error) => endpoint_error_response(
@@ -3704,7 +3885,23 @@ pub(crate) async fn run_streaming_generate(
     // distinguish it from capacity/health-driven fallbacks. We also
     // skip the gauge update here — the ring isn't consulted, so
     // recording a size for it would be misleading.
-    let (target, pool_fallback_lane_worker_count) = if resolved_key.hash.is_none() {
+    let (target, pool_fallback_lane_worker_count) = if params.require_execution_authority_v1 {
+        let target = execution_authority_target(
+            state,
+            dispatch_model,
+            pool,
+            gpu,
+            bundle,
+            bundle_config_hash,
+            admission_pool,
+        )
+        .await
+        .map_err(|_| StreamingDriverErr::PublishFailed {
+            message: "No current worker can verify local execution".into(),
+            retry_after: Some("5"),
+        })?;
+        (target, 0)
+    } else if resolved_key.hash.is_none() {
         (
             publisher::PublishTarget::Pool {
                 pool: pool.to_string(),
@@ -6712,6 +6909,7 @@ pub(crate) fn resolve_model_and_bundle(
 /// machine profile, effective pool, bundle config hash, the bound work
 /// publisher, plus audit fields. Produced by [`resolve_generation_route`].
 struct ResolvedRoute {
+    require_execution_authority_v1: bool,
     physical_lane: PhysicalLane,
     bundle: String,
     gpu: String,
@@ -6885,9 +7083,14 @@ async fn resolve_generation_route(
             ProvisioningSurface::OpenAiCompat,
         ));
     };
-    let (bundle_config_hash, model_revision, uses_catalog_scope) = state
+    let (bundle_config_hash, model_revision, uses_catalog_scope, served_by) = state
         .model_registry
-        .bundle_execution_evidence(&bundle, &hash_pool, dispatch_model);
+        .serving_execution_evidence(&bundle, &hash_pool, dispatch_model);
+    if let Some(response) =
+        remote_control_response("generate", hdr, served_by.as_ref(), &bundle_config_hash)
+    {
+        return Err(response);
+    }
     if !catalog_execution_hash_is_ready(&bundle_config_hash, uses_catalog_scope) {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
@@ -7002,6 +7205,7 @@ async fn resolve_generation_route(
         .unwrap_or(-1);
 
     Ok(ResolvedRoute {
+        require_execution_authority_v1: remote_forbidden(hdr).unwrap_or(false),
         physical_lane,
         bundle,
         gpu,
@@ -7121,6 +7325,9 @@ impl GrammarProfileUnavailable {
     )
 )]
 pub async fn proxy_chat(State(state): State<Arc<AppState>>, mut req: Request) -> Response {
+    if let Some(response) = invalid_remote_header_response("generate", req.headers()) {
+        return response;
+    }
     check_sdk_version(req.headers());
     let disclosure = ServingDisclosure::install(&mut req);
     let metric_labels_slot = req
@@ -7450,6 +7657,7 @@ async fn proxy_chat_inner(
     // -- headers → GPU/pool routing, effective-pool selection, publisher bind.
     //    Shared with /v1/completions via resolve_generation_route.
     let ResolvedRoute {
+        require_execution_authority_v1,
         physical_lane,
         bundle,
         gpu,
@@ -7487,7 +7695,8 @@ async fn proxy_chat_inner(
     // Copied out BEFORE the params are consumed into `WorkParams` below.
     let stream = params.stream;
     let stream_include_usage = params.stream_include_usage;
-    let work_params = params.into_work_params();
+    let mut work_params = params.into_work_params();
+    work_params.require_execution_authority_v1 = require_execution_authority_v1;
 
     // SSE branch — when `stream: true` we hand off to the SSE
     // response builder. The non-streaming aggregating path below is
@@ -8041,6 +8250,9 @@ fn build_text_completion_body(
 /// resolution + generation driver; differs from chat only in the request parse
 /// (raw `prompt` → `GenerateInput::Prompt`) and the `text_completion` body.
 pub async fn proxy_completions(State(state): State<Arc<AppState>>, mut req: Request) -> Response {
+    if let Some(response) = invalid_remote_header_response("generate", req.headers()) {
+        return response;
+    }
     let disclosure = ServingDisclosure::install(&mut req);
     let mut response = proxy_completions_inner(state, req).await;
     disclosure.stamp(response.status(), response.headers_mut());
@@ -8112,6 +8324,7 @@ async fn proxy_completions_inner(state: Arc<AppState>, req: Request) -> Response
     }
 
     let ResolvedRoute {
+        require_execution_authority_v1,
         physical_lane,
         bundle,
         gpu,
@@ -8145,7 +8358,8 @@ async fn proxy_completions_inner(state: Arc<AppState>, req: Request) -> Response
     // Copied out BEFORE the params are consumed into `WorkParams` below.
     let stream = params.stream;
     let stream_include_usage = params.stream_include_usage;
-    let work_params = params.into_work_params();
+    let mut work_params = params.into_work_params();
+    work_params.require_execution_authority_v1 = require_execution_authority_v1;
 
     // SSE streaming → emit `text_completion` chunks. Single-candidate
     // (completions rejects n>1), so no per-candidate interleave.
@@ -8698,6 +8912,9 @@ fn build_responses_body(
 /// `/v1/responses` — OpenAI Responses API (MVP). String `input` → raw-prompt
 /// generation via the shared resolve+drive helpers; `response`-shaped body.
 pub async fn proxy_responses(State(state): State<Arc<AppState>>, mut req: Request) -> Response {
+    if let Some(response) = invalid_remote_header_response("generate", req.headers()) {
+        return response;
+    }
     let disclosure = ServingDisclosure::install(&mut req);
     let mut response = proxy_responses_inner(state, req).await;
     disclosure.stamp(response.status(), response.headers_mut());
@@ -8759,6 +8976,7 @@ async fn proxy_responses_inner(state: Arc<AppState>, req: Request) -> Response {
     ServingDisclosure::record(&state, &parts.extensions, &model_name);
     let (explicit_bundle_override, _) = parse_model_spec(&params.model);
     let ResolvedRoute {
+        require_execution_authority_v1,
         physical_lane,
         bundle,
         gpu,
@@ -8789,7 +9007,8 @@ async fn proxy_responses_inner(state: Arc<AppState>, req: Request) -> Response {
     };
     let start = Instant::now();
 
-    let work_params = params.into_work_params();
+    let mut work_params = params.into_work_params();
+    work_params.require_execution_authority_v1 = require_execution_authority_v1;
 
     let driver = run_streaming_generate(
         &state,
@@ -9845,6 +10064,7 @@ pub(crate) fn is_openai_compat_inner_request_header(name: &str) -> bool {
         "x-sie-pool",
         "x-sie-engine",
         "x-sie-sdk-version",
+        "x-sie-remote",
         "traceparent",
         "tracestate",
     ]
@@ -10826,6 +11046,7 @@ fn work_params_from_json(
     if endpoint == "score" {
         validate_score_grammar_json(parsed)?;
         return Ok(publisher::WorkParams {
+            require_execution_authority_v1: false,
             output_types: None,
             instruction: score_instruction_from_json(parsed),
             is_query: false,
@@ -10848,6 +11069,7 @@ fn work_params_from_json(
 
     if endpoint == "generate" {
         return Ok(publisher::WorkParams {
+            require_execution_authority_v1: false,
             options: parse_generate_options_field(parsed.get("options"))
                 .map_err(QueueParseError::PreBuilt)?,
             generate: generate_params_from_json(parsed).map_err(QueueParseError::PreBuilt)?,
@@ -10864,6 +11086,7 @@ fn work_params_from_json(
     };
 
     Ok(publisher::WorkParams {
+        require_execution_authority_v1: false,
         output_types: field("output_types").and_then(|v| v.as_array()).map(|arr| {
             arr.iter()
                 .filter_map(|v| v.as_str().map(String::from))
@@ -11723,6 +11946,7 @@ fn work_params_from_rmpv(
     if endpoint == "score" {
         validate_score_grammar_rmpv(parsed)?;
         return Ok(publisher::WorkParams {
+            require_execution_authority_v1: false,
             output_types: None,
             instruction: score_instruction_from_rmpv(parsed),
             is_query: false,
@@ -11742,6 +11966,7 @@ fn work_params_from_rmpv(
 
     if endpoint == "generate" {
         return Ok(publisher::WorkParams {
+            require_execution_authority_v1: false,
             options: parse_generate_options_field(
                 rmpv_map_get(parsed, "options")
                     .map(rmpv_to_json_owned)
@@ -11782,6 +12007,7 @@ fn work_params_from_rmpv(
         .unwrap_or(false);
 
     Ok(publisher::WorkParams {
+        require_execution_authority_v1: false,
         output_types: field("output_types").and_then(rmpv_string_array),
         instruction: field("instruction").and_then(rmpv_as_str).map(String::from),
         is_query,
@@ -13867,6 +14093,7 @@ mod tests {
     fn dispatcher_defaults_to_no_first_chunk_pool_republish() {
         let dispatcher = AbandonmentProbe::default();
         assert!(!dispatcher.supports_first_chunk_pool_republish());
+        assert!(!dispatcher.supports_execution_authority_v1());
     }
 
     #[test]
@@ -15012,17 +15239,21 @@ mod tests {
 
     #[async_trait::async_trait]
     impl WorkDispatcher for GenerationTargetProbe {
+        fn supports_execution_authority_v1(&self) -> bool {
+            true
+        }
+
         async fn publish_work(
             self: Arc<Self>,
-            _target: PublishTarget,
+            target: PublishTarget,
             _admission_pool: &str,
             _endpoint: &str,
             _model: &str,
-            _display_model: &str,
+            display_model: &str,
             _engine: &str,
             _bundle_config_hash: &str,
             _items: Vec<rmpv::Value>,
-            _params: &WorkParams,
+            params: &WorkParams,
         ) -> Result<
             (
                 String,
@@ -15031,7 +15262,14 @@ mod tests {
             ),
             DispatchError,
         > {
-            unreachable!("generation target probe only accepts generation")
+            self.params.lock().unwrap().push(params.clone());
+            self.targets
+                .lock()
+                .unwrap()
+                .push((display_model.to_string(), target));
+            Err(DispatchError::Other(
+                "numeric probe refusal after target capture".into(),
+            ))
         }
 
         async fn publish_generate_streaming(
@@ -15338,6 +15576,13 @@ mod tests {
         assert_eq!(target.0, display_model);
         let (pool, machine_profile, bundle, dispatch_model) = match target.1 {
             PublishTarget::Worker {
+                pool,
+                machine_profile,
+                bundle,
+                model,
+                ..
+            }
+            | PublishTarget::VerifiedWorker {
                 pool,
                 machine_profile,
                 bundle,
@@ -15733,6 +15978,181 @@ mod tests {
             assert_eq!(response.status(), StatusCode::OK);
             assert_generation_target(probe.take_target(), "org/h", "org/h", "h100");
         }
+    }
+
+    #[tokio::test]
+    async fn remote_forbid_generation_surfaces_require_and_preserve_verified_target() {
+        for (surface, stream) in [
+            ("generate", false),
+            ("generate", true),
+            ("chat", false),
+            ("chat", true),
+            ("completions", false),
+            ("completions", true),
+            ("responses", false),
+        ] {
+            let (state, probe) = mixed_governed_generation_state(false).await;
+            let (uri, body) = match surface {
+                "generate" => (
+                    "/v1/generate/org%2Fg",
+                    json!({"prompt":"hello","max_new_tokens":4,"stream":stream}),
+                ),
+                "chat" => (
+                    "/v1/chat/completions",
+                    json!({"model":"org/g","messages":[{"role":"user","content":"hello"}],"max_tokens":4,"stream":stream}),
+                ),
+                "completions" => (
+                    "/v1/completions",
+                    json!({"model":"org/g","prompt":"hello","max_tokens":4,"stream":stream}),
+                ),
+                _ => (
+                    "/v1/responses",
+                    json!({"model":"org/g","input":"hello","max_output_tokens":4}),
+                ),
+            };
+            for capable in [false, true] {
+                let mut worker = worker_msg("default", "l4", "default");
+                worker.name = "worker-l4".into();
+                worker.bundle_config_hash = state
+                    .model_registry
+                    .compute_bundle_config_hash_for_pool("default", "default");
+                worker.supports_execution_authority_v1 = capable;
+                state
+                    .registry
+                    .update_worker("http://worker-l4:8080", worker)
+                    .await;
+                let mut request = json_request(uri, body.clone());
+                request
+                    .headers_mut()
+                    .insert("x-sie-remote", HeaderValue::from_static("forbid"));
+                let response = match surface {
+                    "generate" => proxy_request(State(state.clone()), request, "generate").await,
+                    "chat" => proxy_chat(State(state.clone()), request).await,
+                    "completions" => proxy_completions(State(state.clone()), request).await,
+                    _ => proxy_responses(State(state.clone()), request).await,
+                };
+                if !capable {
+                    assert_eq!(
+                        response.status(),
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "{surface}/{stream}"
+                    );
+                    assert_eq!(response.headers().get("retry-after").unwrap(), "5");
+                    assert_eq!(probe.target_count(), 0);
+                    continue;
+                }
+                assert_eq!(response.status(), StatusCode::OK, "{surface}/{stream}");
+                assert!(
+                    matches!(probe.take_target().1, PublishTarget::VerifiedWorker { worker_id, .. } if worker_id == "worker-l4")
+                );
+                assert!(probe.take_params().require_execution_authority_v1);
+                let _ = axum::body::to_bytes(response.into_body(), 16384)
+                    .await
+                    .unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn remote_forbid_numeric_surfaces_never_publish_to_legacy_workers_or_pools() {
+        for surface in [
+            "encode",
+            "score",
+            "extract",
+            "embeddings",
+            "rerank",
+            "rerank-v2",
+        ] {
+            let (mut state, _bundles, _models) = embeddings_dimensions_state();
+            state.pool_manager.create_default_pool().await;
+            let probe = Arc::new(GenerationTargetProbe::default());
+            state.work_publisher = Some(probe.clone());
+            let state = Arc::new(state);
+            let (uri, body) = match surface {
+                "encode" => (
+                    "/v1/encode/known%2Fembedder",
+                    json!({"items":[{"text":"hello"}]}),
+                ),
+                "score" => (
+                    "/v1/score/known%2Fembedder",
+                    json!({"query":{"text":"hello"},"items":[{"text":"world"}]}),
+                ),
+                "extract" => (
+                    "/v1/extract/known%2Fembedder",
+                    json!({"items":[{"text":"hello"}],"labels":["topic"]}),
+                ),
+                "embeddings" => (
+                    "/v1/embeddings",
+                    json!({"model":"known/embedder","input":"hello"}),
+                ),
+                "rerank" => (
+                    "/v1/rerank",
+                    json!({"model":"known/embedder","query":"hello","documents":["world"]}),
+                ),
+                _ => (
+                    "/v2/rerank",
+                    json!({"model":"known/embedder","query":"hello","documents":["world"]}),
+                ),
+            };
+            for capable in [false, true] {
+                let mut worker = worker_msg("default", "l4", "default");
+                worker.name = "verified-worker".into();
+                worker.bundle_config_hash = state
+                    .model_registry
+                    .compute_bundle_config_hash_for_pool("default", "default");
+                worker.supports_execution_authority_v1 = capable;
+                state
+                    .registry
+                    .update_worker("http://verified-worker:8080", worker)
+                    .await;
+                let mut request = json_request(uri, body.clone());
+                request
+                    .headers_mut()
+                    .insert("x-sie-remote", HeaderValue::from_static("forbid"));
+                let response = match surface {
+                    "embeddings" => proxy_openai_embeddings(State(state.clone()), request).await,
+                    "rerank" => proxy_rerank(State(state.clone()), request).await,
+                    "rerank-v2" => proxy_rerank_v2(State(state.clone()), request).await,
+                    _ => proxy_request(State(state.clone()), request, surface).await,
+                };
+                assert_eq!(
+                    response.status(),
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "{surface}/{capable}"
+                );
+                if capable {
+                    assert!(
+                        matches!(probe.take_target().1, PublishTarget::VerifiedWorker { worker_id, .. } if worker_id == "verified-worker")
+                    );
+                    assert!(probe.take_params().require_execution_authority_v1);
+                } else {
+                    assert_eq!(response.headers()["retry-after"], "5");
+                    assert_eq!(probe.target_count(), 0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn remote_forbid_requires_local_snapshot_with_nonempty_hash() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-sie-remote", HeaderValue::from_static("forbid"));
+        let local = crate::types::model::ServedBy::Local;
+        assert!(remote_control_response("encode", &headers, Some(&local), "hash").is_none());
+        for side in [None, Some(&local)] {
+            let response = remote_control_response("encode", &headers, side, "").unwrap();
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(response.headers()["retry-after"], "5");
+        }
+        let remote = crate::types::model::ServedBy::Remote {
+            upstream: Some("private".into()),
+        };
+        assert_eq!(
+            remote_control_response("encode", &headers, Some(&remote), "hash")
+                .unwrap()
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
     }
 
     #[tokio::test]
@@ -17238,6 +17658,7 @@ mod tests {
             .update_worker(
                 "http://assigned-cold:8080",
                 crate::types::WorkerStatusMessage {
+                    supports_execution_authority_v1: false,
                     name: "assigned-cold".to_string(),
                     ready: true,
                     gpu_count: 1,
@@ -17288,7 +17709,8 @@ mod tests {
                 assert_eq!(model, "BAAI/bge-m3");
                 assert_eq!(worker_id, "assigned-cold");
             }
-            publisher::PublishTarget::Pool { .. } => {
+            publisher::PublishTarget::Pool { .. }
+            | publisher::PublishTarget::VerifiedWorker { .. } => {
                 panic!("capped logical batch work must not publish to the shared pool subject")
             }
         }
@@ -21388,6 +21810,7 @@ mod tests {
 
     fn worker_msg(bundle: &str, gpu: &str, pool: &str) -> WorkerStatusMessage {
         WorkerStatusMessage {
+            supports_execution_authority_v1: false,
             name: "worker-1".into(),
             ready: true,
             gpu_count: 1,
