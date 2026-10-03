@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 import numpy as np
 import pytest
 from sie_server.core.inference_output import EncodeOutput
-from sie_server.core.postprocessor import MuveraConfig, MuveraPostprocessor
+from sie_server.core.postprocessor import MuveraConfig, MuveraPostprocessor, SmveConfig, SmvePostprocessor
 from sie_server.core.postprocessor_registry import PostprocessorRegistry
 
 
@@ -95,6 +95,25 @@ class TestPostprocessorTransform:
         assert output.dense is not None
         assert output.dense.shape[0] == 2  # Batch size
         assert elapsed_ms > 0
+
+    def test_transform_sync_applies_smve_and_muvera_together(
+        self, registry: PostprocessorRegistry, muvera_postprocessor: MuveraPostprocessor
+    ) -> None:
+        """Both multivector postprocessors read the same multivectors and add their own output."""
+        smve = SmvePostprocessor(token_dim=8, config=SmveConfig(width=64, k=4))
+        registry.register("test-model", {"muvera": muvera_postprocessor, "smve": smve})
+        output = EncodeOutput(
+            multivector=[np.random.randn(5, 8).astype(np.float32) for _ in range(2)],
+            multivector_token_dim=8,
+        )
+
+        registry.transform_sync("test-model", output, {"muvera": {}, "smve": {}}, is_query=True)
+
+        assert output.dense is not None
+        assert output.dense.shape[0] == 2
+        assert output.sparse is not None
+        assert len(output.sparse) == 2
+        assert all(0 < v.indices.size <= 5 * 4 for v in output.sparse)
 
     def test_transform_sync_skips_when_option_null(
         self, registry: PostprocessorRegistry, muvera_postprocessor: MuveraPostprocessor

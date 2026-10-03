@@ -33,6 +33,11 @@ def _validated_encode_output_types(value: object) -> list[str]:
     return validated_output_types
 
 
+# Response types a postprocessor builds from multivectors, by option key: the
+# adapter emits multivectors and the postprocessor adds the response type.
+_MULTIVECTOR_POSTPROCESSED_OUTPUTS = {"muvera": "dense", "smve": "sparse"}
+
+
 def resolve_encode_output_types(
     config: ModelConfig,
     request_output_types: list[str] | None,
@@ -43,7 +48,8 @@ def resolve_encode_output_types(
 
     Profiles may expose a postprocessed output that the adapter does not emit
     directly. MuVERA is the canonical example: the public response is dense,
-    while the adapter must first produce multivectors. Keeping capability
+    while the adapter must first produce multivectors. SMVE does the same for a
+    sparse response. Keeping capability
     validation and that translation here prevents the HTTP and managed queue
     paths from drifting apart.
 
@@ -74,10 +80,13 @@ def resolve_encode_output_types(
         raise InvalidInputError(msg)
 
     adapter_output_types = list(response_output_types)
-    if effective_options.get("muvera") is not None and "dense" in response_output_types:
-        adapter_output_types = [output_type for output_type in response_output_types if output_type != "dense"]
-        if "multivector" not in adapter_output_types:
-            adapter_output_types.append("multivector")
+    for option_key, postprocessed_type in _MULTIVECTOR_POSTPROCESSED_OUTPUTS.items():
+        if effective_options.get(option_key) is not None and postprocessed_type in adapter_output_types:
+            adapter_output_types = [
+                output_type for output_type in adapter_output_types if output_type != postprocessed_type
+            ]
+            if "multivector" not in adapter_output_types:
+                adapter_output_types.append("multivector")
 
     return adapter_output_types, response_output_types
 

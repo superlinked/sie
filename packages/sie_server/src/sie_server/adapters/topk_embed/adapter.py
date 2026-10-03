@@ -60,7 +60,7 @@ from sie_server.adapters.topk_embed.graphs import GRAPH_MODES, GraphMode, GraphR
 from sie_server.adapters.topk_embed.packed import PackedTextModel, Packing, resolve_kernels, to_device
 from sie_server.core.inference_output import EncodeOutput
 from sie_server.core.oom import is_oom_error
-from sie_server.core.postprocessor import MuveraConfig, MuveraPostprocessor
+from sie_server.core.postprocessor import MuveraConfig, MuveraPostprocessor, SmveConfig, SmvePostprocessor
 from sie_server.types.inputs import ImageInput, InvalidInputError, Item, decode_image
 
 if TYPE_CHECKING:
@@ -165,6 +165,7 @@ class TopkEmbedAdapter(BaseAdapter):
         text_batch_tokens: int = 16384,
         image_batch_size: int = 4,
         muvera_config: dict[str, Any] | None = None,
+        smve_config: dict[str, Any] | None = None,
         attn_implementation: str | None = None,
         packed: bool | None = None,
         cuda_graphs: str | bool = "off",
@@ -187,6 +188,7 @@ class TopkEmbedAdapter(BaseAdapter):
             text_batch_tokens: Padded tokens per text forward pass.
             image_batch_size: Images per vision forward pass.
             muvera_config: Optional MUVERA configuration (passed to postprocessor).
+            smve_config: Optional SMVE configuration (passed to postprocessor).
             attn_implementation: Attention kernel for the full-attention layers of
                 the row-per-input path (``sdpa`` when unset).
             packed: Run each batch as one packed sequence with variable-length
@@ -211,6 +213,7 @@ class TopkEmbedAdapter(BaseAdapter):
         self._text_batch_tokens = max(1, int(text_batch_tokens))
         self._image_batch_size = max(1, int(image_batch_size))
         self._muvera_config = muvera_config
+        self._smve_config = smve_config
         self._attn_implementation = attn_implementation
         self._packed = packed
         self._packed_text: PackedTextModel | None = None
@@ -492,8 +495,8 @@ class TopkEmbedAdapter(BaseAdapter):
         opts = options or {}
         normalize = bool(opts.get("normalize", self._normalize))
         # Vectors cross to the host in 16 bits when the response is 16-bit anyway and nothing
-        # after the adapter reads them at full precision (the MUVERA postprocessor does).
-        half = opts.get("output_dtype") == "float16" and opts.get("muvera") is None
+        # after the adapter reads them at full precision (the MUVERA and SMVE postprocessors do).
+        half = opts.get("output_dtype") == "float16" and opts.get("muvera") is None and opts.get("smve") is None
         dtype = torch.float16 if half else torch.float32
 
         # Items route by modality: a batch of the reference model carries one modality,
@@ -989,9 +992,15 @@ class TopkEmbedAdapter(BaseAdapter):
         super().unload()
 
     def get_postprocessors(self) -> dict[str, Any]:
-        """Return the configured MUVERA multivector-to-dense postprocessor."""
-        config = MuveraConfig(**self._muvera_config) if self._muvera_config else MuveraConfig()
-        return {"muvera": MuveraPostprocessor(token_dim=self._multivector_dim or 1024, config=config)}
+        """Return the MUVERA (multivector to dense) and SMVE (multivector to sparse) postprocessors."""
+        token_dim = self._multivector_dim or 1024
+        muvera = MuveraConfig(**self._muvera_config) if self._muvera_config else MuveraConfig()
+        smve = SmveConfig(**self._smve_config) if self._smve_config else SmveConfig()
+        return {
+            "muvera": MuveraPostprocessor(token_dim=token_dim, config=muvera),
+            # SMVE projects on the model's device: its matrix multiply is far too large for the CPU here.
+            "smve": SmvePostprocessor(token_dim=token_dim, config=smve, device=self._device),
+        }
 
     def get_preprocessor(self) -> Any:
         # The adapter owns tokenization and image preprocessing. The base

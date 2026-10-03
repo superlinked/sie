@@ -593,3 +593,81 @@ async def test_bound_generation_keeps_engine_timeout_errors() -> None:
         await _drain(bound_generation(failing(), GenerationTimeouts(overall_s=5.0)))
 
     assert not isinstance(raised.value, GenerationTimeoutError)
+
+
+def _late_interaction_config() -> ModelConfig:
+    """A multivector model whose profiles expose MUVERA (dense) and SMVE (sparse) outputs."""
+    return ModelConfig.model_validate(
+        {
+            "sie_id": "test/late-interaction",
+            "hf_id": "test/late-interaction",
+            "inputs": {"text": True},
+            "tasks": {"encode": {"dense": None, "sparse": None, "multivector": {"dim": 8}}},
+            "max_sequence_length": 512,
+            "profiles": {
+                "default": {
+                    "max_batch_tokens": 8192,
+                    "adapter_path": "sie_server.adapters.fake.adapter:FakeAdapter",
+                    "adapter_options": {"runtime": {"output_types": ["multivector"]}},
+                },
+                "smve": {
+                    "extends": "default",
+                    "adapter_options": {"runtime": {"output_types": ["sparse"], "smve": {}}},
+                },
+                "muvera_and_smve": {
+                    "extends": "default",
+                    "adapter_options": {
+                        "runtime": {"output_types": ["dense", "sparse", "multivector"], "muvera": {}, "smve": {}}
+                    },
+                },
+            },
+        }
+    )
+
+
+def test_smve_profile_asks_the_adapter_for_multivectors() -> None:
+    config = _late_interaction_config()
+    effective_options, selected_profile = merge_runtime_options_with_profile(config, {"profile": "smve"})
+
+    adapter_output_types, response_output_types = resolve_encode_output_types(
+        config, None, selected_profile, effective_options
+    )
+
+    assert adapter_output_types == ["multivector"]
+    assert response_output_types == ["sparse"]
+
+
+def test_muvera_and_smve_share_one_multivector_request() -> None:
+    config = _late_interaction_config()
+    effective_options, selected_profile = merge_runtime_options_with_profile(config, {"profile": "muvera_and_smve"})
+
+    adapter_output_types, response_output_types = resolve_encode_output_types(
+        config, ["dense", "sparse", "multivector"], selected_profile, effective_options
+    )
+
+    assert adapter_output_types == ["multivector"]
+    assert response_output_types == ["dense", "sparse", "multivector"]
+
+
+def test_sparse_without_smve_still_comes_from_the_adapter() -> None:
+    config = ModelConfig.model_validate(
+        {
+            "sie_id": "test/sparse",
+            "hf_id": "test/sparse",
+            "inputs": {"text": True},
+            "tasks": {"encode": {"sparse": {"dim": 32}}},
+            "max_sequence_length": 512,
+            "profiles": {
+                "default": {
+                    "max_batch_tokens": 8192,
+                    "adapter_path": "sie_server.adapters.fake.adapter:FakeAdapter",
+                    "adapter_options": {"runtime": {"output_types": ["sparse"]}},
+                },
+            },
+        }
+    )
+    effective_options, selected_profile = merge_runtime_options_with_profile(config, None)
+
+    adapter_output_types, _ = resolve_encode_output_types(config, ["sparse"], selected_profile, effective_options)
+
+    assert adapter_output_types == ["sparse"]

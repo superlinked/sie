@@ -35,7 +35,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Known postprocessor option keys
-POSTPROCESSOR_OPTION_KEYS = frozenset({"muvera", "output_dtype"})
+POSTPROCESSOR_OPTION_KEYS = frozenset({"muvera", "smve", "output_dtype"})
 
 # Global quantize postprocessor (stateless, shared across all models)
 _QUANTIZE_POSTPROCESSOR = QuantizePostprocessor()

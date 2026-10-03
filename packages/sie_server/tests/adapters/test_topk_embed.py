@@ -387,10 +387,26 @@ class TestMetering:
         items = [Item(text="one two"), Item(images=[_png()], text="ignored caption"), Item(text="three")]
         assert adapter.count_input_tokens(items) == [2, 0, 1]
 
-    def test_postprocessor_uses_the_token_dim(self, adapter: TopkEmbedAdapter) -> None:
+    def test_postprocessors_use_the_token_dim(self, adapter: TopkEmbedAdapter) -> None:
         postprocessors = adapter.get_postprocessors()
-        assert set(postprocessors) == {"muvera"}
+        assert set(postprocessors) == {"muvera", "smve"}
         assert postprocessors["muvera"].token_dim == HEAD_WIDTH
+        assert postprocessors["smve"].token_dim == HEAD_WIDTH
+        # SMVE projects on the model's own device.
+        assert postprocessors["smve"].device == "cpu"
+
+    def test_smve_config_comes_from_the_loadtime_options(self) -> None:
+        smve = make_adapter(smve_config={"width": 512, "k": 8, "max_nonzeros": 64}).get_postprocessors()["smve"]
+        assert (smve.config.width, smve.config.k, smve.config.max_nonzeros) == (512, 8, 64)
+
+    def test_smve_turns_the_token_vectors_into_one_sparse_vector(self, adapter: TopkEmbedAdapter) -> None:
+        output = adapter.encode([Item(text="alpha beta gamma")], ["multivector"], is_query=True, options={"smve": {}})
+        smve = adapter.get_postprocessors()["smve"]
+        smve.transform(output, is_query=True)
+        assert output.sparse is not None
+        (vector,) = output.sparse
+        assert 0 < vector.indices.size <= output.multivector[0].shape[0] * smve.config.k
+        assert int(vector.indices.max()) < smve.target_dim
 
 
 # On the cluster path one item's serialized result is chunked only up to 16 MiB (the sidecar's

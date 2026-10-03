@@ -30,6 +30,11 @@ profiles:
         doc_prefix: '[D] '
         doc_punctuation_skiplist: true
         cuda_graphs: bucketed
+        # Sparse Multi-Vector Encoding for the smve profile, with TopK's published
+        # settings for this checkpoint (its model card: width 65536, k=32).
+        smve_config:
+          width: 65536
+          k: 32
       runtime:
         # The checkpoint's PyLate recipe (config_sentence_transformers.json).
         query_max_length: 32
@@ -61,6 +66,17 @@ profiles:
         output_similarity:
           dense: dot
         muvera: {}
+  smve:
+    extends: default
+    adapter_options:
+      runtime:
+        query_max_length: 32
+        max_seq_length: 300
+        output_types:
+        - sparse
+        output_similarity:
+          sparse: dot
+        smve: {}
   long_context:
     extends: default
     adapter_options:

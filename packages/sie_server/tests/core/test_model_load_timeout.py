@@ -89,6 +89,27 @@ def test_muvera_runtime_requires_registered_postprocessor() -> None:
         loader._finish_load("test/visual:muvera", "cpu", adapter, config)
 
 
+def test_smve_runtime_requires_registered_postprocessor() -> None:
+    loader = _make_loader()
+    config = ModelConfig(
+        sie_id="test/late:smve",
+        hf_id="test/late",
+        tasks=Tasks(encode=EncodeTask(multivector=EmbeddingDim(dim=8))),
+        profiles={
+            "default": ProfileConfig(
+                adapter_path="sie_server.adapters.base:ModelAdapter",
+                max_batch_tokens=8,
+                adapter_options=AdapterOptions(runtime={"smve": {}, "output_types": ["sparse"]}),
+            )
+        },
+    )
+    adapter = MagicMock()
+    adapter.get_postprocessors.return_value = {"muvera": MagicMock()}
+
+    with pytest.raises(ValueError, match=r"requests SMVE.*did not register a 'smve' postprocessor"):
+        loader._finish_load("test/late:smve", "cpu", adapter, config)
+
+
 class TestResolveLoadTimeout:
     """``_resolve_load_timeout`` precedence and parsing."""
 
