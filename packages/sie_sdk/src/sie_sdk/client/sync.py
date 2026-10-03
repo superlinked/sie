@@ -294,6 +294,12 @@ def _close_transport(transport: httpx.Client) -> None:
         transport.close()
 
 
+def _confine_injected_client_origin(request: httpx.Request, *, base_url: str) -> None:
+    """Keep a configured transport's credentials on its intended origin."""
+    if not request_matches_base_url_origin(base_url, str(request.url)):
+        raise httpx.RequestError("configured HTTP client refused a different origin", request=request)
+
+
 def _attach_origin_scoped_headers(
     request: httpx.Request,
     *,
@@ -428,6 +434,15 @@ class SIEClient:
             while it loads, and a model served only remotely answers ``400``.
             ``None`` (default) leaves the choice to the model's routing policy.
             The setting applies to every call made with this client.
+        http_client: Optional configured synchronous HTTP client for custom
+            transports, proxy/TLS policy, or dynamic authentication. Its base
+            URL must match ``base_url`` exactly and redirects must be disabled.
+            SDK headers are added and requests stay confined to the gateway
+            origin; a control plane on another origin is unavailable with this
+            option. Existing hooks, authentication, and transport settings are
+            preserved. Pass ``api_key=""`` to avoid SDK environment credentials
+            when the HTTP client supplies its own authentication. The SDK owns
+            and closes this client; do not share it with another owner.
 
     Example:
         >>> client = SIEClient("http://localhost:8080")
@@ -469,6 +484,7 @@ class SIEClient:
         connect_timeout_s: float | None = None,
         read_timeout_s: float | None = None,
         remote: Literal["forbid"] | None = None,
+        http_client: httpx.Client | None = None,
     ) -> None:
         base_url = resolve_base_url(base_url)
         api_key = resolve_api_key(api_key, base_url, control_plane_url)
@@ -545,7 +561,21 @@ class SIEClient:
                 max_connections=max_connections,
                 max_keepalive_connections=max_connections,
             )
-        self._client = httpx.Client(**client_kwargs)
+        if http_client is None:
+            self._client = httpx.Client(**client_kwargs)
+        else:
+            if str(http_client.base_url).rstrip("/") != str(httpx.URL(self._base_url)).rstrip("/"):
+                raise ValueError("http_client base URL must match base_url")
+            if http_client.is_closed or http_client.follow_redirects:
+                raise ValueError("http_client must be open with redirects disabled")
+            if max_connections is not None:
+                raise ValueError("configure connection limits on http_client instead")
+            if self._control_plane_url and not request_matches_base_url_origin(self._base_url, self._control_plane_url):
+                raise ValueError("http_client cannot serve a control plane on another origin")
+            http_client.headers.update(headers)
+            http_client.event_hooks["request"].append(partial(_confine_injected_client_origin, base_url=self._base_url))
+            http_client.event_hooks["request"].extend(client_kwargs.get("event_hooks", {}).get("request", []))
+            self._client = http_client
         # Per-thread request evidence lets benchmark callers account for SDK
         # retries without changing normal response payloads.
         self._request_state = threading.local()
