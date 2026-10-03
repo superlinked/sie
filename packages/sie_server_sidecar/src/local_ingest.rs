@@ -1555,6 +1555,12 @@ fn validate_work_items_with_limit(
                 wi.operation, body.endpoint
             ));
         }
+        if wi.operation == "load" {
+            return Err(
+                "InvalidTransportBinding: load is not supported on the local-ingest lane"
+                    .to_string(),
+            );
+        }
         if wi.model_id != body.model {
             return Err(format!(
                 "InvalidTransportBinding: model_id {:?} does not match envelope model {:?}",
@@ -2017,6 +2023,22 @@ mod tests {
         assert!(validate_work_items(&body, &[item])
             .unwrap_err()
             .contains("unresolved payload reference"));
+    }
+
+    #[test]
+    fn work_item_validation_rejects_local_load_only_before_dispatch() {
+        let mut item = sample_work_item();
+        item.operation = "load".into();
+        item.item = None;
+        let mut body = bound_body(std::slice::from_ref(&item));
+        assert!(validate_work_items(&body, std::slice::from_ref(&item))
+            .unwrap_err()
+            .contains("does not match endpoint"));
+        body.endpoint = "load".into();
+        assert_eq!(
+            validate_work_items(&body, &[item]).unwrap_err(),
+            "InvalidTransportBinding: load is not supported on the local-ingest lane"
+        );
     }
 
     #[test]

@@ -72,8 +72,9 @@ Message settlement:
 - A `load` work item carries no input. It goes through the same admission,
   config and readiness checks as other work for that model. Once
   `EnsureModelReady` reports ready, it is ACKed without inference or a result.
-  This is the worker-side warm-up primitive; the gateway does not yet produce
-  these items.
+  This is the NATS worker-side warm-up primitive; the gateway does not yet
+  produce these items. Local-ingest `publish_work` rejects `load` before
+  dispatch because that request/response lane requires a result.
 - A work item may carry `fallback_reason` for a future gateway remote fallback
   attempt. If the backend returns `nak_retry`, the sidecar publishes an error
   result with the outcome's `error_code` (`QUEUE_FULL` when absent) and
