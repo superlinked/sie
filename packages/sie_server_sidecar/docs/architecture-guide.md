@@ -568,6 +568,25 @@ Successful non-streaming results echo that stable
 execution hash so the gateway can bind response provenance to the exact worker
 execution. Empty hashes remain accepted only for legacy, non-attested traffic.
 
+A non-empty hash also requires an installed `ConfigApplyState`; custom
+dispatchers without that authority refuse pinned work before backend execution.
+The Python IPC receiver independently checks the live bundle configuration
+view, including control-plane adapter scope and unsupported models. Its shared
+registry execution lease permits concurrent inference while blocking
+filesystem reload and asynchronous add/remove/replace until the batch or
+generation stream finishes. Synchronous configuration mutation refuses while
+the lease is held and must run on the registry's lifecycle loop once bound.
+The lease is separate from model-load locks so a pinned request can load its
+model while a configuration writer waits.
+
+Hashed generation retains the gateway-selected model/profile. If the Python
+grammar resolver would rewrite that target, the receiver NAKs before loading
+or prewarming a model: grammar-routing declarations are not covered by the
+bundle hash. Score IPC items carry the same optional hash as encode and
+extract items, including scheduler batches. Deploy matching updated Python
+workers and sidecars together to obtain this execution authority; legacy
+empty-hash traffic and older IPC producers do not provide the guarantee.
+
 Live config apply updates model configuration in the colocated backend registry/catalog.
 It does not update adapter code or bundle definitions inside the running worker
 image.

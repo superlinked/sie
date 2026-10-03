@@ -518,10 +518,8 @@ def _rescanning_registry(devices: list[str], configs: list[dict[str, ModelConfig
 
 class TestConfigDropDoesNotStrandAGroup:
     @patch("sie_server.core.model_loader.load_adapter")
-    async def test_a_resident_whose_config_was_rescanned_away_can_still_be_unloaded(
-        self, mock_load_adapter: MagicMock
-    ) -> None:
-        """A rescan replaces the whole catalog while the model stays loaded and claimed."""
+    async def test_a_legacy_resident_without_config_can_still_be_unloaded(self, mock_load_adapter: MagicMock) -> None:
+        """Legacy/custom snapshots can leave a resident without its catalog entry."""
         wide = _make_config("wide", width=2)
         registry = _rescanning_registry(["cuda:0", "cuda:1"], [{"wide": wide}])
         mock_load_adapter.return_value = _adapter()
@@ -530,7 +528,10 @@ class TestConfigDropDoesNotStrandAGroup:
         assert sorted(registry._device_claims) == ["cuda:0", "cuda:1"]
 
         with patch("sie_server.core.registry.load_model_configs", return_value={}):
-            registry.rescan_configs()
+            with pytest.raises(RuntimeError, match="resident model configuration would change"):
+                registry.rescan_configs()
+        # Reproduce the old state without permitting a new unsafe sync rescan.
+        registry._configs.clear()
         assert not registry.has_model("wide")
 
         await registry.unload_async("wide")
@@ -546,14 +547,16 @@ class TestConfigDropDoesNotStrandAGroup:
 
 
 @patch("sie_server.core.model_loader.load_adapter")
-def test_the_synchronous_unload_also_reaches_a_rescanned_away_resident(mock_load_adapter: MagicMock) -> None:
+def test_the_synchronous_unload_also_reaches_a_legacy_resident_without_config(mock_load_adapter: MagicMock) -> None:
     wide = _make_config("wide", width=2)
     registry = _rescanning_registry(["cuda:0", "cuda:1"], [{"wide": wide}])
     mock_load_adapter.return_value = _adapter()
 
     registry.load("wide", "cuda")
     with patch("sie_server.core.registry.load_model_configs", return_value={}):
-        registry.rescan_configs()
+        with pytest.raises(RuntimeError, match="resident model configuration would change"):
+            registry.rescan_configs()
+    registry._configs.clear()
 
     registry.unload("wide")
 

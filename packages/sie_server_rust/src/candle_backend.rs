@@ -4772,6 +4772,7 @@ mod tests {
             instruction: None,
             options,
             profile_id: None,
+            bundle_config_hash: None,
             payload_fetch_ms: 0.0,
             prepared_tokens: None,
         }
@@ -7097,6 +7098,7 @@ profiles:
             instruction: None,
             options: None,
             profile_id: None,
+            bundle_config_hash: None,
             payload_fetch_ms: 0.0,
             prepared_tokens: None,
         };
@@ -7193,6 +7195,7 @@ profiles:
                         "output_similarity": {"dense": "dot"},
                     })),
                     profile_id: Some("default".to_string()),
+                    bundle_config_hash: None,
                     payload_fetch_ms: 0.0,
                     prepared_tokens: None,
                 }],
@@ -7244,6 +7247,7 @@ profiles:
             instruction: None,
             options: None,
             profile_id: None,
+            bundle_config_hash: None,
             payload_fetch_ms: 0.0,
             prepared_tokens: None,
         };

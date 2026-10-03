@@ -17,6 +17,7 @@ from sie_server.adapters.errors import InputTooLongError, UpstreamUnavailableErr
 from sie_server.api.ws import (
     BundleConfigView,
     BundleMetadataUnavailableError,
+    bundle_model_is_supported,
     compute_bundle_config_hash_cached,
     compute_bundle_config_view,
 )
@@ -671,6 +672,23 @@ class QueueExecutor:
         if self._control_plane_adapters.get(bundle_id) != scope:
             self._control_plane_adapters[bundle_id] = scope
             self._view_state_version += 1
+
+    def accepts_execution_config(self, bundle_id: str, model_id: str, expected_hashes: set[str]) -> bool:
+        """Check pinned execution against live authority; caller retains a registry lease."""
+        if not bundle_id or not expected_hashes:
+            return False
+        view = self.bundle_config_view(bundle_id)
+        return bool(
+            view.bundle_config_hash
+            and expected_hashes == {view.bundle_config_hash}
+            and model_id not in view.unsupported_models
+            and bundle_model_is_supported(
+                self._registry,
+                bundle_id,
+                model_id,
+                control_plane_adapters=self._control_plane_adapters.get(bundle_id),
+            )
+        )
 
     async def apply_model_config(self, req: ApplyModelConfigRequest) -> ApplyModelConfigResponse:
         """Validate and add a bundle-scoped config delta to the local registry.

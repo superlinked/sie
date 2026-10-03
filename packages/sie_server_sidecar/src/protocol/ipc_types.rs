@@ -730,6 +730,8 @@ pub struct ScoreBatchItem {
     #[serde(default)]
     pub profile_id: Option<String>,
     #[serde(default)]
+    pub bundle_config_hash: Option<String>,
+    #[serde(default)]
     pub payload_fetch_ms: f64,
     /// Rust-side pre-tokenised input, ordering `[query, doc_0, doc_1, ...]`.
     /// `None` for v1 by default: the dispatcher only attaches tokens for

@@ -784,17 +784,16 @@ impl Dispatcher {
         }
 
         let _execution_guard = if let Some(state) = self.config_apply_state.as_ref() {
-            let guard = state.lock_execution().await;
-            if !state.accepts_work(&wi.bundle_config_hash, &wi.model_id) {
-                return Err(GenerateDispatchError::new(
-                    "BUNDLE_CONFIG_MISMATCH",
-                    "worker configuration changed before generation execution",
-                ));
-            }
-            Some(guard)
+            Some(state.lock_execution().await)
         } else {
             None
         };
+        if unknown_bundle_config_hash([&wi], self.config_apply_state.as_deref()).is_some() {
+            return Err(GenerateDispatchError::new(
+                "BUNDLE_CONFIG_MISMATCH",
+                "worker configuration changed before generation execution",
+            ));
+        }
         let executed_hash = wi.bundle_config_hash.clone();
         let reply_subject = wi.reply_subject.clone();
         let expected_request_id = wi.request_id.clone();
@@ -1167,11 +1166,12 @@ fn unknown_bundle_config_hash<'a>(
     items: impl IntoIterator<Item = &'a WorkItem>,
     state: Option<&ConfigApplyState>,
 ) -> Option<(&'a str, usize)> {
-    let state = state?;
     let mut first_unknown: Option<&'a str> = None;
     let mut count = 0usize;
     for wi in items {
-        if !state.accepts_work(&wi.bundle_config_hash, &wi.model_id) {
+        if state.map_or(!wi.bundle_config_hash.is_empty(), |state| {
+            !state.accepts_work(&wi.bundle_config_hash, &wi.model_id)
+        }) {
             count += 1;
             if first_unknown.is_none() {
                 first_unknown = Some(wi.bundle_config_hash.as_str());
@@ -1889,24 +1889,22 @@ impl Dispatcher {
         // inference takes shared guards. Re-check after payload resolution so
         // a queued A request can never execute after the worker advances to B.
         let _execution_guard = if let Some(state) = self.config_apply_state.as_ref() {
-            let guard = state.lock_execution().await;
-            if !state.accepts_work(&wi.bundle_config_hash, &model_id) {
-                let reason = barrier_nak_reason(Some(state), &model_id);
-                info!(
-                    model = %model_id,
-                    expected_hash = %wi.bundle_config_hash,
-                    local_hash = %state.current_bundle_config_hash(),
-                    reason,
-                    "generate work refused at the config barrier before execution — NAKing"
-                );
-                nak_msg_with_reason(&msg, base_delay_ms, &self.runtime_state.telemetry, reason)
-                    .await;
-                return;
-            }
-            Some(guard)
+            Some(state.lock_execution().await)
         } else {
             None
         };
+        if unknown_bundle_config_hash([&wi], self.config_apply_state.as_deref()).is_some() {
+            let reason = barrier_nak_reason(self.config_apply_state.as_deref(), &model_id);
+            info!(
+                model = %model_id,
+                expected_hash = %wi.bundle_config_hash,
+                local_hash = %self.config_apply_state.as_ref().map(|state| state.current_bundle_config_hash()).unwrap_or_default(),
+                reason,
+                "generate work refused at the config barrier before execution — NAKing"
+            );
+            nak_msg_with_reason(&msg, base_delay_ms, &self.runtime_state.telemetry, reason).await;
+            return;
+        }
 
         let work_item_msgpack = match rmp_serde::to_vec_named(&wi) {
             Ok(bytes) => bytes,
@@ -2572,34 +2570,34 @@ impl Dispatcher {
         }
 
         let _execution_guard = if let Some(state) = self.config_apply_state.as_ref() {
-            let guard = state.lock_execution().await;
-            if let Some((expected_hash, unknown_hash_count)) =
-                unknown_bundle_config_hash(resolved.iter().map(|(wi, _, _, _, _)| wi), Some(state))
-            {
-                info!(
-                    model = %model_id,
-                    expected_hash,
-                    unknown_hash_count,
-                    local_hash = %state.current_bundle_config_hash(),
-                    "encode work refused at the config barrier before execution — NAKing"
-                );
-                let msgs_only: Vec<(WorkItem, Delivery)> = resolved
-                    .into_iter()
-                    .map(|(wi, delivery, _, _, _)| (wi, delivery))
-                    .collect();
-                nak_all_at_barrier(
-                    &msgs_only,
-                    base_nak_delay_ms(),
-                    &self.runtime_state.telemetry,
-                    Some(state),
-                )
-                .await;
-                return Ok(());
-            }
-            Some(guard)
+            Some(state.lock_execution().await)
         } else {
             None
         };
+        if let Some((expected_hash, unknown_hash_count)) = unknown_bundle_config_hash(
+            resolved.iter().map(|(wi, _, _, _, _)| wi),
+            self.config_apply_state.as_deref(),
+        ) {
+            info!(
+                model = %model_id,
+                expected_hash,
+                unknown_hash_count,
+                local_hash = %self.config_apply_state.as_ref().map(|state| state.current_bundle_config_hash()).unwrap_or_default(),
+                "encode work refused at the config barrier before execution — NAKing"
+            );
+            let msgs_only: Vec<(WorkItem, Delivery)> = resolved
+                .into_iter()
+                .map(|(wi, delivery, _, _, _)| (wi, delivery))
+                .collect();
+            nak_all_at_barrier(
+                &msgs_only,
+                base_nak_delay_ms(),
+                &self.runtime_state.telemetry,
+                self.config_apply_state.as_deref(),
+            )
+            .await;
+            return Ok(());
+        }
 
         let mut active = Vec::with_capacity(resolved.len());
         for item in resolved {
@@ -2741,34 +2739,34 @@ impl Dispatcher {
         }
 
         let _execution_guard = if let Some(state) = self.config_apply_state.as_ref() {
-            let guard = state.lock_execution().await;
-            if let Some((expected_hash, unknown_hash_count)) =
-                unknown_bundle_config_hash(prepared.iter().map(|(wi, _, _, _, _)| wi), Some(state))
-            {
-                info!(
-                    model = %model_id,
-                    expected_hash,
-                    unknown_hash_count,
-                    local_hash = %state.current_bundle_config_hash(),
-                    "score work refused at the config barrier before execution — NAKing"
-                );
-                let msgs_only: Vec<(WorkItem, Delivery)> = prepared
-                    .into_iter()
-                    .map(|(wi, delivery, _, _, _)| (wi, delivery))
-                    .collect();
-                nak_all_at_barrier(
-                    &msgs_only,
-                    base_nak_delay_ms(),
-                    &self.runtime_state.telemetry,
-                    Some(state),
-                )
-                .await;
-                return Ok(());
-            }
-            Some(guard)
+            Some(state.lock_execution().await)
         } else {
             None
         };
+        if let Some((expected_hash, unknown_hash_count)) = unknown_bundle_config_hash(
+            prepared.iter().map(|(wi, _, _, _, _)| wi),
+            self.config_apply_state.as_deref(),
+        ) {
+            info!(
+                model = %model_id,
+                expected_hash,
+                unknown_hash_count,
+                local_hash = %self.config_apply_state.as_ref().map(|state| state.current_bundle_config_hash()).unwrap_or_default(),
+                "score work refused at the config barrier before execution — NAKing"
+            );
+            let msgs_only: Vec<(WorkItem, Delivery)> = prepared
+                .into_iter()
+                .map(|(wi, delivery, _, _, _)| (wi, delivery))
+                .collect();
+            nak_all_at_barrier(
+                &msgs_only,
+                base_nak_delay_ms(),
+                &self.runtime_state.telemetry,
+                self.config_apply_state.as_deref(),
+            )
+            .await;
+            return Ok(());
+        }
 
         let mut active = Vec::with_capacity(prepared.len());
         for item in prepared {
@@ -2810,6 +2808,7 @@ impl Dispatcher {
                 instruction: wi.instruction.clone(),
                 options: wi.options.clone(),
                 profile_id: opt_non_empty(&wi.profile_id),
+                bundle_config_hash: opt_non_empty(&wi.bundle_config_hash),
                 payload_fetch_ms: *fm,
                 prepared_tokens: None,
             })
@@ -2937,34 +2936,34 @@ impl Dispatcher {
         }
 
         let _execution_guard = if let Some(state) = self.config_apply_state.as_ref() {
-            let guard = state.lock_execution().await;
-            if let Some((expected_hash, unknown_hash_count)) =
-                unknown_bundle_config_hash(resolved.iter().map(|(wi, _, _, _, _)| wi), Some(state))
-            {
-                info!(
-                    model = %model_id,
-                    expected_hash,
-                    unknown_hash_count,
-                    local_hash = %state.current_bundle_config_hash(),
-                    "extract work refused at the config barrier before execution — NAKing"
-                );
-                let msgs_only: Vec<(WorkItem, Delivery)> = resolved
-                    .into_iter()
-                    .map(|(wi, delivery, _, _, _)| (wi, delivery))
-                    .collect();
-                nak_all_at_barrier(
-                    &msgs_only,
-                    base_nak_delay_ms(),
-                    &self.runtime_state.telemetry,
-                    Some(state),
-                )
-                .await;
-                return Ok(());
-            }
-            Some(guard)
+            Some(state.lock_execution().await)
         } else {
             None
         };
+        if let Some((expected_hash, unknown_hash_count)) = unknown_bundle_config_hash(
+            resolved.iter().map(|(wi, _, _, _, _)| wi),
+            self.config_apply_state.as_deref(),
+        ) {
+            info!(
+                model = %model_id,
+                expected_hash,
+                unknown_hash_count,
+                local_hash = %self.config_apply_state.as_ref().map(|state| state.current_bundle_config_hash()).unwrap_or_default(),
+                "extract work refused at the config barrier before execution — NAKing"
+            );
+            let msgs_only: Vec<(WorkItem, Delivery)> = resolved
+                .into_iter()
+                .map(|(wi, delivery, _, _, _)| (wi, delivery))
+                .collect();
+            nak_all_at_barrier(
+                &msgs_only,
+                base_nak_delay_ms(),
+                &self.runtime_state.telemetry,
+                self.config_apply_state.as_deref(),
+            )
+            .await;
+            return Ok(());
+        }
 
         let mut active = Vec::with_capacity(resolved.len());
         for item in resolved {
@@ -3740,6 +3739,7 @@ impl Dispatcher {
                 instruction: wi.instruction.clone(),
                 options: wi.options.clone(),
                 profile_id: opt_non_empty(&wi.profile_id),
+                bundle_config_hash: opt_non_empty(&wi.bundle_config_hash),
                 payload_fetch_ms: fetch_ms,
                 prepared_tokens: None,
             };
@@ -5265,37 +5265,37 @@ async fn process_scheduler_batch(
     dispatcher.runtime_state.inflight_batches.inc();
 
     let _execution_guard = if let Some(state) = dispatcher.config_apply_state.as_ref() {
-        let guard = state.lock_execution().await;
-        if let Some((expected_hash, unknown_hash_count)) =
-            unknown_bundle_config_hash(batch.metadata.iter().map(|meta| &meta.wi), Some(state))
-        {
-            dispatcher.runtime_state.inflight_batches.dec();
-            info!(
-                model = %model_id,
-                op = op_label,
-                expected_hash,
-                unknown_hash_count,
-                local_hash = %state.current_bundle_config_hash(),
-                "scheduler work refused at the config barrier before execution — NAKing batch"
-            );
-            let msgs_only: Vec<(WorkItem, Delivery)> = batch
-                .metadata
-                .into_iter()
-                .map(|meta| (meta.wi, meta.delivery))
-                .collect();
-            nak_all_at_barrier(
-                &msgs_only,
-                base_nak_delay_ms(),
-                &dispatcher.runtime_state.telemetry,
-                Some(state),
-            )
-            .await;
-            return;
-        }
-        Some(guard)
+        Some(state.lock_execution().await)
     } else {
         None
     };
+    if let Some((expected_hash, unknown_hash_count)) = unknown_bundle_config_hash(
+        batch.metadata.iter().map(|meta| &meta.wi),
+        dispatcher.config_apply_state.as_deref(),
+    ) {
+        dispatcher.runtime_state.inflight_batches.dec();
+        info!(
+            model = %model_id,
+            op = op_label,
+            expected_hash,
+            unknown_hash_count,
+            local_hash = %dispatcher.config_apply_state.as_ref().map(|state| state.current_bundle_config_hash()).unwrap_or_default(),
+            "scheduler work refused at the config barrier before execution — NAKing batch"
+        );
+        let msgs_only: Vec<(WorkItem, Delivery)> = batch
+            .metadata
+            .into_iter()
+            .map(|meta| (meta.wi, meta.delivery))
+            .collect();
+        nak_all_at_barrier(
+            &msgs_only,
+            base_nak_delay_ms(),
+            &dispatcher.runtime_state.telemetry,
+            dispatcher.config_apply_state.as_deref(),
+        )
+        .await;
+        return;
+    }
 
     // AFTER the config execution barrier above, not before it. The barrier can
     // still NAK the whole batch for a bundle-hash change, and a NAK'd batch
@@ -7322,6 +7322,41 @@ mod tests {
     }
 
     #[test]
+    fn unknown_bundle_config_hash_refuses_pinned_work_without_authority() {
+        let mut pinned = wi("r1", 0, "A", "encode");
+        pinned.bundle_config_hash = "hash-1".into();
+        let legacy = wi("r1", 1, "A", "encode");
+        assert_eq!(unknown_bundle_config_hash([&legacy], None), None);
+        assert_eq!(
+            unknown_bundle_config_hash([&legacy, &pinned], None),
+            Some(("hash-1", 1))
+        );
+    }
+
+    #[tokio::test]
+    async fn pinned_work_never_reaches_a_backend_without_config_authority() {
+        let backend = naking_backend(None, None, None);
+        let dispatcher = dispatcher_with_backend(backend.clone());
+        let mut work = wi("pinned", 0, "A", "encode");
+        work.bundle_config_hash = "hash-1".into();
+        let events = settle_one(&dispatcher, work).await;
+        assert_eq!(backend.encoded.load(Ordering::SeqCst), 0);
+        assert!(matches!(
+            events.as_slice(),
+            [crate::delivery::LocalDeliveryEvent::Retry { .. }]
+        ));
+
+        let mut work = wi("pinned-gen", 0, "A", "generate");
+        work.bundle_config_hash = "hash-1".into();
+        work.generate = Some(MsgValue::Map(Vec::new()));
+        let error = dispatcher
+            .process_local_generate(work, |_| async { Ok(()) })
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "BUNDLE_CONFIG_MISMATCH");
+    }
+
+    #[test]
     fn unknown_bundle_config_hash_reports_first_unknown_and_count() {
         let state = ConfigApplyState::new("hash-1".into());
 
@@ -7366,7 +7401,9 @@ mod tests {
         let mut naking = 0;
         for (site, _) in production.match_indices(barrier) {
             let rest = &production[site..];
-            let refusal = &rest[..rest.find("Some(guard)").expect("a barrier keeps its guard")];
+            let refusal = &rest[..rest
+                .find("return")
+                .expect("a barrier refuses before execution")];
             if !refusal.contains("nak") {
                 continue; // local-ingest generate answers with an error, not a NAK
             }

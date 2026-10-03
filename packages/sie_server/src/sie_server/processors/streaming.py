@@ -85,6 +85,7 @@ from sie_server.core.video_frames import (
 )
 from sie_server.observability import worker_telemetry as _metrics
 from sie_server.observability.lifecycle import current_lifecycle, observe_generation
+from sie_server.processors.generate_params import extract_generate_params
 from sie_server.processors.grammar_cache import GrammarLRU
 from sie_server.processors.grammar_compile import compile_outlines
 from sie_server.processors.remote_chat import remote_chat_chunks
@@ -2991,13 +2992,7 @@ class StreamingProcessor:
 
     @staticmethod
     def _extract_generate_params(wi: WorkItem) -> dict[str, Any] | None:
-        params = wi.get("generate")  # type: ignore[call-overload]
-        if isinstance(params, dict):
-            return params
-        options = wi.get("options")
-        if isinstance(options, dict) and ("prompt" in options or "messages" in options):
-            return options
-        return None
+        return extract_generate_params(wi)
 
     @classmethod
     def _validate_generate_params(

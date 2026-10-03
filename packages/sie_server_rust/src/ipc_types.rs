@@ -278,6 +278,8 @@ pub struct ScoreBatchItem {
     #[serde(default)]
     pub profile_id: Option<String>,
     #[serde(default)]
+    pub bundle_config_hash: Option<String>,
+    #[serde(default)]
     pub payload_fetch_ms: f64,
     /// Optional sidecar-prepared tokens ordered as query followed by score
     /// documents. The current sidecar leaves this unset for score requests,
@@ -650,6 +652,7 @@ mod tests {
             instruction: None,
             options: None,
             profile_id: Some("candle".to_string()),
+            bundle_config_hash: None,
             payload_fetch_ms: 0.0,
             prepared_tokens: Some(PreparedTokens {
                 input_ids: vec![vec![1, 2], vec![3, 4, 5]],

@@ -370,6 +370,7 @@ class ScoreBatchItem(msgspec.Struct):
     instruction: str | None = None
     options: dict[str, Any] | None = None
     profile_id: str | None = None
+    bundle_config_hash: str | None = None
     payload_fetch_ms: float = 0.0
     # Rust-side fast-path tokenisation. Wire layout matches the Rust
     # dispatcher: ``input_ids[0]`` is the query, ``input_ids[1..]`` are

@@ -476,6 +476,31 @@ def compute_bundle_config_view(
     return BundleConfigView(_serialize_hash_entries(entries), sorted(unsupported))
 
 
+def bundle_model_is_supported(
+    registry: ModelRegistry,
+    bundle_id: str,
+    model_id: str,
+    *,
+    control_plane_adapters: Collection[str] | None = None,
+) -> bool:
+    """Whether the selected concrete route belongs to the advertised hash scope.
+
+    A registry may also contain profiles for other bundles. Their mere presence
+    cannot authorize execution using the hash of this bundle's local profile.
+    """
+    config = registry.get_configs_snapshot(bundle_id).get(model_id)
+    if config is None:
+        return False
+    try:
+        image_adapters = _bundle_adapter_modules(bundle_id)
+    except BundleMetadataUnavailableError:
+        return False
+    scope = frozenset(control_plane_adapters) if control_plane_adapters is not None else image_adapters
+    return _profile_matches_bundle(config, "default", scope) and _profile_matches_bundle(
+        config, "default", image_adapters
+    )
+
+
 def _config_base_name(name: str, config: ServerModelConfig) -> str:
     source = config.synthetic_profile_variant_source
     return source[0] if source is not None else name

@@ -437,6 +437,7 @@ mod tests {
             instruction: None,
             options: None,
             profile_id: None,
+            bundle_config_hash: None,
             payload_fetch_ms: 0.0,
             prepared_tokens,
         }

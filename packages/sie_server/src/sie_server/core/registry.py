@@ -19,7 +19,7 @@ import json
 import logging
 import threading
 import time
-from collections.abc import Collection, Coroutine, Iterable
+from collections.abc import AsyncIterator, Collection, Coroutine, Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -331,6 +331,13 @@ class ModelRegistry:
         self._model_load_locks: dict[str, asyncio.Lock] = {}
         self._load_admission_lock: asyncio.Lock | None = None
         self._config_update_lock: asyncio.Lock | None = None
+        # Independent of the load locks: inference can lazily load a model
+        # while holding a shared lease. Config writers enter before taking
+        # any load/config lock, so they cannot deadlock those readers.
+        self._execution_condition = asyncio.Condition()
+        self._execution_readers = 0
+        self._execution_writer = False
+        self._execution_writers_waiting = 0
         self._unload_done: dict[str, asyncio.Event] = {}
         # Async lifecycle state is owned by one long-lived server event loop.
         # Legacy synchronous callers are serialized independently until that
@@ -547,6 +554,12 @@ class ModelRegistry:
         from sie_sdk.storage import is_cloud_path
 
         all_configs = load_model_configs(models_dir)
+        prospective = {
+            name: config
+            for name, config in all_configs.items()
+            if (self._model_filter is None or name in self._model_filter) and self.accepts_config_pool(config)
+        }
+        self._check_sync_config_replacement(prospective)
 
         # Apply model filter if specified
         if self._model_filter is not None:
@@ -628,6 +641,7 @@ class ModelRegistry:
         Returns:
             List of newly discovered model names.
         """
+        self._check_sync_config_mutation()
         if self._models_dir is None:
             return []
 
@@ -1256,6 +1270,66 @@ class ModelRegistry:
         if self._config_update_lock is None:
             self._config_update_lock = asyncio.Lock()
         return self._config_update_lock
+
+    @contextlib.asynccontextmanager
+    async def execution_lease(self) -> AsyncIterator[None]:
+        """Pin configuration through an IPC execution, allowing concurrent readers.
+
+        Writers have priority once queued. Loading/eviction may proceed under
+        a lease, but the selected configuration cannot change until it ends.
+        """
+        self._bind_lifecycle_loop()
+        async with self._execution_condition:
+            await self._execution_condition.wait_for(
+                lambda: not self._execution_writer and self._execution_writers_waiting == 0
+            )
+            self._execution_readers += 1
+        try:
+            yield
+        finally:
+            async with self._execution_condition:
+                self._execution_readers -= 1
+                self._execution_condition.notify_all()
+
+    @contextlib.asynccontextmanager
+    async def _config_mutation_lease(self) -> AsyncIterator[None]:
+        """Wait for pinned executions before changing the registry configuration."""
+        self._bind_lifecycle_loop()
+        async with self._execution_condition:
+            self._execution_writers_waiting += 1
+            try:
+                await self._execution_condition.wait_for(
+                    lambda: not self._execution_writer and self._execution_readers == 0
+                )
+                self._execution_writer = True
+            finally:
+                self._execution_writers_waiting -= 1
+                self._execution_condition.notify_all()
+        try:
+            yield
+        finally:
+            async with self._execution_condition:
+                self._execution_writer = False
+                self._execution_condition.notify_all()
+
+    def _check_sync_config_mutation(self) -> None:
+        """A synchronous writer cannot wait for an in-flight async execution."""
+        if self._lifecycle_loop is not None and self._lifecycle_loop.is_running():
+            try:
+                current_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                current_loop = None
+            if current_loop is not self._lifecycle_loop:
+                raise RuntimeError("configuration belongs to the lifecycle loop; await an asynchronous config update")
+        if self._execution_readers or self._execution_writer or self._execution_writers_waiting:
+            raise RuntimeError("configuration is in use; await an asynchronous config update")
+
+    def _check_sync_config_replacement(self, prospective: Mapping[str, ModelConfig]) -> None:
+        """A synchronous writer cannot drain an adapter bound to the old config."""
+        for model_id in self._loaded.keys() | self._loading | self._unloading:
+            candidate = prospective.get(model_id)
+            if candidate is None or not _model_configs_semantically_equal(self._configs.get(model_id), candidate):
+                raise RuntimeError("resident model configuration would change; await an asynchronous config update")
 
     def _check_model_loadable(self, name: str) -> tuple[ModelConfig, Path]:
         """Check if a model can be loaded (exists in registry).
@@ -2324,8 +2398,12 @@ class ModelRegistry:
             Concrete config ids considered by this update, including generated
             profile variants.
         """
+        self._check_sync_config_mutation()
         expanded, updated_ids, removed_ids = self._prepare_config_update(config)
         self._preflight_config_update(expanded, updated_ids, removed_ids)
+        self._check_sync_config_replacement(
+            {**{name: value for name, value in self._configs.items() if name not in removed_ids}, **expanded}
+        )
         if removed_ids:
             removed = ", ".join(sorted(removed_ids))
             msg = f"cannot synchronously remove model config(s): {removed}; use add_config_async"
@@ -2338,7 +2416,7 @@ class ModelRegistry:
     async def add_config_async(self, config: ModelConfig, model_dir: Path | None = None) -> set[str]:
         """Add a model config, draining removed loaded variants while no load is admitted."""
         update_lock = self._get_config_update_lock()
-        async with update_lock:
+        async with self._config_mutation_lease(), update_lock:
             expanded, updated_ids, removed_ids = self._prepare_config_update(config)
             self._preflight_config_update(expanded, updated_ids, removed_ids)
             changed_ids = {
@@ -2368,7 +2446,7 @@ class ModelRegistry:
         and handles profile-only configs whose bare base id is not routable.
         """
         update_lock = self._get_config_update_lock()
-        async with update_lock:
+        async with self._config_mutation_lease(), update_lock:
             removed_ids = ({model_id} | self._synthetic_profile_variant_ids_for_base(model_id)) & set(self._configs)
             if not removed_ids:
                 return set()
@@ -2520,7 +2598,7 @@ class ModelRegistry:
             new_configs[config.sie_id] = config
 
         update_lock = self._get_config_update_lock()
-        async with update_lock:
+        async with self._config_mutation_lease(), update_lock:
             retained_names: set[str] = set()
             if retained_models:
                 snapshot_bases = {_config_base_name(name, config) for name, config in new_configs.items()}

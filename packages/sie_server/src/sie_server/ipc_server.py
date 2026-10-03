@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import contextvars
 import hashlib
 import json
@@ -8,6 +9,7 @@ import logging
 import os
 import struct
 import time
+from collections.abc import AsyncIterator, Iterable
 from pathlib import Path
 from types import TracebackType
 from typing import Any, Self, cast
@@ -17,6 +19,7 @@ import msgspec
 
 from sie_server.adapter_call_loop import handle_run_batch
 from sie_server.core.gpu_health import gpu_is_healthy_async
+from sie_server.core.grammar_routing import resolve_grammar_serving_model
 from sie_server.core.readiness import is_ready
 from sie_server.ipc_types import (
     IPC_VERSION,
@@ -41,6 +44,7 @@ from sie_server.ipc_types import (
     EnsureModelReadyResponse,
     GenerateEvent,
     IpcResponseChunkV1,
+    ItemOutcome,
     PingRequest,
     PingResponse,
     ProcessEncodeBatchRequest,
@@ -59,6 +63,7 @@ from sie_server.ipc_types import (
     WorkerCapabilitiesResponse,
 )
 from sie_server.processors.admission import resolve_admission_enabled
+from sie_server.processors.generate_params import extract_generate_params
 from sie_server.queue_executor import QueueExecutor
 
 logger = logging.getLogger(__name__)
@@ -668,16 +673,65 @@ class IpcServer:
         )
 
     async def _handle_process_encode(self, req: ProcessEncodeBatchRequest) -> BatchOutcome:
-        return await self._executor.process_encode_batch(req)
+        async with self._execution_config(req.model_id, (item.bundle_config_hash for item in req.items)) as valid:
+            if not valid:
+                return self._config_retry(req.items)
+            return await self._executor.process_encode_batch(req)
 
     async def _handle_process_score(self, req: ProcessScoreBatchRequest) -> BatchOutcome:
-        return await self._executor.process_score_batch(req)
+        async with self._execution_config(req.model_id, (item.bundle_config_hash for item in req.items)) as valid:
+            if not valid:
+                return self._config_retry(req.items)
+            return await self._executor.process_score_batch(req)
 
     async def _handle_process_extract(self, req: ProcessExtractBatchRequest) -> BatchOutcome:
-        return await self._executor.process_extract_batch(req)
+        async with self._execution_config(req.model_id, (item.bundle_config_hash for item in req.items)) as valid:
+            if not valid:
+                return self._config_retry(req.items)
+            return await self._executor.process_extract_batch(req)
 
     async def _handle_run_batch(self, req: RunBatchRequest) -> BatchOutcome:
-        return await handle_run_batch(self._executor, req)
+        hashes = (
+            payload.bundle_config_hash
+            for item in req.items
+            if (payload := {"encode": item.encode, "score": item.score, "extract": item.extract}.get(item.op))
+            is not None
+        )
+        async with self._execution_config(req.model_id, hashes) as valid:
+            if not valid:
+                return self._config_retry(req.items)
+            return await handle_run_batch(self._executor, req)
+
+    @contextlib.asynccontextmanager
+    async def _execution_config(self, model_id: str, hashes: Iterable[str | None]) -> AsyncIterator[bool]:
+        """Verify pinned work against live Python authority and retain its config.
+
+        The sidecar barrier cannot cover filesystem reload or direct registry
+        updates. Empty legacy hashes retain their existing behavior; a known
+        hash needs a live, supported model in this worker's advertised scope.
+        """
+        expected = {value for value in hashes if value}
+        if not expected:
+            yield True
+            return
+        async with self._executor.registry.execution_lease():
+            yield self._executor.accepts_execution_config(self._bundle_id, model_id, expected)
+
+    @staticmethod
+    def _config_retry(items: Iterable[Any]) -> BatchOutcome:
+        """Return unsettled work to the sidecar without executing any inputs."""
+        return BatchOutcome(
+            outcomes=[
+                ItemOutcome(
+                    work_item_id=item.work_item_id,
+                    request_id=item.request_id,
+                    item_index=item.item_index,
+                    disposition="nak_retry",
+                    nak_delay_ms=5000,
+                )
+                for item in items
+            ]
+        )
 
     async def _handle_apply_model_config(self, req: ApplyModelConfigRequest) -> ApplyModelConfigResponse:
         return await self._executor.apply_model_config(req)
@@ -738,6 +792,36 @@ class IpcServer:
         request_id: str,
         writer: asyncio.StreamWriter,
     ) -> None:
+        work_item = msgpack.unpackb(req.work_item_msgpack, raw=False)
+        if not isinstance(work_item, dict):
+            raise IpcServerError("generation work item must be a mapping")
+        expected_hash = work_item.get("bundle_config_hash")
+        if expected_hash is not None and not isinstance(expected_hash, str):
+            raise IpcServerError("generation bundle_config_hash must be a string")
+        async with self._execution_config(req.model_id, [expected_hash]) as valid:
+            # Gateway generation routing already selects the grammar profile.
+            # Those routing fields are not part of the bundle hash; a worker
+            # must not reinterpret pinned work using a changed grammar target.
+            if expected_hash and valid:
+                generate = extract_generate_params(work_item)
+                valid = work_item.get("model_id") == req.model_id
+                if valid and isinstance(generate, dict) and generate.get("grammar") is not None:
+                    valid = resolve_grammar_serving_model(self._executor.registry, req.model_id) == req.model_id
+            if not valid:
+                sink = _IpcGenerateSink(self, writer, request_id)
+                await sink.send(GenerateEvent(kind="nak", delay_ms=5000))
+                await sink.send(GenerateEvent(kind="done"))
+                return
+            await self._process_generate(req, request_id=request_id, writer=writer)
+
+    async def _process_generate(
+        self,
+        req: ProcessGenerateRequest,
+        *,
+        request_id: str,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        """Execute generation while the caller retains its configuration lease."""
         sink = _IpcGenerateSink(self, writer, request_id)
         msg = _IpcGenerateMessage(sink, req.work_item_msgpack)
         token = _GENERATE_SINK.set(sink)

@@ -58,6 +58,147 @@ async def _drain_background_tasks(registry: ModelRegistry) -> None:
     assert not still_pending, f"background tasks did not settle: {len(still_pending)} pending"
 
 
+@pytest.mark.parametrize("mutation", ["add", "remove", "replace"])
+async def test_pinned_executions_delay_config_mutation_without_serializing_readers(mutation: str) -> None:
+    registry = ModelRegistry()
+    registry.add_config(_make_config())
+    release = asyncio.Event()
+    both_entered = asyncio.Event()
+    entered = 0
+
+    async def inference() -> None:
+        nonlocal entered
+        async with registry.execution_lease():
+            entered += 1
+            if entered == 2:
+                both_entered.set()
+            await release.wait()
+            assert registry.get_config("test").tasks.encode.dense.dim == 768
+
+    readers = [asyncio.create_task(inference()) for _ in range(2)]
+    await asyncio.wait_for(both_entered.wait(), 1)
+    changed = _make_config(dense_dim=384)
+    operation = (
+        registry.add_config_async(changed)
+        if mutation == "add"
+        else registry.remove_config_async("test")
+        if mutation == "remove"
+        else registry.replace_configs_async([changed])
+    )
+    writer = asyncio.create_task(operation)
+    await asyncio.sleep(0)
+    assert not writer.done()
+    with pytest.raises(RuntimeError, match="configuration is in use"):
+        registry.add_config(changed)
+    with pytest.raises(RuntimeError, match="configuration is in use"):
+        registry.rescan_configs()
+    release.set()
+    await asyncio.wait_for(asyncio.gather(*readers, writer), 1)
+    assert (
+        not registry.has_model("test")
+        if mutation == "remove"
+        else registry.get_config("test").tasks.encode.dense.dim == 384
+    )
+
+
+async def test_a_waiting_config_writer_does_not_deadlock_a_reader_lazy_load() -> None:
+    registry = ModelRegistry()
+    registry.add_config(_make_config())
+    adapter = MagicMock()
+    adapter.memory_footprint.return_value = 1000
+    async with registry.execution_lease():
+        writer = asyncio.create_task(registry.add_config_async(_make_config(dense_dim=384)))
+        await asyncio.sleep(0)
+        with patch("sie_server.core.model_loader.load_adapter", return_value=adapter):
+            assert await asyncio.wait_for(registry.load_async("test", "cpu"), 1) is adapter
+        assert not writer.done()
+    await asyncio.wait_for(writer, 1)
+    assert registry.get_config("test").tasks.encode.dense.dim == 384
+
+
+async def test_cancelled_config_writer_reopens_reader_admission() -> None:
+    registry = ModelRegistry()
+    registry.add_config(_make_config())
+    async with registry.execution_lease():
+        writer = asyncio.create_task(registry.remove_config_async("test"))
+        await asyncio.sleep(0)
+        writer.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await writer
+        async with asyncio.timeout(1), registry.execution_lease():
+            assert registry.has_model("test")
+
+
+async def test_cancelled_execution_releases_config_writer_and_foreign_sync_writes_refuse() -> None:
+    registry = ModelRegistry()
+    registry.add_config(_make_config())
+    entered = asyncio.Event()
+
+    async def inference() -> None:
+        async with registry.execution_lease():
+            entered.set()
+            await asyncio.Event().wait()
+
+    reader = asyncio.create_task(inference())
+    await entered.wait()
+    with pytest.raises(RuntimeError, match="lifecycle loop"):
+        await asyncio.to_thread(registry.add_config, _make_config(dense_dim=384))
+    writer = asyncio.create_task(registry.remove_config_async("test"))
+    reader.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await reader
+    await asyncio.wait_for(writer, 1)
+    assert not registry.has_model("test")
+
+
+async def test_config_writer_runs_before_new_executions() -> None:
+    registry = ModelRegistry()
+    registry.add_config(_make_config())
+    order: list[str] = []
+
+    async def mutate() -> None:
+        await registry.add_config_async(_make_config(dense_dim=384))
+        order.append("writer")
+
+    async def infer() -> None:
+        async with registry.execution_lease():
+            assert registry.get_config("test").tasks.encode.dense.dim == 384
+            order.append("reader")
+
+    async with registry.execution_lease():
+        writer = asyncio.create_task(mutate())
+        await asyncio.sleep(0)
+        reader = asyncio.create_task(infer())
+        await asyncio.sleep(0)
+        assert order == []
+    await asyncio.wait_for(asyncio.gather(writer, reader), 1)
+    assert order == ["writer", "reader"]
+
+
+@pytest.mark.parametrize("mutation", ["add", "rescan"])
+@pytest.mark.parametrize("state", ["loaded", "loading", "unloading"])
+async def test_sync_configuration_cannot_leave_an_adapter_bound_to_old_options(mutation: str, state: str) -> None:
+    registry = ModelRegistry()
+    registry.add_config(_make_config())
+    if state == "loaded":
+        registry._loaded["test"] = MagicMock()
+    else:
+        getattr(registry, f"_{state}").add("test")
+    changed = _make_config(dense_dim=384)
+    with pytest.raises(RuntimeError, match="resident model configuration would change"):
+        if mutation == "add":
+            registry.add_config(changed)
+        else:
+            registry._models_dir = "/fake/models"
+            with patch("sie_server.core.registry.load_model_configs", return_value={"test": changed}):
+                registry.rescan_configs()
+    assert registry.get_config("test").tasks.encode.dense.dim == 768
+    # An unchanged resident config and unrelated additions remain safe.
+    registry.add_config(_make_config())
+    registry.add_config(_make_config(name="unrelated"))
+    assert registry.has_model("unrelated")
+
+
 class TestAsyncLoading:
     """Tests for async model loading."""
 
