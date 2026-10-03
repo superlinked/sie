@@ -241,3 +241,22 @@ an admission gate can reject stale or future evidence. Remeasure after changes
 to weights, serving settings, software, endpoint or request transforms.
 This delivery produces evidence; hybrid routing still requires its runtime
 admission gate and does not become enabled by writing a record.
+
+
+## Single-node generation fallback
+
+A model with a local generation profile and a remote generation profile may
+use `routing: {policy: fallback, fallback_profile: remote}`. Native generation,
+chat, completions and supported buffered Responses share the bridge decision.
+The request is validated before loading or remote dispatch. A local
+`MODEL_LOADING` refusal starts local warm-up and makes one remote attempt;
+`unhealthy` remains an explicit trigger. Remote serving forbidden by the
+caller keeps the request local.
+
+Streaming native generation and completions, like chat, read their first event
+before committing HTTP success. If the bridge fails before output, the response
+retains the original local refusal and retry delay and discloses the fallback
+error. After the first event the stream reports failure without replaying work.
+An explicitly named remote profile is served directly. Cluster fallback still
+requires the gateway routing and refusal-restoration delivery; admitting the
+model configuration does not make a gateway bridge requests by itself.

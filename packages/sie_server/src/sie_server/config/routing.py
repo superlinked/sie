@@ -72,10 +72,6 @@ def validate_model_routing(config: ModelConfig) -> None:
     if routing.policy == "threshold":
         msg = f"Model '{config.sie_id}': routing policy 'threshold' is not available yet"
         raise ValueError(msg)
-    # Token output support alone does not make a bridged stream safe: the
-    # ingress must preserve the original refusal before committing its 200.
-    if routing.policy == "fallback" and config.tasks.generate is not None:
-        raise ValueError("routing policy 'fallback' cannot serve generate before pre-output fallback handling")
     refusal = hybrid_equivalence_refusal(config) or remote_output_refusal(config)
     if refusal is not None:
         raise ValueError(refusal)

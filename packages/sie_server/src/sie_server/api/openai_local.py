@@ -36,6 +36,7 @@ from urllib.parse import urlsplit
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+from jsonschema import Draft202012Validator, SchemaError
 from sie_sdk.queue_types import denormalize_model_id
 
 from sie_server.adapters._generation_base import (
@@ -51,6 +52,7 @@ from sie_server.adapters.errors import InputTooLongError, UpstreamUnavailableErr
 from sie_server.adapters.mlx.generation import MLXGenerationAdapter, normalize_mlx_seed
 from sie_server.adapters.remote._http import RemoteUpstreamError
 from sie_server.adapters.sglang.generation import SGLangGenerationAdapter
+from sie_server.api.generate import _validate_logit_bias, _validate_logprobs, _validate_schema_shape
 from sie_server.api.helpers import (
     ModelStateChecker,
     ensure_finite_scores,
@@ -103,6 +105,7 @@ _MAX_BODY_BYTES = int(os.environ.get("SIE_CHAT_MAX_BODY_BYTES", str(8 * 1024 * 1
 # token cap below remains authoritative for normal output; this is a final byte
 # fence for malformed/non-token responses.
 _MAX_CHAT_RESPONSE_BYTES = int(os.environ.get("SIE_CHAT_MAX_RESPONSE_BYTES", str(32 * 1024 * 1024)))
+_MAX_CHAT_TOOLS = 64
 _MAX_CHAT_MESSAGES = 4096
 _MAX_CHAT_CHOICES = 128
 _MAX_CHAT_VIDEOS = 1
@@ -454,6 +457,10 @@ def _validate_cuda_chat_body(body: dict[str, Any]) -> None:
         unknown = sorted(unknown_fields)[0]
         raise _bad_request(f"field '{unknown}' is not supported", param=unknown, code="unsupported_field")
 
+    _validate_common_chat_body(body)
+
+
+def _validate_common_chat_body(body: dict[str, Any]) -> None:
     n = body.get("n")
     if n is not None and (isinstance(n, bool) or not isinstance(n, int) or not (1 <= n <= _MAX_CHAT_CHOICES)):
         raise _bad_request(f"'n' must be an integer in [1, {_MAX_CHAT_CHOICES}]", param="n")
@@ -489,12 +496,88 @@ def _validate_cuda_chat_body(body: dict[str, Any]) -> None:
     if top_k is not None and (isinstance(top_k, bool) or not isinstance(top_k, int) or top_k < 1):
         raise _bad_request("'top_k' must be an integer >= 1", param="top_k")
 
+    _validate_logprobs(body.get("logprobs"), body.get("top_logprobs"))
+    try:
+        _validate_logit_bias(body.get("logit_bias"))
+    except OverflowError:
+        raise _bad_request("'logit_bias' values must be finite numbers", param="logit_bias") from None
+    stop = body.get("stop")
+    if stop is not None and not (
+        isinstance(stop, str) or (isinstance(stop, list) and all(isinstance(value, str) for value in stop))
+    ):
+        raise _bad_request("'stop' must be a string or array of strings", param="stop")
+    for field in ("parallel_tool_calls",):
+        if body.get(field) is not None and not isinstance(body[field], bool):
+            raise _bad_request(f"'{field}' must be a boolean", param=field)
+    for field in ("user", "safety_identifier"):
+        if body.get(field) is not None and not isinstance(body[field], str):
+            raise _bad_request(f"'{field}' must be a string", param=field)
+    _validate_chat_tools(body)
+
+
+def _validate_chat_tools(body: dict[str, Any]) -> None:
+    tools = body.get("tools")
+    names: set[str] = set()
+    if tools is not None:
+        if not isinstance(tools, list) or len(tools) > _MAX_CHAT_TOOLS:
+            raise _bad_request("'tools' must be an array of at most 64 functions", param="tools")
+        for tool in tools:
+            function = tool.get("function") if isinstance(tool, dict) else None
+            if not isinstance(function, dict) or tool.get("type") != "function":
+                raise _bad_request("'tools' entries must declare a function object", param="tools")
+            name = function.get("name")
+            if not isinstance(name, str) or not name:
+                raise _bad_request("tool function names must be non-empty strings", param="tools")
+            names.add(name)
+            if function.get("description") is not None and not isinstance(function["description"], str):
+                raise _bad_request("tool descriptions must be strings", param="tools")
+            if function.get("strict") is not None and not isinstance(function["strict"], bool):
+                raise _bad_request("tool strict must be a boolean", param="tools")
+            parameters = function.get("parameters")
+            if parameters is not None:
+                if not isinstance(parameters, dict):
+                    raise _bad_request("tool parameters must be a JSON Schema object", param="tools")
+                try:
+                    _validate_schema_shape(parameters)
+                    Draft202012Validator.check_schema(parameters)
+                except (HTTPException, SchemaError):
+                    raise _bad_request("tool parameters must be a supported JSON Schema", param="tools") from None
+    choice = body.get("tool_choice")
+    if choice is None or choice in ("auto", "none"):
+        return
+    if choice == "required":
+        if not names:
+            raise _bad_request("required tool_choice needs tools", param="tool_choice")
+        return
+    function = choice.get("function") if isinstance(choice, dict) else None
+    if (
+        not isinstance(function, dict)
+        or choice.get("type") != "function"
+        or not isinstance(function.get("name"), str)
+        or function["name"] not in names
+    ):
+        raise _bad_request("'tool_choice' must name a declared function", param="tool_choice")
+
 
 def _validate_mlx_chat_body(body: dict[str, Any]) -> None:
     unknown_fields = body.keys() - _MLX_CHAT_FIELDS
     if unknown_fields:
         unknown = sorted(unknown_fields)[0]
         raise _bad_request(f"field '{unknown}' is not supported", param=unknown, code="unsupported_field")
+
+    _validate_common_chat_body(body)
+
+    min_p = body.get("min_p")
+    if min_p is not None and (isinstance(min_p, bool) or not isinstance(min_p, int | float) or not 0 <= min_p <= 1):
+        raise _bad_request("'min_p' must be a number in [0, 1]", param="min_p")
+    context_size = body.get("repetition_context_size")
+    if context_size is not None and (isinstance(context_size, bool) or not isinstance(context_size, int)):
+        raise _bad_request("'repetition_context_size' must be an integer", param="repetition_context_size")
+    mapping = body.get("role_mapping")
+    if mapping is not None and (
+        not isinstance(mapping, dict) or any(not isinstance(value, str) for value in mapping.values())
+    ):
+        raise _bad_request("'role_mapping' must be an object of strings", param="role_mapping")
 
 
 def _decode_data_uri_video(url: str) -> tuple[bytes, str]:
@@ -1067,6 +1150,15 @@ async def _remote_chat_events(
         await aclose_with_error_precedence(iterator, outcome_selected=True, context="remote chat adapter")
 
 
+def _validate_remote_chat_media(messages: list[dict[str, Any]]) -> None:
+    for message in messages:
+        content = message.get("content")
+        if isinstance(content, list) and any(part.get("type") not in {"text", "input_text"} for part in content):
+            raise _bad_request(
+                "remote chat does not support media messages", param="messages", code="unsupported_field"
+            )
+
+
 async def _remote_chat_response(
     adapter: GenerationAdapter,
     body: dict[str, Any],
@@ -1152,7 +1244,14 @@ async def chat_completions(
     (never FastAPI's ``{"detail": ...}`` wrapper), matching ``/v1/completions``.
     """
     try:
-        return await _chat_completions(http_request, x_machine_profile)
+        response = await _chat_completions(http_request, x_machine_profile)
+        if isinstance(response, JSONResponse) and response.status_code >= status.HTTP_400_BAD_REQUEST:
+            payload = json.loads(bytes(response.body))
+            code = payload.get("error", {}).get("code")
+            refusal = fallback_refusal(http_request, response.status_code, code)
+            if refusal is not None:
+                return openai_error_response(refusal)
+        return response
     except HTTPException as exc:
         return openai_error_response(fallback_refusal(http_request, exc.status_code, error_code(exc)) or exc)
 
@@ -1243,40 +1342,31 @@ async def _chat_completions(
             _validate_cuda_chat_body(body)
         else:
             _validate_mlx_chat_body(body)
+        options = body.get("stream_options")
+        if options is not None and (
+            not isinstance(options, dict)
+            or bool(options.keys() - {"include_usage"})
+            or ("include_usage" in options and not isinstance(options["include_usage"], bool))
+        ):
+            raise _bad_request("'stream_options' must contain only boolean 'include_usage'", param="stream_options")
         if remote_chat:
-            options = body.get("stream_options")
-            if options is not None and (
-                not isinstance(options, dict)
-                or bool(options.keys() - {"include_usage"})
-                or ("include_usage" in options and not isinstance(options["include_usage"], bool))
-            ):
-                raise _bad_request("'stream_options' must contain only boolean 'include_usage'", param="stream_options")
-            for message in messages:
-                content = message.get("content")
-                if isinstance(content, list) and any(
-                    part.get("type") not in {"text", "input_text"} for part in content
-                ):
-                    raise _bad_request(
-                        "remote chat does not support media messages",
-                        param="messages",
-                        code="unsupported_field",
-                    )
+            _validate_remote_chat_media(messages)
+
+        # Normalize and reject client errors before the bridge owns a local
+        # refusal; otherwise a caller error could be rewritten as that refusal.
+        prepared_chat = _prepare_chat_body(
+            body, config=config, max_completion_tokens=max_completion_tokens, max_tokens=max_tokens, seed=seed
+        )
 
         route = await route_request(http_request, requested_key, span, serving_key=registry_key)
 
         adapter = registry.get(route.key)
         registry.touch_lru(route.key)
-        if remote_chat and isinstance(adapter, GenerationAdapter):
-            proxied = _prepare_chat_body(
-                body,
-                config=config,
-                max_completion_tokens=max_completion_tokens,
-                max_tokens=max_tokens,
-                seed=seed,
-            )
+        if serves_remotely(registry.get_config(route.key)) and isinstance(adapter, GenerationAdapter):
+            _validate_remote_chat_media(messages)
             return await _remote_chat_response(
                 adapter,
-                proxied,
+                prepared_chat,
                 requested_model=model,
                 config=config,
                 stream=bool(stream_opt),

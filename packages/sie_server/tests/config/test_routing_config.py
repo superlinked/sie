@@ -289,14 +289,13 @@ def test_hybrid_extract_is_allowed() -> None:
     validate_model_routing(ModelConfig.model_validate(extract_hybrid()))
 
 
-def test_hybrid_generation_is_refused_before_pre_output_fallback_handling() -> None:
+def test_hybrid_generation_is_supported_with_pre_output_fallback_handling() -> None:
     profiles = {
         "default": local_profile(kv_budget_tokens=4096),
         "remote": remote_profile(GENERATE_REMOTE, kv_budget_tokens=4096),
     }
 
-    with pytest.raises(ValueError, match=r"routing.*generate"):
-        validate_model_routing(ModelConfig.model_validate(hybrid(tasks=GENERATE, profiles=profiles)))
+    validate_model_routing(ModelConfig.model_validate(hybrid(tasks=GENERATE, profiles=profiles)))
 
 
 @pytest.mark.parametrize(

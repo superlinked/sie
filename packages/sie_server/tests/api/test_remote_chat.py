@@ -2,7 +2,7 @@ import asyncio
 import json
 from collections.abc import AsyncIterator, Callable, Iterator
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
@@ -13,9 +13,12 @@ from sie_server.adapters.remote.openai import OpenAIUpstreamAdapter
 from sie_server.adapters.remote.sie import SieUpstreamAdapter
 from sie_server.api import openai_local
 from sie_server.api.generate import router as generate_router
+from sie_server.api.openai_completions import router as completions_router
 from sie_server.api.openai_local import _remote_chat_response, router
+from sie_server.api.openai_responses import router as responses_router
 from sie_server.config.model import ModelConfig
 from sie_server.config.upstreams import Upstream, install_upstreams
+from sie_server.core.loader import expand_profile_variants
 from sie_server.core.upstream_client import upstream_client
 
 MODEL = "caller/model"
@@ -112,6 +115,8 @@ def remote_chat(
     app = FastAPI()
     app.include_router(router)
     app.include_router(generate_router)
+    app.include_router(completions_router)
+    app.include_router(responses_router)
     app.state.registry = registry
     requests: list[httpx.Request] = []
     try:
@@ -450,3 +455,273 @@ def test_native_remote_failure_after_output_remains_a_stream_error(remote_chat: 
     assert len(requests) == 1
     assert stream.closed
     assert upstream_limiter("chat-api")._in_flight == 0
+
+
+_GENERATION_SURFACES = [
+    ("native", False),
+    ("native", True),
+    ("chat", False),
+    ("chat", True),
+    ("completions", False),
+    ("completions", True),
+    ("responses", False),
+]
+
+
+def _cold_generation_bridge(remote_chat: tuple) -> MagicMock:
+    client, _, remote_config, _ = remote_chat
+    remote_config.profiles["default"].adapter_options.runtime.clear()
+    data = remote_config.model_dump(mode="json")
+    data.update(
+        remote_backed=False, hf_id="weights/model", routing={"policy": "fallback", "fallback_profile": "remote"}
+    )
+    data["profiles"] = {
+        "remote": data["profiles"]["default"],
+        "default": {
+            "adapter_path": "sie_server.adapters.sglang:SGLangGenerationAdapter",
+            "max_batch_tokens": 8192,
+            "kv_budget_tokens": 4096,
+        },
+    }
+    config = ModelConfig.model_validate(data)
+    variants = expand_profile_variants([config])
+    registry = client.app.state.registry
+    registry.get_config.side_effect = variants.__getitem__
+    registry.is_loading.side_effect = lambda name: name == MODEL
+    registry.is_loaded.side_effect = lambda name: name != MODEL
+    registry.start_load_async = AsyncMock(return_value=True)
+    return registry
+
+
+def _generation_request(surface: str, *, stream: bool) -> tuple[str, dict[str, Any]]:
+    if surface == "native":
+        return f"/v1/generate/{SAFE_MODEL}", {"prompt": "question", "max_new_tokens": 8, "stream": stream}
+    if surface == "chat":
+        return "/v1/chat/completions", {**BODY, "stream": stream, "max_tokens": 8}
+    if surface == "responses":
+        return "/v1/responses", {"model": MODEL, "input": "question", "max_output_tokens": 8}
+    return "/v1/completions", {"model": MODEL, "prompt": "question", "max_tokens": 8, "stream": stream}
+
+
+@pytest.mark.parametrize(("surface", "streaming"), _GENERATION_SURFACES)
+@pytest.mark.parametrize("upstream_status", [400, 503, 500, 200])
+def test_generation_bridge_restores_original_local_refusal_across_surfaces(
+    remote_chat: tuple, surface: str, streaming: bool, upstream_status: int
+) -> None:
+    client, _, _, requests = remote_chat
+    registry = _cold_generation_bridge(remote_chat)
+    answer_with(
+        remote_chat,
+        json_response(
+            upstream_status, {"error": {"code": "INVALID_INPUT", "message": "private"}}, headers={"retry-after": "19"}
+        ),
+    )
+    path, body = _generation_request(surface, stream=streaming)
+    response = client.post(path, json=body)
+    assert response.status_code == 503, response.text
+    payload = response.json()
+    error = payload.get("error", payload.get("detail"))
+    assert error["code"] == "MODEL_LOADING"
+    assert response.headers["retry-after"] == "5"
+    assert response.headers["X-SIE-Served-By"] == "local"
+    assert response.headers["X-SIE-Fallback-Reason"] == "model_loading"
+    assert "X-SIE-Fallback-Error" in response.headers
+    assert "private" not in response.text
+    assert len(requests) == 1
+    registry.start_load_async.assert_awaited_once_with(MODEL, "cpu")
+    assert upstream_limiter("chat-api")._in_flight == 0
+
+
+@pytest.mark.parametrize(("surface", "streaming"), _GENERATION_SURFACES)
+def test_remote_forbid_keeps_cold_generation_off_the_bridge(remote_chat: tuple, surface: str, streaming: bool) -> None:
+    client, _, _, requests = remote_chat
+    registry = _cold_generation_bridge(remote_chat)
+    answer_with(remote_chat, json_response(200, completion()))
+    path, body = _generation_request(surface, stream=streaming)
+    response = client.post(path, json=body, headers={"X-SIE-Remote": "forbid"})
+    assert response.status_code == 503, response.text
+    assert "X-SIE-Fallback-Reason" not in response.headers
+    assert not requests
+    registry.start_load_async.assert_not_awaited()
+
+
+@pytest.mark.parametrize("surface", ["native", "chat", "completions", "responses"])
+def test_buffered_generation_bridge_discloses_success_and_warms_local(remote_chat: tuple, surface: str) -> None:
+    client, adapter, _, requests = remote_chat
+    registry = _cold_generation_bridge(remote_chat)
+    if surface == "chat":
+        answer_with(remote_chat, json_response(200, completion()))
+    else:
+        if isinstance(adapter, OpenAIUpstreamAdapter):
+            upstream_events = [
+                {"choices": [{"index": 0, "text": "answer", "finish_reason": None}]},
+                {"choices": [{"index": 0, "text": "", "finish_reason": "stop"}]},
+                {"choices": [], "usage": USAGE},
+                "[DONE]",
+            ]
+        else:
+            upstream_events = [
+                {"request_id": "upstream-id", "seq": 0, "text_delta": "answer", "done": False},
+                {
+                    "request_id": "upstream-id",
+                    "seq": 1,
+                    "text_delta": "",
+                    "done": True,
+                    "finish_reason": "stop",
+                    "usage": USAGE,
+                },
+                "[DONE]",
+            ]
+        answer_with(
+            remote_chat,
+            httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=ChatStream(upstream_events)),
+        )
+    path, body = _generation_request(surface, stream=False)
+    response = client.post(path, json=body)
+    assert response.status_code == 200, response.text
+    assert "answer" in response.text
+    assert response.json()["model"] == MODEL
+    assert response.headers["X-SIE-Served-By"] == "remote"
+    assert response.headers["X-SIE-Fallback-Reason"] == "model_loading"
+    assert response.headers["X-SIE-Upstream"] == "chat-api"
+    assert len(requests) == 1
+    registry.start_load_async.assert_awaited_once_with(MODEL, "cpu")
+    assert upstream_limiter("chat-api")._in_flight == 0
+
+
+@pytest.mark.parametrize("surface", ["native", "chat", "completions"])
+def test_generation_bridge_never_restores_a_refusal_after_output(remote_chat: tuple, surface: str) -> None:
+    client, adapter, _, requests = remote_chat
+    registry = _cold_generation_bridge(remote_chat)
+    if surface == "chat":
+        first = events()[0]
+    elif isinstance(adapter, OpenAIUpstreamAdapter):
+        first = {"choices": [{"index": 0, "text": "answer", "finish_reason": None}]}
+    else:
+        first = {"request_id": "upstream-id", "seq": 0, "text_delta": "answer", "done": False}
+    stream = ChatStream([first], disconnect=True)
+    answer_with(remote_chat, httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=stream))
+    path, body = _generation_request(surface, stream=True)
+    response = client.post(path, json=body)
+    assert response.status_code == 200, response.text
+    assert "answer" in response.text
+    assert '"error"' in response.text
+    assert "MODEL_LOADING" not in response.text
+    assert "private upstream detail" not in response.text
+    assert response.headers["X-SIE-Served-By"] == "remote"
+    assert len(requests) == 1
+    registry.start_load_async.assert_awaited_once_with(MODEL, "cpu")
+    assert stream.closed
+    assert upstream_limiter("chat-api")._in_flight == 0
+
+
+@pytest.mark.parametrize(("surface", "streaming"), _GENERATION_SURFACES)
+def test_invalid_generation_never_starts_a_bridge(remote_chat: tuple, surface: str, streaming: bool) -> None:
+    client, _, _, requests = remote_chat
+    registry = _cold_generation_bridge(remote_chat)
+    answer_with(remote_chat, json_response(200, completion()))
+    path, body = _generation_request(surface, stream=streaming)
+    body[
+        "max_new_tokens" if surface == "native" else "max_output_tokens" if surface == "responses" else "max_tokens"
+    ] = 1000
+    response = client.post(path, json=body)
+    assert response.status_code == 400, response.text
+    assert "X-SIE-Fallback-Reason" not in response.headers
+    assert not requests
+    registry.start_load_async.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "options", [{"include_usage": "private-not-bool"}, {"include_usage": 1}, {"extra": True}, [], True]
+)
+@pytest.mark.parametrize("streaming", [False, True])
+def test_malformed_chat_stream_options_never_start_a_bridge(remote_chat: tuple, options: Any, streaming: bool) -> None:
+    client, _, _, requests = remote_chat
+    registry = _cold_generation_bridge(remote_chat)
+    answer_with(remote_chat, json_response(200, completion()))
+    response = client.post("/v1/chat/completions", json={**BODY, "stream": streaming, "stream_options": options})
+    assert response.status_code == 400, response.text
+    assert response.json()["error"]["param"] == "stream_options"
+    assert not requests
+    registry.start_load_async.assert_not_awaited()
+
+
+def test_chat_bridge_does_not_dispatch_unsupported_media(remote_chat: tuple) -> None:
+    client, _, _, requests = remote_chat
+    registry = _cold_generation_bridge(remote_chat)
+    answer_with(remote_chat, json_response(200, completion()))
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": MODEL,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="}},
+                    ],
+                }
+            ],
+        },
+    )
+    assert response.status_code == 503, response.text
+    assert response.json()["error"]["code"] == "MODEL_LOADING"
+    assert not requests
+    registry.start_load_async.assert_awaited_once_with(MODEL, "cpu")
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("temperature", "bad"),
+        ("temperature", True),
+        ("top_p", 2),
+        ("top_k", 1.5),
+        ("logprobs", "bad"),
+        ("top_logprobs", True),
+        ("logit_bias", []),
+        ("stop", 7),
+        ("stop", ["stop", 7]),
+        ("tools", True),
+        ("tools", [{"type": "function", "function": {"name": "x", "parameters": {"type": 7}}}]),
+    ],
+)
+@pytest.mark.parametrize("streaming", [False, True])
+def test_malformed_common_chat_fields_never_start_a_bridge(
+    remote_chat: tuple, field: str, value: Any, streaming: bool
+) -> None:
+    client, _, _, requests = remote_chat
+    registry = _cold_generation_bridge(remote_chat)
+    answer_with(remote_chat, json_response(400, {"error": {"message": "private"}}))
+    response = client.post("/v1/chat/completions", json={**BODY, "stream": streaming, field: value})
+    assert response.status_code == 400, response.text
+    assert response.json()["error"]["param"] == field
+    assert not requests
+    registry.start_load_async.assert_not_awaited()
+
+
+@pytest.mark.parametrize("choice", [None, "auto", "none"])
+def test_empty_chat_tools_remain_valid_on_a_bridge(remote_chat: tuple, choice: str | None) -> None:
+    client, _, _, requests = remote_chat
+    registry = _cold_generation_bridge(remote_chat)
+    registry.device = "cuda"
+    answer_with(remote_chat, json_response(200, completion()))
+    body = {**BODY, "tools": []}
+    if choice is not None:
+        body["tool_choice"] = choice
+    response = client.post("/v1/chat/completions", json=body)
+    assert response.status_code == 200, response.text
+    assert len(requests) == 1
+    registry.start_load_async.assert_awaited_once_with(MODEL, "cuda")
+
+
+@pytest.mark.parametrize("choice", ["required", {"type": "function", "function": {"name": "missing"}}])
+def test_empty_chat_tools_cannot_satisfy_a_required_choice(remote_chat: tuple, choice: Any) -> None:
+    client, _, _, requests = remote_chat
+    registry = _cold_generation_bridge(remote_chat)
+    registry.device = "cuda"
+    response = client.post("/v1/chat/completions", json={**BODY, "tools": [], "tool_choice": choice})
+    assert response.status_code == 400, response.text
+    assert response.json()["error"]["param"] == "tool_choice"
+    assert not requests
+    registry.start_load_async.assert_not_awaited()
