@@ -13,6 +13,8 @@ from sie_server.adapters._generation_base import GenerationAdapter
 from sie_server.config.engine import EngineConfig
 from sie_server.config.hybrid_admission import openai_equivalence_refusal
 from sie_server.config.model import ModelConfig
+from sie_server.config.sie_identity import sie_identity_refusal
+from sie_server.config.upstreams import UpstreamKind, installed_upstreams
 from sie_server.core.loader import expand_profile_variants, resolve_adapter_class
 
 _HYBRID_POLICIES = frozenset({"fallback", "threshold"})
@@ -81,7 +83,15 @@ def validate_model_routing(
         raise ValueError(msg)
     refusal = hybrid_equivalence_refusal(config)
     if refusal is not None and device is not None:
-        reason = openai_equivalence_refusal(config, device=device, engine_config=engine_config)
+        profile = config.resolve_profile(routing.fallback_profile or "default")
+        upstream_name = profile.loadtime.get("upstream")
+        upstream = installed_upstreams().get(upstream_name) if isinstance(upstream_name, str) else None
+        check = (
+            sie_identity_refusal
+            if upstream is not None and upstream.kind is UpstreamKind.SIE
+            else openai_equivalence_refusal
+        )
+        reason = check(config, device=device, engine_config=engine_config)
         refusal = f"{refusal}: {reason}" if reason is not None else None
     refusal = refusal or remote_output_refusal(config)
     if refusal is not None:

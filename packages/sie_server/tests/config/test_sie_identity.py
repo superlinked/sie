@@ -3,12 +3,21 @@
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
+import yaml
+from fastapi import HTTPException, Request
+from opentelemetry import trace
+from sie_server.api.routing import route_request
 from sie_server.config import sie_identity
 from sie_server.config.model import ModelConfig
+from sie_server.config.routing import validate_model_routing
 from sie_server.config.upstreams import Upstream, install_upstreams
+from sie_server.core.loader import expand_profile_variants
+from sie_server.core.registry import ModelRegistry
 
 IDENTITY = "v1:sha256:" + "b" * 64
 REVISION = "a" * 40
@@ -257,3 +266,77 @@ def test_muvera_defaults_cannot_be_applied_twice(remote) -> None:
     config.profiles["default"].adapter_options.runtime.update({"muvera": {"dim": 1024}, "output_types": ["dense"]})
     assert "postprocessing" in sie_identity.sie_identity_refusal(config, device="cpu")
     assert not remote[1]
+
+
+def test_configuration_admission_requires_fresh_matching_runtime(remote, tmp_path) -> None:
+    config = model()
+    registry = ModelRegistry(device="cpu", enable_hot_reload=False)
+    registry.add_config(config)
+    assert registry.has_model(config.sie_id + ":remote")
+    with pytest.raises(ValueError, match="refused until"):
+        validate_model_routing(config)
+    sie_identity._OBSERVATIONS.clear()
+    remote[3][0] = httpx.Response(200, json=metadata(revision="c" * 40))
+    with pytest.raises(ValueError, match="weights or execution profile"):
+        registry.add_config(config)
+
+
+def test_directory_load_uses_the_same_identity_admission(remote, tmp_path) -> None:
+    config = model()
+    models = tmp_path / "models"
+    models.mkdir()
+    (models / "model.yaml").write_text(yaml.safe_dump(config.model_dump(mode="json")))
+    registry = ModelRegistry(models_dir=models, device="cpu", enable_hot_reload=False)
+    assert registry.has_model(config.sie_id)
+    sie_identity._OBSERVATIONS.clear()
+    remote[3][0] = httpx.Response(200, json=metadata(profiles={}))
+    with pytest.raises(ValueError, match="identity is unavailable"):
+        ModelRegistry(models_dir=models, device="cpu", enable_hot_reload=False)
+
+
+@pytest.mark.parametrize("changed", [False, True])
+async def test_bridge_rechecks_expired_identity_and_preserves_warmup_and_refusal(remote, monkeypatch, changed) -> None:
+    config = model()
+    clock = [100.0]
+    monkeypatch.setattr(sie_identity.time, "monotonic", lambda: clock[0])
+    validate_model_routing(config, device="cpu")
+    if changed:
+        clock[0] += 31
+        remote[3][0] = httpx.Response(200, json=metadata(revision="c" * 40))
+    registry = MagicMock(spec=ModelRegistry)
+    registry.device, registry.engine_config = "cpu", None
+    registry.profile_execution_device.return_value = "cpu"
+    variants = expand_profile_variants([config])
+    registry.get_config.side_effect = variants.__getitem__
+    registry.has_model.return_value = True
+    registry.is_unloading.return_value = False
+    registry.is_loading.side_effect = lambda name: name == config.sie_id
+    registry.is_loaded.side_effect = lambda name: name != config.sie_id
+    registry.start_load_async = AsyncMock(return_value=True)
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/",
+            "headers": [],
+            "app": SimpleNamespace(state=SimpleNamespace(registry=registry)),
+        }
+    )
+    if changed:
+        with pytest.raises(HTTPException) as refused:
+            await route_request(request, config.sie_id, trace.INVALID_SPAN)
+        assert refused.value.status_code == 503
+        assert refused.value.detail["code"] == "MODEL_LOADING"
+        assert refused.value.headers == {
+            "Retry-After": "5",
+            "X-SIE-Served-By": "local",
+            "X-SIE-Fallback-Reason": "model_loading",
+            "X-SIE-Fallback-Error": "INFERENCE_ERROR",
+        }
+        assert not hasattr(request.state, "serving_route")
+    else:
+        route = await route_request(request, config.sie_id, trace.INVALID_SPAN)
+        assert route.key == config.sie_id + ":remote"
+        assert route.upstream == "team"
+    registry.start_load_async.assert_awaited_once_with(config.sie_id, "cpu")
+    registry.load_now.assert_not_awaited()

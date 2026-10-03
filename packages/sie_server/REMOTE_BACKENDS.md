@@ -208,7 +208,7 @@ and CrossEncoder require verified checkpoint module metadata: disabling
 BGE-M3 cannot identify its effective revision; flash/LoRA and other engines need
 additional runtime evidence. An identity is a descriptor, not a numerical
 measurement. This field alone does not activate hybrid routing: OpenAI profiles
-need passing numerical evidence, and the SIE upstream comparison is still pending.
+need passing numerical evidence; SIE profiles require the fresh comparison below.
 
 
 ## Measuring remote equivalence
@@ -265,6 +265,36 @@ an admission gate can reject stale or future evidence. Remeasure after changes
 to weights, serving settings, software, endpoint or request transforms.
 Writing a record does not activate hybrid routing; activation also requires
 deployment-owned admission policy and a model routing update.
+
+## Admitting SIE identity fallback
+
+Single-node `fallback` for encode/score can use an SIE upstream when both sides
+report the same immutable weights revision and non-null local execution identity.
+The remote profile must name an explicit upstream profile, for example
+`upstream_model: BAAI/bge-m3:default`, so the upstream's bare-model routing policy
+cannot change where the request runs. Both deployments must use the same pinned
+native BGE-M3 execution contract, including hardware, libraries and resolved
+profile settings. Unknown identities remain refused.
+
+Configuration load and each bridge compare bounded metadata obtained through
+`SIEClient` with the deployment's configured credential, TLS and proxy policy.
+A successful observation lasts at most 30 seconds; a failed observation lasts
+2 seconds. The next check after expiry refreshes metadata. A concurrent refresh
+refuses another bridge instead of waiting or starting a second metadata request.
+Changes to the installed upstream discard the previous observation.
+
+Metadata is uncompressed and limited to 64 KiB. Its pool/socket operations share
+a 5-second deadline, including partial headers and chunk framing; OS hostname
+resolution follows the platform resolver's timeout. Synchronous primitive
+transports use the same socket deadline mechanism with their request budget.
+Redirects, unavailable credentials and invalid responses cannot admit a bridge.
+The remote-serving switch also blocks metadata dispatch.
+
+Request transforms, non-float32 wire output and Muvera defaults are refused.
+Runtime overrides outside the matched local defaults stay local. Expired or
+changed metadata preserves the original local refusal and retry hint while
+starting local warm-up. This admission path requires one concrete execution
+device and does not enable gateway fallback or fleet-wide identity rollout.
 
 ## Admitting measured OpenAI fallback
 
