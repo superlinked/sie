@@ -1,0 +1,108 @@
+{
+  "wm_model_id": "Qwen/Qwen2.5-1.5B-Instruct",
+  "watermark_params": {
+    "greenlist_ratio": 0.25,
+    "bias": 4.0,
+    "hashing_key": 15485863,
+    "seeding_scheme": "lefthash",
+    "context_width": 1
+  },
+  "samples": [
+    {
+      "id": "wa-0",
+      "kind": "watermarked",
+      "prompt": "Write a ~150 word opinion column about why cities should invest in night buses.",
+      "text": "Cities need to consider investing in night buses as part of their comprehensive transportation system. The primary reasons for this investment include enhancing urban livability and promoting economic activity. With many people seeking late-night entertainment options or work commutes during off-peak hours, effective night bus service can help fill these gaps.\n\nNight buses allow residents and commuters the chance to catch late trains without rushing through busy times when traffic congestion is most severe. Additionally, they provide opportunities for those working nights or early mornings to travel home after finishing their shifts. Such services often lead to better overall public health outcomes because individuals are less likely to suffer from sleep deprivation caused by rush-hour travel disruptions.\n\nMoreover, nighttime mobility significantly reduces noise pollution levels compared with daytime routes where traffic tends to be heaviest during peak hours. Lower ambient noise contributes to improved air quality, which further supports city environmental sustainability goals.\n\nIn conclusion, considering investment into night buses is vital for creating balanced and sustainable transportation infrastructures within our rapidly growing cities while ensuring greater accessibility and"
+    },
+    {
+      "id": "co-0",
+      "kind": "control",
+      "prompt": "Write a ~150 word opinion column about why cities should invest in night buses.",
+      "text": "Cities should prioritize investing in night buses for several compelling reasons:\n\nFirstly, they offer an important service to the community that is often overlooked during peak hours. Night buses serve as a lifeline for students commuting after school, workers leaving offices early, and residents needing medical appointments or groceries late at night.\n\nSecondly, these services help reduce traffic congestion during off-peak times when streets would otherwise be empty. This not only improves public safety but also reduces air pollution from idling vehicles on busy roads.\n\nThirdly, investing in nighttime transportation infrastructure can stimulate local economies. By providing reliable, affordable options for people who might have difficulty using traditional transit systems due to their schedules or financial constraints, it opens up new markets for businesses operating around the clock.\n\nLastly, developing and maintaining well-functioning night bus networks encourages investment in other aspects of urban infrastructure like sidewalks, lighting, and park facilities, creating a more cohesive and livable city environment overall.\n\nIn conclusion, while daytime services undoubtedly play crucial roles, the"
+    },
+    {
+      "id": "wa-1",
+      "kind": "watermarked",
+      "prompt": "Write a ~150 word news-style report on a fictional startup called Verdant Loop that recycles coffee grounds into building insulation in Rotterdam.",
+      "text": "Verdant Loop is an innovative start-up located in Rotterdam that has revolutionized the way we think about waste management and sustainable living. Unlike traditional methods of processing coffee grounds, Verdant Loop takes advantage of their unique properties to create high-quality insulation material for use in construction.\nUsing state-of-the-art technology, Verdant Loop transforms spent coffee grounds into a product known as CO2X, which provides excellent thermal insulation and is also highly effective at regulating humidity levels within buildings. The company claims that each tonne of CO2X can reduce energy costs by up to 3%.\nBut this isn't just good for the planet; it's great for business too. According to the team behind Verdant Loop, the process not only creates environmentally-friendly insulation, but also generates revenue from selling the leftover ground coffee beans back to farmers who supply them with raw materials.\nAs cities around the world struggle to meet sustainability goals, startups like Verdant Loop offer hope that there may be no need to choose between"
+    },
+    {
+      "id": "co-1",
+      "kind": "control",
+      "prompt": "Write a ~150 word news-style report on a fictional startup called Verdant Loop that recycles coffee grounds into building insulation in Rotterdam.",
+      "text": "Verdant Loop is an innovative startup based in Rotterdam that aims to reduce the environmental impact of disposable coffee cups and packaging. The company has developed a unique solution for recycling used coffee grounds into high-quality insulation materials suitable for use in construction projects.\nUsing advanced technology and proprietary processes, Verdant Loop transforms discarded coffee grounds into a dense, lightweight material that can be easily incorporated into building structures. This process not only reduces waste but also decreases energy consumption during heating and cooling cycles, contributing to more sustainable living environments.\nThe startup's vision aligns with global efforts towards reducing carbon emissions and promoting circular economy principles. Verdant Loop's commitment to sustainability makes it a standout player in the rapidly growing field of eco-friendly building solutions."
+    },
+    {
+      "id": "wa-2",
+      "kind": "watermarked",
+      "prompt": "Write a ~150 word essay on how the printing press changed the economics of rumor.",
+      "text": "The invention and widespread use of the printing press in Europe during the 16th century revolutionized the way rumors spread and were disseminated across society. Prior to this technology, most information was passed along orally or written by hand, making it extremely slow and unreliable.\n\nThe printing press allowed for faster distribution of news, which led to the rise of more immediate communication between people. This technological advancement also made it easier for rumors to travel quickly from one person to another due to the mass production and availability of books containing all sorts of gossip, speculation, and false statements about various topics such as politics, religion, science, and business.\n\nWith greater accessibility and reliability in conveying ideas through printed matter, people became much more willing to believe stories told via newspapers and other print materials rather than just their own experiences or observations. The speed with which these pieces could reach readers made them appealing as sources of entertainment and amusement that offered quick insights into what was happening in the world at large – even if they weren’t"
+    },
+    {
+      "id": "co-2",
+      "kind": "control",
+      "prompt": "Write a ~150 word essay on how the printing press changed the economics of rumor.",
+      "text": "The invention of the printing press in the 15th century had profound implications for the economic structure and dynamics surrounding rumors. Prior to Johannes Gutenberg's groundbreaking innovation in movable type printing, information dissemination was limited to handwritten documents or oral traditions, which were often unreliable due to their susceptibility to corruption and forgery.\n\nWith the advent of printed materials like books and pamphlets, the spread of information became more efficient, widespread, and less prone to manipulation. This shift enabled individuals to access information that previously could only be preserved and passed down through generations as an oral tradition. As a result, rumors began to circulate not just within communities but across wider geographic areas, as people could now read about events firsthand.\n\nThe increased availability of written records led to a democratization of knowledge, making it easier for commoners to challenge authority figures who might have been disseminating false or harmful rumors. It also opened up opportunities for independent publishers and journalists to report news and opinions directly from witnesses, reducing the power of traditional"
+    },
+    {
+      "id": "wa-3",
+      "kind": "watermarked",
+      "prompt": "Write a ~150 word travel piece about visiting Lake Balaton in October.",
+      "text": "October marks the peak season for summer tourism at Lake Balaton in Hungary, offering picturesque views and cool temperatures that make it perfect for those seeking an escape from the heat of summer. With mild weather, comfortable temperatures between 70°F (21°C) to 86°F (30°C), and clear skies punctuated with occasional sunsets, visitors can enjoy long, warm days under blue skies or cozy evenings by lantern-lit bridges.\n\nThe region is filled with charming towns like Ósmányás, known for its wine vineyards, and Keszthely, famous for its ancient fortifications. The surrounding forests offer hiking opportunities, making the lake a favorite destination for nature lovers. Additionally, numerous water activities such as jet skiing, sailing, and kayaking attract adventurers looking to stay active amidst the beauty of this tranquil inland sea.\n\nFor the adventurous spirits among us, exploring lesser-known coves around the lake during quieter hours provides a serene experience, away from crowds, offering"
+    },
+    {
+      "id": "co-3",
+      "kind": "control",
+      "prompt": "Write a ~150 word travel piece about visiting Lake Balaton in October.",
+      "text": "Lake Balaton is a breathtaking body of water that stretches over 240 miles across Hungary and Croatia. In October, the weather becomes slightly cooler than in August, but still relatively warm enough to make for pleasant swimming or kayaking. The air quality is also much clearer, allowing visitors to enjoy the scenery without being clouded by pollution.\n\nOne of the highlights of visiting Lake Balaton during this time of year is the abundance of wildflowers blooming throughout the area. Whether you're hiking through the nearby villages or exploring the many scenic spots along the lake, you'll be surrounded by vibrant blooms of purple violets, yellow crocuses, and even the rare pink tulips.\n\nAnother great thing about visiting Lake Balaton in October is its accessibility as an international airport has recently been built just outside the city, making it easier to get around and explore the surrounding region. The local cuisine here is also worth trying, with dishes such as goulash, paprikadobos ("
+    },
+    {
+      "id": "wa-4",
+      "kind": "watermarked",
+      "prompt": "Write a ~150 word explainer on why container ships keep getting bigger.",
+      "text": "Container ships are indeed increasing in size for several compelling reasons:\n\n1. **Capacity and Load Efficiency**: Larger containerships can hold significantly more cargo compared to smaller ones. With improved loading techniques, this allows shippers to carry heavier loads without compromising safety.\n\n2. **Sustainability Efforts**: The industry has adopted sustainable shipping practices to reduce carbon emissions. Increased size enables more efficient operation and reduced fuel consumption per unit of goods transported.\n\n3. **Technology Integration**: Newer designs incorporate technologies like smart logistics management, real-time tracking, and enhanced cybersecurity measures that rely on the sheer volume of data collected across different segments of an international supply chain.\n\n4. **Economic Growth and Trade Expansion**: Global trade volumes have risen exponentially over decades due to economic globalization. Smaller vessels cannot manage these increased flows efficiently or safely; larger ships are now considered necessary to maintain competitiveness and global connectivity.\n\n5. **Regulatory Compliance**: Various maritime laws require certain standards and specifications regarding vessel size, safety, environmental impact,"
+    },
+    {
+      "id": "co-4",
+      "kind": "control",
+      "prompt": "Write a ~150 word explainer on why container ships keep getting bigger.",
+      "text": "The size of container ships has been increasing over the years due to several factors:\n\n1. Economic Growth: As economies grow, so do their export and import volumes, which require larger vessels.\n\n2. Technological Advancements: Improvements in ship design and technology have allowed for increased capacity per unit length.\n\n3. Increased Load Factors: The efficiency of containerships is directly related to how efficiently they can be loaded with cargo.\n\n4. Cost-Effectiveness: Larger ships can transport more goods at once, reducing costs per tonne moved.\n\n5. Global Trade Flows: As global trade expands, larger ships are needed to handle increasingly diverse cargo loads across continents.\n\n6. Safety Regulations: International shipping standards set by organizations like the IMO (International Maritime Organization) dictate minimum vessel sizes.\n\n7. Environmental Considerations: Smaller ships may not meet emissions regulations or safety requirements imposed by coastal states.\n\n8. Operational Efficiency: Larger ships typically operate at higher speeds, reducing operational expenses and improving fuel efficiency."
+    },
+    {
+      "id": "wa-5",
+      "kind": "watermarked",
+      "prompt": "Write a ~150 word review of a fictional novel titled 'The Cartographer's Debt' by Ines Marlowe.",
+      "text": "\"**The Cartographer's Debt** is an intriguing debut novel that explores themes of duty, redemption, and the search for meaning in life through its protagonist, Lila, a cartographer with a unique vision and purpose to map out lost lands.\"\n\nSet in a world where ancient magic still exists but has been suppressed, Lila finds herself torn between her moral code as a cartographer and her deep-seated guilt from breaking one of these rules. Her quest to return treasures to their rightful places becomes entangled with a complex web of alliances, betrayals, and personal losses.\n\nInes Marlowe masterfully weaves together elements of fantasy, mystery, and psychological depth, offering readers a vivid glimpse into a world rich with history and culture yet threatened by modernity. The character development is particularly noteworthy, with each arc bringing deeper layers to the protagonist and supporting cast.\n\nThe novel also excels in its evocation of both a fantastical landscape (a mix of medieval architecture and futuristic technology)"
+    },
+    {
+      "id": "co-5",
+      "kind": "control",
+      "prompt": "Write a ~150 word review of a fictional novel titled 'The Cartographer's Debt' by Ines Marlowe.",
+      "text": "\"**The Cartographer's Debt**\" by Ines Marlowe is an enthralling blend of historical fiction and speculative romance that transports readers to the lush forests of early 21st-century Japan in the wake of World War II. The story follows Natsuki Ito, a young woman with vivid memories of her time in internment camps during the war, who embarks on a perilous journey across the country seeking answers about her past.\n\nMarlowe masterfully weaves together elements of survival, love, and redemption into a captivating narrative. The characters are well-developed and multi-dimensional, each with their own struggles and hidden stories. The author's skillful use of language imbues the prose with a sense of urgency and depth, making the reader feel as though they're right there beside the protagonist on her harrowing journey.\n\nOne particularly poignant moment involves a character's death through a mysterious and horrific means—details left unsaid, but leaving lasting impressions. This adds"
+    },
+    {
+      "id": "wa-6",
+      "kind": "watermarked",
+      "prompt": "Write a ~150 word article about the revival of sleeper trains between Vienna and Brussels.",
+      "text": "Sleeper trains have always been an iconic form of transportation, offering travelers not just travel but also rest during long journeys. However, with the rise of air travel and the convenience of modern road and sea transport, many have forgotten their role in connecting diverse cultures and promoting tourism.\n\nIn recent years, however, there has been a resurgence in interest for using sleeper trains to travel from Vienna, Austria, to Brussels, Belgium. This route, known as the \"Vienna–Brussels Railway,\" is particularly significant due to its historical and geographical importance. The train itself was built in 2014 and is named after the two cities it connects, combining luxury with comfort and elegance, making it one of the most sought-after sleeper train options on the market today.\n\nThe popularity of this train is evident from the number of passengers who choose it over other modes of transportation, especially during off-peak times when airlines often become full or unsatisfactory for those preferring quieter travel conditions. Additionally, for"
+    },
+    {
+      "id": "co-6",
+      "kind": "control",
+      "prompt": "Write a ~150 word article about the revival of sleeper trains between Vienna and Brussels.",
+      "text": "The revival of sleeper trains between Vienna and Brussels has been a long-awaited project that promises to be a game-changer for both travelers and locals alike. These trains offer a luxurious experience with comfortable seating, panoramic windows, and gourmet meals served in first-class cabins.\n\nThe trains run multiple times daily on weekdays, with each journey taking just over four hours. Passengers can expect smooth, modern interiors equipped with all the amenities one would typically find on luxury flights. The trains also have onboard Wi-Fi and entertainment options like movies and games for those traveling during peak evenings or mornings.\n\nOne of the main benefits of these sleeper trains is their affordability compared to flying directly from Europe's two largest capitals. For many budget-conscious individuals, it offers an alternative route without sacrificing comfort or service quality.\n\nAdditionally, traveling through Austria via the Vienna S-Bahn (subway) connects passengers seamlessly to the rest of the country, making this train ride even more convenient. With minimal time spent in transit, you're able to focus"
+    },
+    {
+      "id": "wa-7",
+      "kind": "watermarked",
+      "prompt": "Write a ~150 word piece on what makes sourdough starters so hard to kill.",
+      "text": "Sourdough starters hold immense appeal due to their unique and distinct flavor profile that sets them apart from conventional breads. The key factor in making sourdough starters difficult to kill lies within the yeast and lactic acid bacteria present.\n\nThe combination of these microorganisms creates an environment hostile to most contaminants. Yeast, especially wild yeasts like those found on the skin or in soil, thrive in environments with high humidity and acidic conditions typical of flour and water mixed at room temperature. Lactic acid bacteria contribute significantly as they ferment sugars naturally into acids, further creating an antimicrobial atmosphere.\n\nMoreover, unlike baker's yeast (Saccharomyces cerevisiae), wild yeasts can tolerate higher acidity and higher moisture levels than artificial yeast. This natural adaptation makes it nearly impossible for synthetic yeast alternatives to replicate its effects against harmful microorganisms without compromising dough quality or safety.\n\nIn conclusion, the complexity of balancing optimal growth conditions—temperature, pH level, carbon dioxide production—in favor of microbial resilience allows traditional"
+    },
+    {
+      "id": "co-7",
+      "kind": "control",
+      "prompt": "Write a ~150 word piece on what makes sourdough starters so hard to kill.",
+      "text": "Sourdough starters are incredibly resilient and difficult to kill due to their unique microflora composition that is specifically adapted for fermentation. This microbial community thrives in a balanced environment with the right mix of sugars, water, and temperature. The starter's health is dependent not only on yeast but also on beneficial bacteria like lactobacilli, which produce lactic acid that slows down further bacterial growth. Additionally, the presence of certain enzymes allows the starter to continue fermenting even if parts have been accidentally discarded or removed. The complexity and diversity of this microbial ecosystem make it nearly impossible for external contaminants to take over and destroy the starter."
+    }
+  ]
+}

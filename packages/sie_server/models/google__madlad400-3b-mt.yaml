@@ -1,0 +1,44 @@
+sie_id: "google/madlad400-3b-mt"
+hf_id: "google/madlad400-3b-mt"
+hf_revision: fa184c675da0b5c9e1c8694fccd4e12e2d422094
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: null
+  extract: null
+  generate:
+    context_length: 512
+    max_output_tokens: 512
+    capabilities:
+      grammar: []
+      streaming: true
+      tools: false
+    chat_template_kwargs: {}
+max_sequence_length: 512
+profiles:
+  default:
+    max_batch_tokens: 4096
+    kv_budget_tokens: 4096
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.ctranslate2.generation:CTranslate2GenerationAdapter
+    adapter_options:
+      loadtime:
+        serving_artifact:
+          format: ctranslate2
+          repo_id: superlinked/madlad400-3b-mt-ctranslate2-bfloat16
+          revision: 3e2bd4703cc3f17c08baecfe771f3e30f539d071
+          manifest_path: sie-serving-artifact.json
+          manifest_sha256: beacd7447839fa51b337e059689a30e20766b7f6d4bf5f6047865904bee951f4
+          compute_type: bfloat16
+        native_batch_max_size: 8
+        native_batch_max_tokens: 4096
+      runtime:
+        first_chunk_timeout_s: 180
+        inter_chunk_timeout_s: 10
+        overall_timeout_s: 600
+        default_sampling:
+          temperature: 0.0

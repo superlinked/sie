@@ -1,5 +1,5 @@
 schema_version: 1
-contract_version: "2026-07-20"
+contract_version: "2026-08-27"
 
 # This is the machine-readable telemetry source of truth. A request path emits
 # one typed semantic event; the owning facade is the only code allowed to turn
@@ -47,12 +47,20 @@ cardinality_budgets:
       overflow_backend: other
       overflow_effect: telemetry_only_serving_fail_open
       warning: at_most_once_per_process
+    upstream_names:
+      admitted_exact_process_lifetime: 16
+      collapsed_overflow_names: 1
+      total_series_names: 17
+      selection: first_observed_distinct_upstream_names
+      overflow_label: other
     fixed_domains:
       lane_per_process: 1
       operation: operation
       worker_outcome: worker_outcome
       inference_phase: inference_phase
       unit_type: unit_type
+      upstream_per_process: 17
+      upstream_refusal: upstream_refusal
     instrument_limits:
       shared_worker_request:
         metrics: [sie.worker.requests, sie.worker.request.duration]
@@ -66,6 +74,14 @@ cardinality_budgets:
         metrics: [sie.worker.units]
         formula: catalog_series_pairs * operation * unit_type
         limit: 5397
+      upstream_refusals:
+        metrics: [sie.worker.upstream.refusals]
+        formula: lane_per_process * upstream_per_process * upstream_refusal
+        limit: 68
+      upstream_breaker:
+        metrics: [sie.worker.upstream.breaker.open]
+        formula: lane_per_process * upstream_per_process
+        limit: 17
     applies_to:
       service: sie-worker
       runtime: python
@@ -90,6 +106,8 @@ cardinality_budgets:
         - generation_grammar
         - generation_grammar_cache
         - generation_grammar_compile
+        - worker_upstream
+        - worker_upstream_refusal
   worker_rust_facade:
     scope: per_process_per_instrument
     sdk_series_retention: process_lifetime
@@ -246,6 +264,7 @@ cardinality_budgets:
       shutdown_drain_outcome: shutdown_drain_outcome
       result_transport_mode: result_transport_mode
       result_transport_outcome: result_transport_outcome
+      deadline_action: deadline_action
     instrument_limits:
       queue_and_batch_core:
         metrics:
@@ -257,6 +276,14 @@ cardinality_budgets:
           - sie.worker.scheduler.request_batch.total
         formula: operation * catalog_series_pairs
         limit: 1799
+      work_item_age:
+        metrics: [sie.worker.work_item.age]
+        formula: operation * lane_per_process
+        limit: 7
+      work_item_deadline:
+        metrics: [sie.worker.work_item.deadline_exceeded]
+        formula: operation * deadline_action * lane_per_process
+        limit: 21
       batch_fill:
         metrics: [sie.worker.batch.fill_ratio]
         formula: operation * catalog_series_pairs * flush_reason
@@ -295,7 +322,7 @@ cardinality_budgets:
       nats:
         metrics: [sie.worker.nats.operations]
         formula: nats_operation * binary_outcome * nats_reason
-        limit: 210
+        limit: 252
       nats_delivery:
         metrics: [sie.worker.nats.delivery.attempts]
         formula: delivery_redelivered
@@ -369,6 +396,25 @@ cardinality_budgets:
       - sie.gateway.active_lease.gpus
       - sie.gateway.pool.warm_floor
       - sie.gateway.rejected.requests
+  # Per-lane queue admission reuses the same deployment-owned lane tuple and
+  # the same fail-closed rules as the KEDA control domain, but is not itself a
+  # KEDA control signal: its Prometheus spelling is not a scaler API.
+  gateway_lane_admission_domain:
+    source: SIE_GATEWAY_CONFIGURED_PHYSICAL_LANES
+    tuple: [pool, machine_profile, bundle]
+    normalization: trim_then_lowercase
+    allowed_characters: "^[A-Za-z0-9_-]+$"
+    maximum_component_length: 63
+    maximum_configured_lanes: 1024
+    emission: exact_catalog_members_only
+    unresolved_lane_behavior: omit_decision_metric
+    synthetic_fallback_lane: forbidden
+    sdk_stream_cardinality:
+      # 1024 configured lanes x 3 lane_admission_outcome values.
+      lane_admission_decisions: 3072
+      overflow_series: forbidden
+    applies_to:
+      - sie.gateway.queue.lane_admission.decisions
 
 scope:
   included: all_production_metrics_keda_control_signals_and_privacy_approved_managed_logs
@@ -439,34 +485,42 @@ resource_attributes:
     - service.version
 
 services:
+  control_plane:
+    service_name: sie-control-plane
+    managed_collector: control_plane
   gateway:
     service_name: sie-gateway
+    managed_collector: regional
     runtimes:
       - packages/sie_gateway
-      - packages/sie_cloud/gateway
   dispatcher:
     service_name: sie-dispatcher
-    runtimes:
-      - packages/sie_cloud/dispatcher
+    managed_collector: regional
+    runtimes: []
   config:
     service_name: sie-config
+    managed_collector: regional
     runtimes:
       - packages/sie_config
   worker_sidecar:
     service_name: sie-worker-sidecar
+    managed_collector: regional
     runtimes:
       - packages/sie_server_sidecar
   worker_engine:
     service_name: sie-worker
+    managed_collector: regional
     runtimes:
       - packages/sie_server
       - packages/sie_server_rust
   worker_python_engine:
     service_name: sie-worker
+    managed_collector: regional
     runtimes:
       - packages/sie_server
   worker_rust_engine:
     service_name: sie-worker
+    managed_collector: regional
     runtimes:
       - packages/sie_server_rust
 
@@ -565,6 +619,14 @@ metric_processing:
   datapoint_attributes:
     policy: exact_metric_attribute_set
     unknown: drop
+  remote_scalar_reconstruction:
+    ordering: after_exact_metric_attribute_set_before_queue_identity
+    resource_types: [string]
+    datapoint_types: [string, int, double, bool]
+    duplicates: first_lookup_value_only
+    non_scalar_or_missing: omit
+    cache: clear_for_each_resource_and_datapoint
+    local_prometheus_processing: unchanged
   exemplars:
     policy: forbidden
     producer_filter: always_off
@@ -601,6 +663,8 @@ traces:
         unknown_service: drop
       local_oss_action: retain_producer_identity_unchanged
     resource_attributes:
+      duplicate_keys: reconstruct_first_validated_scalar_after_receiver_identity_stamping
+      non_string_identity: drop_field
       allow:
         - service.name
         - service.instance.id
@@ -636,10 +700,41 @@ traces:
         reason: pinned_collector_cannot_reliably_clear_link_attributes_or_trace_state
         transform_defense: set_links_empty_for_future_runtime_support
         local_oss_action: retain_unchanged
+        drop_counter: otelcol_processor_filter_spans_filtered
+        drop_counter_filter: filter/remote_linked_spans
+        request_views:
+          producer: shared_sdk_processor_before_bounded_export_queue
+          source_names: [worker.run_batch, sidecar.dispatch]
+          names: [worker.run_batch.request, sidecar.dispatch.request]
+          trigger: recorded_sampled_source_with_links
+          parents: distinct_valid_sampled_trace_id_and_span_id_pairs
+          primary_sampling: inherit_source_span_sampling
+          span_id: fresh_per_view
+          timing_and_kind: exact_source_interval_and_kind
+          status: source_code_without_message
+          attributes_events_links_trace_state: empty
+          semantics: leaf_observation_of_shared_execution_not_additional_work
+          descendants: remain_children_of_original_shared_span
+          limits: source_sampling_and_sdk_link_limits_and_existing_export_queue
+          loss: cannot_recover_unsampled_sources_or_discarded_links
       name:
         unknown: other
         allow:
           - gateway.request
+          - gateway.response_body
+          - gateway.generation_stream
+          - gateway.dispatch
+          - gateway.dispatch.ipc
+          - gateway.dispatch.i6pn
+          - dispatcher.dispatch
+          - dispatcher.modal.remote
+          - dispatcher.modal.stream
+          - dispatcher.modal.spawn
+          - dispatcher.websocket
+          - dispatcher.i6pn
+          - dispatcher.fallback
+          - sidecar.local_ingest
+          - worker.local_ingest
           - gateway.publish
           - gateway.proxy
           - gateway.proxy_chat
@@ -647,6 +742,8 @@ traces:
           - gateway.proxy_generate
           - sidecar.dispatch
           - worker.run_batch
+          - worker.run_batch.request
+          - sidecar.dispatch.request
           - worker.streaming_processor
           - encode
           - score
@@ -662,7 +759,13 @@ traces:
 
 enums:
   operation: [encode, score, extract, embeddings, moderations, generate, other]
+  activity_window: [1h, 24h]
+  signup_review_status: [pending, approved, rejected, other]
+  launch_credit_status: [pending, approved, rejected, other]
   request_outcome: [success, redirect, client_error, server_error, other]
+  lifecycle_phase: [request, response_body, generation_stream, worker_generation, dispatch_attempt]
+  lifecycle_outcome: [success, rejected, error, cancelled]
+  lifecycle_error_class: [none, client_error, server_error, transport, timeout, worker, cancelled, protocol, other]
   admission_outcome:
     - admitted
     - unauthenticated
@@ -670,11 +773,21 @@ enums:
     - auth_misconfigured
     - region_mismatch
     - license_excluded
+    - serving_unavailable
     - payload_too_large
+    - invalid_request
     - insufficient_credits
     - key_spend_limit_exceeded
     - rate_limited
     - other
+  # `discarded` is a 200 whose snapshot body did not strictly advance the held
+  # version, so the replica parsed and then dropped it. Keeping it distinct from
+  # `installed` is the point of the family: a bare 200-vs-304 split cannot tell
+  # a useful fetch from a wasted one.
+  key_snapshot_poll_outcome: [not_modified, installed, discarded, error]
+  # `skipped` is the no-reservation branch, which issues no control-plane call
+  # and therefore contributes no duration observation.
+  settlement_confirm_outcome: [success, error, skipped]
   gateway_dispatch_path: [i6pn, modal, other]
   dispatcher_path: [modal_remote, modal_stream, modal_spawn, generation_ws, other]
   dispatch_outcome: [success, error, timeout, cancelled, not_found, other]
@@ -698,7 +811,7 @@ enums:
     - transport_failure
     - other
   worker_outcome: [success, error, retry, cancelled, other]
-  worker_backend: [python, candle, sglang, other]
+  worker_backend: [python, candle, sglang, remote, other]
   inference_phase: [tokenization, inference, postprocessing]
   unit_type: [input_tokens, pages, images]
   flush_reason: [cost_cap, count_cap, timeout, coalesce, single_oversize, idle_bypass, drain, other]
@@ -756,6 +869,14 @@ enums:
     - decode
   queue_event: [publish_ack, dlq_forward, payload_offload]
   queue_event_outcome: [success, ack_error, error, deduplicated]
+  # `shed_shadow` is the decision the per-lane check would have taken with
+  # enforcement on. It never changes admission.
+  lane_admission_outcome: [admitted, shed_shadow, shed_enforced]
+  # Fixed set of keyed worker pools on the inbox path. `inbox` backpressures
+  # when saturated because dropping a result or chunk is a correctness fault;
+  # `cleanup` sheds because the expiry reconcile already recovers the key.
+  queue_worker_pool: [inbox, payload_cleanup]
+  queue_worker_pool_event: [saturated, shed]
   provisioning_surface: [native, openai]
   generation_event: [cancellation, chunk, nak]
   generation_event_reason:
@@ -812,13 +933,16 @@ enums:
     - completed
     - retry
     - pool_not_assigned
+    - model_unsupported
     - first_delivery
     - redelivery
     - metadata_unavailable
     - transport
     - stream_ended
+    - deadline_exceeded
     - other
   delivery_redelivered: ["true", "false"]
+  deadline_action: [dropped, executed, other]
   payload_reason:
     - none
     - not_found
@@ -843,6 +967,7 @@ enums:
   generation_admission_outcome: [admitted, rejected, error, other]
   generation_admission_reason: [none, kv_budget, resolver_error, missing_budget, other]
   generation_duplicate_path: [first_chunk_fallback, other]
+  upstream_refusal: [rate_cap, concurrency_cap, breaker_open, other]
   forward_state: [active, waiting]
   forward_outcome: [success, error]
   forward_input_source: [prepared, raw, other]
@@ -912,8 +1037,17 @@ attribute_domains:
   profile: {type: release_catalog_value, invalid: other}
   pool: {type: physical_queue_pool, invalid: other}
   bundle: {type: release_manifest_value, invalid: other}
+  upstream: {type: startup_configuration_upstream_name, invalid: other}
 
 attribute_sets:
+  control_plane_operation:
+    operation: operation
+  control_plane_activity:
+    window: activity_window
+  control_plane_signup_review:
+    status: signup_review_status
+  control_plane_launch_credit:
+    status: launch_credit_status
   gateway_request:
     operation: operation
     outcome: request_outcome
@@ -944,6 +1078,14 @@ attribute_sets:
   gateway_queue_event:
     event: queue_event
     outcome: queue_event_outcome
+  gateway_lane_admission:
+    pool: pool
+    machine_profile: machine_profile
+    bundle: bundle
+    outcome: lane_admission_outcome
+  gateway_queue_worker_pool:
+    pool: queue_worker_pool
+    event: queue_worker_pool_event
   gateway_provisioning:
     surface: provisioning_surface
     http.status_code: http.status_code
@@ -951,6 +1093,10 @@ attribute_sets:
     event: generation_event
     reason: generation_event_reason
     outcome: generation_event_outcome
+  gateway_key_snapshot_poll:
+    outcome: key_snapshot_poll_outcome
+  gateway_settlement_confirm:
+    outcome: settlement_confirm_outcome
   gateway_generation_completion:
     operation: operation
   gateway_generation_tokens:
@@ -991,6 +1137,16 @@ attribute_sets:
     lane: lane
     model: model
     profile: profile
+  # Transport-queue age is a property of the queue, not of the model that
+  # happens to be on the other side of it, so this set deliberately omits the
+  # catalog (model, profile) pair the scheduler-local queue families carry.
+  worker_work_item_age:
+    operation: operation
+    lane: lane
+  worker_work_item_deadline:
+    operation: operation
+    action: deadline_action
+    lane: lane
   worker_batch:
     operation: operation
     lane: lane
@@ -1188,6 +1344,13 @@ attribute_sets:
     lane: lane
     model: model
     profile: profile
+  worker_upstream:
+    upstream: upstream
+    lane: lane
+  worker_upstream_refusal:
+    reason: upstream_refusal
+    upstream: upstream
+    lane: lane
   keda_lane:
     pool: pool
     machine_profile: machine_profile
@@ -1204,6 +1367,11 @@ histogram_buckets:
   gateway_queue_publish_seconds: [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0]
   gateway_queue_publish_items: [1, 5, 9, 13, 17, 21, 25, 29, 33, 37, 41, 45, 49, 53, 57, 61]
   gateway_queue_result_wait_seconds: [0.01, 0.025, 0.05, 0.1, 0.2, 0.3, 0.5, 0.75, 1.0, 2.0, 5.0, 10.0, 30.0]
+  # Shares gateway_request_seconds' boundaries below 1.0 so the confirm's share
+  # of buffered response latency is readable off the two histograms directly.
+  # The 20.0 boundary is the documented worst case: four attempts under a
+  # five-second client timeout each.
+  gateway_settlement_confirm_seconds: [0.0005, 0.001, 0.002, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 30.0]
   dispatcher_invocation_seconds: [0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0]
   # Sealed staging is fetch + seal + first model load, NOT a request: the measured
   # cold start is ~130 s, so the interesting resolution is tens-to-hundreds of
@@ -1212,6 +1380,11 @@ histogram_buckets:
   dispatcher_sealed_stage_seconds: [1.0, 5.0, 10.0, 30.0, 60.0, 120.0, 180.0, 300.0, 450.0, 600.0, 900.0]
   config_request_seconds: [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0]
   worker_queue_seconds: [0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0]
+  # Transport-queue age spans far past the scheduler-local 30s ceiling. The
+  # upper boundaries are the system's own constants — 120s client ceiling, 300s
+  # generation ack wait, 600s redelivery envelope, 1800s stream retention — so
+  # "executed after its client gave up" is a bucket count, not an interpolation.
+  worker_work_item_age_seconds: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1800.0]
   worker_request_seconds: [0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0]
   worker_model_load_seconds: [0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0, 900.0]
   worker_ipc_seconds: [0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 300.0, 900.0]
@@ -1230,6 +1403,102 @@ histogram_buckets:
 # Prometheus exporter. Histograms add _bucket/_sum/_count. These names are a
 # tested wire contract, not a second producer API.
 metrics:
+  - name: sie.control_plane.signup.activated
+    owner: control_plane
+    facade_event: control_plane.aggregate_snapshot
+    type: gauge
+    unit: "{account}"
+    attributes: none
+    prometheus_name: sie_control_plane_signup_activated
+    export: [otlp]
+  - name: sie.control_plane.signup.reviews
+    owner: control_plane
+    facade_event: control_plane.aggregate_snapshot
+    type: gauge
+    unit: "{account}"
+    attributes: control_plane_signup_review
+    prometheus_name: sie_control_plane_signup_reviews
+    export: [otlp]
+  - name: sie.control_plane.starter.credits
+    owner: control_plane
+    facade_event: control_plane.aggregate_snapshot
+    type: gauge
+    unit: "{credit}"
+    attributes: none
+    prometheus_name: sie_control_plane_starter_credits
+    export: [otlp]
+  - name: sie.control_plane.starter.grants
+    owner: control_plane
+    facade_event: control_plane.aggregate_snapshot
+    type: gauge
+    unit: "{grant}"
+    attributes: control_plane_activity
+    prometheus_name: sie_control_plane_starter_grants
+    export: [otlp]
+  - name: sie.control_plane.starter.grant.limit
+    owner: control_plane
+    facade_event: control_plane.aggregate_snapshot
+    type: gauge
+    unit: "{grant}"
+    attributes: control_plane_activity
+    prometheus_name: sie_control_plane_starter_grant_limit
+    export: [otlp]
+  - name: sie.control_plane.terminal.requests
+    owner: control_plane
+    facade_event: control_plane.aggregate_snapshot
+    type: gauge
+    unit: "{request}"
+    attributes: control_plane_operation
+    prometheus_name: sie_control_plane_terminal_requests
+    export: [otlp]
+  - name: sie.control_plane.metered.credits
+    owner: control_plane
+    facade_event: control_plane.aggregate_snapshot
+    type: gauge
+    unit: "{credit}"
+    attributes: control_plane_operation
+    prometheus_name: sie_control_plane_metered_credits
+    export: [otlp]
+  - name: sie.control_plane.active.accounts
+    owner: control_plane
+    facade_event: control_plane.aggregate_snapshot
+    type: gauge
+    unit: "{account}"
+    attributes: control_plane_activity
+    prometheus_name: sie_control_plane_active_accounts
+    export: [otlp]
+  - name: sie.control_plane.wallet.balance
+    owner: control_plane
+    facade_event: control_plane.aggregate_snapshot
+    type: gauge
+    unit: "{credit}"
+    attributes: none
+    prometheus_name: sie_control_plane_wallet_balance
+    export: [otlp]
+  - name: sie.control_plane.launch_credit.applications
+    owner: control_plane
+    facade_event: control_plane.aggregate_snapshot
+    type: gauge
+    unit: "{application}"
+    attributes: control_plane_launch_credit
+    prometheus_name: sie_control_plane_launch_credit_applications
+    export: [otlp]
+  - name: sie.control_plane.outbox.pending
+    owner: control_plane
+    facade_event: control_plane.aggregate_snapshot
+    type: gauge
+    unit: "{event}"
+    attributes: none
+    prometheus_name: sie_control_plane_outbox_pending
+    export: [otlp]
+  - name: sie.control_plane.outbox.lag
+    owner: control_plane
+    facade_event: control_plane.aggregate_snapshot
+    type: gauge
+    unit: s
+    attributes: none
+    prometheus_name: sie_control_plane_outbox_lag_seconds
+    export: [otlp]
   - name: sie.gateway.requests
     owner: gateway
     facade_event: gateway.request_completed
@@ -1330,6 +1599,19 @@ metrics:
     buckets: gateway_queue_publish_items
     prometheus_name: sie_gateway_queue_publish_items
     export: [prometheus, otlp]
+  - name: sie.gateway.queue.worker_pool.events
+    owner: gateway
+    facade_event: gateway.queue_worker_pool_event
+    type: counter
+    unit: "{event}"
+    attributes: gateway_queue_worker_pool
+    prometheus_name: sie_gateway_queue_worker_pool_events_total
+    # A local saturation diagnostic for the inbox decode pools, not a remote
+    # dashboard series: it answers "is this replica's decode path backing up"
+    # while reading the replica's own logs and pprof. Keeping it local also
+    # avoids owing a Better Stack query and a collector route for a counter
+    # that is expected to sit at zero.
+    export: [prometheus]
   - name: sie.gateway.queue.result_waits
     owner: gateway
     facade_event: gateway.queue_result_wait_completed
@@ -1354,6 +1636,17 @@ metrics:
     unit: "{event}"
     attributes: gateway_queue_event
     prometheus_name: sie_gateway_queue_events_total
+    export: [prometheus, otlp]
+  # Per-lane queue admission (design: settlement-and-queue-scalability B5).
+  # `shed_shadow` is recorded while enforcement is off so the new decision can
+  # be evaluated against production traffic before it sheds anything.
+  - name: sie.gateway.queue.lane_admission.decisions
+    owner: gateway
+    facade_event: gateway.queue_lane_admission_decided
+    type: counter
+    unit: "{decision}"
+    attributes: gateway_lane_admission
+    prometheus_name: sie_gateway_queue_lane_admission_decisions_total
     export: [prometheus, otlp]
   - name: sie.gateway.queue.result_chunks.received
     owner: gateway
@@ -1427,6 +1720,14 @@ metrics:
     attributes: gateway_provisioning
     prometheus_name: sie_gateway_provisioning_responses_total
     export: [prometheus, otlp]
+  - name: sie.gateway.routing.unsupported_model_exclusions
+    owner: gateway
+    facade_event: gateway.unsupported_model_route_exclusion
+    type: counter
+    unit: "{exclusion}"
+    attributes: none
+    prometheus_name: sie_gateway_routing_unsupported_model_exclusions_total
+    export: [prometheus, otlp]
   - name: sie.gateway.generation.events
     owner: gateway
     facade_event: gateway.generation_transport_event
@@ -1463,6 +1764,35 @@ metrics:
     prometheus_name: sie_gateway_generation_tokens_total
     export: [prometheus, otlp]
 
+  # Conditional-GET effectiveness of the managed key-snapshot poll, counted at
+  # the only conditional caller. Answers whether the 304 fast path actually
+  # hits under production traffic.
+  - name: sie.gateway.key_snapshot.polls
+    owner: gateway
+    facade_event: gateway.key_snapshot_poll_completed
+    type: counter
+    unit: "{poll}"
+    attributes: gateway_key_snapshot_poll
+    prometheus_name: sie_gateway_key_snapshot_polls_total
+    export: [prometheus, otlp]
+  # What a buffered managed response waits on before it is returned.
+  - name: sie.gateway.settlement.confirms
+    owner: gateway
+    facade_event: gateway.settlement_confirm_completed
+    type: counter
+    unit: "{confirm}"
+    attributes: gateway_settlement_confirm
+    prometheus_name: sie_gateway_settlement_confirms_total
+    export: [prometheus, otlp]
+  - name: sie.gateway.settlement.confirm.duration
+    owner: gateway
+    facade_event: gateway.settlement_confirm_completed
+    type: histogram
+    unit: s
+    attributes: gateway_settlement_confirm
+    buckets: gateway_settlement_confirm_seconds
+    prometheus_name: sie_gateway_settlement_confirm_duration_seconds
+    export: [prometheus, otlp]
   - name: sie.dispatcher.invocations
     owner: dispatcher
     facade_event: dispatcher.invocation_completed
@@ -1620,6 +1950,30 @@ metrics:
     unit: "{item}"
     attributes: worker_queue
     prometheus_name: sie_worker_queue_depth
+    export: [prometheus, otlp]
+  # Transport-queue age at execution commit, which the scheduler-local queue
+  # families above cannot see. Recorded at every execution-commit point (the
+  # three batch handlers, the scheduler drain, and generation) so no operation
+  # is silently absent; items that never execute are deliberately not observed.
+  # Owned by the sidecar alone: the Modal-native Python lane has no broker
+  # between the gateway and the engine, so there is no second producer of this
+  # observation to conflict with.
+  - name: sie.worker.work_item.age
+    owner: worker_sidecar
+    facade_event: worker.work_item_age_observed
+    type: histogram
+    unit: s
+    attributes: worker_work_item_age
+    buckets: worker_work_item_age_seconds
+    prometheus_name: sie_worker_work_item_age_seconds
+    export: [prometheus, otlp]
+  - name: sie.worker.work_item.deadline_exceeded
+    owner: worker_sidecar
+    facade_event: worker.work_item_deadline_exceeded
+    type: counter
+    unit: "{item}"
+    attributes: worker_work_item_deadline
+    prometheus_name: sie_worker_work_item_deadline_exceeded_total
     export: [prometheus, otlp]
   - name: sie.worker.scheduler.request_batch.dispatch_wait
     owner: worker_sidecar
@@ -2054,6 +2408,20 @@ metrics:
     buckets: generation_seconds
     prometheus_name: sie_worker_generation_ttft_seconds
     export: [prometheus, otlp]
+  # Worker-side phase boundary for #3136: receipt -> adapter dispatch
+  # (validation, model load, chat-template render, admission/capacity wait).
+  # Complements ttft (engine grammar preparation + prefill) and tpot (decode)
+  # so the client-observed time-to-first-token decomposes by phase per
+  # grammar mode.
+  - name: sie.worker.generation.worker_wait
+    owner: worker_python_engine
+    facade_event: worker.generation_worker_wait_observed
+    type: histogram
+    unit: s
+    attributes: generation_stream
+    buckets: generation_seconds
+    prometheus_name: sie_worker_generation_worker_wait_seconds
+    export: [prometheus, otlp]
   - name: sie.worker.generation.tpot
     owner: worker_python_engine
     facade_event: worker.generation_stream_completed
@@ -2136,6 +2504,25 @@ metrics:
     unit: "{request}"
     attributes: generation_grammar
     prometheus_name: sie_worker_generation_grammar_requests_total
+    export: [prometheus, otlp]
+
+  # Remote profiles call upstreams through one process-wide limiter per
+  # upstream name: a request budget, a concurrency cap and a circuit breaker.
+  - name: sie.worker.upstream.refusals
+    owner: worker_python_engine
+    facade_event: worker.upstream_refused
+    type: counter
+    unit: "{request}"
+    attributes: worker_upstream_refusal
+    prometheus_name: sie_worker_upstream_refusals_total
+    export: [prometheus, otlp]
+  - name: sie.worker.upstream.breaker.open
+    owner: worker_python_engine
+    facade_event: worker.upstream_breaker_changed
+    type: gauge
+    unit: "{upstream}"
+    attributes: worker_upstream
+    prometheus_name: sie_worker_upstream_breaker_open
     export: [prometheus, otlp]
 
   # Rust/Candle-specific forward diagnostics share the canonical worker meter
@@ -2281,6 +2668,7 @@ collector_self_metrics:
   # Prometheus counter exposition adds `_total`; normalize only these exact
   # source aliases back to the stable OTLP family names below.
   prometheus_input_aliases:
+    otelcol_processor_filter_spans_filtered_total: otelcol_processor_filter_spans_filtered
     otelcol_receiver_refused_spans_total: otelcol_receiver_refused_spans
     otelcol_exporter_send_failed_spans_total: otelcol_exporter_send_failed_spans
     otelcol_receiver_refused_metric_points_total: otelcol_receiver_refused_metric_points
@@ -2288,6 +2676,10 @@ collector_self_metrics:
     otelcol_receiver_refused_log_records_total: otelcol_receiver_refused_log_records
     otelcol_exporter_send_failed_log_records_total: otelcol_exporter_send_failed_log_records
   metrics:
+    - name: otelcol_processor_filter_spans_filtered
+      attributes: [filter]
+      filter_allow: [filter/remote_linked_spans]
+      meaning: original_linked_spans_removed_by_remote_privacy_not_transport_loss
     - name: up
       attributes: []
     - name: otelcol_exporter_queue_size
@@ -2316,18 +2708,43 @@ logs:
     sampling: enclosing_trace_sampled
     attributes:
       event.name: inference.request.completed
-      event.schema.version: "1"
+      event.schema.version: "2"
       operation: operation
       outcome: request_outcome
       http.status_code: http.status_code
+      model: canonical_model_or_other
+      machine_profile: canonical_machine_profile
+      duration_ms: request_duration_ms
+      admission_outcome: bounded_admission_outcome
     correlation: [trace_id, span_id]
     export: [structured_stdout, otlp]
 
+  - event_name: inference.lifecycle.completed
+    owner: application
+    producers: [gateway, worker, dispatcher]
+    facade_event: lifecycle.completed
+    body: inference.lifecycle.completed
+    severity: INFO
+    sampling: enclosing_trace_sampled
+    attributes:
+      event.name: inference.lifecycle.completed
+      event.schema.version: "1"
+      phase: lifecycle_phase
+      operation: operation
+      outcome: lifecycle_outcome
+      error_class: lifecycle_error_class
+      duration_ms: finite_nonnegative_phase_duration_ms
+      first_token_ms: optional_nonnegative_first_content_delta_ms_from_phase_start
+    correlation: [trace_id, span_id]
+    export: [otlp]
+
 log_processing:
   declared_events_only: true
+  accepted_schema_versions: ["1", "2"]
   helm_receiver_binding:
     receiver: gateway
-    other_receivers: reject
+    other_receivers: reject_completion_event
+    lifecycle_application_receiver: sie-worker_worker_generation_or_sie-dispatcher_dispatch_attempt_only
     service_name: collector_authoritative_sie-gateway
   resource_identity:
     deployment.environment: collector_authoritative
@@ -2336,6 +2753,7 @@ log_processing:
     service.version: producer_optional
 
 forbidden_metric_attributes:
+  - account_id
   - tenant_id
   - organization_id
   - api_key_id
@@ -2351,6 +2769,10 @@ forbidden_metric_attributes:
 forbidden_managed_log_fields:
   - authorization
   - api_key
+  - api_key_id
+  - account_id
+  - workos_user_id
+  - email
   - prompt
   - document
   - embedding

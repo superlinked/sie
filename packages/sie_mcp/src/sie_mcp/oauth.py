@@ -1,4 +1,4 @@
-"""OAuth 2.0 bridge for the claude.ai connector surface (Req 12 #1312).
+"""OAuth 2.0 bridge for the claude.ai connector surface.
 
 claude.ai custom connectors are OAuth-only — a user cannot paste a Bearer/connector
 secret into the connector UI the way the Cowork plugin bakes one into its header.
@@ -8,17 +8,17 @@ page, and a token endpoint) and maps it onto the **existing** connector-secret s
 the user types their connector secret on the authorize page, and the token endpoint
 returns that secret as the access token. claude.ai then sends it as
 ``Authorization: Bearer <secret>`` and ``auth.authenticate`` validates it unchanged.
-The MCP tools and the auth shim are untouched; #1313 (Req 10) later swaps the static
-secret for real issued keys.
+The MCP tools and the auth shim are untouched; the static connector secret can
+later be replaced with issued keys.
 
 Security notes:
 - Connector secrets, authorization codes, and access tokens are NEVER logged.
 - PKCE is required; redirect URIs are validated against a configured allowlist.
 - Authorization codes are bound to the requesting ``client_id`` (when one is
   presented), so a leaked code cannot be redeemed by a different public client.
-  Audience (``resource``) binding lands with real issued keys in #1313 (Req 10).
+  Audience (``resource``) binding belongs with real issued keys.
 - Authorization codes are single-use and short-lived, held in-process (the edge runs
-  as a single uvicorn worker for the POC; a shared store is the Req 10 follow-up).
+  as a single uvicorn worker; a multi-worker deployment requires a shared store).
 """
 
 import base64
@@ -53,7 +53,7 @@ def verify_pkce(code_verifier: str, code_challenge: str, method: str) -> bool:
     except UnicodeEncodeError:
         return False
     expected = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
-    return secrets.compare_digest(expected, code_challenge)
+    return secrets.compare_digest(expected.encode(), code_challenge.encode("utf-8", "surrogatepass"))
 
 
 class OAuthError(Exception):
@@ -229,13 +229,23 @@ def _parse_form(body: bytes) -> dict[str, str]:
     return {key: values[0] for key, values in parse_qs(decoded).items() if values}
 
 
+_ORIGIN_UNAVAILABLE = {
+    "error": "server_error",
+    "error_description": "OAuth origin is not configured; set SIE_MCP_PUBLIC_URL or SIE_MCP_ALLOWED_HOSTS.",
+}
+
+
 async def _protected_resource(request: Request, config: MCPConfig) -> JSONResponse:
-    origin = base_url(config, scheme=request.url.scheme, headers=request.headers)
+    origin = base_url(config, scheme=request.scope.get("scheme", "http"), headers=request.headers)
+    if origin is None:
+        return JSONResponse(_ORIGIN_UNAVAILABLE, status_code=503)
     return JSONResponse(protected_resource_metadata(origin))
 
 
 async def _authorization_server(request: Request, config: MCPConfig) -> JSONResponse:
-    origin = base_url(config, scheme=request.url.scheme, headers=request.headers)
+    origin = base_url(config, scheme=request.scope.get("scheme", "http"), headers=request.headers)
+    if origin is None:
+        return JSONResponse(_ORIGIN_UNAVAILABLE, status_code=503)
     return JSONResponse(authorization_server_metadata(origin))
 
 

@@ -26,8 +26,8 @@ Cost semantics vary by modality (modality-native units):
 
 These units are NOT commensurable across modalities, so ``total_cost`` is only
 meaningful within a single modality (the common case — a model's batch is
-single-modality). See docs/adr/0004 for why cost is kept modality-native
-rather than unified onto a canonical unit.
+single-modality), so cost remains modality-native rather than being unified
+onto a misleading canonical unit.
 """
 
 from __future__ import annotations
@@ -247,7 +247,21 @@ class BatchFormer[I: HasCost, T]:
         elapsed_ms = (time.monotonic() - self._first_request_time) * 1000
         return elapsed_ms >= self._config.max_batch_wait_ms
 
-    def _coalesce_expired(self) -> bool:
+    def _effective_coalesce_ms(self, coalesce_cap_ms: float | None) -> float:
+        """Coalesce window for the current wait, optionally capped by the caller.
+
+        ``coalesce_cap_ms`` is the idle-dispatch accumulation window (#2874):
+        a worker that was idle passes a small cap so the first batch after
+        idleness still coalesces burst-mates instead of dispatching a
+        degenerate batch-of-1, while a lone request only ever waits the cap
+        rather than the full busy-path coalesce window.
+        """
+        effective = self._config.effective_coalesce_ms
+        if coalesce_cap_ms is not None:
+            effective = min(effective, coalesce_cap_ms)
+        return effective
+
+    def _coalesce_expired(self, coalesce_cap_ms: float | None = None) -> bool:
         """Check if the coalescing window has expired (no new items recently).
 
         Returns True when items are pending and no new items have arrived
@@ -257,17 +271,18 @@ class BatchFormer[I: HasCost, T]:
 
         Uses effective_coalesce_ms which scales proportionally with
         max_batch_wait_ms to stay relevant across the adaptive range.
+        ``coalesce_cap_ms`` additionally caps the window (idle dispatch, #2874).
         """
         if self._last_submit_time is None or not self._pending:
             return False
         elapsed_ms = (time.monotonic() - self._last_submit_time) * 1000
-        return elapsed_ms >= self._config.effective_coalesce_ms
+        return elapsed_ms >= self._effective_coalesce_ms(coalesce_cap_ms)
 
-    def _should_yield_batch(self) -> bool:
+    def _should_yield_batch(self, coalesce_cap_ms: float | None = None) -> bool:
         """Check if batch should be yielded (full, timeout, or coalesced)."""
         if len(self._pending) == 0:
             return False
-        return self._batch_is_full() or self._batch_timeout_expired() or self._coalesce_expired()
+        return self._batch_is_full() or self._batch_timeout_expired() or self._coalesce_expired(coalesce_cap_ms)
 
     async def submit(self, item: I, metadata: T) -> None:
         """Submit an item for batching.
@@ -310,18 +325,32 @@ class BatchFormer[I: HasCost, T]:
         if self._should_yield_batch() or is_first_request:
             self._batch_ready.set()
 
-    async def get_batch(self, *, immediate: bool = False) -> FormattedBatch[I, T]:
+    async def get_batch(
+        self,
+        *,
+        immediate: bool = False,
+        coalesce_cap_ms: float | None = None,
+    ) -> FormattedBatch[I, T]:
         """Wait for and return the next batch.
 
         Blocks until:
         - Batch is full (cost or request limit reached), OR
         - Timeout expires after first request, OR
+        - Coalesce window (optionally capped) expires, OR
         - immediate=True and any items are pending
 
         Args:
             immediate: If True, yield immediately when any items are pending
                 without waiting for timeout. Used when the worker was idle
                 to eliminate unnecessary batch wait at low concurrency.
+            coalesce_cap_ms: Optional cap on the coalesce window for THIS
+                wait. The idle-dispatch accumulation window (#2874): the
+                worker passes a small single-digit-ms cap after idleness so
+                bursty arrivals fuse into one batch instead of a train of
+                immediate batch-of-1 dispatches, while a lone request never
+                waits longer than the cap once arrivals stop. The
+                ``max_batch_wait_ms`` first-request timeout still bounds the
+                total wait.
 
         Returns:
             FormattedBatch with items sorted by cost (ascending).
@@ -329,12 +358,12 @@ class BatchFormer[I: HasCost, T]:
         """
         while True:
             async with self._lock:
-                if self._should_yield_batch() or (immediate and len(self._pending) > 0):
+                if self._should_yield_batch(coalesce_cap_ms) or (immediate and len(self._pending) > 0):
                     # _extract_batch already sorts by cost and respects limits
-                    return self._extract_batch()
+                    return self._extract_batch(coalesce_cap_ms=coalesce_cap_ms)
 
             # Wait for batch ready signal or timeout
-            timeout_s = self._get_wait_timeout()
+            timeout_s = self._get_wait_timeout(coalesce_cap_ms)
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(
                     self._batch_ready.wait(),
@@ -344,13 +373,14 @@ class BatchFormer[I: HasCost, T]:
             # Clear event for next batch
             self._batch_ready.clear()
 
-    def _get_wait_timeout(self) -> float | None:
+    def _get_wait_timeout(self, coalesce_cap_ms: float | None = None) -> float | None:
         """Calculate how long to wait for more requests.
 
         Returns the shorter of:
         - Time remaining in the batch formation window (max_batch_wait_ms)
-        - Time remaining until the coalesce window expires (based on when the
-          last item was submitted, not a fixed polling interval)
+        - Time remaining until the (optionally capped) coalesce window
+          expires (based on when the last item was submitted, not a fixed
+          polling interval)
 
         This ensures precise coalesce detection: the sleep duration is exactly
         the time until coalesce fires, rather than polling every coalesce_ms.
@@ -363,7 +393,7 @@ class BatchFormer[I: HasCost, T]:
         batch_remaining_ms = max(0, self._config.max_batch_wait_ms - elapsed_ms)
 
         # Compute actual time remaining until coalesce fires
-        coalesce_ms = self._config.effective_coalesce_ms
+        coalesce_ms = self._effective_coalesce_ms(coalesce_cap_ms)
         if self._last_submit_time is not None:
             since_last_submit_ms = (now - self._last_submit_time) * 1000
             coalesce_remaining_ms = max(0, coalesce_ms - since_last_submit_ms)
@@ -373,7 +403,11 @@ class BatchFormer[I: HasCost, T]:
         effective_ms = min(batch_remaining_ms, coalesce_remaining_ms)
         return effective_ms / 1000  # Convert to seconds
 
-    def _extract_batch(self, max_items: int | None = None) -> FormattedBatch[I, T]:
+    def _extract_batch(
+        self,
+        max_items: int | None = None,
+        coalesce_cap_ms: float | None = None,
+    ) -> FormattedBatch[I, T]:
         """Extract an optimal sub-batch from pending requests.
 
         Algorithm:
@@ -389,11 +423,15 @@ class BatchFormer[I: HasCost, T]:
                 continuous-batch drain to a caller-held snapshot budget so
                 post-snapshot arrivals are not swept in ahead of the next FCFS
                 selection. See #1606.
+            coalesce_cap_ms: The coalesce cap the caller used to decide the
+                yield (#2874), threaded through so the logged trigger matches
+                the actual yield reason (a capped-coalesce dispatch logs
+                ``coalesced``, not ``immediate``).
         """
         # Track why batch was triggered (must check BEFORE extracting items)
         was_full = self._batch_is_full()
         was_timeout = self._batch_timeout_expired()
-        was_coalesced = self._coalesce_expired()
+        was_coalesced = self._coalesce_expired(coalesce_cap_ms)
         pending_before = len(self._pending)
         cost_before = self._total_cost
 
@@ -471,6 +509,28 @@ class BatchFormer[I: HasCost, T]:
         if self._should_yield_batch():
             return self._extract_batch()
         return None
+
+    def drain_pending(self) -> list[T]:
+        """Remove every pending request and return their metadata.
+
+        Used by ``ModelWorker.stop()`` to fail the futures of work that will
+        never run because the worker is going away. Returns one entry per
+        pending *item*; a multi-item request appears once per item, so
+        callers that act on the metadata must deduplicate.
+
+        Deliberately synchronous, and deliberately does not take ``_lock``.
+        It runs on the event loop, and every ``_lock`` critical section in
+        this class is await-free, so no lock holder can be suspended
+        mid-mutation for this call to interleave with. Taking the lock would
+        require an ``await``, which is exactly what a caller unwinding a
+        cancellation cannot do.
+        """
+        metadata = [request.metadata for request in self._pending]
+        self._pending = []
+        self._total_cost = 0
+        self._first_request_time = None
+        self._last_submit_time = None
+        return metadata
 
     async def try_drain(self, max_items: int | None = None) -> FormattedBatch[I, T] | None:
         """Drain accumulated items immediately, bypassing batch timeout.

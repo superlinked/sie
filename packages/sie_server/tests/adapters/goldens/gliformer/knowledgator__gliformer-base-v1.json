@@ -1,0 +1,2093 @@
+{
+ "model": "knowledgator/gliformer-base-v1",
+ "revision": "590f9d3f577ea2f6d685aaec84b2d66b6db86b15",
+ "generated_with": {
+  "gliformer": "0.1.2",
+  "gliner": "0.2.26",
+  "transformers": "4.57.6",
+  "torch": "2.9.1+cu129",
+  "device": "cpu",
+  "dtype": "float32",
+  "max_length": 2048
+ },
+ "texts": [
+  "Alice Johnson works at Acme Corp in London. She joined in March 2021 as a senior software engineer.",
+  "Apple announced the iPhone 17 in Cupertino on Tuesday; Tim Cook called it the best phone ever made.",
+  "The refund request from Maria Lopez for order 4471 was denied because the item was returned after 45 days.",
+  "Dr. Maria Rossi prescribed 20 mg of atorvastatin to the patient at St. Mary's Hospital in Boston."
+ ],
+ "cases": [
+  {
+   "name": "entities",
+   "request": {
+    "labels": [
+     "person",
+     "organization",
+     "location",
+     "date",
+     "product"
+    ]
+   },
+   "reference_call": {
+    "threshold": 0.5,
+    "entities": [
+     "person",
+     "organization",
+     "location",
+     "date",
+     "product"
+    ]
+   },
+   "reference_output": {
+    "ner": [
+     [
+      {
+       "start": 0,
+       "end": 13,
+       "text": "Alice Johnson",
+       "label": "person",
+       "score": 0.998687207698822
+      },
+      {
+       "start": 23,
+       "end": 32,
+       "text": "Acme Corp",
+       "label": "organization",
+       "score": 0.9987726807594299
+      },
+      {
+       "start": 36,
+       "end": 42,
+       "text": "London",
+       "label": "location",
+       "score": 0.9904738068580627
+      },
+      {
+       "start": 58,
+       "end": 68,
+       "text": "March 2021",
+       "label": "date",
+       "score": 0.98014235496521
+      }
+     ],
+     [
+      {
+       "start": 0,
+       "end": 5,
+       "text": "Apple",
+       "label": "organization",
+       "score": 0.9994114637374878
+      },
+      {
+       "start": 20,
+       "end": 29,
+       "text": "iPhone 17",
+       "label": "product",
+       "score": 0.9953331351280212
+      },
+      {
+       "start": 33,
+       "end": 42,
+       "text": "Cupertino",
+       "label": "location",
+       "score": 0.9993935823440552
+      },
+      {
+       "start": 46,
+       "end": 53,
+       "text": "Tuesday",
+       "label": "date",
+       "score": 0.9983695149421692
+      },
+      {
+       "start": 55,
+       "end": 63,
+       "text": "Tim Cook",
+       "label": "person",
+       "score": 0.9993093013763428
+      }
+     ],
+     [
+      {
+       "start": 24,
+       "end": 35,
+       "text": "Maria Lopez",
+       "label": "person",
+       "score": 0.994909942150116
+      },
+      {
+       "start": 40,
+       "end": 50,
+       "text": "order 4471",
+       "label": "product",
+       "score": 0.6843111515045166
+      }
+     ],
+     [
+      {
+       "start": 0,
+       "end": 15,
+       "text": "Dr. Maria Rossi",
+       "label": "person",
+       "score": 0.9503074288368225
+      },
+      {
+       "start": 36,
+       "end": 48,
+       "text": "atorvastatin",
+       "label": "product",
+       "score": 0.8504046201705933
+      },
+      {
+       "start": 67,
+       "end": 86,
+       "text": "St. Mary's Hospital",
+       "label": "organization",
+       "score": 0.956914484500885
+      },
+      {
+       "start": 90,
+       "end": 96,
+       "text": "Boston",
+       "label": "location",
+       "score": 0.9274460673332214
+      }
+     ]
+    ]
+   }
+  },
+  {
+   "name": "classification",
+   "request": {
+    "labels": [
+     "positive",
+     "negative",
+     "neutral"
+    ],
+    "options": {
+     "classification_task": "sentiment"
+    }
+   },
+   "reference_call": {
+    "threshold": 0.5,
+    "classes": {
+     "sentiment": [
+      "positive",
+      "negative",
+      "neutral"
+     ]
+    }
+   },
+   "reference_output": {
+    "classification": [
+     [
+      [
+       {
+        "class_name": "neutral",
+        "score": 0.9999700784683228
+       }
+      ]
+     ],
+     [
+      [
+       {
+        "class_name": "positive",
+        "score": 0.9999016523361206
+       }
+      ]
+     ],
+     [
+      [
+       {
+        "class_name": "negative",
+        "score": 0.9999743700027466
+       }
+      ]
+     ],
+     [
+      [
+       {
+        "class_name": "neutral",
+        "score": 0.9999922513961792
+       }
+      ]
+     ]
+    ]
+   }
+  },
+  {
+   "name": "classification_multi_label",
+   "request": {
+    "labels": [
+     "business",
+     "technology",
+     "health",
+     "customer support"
+    ],
+    "options": {
+     "classification_task": "topic",
+     "multi_label": true,
+     "threshold": 0.3
+    }
+   },
+   "reference_call": {
+    "threshold": 0.3,
+    "classes": {
+     "topic": [
+      "business",
+      "technology",
+      "health",
+      "customer support"
+     ]
+    },
+    "multi_label": true
+   },
+   "reference_output": {
+    "classification": [
+     [
+      [
+       {
+        "class_name": "business",
+        "score": 0.9943450689315796
+       },
+       {
+        "class_name": "technology",
+        "score": 0.983393132686615
+       }
+      ]
+     ],
+     [
+      [
+       {
+        "class_name": "technology",
+        "score": 0.9674676060676575
+       }
+      ]
+     ],
+     [
+      [
+       {
+        "class_name": "business",
+        "score": 0.9786849021911621
+       },
+       {
+        "class_name": "customer support",
+        "score": 0.9734137654304504
+       }
+      ]
+     ],
+     [
+      [
+       {
+        "class_name": "health",
+        "score": 0.9973570704460144
+       }
+      ]
+     ]
+    ]
+   }
+  },
+  {
+   "name": "relations",
+   "request": {
+    "labels": [
+     "person",
+     "organization",
+     "location",
+     "date",
+     "product"
+    ],
+    "options": {
+     "relation_labels": [
+      "works at",
+      "located in",
+      "chief executive of"
+     ]
+    }
+   },
+   "reference_call": {
+    "threshold": 0.5,
+    "joint_relations": [
+     {
+      "name": null,
+      "entities": [
+       "person",
+       "organization",
+       "location",
+       "date",
+       "product"
+      ],
+      "relations": [
+       "works at",
+       "located in",
+       "chief executive of"
+      ]
+     }
+    ]
+   },
+   "reference_output": {
+    "ner": [
+     [
+      {
+       "start": 0,
+       "end": 13,
+       "text": "Alice Johnson",
+       "label": "person",
+       "score": 0.9992438554763794
+      },
+      {
+       "start": 23,
+       "end": 32,
+       "text": "Acme Corp",
+       "label": "organization",
+       "score": 0.9997832179069519
+      },
+      {
+       "start": 36,
+       "end": 42,
+       "text": "London",
+       "label": "location",
+       "score": 0.9992039799690247
+      },
+      {
+       "start": 58,
+       "end": 68,
+       "text": "March 2021",
+       "label": "date",
+       "score": 0.9951400756835938
+      }
+     ],
+     [
+      {
+       "start": 0,
+       "end": 5,
+       "text": "Apple",
+       "label": "organization",
+       "score": 0.999916672706604
+      },
+      {
+       "start": 20,
+       "end": 29,
+       "text": "iPhone 17",
+       "label": "product",
+       "score": 0.9990525841712952
+      },
+      {
+       "start": 33,
+       "end": 42,
+       "text": "Cupertino",
+       "label": "location",
+       "score": 0.9998286962509155
+      },
+      {
+       "start": 46,
+       "end": 53,
+       "text": "Tuesday",
+       "label": "date",
+       "score": 0.9989157319068909
+      },
+      {
+       "start": 55,
+       "end": 63,
+       "text": "Tim Cook",
+       "label": "person",
+       "score": 0.9997623562812805
+      }
+     ],
+     [
+      {
+       "start": 24,
+       "end": 35,
+       "text": "Maria Lopez",
+       "label": "person",
+       "score": 0.9968036413192749
+      },
+      {
+       "start": 40,
+       "end": 50,
+       "text": "order 4471",
+       "label": "product",
+       "score": 0.8277521133422852
+      }
+     ],
+     [
+      {
+       "start": 0,
+       "end": 15,
+       "text": "Dr. Maria Rossi",
+       "label": "person",
+       "score": 0.9825044274330139
+      },
+      {
+       "start": 36,
+       "end": 48,
+       "text": "atorvastatin",
+       "label": "product",
+       "score": 0.8257777690887451
+      },
+      {
+       "start": 67,
+       "end": 86,
+       "text": "St. Mary's Hospital",
+       "label": "organization",
+       "score": 0.9964388608932495
+      },
+      {
+       "start": 90,
+       "end": 96,
+       "text": "Boston",
+       "label": "location",
+       "score": 0.9968149065971375
+      }
+     ]
+    ],
+    "joint_relex": [
+     [
+      {
+       "head": {
+        "start": 0,
+        "end": 13,
+        "text": "Alice Johnson",
+        "type": "person",
+        "entity_idx": 0
+       },
+       "tail": {
+        "start": 23,
+        "end": 32,
+        "text": "Acme Corp",
+        "type": "organization",
+        "entity_idx": 1
+       },
+       "relation": "works at",
+       "score": 0.9429084062576294
+      },
+      {
+       "head": {
+        "start": 23,
+        "end": 32,
+        "text": "Acme Corp",
+        "type": "organization",
+        "entity_idx": 1
+       },
+       "tail": {
+        "start": 36,
+        "end": 42,
+        "text": "London",
+        "type": "location",
+        "entity_idx": 2
+       },
+       "relation": "located in",
+       "score": 0.8052617311477661
+      }
+     ],
+     [
+      {
+       "head": {
+        "start": 0,
+        "end": 5,
+        "text": "Apple",
+        "type": "organization",
+        "entity_idx": 0
+       },
+       "tail": {
+        "start": 33,
+        "end": 42,
+        "text": "Cupertino",
+        "type": "location",
+        "entity_idx": 2
+       },
+       "relation": "located in",
+       "score": 0.6062094569206238
+      },
+      {
+       "head": {
+        "start": 20,
+        "end": 29,
+        "text": "iPhone 17",
+        "type": "product",
+        "entity_idx": 1
+       },
+       "tail": {
+        "start": 33,
+        "end": 42,
+        "text": "Cupertino",
+        "type": "location",
+        "entity_idx": 2
+       },
+       "relation": "located in",
+       "score": 0.6795557737350464
+      },
+      {
+       "head": {
+        "start": 55,
+        "end": 63,
+        "text": "Tim Cook",
+        "type": "person",
+        "entity_idx": 4
+       },
+       "tail": {
+        "start": 0,
+        "end": 5,
+        "text": "Apple",
+        "type": "organization",
+        "entity_idx": 0
+       },
+       "relation": "works at",
+       "score": 0.7263557314872742
+      },
+      {
+       "head": {
+        "start": 55,
+        "end": 63,
+        "text": "Tim Cook",
+        "type": "person",
+        "entity_idx": 4
+       },
+       "tail": {
+        "start": 0,
+        "end": 5,
+        "text": "Apple",
+        "type": "organization",
+        "entity_idx": 0
+       },
+       "relation": "chief executive of",
+       "score": 0.6439918279647827
+      }
+     ],
+     [],
+     [
+      {
+       "head": {
+        "start": 0,
+        "end": 15,
+        "text": "Dr. Maria Rossi",
+        "type": "person",
+        "entity_idx": 0
+       },
+       "tail": {
+        "start": 67,
+        "end": 86,
+        "text": "St. Mary's Hospital",
+        "type": "organization",
+        "entity_idx": 2
+       },
+       "relation": "works at",
+       "score": 0.885895311832428
+      },
+      {
+       "head": {
+        "start": 36,
+        "end": 48,
+        "text": "atorvastatin",
+        "type": "product",
+        "entity_idx": 1
+       },
+       "tail": {
+        "start": 90,
+        "end": 96,
+        "text": "Boston",
+        "type": "location",
+        "entity_idx": 3
+       },
+       "relation": "located in",
+       "score": 0.5062950253486633
+      },
+      {
+       "head": {
+        "start": 67,
+        "end": 86,
+        "text": "St. Mary's Hospital",
+        "type": "organization",
+        "entity_idx": 2
+       },
+       "tail": {
+        "start": 90,
+        "end": 96,
+        "text": "Boston",
+        "type": "location",
+        "entity_idx": 3
+       },
+       "relation": "located in",
+       "score": 0.8539669513702393
+      }
+     ]
+    ]
+   }
+  },
+  {
+   "name": "output_schema",
+   "request": {
+    "output_schema": {
+     "type": "object",
+     "properties": {
+      "customer": {
+       "type": "string"
+      },
+      "order number": {
+       "type": "string"
+      },
+      "decision": {
+       "type": "string",
+       "enum": [
+        "approved",
+        "denied",
+        "escalated"
+       ]
+      },
+      "reasons": {
+       "type": "array",
+       "items": {
+        "type": "string"
+       }
+      },
+      "people": {
+       "type": "array",
+       "items": {
+        "type": "object",
+        "properties": {
+         "name": {
+          "type": "string"
+         },
+         "role": {
+          "type": "string"
+         }
+        }
+       }
+      }
+     }
+    }
+   },
+   "reference_call": {
+    "threshold": 0.5,
+    "classes": {
+     "decision": [
+      "approved",
+      "denied",
+      "escalated"
+     ]
+    },
+    "structures": {
+     "$root": {
+      "customer": "str",
+      "order number": "str",
+      "reasons": [
+       "str"
+      ],
+      "people": [
+       {
+        "name": "str",
+        "role": "str"
+       }
+      ]
+     }
+    }
+   },
+   "reference_output": {
+    "classification": [
+     [
+      []
+     ],
+     [
+      []
+     ],
+     [
+      [
+       {
+        "class_name": "denied",
+        "score": 0.9998706579208374
+       }
+      ]
+     ],
+     [
+      []
+     ]
+    ],
+    "structuring": [
+     {
+      "customer": null,
+      "order number": null,
+      "reasons": [],
+      "people": [
+       {
+        "name": "Alice Johnson",
+        "role": "senior software engineer"
+       }
+      ]
+     },
+     {
+      "customer": null,
+      "order number": null,
+      "reasons": [],
+      "people": [
+       {
+        "name": "Tim Cook",
+        "role": null
+       }
+      ]
+     },
+     {
+      "customer": "Maria Lopez",
+      "order number": "4471",
+      "reasons": [
+       "the item was returned after 45 days"
+      ],
+      "people": []
+     },
+     {}
+    ]
+   }
+  },
+  {
+   "name": "combined",
+   "request": {
+    "labels": [
+     "person",
+     "organization",
+     "location",
+     "date",
+     "product"
+    ],
+    "output_schema": {
+     "type": "object",
+     "properties": {
+      "customer": {
+       "type": "string"
+      },
+      "order number": {
+       "type": "string"
+      },
+      "decision": {
+       "type": "string",
+       "enum": [
+        "approved",
+        "denied",
+        "escalated"
+       ]
+      },
+      "reasons": {
+       "type": "array",
+       "items": {
+        "type": "string"
+       }
+      },
+      "people": {
+       "type": "array",
+       "items": {
+        "type": "object",
+        "properties": {
+         "name": {
+          "type": "string"
+         },
+         "role": {
+          "type": "string"
+         }
+        }
+       }
+      }
+     }
+    },
+    "options": {
+     "relation_labels": [
+      "works at",
+      "located in",
+      "chief executive of"
+     ]
+    }
+   },
+   "reference_call": {
+    "threshold": 0.5,
+    "classes": {
+     "decision": [
+      "approved",
+      "denied",
+      "escalated"
+     ]
+    },
+    "joint_relations": [
+     {
+      "name": null,
+      "entities": [
+       "person",
+       "organization",
+       "location",
+       "date",
+       "product"
+      ],
+      "relations": [
+       "works at",
+       "located in",
+       "chief executive of"
+      ]
+     }
+    ],
+    "structures": {
+     "$root": {
+      "customer": "str",
+      "order number": "str",
+      "reasons": [
+       "str"
+      ],
+      "people": [
+       {
+        "name": "str",
+        "role": "str"
+       }
+      ]
+     }
+    }
+   },
+   "reference_output": {
+    "ner": [
+     [
+      {
+       "start": 0,
+       "end": 13,
+       "text": "Alice Johnson",
+       "label": "person",
+       "score": 0.9790270328521729
+      },
+      {
+       "start": 23,
+       "end": 32,
+       "text": "Acme Corp",
+       "label": "organization",
+       "score": 0.9995777010917664
+      },
+      {
+       "start": 36,
+       "end": 42,
+       "text": "London",
+       "label": "location",
+       "score": 0.9974365830421448
+      },
+      {
+       "start": 58,
+       "end": 68,
+       "text": "March 2021",
+       "label": "date",
+       "score": 0.9894367456436157
+      }
+     ],
+     [
+      {
+       "start": 0,
+       "end": 5,
+       "text": "Apple",
+       "label": "organization",
+       "score": 0.9997462630271912
+      },
+      {
+       "start": 20,
+       "end": 29,
+       "text": "iPhone 17",
+       "label": "product",
+       "score": 0.9951222538948059
+      },
+      {
+       "start": 33,
+       "end": 42,
+       "text": "Cupertino",
+       "label": "location",
+       "score": 0.9991375207901001
+      },
+      {
+       "start": 46,
+       "end": 53,
+       "text": "Tuesday",
+       "label": "date",
+       "score": 0.9976429343223572
+      },
+      {
+       "start": 55,
+       "end": 63,
+       "text": "Tim Cook",
+       "label": "person",
+       "score": 0.9976812601089478
+      }
+     ],
+     [
+      {
+       "start": 24,
+       "end": 35,
+       "text": "Maria Lopez",
+       "label": "person",
+       "score": 0.6708275079727173
+      }
+     ],
+     [
+      {
+       "start": 0,
+       "end": 15,
+       "text": "Dr. Maria Rossi",
+       "label": "person",
+       "score": 0.9292746782302856
+      },
+      {
+       "start": 36,
+       "end": 48,
+       "text": "atorvastatin",
+       "label": "product",
+       "score": 0.8454955816268921
+      },
+      {
+       "start": 67,
+       "end": 86,
+       "text": "St. Mary's Hospital",
+       "label": "organization",
+       "score": 0.9858440160751343
+      },
+      {
+       "start": 90,
+       "end": 96,
+       "text": "Boston",
+       "label": "location",
+       "score": 0.9933439493179321
+      }
+     ]
+    ],
+    "classification": [
+     [
+      []
+     ],
+     [
+      []
+     ],
+     [
+      [
+       {
+        "class_name": "denied",
+        "score": 0.9998306035995483
+       }
+      ]
+     ],
+     [
+      []
+     ]
+    ],
+    "joint_relex": [
+     [
+      {
+       "head": {
+        "start": 0,
+        "end": 13,
+        "text": "Alice Johnson",
+        "type": "person",
+        "entity_idx": 0
+       },
+       "tail": {
+        "start": 23,
+        "end": 32,
+        "text": "Acme Corp",
+        "type": "organization",
+        "entity_idx": 1
+       },
+       "relation": "works at",
+       "score": 0.9450026750564575
+      },
+      {
+       "head": {
+        "start": 0,
+        "end": 13,
+        "text": "Alice Johnson",
+        "type": "person",
+        "entity_idx": 0
+       },
+       "tail": {
+        "start": 36,
+        "end": 42,
+        "text": "London",
+        "type": "location",
+        "entity_idx": 2
+       },
+       "relation": "works at",
+       "score": 0.5902034640312195
+      },
+      {
+       "head": {
+        "start": 0,
+        "end": 13,
+        "text": "Alice Johnson",
+        "type": "person",
+        "entity_idx": 0
+       },
+       "tail": {
+        "start": 36,
+        "end": 42,
+        "text": "London",
+        "type": "location",
+        "entity_idx": 2
+       },
+       "relation": "located in",
+       "score": 0.5139472484588623
+      },
+      {
+       "head": {
+        "start": 23,
+        "end": 32,
+        "text": "Acme Corp",
+        "type": "organization",
+        "entity_idx": 1
+       },
+       "tail": {
+        "start": 36,
+        "end": 42,
+        "text": "London",
+        "type": "location",
+        "entity_idx": 2
+       },
+       "relation": "located in",
+       "score": 0.8067009449005127
+      }
+     ],
+     [
+      {
+       "head": {
+        "start": 0,
+        "end": 5,
+        "text": "Apple",
+        "type": "organization",
+        "entity_idx": 0
+       },
+       "tail": {
+        "start": 33,
+        "end": 42,
+        "text": "Cupertino",
+        "type": "location",
+        "entity_idx": 2
+       },
+       "relation": "located in",
+       "score": 0.6147376298904419
+      },
+      {
+       "head": {
+        "start": 20,
+        "end": 29,
+        "text": "iPhone 17",
+        "type": "product",
+        "entity_idx": 1
+       },
+       "tail": {
+        "start": 33,
+        "end": 42,
+        "text": "Cupertino",
+        "type": "location",
+        "entity_idx": 2
+       },
+       "relation": "located in",
+       "score": 0.6687809824943542
+      },
+      {
+       "head": {
+        "start": 55,
+        "end": 63,
+        "text": "Tim Cook",
+        "type": "person",
+        "entity_idx": 4
+       },
+       "tail": {
+        "start": 0,
+        "end": 5,
+        "text": "Apple",
+        "type": "organization",
+        "entity_idx": 0
+       },
+       "relation": "works at",
+       "score": 0.7464385628700256
+      },
+      {
+       "head": {
+        "start": 55,
+        "end": 63,
+        "text": "Tim Cook",
+        "type": "person",
+        "entity_idx": 4
+       },
+       "tail": {
+        "start": 0,
+        "end": 5,
+        "text": "Apple",
+        "type": "organization",
+        "entity_idx": 0
+       },
+       "relation": "chief executive of",
+       "score": 0.5472172498703003
+      },
+      {
+       "head": {
+        "start": 55,
+        "end": 63,
+        "text": "Tim Cook",
+        "type": "person",
+        "entity_idx": 4
+       },
+       "tail": {
+        "start": 33,
+        "end": 42,
+        "text": "Cupertino",
+        "type": "location",
+        "entity_idx": 2
+       },
+       "relation": "works at",
+       "score": 0.5529800057411194
+      }
+     ],
+     [],
+     [
+      {
+       "head": {
+        "start": 0,
+        "end": 15,
+        "text": "Dr. Maria Rossi",
+        "type": "person",
+        "entity_idx": 0
+       },
+       "tail": {
+        "start": 67,
+        "end": 86,
+        "text": "St. Mary's Hospital",
+        "type": "organization",
+        "entity_idx": 2
+       },
+       "relation": "works at",
+       "score": 0.8912127017974854
+      },
+      {
+       "head": {
+        "start": 0,
+        "end": 15,
+        "text": "Dr. Maria Rossi",
+        "type": "person",
+        "entity_idx": 0
+       },
+       "tail": {
+        "start": 90,
+        "end": 96,
+        "text": "Boston",
+        "type": "location",
+        "entity_idx": 3
+       },
+       "relation": "located in",
+       "score": 0.505382239818573
+      },
+      {
+       "head": {
+        "start": 36,
+        "end": 48,
+        "text": "atorvastatin",
+        "type": "product",
+        "entity_idx": 1
+       },
+       "tail": {
+        "start": 90,
+        "end": 96,
+        "text": "Boston",
+        "type": "location",
+        "entity_idx": 3
+       },
+       "relation": "located in",
+       "score": 0.6236289739608765
+      },
+      {
+       "head": {
+        "start": 67,
+        "end": 86,
+        "text": "St. Mary's Hospital",
+        "type": "organization",
+        "entity_idx": 2
+       },
+       "tail": {
+        "start": 90,
+        "end": 96,
+        "text": "Boston",
+        "type": "location",
+        "entity_idx": 3
+       },
+       "relation": "located in",
+       "score": 0.8565820455551147
+      }
+     ]
+    ],
+    "structuring": [
+     {
+      "people": [
+       {
+        "name": "Alice Johnson",
+        "role": "senior software engineer"
+       }
+      ]
+     },
+     {
+      "people": [
+       {
+        "name": "Tim Cook",
+        "role": null
+       }
+      ]
+     },
+     {
+      "customer": "Maria Lopez",
+      "order number": "4471",
+      "reasons": [
+       "the item was returned after 45 days"
+      ],
+      "people": []
+     },
+     {}
+    ]
+   }
+  },
+  {
+   "name": "label_groups",
+   "request": {
+    "labels": [
+     "person",
+     "organization",
+     "location",
+     "date",
+     "product"
+    ],
+    "options": {
+     "label_groups": {
+      "sentiment": [
+       "positive",
+       "negative",
+       "neutral"
+      ],
+      "topic": [
+       "business",
+       "technology",
+       "health",
+       "customer support"
+      ]
+     }
+    }
+   },
+   "reference_call": {
+    "threshold": 0.5,
+    "entities": [
+     "person",
+     "organization",
+     "location",
+     "date",
+     "product"
+    ],
+    "classes": {
+     "sentiment": [
+      "positive",
+      "negative",
+      "neutral"
+     ],
+     "topic": [
+      "business",
+      "technology",
+      "health",
+      "customer support"
+     ]
+    }
+   },
+   "reference_output": {
+    "ner": [
+     [
+      {
+       "start": 0,
+       "end": 13,
+       "text": "Alice Johnson",
+       "label": "person",
+       "score": 0.99660325050354
+      },
+      {
+       "start": 23,
+       "end": 32,
+       "text": "Acme Corp",
+       "label": "organization",
+       "score": 0.99643874168396
+      },
+      {
+       "start": 36,
+       "end": 42,
+       "text": "London",
+       "label": "location",
+       "score": 0.9908099174499512
+      },
+      {
+       "start": 58,
+       "end": 68,
+       "text": "March 2021",
+       "label": "date",
+       "score": 0.9783049821853638
+      }
+     ],
+     [
+      {
+       "start": 0,
+       "end": 5,
+       "text": "Apple",
+       "label": "organization",
+       "score": 0.9964777827262878
+      },
+      {
+       "start": 20,
+       "end": 29,
+       "text": "iPhone 17",
+       "label": "product",
+       "score": 0.9844722151756287
+      },
+      {
+       "start": 33,
+       "end": 42,
+       "text": "Cupertino",
+       "label": "location",
+       "score": 0.9893314838409424
+      },
+      {
+       "start": 46,
+       "end": 53,
+       "text": "Tuesday",
+       "label": "date",
+       "score": 0.9891701340675354
+      },
+      {
+       "start": 55,
+       "end": 63,
+       "text": "Tim Cook",
+       "label": "person",
+       "score": 0.9964523315429688
+      }
+     ],
+     [
+      {
+       "start": 24,
+       "end": 35,
+       "text": "Maria Lopez",
+       "label": "person",
+       "score": 0.9686092138290405
+      },
+      {
+       "start": 40,
+       "end": 50,
+       "text": "order 4471",
+       "label": "product",
+       "score": 0.7610914707183838
+      }
+     ],
+     [
+      {
+       "start": 0,
+       "end": 15,
+       "text": "Dr. Maria Rossi",
+       "label": "person",
+       "score": 0.8969882130622864
+      },
+      {
+       "start": 36,
+       "end": 48,
+       "text": "atorvastatin",
+       "label": "product",
+       "score": 0.7445228695869446
+      },
+      {
+       "start": 67,
+       "end": 86,
+       "text": "St. Mary's Hospital",
+       "label": "organization",
+       "score": 0.9035640954971313
+      },
+      {
+       "start": 90,
+       "end": 96,
+       "text": "Boston",
+       "label": "location",
+       "score": 0.9169180393218994
+      }
+     ]
+    ],
+    "classification": [
+     [
+      [
+       {
+        "class_name": "neutral",
+        "score": 0.998162567615509
+       }
+      ],
+      []
+     ],
+     [
+      [
+       {
+        "class_name": "positive",
+        "score": 0.9932578802108765
+       }
+      ],
+      []
+     ],
+     [
+      [
+       {
+        "class_name": "negative",
+        "score": 0.99916672706604
+       }
+      ],
+      []
+     ],
+     [
+      [
+       {
+        "class_name": "neutral",
+        "score": 0.999794065952301
+       }
+      ],
+      []
+     ]
+    ]
+   }
+  },
+  {
+   "name": "nested_objects",
+   "request": {
+    "output_schema": {
+     "type": "object",
+     "properties": {
+      "patient": {
+       "type": "object",
+       "properties": {
+        "name": {
+         "type": "string"
+        },
+        "hospital": {
+         "type": "string"
+        }
+       }
+      },
+      "medications": {
+       "type": "array",
+       "items": {
+        "type": "object",
+        "properties": {
+         "drug": {
+          "type": "string"
+         },
+         "dose": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "drug"
+        ]
+       }
+      },
+      "employer": {
+       "type": "object",
+       "properties": {
+        "name": {
+         "type": "string"
+        },
+        "location": {
+         "type": "object",
+         "properties": {
+          "city": {
+           "type": "string"
+          }
+         }
+        }
+       }
+      }
+     }
+    }
+   },
+   "reference_call": {
+    "threshold": 0.5,
+    "structures": {
+     "$root": {
+      "patient": {
+       "name": "str",
+       "hospital": "str"
+      },
+      "medications": [
+       {
+        "drug": "str",
+        "dose": "str"
+       }
+      ],
+      "employer": {
+       "name": "str",
+       "location": {
+        "city": "str"
+       }
+      }
+     }
+    }
+   },
+   "reference_output": {
+    "structuring": [
+     {
+      "patient": {
+       "name": null,
+       "hospital": null
+      },
+      "employer": {
+       "name": "Acme Corp",
+       "location": {
+        "city": "London"
+       }
+      },
+      "medications": []
+     },
+     {},
+     {},
+     {
+      "patient": {
+       "name": "patient",
+       "hospital": "St. Mary's Hospital"
+      },
+      "employer": {
+       "name": null,
+       "location": {
+        "city": null
+       }
+      },
+      "medications": [
+       {
+        "drug": "atorvastatin",
+        "dose": "20 mg"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "name": "metadata_entities",
+   "request": {
+    "labels": [
+     "works at",
+     "located in",
+     "chief executive of"
+    ],
+    "item_metadata": [
+     {
+      "entities": [
+       {
+        "text": "Alice Johnson",
+        "label": "person",
+        "start": 0,
+        "end": 13
+       },
+       {
+        "text": "Acme Corp",
+        "label": "organization",
+        "start": 23,
+        "end": 32
+       },
+       {
+        "text": "London",
+        "label": "location",
+        "start": 36,
+        "end": 42
+       }
+      ]
+     },
+     {
+      "entities": [
+       {
+        "text": "Apple",
+        "label": "organization",
+        "start": 0,
+        "end": 5
+       },
+       {
+        "text": "Cupertino",
+        "label": "location",
+        "start": 33,
+        "end": 42
+       },
+       {
+        "text": "Tim Cook",
+        "label": "person",
+        "start": 55,
+        "end": 63
+       }
+      ]
+     },
+     {
+      "entities": [
+       {
+        "text": "Maria Lopez",
+        "label": "person",
+        "start": 24,
+        "end": 35
+       }
+      ]
+     },
+     {
+      "entities": [
+       {
+        "text": "Dr. Maria Rossi",
+        "label": "person",
+        "start": 0,
+        "end": 15
+       },
+       {
+        "text": "St. Mary's Hospital",
+        "label": "organization",
+        "start": 67,
+        "end": 86
+       },
+       {
+        "text": "Boston",
+        "label": "location",
+        "start": 90,
+        "end": 96
+       }
+      ]
+     }
+    ]
+   },
+   "reference_calls": [
+    {
+     "texts": [
+      0,
+      1,
+      3
+     ],
+     "joint_relations": [
+      {
+       "name": null,
+       "entities": [
+        "location",
+        "organization",
+        "person"
+       ],
+       "relations": [
+        "works at",
+        "located in",
+        "chief executive of"
+       ]
+      }
+     ],
+     "threshold": 0.5
+    },
+    {
+     "texts": [
+      2
+     ],
+     "joint_relations": [
+      {
+       "name": null,
+       "entities": [
+        "person"
+       ],
+       "relations": [
+        "works at",
+        "located in",
+        "chief executive of"
+       ]
+      }
+     ],
+     "threshold": 0.5
+    }
+   ],
+   "reference_output": {
+    "ner": [
+     [
+      {
+       "start": 0,
+       "end": 13,
+       "text": "Alice Johnson",
+       "label": "person",
+       "score": 0.9989445805549622
+      },
+      {
+       "start": 23,
+       "end": 32,
+       "text": "Acme Corp",
+       "label": "organization",
+       "score": 0.9999117851257324
+      },
+      {
+       "start": 36,
+       "end": 42,
+       "text": "London",
+       "label": "location",
+       "score": 0.9998037219047546
+      }
+     ],
+     [
+      {
+       "start": 0,
+       "end": 5,
+       "text": "Apple",
+       "label": "organization",
+       "score": 0.9998822212219238
+      },
+      {
+       "start": 33,
+       "end": 42,
+       "text": "Cupertino",
+       "label": "location",
+       "score": 0.999714195728302
+      },
+      {
+       "start": 55,
+       "end": 63,
+       "text": "Tim Cook",
+       "label": "person",
+       "score": 0.9997449517250061
+      }
+     ],
+     [
+      {
+       "start": 24,
+       "end": 35,
+       "text": "Maria Lopez",
+       "label": "person",
+       "score": 0.997208297252655
+      }
+     ],
+     [
+      {
+       "start": 0,
+       "end": 15,
+       "text": "Dr. Maria Rossi",
+       "label": "person",
+       "score": 0.9910715222358704
+      },
+      {
+       "start": 67,
+       "end": 86,
+       "text": "St. Mary's Hospital",
+       "label": "organization",
+       "score": 0.9987630844116211
+      },
+      {
+       "start": 90,
+       "end": 96,
+       "text": "Boston",
+       "label": "location",
+       "score": 0.9997548460960388
+      }
+     ]
+    ],
+    "joint_relex": [
+     [
+      {
+       "head": {
+        "start": 0,
+        "end": 13,
+        "text": "Alice Johnson",
+        "type": "person",
+        "entity_idx": 0
+       },
+       "tail": {
+        "start": 23,
+        "end": 32,
+        "text": "Acme Corp",
+        "type": "organization",
+        "entity_idx": 1
+       },
+       "relation": "works at",
+       "score": 0.9344766139984131
+      },
+      {
+       "head": {
+        "start": 0,
+        "end": 13,
+        "text": "Alice Johnson",
+        "type": "person",
+        "entity_idx": 0
+       },
+       "tail": {
+        "start": 36,
+        "end": 42,
+        "text": "London",
+        "type": "location",
+        "entity_idx": 2
+       },
+       "relation": "located in",
+       "score": 0.5706331729888916
+      },
+      {
+       "head": {
+        "start": 23,
+        "end": 32,
+        "text": "Acme Corp",
+        "type": "organization",
+        "entity_idx": 1
+       },
+       "tail": {
+        "start": 36,
+        "end": 42,
+        "text": "London",
+        "type": "location",
+        "entity_idx": 2
+       },
+       "relation": "located in",
+       "score": 0.8232421875
+      }
+     ],
+     [
+      {
+       "head": {
+        "start": 0,
+        "end": 5,
+        "text": "Apple",
+        "type": "organization",
+        "entity_idx": 0
+       },
+       "tail": {
+        "start": 33,
+        "end": 42,
+        "text": "Cupertino",
+        "type": "location",
+        "entity_idx": 1
+       },
+       "relation": "located in",
+       "score": 0.6930734515190125
+      },
+      {
+       "head": {
+        "start": 55,
+        "end": 63,
+        "text": "Tim Cook",
+        "type": "person",
+        "entity_idx": 2
+       },
+       "tail": {
+        "start": 0,
+        "end": 5,
+        "text": "Apple",
+        "type": "organization",
+        "entity_idx": 0
+       },
+       "relation": "works at",
+       "score": 0.6978469491004944
+      },
+      {
+       "head": {
+        "start": 55,
+        "end": 63,
+        "text": "Tim Cook",
+        "type": "person",
+        "entity_idx": 2
+       },
+       "tail": {
+        "start": 0,
+        "end": 5,
+        "text": "Apple",
+        "type": "organization",
+        "entity_idx": 0
+       },
+       "relation": "chief executive of",
+       "score": 0.6321127414703369
+      }
+     ],
+     [],
+     [
+      {
+       "head": {
+        "start": 0,
+        "end": 15,
+        "text": "Dr. Maria Rossi",
+        "type": "person",
+        "entity_idx": 0
+       },
+       "tail": {
+        "start": 67,
+        "end": 86,
+        "text": "St. Mary's Hospital",
+        "type": "organization",
+        "entity_idx": 1
+       },
+       "relation": "works at",
+       "score": 0.871353030204773
+      },
+      {
+       "head": {
+        "start": 67,
+        "end": 86,
+        "text": "St. Mary's Hospital",
+        "type": "organization",
+        "entity_idx": 1
+       },
+       "tail": {
+        "start": 90,
+        "end": 96,
+        "text": "Boston",
+        "type": "location",
+        "entity_idx": 2
+       },
+       "relation": "located in",
+       "score": 0.8645806908607483
+      }
+     ]
+    ]
+   }
+  }
+ ],
+ "embeddings": {
+  "dim": 768,
+  "normalized_head": [
+   [
+    -0.018502,
+    -0.018632,
+    -0.008736,
+    0.016341,
+    0.052293,
+    0.022783,
+    -0.003933,
+    -0.056564,
+    0.045225,
+    -0.001035,
+    -0.027572,
+    0.032462,
+    -0.013723,
+    0.001705,
+    -0.027491,
+    -0.052751,
+    -0.035627,
+    -0.007689,
+    0.020974,
+    -0.025024,
+    -0.074117,
+    0.009489,
+    0.057615,
+    -0.001391,
+    -0.000291,
+    0.052993,
+    0.032606,
+    0.002227,
+    0.0226,
+    -0.06802,
+    0.000411,
+    0.024973
+   ],
+   [
+    -0.015014,
+    0.011539,
+    0.00173,
+    0.007041,
+    0.029498,
+    -0.020323,
+    0.038047,
+    -0.06919,
+    -0.00934,
+    0.008803,
+    -0.01832,
+    0.012771,
+    -0.043397,
+    -0.03958,
+    -0.009253,
+    -0.022304,
+    0.012995,
+    -0.018696,
+    0.067448,
+    0.016524,
+    -0.079188,
+    0.03399,
+    0.025882,
+    -0.027322,
+    -0.010041,
+    0.027105,
+    -0.018423,
+    -0.01463,
+    0.031063,
+    -0.024317,
+    -0.004779,
+    -0.002745
+   ],
+   [
+    -0.016719,
+    0.021034,
+    -0.014712,
+    -0.043321,
+    -0.026456,
+    -0.001868,
+    0.045459,
+    0.037092,
+    0.032058,
+    -0.089875,
+    0.001625,
+    0.027908,
+    0.028072,
+    -0.047954,
+    0.005912,
+    -0.054589,
+    0.021176,
+    0.015582,
+    0.000927,
+    0.000694,
+    -0.028277,
+    -0.007012,
+    0.018294,
+    -0.029804,
+    0.005433,
+    0.040077,
+    -0.008968,
+    -0.020565,
+    -0.006377,
+    0.040173,
+    0.026311,
+    -0.016995
+   ],
+   [
+    0.023582,
+    0.01021,
+    -0.036282,
+    0.062173,
+    -0.024303,
+    0.001351,
+    0.031331,
+    -0.017259,
+    0.011454,
+    0.034669,
+    0.000175,
+    -0.00369,
+    0.036723,
+    -0.029826,
+    0.000464,
+    -0.041013,
+    0.011865,
+    -0.044155,
+    0.006992,
+    -0.04714,
+    -0.039124,
+    0.020205,
+    -0.009949,
+    -0.088214,
+    -0.102792,
+    -0.017662,
+    -0.006912,
+    -0.045517,
+    -0.008686,
+    -0.006036,
+    0.016435,
+    -0.005654
+   ]
+  ],
+  "cosine": [
+   [
+    1.0,
+    0.654727,
+    0.130212,
+    0.165476
+   ],
+   [
+    0.654727,
+    1.0,
+    0.2212,
+    0.345787
+   ],
+   [
+    0.130212,
+    0.2212,
+    1.0,
+    0.236942
+   ],
+   [
+    0.165476,
+    0.345787,
+    0.236942,
+    1.0
+   ]
+  ]
+ }
+}

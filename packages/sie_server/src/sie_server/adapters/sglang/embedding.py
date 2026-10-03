@@ -16,6 +16,7 @@ Engine API to avoid event loop conflicts with uvicorn/uvloop.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import math
 import os
@@ -54,6 +55,14 @@ logger = logging.getLogger(__name__)
 # behavior (used to A/B the lift). Overridable per-deploy via the env var.
 _EMBED_CONCURRENCY_ENV = "SIE_SGLANG_EMBED_CONCURRENCY"
 _DEFAULT_EMBED_CONCURRENCY = 8
+
+
+_EMBED_READ_TIMEOUT_S = 60.0
+"""Read cap for one embedding POST.
+
+A stalled collective produces no bytes and no error, so an unbounded read
+would hold the request, and every accelerator in the group, open forever.
+"""
 
 
 def _resolve_embed_concurrency(configured: int | None) -> int:
@@ -108,6 +117,13 @@ class SGLangEmbeddingAdapter(BaseAdapter):
     def _check_loaded(self) -> None:
         if self._server_url is None:
             raise RuntimeError(ERR_NOT_LOADED)
+        # Without this the adapter never notices its engine exiting, and every
+        # later request opens a connection to a port nobody is listening on,
+        # waits out the connect timeout and returns a transport error.
+        _server.raise_if_engine_exited(self._process, str(self._model_name_or_path))
+
+    def engine_exit_code(self) -> int | None:
+        return _server.engine_exit_code(self._process)
 
     def __init__(
         self,
@@ -123,12 +139,19 @@ class SGLangEmbeddingAdapter(BaseAdapter):
         doc_template: str | None = None,
         default_instruction: str | None = None,
         append_eos: bool = False,
-        pooling_method: str | None = None,
         lora_paths: dict[str, str] | None = None,
         max_loras_per_batch: int = 8,
         dense_dim: int | None = None,
         startup_timeout_s: float | None = None,
         embed_concurrency: int | None = None,
+        # Accepted for the same reason the generation adapter accepts it: the
+        # width is a property of a load, not of a task. No embedding profile
+        # needs it today, and one is the byte-identical single-device case.
+        tensor_parallel_size: int = 1,
+        disable_piecewise_cuda_graph: bool | None = None,
+        request_read_timeout_s: float | None = None,
+        watchdog_timeout_s: float | None = None,
+        nccl_port: int | None = None,
         **kwargs: Any,  # Accept extra args from loader (e.g., pooling)
     ) -> None:
         r"""Initialize the adapter.
@@ -159,9 +182,6 @@ class SGLangEmbeddingAdapter(BaseAdapter):
                 from the model's own tokenizer at load time (see ``load``), so it
                 is never hardcoded. Leave False for models SGLang already handles
                 (e.g. Qwen3-Embedding).
-            pooling_method: Pooling method for embeddings. Options: "cls", "lasttoken",
-                "max", "mean", "mean_sqrt_len_tokens", "weightedmean". If None, uses
-                SGLang's default (usually lasttoken for LLM models).
             lora_paths: LoRA adapters to load. Dict mapping adapter name to path.
                 Example: {"legal": "org/legal-lora", "medical": "/path/to/medical"}.
                 At request time, select via lora parameter in encode().
@@ -183,14 +203,31 @@ class SGLangEmbeddingAdapter(BaseAdapter):
         self._default_instruction = default_instruction
         self._append_eos = append_eos
         self._eos_token = ""  # Resolved from the model tokenizer in load() when append_eos
-        self._pooling_method = pooling_method
         self._lora_paths = lora_paths or {}
         self._max_loras_per_batch = max_loras_per_batch
         self._startup_timeout_s = _server.resolve_startup_timeout(startup_timeout_s)
         self._embed_concurrency = _resolve_embed_concurrency(embed_concurrency)
+        self._tensor_parallel_size = _server.validate_tensor_parallel_size(tensor_parallel_size)
+        self._disable_piecewise_cuda_graph = (
+            self._tensor_parallel_size > 1 if disable_piecewise_cuda_graph is None else disable_piecewise_cuda_graph
+        )
+        self._request_read_timeout_s = (
+            _server.validate_optional_positive(request_read_timeout_s, field="request_read_timeout_s")
+            or _EMBED_READ_TIMEOUT_S
+        )
+        self._watchdog_timeout_s = _server.validate_optional_positive(watchdog_timeout_s, field="watchdog_timeout_s")
+        self._declared_nccl_port = _server.validate_optional_port(nccl_port)
+        if self._declared_nccl_port is not None and self._tensor_parallel_size == 1:
+            msg = "nccl_port applies only above tensor_parallel_size=1; a single rank has no rendezvous"
+            raise ValueError(msg)
+        self._nccl_port: int | None = None
+        # Declared or chosen, the rendezvous port is reserved in the shared set,
+        # so teardown hands back exactly what this adapter holds.
+        self._reserved_nccl_port: int | None = None
 
         self._process: subprocess.Popen[bytes] | None = None
         self._server_url: str | None = None
+        self._port: int | None = None
         # Shared HTTP client + thread pool for concurrent POSTs to SGLang. Only
         # populated (in ``load``) when concurrency > 1; a single-post encode
         # keeps using module-level ``requests.post`` so the concurrency=1 A/B
@@ -237,15 +274,26 @@ class SGLangEmbeddingAdapter(BaseAdapter):
         if self._append_eos:
             self._eos_token = self._resolve_eos_token()
 
+        # Before any accelerator is claimed: a width the model's own head counts
+        # cannot be divided by fails here rather than minutes into the engine's
+        # own assertion, with the whole group held in the meantime.
+        _server.validate_width_against_model_config(
+            self._tensor_parallel_size,
+            model_name_or_path=str(self._model_name_or_path),
+            revision=self._revision,
+        )
         device_index = _server.parse_device_index(device)
+        device_indices = _server.resolve_device_group(device_index, self._tensor_parallel_size)
         port = _server.find_free_port()
+        self._port = port
         self._server_url = f"http://localhost:{port}"
 
         logger.info(
-            "Starting SGLang server for %s on device=%s (gpu_id=%d) at port %d",
+            "Starting SGLang server for %s on device=%s (gpu_ids=%s, tp=%d) at port %d",
             self._model_name_or_path,
             device,
-            device_index,
+            ",".join(str(index) for index in device_indices),
+            self._tensor_parallel_size,
             port,
         )
 
@@ -266,8 +314,10 @@ class SGLangEmbeddingAdapter(BaseAdapter):
             str(self._max_seq_length),
             "--mem-fraction-static",
             str(self._mem_fraction_static),
-            "--tp",
-            "1",  # Tensor parallel = 1 (single GPU)
+            # Full flag name rather than the "--tp" abbreviation, which a
+            # future upstream flag sharing that prefix would make ambiguous.
+            "--tensor-parallel-size",
+            str(self._tensor_parallel_size),
             "--log-level",
             "warning",
         ]
@@ -275,11 +325,18 @@ class SGLangEmbeddingAdapter(BaseAdapter):
         if self._trust_remote_code:
             cmd.append("--trust-remote-code")
 
+        # Overrides the engine's default watchdog, which decides how long a
+        # forward batch may run before the engine crashes itself.
+        if self._watchdog_timeout_s is not None:
+            cmd.extend(["--watchdog-timeout", str(self._watchdog_timeout_s)])
+
+        # SGLang's default piecewise capture path is measured to hang at width
+        # two and to exhaust memory at width four. Disabled above width one.
+        if self._disable_piecewise_cuda_graph:
+            cmd.append("--disable-piecewise-cuda-graph")
+
         if self._revision is not None:
             cmd.extend(["--revision", self._revision])
-
-        if self._pooling_method:
-            cmd.extend(["--pooling-method", self._pooling_method])
 
         # LoRA configuration for the SGLang server.
         if self._lora_paths:
@@ -293,18 +350,42 @@ class SGLangEmbeddingAdapter(BaseAdapter):
                 list(self._lora_paths.keys()),
             )
 
-        self._output_file = _server.open_output_log()
-        self._process = _server.launch_sglang_server(cmd, device_index=device_index, output_file=self._output_file)
+        # The port (and, once opened, the log fd) belong to this adapter from
+        # the reservation above onward, so every raise below hands them back
+        # rather than leaking one slot of the 100-port span per attempt: a full
+        # /tmp in open_output_log, a failed exec, or a cancelled load included.
+        try:
+            # Only a group rendezvouses, so width one reserves nothing and its
+            # launch argv is unchanged. Left to the engine it picks a random
+            # port, which is the collision NCCL_BASE_PORT exists to prevent.
+            if self._tensor_parallel_size > 1:
+                if self._declared_nccl_port is not None:
+                    _server.reserve_port(self._declared_nccl_port)
+                    self._reserved_nccl_port = self._declared_nccl_port
+                else:
+                    self._reserved_nccl_port = _server.find_free_port(_server.NCCL_BASE_PORT)
+                self._nccl_port = self._reserved_nccl_port
+                cmd.extend(["--nccl-port", str(self._nccl_port)])
+            self._output_file = _server.open_output_log()
+            self._process = _server.launch_sglang_server(
+                cmd, device_indices=device_indices, output_file=self._output_file
+            )
 
-        if not _server.wait_for_server(
-            self._server_url,
-            self._process,
-            output_file=self._output_file,
-            timeout_s=self._startup_timeout_s,
-        ):
-            _server.terminate_process(self._process)
-            self._process = None
-            raise _server.startup_failure_error(self._output_file)
+            if not _server.wait_for_server(
+                self._server_url,
+                self._process,
+                output_file=self._output_file,
+                timeout_s=self._startup_timeout_s,
+            ):
+                # Capture crash-vs-timeout before terminate makes poll() ambiguous.
+                crash_exit_code = self._process.poll()
+                _server.terminate_process(self._process)
+                self._process = None
+                # Build the error before the abort deletes the log it reads.
+                raise _server.startup_failure_error(self._output_file, crash_exit_code=crash_exit_code)
+        except BaseException:
+            self._abort_failed_load()
+            raise
 
         # Concurrent-POST fan-out: a keep-alive session with a connection pool
         # sized to the concurrency and a matching thread pool, so a sharded
@@ -329,6 +410,28 @@ class SGLangEmbeddingAdapter(BaseAdapter):
             self._embed_concurrency,
         )
 
+    def _abort_failed_load(self) -> None:
+        """Tear down a partially-started child + reset state after a failed load.
+
+        The registry does not call unload() on a failed load, so this mirrors
+        unload(): terminate the child, release the reserved port, drop the temp
+        log, and clear _server_url/_device so the adapter does not look "loaded".
+        Mirrors the generation siblings (SGLang + MLX).
+        """
+        _server.terminate_process(self._process)
+        self._process = None
+        _server.release_port(self._port)
+        # Guarded rather than unconditional: width one never reserves a
+        # collective port, and its teardown must stay exactly as it was.
+        if self._reserved_nccl_port is not None:
+            _server.release_port(self._reserved_nccl_port)
+            self._reserved_nccl_port = None
+        self._nccl_port = None
+        self._port = None
+        self._server_url = None
+        self._device = None
+        self._cleanup_output_log()
+
     def unload(self) -> None:
         """Unload the model by stopping SGLang server subprocess."""
         if self._post_executor is not None:
@@ -342,9 +445,34 @@ class SGLangEmbeddingAdapter(BaseAdapter):
             _server.terminate_process(self._process)
             self._process = None
 
+        # Release only after the child is down so a concurrent load can't be
+        # handed a port the dying child still holds bound.
+        _server.release_port(self._port)
+        # Guarded rather than unconditional: width one never reserves a
+        # collective port, and its teardown must stay exactly as it was.
+        if self._reserved_nccl_port is not None:
+            _server.release_port(self._reserved_nccl_port)
+            self._reserved_nccl_port = None
+        self._nccl_port = None
+        self._port = None
         self._server_url = None
         self._device = None
         self._dense_dim = self._configured_dense_dim
+        self._cleanup_output_log()
+
+    def _cleanup_output_log(self) -> None:
+        """Close + delete the subprocess stdout/stderr log (best-effort, idempotent).
+
+        Without this, one ``sglang_*.log`` leaks into /tmp per load — unbounded
+        under LRU-eviction / hot-reload churn — and the open fd is held for the
+        subprocess lifetime. Mirrors the MLX sibling's cleanup.
+        """
+        if self._output_file is not None:
+            with contextlib.suppress(OSError):
+                self._output_file.close()
+            with contextlib.suppress(OSError):
+                Path(self._output_file.name).unlink()
+            self._output_file = None
 
     def memory_footprint(self) -> int:
         """Return the GPU memory usage in bytes.
@@ -402,7 +530,8 @@ class SGLangEmbeddingAdapter(BaseAdapter):
         self._validate_output_types(output_types)
 
         # Resolve runtime options (config defaults -> profile -> request overrides)
-        # Note: pooling is NOT overridable for SGLang (set at subprocess startup via --pooling-method)
+        # Note: pooling is not overridable. The engine decides it from the
+        # checkpoint, and neither pinned version accepts a flag for it.
         opts = options or {}
         query_template = opts.get("query_template", self._query_template)
         doc_template = opts.get("doc_template", self._doc_template)
@@ -593,7 +722,7 @@ class SGLangEmbeddingAdapter(BaseAdapter):
                 "input": texts,
                 "encoding_format": "float",
             },
-            timeout=60,
+            timeout=self._request_read_timeout_s,
         )
         if response.status_code != 200:
             logger.error(

@@ -1,5 +1,5 @@
 /**
- * Tests for the ``ModelLoadFailedError`` short-circuit (sie-test#85).
+ * Tests for the ``ModelLoadFailedError`` short-circuit.
  *
  * A 502 ``MODEL_LOAD_FAILED`` response must:
  * - throw {@link ModelLoadFailedError} immediately on the first response

@@ -19,6 +19,10 @@ import shutil
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from huggingface_hub import HFCacheInfo
 
 logger = logging.getLogger(__name__)
 
@@ -169,6 +173,28 @@ class ModelDiskCacheManager:
         stats = self.get_stats()
         return stats.usage_ratio > self._threshold
 
+    def _scan_cache(self) -> HFCacheInfo | None:
+        """Walk the whole cache directory once.
+
+        This is the expensive operation in this module: it stats every blob of
+        every repo, so callers should scan once and reuse the result.
+
+        Returns:
+            The scan result, or None if huggingface_hub is unavailable or the
+            scan failed.
+        """
+        try:
+            from huggingface_hub import scan_cache_dir
+        except ImportError:
+            logger.warning("huggingface_hub not available, cannot scan cache")
+            return None
+
+        try:
+            return scan_cache_dir(self._cache_dir)
+        except Exception as e:  # noqa: BLE001 — huggingface_hub scan errors are varied
+            logger.warning("Failed to scan cache at %s: %s", self._cache_dir, e)
+            return None
+
     def get_cached_models(self) -> list[CachedModelInfo]:
         """Get all cached models sorted by last access time (oldest first).
 
@@ -177,18 +203,21 @@ class ModelDiskCacheManager:
         Returns:
             List of CachedModelInfo sorted by last_accessed (LRU order).
         """
-        try:
-            from huggingface_hub import scan_cache_dir
-        except ImportError:
-            logger.warning("huggingface_hub not available, cannot scan cache")
+        cache_info = self._scan_cache()
+        if cache_info is None:
             return []
+        return self._models_from_scan(cache_info)
 
-        try:
-            cache_info = scan_cache_dir(self._cache_dir)
-        except Exception as e:  # noqa: BLE001 — huggingface_hub scan errors are varied
-            logger.warning("Failed to scan cache at %s: %s", self._cache_dir, e)
-            return []
+    @staticmethod
+    def _models_from_scan(cache_info: HFCacheInfo) -> list[CachedModelInfo]:
+        """Project a cache scan into model infos sorted LRU-first.
 
+        Args:
+            cache_info: A scan result from :meth:`_scan_cache`.
+
+        Returns:
+            List of CachedModelInfo sorted by last_accessed (LRU order).
+        """
         models: list[CachedModelInfo] = []
 
         for repo in cache_info.repos:
@@ -242,13 +271,18 @@ class ModelDiskCacheManager:
 
         return None
 
-    def evict_model(self, model: CachedModelInfo) -> int:
+    def evict_model(self, model: CachedModelInfo, cache_info: HFCacheInfo | None = None) -> int:
         """Delete a model from the disk cache.
 
         Uses huggingface_hub's delete_revisions() for safe deletion.
 
         Args:
             model: The model to evict.
+            cache_info: Optional cache scan the delete strategy is computed
+                from. Pass a scan that already covers ``model`` to avoid a
+                second full cache walk; omit it to scan now. A scan that has
+                gone stale is safe: unknown revisions are skipped with a
+                warning and already-deleted paths are ignored.
 
         Returns:
             Number of bytes freed.
@@ -257,15 +291,18 @@ class ModelDiskCacheManager:
             logger.warning("No commit hashes for model %s, cannot evict", model.repo_id)
             return 0
 
-        try:
-            from huggingface_hub import scan_cache_dir
-        except ImportError:
-            logger.warning("huggingface_hub not available, cannot evict")
-            return 0
+        if cache_info is None:
+            cache_info = self._scan_cache()
+            if cache_info is None:
+                return 0
 
         try:
-            cache_info = scan_cache_dir(self._cache_dir)
             delete_strategy = cache_info.delete_revisions(*model.commit_hashes)
+            if delete_strategy.expected_freed_size == 0:
+                # The scan named revisions the cache no longer has (deleted
+                # concurrently, or already evicted), so there is nothing to free.
+                logger.debug("Nothing left to free for model %s, skipping", model.repo_id)
+                return 0
 
             logger.info(
                 "Evicting model '%s' from disk cache (will free %s)",
@@ -303,8 +340,30 @@ class ModelDiskCacheManager:
         if self._pinned_provider is not None:
             exclude |= self._pinned_provider()
 
+        # Scanning the cache walks and stats every blob, so it happens at most
+        # once per call: victims are taken from that LRU-ordered snapshot and
+        # only the cheap disk_usage check runs between evictions. Deletions are
+        # reflected by that check, so freed space needs no rescan. The snapshot
+        # going stale is safe — the cursor only moves forward (so the loop can
+        # never spin), and a model that vanished concurrently frees nothing and
+        # is skipped like any other failed eviction.
+        candidates: list[CachedModelInfo] | None = None
+        cache_info: HFCacheInfo | None = None
+        cursor = 0
+
         while self.check_pressure():
-            lru_model = self.get_lru_model(exclude=exclude)
+            if candidates is None:
+                cache_info = self._scan_cache()
+                candidates = [] if cache_info is None else self._models_from_scan(cache_info)
+
+            lru_model: CachedModelInfo | None = None
+            while cursor < len(candidates):
+                candidate = candidates[cursor]
+                cursor += 1
+                if candidate.repo_id not in exclude:
+                    lru_model = candidate
+                    break
+
             if lru_model is None:
                 # No more models to evict
                 stats = self.get_stats()
@@ -314,7 +373,7 @@ class ModelDiskCacheManager:
                 )
                 break
 
-            freed = self.evict_model(lru_model)
+            freed = self.evict_model(lru_model, cache_info=cache_info)
             if freed > 0:
                 evicted.append(lru_model.repo_id)
                 logger.info(
@@ -322,9 +381,6 @@ class ModelDiskCacheManager:
                     lru_model.repo_id,
                     _format_bytes(freed),
                 )
-            else:
-                # Failed to evict, add to exclude to avoid infinite loop
-                exclude.add(lru_model.repo_id)
 
         return evicted
 

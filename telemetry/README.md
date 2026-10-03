@@ -12,11 +12,10 @@ conditionally owned queue/adaptive-scheduler surfaces. Only authoritative lane
 lifecycle signals remain excluded until a deployed producer owns them;
 undeclared new instruments are not permitted.
 
-The current inventory is 117 application families: 115 may reach the remote
-OTLP branch and two remain Prometheus-only controls. Nine additional,
-exact collector-self families form a separate operational allowlist. The
-Better Stack dashboard code therefore covers 124 remotely eligible families
-without turning collector self-telemetry into a version-dependent wildcard.
+The current inventory is 122 application families: 120 may reach the remote
+OTLP branch and two remain Prometheus-only controls. Ten additional,
+exact collector-self families form a separate operational allowlist without
+turning collector self-telemetry into a version-dependent wildcard.
 
 `sie.gateway.pool.pinned_model.loaded` is intentionally Prometheus-only. Its
 `pool` attribute is an API-defined logical pool name (`logical_pool`), which is
@@ -66,6 +65,70 @@ The facade may update the counter, duration histogram, admission counter, and
 safe completion log that belong to that one semantic event. The request path
 still calls the facade only once. It must never call a Prometheus client and an
 OTel client for the same event.
+
+The sampled `inference.request.completed` log schema v2 carries the canonical
+model, machine profile, request duration, admission outcome, HTTP outcome, and
+operation. It does not carry account, WorkOS user, API-key, request, contact,
+or payload identifiers. Durable per-account product events belong to the
+authenticated control-plane analytics export, not the Better Stack pipeline.
+Collectors accept schema v1 only while older gateway pods drain during a
+rolling update; they preserve its version and never relabel an incomplete v1
+record as v2.
+
+### Request and generation lifecycle
+
+`gateway.request`, `sie.gateway.requests`, `sie.gateway.request.duration`, and
+`inference.request.completed` retain their response-ready boundary: the inner
+HTTP service has returned headers. They do not measure a streamed body. HTTP
+5xx and service errors set structural OTel ERROR with no status description;
+4xx are rejections, not server span errors.
+
+`gateway.response_body` is a child covering response-ready to body EOF, body
+error, or drop. EOF means server-side body consumption, not acknowledgement by
+the client. Drop before EOF is cancellation (client disconnect, server abort,
+or a consumer that stops reading); telemetry cannot distinguish those causes.
+`gateway.generation_stream` covers the SSE driver's lifetime after publication
+until its semantic terminal observation. It records errors inside HTTP 200
+streams, timeout and cancellation independently of HTTP status. Its optional
+`first_token_ms` is the first nonempty text or tool delta observed by that driver,
+measured from driver start; heartbeats, role-only frames and terminal-only
+responses do not create this value. Existing adapter and gateway generation
+TTFT/TPOT metrics retain their ownership and meaning; these additions create
+no metrics.
+
+The Python `worker.streaming_processor` observes a generation attempt through
+terminal publication and handler exit. A published worker or transport error
+terminal marks ERROR; bounded validation errors are rejected client errors. A
+confirmed retry handoff ends this attempt as rejected without completing the
+generation. A published cancelled terminal or task cancellation records
+cancellation, and return without a confirmed terminal or retry handoff is a
+transport failure. Exceptions are
+classified without exporting their text or automatic exception events.
+
+`inference.lifecycle.completed` schema v1 is a fixed OTLP-only record carrying
+phase, operation, outcome, bounded error class, duration, optional first-content
+timing, and structural trace/span IDs. Each phase emits once; no raw stdout or
+logging bridge is enabled. Service/phase pairs and exact numeric/string types
+are rechecked by the collector. Durations must be finite and nonnegative; they
+have no 24-hour ceiling. First-content timing must not exceed phase duration.
+Cancellation and rejection leave structural status UNSET; their safe record
+carries the distinction.
+
+Log resource identity is restricted to string values. Malformed optional
+`service.instance.id` and `service.version` values are omitted; the collector
+still supplies the authoritative gateway service, environment, and region.
+Reconstruction removes duplicate keys, including nested values hidden behind a
+valid first value. Completion schema v1 retains only its own fields; schema v2
+requires integer HTTP status, string model/profile, and finite nonnegative
+duration before canonicalization and export.
+
+**Retention is sampled and best effort.** Lifecycle logs require a valid sampled
+span context and the enabled safe-log exporter. They follow the enclosing head
+sampling decision, even for errors. A parent-based 5% root sampler therefore
+cannot retain every failure trace or failure record; inbound sampling decisions
+and exporter/collector loss also affect retention. Metrics remain unsampled.
+These changes do not enable tail sampling, change sampling rates, or promise
+complete error coverage.
 
 Every deployment uses the same application path: OTel instruments and log
 records leave the process through OTLP. Prometheus is a collector exporter, not
@@ -168,11 +231,43 @@ forwarder. It preserves trace/span/parent IDs, start/end timestamps, kind,
 status code, flags, a bounded span name, and the five safe resource identity
 fields declared in `contract.yaml`. It removes every span event and span/scope
 attribute, clears status text, inbound trace-state text, and scope identity,
-drops unknown resource attributes, and collapses unknown span names to `other`.
+reconstructs the five retained string resource fields after receiver identity
+stamping (discarding duplicate keys and non-string values), and collapses
+unknown span names to `other`.
 Because each link can carry arbitrary attributes and trace-state text, and the
 pinned collector cannot reliably mutate links in place, the remote branch
-drops the entire linked span. Unlinked sibling spans continue through the
-allowlist; the unchanged local OSS branch may retain linked spans. When Helm is
+drops the entire linked span. Do not remove this guard: Collector 0.119 accepts
+`set(links, [])` but leaves the links untouched at runtime.
+
+For `worker.run_batch` and `sidecar.dispatch`, the shared SDK processor adds
+`.request` timing leaves when the recorded, sampled original has links. Each
+leaf has a fresh span ID under a distinct valid contributing parent, the exact
+shared start/end time and kind, and the original status code without text. It
+contains no span attributes, events, links or tracestate. The original and its
+rich links stay unchanged locally. Remote filtering drops the linked original
+and retains the safe leaves; ordinary unlinked batches need no extra spans.
+Repeated parent IDs are deduplicated even if tracestate differs, and unsampled
+linked parents are not promoted into sampled traces.
+
+These leaves show each request's participation in shared execution. Their
+durations must not be summed as independent compute, and they do not reparent
+detailed descendants: those still belong to the original shared span, which
+is absent remotely. A sampled linked request cannot recover an unsampled
+original batch. SDK-discarded links likewise cannot be reconstructed; the
+original's dropped-link count remains visible locally. Leaves enter the same
+bounded export queue as originals, so fan-in adds queue pressure and can incur
+the existing exporter losses. No sampler, collector pin, metric/control path,
+or log schema changes are required.
+
+The collector's isolated self pipeline exports
+`otelcol_processor_filter_spans_filtered` only for
+`filter=filter/remote_linked_spans`, retaining no other point attributes. This
+counts removed original spans, not lost requests: successfully projected leaves
+can accompany each dropped original. It distinguishes privacy filtering from
+receiver refusal or exporter failure. It cannot measure head-sampling loss,
+producer queue drops, or SDK-discarded links.
+
+Unlinked sibling spans continue through the allowlist. When Helm is
 configured with Tempo as well as Better Stack, those are separate collector
 pipelines: the local OSS branch receives the producer trace unchanged, while
 only the remote branch runs the privacy processors. Producers still export one
@@ -195,8 +290,8 @@ process lifecycles. The semantic methods and their emitted instruments are
 nevertheless governed by the one contract:
 
 - `sie_gateway` owns HTTP completion, admission, KEDA capacity state, and the
-  request span/log boundary. `sie_cloud/gateway` calls the gateway facade for
-  the final i6pn-or-Modal dispatch result.
+  request span/log boundary. Downstream deployments can reuse that facade for
+  their final dispatch result.
 - The Modal dispatcher owns actual substrate invocation attempts.
 - `sie_config` owns config HTTP and authoritative state changes.
 - `sie_server_sidecar` owns realtime queueing and batch formation plus its
@@ -253,6 +348,13 @@ Rust request-detail subset bounds requests at `33 × 7 × 5 = 1,155`, phases at
 admitting arbitrary finish reasons or silently folding a contract-valid
 terminal into `other`.
 
+The Python worker's remote-upstream instruments carry the name of an upstream
+from the server's startup configuration instead of the catalog pair. The
+facade admits the first 16 upstream names it sees for the lifetime of the
+process and collapses the rest to `other`, so `sie.worker.upstream.refusals`
+retains at most `17 × 4 = 68` series (three refusal reasons and `other`) and
+`sie.worker.upstream.breaker.open` at most 17.
+
 Every Rust-engine instrument has an explicit SDK view derived from its
 checked-in admission tier and finite domains, so contract-valid series do not
 become `otel.metric.overflow`. Forward output paths use one closed six-value
@@ -276,11 +378,16 @@ For the sidecar's six declared queue operations, the budget is
 Every sidecar instrument nevertheless has an explicit SDK view derived from
 its full checked-in attribute domains. Batch size/cost omit `flush.reason`
 because it does not change their batch-shape semantics; fill ratio retains it.
-The resulting high-product ceilings are 14,392 fill-ratio series and 4,112
-generation-loading series, while all other sidecar ceilings are at or below
-1,799. These are upper bounds on retained SDK series, not expected steady-state
-usage or byte-size claims; the machine-checked formulas live in
-`contract.yaml`.
+`sie.worker.work_item.age` omits the catalog pair entirely and costs seven
+series: transport-queue age is a property of the queue rather than of the
+model on the far side of it, so the catalog factor would multiply the series
+count without adding an answer. `sie.worker.work_item.deadline_exceeded`
+likewise carries only `operation` and `action` (`dropped` or `executed`), for
+21 series. The resulting high-product ceilings are 14,392
+fill-ratio series and 4,112 generation-loading series, while all other sidecar
+ceilings are at or below 1,799. These are upper bounds on retained SDK series,
+not expected steady-state usage or byte-size claims; the machine-checked
+formulas live in `contract.yaml`.
 
 ## KEDA is a control API
 
@@ -355,8 +462,7 @@ Helm uses `lookup` to render each existing Deployment or StatefulSet's live
 Helm resource patch from resetting the observed HPA-controlled replica count and leaves no
 permanent replica-pin data in values, annotations, or release history.
 
-The `0.6.20` boundary is one supervised maintenance-window upgrade, documented
-in the [deployment runbook](../deploy/upgrade-runbook.md).
+The `0.6.20` boundary requires one supervised maintenance-window upgrade.
 Stop external traffic and topology/config writes, keep the effective namespace,
 lane catalog, names, scale targets, Prometheus backend, and KEDA ownership
 unchanged, and run one normal
@@ -585,10 +691,21 @@ CI should reject a change unless it proves all of the following:
    fields, events, linked spans, trace-state and status text while the local
    Tempo branch remains unchanged;
 9. median-of-three warmed telemetry-off/on benchmarks cover the gateway
-   facade/Tower path, the managed cloud-gateway final-dispatch wrapper, Python
+   facade/Tower path, the downstream final-dispatch facade integration, Python
    and Rust workers, config, sidecar, and dispatcher hot paths; a paired
    durability-disabled/enabled benchmark separately gates the gateway
    dispatch-durability lifecycle before the change is declared ready;
 10. an end-to-end KEDA signal respects the declared five-second OTLP export and
    Prometheus scrape budgets, and collector, producer-export, scrape, or query
    failure activates the worker lane's declared safe fallback.
+
+Remote metric maps are reconstructed after the existing per-metric attribute
+allowlist. Each retained resource key has at most one string value; each retained
+point key has at most one string, integer, double or boolean value. The first
+lookup value wins, matching the value used by preceding filters. Missing or
+non-scalar values are omitted, and scratch state is cleared for every resource
+and point. This removes duplicate protobuf keys without changing metric values,
+histograms, timestamps, temporality or producer domain policies. Local Prometheus
+processing remains unchanged. The pinned collector regression sends raw duplicate
+keys through both rendered receiver branches, including reversed service claims,
+nested values and missing optional fields on successive points.

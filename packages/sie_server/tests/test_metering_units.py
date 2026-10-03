@@ -35,6 +35,7 @@ from sie_server.adapters.bert_flash import BertFlashAdapter
 from sie_server.adapters.clip import CLIPAdapter
 from sie_server.adapters.colbert import ColBERTAdapter
 from sie_server.adapters.colbert_modernbert_flash.adapter import ColBERTModernBERTFlashAdapter
+from sie_server.adapters.colqwen3 import ColQwen3Adapter
 from sie_server.adapters.cross_encoder import CrossEncoderAdapter
 from sie_server.adapters.jina_flash_cross_encoder import JinaFlashCrossEncoderAdapter
 from sie_server.adapters.qwen3_vl_reranker.adapter import Qwen3VLRerankerAdapter
@@ -324,6 +325,77 @@ class TestEncodePipelineFallback:
         assert timing.input_token_counts is None
 
 
+class TestColQwen3ProcessorUsage:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("items", "is_query", "expected_tokens", "expected_images"),
+        [
+            ([Item(text="alpha beta", images=[{"data": b"ignored"}]), Item(text="")], True, [14, 12], [0, 0]),
+            ([Item(text="alpha beta"), Item(text="")], False, [14, 12], [0, 0]),
+            ([Item(text="one"), Item(text="caption", images=[{"data": b"x"}])], False, [13, 0], [0, 1]),
+            ([Item(text="caption", images=[{"data": b"x"}])], False, [0], [1]),
+            ([Item(images=[{"data": b"x"}])], False, None, [1]),
+        ],
+    )
+    async def test_actual_counts_reach_pipeline_and_units(
+        self,
+        items: list[Item],
+        is_query: bool,
+        expected_tokens: list[int] | None,
+        expected_images: list[int],
+    ) -> None:
+        adapter = ColQwen3Adapter("stub/model")
+        tokenizer = _FakeTokenizer()
+
+        def process(*, text: list[str], **kwargs: Any) -> dict[str, torch.Tensor]:
+            count = len(tokenizer(text)["input_ids"][0]) + 10
+            return {"input_ids": torch.zeros((1, count), dtype=torch.long)}
+
+        adapter._processor = MagicMock(side_effect=process)
+        adapter._model = MagicMock(return_value=MagicMock(embeddings=torch.ones((1, 2, 4))))
+        adapter._device = "cpu"
+        adapter._load_images = MagicMock(return_value=[MagicMock()])
+        adapter._encode_images = MagicMock(side_effect=lambda images: [np.ones((7, 4)) for _ in images])
+        fallback = MagicMock(
+            side_effect=AssertionError("processed text must not be retokenized")
+            if expected_tokens is not None
+            else None
+        )
+        fallback.return_value = None
+        adapter.count_input_tokens = fallback
+        registry = _batched_registry(adapter, _FusingWorker(adapter))
+
+        formatted, timing = await EncodePipeline.run_encode(
+            registry=registry,
+            model="m",
+            items=items,
+            output_types=["multivector"],
+            instruction=None,
+            config=MagicMock(),
+            is_query=is_query,
+            options={},
+        )
+        assert len(formatted) == len(items)
+        assert timing.input_token_counts == expected_tokens
+        if is_query:
+            assert timing.input_image_counts == expected_images
+        else:
+            assert timing.input_image_counts is None
+        image_counts = timing.input_image_counts or adapter.count_input_images(items)
+        assert image_counts == expected_images
+        for index, image_count in enumerate(image_counts):
+            token_count = expected_tokens[index] if expected_tokens is not None else None
+            units = _encode_units(token_count, image_count)
+            assert units is not None
+            assert units.input_tokens == token_count
+            assert units.images == (image_count or None)
+        if expected_tokens is not None:
+            fallback.assert_not_called()
+        text_calls = sum(is_query or not item.images for item in items)
+        assert adapter._processor.call_count == text_calls
+        assert adapter._model.call_count == text_calls
+
+
 # ---------------------------------------------------------------------------
 # QueueExecutor.process_score_batch — score seam backfill
 # ---------------------------------------------------------------------------
@@ -434,6 +506,64 @@ class TestScoreBackfill:
 
         assert assembled.input_token_counts == [7, 8]
         assert assembled.input_image_counts == [1, 2]
+
+    @pytest.mark.parametrize("counts", [[-1], [True]])
+    def test_score_output_rejects_invalid_content_counts(self, counts: list[int]) -> None:
+        with pytest.raises(ValueError, match="non-negative integers"):
+            ScoreOutput(scores=np.array([0.5], dtype=np.float32), content_token_counts=counts)
+
+    def test_score_handler_preserves_content_counts_across_oom_slicing(self) -> None:
+        handler = ScoreHandler()
+        output = ScoreOutput(
+            scores=np.array([0.9, 0.1], dtype=np.float32),
+            input_token_counts=[80, 90],
+            content_token_counts=[7, 17],
+        )
+
+        partials = {index: handler.slice_output(output, index) for index in range(2)}
+        assembled = handler.assemble_output(partials, batch_size=2)
+
+        assert assembled.content_token_counts == [7, 17]
+        partials[1] = ScoreOutput(scores=np.array([0.1], dtype=np.float32), input_token_counts=[90])
+        assert handler.assemble_output(partials, batch_size=2).content_token_counts is None
+
+    @pytest.mark.asyncio
+    async def test_content_tokens_settle_beside_input_tokens(self) -> None:
+        adapter = JinaFlashCrossEncoderAdapter(model_name_or_path="stub/model", max_seq_length=512)
+        score_output = ScoreOutput(
+            scores=np.array([0.9, 0.1], dtype=np.float32),
+            input_token_counts=[80, 90],
+            content_token_counts=[7, 17],
+        )
+        reg = _score_registry()
+        reg.get.return_value = adapter
+        reg.start_worker = AsyncMock(return_value=_score_worker(score_output))
+
+        outcome = await QueueExecutor(reg).process_score_batch(_score_request())
+
+        units = outcome.outcomes[0].units
+        assert units is not None
+        assert (units.input_tokens, units.content_input_tokens, units.pairs) == (170, 24, 2)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("content", [None, [7, 91]])
+    async def test_content_tokens_are_omitted_unless_every_pair_fits_its_input(self, content: list[int] | None) -> None:
+        adapter = JinaFlashCrossEncoderAdapter(model_name_or_path="stub/model", max_seq_length=512)
+        score_output = ScoreOutput(
+            scores=np.array([0.9, 0.1], dtype=np.float32),
+            input_token_counts=[80, 90],
+            content_token_counts=content,
+        )
+        reg = _score_registry()
+        reg.get.return_value = adapter
+        reg.start_worker = AsyncMock(return_value=_score_worker(score_output))
+
+        outcome = await QueueExecutor(reg).process_score_batch(_score_request())
+
+        units = outcome.outcomes[0].units
+        assert units is not None
+        assert units.input_tokens == 170
+        assert units.content_input_tokens is None
 
     @pytest.mark.asyncio
     async def test_qwen3_vl_settles_only_images_consumed_per_pair(self) -> None:
@@ -1819,7 +1949,9 @@ class TestVisionTextTokenStamp:
         # still derives its per-text counts from the shared base counter over
         # the processor tokenizer (the real metering path), returning matching
         # zero vectors; the image tower returns zero vectors.
-        adapter._encode_image_items = lambda items: np.zeros((len(items), 4), dtype=np.float32)  # type: ignore[method-assign]
+        adapter._encode_image_items = lambda items, item_indices: np.zeros(  # type: ignore[method-assign]
+            (len(items), 4), dtype=np.float32
+        )
 
         def fake_encode_texts(texts: list[str]) -> tuple[Any, list[int] | None]:
             counts = adapter._token_counts_or_none(adapter._processor.tokenizer, list(texts), expected_len=len(texts))

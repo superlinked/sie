@@ -229,6 +229,16 @@ class ModelAdapter(ABC):
         _ = (device_type, device_total_bytes)
         return None
 
+    def engine_exit_code(self) -> int | None:
+        """Return the exit code of this adapter's engine process once it has exited.
+
+        An adapter that serves through a child engine process reports the
+        child's exit code after the child dies, so the registry can unload the
+        model and load it again. ``None`` means the engine is running, is not
+        started, or the adapter has no separate engine process.
+        """
+        return None
+
     def encode(
         self,
         items: list[Item],
@@ -354,6 +364,26 @@ class ModelAdapter(ABC):
         msg = f"{self.__class__.__name__} does not support extract()"
         raise NotImplementedError(msg)
 
+    def extract_item_costs(
+        self,
+        items: list[Item],
+        *,
+        labels: list[str] | None = None,
+        output_schema: dict[str, Any] | None = None,
+        instruction: str | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> list[int] | None:
+        """Per-item batching cost for an extract request, or ``None`` for the default.
+
+        The default extract cost is each item's text length (document byte size
+        for documents; see ``core.extract_cost``), which assumes one forward
+        row per item. Adapters that expand one item into several model rows —
+        e.g. one encoder pass per (item, question) pair — override this so the
+        batcher does not over-pack their batches. Must not raise.
+        """
+        _ = (items, labels, output_schema, instruction, options)
+        return None
+
     def count_input_tokens(self, items: list[Item]) -> list[int] | None:
         """Authoritative per-item input-token counts for the unit meter (§7.3).
 
@@ -464,6 +494,19 @@ class ModelAdapter(ABC):
             Dict mapping option names to Postprocessor instances, or None.
         """
         return None
+
+    def max_concurrent_dispatch(self) -> int:
+        """Return how many batches the worker may run through this adapter at once.
+
+        The default of 1 keeps the worker's single-batch dispatch: one forward
+        pass at a time on the inference thread. An adapter whose inference runs
+        in an out-of-process engine with its own continuous batching (SGLang)
+        can return more, so a batch that waits on its longest sequence does not
+        hold back every request queued behind it. The worker only honours
+        values above 1 for adapters without LoRA support, because LoRA
+        selection is adapter-global state.
+        """
+        return 1
 
     # -------------------------------------------------------------------------
     # LoRA Support (optional - adapters opt-in by overriding these methods)

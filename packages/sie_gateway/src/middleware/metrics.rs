@@ -57,7 +57,9 @@ use std::time::Instant;
 use tower::{Layer, Service};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
+use crate::observability::lifecycle::{ErrorClass, Lifecycle, Outcome};
 use crate::observability::metrics as telemetry;
+use hyper::body::{Body as HttpBody, Frame, SizeHint};
 
 #[cfg(test)]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -65,6 +67,7 @@ struct RequestObservation {
     operation: &'static str,
     status: u16,
     machine_profile: String,
+    model: String,
 }
 
 #[derive(Clone, Default)]
@@ -179,9 +182,16 @@ where
             .insert(telemetry::RequestTraceContext::new(request_cx.clone()));
 
         let start = Instant::now();
+        let mut lifecycle = Lifecycle::request(request_span.clone(), endpoint);
         Box::pin(
             async move {
-                let response = inner.call(req).await?;
+                let response = match inner.call(req).await {
+                    Ok(response) => response,
+                    Err(error) => {
+                        lifecycle.finish(Outcome::Error, ErrorClass::Transport);
+                        return Err(error);
+                    }
+                };
 
                 let status = response.status().as_u16();
                 let elapsed = start.elapsed().as_secs_f64();
@@ -189,9 +199,13 @@ where
                 // the request exited before normalization (e.g. `model is
                 // required`). Empty strings also collapse to `"other"`
                 // so dashboards never render a blank label row.
-                let profile_label = slot
-                    .get()
+                let labels = slot.get();
+                let profile_label = labels
                     .map(|l| l.machine_profile.as_str())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("other");
+                let model_label = labels
+                    .map(|l| l.model.as_str())
                     .filter(|s| !s.is_empty())
                     .unwrap_or("other");
 
@@ -202,13 +216,17 @@ where
                 let admission_outcome = admission_slot
                     .get()
                     .unwrap_or(telemetry::AdmissionOutcome::Admitted);
+                let observation = telemetry::RequestCompletionObservation {
+                    operation: endpoint,
+                    status,
+                    machine_profile: profile_label,
+                    model: model_label,
+                    duration_s: elapsed,
+                    admission_outcome,
+                };
                 telemetry::record_request_completed(
                     Some(request_cx_for_log.span().span_context()),
-                    endpoint,
-                    status,
-                    profile_label,
-                    elapsed,
-                    admission_outcome,
+                    &observation,
                 );
                 #[cfg(test)]
                 if let Some(observations) = observations {
@@ -216,6 +234,7 @@ where
                         operation: endpoint,
                         status,
                         machine_profile: profile_label.to_string(),
+                        model: model_label.to_string(),
                     });
                 }
 
@@ -224,6 +243,11 @@ where
                 // existing audit/proxy `tracing` events (some with raw request or
                 // error fields) into exported OTel span events and broaden the
                 // privacy contract beyond this bounded request spine.
+                lifecycle.finish_http(status);
+                let body_lifecycle = Lifecycle::response_body(request_cx_for_log, endpoint);
+                let (parts, body) = response.into_parts();
+                let response =
+                    Response::from_parts(parts, Body::new(ObservedBody::new(body, body_lifecycle)));
                 drop(request_span);
                 Ok(response)
             }
@@ -233,6 +257,55 @@ where
             // request extension and publisher propagation uses Context::current().
             .with_context(request_cx),
         )
+    }
+}
+
+/// Observe transport lifecycle without inspecting payload bytes (SSE heartbeats
+/// and role frames are not tokens). Dropping before EOF means cancellation; it
+/// does not prove why the peer/server stopped consuming the response.
+struct ObservedBody {
+    inner: Body,
+    lifecycle: Lifecycle,
+}
+
+impl ObservedBody {
+    fn new(inner: Body, mut lifecycle: Lifecycle) -> Self {
+        if inner.is_end_stream() {
+            lifecycle.finish(Outcome::Success, ErrorClass::None);
+        }
+        Self { inner, lifecycle }
+    }
+}
+
+impl HttpBody for ObservedBody {
+    type Data = bytes::Bytes;
+    type Error = axum::Error;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        let context = self.lifecycle.context();
+        let _guard = context.attach();
+        let result = Pin::new(&mut self.inner).poll_frame(cx);
+        match &result {
+            Poll::Ready(Some(Err(_))) => {
+                self.lifecycle.finish(Outcome::Error, ErrorClass::Transport)
+            }
+            Poll::Ready(None) => self.lifecycle.finish(Outcome::Success, ErrorClass::None),
+            Poll::Ready(Some(Ok(_))) if self.inner.is_end_stream() => {
+                self.lifecycle.finish(Outcome::Success, ErrorClass::None)
+            }
+            _ => {}
+        }
+        result
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+    fn size_hint(&self) -> SizeHint {
+        self.inner.size_hint()
     }
 }
 
@@ -286,6 +359,142 @@ mod tests {
     use std::time::Instant;
     use tower::ServiceExt;
 
+    fn trace_capture() -> (
+        opentelemetry_sdk::trace::SdkTracerProvider,
+        opentelemetry_sdk::trace::InMemorySpanExporter,
+        tracing::subscriber::DefaultGuard,
+        tracing::Dispatch,
+    ) {
+        use opentelemetry::trace::TracerProvider;
+        use tracing_subscriber::prelude::*;
+        let exporter = opentelemetry_sdk::trace::InMemorySpanExporter::default();
+        let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+            // Other tests change the process sampler environment; capture spans deterministically.
+            .with_sampler(opentelemetry_sdk::trace::Sampler::AlwaysOn)
+            .with_simple_exporter(exporter.clone())
+            .build();
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test")));
+        (
+            provider,
+            exporter,
+            tracing::subscriber::set_default(subscriber),
+            // Keep two dispatchers alive while subscriber-less sibling tests
+            // register shared callsites; avoid tracing-core's single-dispatcher fast path.
+            tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default()),
+        )
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn response_ready_and_body_terminal_are_distinct() {
+        use http_body_util::BodyExt;
+        let (_provider, exporter, _guard, _callsite_guard) = trace_capture();
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(2);
+        let body = Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx));
+        let body = Arc::new(Mutex::new(Some(body)));
+        let router = Router::new()
+            .route(
+                "/v1/generate/test",
+                post(move || {
+                    let body = body.lock().unwrap().take().unwrap();
+                    async move { Response::new(body) }
+                }),
+            )
+            .layer(MetricsLayer::new());
+        let response = router
+            .oneshot(
+                Request::post("/v1/generate/test")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let spans = exporter.get_finished_spans().unwrap();
+        assert_eq!(
+            spans
+                .iter()
+                .map(|span| span.name.as_ref())
+                .collect::<Vec<_>>(),
+            ["gateway.request"]
+        );
+        let request_id = spans[0].span_context.span_id();
+        let request_end = spans[0].end_time;
+        let mut body = response.into_body();
+        tx.send(Ok(bytes::Bytes::from_static(b"data: token\n\n")))
+            .await
+            .unwrap();
+        assert!(body.frame().await.unwrap().is_ok());
+        assert_eq!(exporter.get_finished_spans().unwrap().len(), 1);
+        drop(tx);
+        assert!(body.frame().await.is_none());
+        // EOF closes the span even while the body value remains alive.
+        let spans = exporter.get_finished_spans().unwrap();
+        let terminal = spans
+            .iter()
+            .find(|span| span.name == "gateway.response_body")
+            .unwrap();
+        assert_eq!(terminal.parent_span_id, request_id);
+        assert!(terminal.end_time >= request_end);
+        assert_eq!(terminal.status, opentelemetry::trace::Status::Unset);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn server_errors_survive_as_structural_status_but_rejections_do_not() {
+        let (_provider, exporter, _guard, _callsite_guard) = trace_capture();
+        for status in [StatusCode::BAD_REQUEST, StatusCode::SERVICE_UNAVAILABLE] {
+            let router = Router::new()
+                .route("/v1/encode/test", post(move || async move { status }))
+                .layer(MetricsLayer::new());
+            let _ = router
+                .oneshot(
+                    Request::post("/v1/encode/test")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+        }
+        let spans = exporter.get_finished_spans().unwrap();
+        let requests: Vec<_> = spans
+            .iter()
+            .filter(|span| span.name == "gateway.request")
+            .collect();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].status, opentelemetry::trace::Status::Unset);
+        assert_eq!(requests[1].status, opentelemetry::trace::Status::error(""));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn body_failure_and_client_drop_end_once_without_exception_text() {
+        use http_body_util::BodyExt;
+        let (_provider, exporter, _guard, _callsite_guard) = trace_capture();
+        let stream = futures_util::stream::iter([
+            Ok(bytes::Bytes::from_static(b"first")),
+            Err(std::io::Error::other("private exception payload")),
+        ]);
+        let mut body = ObservedBody::new(
+            Body::from_stream(stream),
+            Lifecycle::response_body(opentelemetry::Context::new(), "generate"),
+        );
+        assert!(body.frame().await.unwrap().is_ok());
+        assert!(body.frame().await.unwrap().is_err());
+        drop(body);
+        let pending = Body::from_stream(futures_util::stream::pending::<
+            Result<bytes::Bytes, std::io::Error>,
+        >());
+        let body = ObservedBody::new(
+            pending,
+            Lifecycle::response_body(opentelemetry::Context::new(), "generate"),
+        );
+        assert_eq!(exporter.get_finished_spans().unwrap().len(), 1);
+        drop(body);
+        let spans = exporter.get_finished_spans().unwrap();
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0].status, opentelemetry::trace::Status::error(""));
+        assert_eq!(spans[1].status, opentelemetry::trace::Status::Unset);
+        assert!(spans.iter().all(|span| span.events.is_empty()));
+    }
+
     // A test handler that mimics the real proxy handler: write the
     // canonical machine_profile into the slot that `MetricsLayer`
     // installed. Real callers always normalize first, so the tests
@@ -294,6 +503,7 @@ mod tests {
         if let Some(slot) = req.extensions().get::<telemetry::MetricLabelsSlot>() {
             slot.set(telemetry::MetricLabels {
                 machine_profile: profile.to_string(),
+                model: "org/model".to_string(),
             });
         }
         axum::response::IntoResponse::into_response((StatusCode::OK, "ok"))
@@ -325,6 +535,7 @@ mod tests {
                     if let Some(slot) = req.extensions().get::<telemetry::MetricLabelsSlot>() {
                         slot.set(telemetry::MetricLabels {
                             machine_profile: "a100".to_string(),
+                            model: "org/model".to_string(),
                         });
                     }
                     axum::response::IntoResponse::into_response((
@@ -444,6 +655,7 @@ mod tests {
                 if let Some(slot) = req.extensions().get::<telemetry::MetricLabelsSlot>() {
                     slot.set(telemetry::MetricLabels {
                         machine_profile: "l4-spot".to_string(),
+                        model: "org/model".to_string(),
                     });
                 }
                 StatusCode::OK
@@ -531,6 +743,7 @@ mod tests {
                 operation: "encode",
                 status: 200,
                 machine_profile: "l4-spot".to_string(),
+                model: "org/model".to_string(),
             }]
         );
     }
@@ -557,6 +770,7 @@ mod tests {
                 operation: "score",
                 status: 503,
                 machine_profile: "other".to_string(),
+                model: "other".to_string(),
             }]
         );
     }
@@ -573,6 +787,7 @@ mod tests {
                 operation: "extract",
                 status: 504,
                 machine_profile: "a100".to_string(),
+                model: "org/model".to_string(),
             }]
         );
     }
@@ -589,6 +804,7 @@ mod tests {
                 operation: "embeddings",
                 status: 200,
                 machine_profile: "l4-spot".to_string(),
+                model: "org/model".to_string(),
             }]
         );
     }
@@ -611,6 +827,7 @@ mod tests {
                     operation: "generate",
                     status: 200,
                     machine_profile: "a100".to_string(),
+                    model: "org/model".to_string(),
                 }
         }));
     }
@@ -627,6 +844,7 @@ mod tests {
                 operation: "extract",
                 status: 200,
                 machine_profile: "l4-spot".to_string(),
+                model: "org/model".to_string(),
             }]
         );
     }
@@ -643,6 +861,7 @@ mod tests {
                 operation: "moderations",
                 status: 501,
                 machine_profile: "other".to_string(),
+                model: "other".to_string(),
             }]
         );
     }

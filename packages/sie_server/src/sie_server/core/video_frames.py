@@ -10,11 +10,10 @@ depend on.
 Three invariants hold here:
 
 - **Bounded.** :data:`MAX_SAMPLED_FRAMES` caps the frames one item can ever
-  yield. The managed gateway reserves ``images`` for a video item from that
-  same constant (``VIDEO_MAX_SAMPLED_FRAMES`` in
-  ``packages/sie_cloud/gateway/src/dispatcher.rs``), and settlement rejects a
-  worker count above its reservation ceiling — so this budget is a billing
-  contract, deliberately NOT environment-tunable.
+  yield. The cluster admission layer mirrors the same constant when reserving
+  ``images`` for a video item, and settlement rejects a worker count above its
+  reservation ceiling — so this budget is a billing contract, deliberately
+  NOT environment-tunable.
 - **Fail-closed.** Every decode failure raises :class:`VideoDecodeError`
   (an :class:`~sie_server.types.inputs.InvalidInputError`, surfaced as
   ``INVALID_INPUT`` / HTTP 400 on both the HTTP and queue paths). A missing or
@@ -34,7 +33,7 @@ co-scheduled request. The residual costs are one seek per sampled frame
 containers that report no usable metadata, the one grab-only counting pass
 under :data:`_MAX_SCANNED_FRAMES`.
 
-TODO(#2433): move extraction off the inference executor entirely — decode in
+TODO: move extraction off the inference executor entirely — decode in
 per-item preprocessing (``EncodePipeline._prepare_batch``) and hand the frames
 to the adapter through ``PreparedItem.payload``, so the GPU thread only ever
 sees decoded frames. That needs a prepared-item payload the video-capable
@@ -58,9 +57,9 @@ from sie_server.types.inputs import InvalidInputError, media_bytes
 logger = logging.getLogger(__name__)
 
 # Billing contract — see the module docstring. Raising this without raising the
-# gateway's `VIDEO_MAX_SAMPLED_FRAMES` would let a settled frame count exceed
-# its reservation ceiling and turn a successful encode into a billing fault, so
-# it is a constant rather than an environment knob.
+# admission layer's mirrored budget would let a settled frame count exceed its
+# reservation ceiling and turn a successful encode into a billing fault, so it
+# is a constant rather than an environment knob.
 MAX_SAMPLED_FRAMES: Final[int] = 32
 
 
@@ -68,7 +67,7 @@ MAX_SAMPLED_FRAMES: Final[int] = 32
 # Generous by design — a minute of 1080p H.264 sits far below the byte cap.
 #
 # Unlike MAX_SAMPLED_FRAMES these ARE env knobs, but only LOWERING the byte cap
-# is meaningful behind the managed gateway: it mirrors this default as the
+# is meaningful behind a metered gateway: it mirrors this default as the
 # compile-time `METERED_VIDEO_INPUT_BYTE_CAP` and rejects an over-cap payload
 # pre-reservation, so raising SIE_MAX_VIDEO_BYTES past 256 MiB changes nothing
 # there and only widens what self-hosted deployments accept. The duration cap
@@ -197,6 +196,76 @@ def extract_frames(video: Any, *, max_frames: int = MAX_SAMPLED_FRAMES) -> list[
             return _sample(cv2, capture, total=total, budget=budget)
         finally:
             capture.release()
+
+
+def sniff_video_container(data: bytes) -> str | None:
+    """Identify an MP4/MOV, WebM/Matroska, or AVI container from its magic bytes.
+
+    FFmpeg selects its demuxer by content, so callers that forward bytes to a
+    decoder must gate on this rather than on a declared media type.
+    """
+    if data[4:8] == b"ftyp":
+        return "mp4"
+    if data[:4] == b"\x1a\x45\xdf\xa3":
+        return "mkv"
+    if data[:4] == b"RIFF" and data[8:12] == b"AVI ":
+        return "avi"
+    return None
+
+
+# Generation-path decode rails. The generation runtime decodes a clip on its
+# own request loop, seeking from the preceding keyframe for every sampled
+# frame, so work scales with the stream's frame count and frame size rather
+# than with the frames it keeps.
+MAX_GENERATION_VIDEO_FRAMES: Final[int] = 3600
+MAX_GENERATION_VIDEO_FPS: Final[float] = 120.0
+MAX_GENERATION_VIDEO_FRAME_PIXELS: Final[int] = 1920 * 1080
+
+
+def check_generation_video_bounds(data: bytes, *, suffix: str) -> None:
+    """Admit a clip for generation only if its container metadata is within the decode rails.
+
+    Reads metadata without decoding frames. Fails closed on a container the
+    decoder cannot open or that reports no usable dimensions, frame count, or
+    frame rate, and enforces the byte, duration, frame-count, frame-rate, and
+    frame-size caps.
+
+    Raises:
+        VideoDecodeError: on any of the above.
+    """
+    if not data:
+        raise VideoDecodeError("video input carries no data")
+    if len(data) > MAX_VIDEO_BYTES:
+        msg = f"video input is {len(data)} bytes, exceeding the {MAX_VIDEO_BYTES}-byte admission cap"
+        raise VideoDecodeError(msg)
+    cv2 = _load_decoder()
+    with tempfile.NamedTemporaryFile(suffix=suffix) as handle:
+        handle.write(data)
+        handle.flush()
+        capture = cv2.VideoCapture(handle.name)
+        try:
+            if not capture.isOpened():
+                raise VideoDecodeError("video input could not be opened by the decoder")
+            total = _validated_frame_total(cv2, capture)
+            width = float(capture.get(cv2.CAP_PROP_FRAME_WIDTH) or 0.0)
+            height = float(capture.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0.0)
+            fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
+        finally:
+            capture.release()
+    if total is None or not all(math.isfinite(v) and v > 0 for v in (width, height)):
+        raise VideoDecodeError("video input does not report usable dimensions, frame count, and frame rate")
+    if total > MAX_GENERATION_VIDEO_FRAMES:
+        msg = f"video input has {total} frames, exceeding the {MAX_GENERATION_VIDEO_FRAMES}-frame cap"
+        raise VideoDecodeError(msg)
+    if fps > MAX_GENERATION_VIDEO_FPS:
+        msg = f"video input is {fps:.1f} fps, exceeding the {MAX_GENERATION_VIDEO_FPS:.0f} fps cap"
+        raise VideoDecodeError(msg)
+    if int(width) * int(height) > MAX_GENERATION_VIDEO_FRAME_PIXELS:
+        msg = (
+            f"video resolution {int(width)}x{int(height)} exceeds the "
+            f"{MAX_GENERATION_VIDEO_FRAME_PIXELS}-pixel frame limit"
+        )
+        raise VideoDecodeError(msg)
 
 
 def _load_decoder() -> Any:

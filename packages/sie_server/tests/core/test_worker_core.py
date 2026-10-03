@@ -1,11 +1,15 @@
 import asyncio
+import io
 import time
 from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
+import torch
+from PIL import Image as PILImage
 from sie_server.core.inference_output import EncodeOutput
 from sie_server.core.prepared import TextPreparedItem, make_text_item
+from sie_server.core.preprocessor import ImagePreprocessor
 from sie_server.core.timing import RequestTiming
 from sie_server.core.worker import ModelWorker, RequestMetadata, WorkerConfig, WorkerResult, WorkerStats
 from sie_server.core.worker import model_worker as model_worker_module
@@ -72,6 +76,9 @@ class TestWorkerConfig:
         assert config.max_batch_wait_ms == 15
         assert config.coalesce_ms == 15.0
         assert config.coalesce_ratio == 0.5
+        # Idle accumulation window (#2874): single-digit ms by default so an
+        # idle worker fuses bursts without materially delaying lone requests.
+        assert config.idle_coalesce_ms == 3.0
 
     def test_custom_values(self) -> None:
         """Can set custom config values."""
@@ -97,6 +104,75 @@ class TestWorkerStats:
         assert stats.items_processed == 0
         assert stats.total_tokens_processed == 0
         assert stats.inference_errors == 0
+
+    def test_instrumentation_series_are_bounded(self) -> None:
+        """Instrumentation must not grow for the life of the process.
+
+        ``SIE_INSTRUMENTATION=1`` left on in a long-lived deployment appends
+        five samples per batch per worker. Unbounded, that is a leak that also
+        makes ``summary()`` progressively slower, since it runs min/max/mean/
+        median over the whole history. Each series is a bounded ring buffer
+        that keeps the NEWEST samples.
+        """
+        limit = 8
+        stats = WorkerStats()
+        stats.enable_instrumentation(history_limit=limit)
+        assert stats.instrumentation_enabled
+
+        series = (
+            stats.batch_sizes,
+            stats.batch_tokens,
+            stats.batch_wait_ms,
+            stats.inference_ms,
+            stats.requests_per_batch,
+        )
+        for sample in range(limit * 5):
+            for entries in series:
+                assert entries is not None
+                entries.append(sample)
+
+        for entries in series:
+            assert entries is not None
+            assert len(entries) == limit
+            # Oldest samples evicted, newest retained.
+            assert list(entries) == list(range(limit * 5 - limit, limit * 5))
+
+    def test_instrumentation_summary_shape_is_unchanged(self) -> None:
+        """``summary()`` output must stay byte-identical in shape for consumers."""
+        stats = WorkerStats(batches_processed=2, items_processed=6, total_tokens_processed=90)
+        stats.enable_instrumentation()
+        assert stats.batch_sizes is not None
+        assert stats.batch_tokens is not None
+        assert stats.batch_wait_ms is not None
+        assert stats.inference_ms is not None
+        assert stats.requests_per_batch is not None
+        for size, tokens, wait, infer, requests in ((2, 30, 1.0, 10.0, 2), (4, 60, 3.0, 20.0, 3)):
+            stats.batch_sizes.append(size)
+            stats.batch_tokens.append(tokens)
+            stats.batch_wait_ms.append(wait)
+            stats.inference_ms.append(infer)
+            stats.requests_per_batch.append(requests)
+
+        summary = stats.summary()
+        assert "Batches processed: 2" in summary
+        assert "=== Batch Size Stats ===" in summary
+        assert "Items/batch: min=2, max=4, mean=3.0, median=3.0" in summary
+        assert "Tokens/batch: min=30, max=60, mean=45.0" in summary
+        assert "Requests/batch: min=2, max=3, mean=2.5" in summary
+        assert "=== Timing Stats ===" in summary
+        assert "Batch wait (ms): min=1.0, max=3.0, mean=2.0, p50=2.0" in summary
+        assert "Inference (ms): min=10.0, max=20.0, mean=15.0, p50=15.0" in summary
+
+    def test_summary_without_instrumentation_omits_detail(self) -> None:
+        """The non-instrumented summary keeps its four-line shape."""
+        summary = WorkerStats().summary()
+
+        assert summary.splitlines() == [
+            "Batches processed: 0",
+            "Items processed: 0",
+            "Tokens processed: 0",
+            "Inference errors: 0",
+        ]
 
 
 class TestModelWorker:
@@ -237,6 +313,43 @@ class TestModelWorker:
             assert worker.stats.batches_processed >= 1
             assert worker.stats.items_processed >= 1
 
+        finally:
+            await worker.stop()
+
+    @pytest.mark.asyncio
+    async def test_mixed_text_image_batch_completes(self, mock_adapter: MagicMock) -> None:
+        """A mixed text+image request must resolve its future (#3136).
+
+        Submits exactly what ``EncodePipeline.run_encode`` submits for a mixed
+        batch on an image-preprocessor model: the ImagePreprocessor-prepared
+        list plus the full original item list. When the preprocessor dropped
+        text-only items, ``_complete_requests`` never saw a result for every
+        item and the request hung until an outer timeout.
+        """
+        buf = io.BytesIO()
+        PILImage.new("RGB", (4, 4), color=(255, 0, 0)).save(buf, format="PNG")
+        png = buf.getvalue()
+
+        items = [
+            Item(text="a red square"),
+            *[Item(images=[{"data": png, "format": "png"}]) for _ in range(4)],
+        ]
+        processor = MagicMock(return_value={"pixel_values": torch.zeros(1, 3, 4, 4)})
+        prepared_batch = ImagePreprocessor(processor, "test-model").prepare(items, config=MagicMock())
+
+        worker = ModelWorker(
+            mock_adapter,
+            WorkerConfig(max_batch_tokens=100, max_batch_requests=1, max_batch_wait_ms=1),
+        )
+        await worker.start()
+        try:
+            future = await worker.submit(
+                prepared_items=prepared_batch.items,
+                items=items,
+                output_types=["dense"],
+            )
+            worker_result = await asyncio.wait_for(future, timeout=3.0)
+            assert worker_result.output.batch_size == len(items)
         finally:
             await worker.stop()
 
@@ -467,6 +580,146 @@ class TestModelWorker:
             # Should complete well under the 50ms batch timeout
             # (inference is near-instant with mock adapter)
             assert elapsed_ms < 20
+
+        finally:
+            await worker.stop()
+
+    @pytest.mark.asyncio
+    async def test_staggered_burst_fuses_with_idle_window(self, mock_adapter: MagicMock) -> None:
+        """#2874: a burst arriving at an IDLE worker fuses into one batch.
+
+        Before the idle accumulation window, an idle worker dispatched
+        immediately with whatever was pending, so staggered arrivals became a
+        train of serialized batch-of-1 forwards (the was_idle degeneracy).
+        """
+        call_sizes: list[int] = []
+
+        def counting_encode(items, output_types, **kwargs):
+            call_sizes.append(len(items))
+            return EncodeOutput(
+                dense=np.array([[0.1, 0.2, 0.3]] * len(items)),
+                batch_size=len(items),
+            )
+
+        mock_adapter.encode.side_effect = counting_encode
+
+        config = WorkerConfig(
+            max_batch_tokens=1000,
+            max_batch_requests=64,
+            max_batch_wait_ms=500,
+            coalesce_ms=200,
+            coalesce_ratio=0.5,
+            idle_coalesce_ms=60,
+        )
+        worker = ModelWorker(mock_adapter, config)
+        await worker.start()
+
+        try:
+            futures = []
+            for i in range(4):
+                future = await worker.submit(
+                    [make_text_item([1, 2], 0)],
+                    [Item(text=f"text {i}")],
+                    ["dense"],
+                )
+                futures.append(future)
+                # Stagger arrivals well inside the 60ms idle window.
+                await asyncio.sleep(0.005)
+
+            await asyncio.gather(*futures)
+
+            # All four staggered requests fused into a single forward.
+            assert sum(call_sizes) == 4
+            assert call_sizes == [4], f"expected one fused batch, got: {call_sizes}"
+
+        finally:
+            await worker.stop()
+
+    @pytest.mark.asyncio
+    async def test_staggered_burst_shreds_without_idle_window(self, mock_adapter: MagicMock) -> None:
+        """Contrast for the test above: ``idle_coalesce_ms=0`` restores the
+        legacy immediate idle dispatch, and the same staggered burst shreds
+        into multiple small forwards. This is the mutation the idle window
+        exists to kill — if the window stops being applied, the fusing test
+        above degrades into THIS shape and fails.
+        """
+        call_sizes: list[int] = []
+
+        def counting_encode(items, output_types, **kwargs):
+            call_sizes.append(len(items))
+            return EncodeOutput(
+                dense=np.array([[0.1, 0.2, 0.3]] * len(items)),
+                batch_size=len(items),
+            )
+
+        mock_adapter.encode.side_effect = counting_encode
+
+        config = WorkerConfig(
+            max_batch_tokens=1000,
+            max_batch_requests=64,
+            max_batch_wait_ms=500,
+            coalesce_ms=200,
+            coalesce_ratio=0.5,
+            idle_coalesce_ms=0,
+        )
+        worker = ModelWorker(mock_adapter, config)
+        await worker.start()
+
+        try:
+            futures = []
+            for i in range(4):
+                future = await worker.submit(
+                    [make_text_item([1, 2], 0)],
+                    [Item(text=f"text {i}")],
+                    ["dense"],
+                )
+                futures.append(future)
+                await asyncio.sleep(0.005)
+
+            await asyncio.gather(*futures)
+
+            assert sum(call_sizes) == 4
+            # The first arrival dispatches alone (immediate idle dispatch), so
+            # the burst cannot land in a single forward.
+            assert len(call_sizes) >= 2, f"expected shredded batches without the window, got: {call_sizes}"
+
+        finally:
+            await worker.stop()
+
+    @pytest.mark.asyncio
+    async def test_lone_request_waits_only_the_idle_window(self, mock_adapter: MagicMock) -> None:
+        """A lone request must not wait the busy-path coalesce/batch windows —
+        only the small idle accumulation window bounds its dispatch latency.
+        """
+        mock_adapter.encode.return_value = EncodeOutput(
+            dense=np.array([[0.1, 0.2, 0.3]]),
+            batch_size=1,
+        )
+
+        config = WorkerConfig(
+            max_batch_tokens=1000,
+            max_batch_requests=64,
+            max_batch_wait_ms=500,
+            coalesce_ms=400,
+            coalesce_ratio=1.0,
+            idle_coalesce_ms=5,
+        )
+        worker = ModelWorker(mock_adapter, config)
+        await worker.start()
+
+        try:
+            start = time.monotonic()
+            future = await worker.submit(
+                [make_text_item([1, 2, 3], 0)],
+                [Item(text="hello")],
+                ["dense"],
+            )
+            await asyncio.wait_for(future, timeout=2.0)
+            elapsed_ms = (time.monotonic() - start) * 1000
+
+            # ~5ms idle window + mock inference; far below the 400ms coalesce
+            # and 500ms batch windows.
+            assert elapsed_ms < 200
 
         finally:
             await worker.stop()

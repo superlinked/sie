@@ -21,7 +21,7 @@ profiles:
       runtime:
         # Default task is object detection: Florence-2-base is measured on COCO
         # detection (its model-card metric, like Florence-2-base-ft / large; #1437).
-        # The same model is also the sie_tools image OCR fallback — that call
+        # The same model is also used as an image OCR fallback — that call
         # passes options={"task": "<OCR>"} explicitly, so one model serves both OD
         # and OCR. This default only sets the no-task-specified behaviour.
         task: <OD>

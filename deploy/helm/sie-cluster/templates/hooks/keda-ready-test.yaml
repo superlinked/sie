@@ -1,10 +1,12 @@
 {{- if .Values.autoscaling.enabled }}
 {{- $expectedScaledObjects := 1 -}}
+{{- $expectedExternalMetrics := 1 -}}
 {{- range $pool := .Values.workers.pools -}}
 {{- if $pool.enabled -}}
 {{- range $bundleCfg := $pool.bundles -}}
 {{- if dig "enabled" true $bundleCfg -}}
 {{- $expectedScaledObjects = add1 $expectedScaledObjects -}}
+{{- $expectedExternalMetrics = add $expectedExternalMetrics 5 -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
@@ -13,8 +15,12 @@
 {{- $maxPollingInterval := max 30 $workerPollingInterval -}}
 {{- $failureThreshold := 3 -}}
 {{- $validationWindow := mul $maxPollingInterval $failureThreshold -}}
-{{- $checkInterval := min 30 (max 5 $workerPollingInterval) -}}
-{{- $timeout := add $validationWindow 180 -}}
+{{- $probeConcurrency := 16 -}}
+{{- $probeRequestTimeout := 5 -}}
+{{- $probeBatches := div (add $expectedScaledObjects (sub $probeConcurrency 1)) $probeConcurrency -}}
+{{- $probeRoundBudget := mul $probeBatches (mul 5 $probeRequestTimeout) -}}
+{{- $probeBudget := mul $probeRoundBudget $failureThreshold -}}
+{{- $timeout := add (add $validationWindow $probeBudget) 180 -}}
 {{- $activeDeadline := add $timeout 60 -}}
 # RBAC must be at a lower weight than the Job so it is fully propagated before the pod starts.
 apiVersion: v1
@@ -49,6 +55,14 @@ rules:
   - apiGroups: ["autoscaling"]
     resources: ["horizontalpodautoscalers"]
     verbs: ["get", "list"]
+  # Query each exact KEDA-generated external metric so scale-to-zero targets
+  # populate trigger health even while the HPA is disabled at zero. The
+  # aggregated API authorizes an exact-metric response as a namespaced list on
+  # its wildcard resource; strict path/catalog validation below narrows use to
+  # the five chart-owned metric names.
+  - apiGroups: ["external.metrics.k8s.io"]
+    resources: ["*"]
+    verbs: ["list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -104,18 +118,24 @@ spec:
           command: ["/bin/sh", "-c"]
           args:
             - |
-              set -e
+              set -eu
               NAMESPACE="{{ include "sie-cluster.namespace" . }}"
               {{- include "sie-cluster.kubernetes.inClusterKubeconfig" . | nindent 14 }}
               EXPECTED_COUNT={{ $expectedScaledObjects }}
+              EXPECTED_METRIC_COUNT={{ $expectedExternalMetrics }}
               SCALEDOBJECT_SELECTOR='app.kubernetes.io/instance={{ .Release.Name }},app.kubernetes.io/part-of=sie,app.kubernetes.io/managed-by=Helm,sie.superlinked.com/scaler-managed=true,sie.superlinked.com/scaler-revision={{ .Release.Revision }},sie.superlinked.com/helm-namespace={{ .Release.Namespace }}'
               HPA_SELECTOR='app.kubernetes.io/instance={{ .Release.Name }},app.kubernetes.io/part-of=sie,app.kubernetes.io/managed-by=Helm,sie.superlinked.com/scaler-managed=true,sie.superlinked.com/helm-namespace={{ .Release.Namespace }}'
               FAILURE_THRESHOLD={{ $failureThreshold }}
               VALIDATION_WINDOW={{ $validationWindow }}
               TIMEOUT={{ $timeout }}
-              INTERVAL={{ $checkInterval }}
+              INTERVAL={{ $maxPollingInterval }}
+              PROBE_CONCURRENCY={{ $probeConcurrency }}
+              PROBE_REQUEST_TIMEOUT={{ $probeRequestTimeout }}
+              EXTERNAL_METRIC_MAX_BYTES=65536
               SCALEDOBJECTS_FILE=/tmp/keda-scaledobjects.json
               HPAS_FILE=/tmp/keda-hpas.json
+              EXTERNAL_METRICS_FILE=/tmp/keda-external-metrics.tsv
+              EXTERNAL_METRIC_DIR=/tmp/keda-external-metric-responses
               echo "=== ScaledObject Health Test ==="
 
               # Ordinary kubectl resource reads use the projected in-cluster
@@ -196,60 +216,174 @@ spec:
                 '
               }
 
-              elapsed=0
-              echo "Waiting ${VALIDATION_WINDOW}s (failureThreshold=${FAILURE_THRESHOLD}, max polling interval={{ $maxPollingInterval }}s) before accepting KEDA status"
-              while [ "$elapsed" -lt "$VALIDATION_WINDOW" ]; do
-                remaining=$((VALIDATION_WINDOW - elapsed))
-                delay=$INTERVAL
-                if [ "$delay" -gt "$remaining" ]; then
-                  delay=$remaining
+              # Kubernetes HPA deliberately stops requesting external metrics
+              # while a scale target is at zero. Query every exact KEDA metric
+              # through the aggregated API so the adapter evaluates each
+              # trigger and KEDA can publish the otherwise-empty health map.
+              prime_external_metrics() {
+                if ! jq -e --arg namespace "$NAMESPACE" \
+                  --argjson expected_count "$EXPECTED_COUNT" \
+                  --argjson expected_metrics "$EXPECTED_METRIC_COUNT" '
+                  def dns_label:
+                    type == "string" and length >= 1 and length <= 63 and
+                    test("^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$");
+                  ($namespace | dns_label) and
+                  (.items | type == "array" and length == $expected_count) and
+                  ([.items[].spec.triggers[]] | length == $expected_metrics) and
+                  all(.items[];
+                    (.metadata.name | dns_label) and
+                    (.spec.triggers | type == "array" and length >= 1 and length <= 5) and
+                    all(.spec.triggers | to_entries[];
+                      .key >= 0 and .key <= 4 and .value.type == "prometheus"
+                    )
+                  )
+                ' "$SCALEDOBJECTS_FILE" >/dev/null; then
+                  echo "KEDA external metric catalog failed validation" >&2
+                  return 1
                 fi
-                sleep "$delay"
-                elapsed=$((elapsed + delay))
-              done
+                if ! jq -r '
+                  .items | to_entries[] |
+                  .key as $object_index |
+                  .value.metadata.name as $scaledobject |
+                  .value.spec.triggers | to_entries[] |
+                  [$object_index, $scaledobject, "s\(.key)-\(.value.type)"] | @tsv
+                ' "$SCALEDOBJECTS_FILE" > "$EXTERNAL_METRICS_FILE"; then
+                  echo "KEDA external metric catalog could not be generated" >&2
+                  return 1
+                fi
+                if ! metric_count=$(wc -l < "$EXTERNAL_METRICS_FILE" | tr -d ' '); then
+                  echo "KEDA external metric catalog could not be counted" >&2
+                  return 1
+                fi
+                if [ "$metric_count" -ne "$EXPECTED_METRIC_COUNT" ]; then
+                  echo "KEDA external metric catalog count mismatch" >&2
+                  return 1
+                fi
+                if ! mkdir -p "$EXTERNAL_METRIC_DIR"; then
+                  echo "KEDA external metric response directory could not be created" >&2
+                  return 1
+                fi
 
+                probe_batch=0
+                probe_pids=""
+                probe_failed=0
+                probe_object_index=0
+                while [ "$probe_object_index" -lt "$EXPECTED_COUNT" ]; do
+                  current_object_index=$probe_object_index
+                  (
+                    object_metric_index=0
+                    while IFS="$(printf '\t')" read -r catalog_object_index scaledobject metric; do
+                      if [ "$catalog_object_index" -ne "$current_object_index" ]; then
+                        continue
+                      fi
+                      object_metric_index=$((object_metric_index + 1))
+                      response_file="${EXTERNAL_METRIC_DIR}/${current_object_index}-${object_metric_index}.json"
+                      if ! encoded_namespace=$(jq -rn --arg value "$NAMESPACE" '$value | @uri'); then
+                        exit 1
+                      fi
+                      if ! encoded_metric=$(jq -rn --arg value "$metric" '$value | @uri'); then
+                        exit 1
+                      fi
+                      if ! encoded_selector=$(jq -rn --arg value "scaledobject.keda.sh/name=$scaledobject" '$value | @uri'); then
+                        exit 1
+                      fi
+                      metric_path="/apis/external.metrics.k8s.io/v1beta1/namespaces/${encoded_namespace}/${encoded_metric}?labelSelector=${encoded_selector}"
+                      if ! kubectl get --request-timeout="${PROBE_REQUEST_TIMEOUT}s" --raw "$metric_path" 2>/dev/null \
+                        | head -c $((EXTERNAL_METRIC_MAX_BYTES + 1)) > "$response_file"; then
+                        exit 1
+                      fi
+                      if ! response_bytes=$(wc -c < "$response_file" | tr -d ' '); then
+                        exit 1
+                      fi
+                      if [ "$response_bytes" -gt "$EXTERNAL_METRIC_MAX_BYTES" ]; then
+                        exit 1
+                      fi
+                      if ! jq -e --arg metric "$metric" '
+                        type == "object" and
+                        .apiVersion == "external.metrics.k8s.io/v1beta1" and
+                        .kind == "ExternalMetricValueList" and
+                        (.items | type == "array" and length == 1) and
+                        (.items[0] | type == "object") and
+                        .items[0].metricName == $metric and
+                        ((.items[0].metricLabels == null) or (.items[0].metricLabels | type == "object")) and
+                        (.items[0].timestamp | type == "string" and length >= 1 and length <= 64) and
+                        (.items[0].value | type == "string" and length >= 1 and length <= 64)
+                      ' "$response_file" >/dev/null; then
+                        exit 1
+                      fi
+                    done < "$EXTERNAL_METRICS_FILE"
+                    if [ "$object_metric_index" -lt 1 ] || [ "$object_metric_index" -gt 5 ]; then
+                      exit 1
+                    fi
+                  ) &
+                  probe_pids="$probe_pids $!"
+                  probe_batch=$((probe_batch + 1))
+                  probe_object_index=$((probe_object_index + 1))
+                  if [ "$probe_batch" -ge "$PROBE_CONCURRENCY" ]; then
+                    for probe_pid in $probe_pids; do
+                      if ! wait "$probe_pid"; then
+                        probe_failed=1
+                      fi
+                    done
+                    if [ "$probe_failed" -ne 0 ]; then
+                      echo "KEDA external metric query batch failed" >&2
+                      return 1
+                    fi
+                    probe_batch=0
+                    probe_pids=""
+                  fi
+                done
+                for probe_pid in $probe_pids; do
+                  if ! wait "$probe_pid"; then
+                    probe_failed=1
+                  fi
+                done
+                if [ "$probe_failed" -ne 0 ] || [ "$probe_object_index" -ne "$EXPECTED_COUNT" ]; then
+                  echo "KEDA external metric query round failed" >&2
+                  return 1
+                fi
+              }
+
+              elapsed=0
+              consecutive_successes=0
+              echo "Requiring ${FAILURE_THRESHOLD} complete healthy rounds across ${VALIDATION_WINDOW}s"
               while [ $elapsed -lt $TIMEOUT ]; do
-                if ! summary=$(k8s_summary); then
-                  echo "Waiting for the release ScaledObject API... (${elapsed}s/${TIMEOUT}s)"
-                  sleep $INTERVAL
-                  elapsed=$((elapsed + INTERVAL))
-                  continue
+                sleep "$INTERVAL"
+                elapsed=$((elapsed + INTERVAL))
+                round_healthy=false
+                if summary=$(k8s_summary) \
+                  && printf '%s' "$summary" | jq -e --argjson expected "$EXPECTED_COUNT" '
+                    .count == $expected and .hpa_count == $expected
+                  ' >/dev/null \
+                  && prime_external_metrics \
+                  && summary=$(k8s_summary) \
+                  && printf '%s' "$summary" | jq -e --argjson expected "$EXPECTED_COUNT" '
+                    .count == $expected and
+                    .hpa_count == $expected and
+                    .ready == $expected and
+                    .status_reconciled == $expected and
+                    .healthy == $expected and
+                    .fallback == 0 and
+                    .hpa_set_reconciled == true
+                  ' >/dev/null; then
+                  round_healthy=true
                 fi
-                count=$(printf '%s' "$summary" | jq -r '.count')
-                hpa_count=$(printf '%s' "$summary" | jq -r '.hpa_count')
-                ready_count=$(printf '%s' "$summary" | jq -r '.ready')
-                fallback_count=$(printf '%s' "$summary" | jq -r '.fallback')
-                status_reconciled_count=$(printf '%s' "$summary" | jq -r '.status_reconciled')
-                healthy_count=$(printf '%s' "$summary" | jq -r '.healthy')
-                hpa_set_reconciled=$(printf '%s' "$summary" | jq -r '.hpa_set_reconciled')
-                if [ "$count" -ne "$EXPECTED_COUNT" ] || [ "$hpa_count" -ne "$EXPECTED_COUNT" ]; then
-                  echo "Waiting for release autoscalers: ScaledObjects=$count HPAs=$hpa_count expected=$EXPECTED_COUNT (${elapsed}s/${TIMEOUT}s)"
-                  sleep $INTERVAL
-                  elapsed=$((elapsed + INTERVAL))
-                  continue
+                if [ "$round_healthy" = "true" ]; then
+                  consecutive_successes=$((consecutive_successes + 1))
+                else
+                  consecutive_successes=0
                 fi
-                if [ "$ready_count" -eq "$EXPECTED_COUNT" ] \
-                  && [ "$status_reconciled_count" -eq "$EXPECTED_COUNT" ] \
-                  && [ "$healthy_count" -eq "$EXPECTED_COUNT" ] \
-                  && [ "$fallback_count" -eq "0" ] \
-                  && [ "$hpa_set_reconciled" = "true" ]; then
-                  echo "SUCCESS: All $EXPECTED_COUNT release ScaledObjects and controller-reconciled HPAs are current with trigger health Happy"
+                if [ "$consecutive_successes" -ge "$FAILURE_THRESHOLD" ] \
+                  && [ "$elapsed" -ge "$VALIDATION_WINDOW" ]; then
+                  echo "SUCCESS: All $EXPECTED_COUNT release ScaledObjects passed $consecutive_successes complete external-metric health rounds"
                   exit 0
                 fi
-                echo "Waiting for KEDA reconciliation: ready=$ready_count/$EXPECTED_COUNT status=$status_reconciled_count/$EXPECTED_COUNT healthy=$healthy_count/$EXPECTED_COUNT fallback=$fallback_count HPA-set-current=$hpa_set_reconciled (${elapsed}s/${TIMEOUT}s)"
-                echo "Status sample: $summary"
-                sleep $INTERVAL
-                elapsed=$((elapsed + INTERVAL))
+                echo "Waiting for consecutive KEDA health: rounds=$consecutive_successes/$FAILURE_THRESHOLD elapsed=${elapsed}s/${TIMEOUT}s"
               done
               echo "FAILED: ScaledObjects and controller-reconciled HPAs did not become current, Ready, and trigger-healthy after a complete KEDA failure window"
               exit 1
           resources:
-            requests:
-              cpu: 10m
-              memory: 64Mi
-            limits:
-              cpu: 100m
-              memory: 256Mi
+            {{- include "sie-cluster.hooks.resources" . | nindent 12 }}
       tolerations:
         - key: nvidia.com/gpu
           operator: Exists

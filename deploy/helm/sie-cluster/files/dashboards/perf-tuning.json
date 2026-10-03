@@ -7,15 +7,7 @@
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
   "id": null,
-  "links": [
-    {
-      "title": "Findings doc",
-      "url": "https://github.com/superlinked/sie-perf-lab/blob/main/docs/l4-cluster-perf-tuning.md",
-      "type": "link",
-      "targetBlank": true,
-      "tags": []
-    }
-  ],
+  "links": [],
   "panels": [
     {
       "gridPos": { "h": 2, "w": 24, "x": 0, "y": 0 },
@@ -363,7 +355,7 @@
       "type": "text",
       "options": {
         "mode": "markdown",
-        "content": "## GPU device counters (DCGM)\nL4 TDP = **72 W**, stock max proc clock = **2040 MHz**. Sustained power ≥ 65 W with proc clock ≤ 1500 MHz is the **power-capped** signature. See sie-perf-lab/docs/l4-cluster-perf-tuning.md §6.\n\n**MFU proxies** (below): `DCGM_FI_PROF_SM_ACTIVE` ≈ fraction of cycles an SM has ≥1 warp assigned (saturation). `DCGM_FI_PROF_PIPE_FP16_ACTIVE` + `PIPE_TENSOR_ACTIVE` = fraction of cycles the FP16/HMMA pipes are computing — our embedding model runs FP16 so `PIPE_FP16_ACTIVE` ≫ `PIPE_TENSOR_ACTIVE` is expected on varlen flash-attn."
+        "content": "## GPU device counters (DCGM)\nL4 TDP = **72 W**, stock max proc clock = **2040 MHz**. Sustained power ≥ 65 W with proc clock ≤ 1500 MHz is the **power-capped** signature.\n\n**MFU proxies** (below): `DCGM_FI_PROF_SM_ACTIVE` ≈ fraction of cycles an SM has ≥1 warp assigned (saturation). `DCGM_FI_PROF_PIPE_FP16_ACTIVE` + `PIPE_TENSOR_ACTIVE` = fraction of cycles the FP16/HMMA pipes are computing — our embedding model runs FP16 so `PIPE_FP16_ACTIVE` ≫ `PIPE_TENSOR_ACTIVE` is expected on varlen flash-attn."
       }
     },
     {

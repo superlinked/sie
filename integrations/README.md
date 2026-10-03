@@ -82,21 +82,25 @@ We use a layered testing approach:
 mise run test
 
 # Run tests for a specific integration
-mise run test integrations/sie_langchain/tests/
+mise run test -- integrations/sie_langchain/tests/
 ```
 
 **Integration tests** (require running server):
 
 ```bash
 # Start SIE server
-mise run serve -d cpu -p 8080
+mise run serve -- -d cpu -p 8080
 
 # Run all integration tests
-mise run test -i
+mise run test -- -i
 
 # Run integration tests for specific package
-mise run test -i integrations/sie_langchain/
+mise run test -- -i integrations/sie_langchain/
 ```
+
+Hosted CI runs these suites against a real CPU server in the advisory
+`Real models / CPU` job. See [CONTRIBUTING.md](../CONTRIBUTING.md#hosted-ci-equivalents)
+to run the same lane locally.
 
 ### Creating a New Integration
 
@@ -135,8 +139,12 @@ mise run test -i integrations/sie_langchain/
 
 The `conftest.py` file provides common fixtures for all integrations:
 
-- `mock_sie_client` - Mocked `SIEClient` that returns test embeddings
-- `mock_sie_async_client` - Mocked async client
+- `mock_sie_client` - `SIEClient` mock autospecced from the SDK. A call with an
+  argument the SDK does not accept raises `TypeError`. Change a method's behavior
+  through its `side_effect` or `return_value` rather than assigning a new mock.
+- `mock_sie_async_client` - The same for `SIEAsyncClient`
+- `extract_error_text` and `extract_item_error` - Item text for which the mocks
+  return a per-item extract `error`, and that error
 - `sie_server_url` - URL of running SIE server (for integration tests)
 
 Example usage:
@@ -297,7 +305,7 @@ image_emb = client.encode("openai/clip-vit-large-patch14", Item(image=image))
 
 # Visual document retrieval with ColPali
 page_image = Image.open("document_page.png")
-page_emb = client.encode("vidore/colpali-v1.2", Item(image=page_image), output_types=["multivector"])
+page_emb = client.encode("vidore/colpali-v1.3-hf", Item(image=page_image), output_types=["multivector"])
 ```
 
 **Supported vector databases for multi-vector:**
@@ -316,8 +324,6 @@ Each integration is versioned and released independently:
 4. GitHub Actions publishes to PyPI
 
 ## Contributing
-
-See the main repository's CONTRIBUTING.md for general guidelines.
 
 For integration-specific contributions:
 

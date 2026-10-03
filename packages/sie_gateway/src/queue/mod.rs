@@ -2,6 +2,11 @@ pub mod backlog;
 pub mod dispatch;
 pub mod dlq;
 pub mod identity;
+pub mod keyed_worker_pool;
+pub mod lane_admission;
+#[cfg(feature = "cloud-storage")]
+pub mod oss_payload_store;
 pub mod payload_store;
 pub mod publisher;
+pub mod stream_durability;
 pub mod streaming;

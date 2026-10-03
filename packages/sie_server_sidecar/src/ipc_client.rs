@@ -1047,7 +1047,25 @@ impl IpcClient {
     /// implement `run_batch` and for unit tests that don't wire a
     /// scheduler.
     pub async fn run_batch(&self, req: RunBatchRequest) -> Result<BatchOutcome, IpcError> {
-        self.call(METHOD_RUN_BATCH, req).await
+        self.run_batch_with_budget(req, None).await
+    }
+
+    /// [`Self::run_batch`] for work whose callers still wait for `budget`.
+    /// The call is allowed the longer of the configured request timeout and
+    /// `budget`, so legitimate slow batches are not cut short and retried.
+    pub async fn run_batch_with_budget(
+        &self,
+        req: RunBatchRequest,
+        budget: Option<Duration>,
+    ) -> Result<BatchOutcome, IpcError> {
+        self.call_with_timeout(METHOD_RUN_BATCH, req, self.run_batch_timeout(budget))
+            .await
+    }
+
+    fn run_batch_timeout(&self, budget: Option<Duration>) -> Duration {
+        budget.map_or(self.request_timeout, |budget| {
+            budget.max(self.request_timeout)
+        })
     }
 
     pub async fn apply_model_config(
@@ -1259,6 +1277,59 @@ mod tests {
                 });
             }
         })
+    }
+
+    #[test]
+    fn run_batch_waits_for_the_longer_of_the_request_timeout_and_the_budget() {
+        let client = IpcClient::new(short_sock_path()).with_timeout(Duration::from_secs(60));
+
+        assert_eq!(client.run_batch_timeout(None), Duration::from_secs(60));
+        assert_eq!(
+            client.run_batch_timeout(Some(Duration::from_secs(10))),
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            client.run_batch_timeout(Some(Duration::from_secs(95))),
+            Duration::from_secs(95)
+        );
+    }
+
+    #[tokio::test]
+    async fn run_batch_budget_outlasts_a_shorter_request_timeout() {
+        let path = short_sock_path();
+        let _server = spawn_echo_async(path.clone(), |req_bytes| async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let req: serde_json::Value = rmp_serde::from_slice(&req_bytes).unwrap();
+            rmp_serde::to_vec_named(&serde_json::json!({
+                "version": IPC_VERSION,
+                "request_id": req["request_id"],
+                "ok": true,
+                "body": {"outcomes": []},
+                "error": serde_json::Value::Null,
+            }))
+            .unwrap()
+        })
+        .await;
+        let client = IpcClient::new(&path).with_timeout(Duration::from_millis(50));
+        let request = || RunBatchRequest {
+            model_id: "m".into(),
+            batch_id: 1,
+            lora_key: String::new(),
+            total_cost: 0,
+            items: Vec::new(),
+            accepts_batched_f16_multivectors: true,
+        };
+
+        assert!(matches!(
+            client.run_batch(request()).await,
+            Err(IpcError::Timeout)
+        ));
+        let outcome = client
+            .run_batch_with_budget(request(), Some(Duration::from_secs(5)))
+            .await
+            .expect("a batch inside its deadline budget must not time out");
+        assert!(outcome.outcomes.is_empty());
+        let _ = std::fs::remove_file(&path);
     }
 
     fn ping_reply_bytes(req_bytes: &[u8], worker_id: &str) -> Vec<u8> {

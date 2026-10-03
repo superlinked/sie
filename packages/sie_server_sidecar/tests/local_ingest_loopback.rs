@@ -333,6 +333,7 @@ fn work_item(request_id: &str, idx: u32, total: u32, op: &str, admission_pool: &
         traceparent: None,
         tracestate: None,
         timestamp: 0.0,
+        deadline: None,
     }
 }
 

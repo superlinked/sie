@@ -4,11 +4,11 @@ Two distinct figures travel in the metadata; do not conflate them:
 
 - ``markdown_tokens_estimate`` — a LIVE, per-call estimate of *this* response's
   markdown, via a ~4 chars/token heuristic. Order-of-magnitude only.
-- ``token_reduction`` — the COMMITTED #1311 measurement of markdown vs direct
-  document ingestion, copied verbatim from the benchmark run (AGENTS.md: never
-  ship perf claims without baseline data). The authoritative method is
-  ``count_tokens`` on the document block (text + one image per page) vs the SIE
-  markdown; full detail in ``benchmarks/token_reduction/results/latest.json``.
+- ``token_reduction`` — the committed measurement of markdown vs direct
+  document ingestion, copied verbatim from the benchmark run. The measurement
+  compares
+  ``count_tokens`` on the document block (text plus one image per page) with the
+  SIE markdown.
 """
 
 import copy
@@ -17,17 +17,17 @@ from typing import Any
 
 _CHARS_PER_TOKEN = 4  # rough Claude/GPT-family heuristic
 
-# Committed token-reduction measurement — issue #1311, run 20260610T144234Z.
-# Source of truth: benchmarks/token_reduction/results/latest.json. Every number
-# below is copied verbatim from that committed run; re-run the benchmark to
-# change them, never hand-edit (AGENTS.md: no fabricated/rounded perf claims).
+# Committed token-reduction measurement from run 20260610T144234Z.
+# Every number below is copied verbatim from that committed run; re-run the
+# benchmark to change them; never hand-edit or round performance claims.
 # The dict is read-only; build_metadata deep-copies it so callers can't mutate it.
-_BENCHMARK_PATH = "benchmarks/token_reduction/results/latest.json"
 _OPUS = "claude-opus-4-8"
 _SONNET = "claude-sonnet-4-6"
 _TOKEN_REDUCTION: dict[str, Any] = {
-    "source": _BENCHMARK_PATH,
-    "issue": 1311,
+    "source": "committed benchmark run 20260610T144234Z",
+    # The response shape retains this provenance slot, but no public issue
+    # tracks the measurement.
+    "issue": None,
     "run": "20260610T144234Z",
     "method": (
         "count_tokens on the document block (text + one image per page, as "
@@ -46,12 +46,12 @@ _blended = _TOKEN_REDUCTION["blended_reduction_pct"]
 _per_type = _TOKEN_REDUCTION["per_file_type_reduction_pct"]
 _NOTE = (
     "markdown_tokens_estimate is a live ~4 chars/token estimate of this response, "
-    "not a measured count. token_reduction is the committed #1311 measurement of "
+    "not a measured count. token_reduction is the committed measurement of "
     "markdown vs direct document ingestion: blended "
     f"{_blended[_OPUS]}% (Opus 4.8, the conservative profile) and "
     f"{_blended[_SONNET]}% (Sonnet 4.6); per-file-type reductions span "
     f"{_per_type['min']}%-{_per_type['max']}% across both profiles "
-    f"(floor Opus/HTML, ceiling Sonnet/PPTX). See {_BENCHMARK_PATH}."
+    f"(floor Opus/HTML, ceiling Sonnet/PPTX), measured in run {_TOKEN_REDUCTION['run']}."
 )
 
 

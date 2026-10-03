@@ -32,6 +32,10 @@ pub struct ModelInfoExtras {
     /// ``generate`` task; empty ``Vec`` when grammar is explicitly
     /// disabled.
     pub grammar_capabilities: Option<Vec<String>>,
+    /// Resolved ``tasks.generate.capabilities.streaming`` value. ``None``
+    /// means the model has no generation task; a generation task with no
+    /// explicit capability inherits the worker default of ``true``.
+    pub streaming_supported: Option<bool>,
     /// ``tasks.generate.grammar_profile`` from the model YAML — the name of a
     /// profile that grammar-constrained requests must be served on. When set,
     /// the chat/completions/generate handlers rewrite a grammar request's model
@@ -197,6 +201,12 @@ impl ModelInfoExtras {
                     })
                     .unwrap_or_default();
                 extras.grammar_capabilities = Some(grammar);
+                extras.streaming_supported = Some(
+                    capabilities
+                        .and_then(|m| m.get("streaming"))
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(true),
+                );
                 // ``tasks.generate.grammar_profile: <name>`` — optional profile
                 // that grammar requests are routed to (the gateway rewrites the
                 // model id to ``{model}:{name}``). Absent => no rewrite.
@@ -344,6 +354,7 @@ impl ModelInfoExtras {
                 max_output_tokens: None,
                 profile_max_output_tokens: HashMap::new(),
                 grammar_capabilities: None,
+                streaming_supported: None,
                 grammar_profile: None,
                 profile_parents: HashMap::new(),
                 tools_supported: None,
@@ -364,6 +375,13 @@ impl ModelInfoExtras {
     /// task is present (see ``from_yaml_raw``).
     pub fn supports_vision_generation(&self) -> bool {
         self.inputs.iter().any(|s| s == "image") && self.outputs.iter().any(|s| s == "tokens")
+    }
+
+    /// Whether the model can serve video *generation* on
+    /// ``/v1/chat/completions``: ``inputs.video`` AND a generation task
+    /// (``inputs.video`` alone is also set by video encode models).
+    pub fn supports_video_generation(&self) -> bool {
+        self.inputs.iter().any(|s| s == "video") && self.outputs.iter().any(|s| s == "tokens")
     }
 }
 
@@ -416,6 +434,33 @@ pub struct ProfileConfig {
     pub adapter_options: Option<serde_json::Value>,
     #[serde(default)]
     pub extends: Option<String>,
+}
+
+/// Module prefix of the adapters that forward a profile to an upstream.
+const REMOTE_ADAPTER_MODULE_PREFIX: &str = "sie_server.adapters.remote.";
+
+/// The upstream kind each remote adapter module calls. An adapter refuses an
+/// upstream of any other kind when it loads, so the module determines the kind.
+const REMOTE_ADAPTER_UPSTREAM_KINDS: &[(&str, &str)] = &[
+    ("sie_server.adapters.remote.openai", "openai"),
+    ("sie_server.adapters.remote.sie", "sie"),
+];
+
+fn remote_adapter_upstream_kind(module: &str) -> Option<&'static str> {
+    REMOTE_ADAPTER_UPSTREAM_KINDS
+        .iter()
+        .find(|(candidate, _)| *candidate == module)
+        .map(|(_, kind)| *kind)
+}
+
+/// The side that serves a route.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ServedBy {
+    Local,
+    /// A remote profile, with the upstream its load-time options name.
+    Remote {
+        upstream: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -478,12 +523,53 @@ impl ModelEntry {
                 "lora_adapters": self.info_extras.lora_adapters,
                 "profile_lora_adapters": self.info_extras.profile_lora_adapters,
                 "grammar": self.info_extras.grammar_capabilities,
+                "streaming": self.info_extras.streaming_supported,
                 "tools": self.info_extras.tools_supported,
                 "code": self.info_extras.code,
                 "sql": self.info_extras.sql,
                 "guard": self.info_extras.guard,
             },
+            "routing": self.routing_value(),
         })
+    }
+
+    /// ``routing`` on a ``/v1/models`` entry, by the single server's rule: a
+    /// route whose default profile uses a remote adapter is ``remote_only``.
+    /// The gateway holds no upstream configuration, so the upstream kind is the
+    /// one the adapter module speaks.
+    fn routing_value(&self) -> Value {
+        match self.default_adapter_module() {
+            Some(module) if module.starts_with(REMOTE_ADAPTER_MODULE_PREFIX) => json!({
+                "policy": "remote_only",
+                "upstream_kind": remote_adapter_upstream_kind(module),
+            }),
+            _ => json!({ "policy": Value::Null, "upstream_kind": Value::Null }),
+        }
+    }
+
+    /// The side that serves this route, by the single server's rule: a route
+    /// whose default profile uses a remote adapter is served by the upstream
+    /// that profile names.
+    pub fn served_by(&self) -> ServedBy {
+        match self.default_adapter_module() {
+            Some(module) if module.starts_with(REMOTE_ADAPTER_MODULE_PREFIX) => ServedBy::Remote {
+                upstream: self
+                    .profile_configs
+                    .get("default")
+                    .and_then(|profile| profile.adapter_options.as_ref())
+                    .and_then(|options| options.pointer("/loadtime/upstream"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            },
+            _ => ServedBy::Local,
+        }
+    }
+
+    fn default_adapter_module(&self) -> Option<&str> {
+        self.profile_configs
+            .get("default")
+            .and_then(|profile| profile.adapter_path.as_deref())
+            .map(|path| path.split(':').next().unwrap_or(path))
     }
 
     /// Per-profile LoRA-adapter served-names for this entry, scoped to a
@@ -827,6 +913,36 @@ pool: customer-a
     }
 
     #[test]
+    fn test_model_config_with_a_routing_block_still_parses() {
+        let yaml = r#"
+sie_id: acme/hybrid
+hf_id: acme/hybrid
+routing:
+  policy: fallback
+  fallback_profile: remote
+  triggers: [model_loading, unhealthy]
+profiles:
+  default:
+    adapter_path: "module:Adapter"
+    max_batch_tokens: 4096
+  remote:
+    adapter_path: "sie_server.adapters.remote.sie:SieUpstreamAdapter"
+    max_batch_tokens: 4096
+    adapter_options:
+      loadtime:
+        upstream: team-sie
+        upstream_model: acme/hybrid
+"#;
+        let from_yaml: ModelConfig = serde_yaml::from_str(yaml).unwrap();
+        let value: serde_json::Value = serde_yaml::from_str(yaml).unwrap();
+        let from_json: ModelConfig = serde_json::from_value(value).unwrap();
+        for config in [from_yaml, from_json] {
+            assert_eq!(config.name, "acme/hybrid");
+            assert_eq!(config.profiles.len(), 2);
+        }
+    }
+
+    #[test]
     fn test_profile_output_caps_are_inheritance_resolved_and_route_scoped() {
         let raw: serde_yaml::Value = serde_yaml::from_str(
             r#"
@@ -1091,6 +1207,37 @@ tasks:
     }
 
     #[test]
+    fn test_model_info_extras_streaming_capability_is_resolved_and_advertised() {
+        let disabled: serde_yaml::Value = serde_yaml::from_str(
+            "name: m\ntasks:\n  generate:\n    capabilities:\n      streaming: false\n",
+        )
+        .unwrap();
+        let defaulted: serde_yaml::Value =
+            serde_yaml::from_str("name: m\ntasks:\n  generate: {}\n").unwrap();
+
+        let disabled_extras = ModelInfoExtras::from_yaml_raw(&disabled);
+        let defaulted_extras = ModelInfoExtras::from_yaml_raw(&defaulted);
+
+        assert_eq!(disabled_extras.streaming_supported, Some(false));
+        assert_eq!(defaulted_extras.streaming_supported, Some(true));
+        assert_eq!(
+            ModelEntry {
+                name: "m".to_string(),
+                canonical_base_model: "m".to_string(),
+                canonical_profile: "default".to_string(),
+                pool: None,
+                bundles: Vec::new(),
+                adapter_modules: HashSet::new(),
+                profile_names: HashSet::new(),
+                profile_configs: HashMap::new(),
+                info_extras: disabled_extras,
+            }
+            .to_model_info_value(false)["capabilities"]["streaming"],
+            json!(false)
+        );
+    }
+
+    #[test]
     fn test_model_info_extras_code_sql_guard_capabilities_parsed() {
         // Qwen3-4B-Instruct-2507 advertises code + sql (and tools); it is
         // not a guard model. Mirrors
@@ -1271,6 +1418,27 @@ tasks:
     }
 
     #[test]
+    fn test_supports_video_generation_requires_video_and_generate() {
+        let video_gen = ModelInfoExtras::from_yaml_raw(
+            &serde_yaml::from_str(
+                "name: m\ninputs:\n  text: true\n  video: true\ntasks:\n  generate: {}\n",
+            )
+            .unwrap(),
+        );
+        assert!(video_gen.supports_video_generation());
+        let video_encode = ModelInfoExtras::from_yaml_raw(
+            &serde_yaml::from_str("name: m\ninputs:\n  video: true\ntasks:\n  encode: {}\n")
+                .unwrap(),
+        );
+        assert!(!video_encode.supports_video_generation());
+        let image_gen = ModelInfoExtras::from_yaml_raw(
+            &serde_yaml::from_str("name: m\ninputs:\n  image: true\ntasks:\n  generate: {}\n")
+                .unwrap(),
+        );
+        assert!(!image_gen.supports_video_generation());
+    }
+
+    #[test]
     fn test_supports_vision_generation_requires_image_and_generate() {
         // Vision-capable generation model (image input + generate task).
         let vlm = ModelInfoExtras::from_yaml_raw(
@@ -1439,5 +1607,131 @@ profiles:
             })
             .expect("a100 profile entry");
         assert_eq!(a100_adapters, vec!["b1".to_string()]);
+    }
+
+    fn entry_with_default_adapter(adapter_path: Option<&str>) -> ModelEntry {
+        let mut profile_configs = HashMap::new();
+        if let Some(adapter_path) = adapter_path {
+            profile_configs.insert(
+                "default".to_string(),
+                CanonicalProfile {
+                    kv_budget_tokens: None,
+                    adapter_path: Some(adapter_path.to_string()),
+                    max_batch_tokens: Some(8192),
+                    compute_precision: None,
+                    max_output_tokens: None,
+                    adapter_options: None,
+                    grammar_profile: None,
+                    chat_template_kwargs: None,
+                },
+            );
+        }
+        ModelEntry {
+            name: "acme/model".to_string(),
+            canonical_base_model: "acme/model".to_string(),
+            canonical_profile: "default".to_string(),
+            pool: None,
+            bundles: Vec::new(),
+            adapter_modules: HashSet::new(),
+            profile_names: profile_configs.keys().cloned().collect(),
+            profile_configs,
+            info_extras: ModelInfoExtras::default(),
+        }
+    }
+
+    #[test]
+    fn test_served_by_names_the_upstream_of_a_remote_default_profile() {
+        let mut remote =
+            entry_with_default_adapter(Some("sie_server.adapters.remote.sie:SieUpstreamAdapter"));
+        assert_eq!(remote.served_by(), ServedBy::Remote { upstream: None });
+        remote
+            .profile_configs
+            .get_mut("default")
+            .unwrap()
+            .adapter_options = Some(json!({"loadtime": {"upstream": "team-sie"}}));
+        assert_eq!(
+            remote.served_by(),
+            ServedBy::Remote {
+                upstream: Some("team-sie".to_string())
+            }
+        );
+        for adapter_path in [
+            Some("sie_server.adapters.sentence_transformer:SentenceTransformerAdapter"),
+            Some("sie_server.adapters.remote_lookalike:Adapter"),
+            None,
+        ] {
+            assert_eq!(
+                entry_with_default_adapter(adapter_path).served_by(),
+                ServedBy::Local,
+                "{adapter_path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_routing_reports_remote_only_for_a_remote_default_profile() {
+        for (adapter_path, kind) in [
+            ("sie_server.adapters.remote.sie:SieUpstreamAdapter", "sie"),
+            (
+                "sie_server.adapters.remote.openai:OpenAIUpstreamAdapter",
+                "openai",
+            ),
+        ] {
+            let entry = entry_with_default_adapter(Some(adapter_path));
+            assert_eq!(
+                entry.to_model_info_value(false)["routing"],
+                json!({"policy": "remote_only", "upstream_kind": kind}),
+                "{adapter_path}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_routing_names_no_kind_for_a_remote_adapter_without_one() {
+        let entry = entry_with_default_adapter(Some("sie_server.adapters.remote.other:Adapter"));
+        assert_eq!(
+            entry.to_model_info_value(false)["routing"],
+            json!({"policy": "remote_only", "upstream_kind": null})
+        );
+    }
+
+    #[test]
+    fn test_routing_is_local_for_a_local_profile_or_none() {
+        for adapter_path in [
+            Some("sie_server.adapters.sentence_transformer:SentenceTransformerAdapter"),
+            Some("sie_server.adapters.remote_lookalike:Adapter"),
+            None,
+        ] {
+            let entry = entry_with_default_adapter(adapter_path);
+            assert_eq!(
+                entry.to_model_info_value(true)["routing"],
+                json!({"policy": null, "upstream_kind": null}),
+                "{adapter_path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_every_remote_bundle_adapter_names_its_upstream_kind() {
+        let bundle: serde_yaml::Value =
+            serde_yaml::from_str(include_str!("../../../sie_server/bundles/remote.yaml"))
+                .expect("valid remote bundle YAML");
+        let adapters: Vec<&str> = bundle["adapters"]
+            .as_sequence()
+            .expect("remote bundle lists adapters")
+            .iter()
+            .map(|adapter| adapter.as_str().expect("adapter module name"))
+            .collect();
+        assert!(!adapters.is_empty());
+        for adapter in adapters {
+            assert!(
+                adapter.starts_with(REMOTE_ADAPTER_MODULE_PREFIX),
+                "{adapter} in the remote bundle is not a remote adapter"
+            );
+            assert!(
+                remote_adapter_upstream_kind(adapter).is_some(),
+                "{adapter} needs an entry in REMOTE_ADAPTER_UPSTREAM_KINDS"
+            );
+        }
     }
 }

@@ -46,3 +46,14 @@ def test_non_bytes_payload_raises_invalid_media() -> None:
 def test_missing_data_raises_invalid_media() -> None:
     with pytest.raises(InvalidMediaError):
         _load_rgb({})
+
+
+def test_undecodable_bytes_raise_invalid_media() -> None:
+    """Valid base64-decoded bytes that are not an image are a typed 400, not a 500."""
+    with pytest.raises(InvalidMediaError, match=r"not a decodable image - at `\$\.items\[\*\]\.images\[0\]\.data`"):
+        _load_rgb({"data": b"not an image at all"})
+
+
+def test_undecodable_bytes_name_the_item_when_index_is_known() -> None:
+    with pytest.raises(InvalidMediaError, match=r"at `\$\.items\[3\]\.images\[0\]\.data`"):
+        _load_rgb({"data": b"not an image at all"}, item_index=3)

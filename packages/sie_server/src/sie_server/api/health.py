@@ -34,7 +34,7 @@ async def livez() -> Response:
     Unlike /healthz (process-alive only), this exercises the GPU with a tiny CUDA
     sync. A wedged CUDA context (``device-side assert``) is unrecoverable in
     PyTorch, so failing liveness lets the kubelet restart the pod — the only path
-    back to a serving worker (see issue #1025).
+    back to a serving worker.
 
     It deliberately does NOT consult the lifecycle ready flag, so graceful
     shutdown draining (when the worker marks itself not-ready) never trips a
@@ -63,7 +63,7 @@ async def readyz() -> Response:
     - GPU health: a tiny CUDA sync confirms the device can still run kernels. A
       wedged CUDA context (``device-side assert``) keeps returning sticky errors
       from every inference while a process-alive check stays green, so without
-      this the gateway would keep routing to a dead worker (see issue #1025).
+      this the gateway would keep routing to a dead worker.
 
     Returns:
         200 OK with "ok" body if ready.

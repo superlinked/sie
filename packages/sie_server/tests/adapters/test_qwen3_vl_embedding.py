@@ -364,10 +364,11 @@ class TestVideoFramesBillAsImages:
             adapter.encode([item], ["dense"])
 
     def test_unreadable_images_are_not_billed(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # ``_load_images`` drops an image it cannot decode with only a warning,
-        # so counting SUBMITTED images would bill three for the one the model
-        # actually saw — the same silent over-bill the video half forbids. Both
-        # halves of the count are processed-based.
+        # ``_load_images`` now faults on an undecodable image (InvalidMediaError
+        # -> 400, matching the video half), so a decode failure can no longer
+        # shrink the loaded set. The processed-based count stays as
+        # defense-in-depth: if fewer images than submitted ever reach the model,
+        # billing follows what was processed, not what was submitted.
         adapter = self._adapter()
         monkeypatch.setattr(
             Qwen3VLEmbeddingAdapter,
@@ -439,3 +440,14 @@ class TestVideoFramesBillAsImages:
         # Both ingress paths map InvalidInputError to INVALID_INPUT / HTTP 400,
         # so an undecodable video is a 4xx and never a generic 500.
         assert issubclass(VideoDecodeError, InvalidInputError)
+
+    def test_undecodable_image_faults_instead_of_being_dropped(self) -> None:
+        # Mirrors the video half: an image the model never saw must fault as a
+        # typed 400, not be silently dropped from the embedding.
+        from sie_server.types.inputs import InvalidMediaError
+
+        adapter = Qwen3VLEmbeddingAdapter("unused")
+        item = SimpleNamespace(images=[{"data": b"valid base64, not an image"}])
+
+        with pytest.raises(InvalidMediaError, match="image data is not a decodable image"):
+            adapter._load_images(item)

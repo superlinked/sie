@@ -4,7 +4,7 @@ These tests require a running SIE server and serve as runnable examples.
 Run with: pytest -m integration integrations/sie_langchain/tests/
 
 Prerequisites:
-    mise run serve -d cpu -p 8080
+    mise run serve -- -d cpu -p 8080
 """
 
 from __future__ import annotations
@@ -192,6 +192,12 @@ class TestRerankerIntegration:
         # Scores should be in descending order
         scores = [d.metadata["relevance_score"] for d in reranked]
         assert scores == sorted(scores, reverse=True)
+        # Scores must be distinct, not all 0.0. The envelope-read bug returned the
+        # same document duplicated at 0.0, which still satisfied len==3 and the
+        # sorted() check above — so assert real, distinct relevance here.
+        assert len(set(scores)) == len(scores)
+        # The semantically most relevant document ranks first for this query.
+        assert reranked[0].page_content == "Semantic search understands meaning."
 
 
 class TestRAGPipelineIntegration:

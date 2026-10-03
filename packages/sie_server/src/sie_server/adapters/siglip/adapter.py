@@ -39,7 +39,6 @@ Example configuration (open_clip backend):
 
 from __future__ import annotations
 
-import io
 import json
 import logging
 import os
@@ -52,7 +51,6 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 import numpy as np
 import torch
-from PIL import Image
 from torch.nn import functional
 
 from sie_server.adapters._base_adapter import BaseAdapter
@@ -60,7 +58,7 @@ from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ComputePrecision
 from sie_server.core.inference_output import EncodeOutput
 from sie_server.core.preprocessor.image import ImagePreprocessor, OpenCLIPImagePreprocessor
-from sie_server.types.inputs import media_bytes
+from sie_server.types.inputs import decode_image
 
 if TYPE_CHECKING:
     from sie_server.types.inputs import Item
@@ -572,17 +570,19 @@ class SiglipAdapter(BaseAdapter):
                     self._preprocess_pool = pool
         return pool
 
-    def _preprocess_one(self, img_input: Any) -> torch.Tensor:
+    def _preprocess_one(
+        self, img_input: Any, *, item_index: int | None = None, image_index: int | None = None
+    ) -> torch.Tensor:
         """Decode + preprocess a single image input into a ``[C, H, W]`` tensor.
 
         Stateless per call (PIL / processor / val_preproc release the GIL on
         the heavy work), so this is safe to fan across the preprocessing pool.
+        ``item_index``/``image_index`` name the request-local position in the
+        typed decode error.
         """
-        img_bytes = media_bytes(img_input, kind="image")
-        pil_img = Image.open(io.BytesIO(img_bytes))
-        # Convert to RGB if necessary
-        if pil_img.mode != "RGB":
-            pil_img = pil_img.convert("RGB")
+        # decode_image raises InvalidMediaError (-> 400 INVALID_INPUT) on
+        # non-bytes or undecodable payloads, and converts to RGB.
+        pil_img = decode_image(img_input, item_index=item_index, image_index=image_index)
         if self._backend == "open_clip":
             assert self._open_clip_preprocess is not None
             return self._open_clip_preprocess(pil_img)
@@ -606,7 +606,9 @@ class SiglipAdapter(BaseAdapter):
         """
         # Build the flat list of preprocessing jobs in stacked order. A job is
         # either a ready ``[C, H, W]`` tensor (open_clip prepared fast path) or
-        # a raw image input to decode + preprocess.
+        # a raw image input to decode + preprocess, tagged with its
+        # request-local (item, image) indices so a decode failure names the
+        # exact field.
         jobs: list[tuple[str, Any]] = []
         counts: list[int] = []
         for slot, item in enumerate(items):
@@ -617,11 +619,14 @@ class SiglipAdapter(BaseAdapter):
             if prepared is not None and len(item_images) == 1:
                 jobs.append(("ready", prepared))
             else:
-                jobs.extend(("decode", img_input) for img_input in item_images)
+                jobs.extend(("decode", (orig_index, j, img_input)) for j, img_input in enumerate(item_images))
 
         def run(job: tuple[str, Any]) -> torch.Tensor:
             kind, payload = job
-            return payload if kind == "ready" else self._preprocess_one(payload)
+            if kind == "ready":
+                return payload
+            item_index, image_index, img_input = payload
+            return self._preprocess_one(img_input, item_index=item_index, image_index=image_index)
 
         if len(jobs) == 1:
             tensors = [run(jobs[0])]
@@ -732,25 +737,39 @@ class SiglipAdapter(BaseAdapter):
             msg = f"Unsupported output types: {unsupported}. SigLIP only supports 'dense'."
             raise ValueError(msg)
 
-    def get_preprocessor(self) -> Any | None:
-        """Return an ImagePreprocessor for CPU/GPU overlap.
+    def get_preprocessor(self) -> Any:
+        """Return text AND image preprocessors (registered by modality).
+
+        Registering ONLY the image preprocessor left text-only requests with
+        no ``"text"`` preprocessor, so they fell through to the unbatched
+        direct-call path in ``EncodePipeline`` — per-request threads spinning
+        on the adapter's ``_tokenizer_lock`` with no batch formation, which is
+        worse than serial under concurrency (#2874). The base
+        ``CharCountPreprocessor`` (cost-only; the adapter still owns its own
+        tokenization) routes text requests through ``ModelWorker`` batching,
+        where ``_encode_texts`` runs the fused batch as one forward. Same
+        pattern as NemoColEmbed (#1163).
 
         Returns:
-            ``ImagePreprocessor`` wrapping the SiglipProcessor on the
-            transformers backend, ``OpenCLIPImagePreprocessor`` wrapping the
-            open_clip ``val_preproc`` callable on the open_clip backend, or
-            ``None`` if not loaded.
+            ``[CharCountPreprocessor, <image preprocessor>]`` — the image
+            entry is the ``ImagePreprocessor`` wrapping the SiglipProcessor on
+            the transformers backend or ``OpenCLIPImagePreprocessor`` wrapping
+            the open_clip ``val_preproc`` callable — or just the text
+            preprocessor if the image processor is unavailable.
         """
+        text_preprocessor = super().get_preprocessor()
         if self._backend == "open_clip":
             if self._open_clip_preprocess is None:
-                return None
-
-            return OpenCLIPImagePreprocessor(self._open_clip_preprocess, self._model_name_or_path)
+                return text_preprocessor
+            return [
+                text_preprocessor,
+                OpenCLIPImagePreprocessor(self._open_clip_preprocess, self._model_name_or_path),
+            ]
 
         if self._processor is None:
-            return None
+            return text_preprocessor
 
-        return ImagePreprocessor(self._processor, self._model_name_or_path)
+        return [text_preprocessor, ImagePreprocessor(self._processor, self._model_name_or_path)]
 
     def unload(self) -> None:
         """Shut down the preprocessing pool, then unload model weights."""

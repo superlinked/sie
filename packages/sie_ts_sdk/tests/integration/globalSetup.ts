@@ -2,7 +2,7 @@
  * Global setup for integration tests.
  *
  * Starts the SIE server before running integration tests.
- * Mirrors the pattern from packages/sie_sdk/tests/conftest.py
+ * Uses the same server-lifecycle contract as the Python SDK integration coverage.
  *
  * Note: Uses a temp file to communicate server info to tests since globalSetup
  * runs in a separate process from the tests when using vitest's fork pool.

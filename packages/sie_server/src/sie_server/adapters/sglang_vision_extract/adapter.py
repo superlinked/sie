@@ -104,6 +104,8 @@ class SGLangVisionExtractAdapter(SGLangGenerationAdapter):
         self._meter_pages = meter_pages
         self._task_labels = dict(task_labels or {})
         self._max_concurrent_requests = max(1, max_concurrent_requests)
+        # One bound across every batch in flight, created on the request loop.
+        self._request_slots: asyncio.Semaphore | None = None
         self._processor: Any = None
         self._request_loop: asyncio.AbstractEventLoop | None = None
         self._request_loop_thread: threading.Thread | None = None
@@ -111,6 +113,15 @@ class SGLangVisionExtractAdapter(SGLangGenerationAdapter):
     def _compat_pythonpath_entries(self) -> tuple[str, ...]:
         """Prepend the code-owned LightOn hook to the generic SGLang path."""
         return (str(Path(__file__).with_name("_compat")), *super()._compat_pythonpath_entries())
+
+    def max_concurrent_dispatch(self) -> int:
+        """SGLang batches continuously, so let the worker keep it fed.
+
+        ``max_concurrent_requests`` bounds the images in flight to the engine
+        across all batches (the semaphore above is shared), so allowing as many
+        concurrent batches never oversubscribes it.
+        """
+        return self._max_concurrent_requests
 
     @classmethod
     def create_for_device(cls, device: str, **kwargs: Any) -> SGLangVisionExtractAdapter:
@@ -184,6 +195,8 @@ class SGLangVisionExtractAdapter(SGLangGenerationAdapter):
             raise RuntimeError(msg)
         self._request_loop = loop
         self._request_loop_thread = thread
+        # A semaphore binds to the loop it first waits on; a reload gets a new loop.
+        self._request_slots = None
 
     def unload(self) -> None:
         loop = self._request_loop
@@ -310,7 +323,9 @@ class SGLangVisionExtractAdapter(SGLangGenerationAdapter):
         *,
         max_new_tokens: int,
     ) -> list[GenerationResult]:
-        semaphore = asyncio.Semaphore(self._max_concurrent_requests)
+        if self._request_slots is None:
+            self._request_slots = asyncio.Semaphore(self._max_concurrent_requests)
+        semaphore = self._request_slots
 
         async def generate_one(image: ImageInput) -> GenerationResult:
             async with semaphore:
@@ -326,7 +341,9 @@ class SGLangVisionExtractAdapter(SGLangGenerationAdapter):
 
         results = await asyncio.gather(*(generate_one(image) for image in images))
         for result in results:
-            if result.finish_reason == "error":
+            # A typed terminal ``error_code`` is a failure even when the
+            # finish_reason stayed ``stop``/``length`` (#3104/#3136).
+            if result.finish_reason == "error" or result.error_code is not None:
                 msg = "SGLang OCR generation failed"
                 raise RuntimeError(msg)
         return results

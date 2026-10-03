@@ -6,7 +6,7 @@ of LanceDB workflows using SIE embeddings, reranking, and extraction.
 Run with: pytest -m integration integrations/sie_lancedb/tests/
 
 Prerequisites:
-    mise run serve -d cpu -p 8080
+    mise run serve -- -d cpu -p 8080
 """
 
 from __future__ import annotations
@@ -125,18 +125,15 @@ class TestHybridSearchWithReranker:
             model="jinaai/jina-reranker-v2-base-multilingual",
         )
 
-        results = (
-            table.search("How does hybrid search improve results?", query_type="hybrid")
-            .rerank(reranker)
-            .limit(3)
-            .to_list()
-        )
+        query = "How does hybrid search improve results?"
+        results = table.search(query, query_type="hybrid").rerank(reranker).limit(3).to_list()
 
         assert len(results) == 3
         assert "_relevance_score" in results[0]
         # Scores should be descending
         scores = [r["_relevance_score"] for r in results]
         assert scores == sorted(scores, reverse=True)
+        assert results[0]["text"] == "Hybrid search combines vector and full-text search."
 
 
 class TestEntityExtraction:
@@ -191,5 +188,6 @@ class TestEntityExtraction:
         assert len(df) == 3
 
         # Each row should have extracted entities
-        for entities in df["entities"]:
+        for entities in table.to_arrow().column("entities").to_pylist():
             assert isinstance(entities, list)
+            assert entities

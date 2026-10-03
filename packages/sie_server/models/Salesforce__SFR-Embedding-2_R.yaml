@@ -1,5 +1,6 @@
 sie_id: Salesforce/SFR-Embedding-2_R
 hf_id: Salesforce/SFR-Embedding-2_R
+hf_revision: f62d15f411ca97b66acc0f34da2a65f3420b55b0
 inputs:
   text: true
   image: false

@@ -101,7 +101,7 @@ pub fn trace_export_config_from_values(
 }
 
 /// Resolve the metric exporter config from the standard OTEL variables,
-/// gated on the caller-provided enable flag (the `sie_server_rust` shape;
+/// gated on the caller-provided enable flag (the native-worker shape;
 /// gateway/sidecar resolve metrics via [`configured_signal_endpoints`]).
 pub fn metric_export_config(enabled: bool) -> Result<Option<SignalExportConfig>, String> {
     metric_export_config_from_values(

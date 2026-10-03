@@ -9,12 +9,12 @@
 # The published image is ghcr.io/superlinked/sie-server-sidecar; the runtime
 # binary inside the image is /sie-server-sidecar.
 #
-# The build runs at the Cargo workspace root (#2339): the root
+# The build runs at the Cargo workspace root: the root
 # Cargo.toml/Cargo.lock plus every member's manifest+sources must be present
 # for cargo to load the workspace, and the binary is selected with
 # `-p sie-server-sidecar`.
 #
-# The only Cargo feature today is `cloud-storage` (S3/GCS payload modes),
+# The only Cargo feature today is `cloud-storage` (S3/GCS/Azure/OSS payload modes),
 # which is the default for `ARG FEATURES` below. CI can override with
 # `--build-arg FEATURES=` if you want a leaner build with no remote
 # payload support.
@@ -25,12 +25,11 @@
 #   testing mount a socket path and set SIE_IPC_SOCKET_PATH accordingly.
 
 ARG FEATURES=cloud-storage
-ARG RUST_VERSION=1.97.0
 
 # =============================================================================
 # Dependency planner: capture the Cargo graph only.
 # =============================================================================
-FROM rust:${RUST_VERSION}-slim-bookworm AS chef
+FROM rust:1.98.1-slim-bookworm@sha256:ebd900bae66fd508b466cef82d64a83a5fb34682e4c8b2797a42908bddc95a57 AS chef
 RUN cargo install cargo-chef --locked --version 0.1.77
 WORKDIR /build
 
@@ -108,7 +107,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # =============================================================================
 # `distroless/cc-debian12` ships glibc + common C runtime libs, matching what
 # the Rust build links against. `nonroot` gives us uid/gid 65532.
-FROM gcr.io/distroless/cc-debian12:nonroot AS runtime
+FROM gcr.io/distroless/cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f AS runtime
 
 COPY --from=builder /usr/local/bin/sie-server-sidecar /sie-server-sidecar
 
@@ -131,4 +130,4 @@ ENTRYPOINT ["/sie-server-sidecar"]
 
 LABEL org.opencontainers.image.title="sie-server-sidecar" \
       org.opencontainers.image.description="SIE server sidecar - NATS JetStream consumer + Python IPC forwarder." \
-      org.opencontainers.image.source="https://github.com/superlinked/sie-internal"
+      org.opencontainers.image.source="https://github.com/superlinked/sie"

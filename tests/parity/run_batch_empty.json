@@ -1,0 +1,15 @@
+{
+  "description": "RunBatch with items=[]. The sidecar scheduler is constructed to never flush zero-item batches, so this path indicates a protocol drift on the sidecar side. Both backends must (1) log a WARN, (2) return BatchOutcome with outcomes=[], (3) NOT call any process_*_batch method, (4) NOT propagate an error to the wire (an empty outcome is benign — the sidecar's publisher treats it as a no-op).",
+  "input": {
+    "model_id": "test/parity-empty",
+    "batch_id": 300,
+    "lora_key": "",
+    "total_cost": 0,
+    "items": []
+  },
+  "expected_canonical_outcomes": [],
+  "notes": {
+    "elided_fields": [],
+    "rationale": "An empty outcomes array is the only correct response. A NAK would loop (the empty batch will keep redelivering); a non-empty response would invent identifiers the publisher has no work-item to correlate with. Both backends must agree that empty-in == empty-out."
+  }
+}

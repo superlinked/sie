@@ -2,12 +2,15 @@
 
 Boots a real server with the fake bundle (zero downloads) and a slow-load
 fault, then races concurrent first-touch requests into the cold model.
-Characterizes both lazy-load lanes (#1726 asymmetry):
 
-- rerank/score/generate: NON-BLOCKING — every racer gets a fast
-  503 MODEL_LOADING with Retry-After; no request rides the load.
-- /v1/embeddings: BLOCKING — the first touch holds the connection and
-  returns 200 only after the load completes.
+Both lazy-load lanes are now NON-BLOCKING (the #1726 asymmetry is closed):
+
+- rerank/score/generate: every racer gets a fast 503 MODEL_LOADING with
+  Retry-After; no request rides the load.
+- /v1/embeddings: the first touch also returns a fast 503 MODEL_LOADING
+  with Retry-After instead of holding the connection through the cold
+  load — single-node parity with the gateway's /v1/embeddings. Retrying
+  eventually returns 200 once the model is resident.
 """
 
 from __future__ import annotations
@@ -22,11 +25,17 @@ from .conftest import SLOW_LOAD_S as _SLOW_LOAD_S
 
 pytestmark = [pytest.mark.fake_stack, pytest.mark.integration]
 
-# Raw httpx (not SIEClient) is deliberate here — AGENTS.md's raw-HTTP
-# exception for debugging transport behavior applies: these tests assert the
+# Raw httpx (not SIEClient) is deliberate here: these tests assert the
 # 503/Retry-After wire semantics that the SDK exists to hide (it auto-retries
 # MODEL_LOADING). The SDK-layer view of the same server lives in
 # test_sdk_surface.py.
+
+
+def _assert_valid_retry_after(response: httpx.Response) -> None:
+    """Every 503 MODEL_LOADING must carry a positive numeric Retry-After hint."""
+    retry_after = {k.lower(): v for k, v in response.headers.items()}.get("retry-after")
+    assert retry_after is not None, "MODEL_LOADING must carry a Retry-After hint"
+    assert float(retry_after) > 0, f"Retry-After must be positive, got {retry_after!r}"
 
 
 def _rerank_once(base: str) -> httpx.Response:
@@ -69,17 +78,48 @@ def test_model_loading_race_nonblocking_lane(fake_server: str) -> None:
     assert len(body["results"]) == 1
 
 
-def test_model_loading_blocking_embeddings_lane(fake_server: str) -> None:
-    """The /v1/embeddings first touch BLOCKS through the cold load (the
-    documented asymmetry): one request, ~slow-load latency, straight 200.
+def test_model_loading_nonblocking_embeddings_lane(fake_server: str) -> None:
+    """The /v1/embeddings first touch is NON-BLOCKING: it returns a FAST 503
+    MODEL_LOADING with a Retry-After hint (OpenAI-shaped body on this surface)
+    instead of riding the cold load, then a retry loop returns 200 once the
+    model is resident — mirroring the rerank/score cold-load lanes.
+
+    This is the regression guard for the usability fix: the previous
+    behavior blocked the connection through the whole slow load and returned
+    a straight 200, which this test used to assert. See PR #3183.
     """
     start = time.monotonic()
-    response = httpx.post(
+    first = httpx.post(
         f"{fake_server}/v1/embeddings",
         json={"model": "sie-fake", "input": ["hello"]},
         timeout=_SLOW_LOAD_S * 10,
     )
-    elapsed = time.monotonic() - start
-    assert response.status_code == 200, response.text
-    assert elapsed >= _SLOW_LOAD_S * 0.9, "blocking lane must ride the cold load"
+    first_touch_s = time.monotonic() - start
+
+    # Fast, retryable 503 — the request must NOT have ridden the cold load.
+    assert first.status_code == 503, first.text
+    assert first_touch_s < _SLOW_LOAD_S, "non-blocking lane must not ride the cold load"
+    _assert_valid_retry_after(first)
+    # Top-level OpenAI-shaped envelope on this surface: {"error": {...}} (#3184).
+    error = first.json()["error"]
+    assert error["code"] == "MODEL_LOADING", first.text
+    assert error["type"] == "server_error"
+
+    # Retrying (as the SDK does transparently) eventually succeeds once loaded.
+    deadline = time.monotonic() + _SLOW_LOAD_S * 10
+    while True:
+        response = httpx.post(
+            f"{fake_server}/v1/embeddings",
+            json={"model": "sie-fake", "input": ["hello"]},
+            timeout=_SLOW_LOAD_S * 10,
+        )
+        if response.status_code == 200:
+            break
+        assert response.status_code == 503, response.text
+        assert response.json()["error"]["code"] == "MODEL_LOADING", response.text
+        # Retry-After must be present and valid on EVERY 503, not just the first.
+        _assert_valid_retry_after(response)
+        if time.monotonic() >= deadline:
+            pytest.fail("model never finished loading")
+        time.sleep(0.5)
     assert len(response.json()["data"][0]["embedding"]) == 384

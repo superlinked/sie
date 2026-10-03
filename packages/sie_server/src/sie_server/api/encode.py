@@ -2,22 +2,26 @@ import logging
 from typing import Annotated, Any, cast
 
 import numpy as np
-from fastapi import APIRouter, Header, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from sie_sdk.types import DEFAULT_OUTPUT_DTYPE, DType, OutputDType, np_to_dtype
 
+from sie_server.adapters.errors import InputTooLongError
 from sie_server.api.helpers import (
     InferenceErrorHandler,
     ModelStateChecker,
     RequestParser,
     ResponseBuilder,
     oom_retry_after_from_registry,
+    validated_total,
 )
 from sie_server.api.options import resolve_runtime_options_with_profile
+from sie_server.api.routing import remote_routing, route_request
 from sie_server.api.serialization import MsgPackResponse
 from sie_server.api.validation import validate_machine_profile_header
 from sie_server.config.model import ModelConfig
 from sie_server.core.encode_pipeline import EncodePipeline, resolve_encode_output_types
+from sie_server.core.timing import RequestTiming
 from sie_server.core.worker import QueueFullError
 from sie_server.observability.tracing import tracer
 from sie_server.observability.worker_telemetry import worker_telemetry, worker_telemetry_enabled
@@ -25,11 +29,35 @@ from sie_server.types.inputs import Item
 from sie_server.types.openapi import EncodeResponseModel
 from sie_server.types.outputs import DenseVector, EncodeResult, MultiVector, SparseVector
 from sie_server.types.requests import EncodeRequest
-from sie_server.types.responses import EncodeResponse, ErrorCode, TimingInfo
+from sie_server.types.responses import EncodeResponse, ErrorCode, TimingInfo, Usage
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/v1", tags=["encode"])
+router = APIRouter(prefix="/v1", tags=["encode"], dependencies=[Depends(remote_routing)])
+
+
+def encode_usage_from_timing(timing: RequestTiming | None, item_count: int) -> Usage | None:
+    """Return exact post-tokenization encode usage, never a character estimate.
+
+    The counterpart of ``score.score_usage_from_output``: the reported number is
+    the worker's own ``input_token_counts``, the number telemetry meters from,
+    so a caller can reconcile what they read with what they are billed.
+
+    A total of ``0`` IS reported — a video-only encode consumes exactly zero
+    text tokens, and that measured zero must not read as "unknown". Absent
+    counts yield ``None`` and the response simply carries no ``usage``, which
+    is the only honest rendering of "this path could not count".
+    """
+    if timing is None:
+        return None
+    total_tokens = validated_total(timing.input_token_counts, item_count)
+    if total_tokens is None:
+        return None
+    usage = Usage(input_tokens=total_tokens)
+    images = validated_total(timing.input_image_counts, item_count)
+    if images is not None:
+        usage["images"] = images
+    return usage
 
 
 def _format_dense(
@@ -171,12 +199,13 @@ def _build_response_items(
         },
         400: {"description": "Invalid request"},
         404: {"description": "Model not found"},
+        413: {"description": "Request body exceeds the configured size limit"},
         502: {
             "description": (
                 "Terminal model-load failure (MODEL_LOAD_FAILED). "
                 "Carried in the ``detail`` envelope: ``{code, message, "
                 "error_class, permanent, attempts}``. No ``Retry-After`` "
-                "header — clients MUST NOT auto-retry. See sie-test#85."
+                "header — clients MUST NOT auto-retry."
             ),
         },
         503: {"description": "Model not loaded or service unavailable"},
@@ -238,14 +267,7 @@ async def encode(
             span.set_attribute("output_types", ",".join(params.output_types or ["dense"]))
 
         registry = http_request.app.state.registry
-        device = registry.device
-
-        # Validate model state using helper
-        model_checker = ModelStateChecker(registry, model, span)
-        model_checker.check_exists()
-        model_checker.check_not_unloading()
-        model_checker.check_not_loading()
-        await model_checker.ensure_loaded(device)
+        ModelStateChecker(registry, model, span).check_exists()
 
         # Get config
         config = registry.get_config(model)
@@ -266,46 +288,6 @@ async def encode(
         # instruction was already extracted from params above
         if instruction is None:
             instruction = options.get("instruction")
-
-        # Check if LoRA is specified and ensure it's loaded
-        lora = options.get("lora_id")
-        if lora is not None:
-            try:
-                is_ready, is_loading = await registry.ensure_lora_loaded_async(model, lora)
-                if is_loading:
-                    # LoRA is loading - return 503 with retry hint
-                    span.set_attribute("error", "lora_loading")
-                    raise HTTPException(
-                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                        detail={
-                            "code": ErrorCode.LORA_LOADING.value,
-                            "message": f"LoRA '{lora}' is loading for model '{model}', please retry",
-                        },
-                        headers={"Retry-After": "1"},
-                    )
-                if not is_ready:
-                    # LoRA load failed
-                    span.set_attribute("error", "lora_load_failed")
-                    raise HTTPException(
-                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                        detail={
-                            "code": ErrorCode.INFERENCE_ERROR.value,
-                            "message": f"Failed to load LoRA '{lora}' for model '{model}'",
-                        },
-                    )
-            except ValueError as e:
-                # Model doesn't support LoRA
-                span.set_attribute("error", "lora_not_supported")
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail={
-                        "code": ErrorCode.INVALID_INPUT.value,
-                        "message": str(e),
-                    },
-                ) from e
-
-            # Worker batcher routes on options["lora"]; profile uses "lora_id".
-            options["lora"] = lora
 
         # Get output_dtype: request param > profile > default
         # Request param takes precedence to allow per-request overrides
@@ -337,6 +319,15 @@ async def encode(
                 },
             ) from e
 
+        route = await route_request(http_request, model, span, profile=profile_name, queued_items=len(request.items))
+
+        # Check if LoRA is specified and ensure it's loaded
+        lora = options.get("lora_id")
+        if lora is not None:
+            await ModelStateChecker(registry, route.key, span).ensure_lora_loaded(lora)
+            # Worker batcher routes on options["lora"]; profile uses "lora_id".
+            options["lora"] = lora
+
         items = request.items
 
         # Run encoding (preprocess → execute)
@@ -351,21 +342,23 @@ async def encode(
         try:
             results, timing = await EncodePipeline.run_encode(
                 registry=registry,
-                model=model,
+                model=route.key,
                 items=items,
                 output_types=adapter_output_types,
                 instruction=instruction,
-                config=config,
+                config=registry.get_config(route.key),
                 is_query=is_query,
                 options=options,
                 response_output_types=output_types,
             )
         except QueueFullError as e:
             raise error_handler.handle_queue_full(e) from e
+        except InputTooLongError as e:
+            raise error_handler.handle_input_too_long(e) from e
         except ValueError as e:
             raise error_handler.handle_value_error(e) from e
         except Exception as e:
-            raise error_handler.handle_inference_error(e) from e
+            raise error_handler.handle_inference_error(e, "Encoding") from e
 
         # Build response (quantization already done by postprocessor)
         response_items = _build_response_items(items, results, config)
@@ -391,24 +384,28 @@ async def encode(
 
         response = EncodeResponse(model=model, items=response_items, timing=timing_info)
 
+        # What the caller is TOLD they used. Same worker counts the telemetry
+        # block below meters from, rendered without the metering-specific
+        # zero-drop: reporting is not billing, and a measured zero is a fact the
+        # caller is entitled to read.
+        usage = encode_usage_from_timing(timing, len(items))
+        if usage is not None:
+            response["usage"] = usage
+
         if worker_telemetry_enabled():
             units: dict[str, int] | None = None
-            if timing is not None and timing.input_token_counts is not None:
-                counts = timing.input_token_counts
-                if len(counts) == len(items) and all(
-                    isinstance(count, int) and not isinstance(count, bool) for count in counts
-                ):
-                    # Non-zero, exactly like the image branch below. A
-                    # video-only encode scatters `0` text tokens to its items,
-                    # and a reported zero is indistinguishable from "this
-                    # dimension does not apply to this item" — which is why the
-                    # queue seam's `_encode_units` drops it and the gateway's
-                    # `validate_dimensions` faults on one outright. Emitting it
-                    # here made the two ingresses report different dimension
-                    # sets for the same batch.
-                    total_tokens = sum(counts)
-                    if total_tokens > 0:
-                        units = {"input_tokens": total_tokens}
+            if timing is not None:
+                # Non-zero, exactly like the image branch below. A
+                # video-only encode scatters `0` text tokens to its items,
+                # and a reported zero is indistinguishable from "this
+                # dimension does not apply to this item" — which is why the
+                # queue seam's `_encode_units` drops it and the gateway's
+                # `validate_dimensions` faults on one outright. Emitting it
+                # here made the two ingresses report different dimension
+                # sets for the same batch.
+                total_tokens = validated_total(timing.input_token_counts, len(items))
+                if total_tokens:
+                    units = {"input_tokens": total_tokens}
             # §7 "$ per image": the adapter's authoritative count of images and
             # sampled video frames it actually processed. Independent of tokens
             # — a video encode reports images with no token count at all.
@@ -431,4 +428,5 @@ async def encode(
 
         # Build response headers and return
         headers = ResponseBuilder.build_headers(timing)
+        headers.update(route.headers())
         return ResponseBuilder.build_response(response, accept, headers, convert_for_json=True)

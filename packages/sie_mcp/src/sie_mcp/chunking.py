@@ -1,9 +1,9 @@
-"""Transient text chunking for ``answer_questions`` (#1309).
+"""Transient text chunking for ``answer_questions``.
 
 SIE has no chunking pipeline today, so this is a deliberately small,
 self-contained primitive: a fixed-size sliding character window with overlap. It
 runs entirely in the MCP edge per request — chunks are never persisted and no
-index is built (the Req 12 "transient retrieval" boundary).
+index is built, preserving a transient retrieval boundary.
 
 Character windows (not model-tokenizer windows) keep the job dependency-free and
 predictable; sizes are expressed in characters and approximate a token budget at

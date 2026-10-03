@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from typing import Any
+from unittest.mock import NonCallableMagicMock
+
 import lancedb
 import pyarrow as pa
 import pytest
@@ -150,6 +153,49 @@ class TestSIEReranker:
         assert len(scores) == sample_table.num_rows
         assert all(isinstance(s, float) for s in scores)
         assert all(s > 0 for s in scores)
+
+    def test_rerank_ranks_through_sie_client(self, score_stub_server: Any) -> None:
+        """Scores returned by a real ``SIEClient.score()`` call rank the matching row first."""
+        texts = [
+            "The weather today is sunny with clear skies.",
+            "Python is a popular programming language.",
+            "Nearest neighbor search uses distance metrics.",
+            "Vector similarity search finds similar embeddings.",
+        ]
+        table = pa.table({"text": texts, "_rowid": [0, 1, 2, 3]})
+        reranker = SIEReranker(base_url=score_stub_server.url, model="test-reranker")
+
+        result = reranker.rerank_vector("vector similarity search", table)
+
+        assert result.column("text").to_pylist()[:2] == [texts[3], texts[2]]
+        assert result.column("_relevance_score").to_pylist() == [3.0, 1.0, 0.0, 0.0]
+
+    def test_rerank_skips_malformed_item_id(self, mock_sie_client: NonCallableMagicMock) -> None:
+        """Malformed item_ids are skipped (no crash, no misassignment)."""
+        mock_sie_client.score.side_effect = None
+        mock_sie_client.score.return_value = {
+            "model": "test-model",
+            "scores": [
+                {"item_id": "1", "score": 0.5, "rank": 0},
+                {"item_id": "item-0", "score": 0.95, "rank": 1},
+                {"item_id": "-1", "score": 0.9, "rank": 2},
+                {"item_id": "99", "score": 0.7, "rank": 3},
+                {"score": 0.6, "rank": 4},
+                {"item_id": 1.5, "score": 0.99, "rank": 5},
+                {"item_id": True, "score": 0.98, "rank": 6},
+            ],
+        }
+        reranker = SIEReranker(model="test-model")
+        reranker._client = mock_sie_client
+        table = pa.table({"text": ["alpha", "bravo", "charlie"], "_rowid": [0, 1, 2]})
+
+        result = reranker.rerank_vector("query", table)
+
+        by_text = dict(
+            zip(result.column("text").to_pylist(), result.column("_relevance_score").to_pylist(), strict=True)
+        )
+        assert by_text == {"bravo": 0.5, "alpha": 0.0, "charlie": 0.0}
+        assert result.column("text").to_pylist()[0] == "bravo"
 
     def test_rerank_on_real_lance_table(self, mock_sie_client: object, db) -> None:
         """Reranker works with a real LanceDB table's search results."""

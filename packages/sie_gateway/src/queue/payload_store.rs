@@ -8,7 +8,7 @@ use tracing::debug;
 #[cfg(feature = "cloud-storage")]
 use object_store::ObjectStoreExt;
 
-const OBJECT_STORE_SCHEMES: &[&str] = &["s3://", "gs://", "abfs://", "abfss://"];
+const OBJECT_STORE_SCHEMES: &[&str] = &["s3://", "gs://", "abfs://", "abfss://", "oss://"];
 
 fn object_store_scheme(url: &str) -> Option<&'static str> {
     OBJECT_STORE_SCHEMES
@@ -281,13 +281,19 @@ impl PayloadStore for ObjectStorePayloadStore {
 
 /// Factory function to create the appropriate payload store based on URL prefix.
 pub async fn create_payload_store(url: &str) -> io::Result<Arc<dyn PayloadStore>> {
-    if url.trim().is_empty() {
+    let url = url.trim();
+    if url.is_empty() {
         return Ok(Arc::new(DisabledPayloadStore));
     }
 
     #[cfg(feature = "cloud-storage")]
     {
         if let Some(scheme) = object_store_scheme(url) {
+            if let Some(rest) = url.strip_prefix("oss://") {
+                return Ok(Arc::new(
+                    super::oss_payload_store::OssPayloadStore::from_url(&format!("oss://{rest}"))?,
+                ));
+            }
             if let Some(rest) = url.strip_prefix("s3://") {
                 return Ok(Arc::new(ObjectStorePayloadStore::new_s3(rest)?));
             }
@@ -492,6 +498,28 @@ mod tests {
             .await
         {
             Ok(_) => panic!("expected abfs:// to require cloud-storage"),
+            Err(err) => err,
+        };
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("cloud-storage"));
+    }
+
+    #[cfg(not(feature = "cloud-storage"))]
+    #[tokio::test]
+    async fn test_create_payload_store_oss_without_feature() {
+        let err = match create_payload_store("oss://my-bucket/payloads").await {
+            Ok(_) => panic!("expected oss:// to require cloud-storage"),
+            Err(err) => err,
+        };
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("cloud-storage"));
+    }
+
+    #[cfg(not(feature = "cloud-storage"))]
+    #[tokio::test]
+    async fn test_create_payload_store_trims_before_scheme_classification() {
+        let err = match create_payload_store("  oss://my-bucket/payloads  ").await {
+            Ok(_) => panic!("expected trimmed oss:// to require cloud-storage"),
             Err(err) => err,
         };
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);

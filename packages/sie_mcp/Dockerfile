@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.6
-# SIE MCP edge — hosted MCP server exposing SIE document jobs (Req 12).
+# SIE MCP edge — hosted MCP server exposing SIE document jobs.
 # Lightweight image: a sie_sdk client, no GPU/model dependencies.
 #
 # Build (from repo root):

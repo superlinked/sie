@@ -1,6 +1,9 @@
 """Tests for SGLang embedding adapter (HTTP server mode)."""
 
+import json
+import socket
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -61,13 +64,26 @@ class TestSGLangEmbeddingAdapter:
 
         assert _server.resolve_startup_timeout() == 1234
 
-    def test_startup_timeout_rejects_non_finite_values(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_startup_timeout_skips_non_finite_environment_values(self, monkeypatch: pytest.MonkeyPatch) -> None:
         for name in _server.STARTUP_TIMEOUT_ENV_VARS:
             monkeypatch.delenv(name, raising=False)
         monkeypatch.setenv("SIE_MODEL_READY_TIMEOUT_S", "inf")
         monkeypatch.setenv("SIE_SERVER_STARTUP_TIMEOUT_S", "1200")
 
-        assert _server.resolve_startup_timeout(float("inf")) == 1200
+        assert _server.resolve_startup_timeout() == 1200
+
+    @pytest.mark.parametrize("bad", [0, -1, float("inf"), float("nan"), True, "900"])
+    def test_startup_timeout_refuses_an_invalid_profile_value(self, monkeypatch: pytest.MonkeyPatch, bad) -> None:
+        """A declared budget is used exactly or refused, never replaced by a fallback."""
+        for name in _server.STARTUP_TIMEOUT_ENV_VARS:
+            monkeypatch.setenv(name, "1200")
+
+        with pytest.raises(ValueError, match="startup_timeout_s"):
+            _server.resolve_startup_timeout(bad)
+
+    def test_embedding_adapter_refuses_an_invalid_profile_startup_timeout(self) -> None:
+        with pytest.raises(ValueError, match="startup_timeout_s"):
+            SGLangEmbeddingAdapter("test-model", startup_timeout_s=0)
 
     def test_startup_timeout_rejects_liveness_budget_mismatch(self, monkeypatch: pytest.MonkeyPatch) -> None:
         for name in _server.STARTUP_TIMEOUT_ENV_VARS:
@@ -308,6 +324,138 @@ class TestSGLangEmbeddingAdapter:
         mock_getpgid.assert_called_with(12345)
         assert adapter._server_url is None
         assert adapter._process is None
+
+    @patch("sie_server.adapters.sglang._server.os.getpgid")
+    @patch("sie_server.adapters.sglang._server.os.killpg")
+    def test_unload_releases_port_and_cleans_output_log(
+        self,
+        mock_killpg: MagicMock,
+        mock_getpgid: MagicMock,
+    ) -> None:
+        """Unload returns the reserved port to the pool and removes the temp log."""
+        mock_process = MagicMock()
+        mock_process.pid = 12345
+        mock_process.wait.return_value = None
+        mock_getpgid.return_value = 12345
+
+        adapter = SGLangEmbeddingAdapter("test-model")
+        adapter._process = mock_process
+        adapter._server_url = "http://localhost:30000"
+        adapter._port = 30000
+        adapter._output_file = _server.open_output_log(prefix="sie_test_sglang_")
+        log_path = Path(adapter._output_file.name)
+
+        # Order matters: releasing the port before the child is down would hand
+        # a live port to a concurrent load, so record both calls on one list.
+        events: list[str] = []
+        with (
+            patch(
+                "sie_server.adapters.sglang._server.terminate_process",
+                side_effect=lambda *_args, **_kwargs: events.append("terminate"),
+            ),
+            patch(
+                "sie_server.adapters.sglang._server.release_port",
+                side_effect=lambda port: events.append(f"release:{port}"),
+            ),
+        ):
+            adapter.unload()
+
+        assert events == ["terminate", "release:30000"]
+        assert adapter._port is None
+        assert adapter._output_file is None
+        assert not log_path.exists()
+
+    @patch("sie_server.adapters.sglang._server.os.getpgid")
+    @patch("sie_server.adapters.sglang._server.os.killpg")
+    @patch("sie_server.adapters.sglang._server.wait_for_server", return_value=False)
+    @patch("sie_server.adapters.sglang._server.subprocess.Popen")
+    @patch("sie_server.adapters.sglang._server.find_free_port")
+    def test_load_failure_releases_port_and_cleans_output_log(
+        self,
+        mock_find_port: MagicMock,
+        mock_popen: MagicMock,
+        mock_wait: MagicMock,
+        mock_killpg: MagicMock,
+        mock_getpgid: MagicMock,
+    ) -> None:
+        """A startup-health failure must not leak the reserved port or the temp log."""
+        mock_find_port.return_value = 30000
+        mock_process = MagicMock()
+        mock_process.pid = 12345
+        mock_process.poll.return_value = None  # Process running but not healthy (timeout path)
+        mock_popen.return_value = mock_process
+        mock_getpgid.return_value = 12345
+
+        # A real temp file, so the assertion below is "gone from disk" rather
+        # than the weaker "attribute was reset".
+        real_log = _server.open_output_log(prefix="sie_test_sglang_")
+        log_path = Path(real_log.name)
+
+        adapter = SGLangEmbeddingAdapter("test-model")
+        with (
+            patch("sie_server.adapters.sglang._server.open_output_log", return_value=real_log),
+            patch("sie_server.adapters.sglang._server.release_port") as mock_release,
+            pytest.raises(RuntimeError, match="failed to start"),
+        ):
+            adapter.load("cuda:0")
+
+        mock_release.assert_called_once_with(30000)
+        assert adapter._port is None
+        assert adapter._server_url is None
+        assert adapter._output_file is None
+        assert not log_path.exists()
+
+    @patch("sie_server.adapters.sglang._server.open_output_log", side_effect=OSError("no space left on device"))
+    @patch("sie_server.adapters.sglang._server.find_free_port")
+    def test_output_log_failure_releases_port(
+        self,
+        mock_find_port: MagicMock,
+        mock_open_log: MagicMock,
+    ) -> None:
+        """The port is reserved before the log is opened, so a /tmp failure must
+        still hand it back — otherwise repeated failures exhaust the span.
+        """
+        mock_find_port.return_value = 30000
+
+        adapter = SGLangEmbeddingAdapter("test-model")
+        with (
+            patch("sie_server.adapters.sglang._server.release_port") as mock_release,
+            pytest.raises(OSError, match="no space left on device"),
+        ):
+            adapter.load("cuda:0")
+
+        mock_release.assert_called_once_with(30000)
+        assert adapter._port is None
+        assert adapter._server_url is None
+
+    @patch("sie_server.adapters.sglang._server.subprocess.Popen", side_effect=OSError("exec format error"))
+    @patch("sie_server.adapters.sglang._server.find_free_port")
+    def test_launch_failure_releases_port_and_cleans_output_log(
+        self,
+        mock_find_port: MagicMock,
+        mock_popen: MagicMock,
+    ) -> None:
+        """A failed exec must release the port and delete the log it opened."""
+        mock_find_port.return_value = 30000
+
+        # A real temp file, so the assertion below is "gone from disk" rather
+        # than the weaker "attribute was reset".
+        real_log = _server.open_output_log(prefix="sie_test_sglang_")
+        log_path = Path(real_log.name)
+
+        adapter = SGLangEmbeddingAdapter("test-model")
+        with (
+            patch("sie_server.adapters.sglang._server.open_output_log", return_value=real_log),
+            patch("sie_server.adapters.sglang._server.release_port") as mock_release,
+            pytest.raises(OSError, match="exec format error"),
+        ):
+            adapter.load("cuda:0")
+
+        mock_release.assert_called_once_with(30000)
+        assert adapter._port is None
+        assert adapter._server_url is None
+        assert adapter._output_file is None
+        assert not log_path.exists()
 
     def test_encode_before_load_raises(self) -> None:
         """Encode before load raises error."""
@@ -634,3 +782,341 @@ class TestSGLangLoRA:
         adapter.set_active_lora("legal")
         with pytest.raises(ValueError, match=r"LoRA 'legal' not loaded.*Available: \[\]"):
             adapter.encode(items, output_types=["dense"])
+
+
+class TestPortReservation:
+    """find_free_port reserves ports; release_port returns them to the pool."""
+
+    def test_release_returns_reserved_port_to_pool(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(_server, "_RESERVED_PORTS", set())
+        port = _server.find_free_port()
+        assert port in _server._RESERVED_PORTS
+        _server.release_port(port)
+        assert port not in _server._RESERVED_PORTS
+
+    def test_exhausted_span_recovers_after_release(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Releasing one port un-bricks allocation after the span exhausts.
+
+        This is the LRU eviction→reload churn scenario: without release_port
+        the reserved set only grows, and once all 100 ports are reserved every
+        generation-model load fails until a full process restart.
+        """
+        # Anchor the scan on a port the OS just proved bindable, so the test
+        # doesn't depend on the state of the real SGLang range (30000-30099).
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("localhost", 0))
+            anchor = s.getsockname()[1]
+        monkeypatch.setattr(_server, "_RESERVED_PORTS", set(range(anchor, anchor + 100)))
+        with pytest.raises(RuntimeError, match="Could not find free port"):
+            _server.find_free_port(anchor)
+        _server.release_port(anchor)
+        assert _server.find_free_port(anchor) == anchor
+
+    def test_release_tolerates_none_and_unreserved_ports(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(_server, "_RESERVED_PORTS", set())
+        _server.release_port(None)
+        _server.release_port(54321)  # never reserved — must be a no-op
+        assert not _server._RESERVED_PORTS
+
+
+class TestKernelCacheEnvironment:
+    def test_disabled_without_root(self) -> None:
+        assert _server._kernel_cache_env({}, device_indices=[0]) == {}
+
+    @patch("sie_server.adapters.sglang._server.subprocess.run")
+    def test_gpu_key_uses_driver_inventory_without_initializing_cuda(self, mock_run: MagicMock) -> None:
+        mock_run.return_value = MagicMock(stdout="NVIDIA H100 80GB HBM3\nNVIDIA H200\n")
+
+        first_key = _server._gpu_cache_key([0])
+        second_key = _server._gpu_cache_key([1])
+
+        assert first_key is not None
+        assert first_key.startswith("gpu-")
+        assert second_key is not None
+        assert second_key.startswith("gpu-")
+        assert first_key != second_key
+        assert mock_run.call_args.args[0] == [
+            "nvidia-smi",
+            "--query-gpu=name",
+            "--format=csv,noheader",
+        ]
+
+    @patch("sie_server.adapters.sglang._server.subprocess.run")
+    def test_gpu_key_is_shared_by_a_uniform_group(self, mock_run: MagicMock) -> None:
+        mock_run.return_value = MagicMock(stdout="NVIDIA L4\nNVIDIA L4\nNVIDIA L4\nNVIDIA L4\n")
+
+        assert _server._gpu_cache_key([0, 1, 2, 3]) == _server._gpu_cache_key([0])
+
+    @patch("sie_server.adapters.sglang._server.subprocess.run")
+    def test_gpu_key_refuses_a_mixed_group(self, mock_run: MagicMock) -> None:
+        """A mixed group must not reuse either member's artifacts.
+
+        Kernels compiled for one product are not valid for the other, and a
+        cache hit would serve them silently.
+        """
+        mock_run.return_value = MagicMock(stdout="NVIDIA L4\nNVIDIA H100 80GB HBM3\n")
+
+        assert _server._gpu_cache_key([0, 1]) is None
+
+    def test_scopes_upstream_caches_by_abi_and_gpu(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(_server, "_installed_jit_abi_key", lambda: "abi123")
+        monkeypatch.setattr(_server, "_gpu_cache_key", lambda _device_indices: "sm120-gpu123")
+
+        env = {_server.KERNEL_CACHE_ROOT_ENV_VAR: str(tmp_path)}
+        cache_env = _server._kernel_cache_env(env, device_indices=[0])
+
+        namespace = tmp_path / "v1" / "abi123" / "sm120-gpu123" / "device-0"
+        assert cache_env["SGLANG_DG_CACHE_DIR"] == str(namespace / "deep-gemm")
+        assert cache_env["FLASHINFER_WORKSPACE_BASE"] == str(namespace / "flashinfer")
+        assert cache_env["CUTE_DSL_CACHE_DIR"] == str(namespace / "cutlass")
+        assert cache_env["TRITON_CACHE_DIR"] == str(namespace / "triton")
+        assert all(Path(path).is_dir() for path in cache_env.values())
+
+    def test_group_namespace_is_distinct_from_single_device(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Width-four artifacts must not be served to a width-one load.
+
+        The namespace carries the whole group, so the same card at a different
+        width reads a different directory.
+        """
+        monkeypatch.setattr(_server, "_installed_jit_abi_key", lambda: "abi123")
+        monkeypatch.setattr(_server, "_gpu_cache_key", lambda _device_indices: "sm120-gpu123")
+        env = {_server.KERNEL_CACHE_ROOT_ENV_VAR: str(tmp_path)}
+
+        single = _server._kernel_cache_env(dict(env), device_indices=[0])
+        group = _server._kernel_cache_env(dict(env), device_indices=[0, 1, 2, 3])
+
+        assert single["TRITON_CACHE_DIR"].endswith("/device-0/triton")
+        assert group["TRITON_CACHE_DIR"].endswith("/device-0_1_2_3/triton")
+        assert single["TRITON_CACHE_DIR"] != group["TRITON_CACHE_DIR"]
+
+    def test_explicit_upstream_path_wins(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(_server, "_installed_jit_abi_key", lambda: "abi123")
+        monkeypatch.setattr(_server, "_gpu_cache_key", lambda _device_indices: "sm90-gpu123")
+        explicit = tmp_path / "operator-deep-gemm"
+        env = {
+            _server.KERNEL_CACHE_ROOT_ENV_VAR: str(tmp_path / "managed"),
+            "SGLANG_DG_CACHE_DIR": str(explicit),
+        }
+
+        cache_env = _server._kernel_cache_env(env, device_indices=[0])
+
+        assert "SGLANG_DG_CACHE_DIR" not in cache_env
+        assert not explicit.exists()
+        assert "TRITON_CACHE_DIR" in cache_env
+
+    def test_invalid_or_unwritable_root_falls_back(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(_server, "_installed_jit_abi_key", lambda: "abi123")
+        monkeypatch.setattr(_server, "_gpu_cache_key", lambda _device_indices: "sm90-gpu123")
+        blocker = tmp_path / "not-a-directory"
+        blocker.write_text("x")
+
+        assert _server._kernel_cache_env({_server.KERNEL_CACHE_ROOT_ENV_VAR: "relative"}, device_indices=[0]) == {}
+        assert _server._kernel_cache_env({_server.KERNEL_CACHE_ROOT_ENV_VAR: str(blocker)}, device_indices=[0]) == {}
+
+        with patch(
+            "sie_server.adapters.sglang._server.tempfile.NamedTemporaryFile",
+            side_effect=OSError("read-only cache"),
+        ):
+            assert (
+                _server._kernel_cache_env(
+                    {_server.KERNEL_CACHE_ROOT_ENV_VAR: str(tmp_path / "read-only")},
+                    device_indices=[0],
+                )
+                == {}
+            )
+
+
+def test_startup_failure_error_distinguishes_crash_from_timeout() -> None:
+    """A dead child is a crash, not a timeout: the loader reclassifies
+    timeout-shaped messages as ModelLoadTimeoutError stamped with elapsed
+    time, so the crash message must never match that pattern.
+    """
+    timeout_error = _server.startup_failure_error(None)
+    assert "failed to start within timeout" in str(timeout_error)
+
+    crash_error = _server.startup_failure_error(None, crash_exit_code=-9)
+    assert "process exited during startup (exit code -9)" in str(crash_error)
+    assert "failed to start within timeout" not in str(crash_error)
+
+
+class TestWidthAgainstModelShape:
+    """A width must divide the dimensions the engine shards across ranks.
+
+    The engine asserts this itself, but only after loading weights, which on a
+    multi-accelerator load holds every card in the group for minutes before the
+    launch fails, and a supervisor that restarts the worker repeats that.
+    """
+
+    @staticmethod
+    def _model_dir(tmp_path: Path, **config: object) -> str:
+        (tmp_path / "config.json").write_text(json.dumps(config), encoding="utf-8")
+        return str(tmp_path)
+
+    @pytest.mark.parametrize("width", [1, 2, 4])
+    def test_a_dividing_width_is_accepted(self, tmp_path: Path, width: int) -> None:
+        path = self._model_dir(tmp_path, num_attention_heads=28, num_key_value_heads=4)
+
+        _server.validate_width_against_model_config(width, model_name_or_path=path)
+
+    def test_a_width_that_splits_attention_heads_unevenly_is_refused(self, tmp_path: Path) -> None:
+        path = self._model_dir(tmp_path, num_attention_heads=28, num_key_value_heads=28)
+
+        with pytest.raises(ValueError, match="num_attention_heads=28"):
+            _server.validate_width_against_model_config(8, model_name_or_path=path)
+
+    def test_a_width_that_splits_key_value_heads_unevenly_is_refused(self, tmp_path: Path) -> None:
+        """Neither a multiple nor a divisor: the heads can be neither split nor replicated."""
+        path = self._model_dir(tmp_path, num_attention_heads=24, num_key_value_heads=6)
+
+        with pytest.raises(ValueError, match="num_key_value_heads=6"):
+            _server.validate_width_against_model_config(4, model_name_or_path=path)
+
+    def test_fewer_key_value_heads_than_the_width_are_replicated(self, tmp_path: Path) -> None:
+        """A width above the group count is legal: the engine replicates the heads.
+
+        Refusing it would reject a shape that serves, which this check exists
+        never to do.
+        """
+        path = self._model_dir(tmp_path, num_attention_heads=32, num_key_value_heads=4)
+
+        _server.validate_width_against_model_config(8, model_name_or_path=path)
+
+    def test_a_multimodal_config_is_checked_against_its_text_stack(self, tmp_path: Path) -> None:
+        """Top-level head counts can describe the vision tower, which is not sharded."""
+        path = self._model_dir(
+            tmp_path,
+            num_attention_heads=12,
+            text_config={"num_attention_heads": 32, "num_key_value_heads": 8},
+        )
+
+        _server.validate_width_against_model_config(8, model_name_or_path=path)
+
+    def test_width_one_is_never_checked(self, tmp_path: Path) -> None:
+        """Single-device serving shards nothing, so no division has to hold."""
+        path = self._model_dir(tmp_path, num_attention_heads=7, num_key_value_heads=7)
+
+        _server.validate_width_against_model_config(1, model_name_or_path=path)
+
+    def test_an_unreadable_config_checks_nothing(self, tmp_path: Path) -> None:
+        """Best effort: this may only turn a later crash into an earlier error.
+
+        It must never reject a shape that would have worked, so a model whose
+        config cannot be read without a download is left to the engine.
+        """
+        _server.validate_width_against_model_config(4, model_name_or_path=str(tmp_path / "absent"))
+        _server.validate_width_against_model_config(4, model_name_or_path="org/not-in-any-cache")
+
+    def test_a_malformed_config_checks_nothing(self, tmp_path: Path) -> None:
+        (tmp_path / "config.json").write_text("{not json", encoding="utf-8")
+
+        _server.validate_width_against_model_config(4, model_name_or_path=str(tmp_path))
+
+    def test_missing_or_nonsense_head_counts_are_skipped(self, tmp_path: Path) -> None:
+        path = self._model_dir(tmp_path, num_attention_heads=0, num_key_value_heads="many")
+
+        _server.validate_width_against_model_config(4, model_name_or_path=path)
+
+
+class TestEmbeddingEngineLiveness:
+    """The embedding adapter must notice its engine dying, like generation does."""
+
+    @staticmethod
+    def _adapter() -> object:
+        from sie_server.adapters.sglang.embedding import SGLangEmbeddingAdapter
+
+        return SGLangEmbeddingAdapter(model_name_or_path="org/embed", dense_dim=768)
+
+    def test_an_unloaded_adapter_reports_not_loaded(self) -> None:
+        adapter = self._adapter()
+
+        with pytest.raises(RuntimeError, match="not loaded"):
+            adapter._check_loaded()
+
+    def test_a_live_engine_passes(self) -> None:
+        adapter = self._adapter()
+        adapter._server_url = "http://localhost:30005"
+        adapter._process = MagicMock(poll=MagicMock(return_value=None))
+
+        adapter._check_loaded()
+
+    def test_a_dead_engine_is_a_terminal_error_not_a_timeout(self) -> None:
+        adapter = self._adapter()
+        adapter._server_url = "http://localhost:30005"
+        adapter._process = MagicMock(poll=MagicMock(return_value=-9))
+
+        with pytest.raises(RuntimeError, match="exited with code -9"):
+            adapter._check_loaded()
+
+    def test_the_removed_pooling_option_is_no_longer_accepted(self) -> None:
+        """Neither pinned engine declares a pooling flag, so the option was dead.
+
+        It is better refused by the loader's unknown-option check than emitted
+        and rejected by the engine at startup.
+        """
+        from sie_server.adapters.sglang.embedding import SGLangEmbeddingAdapter
+        from sie_server.core.loader import reject_unknown_loadtime_options
+
+        with pytest.raises(ValueError, match="pooling_method"):
+            reject_unknown_loadtime_options(SGLangEmbeddingAdapter, {"pooling_method": "mean"}, model_name="demo")
+
+
+class TestEmbeddingGroupLaunch:
+    """An embedding profile that declares a width, through the real ``load``."""
+
+    @staticmethod
+    def _reserving(port: int) -> object:
+        def reserve(start_port: int = _server.BASE_PORT) -> int:
+            _server._RESERVED_PORTS.add(port)
+            return port
+
+        return reserve
+
+    @patch("sie_server.adapters.sglang._server.os.getpgid", return_value=12345)
+    @patch("sie_server.adapters.sglang._server.os.killpg")
+    @patch("sie_server.adapters.sglang._server.subprocess.Popen")
+    @patch("sie_server.adapters.sglang._server.requests.get")
+    def test_a_width_launches_the_whole_group_and_hands_every_port_back(
+        self,
+        mock_requests_get: MagicMock,
+        mock_popen: MagicMock,
+        mock_killpg: MagicMock,
+        mock_getpgid: MagicMock,
+    ) -> None:
+        mock_popen.return_value = MagicMock(
+            pid=12345, poll=MagicMock(return_value=None), wait=MagicMock(return_value=None)
+        )
+        mock_requests_get.return_value = MagicMock(status_code=200)
+        ports = iter([30011, 30411])
+        adapter = SGLangEmbeddingAdapter(
+            model_name_or_path="Qwen/Qwen3-Embedding-8B",
+            tensor_parallel_size=2,
+            watchdog_timeout_s=90.0,
+        )
+
+        try:
+            with patch(
+                "sie_server.adapters.sglang._server.find_free_port",
+                side_effect=lambda start_port=_server.BASE_PORT: self._reserving(next(ports))(start_port),
+            ):
+                adapter.load("cuda:2")
+
+            cmd = mock_popen.call_args[0][0]
+            env = mock_popen.call_args.kwargs["env"]
+            assert cmd[cmd.index("--tensor-parallel-size") + 1] == "2"
+            assert cmd[cmd.index("--nccl-port") + 1] == "30411"
+            assert cmd[cmd.index("--watchdog-timeout") + 1] == "90.0"
+            assert "--disable-piecewise-cuda-graph" in cmd
+            assert env["CUDA_VISIBLE_DEVICES"] == "2,3"
+
+            adapter.unload()
+
+            assert {30011, 30411}.isdisjoint(_server._RESERVED_PORTS)
+        finally:
+            _server.release_port(30011)
+            _server.release_port(30411)
+
+    def test_a_declared_collective_port_at_width_one_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="nccl_port applies only above"):
+            SGLangEmbeddingAdapter(model_name_or_path="Qwen/Qwen3-Embedding-8B", nccl_port=30499)

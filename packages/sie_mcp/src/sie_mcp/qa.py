@@ -1,4 +1,4 @@
-"""``answer_questions`` — the Req 12 transient-QA job (#1309).
+"""Transient question answering for ``answer_questions``.
 
 Grounded question answering over a document set too large to drop whole into a
 single context window. Composed from shipped SIE primitives and run client-side

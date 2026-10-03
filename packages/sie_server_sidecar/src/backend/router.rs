@@ -23,6 +23,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::sync::RwLock;
@@ -353,6 +354,14 @@ impl InferenceBackend for BackendRouter {
     }
 
     async fn run_batch(&self, req: RunBatchRequest) -> Result<BatchOutcome, BackendError> {
+        self.run_batch_with_budget(req, None).await
+    }
+
+    async fn run_batch_with_budget(
+        &self,
+        req: RunBatchRequest,
+        budget: Option<Duration>,
+    ) -> Result<BatchOutcome, BackendError> {
         // `run_batch` uses the same fall-through semantics as the
         // per-op dispatchers: the first backend whose `supports()`
         // claims `model_id` handles it; `UnsupportedModel` trips the
@@ -367,7 +376,7 @@ impl InferenceBackend for BackendRouter {
         let result = self
             .dispatch(&model_id, "run_batch", batch_size, move |backend| {
                 let req = req.clone();
-                async move { backend.run_batch(req).await }
+                async move { backend.run_batch_with_budget(req, budget).await }
             })
             .await;
         result

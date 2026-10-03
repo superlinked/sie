@@ -9,9 +9,10 @@ This module contains specialized vision preprocessors for:
 
 from __future__ import annotations
 
-import io
 import logging
 from typing import TYPE_CHECKING, Any
+
+from PIL import Image as PILImage
 
 from sie_server.core.prepared import (
     DetectionPayload,
@@ -26,11 +27,10 @@ from sie_server.core.prepared import (
     PreparedItem,
 )
 from sie_server.core.preprocessor.base import get_image_executor
-from sie_server.types.inputs import media_bytes
+from sie_server.types.inputs import decode_image
 
 if TYPE_CHECKING:
     import torch
-    from PIL import Image as PILImage
 
     from sie_server.config.model import ModelConfig
     from sie_server.types.inputs import Item
@@ -76,20 +76,18 @@ def collect_detection_prepared_items(
     return pixel_values, pixel_mask, original_sizes, image_indices
 
 
-def _load_rgb(media: object) -> PILImage.Image:
+def _load_rgb(media: object, *, item_index: int | None = None) -> PILImage.Image:
     """Decode a wire image input into an RGB PIL image.
 
-    Centralizes the ``PILImage.open(io.BytesIO(media_bytes(...)))`` + RGB-convert
-    idiom that every vision preprocessor repeated. ``media_bytes`` raises
-    ``InvalidMediaError`` (-> 400 INVALID_INPUT) on a non-bytes payload rather
-    than hitting a raw ``TypeError`` deep in the decode. See issue #1540.
+    Thin wrapper over :func:`sie_server.types.inputs.decode_image`, which owns
+    the decode + RGB-convert idiom that every vision preprocessor repeated
+    (#1540) and raises ``InvalidMediaError`` (-> 400 INVALID_INPUT) on a
+    non-bytes payload or undecodable image bytes rather than hitting a raw
+    ``TypeError``/``UnidentifiedImageError`` deep in the decode. Every caller
+    decodes the item's first image, so the JSON path names ``images[0]``;
+    ``item_index`` is the request-local item index when the caller knows it.
     """
-    from PIL import Image as PILImage  # deferred: PIL is an optional dependency
-
-    img = PILImage.open(io.BytesIO(media_bytes(media, kind="image")))
-    if img.mode != "RGB":
-        img = img.convert("RGB")
-    return img
+    return decode_image(media, kind="image", item_index=item_index, image_index=0)
 
 
 def _find_closest_aspect_ratio(
@@ -295,7 +293,7 @@ class NemoColEmbedPreprocessor:
 
             # Load image from bytes
             img_input = item.images[0]
-            pil_img = _load_rgb(img_input)
+            pil_img = _load_rgb(img_input, item_index=i)
             original_size = pil_img.size
 
             # Dynamic tiling
@@ -572,7 +570,7 @@ class Florence2Preprocessor:
 
         # Load image from bytes - PIL releases GIL during decode
         img_input = item.images[0]
-        pil_img = _load_rgb(img_input)
+        pil_img = _load_rgb(img_input, item_index=index)
         original_size = (pil_img.width, pil_img.height)
 
         # Process through Florence-2 processor (CPU-bound, releases GIL)
@@ -760,7 +758,7 @@ class DonutPreprocessor:
 
         # Load image from bytes - PIL releases GIL during decode
         img_input = item.images[0]
-        pil_img = _load_rgb(img_input)
+        pil_img = _load_rgb(img_input, item_index=index)
         original_size = (pil_img.width, pil_img.height)
 
         # Process image through Donut processor (CPU-bound, releases GIL)
@@ -965,7 +963,7 @@ class LightOnOCRPreprocessor:
             return None
 
         img_input = item.images[0]
-        pil_img = _load_rgb(img_input)
+        pil_img = _load_rgb(img_input, item_index=index)
         original_size = (pil_img.width, pil_img.height)
 
         inputs = self._processor(
@@ -1141,7 +1139,7 @@ class GlmOcrPreprocessor:
             return None
 
         img_input = item.images[0]
-        pil_img = _load_rgb(img_input)
+        pil_img = _load_rgb(img_input, item_index=index)
         original_size = (pil_img.width, pil_img.height)
 
         text = instruction or self._user_text
@@ -1250,6 +1248,17 @@ class GlmOcrPreprocessor:
         return out
 
 
+def _shrink_to(image: PILImage.Image, max_side: int | None) -> PILImage.Image:
+    """``image`` with its longer side at most ``max_side``, aspect ratio kept; the image itself when it fits."""
+    if max_side is None or max(image.width, image.height) <= max_side:
+        return image
+    scale = max_side / max(image.width, image.height)
+    size = (max(1, round(image.width * scale)), max(1, round(image.height * scale)))
+    # reducing_gap lets PIL box-reduce by an integer factor first, then finish
+    # with Lanczos: close to a full Lanczos resize at a fraction of the cost.
+    return image.resize(size, PILImage.Resampling.LANCZOS, reducing_gap=3.0)
+
+
 class DetectionPreprocessor:
     """Preprocessor for object detection models (GroundingDINO, OWL-v2).
 
@@ -1280,15 +1289,26 @@ class DetectionPreprocessor:
         self,
         image_processor: Any,
         model_name: str,
+        *,
+        max_side: int | None = None,
     ) -> None:
         """Initialize with a HuggingFace image processor.
 
         Args:
             image_processor: HuggingFace image processor (processor.image_processor).
             model_name: Model name for logging.
+            max_side: When set, an image whose longer side exceeds it is first
+                shrunk with PIL (aspect ratio kept) so its longer side equals
+                ``max_side``. The model input is far smaller than a phone or
+                drone photo, and resizing a 14-megapixel frame inside the
+                image processor took seconds a request. ``original_size`` stays
+                the size that was sent, so boxes still map to the caller's
+                pixels. Pick a value at least twice the processor's own target
+                so the processor's resize still does the final antialiasing.
         """
         self._image_processor = image_processor
         self._model_name = model_name
+        self._max_side = max_side
 
     @property
     def modality(self) -> str:
@@ -1314,11 +1334,13 @@ class DetectionPreprocessor:
             return None
 
         img = item.images[0]
-        # Load image from bytes - PIL releases GIL during decode. media_bytes
-        # raises InvalidMediaError (-> 400 INVALID_INPUT) on a non-bytes payload
-        # rather than silently dropping the item or hitting a raw TypeError.
-        pil_img = _load_rgb(img)
+        # Load image from bytes - PIL releases GIL during decode. _load_rgb
+        # raises InvalidMediaError (-> 400 INVALID_INPUT) on a non-bytes or
+        # undecodable payload rather than silently dropping the item or hitting
+        # a raw TypeError.
+        pil_img = _load_rgb(img, item_index=index)
         original_size = (pil_img.width, pil_img.height)
+        pil_img = _shrink_to(pil_img, self._max_side)
 
         # Run image_processor to produce tensor (resize, normalize)
         # This is the expensive part (~23ms, 94% of preprocessing)
@@ -1416,7 +1438,7 @@ class DetectionPreprocessor:
         }
 
 
-# Canonical task -> prompt mapping from the PaddleOCR-VL model card
+# Canonical task -> prompt mapping from the PaddleOCR-VL-1.5 model card
 # (PROMPTS dict in the README; trailing colons included). Keep in sync with
 # PaddleOCRVLAdapter._VALID_TASKS.
 _PADDLEOCR_VL_TASK_PROMPTS: dict[str, str] = {
@@ -1490,7 +1512,7 @@ class PaddleOCRVLPreprocessor:
             return None
 
         img_input = item.images[0]
-        pil_img = _load_rgb(img_input)
+        pil_img = _load_rgb(img_input, item_index=index)
         original_size = (pil_img.width, pil_img.height)
 
         inputs = self._processor(
@@ -1659,7 +1681,7 @@ class MinerUVLPreprocessor:
             return None
 
         img_input = item.images[0]
-        pil_img = _load_rgb(img_input)
+        pil_img = _load_rgb(img_input, item_index=index)
         original_size = (pil_img.width, pil_img.height)
 
         inputs = self._processor(

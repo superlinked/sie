@@ -1,0 +1,3630 @@
+{
+	"note": "The 24 second-pass calls behind superlinked.com/doc-field-extraction, three arms over the eight recorded documents. Unlike the first pass, these live in this repository rather than in the dataset, because they carry no image bytes: A1 and A3 do send the page image, and their recorded requests store a placeholder naming the path and SHA-256 the first pass pinned, while A2 sends no image at all. Nothing here needs fetching. Recorded by second-pass/run_second_pass.py in superlinked/sie-web. The digests here are over these records as stored, so they can be recomputed; they catch corruption, and score.py rebuilds every request from the pre-registered arms because a digest sitting beside the data it describes catches nothing else.",
+	"endpoint": "https://api.superlinked.com",
+	"model": "Qwen/Qwen3.8-27B-FP8",
+	"run_started_utc": "2026-09-22T21:03:56.462366Z",
+	"run_completed_utc": "2026-09-22T21:16:15.523669Z",
+	"page": "https://superlinked.com/doc-field-extraction",
+	"calls": [
+		{
+			"slug": "faa-8130-3-rebuilt-fuel-control__a1",
+			"arm": "a1",
+			"case": "faa-8130-3-rebuilt-fuel-control",
+			"endpoint": "https://api.superlinked.com",
+			"path": "/v1/generate/Qwen__Qwen3.8-27B-FP8",
+			"model": "Qwen/Qwen3.8-27B-FP8",
+			"model_revision": "8bd714204e67a1c6c81f84b0dc486b6a6e96e943c42ff488f6b3cbf936e07955",
+			"server_version": "0.7.3",
+			"status": 200,
+			"latency_s": 20.5001,
+			"attempts": 1,
+			"request": {
+				"method": "POST",
+				"body": {
+					"prompt": "Extract the document fields described by the JSON schema. Return only the JSON object.",
+					"max_new_tokens": 2048,
+					"images": [
+						{
+							"data": "<base64 of apps/site/public/reference/doc-field-extraction/faa-8130-3-rebuilt-fuel-control.jpg, sha256 7eb7c4a806758fb7c3d7ceb86bc8a2d20b18277a9ee01370b9579144d2d32bb3>",
+							"format": "jpeg"
+						}
+					],
+					"grammar": {
+						"json_schema": {
+							"type": "object",
+							"properties": {
+								"form_tracking_number": {
+									"type": "string",
+									"description": "Block 3 form tracking number, exactly as printed"
+								},
+								"organization_name": {
+									"type": "string",
+									"description": "Block 4 organization name, without the address"
+								},
+								"work_order_number": {
+									"type": "string",
+									"description": "Block 5 work order, contract or invoice number"
+								},
+								"item_description": {
+									"type": "string",
+									"description": "Block 7 description"
+								},
+								"part_number": {
+									"type": "string",
+									"description": "Block 8 part number"
+								},
+								"quantity": {
+									"type": "integer",
+									"description": "Block 9 quantity"
+								},
+								"serial_number": {
+									"type": "string",
+									"description": "Block 10 serial number, or N/A when none is given"
+								},
+								"status_work": {
+									"type": "string",
+									"description": "Block 11 status or work, exactly as printed"
+								},
+								"remarks": {
+									"type": "string",
+									"description": "Block 12 remarks, exactly as printed"
+								},
+								"block_13a_approved_design_data_checked": {
+									"type": "boolean",
+									"description": "True only when the block 13a approved design data box carries a mark"
+								},
+								"block_13a_non_approved_design_data_checked": {
+									"type": "boolean",
+									"description": "True only when the block 13a non-approved design data box carries a mark"
+								},
+								"block_14a_return_to_service_checked": {
+									"type": "boolean",
+									"description": "True only when the block 14a 14 CFR 43.9 return to service box carries a mark"
+								},
+								"block_14a_other_regulation_checked": {
+									"type": "boolean",
+									"description": "True only when the block 14a other regulation box carries a mark"
+								},
+								"approval_number": {
+									"type": "string",
+									"description": "Block 13c or 14c, whichever is filled"
+								},
+								"signer_name": {
+									"type": "string",
+									"description": "Block 13d or 14d printed name, without a title"
+								},
+								"signature_date": {
+									"type": "string",
+									"description": "Block 13e or 14e date, exactly as printed"
+								}
+							},
+							"required": [
+								"form_tracking_number",
+								"organization_name",
+								"work_order_number",
+								"item_description",
+								"part_number",
+								"quantity",
+								"serial_number",
+								"status_work",
+								"remarks",
+								"block_13a_approved_design_data_checked",
+								"block_13a_non_approved_design_data_checked",
+								"block_14a_return_to_service_checked",
+								"block_14a_other_regulation_checked",
+								"approval_number",
+								"signer_name",
+								"signature_date"
+							]
+						},
+						"strict": true
+					}
+				}
+			},
+			"response": {
+				"headers": {
+					"date": "Tue, 22 Sep 2026 21:04:16 GMT",
+					"content-type": "application/json",
+					"x-sie-credits-debited": "63",
+					"x-sie-execution-binding-sha256": "68d32bec4c2abfc26467ba667b64d8c67ed43a70d95f8a1dbdb1d3ea1562aa25",
+					"x-sie-execution-identity-sha256": "7719d7b34e734a9238aa4e0a0da794dbea44c4e6e2e9b8d9a30486757875d23a",
+					"x-sie-model-revision": "8bd714204e67a1c6c81f84b0dc486b6a6e96e943c42ff488f6b3cbf936e07955",
+					"x-sie-request-id": "01a0caee-b656-7a33-9f93-d4c9399562c4",
+					"x-sie-server-version": "0.7.3",
+					"x-sie-units-images": "1",
+					"x-sie-units-input-tokens": "639",
+					"x-sie-units-output-tokens": "234",
+					"x-sie-version": "0.7.3",
+					"x-sie-worker": "queue:01a0caee-b656-7a33-9f93-d4c9399562c4"
+				},
+				"body": {
+					"attempt_id": "774d7a115e5744c58d0f29f4c302db3c",
+					"finish_reason": "stop",
+					"model": "Qwen/Qwen3.8-27B-FP8",
+					"text": "{\n    \"approval_number\": \"PC #62\",\n    \"block_13a_approved_design_data_checked\": false,\n    \"block_13a_non_approved_design_data_checked\": false,\n    \"block_14a_other_regulation_checked\": true,\n    \"block_14a_return_to_service_checked\": false,\n    \"form_tracking_number\": \"ACME-12345\",\n    \"item_description\": \"Fuel Control\",\n    \"organization_name\": \"Acme Airplane Company\",\n    \"part_number\": \"PW54667\",\n    \"quantity\": 1,\n    \"remarks\": \"Rebuilt (altered) to original PAH's specifications.\",\n    \"serial_number\": \"N/A\",\n    \"signature_date\": \"30 Apr 2008\",\n    \"signer_name\": \"A. Inspector\",\n    \"status_work\": \"See Block 12\",\n    \"work_order_number\": \"WO 98765\"\n}",
+					"tpot_ms": 74.90287678632478,
+					"ttft_ms": 1702.3532220009656,
+					"usage": {
+						"completion_tokens": 234,
+						"credits_charged": 63,
+						"images": 1,
+						"prompt_tokens": 639,
+						"rate_book_version": "2026-09-05-production-bootstrap-v4",
+						"total_tokens": 873
+					}
+				}
+			},
+			"request_sha256": "90a21aa7172549d61c450f7fd5d2a0c6103b729030ab3f08893cc89186fe2b12",
+			"response_sha256": "ca2b57eb253a963dce88cc63d9feaaac85e3bbec91fa3c309305714a0b0fa479"
+		},
+		{
+			"slug": "faa-8130-3-export-flap__a1",
+			"arm": "a1",
+			"case": "faa-8130-3-export-flap",
+			"endpoint": "https://api.superlinked.com",
+			"path": "/v1/generate/Qwen__Qwen3.8-27B-FP8",
+			"model": "Qwen/Qwen3.8-27B-FP8",
+			"model_revision": "8bd714204e67a1c6c81f84b0dc486b6a6e96e943c42ff488f6b3cbf936e07955",
+			"server_version": "0.7.3",
+			"status": 200,
+			"latency_s": 22.8283,
+			"attempts": 1,
+			"request": {
+				"method": "POST",
+				"body": {
+					"prompt": "Extract the document fields described by the JSON schema. Return only the JSON object.",
+					"max_new_tokens": 2048,
+					"images": [
+						{
+							"data": "<base64 of apps/site/public/reference/doc-field-extraction/faa-8130-3-export-flap.jpg, sha256 943474c0ef3a1f598fdaf05febc2544fa3d0ca5efe7074c41b1fec12095d7e61>",
+							"format": "jpeg"
+						}
+					],
+					"grammar": {
+						"json_schema": {
+							"type": "object",
+							"properties": {
+								"form_tracking_number": {
+									"type": "string",
+									"description": "Block 3 form tracking number, exactly as printed"
+								},
+								"organization_name": {
+									"type": "string",
+									"description": "Block 4 organization name, without the address"
+								},
+								"work_order_number": {
+									"type": "string",
+									"description": "Block 5 work order, contract or invoice number"
+								},
+								"item_description": {
+									"type": "string",
+									"description": "Block 7 description"
+								},
+								"part_number": {
+									"type": "string",
+									"description": "Block 8 part number"
+								},
+								"quantity": {
+									"type": "integer",
+									"description": "Block 9 quantity"
+								},
+								"serial_number": {
+									"type": "string",
+									"description": "Block 10 serial number, or N/A when none is given"
+								},
+								"status_work": {
+									"type": "string",
+									"description": "Block 11 status or work, exactly as printed"
+								},
+								"remarks": {
+									"type": "string",
+									"description": "Block 12 remarks, exactly as printed"
+								},
+								"block_13a_approved_design_data_checked": {
+									"type": "boolean",
+									"description": "True only when the block 13a approved design data box carries a mark"
+								},
+								"block_13a_non_approved_design_data_checked": {
+									"type": "boolean",
+									"description": "True only when the block 13a non-approved design data box carries a mark"
+								},
+								"block_14a_return_to_service_checked": {
+									"type": "boolean",
+									"description": "True only when the block 14a 14 CFR 43.9 return to service box carries a mark"
+								},
+								"block_14a_other_regulation_checked": {
+									"type": "boolean",
+									"description": "True only when the block 14a other regulation box carries a mark"
+								},
+								"approval_number": {
+									"type": "string",
+									"description": "Block 13c or 14c, whichever is filled"
+								},
+								"signer_name": {
+									"type": "string",
+									"description": "Block 13d or 14d printed name, without a title"
+								},
+								"signature_date": {
+									"type": "string",
+									"description": "Block 13e or 14e date, exactly as printed"
+								}
+							},
+							"required": [
+								"form_tracking_number",
+								"organization_name",
+								"work_order_number",
+								"item_description",
+								"part_number",
+								"quantity",
+								"serial_number",
+								"status_work",
+								"remarks",
+								"block_13a_approved_design_data_checked",
+								"block_13a_non_approved_design_data_checked",
+								"block_14a_return_to_service_checked",
+								"block_14a_other_regulation_checked",
+								"approval_number",
+								"signer_name",
+								"signature_date"
+							]
+						},
+						"strict": true
+					}
+				}
+			},
+			"response": {
+				"headers": {
+					"date": "Tue, 22 Sep 2026 21:04:39 GMT",
+					"content-type": "application/json",
+					"x-sie-credits-debited": "66",
+					"x-sie-execution-binding-sha256": "68d32bec4c2abfc26467ba667b64d8c67ed43a70d95f8a1dbdb1d3ea1562aa25",
+					"x-sie-execution-identity-sha256": "7719d7b34e734a9238aa4e0a0da794dbea44c4e6e2e9b8d9a30486757875d23a",
+					"x-sie-model-revision": "8bd714204e67a1c6c81f84b0dc486b6a6e96e943c42ff488f6b3cbf936e07955",
+					"x-sie-request-id": "01a0caef-067a-7151-8250-09c64c9d3ccd",
+					"x-sie-server-version": "0.7.3",
+					"x-sie-units-images": "1",
+					"x-sie-units-input-tokens": "639",
+					"x-sie-units-output-tokens": "271",
+					"x-sie-version": "0.7.3",
+					"x-sie-worker": "queue:01a0caef-067a-7151-8250-09c64c9d3ccd"
+				},
+				"body": {
+					"attempt_id": "a4b6a571d3e74e3ea5b9dd2ae51a2ab1",
+					"finish_reason": "stop",
+					"model": "Qwen/Qwen3.8-27B-FP8",
+					"text": "{\n    \"approval_number\": \"DMIR-000011-SW\",\n    \"block_13a_approved_design_data_checked\": true,\n    \"block_13a_non_approved_design_data_checked\": false,\n    \"block_14a_other_regulation_checked\": false,\n    \"block_14a_return_to_service_checked\": false,\n    \"form_tracking_number\": \"BE5432987\",\n    \"item_description\": \"Flap\",\n    \"organization_name\": \"Dave’s Aircraft Parts Manufacturing,\\n  2010 Falcon Way, Somewhere, OK (PQ5410SW)\",\n    \"part_number\": \"C 54321\",\n    \"quantity\": 1,\n    \"remarks\": \"Export Airworthiness Approval – This article meets the special requirements of (enter country).\",\n    \"serial_number\": \"9876543\",\n    \"signature_date\": \"23 Oct 2007\",\n    \"signer_name\": \"A. Inspector\",\n    \"status_work\": \"NEW\",\n    \"work_order_number\": \"WO 2185\"\n}",
+					"tpot_ms": 79.18259910701107,
+					"ttft_ms": 378.46389200058184,
+					"usage": {
+						"completion_tokens": 271,
+						"credits_charged": 66,
+						"images": 1,
+						"prompt_tokens": 639,
+						"rate_book_version": "2026-09-05-production-bootstrap-v4",
+						"total_tokens": 910
+					}
+				}
+			},
+			"request_sha256": "844997ab0262e3567467bc630ae3a9d14c1efde1840995a159db62f4f9b10c61",
+			"response_sha256": "8e61bc6b0392cd9647c91331c0b11308fc00f7c8c922bcb3f3b97d3024b572cc"
+		},
+		{
+			"slug": "osha-300-log-example__a1",
+			"arm": "a1",
+			"case": "osha-300-log-example",
+			"endpoint": "https://api.superlinked.com",
+			"path": "/v1/generate/Qwen__Qwen3.8-27B-FP8",
+			"model": "Qwen/Qwen3.8-27B-FP8",
+			"model_revision": "8bd714204e67a1c6c81f84b0dc486b6a6e96e943c42ff488f6b3cbf936e07955",
+			"server_version": "0.7.3",
+			"status": 200,
+			"latency_s": 51.5813,
+			"attempts": 1,
+			"request": {
+				"method": "POST",
+				"body": {
+					"prompt": "Extract the document fields described by the JSON schema. Return only the JSON object.",
+					"max_new_tokens": 2048,
+					"images": [
+						{
+							"data": "<base64 of apps/site/public/reference/doc-field-extraction/osha-300-log-example.jpg, sha256 13c8dfb0439508cb9d7ace203a3f1810e2c5e9bb0923deddeb4654b7141e1799>",
+							"format": "jpeg"
+						}
+					],
+					"grammar": {
+						"json_schema": {
+							"type": "object",
+							"properties": {
+								"establishment_name": {
+									"type": "string",
+									"description": "Establishment name only, without the city or state"
+								},
+								"city": {
+									"type": "string",
+									"description": "City only"
+								},
+								"state": {
+									"type": "string",
+									"description": "State only"
+								},
+								"cases": {
+									"type": "array",
+									"description": "One entry per filled row",
+									"items": {
+										"type": "object",
+										"properties": {
+											"case_number": {
+												"type": "integer",
+												"description": "Column A case number"
+											},
+											"employee_name": {
+												"type": "string",
+												"description": "Column B employee name, copied character for character from the log"
+											},
+											"job_title": {
+												"type": "string",
+												"description": "Column C job title"
+											},
+											"date_of_injury": {
+												"type": "string",
+												"description": "month/day as written"
+											},
+											"location": {
+												"type": "string",
+												"description": "Column E where the event occurred"
+											},
+											"description": {
+												"type": "string",
+												"description": "Column F description of injury or illness"
+											},
+											"outcome": {
+												"type": "string",
+												"enum": [
+													"death",
+													"days_away_from_work",
+													"job_transfer_or_restriction",
+													"other_recordable"
+												],
+												"description": "The single most serious outcome ticked in columns G to J: death, days away from work, job transfer or restriction, or other recordable"
+											},
+											"days_away_from_work": {
+												"type": "integer",
+												"description": "0 when blank"
+											},
+											"days_job_transfer_or_restriction": {
+												"type": "integer",
+												"description": "0 when blank"
+											},
+											"case_type": {
+												"type": "string",
+												"enum": [
+													"injury",
+													"skin_disorder",
+													"respiratory_condition",
+													"poisoning",
+													"hearing_loss",
+													"all_other_illnesses"
+												],
+												"description": "The illness or injury type ticked in columns M1 to M6; poisoning and hearing loss are not injury"
+											}
+										},
+										"required": [
+											"case_number",
+											"employee_name",
+											"job_title",
+											"date_of_injury",
+											"location",
+											"description",
+											"outcome",
+											"days_away_from_work",
+											"days_job_transfer_or_restriction",
+											"case_type"
+										]
+									}
+								}
+							},
+							"required": [
+								"establishment_name",
+								"city",
+								"state",
+								"cases"
+							]
+						},
+						"strict": true
+					}
+				}
+			},
+			"response": {
+				"headers": {
+					"date": "Tue, 22 Sep 2026 21:05:31 GMT",
+					"content-type": "application/json",
+					"x-sie-credits-debited": "117",
+					"x-sie-execution-binding-sha256": "68d32bec4c2abfc26467ba667b64d8c67ed43a70d95f8a1dbdb1d3ea1562aa25",
+					"x-sie-execution-identity-sha256": "7719d7b34e734a9238aa4e0a0da794dbea44c4e6e2e9b8d9a30486757875d23a",
+					"x-sie-model-revision": "8bd714204e67a1c6c81f84b0dc486b6a6e96e943c42ff488f6b3cbf936e07955",
+					"x-sie-request-id": "01a0caef-6000-7a41-9508-8b5611a74501",
+					"x-sie-server-version": "0.7.3",
+					"x-sie-units-images": "1",
+					"x-sie-units-input-tokens": "961",
+					"x-sie-units-output-tokens": "660",
+					"x-sie-version": "0.7.3",
+					"x-sie-worker": "queue:01a0caef-6000-7a41-9508-8b5611a74501"
+				},
+				"body": {
+					"attempt_id": "01c78acd7c7d46dda4d820c91eb2e812",
+					"finish_reason": "stop",
+					"model": "Qwen/Qwen3.8-27B-FP8",
+					"text": "{\n    \"cases\": [\n        {\n            \"case_number\": 1,\n            \"case_type\": \"injury\",\n            \"date_of_injury\": \"5/25\",\n            \"days_away_from_work\": 12,\n            \"days_job_transfer_or_restriction\": 15\n        ,\n            \"description\": \"fracture, left arm and left leg, fell from ladder\"\n        ,\n            \"employee_name\": \"Mark Bagin\",\n            \"job_title\": \"Welder\",\n            \"location\": \"basement\"\n        ,\n            \"outcome\": \"days_away_from_work\"\n        },\n        {\n            \"case_number\": 2,\n            \"case_type\": \"poisoning\",\n            \"date_of_injury\": \"7/12\",\n            \"days_away_from_work\": 0,\n            \"days_job_transfer_or_restriction\": 30,\n            \"description\": \"poisoning from lead fumes\",\n            \"employee_name\": \"Shana Alexander\",\n            \"job_title\": \"Foundry man\",\n            \"location\": \"pouring deck\",\n            \"outcome\": \"job_transfer_or_restriction\"\n        },\n        {\n            \"case_number\": 3,\n            \"case_type\": \"injury\",\n            \"date_of_injury\": \"8/5\",\n            \"days_away_from_work\": 7,\n            \"days_job_transfer_or_restriction\": 30,\n            \"description\": \"broken leg, fell over box\",\n            \"employee_name\": \"Sam Sander\",\n            \"job_title\": \"Electrician\",\n            \"location\": \"2nd floor storeroom\",\n            \"outcome\": \"days_away_from_work\"\n        },\n        {\n            \"case_number\": 4,\n            \"case_type\": \"injury\",\n            \"date_of_injury\": \"9/17\",\n            \"days_away_from_work\": 3,\n            \"days_job_transfer_or_restriction\": 0,\n            \"description\": \"back strain lifting a box\",\n            \"employee_name\": \"Ralph Boccella\",\n            \"job_title\": \"Laborer\",\n            \"location\": \"packaging department\",\n            \"outcome\": \"other_recordable\"\n        },\n        {\n            \"case_number\": 5,\n            \"case_type\": \"injury\",\n            \"date_of_injury\": \"10/23\",\n            \"days_away_from_work\": 0,\n            \"days_job_transfer_or_restriction\": 0,\n            \"description\": \"dust in left eye\",\n            \"employee_name\": \"Jarrod Daniels\",\n            \"job_title\": \"Machine opr.\",\n            \"location\": \"production floor\",\n            \"outcome\": \"other_recordable\"\n        }\n    ],\n    \"city\": \"Anywhere\",\n    \"establishment_name\": \"XYZ company\",\n    \"state\": \"MA\"\n}",
+					"tpot_ms": 75.91989672272726,
+					"ttft_ms": 445.37190000119153,
+					"usage": {
+						"completion_tokens": 660,
+						"credits_charged": 117,
+						"images": 1,
+						"prompt_tokens": 961,
+						"rate_book_version": "2026-09-05-production-bootstrap-v4",
+						"total_tokens": 1621
+					}
+				}
+			},
+			"request_sha256": "d00f1546a05b5bb92e7fa2839e8350b0177255a0be07ab8a09e0b25d2fb12b01",
+			"response_sha256": "2dc9a95448e0e9425ce84910659e48098b433e1ec61e5904b10cbc424ea6bcc9"
+		},
+		{
+			"slug": "nist-srm-1155a-table-1__a1",
+			"arm": "a1",
+			"case": "nist-srm-1155a-table-1",
+			"endpoint": "https://api.superlinked.com",
+			"path": "/v1/generate/Qwen__Qwen3.8-27B-FP8",
+			"model": "Qwen/Qwen3.8-27B-FP8",
+			"model_revision": "8bd714204e67a1c6c81f84b0dc486b6a6e96e943c42ff488f6b3cbf936e07955",
+			"server_version": "0.7.3",
+			"status": 200,
+			"latency_s": 84.3577,
+			"attempts": 1,
+			"request": {
+				"method": "POST",
+				"body": {
+					"prompt": "Extract the document fields described by the JSON schema. Return only the JSON object.",
+					"max_new_tokens": 2048,
+					"images": [
+						{
+							"data": "<base64 of apps/site/public/reference/doc-field-extraction/nist-srm-1155a-table-1.png, sha256 5c1afbe2167777805bcc6d3f299303ba04e1ab30209d88533acb460b1c5dab8f>",
+							"format": "png"
+						}
+					],
+					"grammar": {
+						"json_schema": {
+							"type": "object",
+							"properties": {
+								"srm_number": {
+									"type": "string",
+									"description": "The SRM number alone, digits and any letter suffix, without the letters SRM"
+								},
+								"certified_values": {
+									"type": "array",
+									"description": "Rows of Table 1, certified mass fraction values",
+									"items": {
+										"type": "object",
+										"properties": {
+											"element": {
+												"type": "string",
+												"description": "The element name alone, with no chemical symbol and no parentheses"
+											},
+											"symbol": {
+												"type": "string",
+												"description": "The chemical symbol alone, one or two letters"
+											},
+											"mass_fraction_percent": {
+												"type": "number",
+												"description": "The certified mass fraction in percent, the value before the plus-or-minus sign"
+											},
+											"expanded_uncertainty_percent": {
+												"type": "number",
+												"description": "The expanded uncertainty in percent, the value after the plus-or-minus sign"
+											},
+											"coverage_factor_k": {
+												"type": "number",
+												"description": "The coverage factor k for this row"
+											}
+										},
+										"required": [
+											"element",
+											"symbol",
+											"mass_fraction_percent",
+											"expanded_uncertainty_percent",
+											"coverage_factor_k"
+										]
+									}
+								}
+							},
+							"required": [
+								"srm_number",
+								"certified_values"
+							]
+						},
+						"strict": true
+					}
+				}
+			},
+			"response": {
+				"headers": {
+					"date": "Tue, 22 Sep 2026 21:06:55 GMT",
+					"content-type": "application/json",
+					"x-sie-credits-debited": "150",
+					"x-sie-execution-binding-sha256": "68d32bec4c2abfc26467ba667b64d8c67ed43a70d95f8a1dbdb1d3ea1562aa25",
+					"x-sie-execution-identity-sha256": "7719d7b34e734a9238aa4e0a0da794dbea44c4e6e2e9b8d9a30486757875d23a",
+					"x-sie-model-revision": "8bd714204e67a1c6c81f84b0dc486b6a6e96e943c42ff488f6b3cbf936e07955",
+					"x-sie-request-id": "01a0caf0-28fa-7e22-b8df-2c55f62751d7",
+					"x-sie-server-version": "0.7.3",
+					"x-sie-units-images": "1",
+					"x-sie-units-input-tokens": "975",
+					"x-sie-units-output-tokens": "1098",
+					"x-sie-version": "0.7.3",
+					"x-sie-worker": "queue:01a0caf0-28fa-7e22-b8df-2c55f62751d7"
+				},
+				"body": {
+					"attempt_id": "9949f89e4074477c8feb1a953f1c84cf",
+					"finish_reason": "stop",
+					"model": "Qwen/Qwen3.8-27B-FP8",
+					"text": "{\n    \"certified_values\": [\n        {\n            \"coverage_factor_k\": 2.45,\n            \"element\": \"Carbon (C)\",\n            \"expanded_uncertainty_percent\": 0.0036,\n            \"mass_fraction_percent\": 0.026\n        ,\n        \"symbol\": \"\\u00b1\"\n        },\n        {\n            \"coverage_factor_k\": 2.26,\n            \"element\": \"Cobalt (Co)\",\n            \"expanded_uncertainty_percent\": 0.018,\n            \"mass_fraction_percent\": 0.225,\n            \"symbol\": \"\\u00b1\"\n        },\n        {\n            \"coverage_factor_k\": 2.2,\n            \"element\": \"Chromium (Cr)\",\n            \"expanded_uncertainty_percent\": 0.099,\n            \"mass_fraction_percent\": 17.803,\n            \"symbol\": \"\\u00b1\"\n        },\n        {\n            \"coverage_factor_k\": 2.2,\n            \"element\": \"Copper (Cu)\",\n            \"expanded_uncertainty_percent\": 0.005,\n            \"mass_fraction_percent\": 0.2431,\n            \"symbol\": \"\\u00b1\"\n        },\n        {\n            \"coverage_factor_k\": 2.0,\n            \"element\": \"Iron (Fe)\",\n            \"expanded_uncertainty_percent\": 0.12,\n            \"mass_fraction_percent\": 64.71,\n            \"symbol\": \"\\u00b1\"\n        },\n        {\n            \"coverage_factor_k\": 2.06,\n            \"element\": \"Manganese (Mn)\",\n            \"expanded_uncertainty_percent\": 0.06,\n            \"mass_fraction_percent\": 1.593,\n            \"symbol\": \"\\u00b1\"\n        },\n        {\n            \"coverage_factor_k\": 2.18,\n            \"element\": \"Molybdenum (Mo)\",\n            \"expanded_uncertainty_percent\": 0.015,\n            \"mass_fraction_percent\": 2.188,\n            \"symbol\": \"\\u00b1\"\n        },\n        {\n            \"coverage_factor_k\": 3.18,\n            \"element\": \"Niobium (Nb)\",\n            \"expanded_uncertainty_percent\": 0.0014,\n            \"mass_fraction_percent\": 0.0082,\n            \"symbol\": \"\\u00b1\"\n        },\n        {\n            \"coverage_factor_k\": 2.2,\n            \"element\": \"Nickel (Ni)\",\n            \"expanded_uncertainty_percent\": 0.056,\n            \"mass_fraction_percent\": 12.471,\n            \"symbol\": \"\\u00b1\"\n        },\n        {\n            \"coverage_factor_k\": 2.11,\n            \"element\": \"Phosphorus (P)\",\n            \"expanded_uncertainty_percent\": 0.0012,\n            \"mass_fraction_percent\": 0.0271,\n            \"symbol\": \"\\u00b1\"\n        },\n        {\n            \"coverage_factor_k\": 2.03,\n            \"element\": \"Silicon (Si)\",\n            \"expanded_uncertainty_percent\": 0.017,\n            \"mass_fraction_percent\": 0.521,\n            \"symbol\": \"\\u00b1\"\n        },\n        {\n            \"coverage_factor_k\": 2.45,\n            \"element\": \"Titanium (Ti)\",\n            \"expanded_uncertainty_percent\": 0.0012,\n            \"mass_fraction_percent\": 0.0039,\n            \"symbol\": \"\\u00b1\"\n        },\n        {\n            \"coverage_factor_k\": 2.23,\n            \"element\": \"Vanadium (V)\",\n            \"expanded_uncertainty_percent\": 0.0046,\n            \"mass_fraction_percent\": 0.0725,\n            \"symbol\": \"\\u00b1\"\n        },\n        {\n            \"coverage_factor_k\": 2.45,\n            \"element\": \"Tungsten (W)\",\n            \"expanded_uncertainty_percent\": 0.0059,\n            \"mass_fraction_percent\": 0.0809,\n            \"symbol\": \"\\u00b1\"\n        }\n    ],\n    \"srm_number\": \"SRM 1155a\"\n}",
+					"tpot_ms": 75.70026376593808,
+					"ttft_ms": 455.8537120028632,
+					"usage": {
+						"completion_tokens": 1098,
+						"credits_charged": 150,
+						"images": 1,
+						"prompt_tokens": 975,
+						"rate_book_version": "2026-09-05-production-bootstrap-v4",
+						"total_tokens": 2073
+					}
+				}
+			},
+			"request_sha256": "341c67871022f37c2f55f496b6ceaf4396376bc0258d48e5ece7ca8fc9ace9db",
+			"response_sha256": "048771636425469e41aa93dc87e72e459f7c5ad26f63fe9d17435bf75e8da66a"
+		},
+		{
+			"slug": "wolters-kluwer-invoice__a1",
+			"arm": "a1",
+			"case": "wolters-kluwer-invoice",
+			"endpoint": "https://api.superlinked.com",
+			"path": "/v1/generate/Qwen__Qwen3.8-27B-FP8",
+			"model": "Qwen/Qwen3.8-27B-FP8",
+			"model_revision": "8bd714204e67a1c6c81f84b0dc486b6a6e96e943c42ff488f6b3cbf936e07955",
+			"server_version": "0.7.3",
+			"status": 200,
+			"latency_s": 23.8283,
+			"attempts": 1,
+			"request": {
+				"method": "POST",
+				"body": {
+					"prompt": "Extract the document fields described by the JSON schema. Return only the JSON object.",
+					"max_new_tokens": 2048,
+					"images": [
+						{
+							"data": "<base64 of apps/site/public/reference/doc-field-extraction/wolters-kluwer-invoice.png, sha256 5aae590cd4523f802aafcb4e338404ad257c40b974cb7146ce5a6ead6557e91a>",
+							"format": "png"
+						}
+					],
+					"grammar": {
+						"json_schema": {
+							"type": "object",
+							"properties": {
+								"invoice_number": {
+									"type": "string",
+									"description": "Invoice number, exactly as printed"
+								},
+								"invoice_date": {
+									"type": "string",
+									"description": "Invoice date, exactly as printed"
+								},
+								"customer_id": {
+									"type": "string",
+									"description": "Customer or account identifier"
+								},
+								"sold_to": {
+									"type": "string",
+									"description": "Organization name only"
+								},
+								"line_items": {
+									"type": "array",
+									"items": {
+										"type": "object",
+										"properties": {
+											"quantity": {
+												"type": "integer",
+												"description": "Quantity ordered"
+											},
+											"item": {
+												"type": "string",
+												"description": "Item or product code"
+											},
+											"unit_of_measure": {
+												"type": "string",
+												"description": "Unit of measure"
+											},
+											"media_description": {
+												"type": "string",
+												"description": "Description of what was supplied"
+											},
+											"amount": {
+												"type": "number",
+												"description": "Line amount"
+											}
+										},
+										"required": [
+											"quantity",
+											"item",
+											"unit_of_measure",
+											"media_description",
+											"amount"
+										]
+									}
+								},
+								"subtotal": {
+									"type": "number",
+									"description": "Subtotal before tax"
+								},
+								"sales_tax": {
+									"type": "number",
+									"description": "Sales tax charged"
+								},
+								"amount_due": {
+									"type": "number",
+									"description": "Amount due"
+								},
+								"currency": {
+									"type": "string",
+									"description": "Three-letter currency code"
+								},
+								"payment_terms": {
+									"type": "string",
+									"description": "Payment terms, exactly as printed and nothing else"
+								},
+								"due_date": {
+									"type": "string",
+									"description": "Payment due date, exactly as printed"
+								},
+								"remit_to": {
+									"type": "string",
+									"description": "Payee name for checks"
+								},
+								"credit_card_type_checked": {
+									"type": "string",
+									"enum": [
+										"visa",
+										"mastercard",
+										"amex",
+										"other",
+										"none"
+									],
+									"description": "The card type whose box is ticked; none when no card box is ticked, even where card types are listed"
+								}
+							},
+							"required": [
+								"invoice_number",
+								"invoice_date",
+								"customer_id",
+								"sold_to",
+								"line_items",
+								"subtotal",
+								"sales_tax",
+								"amount_due",
+								"currency",
+								"payment_terms",
+								"due_date",
+								"remit_to",
+								"credit_card_type_checked"
+							]
+						},
+						"strict": true
+					}
+				}
+			},
+			"response": {
+				"headers": {
+					"date": "Tue, 22 Sep 2026 21:07:19 GMT",
+					"content-type": "application/json",
+					"x-sie-credits-debited": "92",
+					"x-sie-execution-binding-sha256": "68d32bec4c2abfc26467ba667b64d8c67ed43a70d95f8a1dbdb1d3ea1562aa25",
+					"x-sie-execution-identity-sha256": "7719d7b34e734a9238aa4e0a0da794dbea44c4e6e2e9b8d9a30486757875d23a",
+					"x-sie-model-revision": "8bd714204e67a1c6c81f84b0dc486b6a6e96e943c42ff488f6b3cbf936e07955",
+					"x-sie-request-id": "01a0caf1-7303-7b22-b8be-876d9d3f5722",
+					"x-sie-server-version": "0.7.3",
+					"x-sie-units-images": "1",
+					"x-sie-units-input-tokens": "975",
+					"x-sie-units-output-tokens": "298",
+					"x-sie-version": "0.7.3",
+					"x-sie-worker": "queue:01a0caf1-7303-7b22-b8be-876d9d3f5722"
+				},
+				"body": {
+					"attempt_id": "c0131fd795bc4be1825f2423204fd9ed",
+					"finish_reason": "stop",
+					"model": "Qwen/Qwen3.8-27B-FP8",
+					"text": "{\n    \"amount_due\": 3900.0,\n    \"credit_card_type_checked\": \"visa\",\n    \"currency\": \"USD\",\n    \"customer_id\": \"UCSFD00005\",\n    \"due_date\": \"11 Sep 2016\",\n    \"invoice_date\": \"8/12/2016\",\n    \"invoice_number\": \"000277511\",\n    \"line_items\": [\n        {\n            \"amount\": 3900.0,\n            \"item\": \"OPEN ACCESS ARTICLE\",\n            \"media_description\": \"Academic Medicine\",\n            \"quantity\": 1,\n            \"unit_of_measure\": \"Each\"\n        }\n    ],\n    \"payment_terms\": \"NET 30\",\n    \"remit_to\": \"Wolters Kluwer Health, Inc.\\n16705 Collection Center Drive\\nChicago, IL 60693\",\n    \"sales_tax\": 0.0,\n    \"sold_to\": \"UCSF Department of Psychiatry\\n401 Parnassus Ave.\\nBox 0984-Mse\\nSan Francisco, CA 94143-0984\\nUnited States\",\n    \"subtotal\": 3900.0\n}",
+					"tpot_ms": 75.6930989362416,
+					"ttft_ms": 349.26450599959935,
+					"usage": {
+						"completion_tokens": 298,
+						"credits_charged": 92,
+						"images": 1,
+						"prompt_tokens": 975,
+						"rate_book_version": "2026-09-05-production-bootstrap-v4",
+						"total_tokens": 1273
+					}
+				}
+			},
+			"request_sha256": "e83bb8089765e8a381228df92d0a9b8be49ee1026f7c766ef907886b956ba1ac",
+			"response_sha256": "dbdda6cb42a0dee9df9dc73f814f88cec1de5b0117c6fd5212ce11d2f4b48319"
+		},
+		{
+			"slug": "usps-cn22-customs-declaration__a1",
+			"arm": "a1",
+			"case": "usps-cn22-customs-declaration",
+			"endpoint": "https://api.superlinked.com",
+			"path": "/v1/generate/Qwen__Qwen3.8-27B-FP8",
+			"model": "Qwen/Qwen3.8-27B-FP8",
+			"model_revision": "8bd714204e67a1c6c81f84b0dc486b6a6e96e943c42ff488f6b3cbf936e07955",
+			"server_version": "0.7.3",
+			"status": 200,
+			"latency_s": 21.146,
+			"attempts": 1,
+			"request": {
+				"method": "POST",
+				"body": {
+					"prompt": "Extract the document fields described by the JSON schema. Return only the JSON object.",
+					"max_new_tokens": 2048,
+					"images": [
+						{
+							"data": "<base64 of apps/site/public/reference/doc-field-extraction/usps-cn22-customs-declaration.jpg, sha256 84f5eb9bfcbe6037d87233f698062449d6843e5b86def0e59e19650b5faaabe7>",
+							"format": "jpeg"
+						}
+					],
+					"grammar": {
+						"json_schema": {
+							"type": "object",
+							"properties": {
+								"tracking_number": {
+									"type": "string",
+									"description": "Tracking or article number"
+								},
+								"contents_category": {
+									"type": "string",
+									"enum": [
+										"gift",
+										"documents",
+										"commercial_sample",
+										"returned_goods",
+										"other"
+									],
+									"description": "The contents category ticked on the CN 22"
+								},
+								"sender_name": {
+									"type": "string",
+									"description": "Sender name only"
+								},
+								"sender_address": {
+									"type": "string",
+									"description": "Sender street, city, state and postal code, without the sender name"
+								},
+								"destination_city": {
+									"type": "string",
+									"description": "Destination city name alone, without the postal code"
+								},
+								"destination_postal_code": {
+									"type": "string",
+									"description": "Destination postal code alone"
+								},
+								"destination_country": {
+									"type": "string",
+									"description": "Destination country"
+								},
+								"items": {
+									"type": "array",
+									"items": {
+										"type": "object",
+										"properties": {
+											"description": {
+												"type": "string",
+												"description": "Item description"
+											},
+											"quantity": {
+												"type": "integer",
+												"description": "Item quantity"
+											},
+											"weight_lb": {
+												"type": "integer",
+												"description": "Item weight, whole pounds"
+											},
+											"weight_oz": {
+												"type": "integer",
+												"description": "Item weight, remaining ounces"
+											},
+											"value_usd": {
+												"type": "number",
+												"description": "Item value in US dollars"
+											}
+										},
+										"required": [
+											"description",
+											"quantity",
+											"weight_lb",
+											"weight_oz",
+											"value_usd"
+										]
+									}
+								},
+								"total_weight_lb": {
+									"type": "integer",
+									"description": "Total weight, whole pounds"
+								},
+								"total_weight_oz": {
+									"type": "integer",
+									"description": "Total weight, remaining ounces"
+								},
+								"total_value_usd": {
+									"type": "number",
+									"description": "Total value in US dollars"
+								},
+								"country_of_origin": {
+									"type": "string",
+									"description": "Country of origin"
+								},
+								"declaration_date": {
+									"type": "string",
+									"description": "Declaration date, exactly as printed"
+								}
+							},
+							"required": [
+								"tracking_number",
+								"contents_category",
+								"sender_name",
+								"sender_address",
+								"destination_city",
+								"destination_postal_code",
+								"destination_country",
+								"items",
+								"total_weight_lb",
+								"total_weight_oz",
+								"total_value_usd",
+								"country_of_origin",
+								"declaration_date"
+							]
+						},
+						"strict": true
+					}
+				}
+			},
+			"response": {
+				"headers": {
+					"date": "Tue, 22 Sep 2026 21:07:40 GMT",
+					"content-type": "application/json",
+					"x-sie-credits-debited": "92",
+					"x-sie-execution-binding-sha256": "68d32bec4c2abfc26467ba667b64d8c67ed43a70d95f8a1dbdb1d3ea1562aa25",
+					"x-sie-execution-identity-sha256": "7719d7b34e734a9238aa4e0a0da794dbea44c4e6e2e9b8d9a30486757875d23a",
+					"x-sie-model-revision": "8bd714204e67a1c6c81f84b0dc486b6a6e96e943c42ff488f6b3cbf936e07955",
+					"x-sie-request-id": "01a0caf1-cfcb-7551-8d5d-bcf791378800",
+					"x-sie-server-version": "0.7.3",
+					"x-sie-units-images": "1",
+					"x-sie-units-input-tokens": "1002",
+					"x-sie-units-output-tokens": "272",
+					"x-sie-version": "0.7.3",
+					"x-sie-worker": "queue:01a0caf1-cfcb-7551-8d5d-bcf791378800"
+				},
+				"body": {
+					"attempt_id": "bfe823082a9d4703acd6fbf0f8593b4a",
+					"finish_reason": "stop",
+					"model": "Qwen/Qwen3.8-27B-FP8",
+					"text": "{\n    \"contents_category\": \"other\",\n    \"country_of_origin\": \"US\",\n    \"declaration_date\": \"10/13/2015\",\n    \"destination_city\": \"KÖLN\",\n    \"destination_country\": \"GERMANY\",\n    \"destination_postal_code\": \"50823\",\n    \"items\": [\n        {\n            \"description\": \"\\u0022I edit Wikipedia\\u0022 Box T-shirt (Unisex) - X-Large\",\n            \"quantity\": 1,\n            \"value_usd\": 7.20,\n            \"weight_lb\": 0,\n            \"weight_oz\": 5\n        }\n    ],\n    \"sender_address\": \"SWAGBOT 210 E. Walnut Street Suite 100 Springfield MO 65806\",\n    \"sender_name\": \"SWAGBOT\",\n    \"total_value_usd\": 7.20,\n    \"total_weight_lb\": 0,\n    \"total_weight_oz\": 6\n    ,\n    \"tracking_number\": \"LZ 647 929 979 US\"\n}",
+					"tpot_ms": 73.08377870588234,
+					"ttft_ms": 387.33542900081375,
+					"usage": {
+						"completion_tokens": 272,
+						"credits_charged": 92,
+						"images": 1,
+						"prompt_tokens": 1002,
+						"rate_book_version": "2026-09-05-production-bootstrap-v4",
+						"total_tokens": 1274
+					}
+				}
+			},
+			"request_sha256": "778bcbcd584c814de60a9e04323934a8627748765e95808956bafa3f750768d4",
+			"response_sha256": "147d3cdb1f8ff27ee955b3c0afa2eac693e2a38ab16b37e147806e18803f8a2e"
+		},
+		{
+			"slug": "dei-electricity-bill__a1",
+			"arm": "a1",
+			"case": "dei-electricity-bill",
+			"endpoint": "https://api.superlinked.com",
+			"path": "/v1/generate/Qwen__Qwen3.8-27B-FP8",
+			"model": "Qwen/Qwen3.8-27B-FP8",
+			"model_revision": "8bd714204e67a1c6c81f84b0dc486b6a6e96e943c42ff488f6b3cbf936e07955",
+			"server_version": "0.7.3",
+			"status": 200,
+			"latency_s": 29.3442,
+			"attempts": 1,
+			"request": {
+				"method": "POST",
+				"body": {
+					"prompt": "Extract the document fields described by the JSON schema. Return only the JSON object.",
+					"max_new_tokens": 2048,
+					"images": [
+						{
+							"data": "<base64 of apps/site/public/reference/doc-field-extraction/dei-electricity-bill.jpg, sha256 05a4a1e9e22ac73340b44351dec80483ccc62173149728606ad02c617d8ebe32>",
+							"format": "jpeg"
+						}
+					],
+					"grammar": {
+						"json_schema": {
+							"type": "object",
+							"properties": {
+								"meter_number": {
+									"type": "string",
+									"description": "Meter number"
+								},
+								"meter_readings": {
+									"type": "array",
+									"items": {
+										"type": "object",
+										"properties": {
+											"register_type": {
+												"type": "string",
+												"description": "Register or tariff name for this reading row"
+											},
+											"current_reading": {
+												"type": "integer",
+												"description": "The later of the two register readings, the one the current consumption is measured to"
+											},
+											"previous_reading": {
+												"type": "integer",
+												"description": "The earlier of the two register readings, the one the current consumption is measured from"
+											},
+											"consumption_kwh": {
+												"type": "integer",
+												"description": "Consumption in kWh for this register"
+											}
+										},
+										"required": [
+											"register_type",
+											"current_reading",
+											"previous_reading",
+											"consumption_kwh"
+										]
+									}
+								},
+								"contracted_power_kva": {
+									"type": "number",
+									"description": "Contracted power in kVA"
+								},
+								"next_reading_from": {
+									"type": "string",
+									"description": "Start of the next reading window, exactly as printed"
+								},
+								"next_reading_to": {
+									"type": "string",
+									"description": "End of the next reading window, exactly as printed"
+								},
+								"supply_charges_eur": {
+									"type": "number",
+									"description": "Electricity supply charges subtotal"
+								},
+								"regulated_charges_eur": {
+									"type": "number",
+									"description": "Regulated charges subtotal"
+								},
+								"electricity_amount_eur": {
+									"type": "number",
+									"description": "Amount payable for electricity before VAT"
+								},
+								"vat_rate_percent": {
+									"type": "number",
+									"description": "VAT rate in percent"
+								},
+								"vat_eur": {
+									"type": "number",
+									"description": "VAT charged in euro on the electricity amount"
+								},
+								"electricity_total_with_vat_eur": {
+									"type": "number",
+									"description": "Electricity amount including VAT"
+								},
+								"municipal_charges_eur": {
+									"type": "number",
+									"description": "Municipal charges subtotal"
+								},
+								"ert_fee_eur": {
+									"type": "number",
+									"description": "ERT public broadcaster fee"
+								},
+								"previous_unpaid_eur": {
+									"type": "number",
+									"description": "Previous balance carried forward and still unpaid"
+								},
+								"total_due_eur": {
+									"type": "number",
+									"description": "Total amount due"
+								}
+							},
+							"required": [
+								"meter_number",
+								"meter_readings",
+								"contracted_power_kva",
+								"next_reading_from",
+								"next_reading_to",
+								"supply_charges_eur",
+								"regulated_charges_eur",
+								"electricity_amount_eur",
+								"vat_rate_percent",
+								"vat_eur",
+								"electricity_total_with_vat_eur",
+								"municipal_charges_eur",
+								"ert_fee_eur",
+								"previous_unpaid_eur",
+								"total_due_eur"
+							]
+						},
+						"strict": true
+					}
+				}
+			},
+			"response": {
+				"headers": {
+					"date": "Tue, 22 Sep 2026 21:08:10 GMT",
+					"content-type": "application/json",
+					"x-sie-credits-debited": "96",
+					"x-sie-execution-binding-sha256": "68d32bec4c2abfc26467ba667b64d8c67ed43a70d95f8a1dbdb1d3ea1562aa25",
+					"x-sie-execution-identity-sha256": "7719d7b34e734a9238aa4e0a0da794dbea44c4e6e2e9b8d9a30486757875d23a",
+					"x-sie-model-revision": "8bd714204e67a1c6c81f84b0dc486b6a6e96e943c42ff488f6b3cbf936e07955",
+					"x-sie-request-id": "01a0caf2-22de-7a12-999a-037d558999d6",
+					"x-sie-server-version": "0.7.3",
+					"x-sie-units-images": "1",
+					"x-sie-units-input-tokens": "960",
+					"x-sie-units-output-tokens": "368",
+					"x-sie-version": "0.7.3",
+					"x-sie-worker": "queue:01a0caf2-22de-7a12-999a-037d558999d6"
+				},
+				"body": {
+					"attempt_id": "e934c8e259bd47c78dba515ee9920b32",
+					"finish_reason": "stop",
+					"model": "Qwen/Qwen3.8-27B-FP8",
+					"text": "{\n    \"contracted_power_kva\": 25,\n    \"electricity_amount_eur\": 344.22,\n    \"electricity_total_with_vat_eur\": 388.52,\n    \"ert_fee_eur\": 6.62,\n    \"meter_number\": \"T18083\",\n    \"meter_readings\": [\n        {\n            \"consumption_kwh\": 2294,\n            \"current_reading\": 35579,\n            \"previous_reading\": 37873,\n            \"register_type\": \t\"11\"\n        },\n        {\n            \"consumption_kwh\": 695,\n            \"current_reading\": 13498,\n            \"previous_reading\": 14193,\n            \"register_type\": \"12\"\n        }\n    ],\n    \"municipal_charges_eur\": 58.17,\n    \"next_reading_from\": \"26/11/2015\",\n    \"next_reading_to\": \"02/12/2015\",\n    \"previous_unpaid_eur\": 423.00,\n    \"regulated_charges_eur\": 245.61,\n    \"supply_charges_eur\": 287.98,\n    \"total_due_eur\": 876.00,\n    \"vat_eur\": 44.30\n   ,\n    \"vat_rate_percent\": 13\n}",
+					"tpot_ms": 75.33016561141304,
+					"ttft_ms": 462.0817030008766,
+					"usage": {
+						"completion_tokens": 368,
+						"credits_charged": 96,
+						"images": 1,
+						"prompt_tokens": 960,
+						"rate_book_version": "2026-09-05-production-bootstrap-v4",
+						"total_tokens": 1328
+					}
+				}
+			},
+			"request_sha256": "894b09ee4fdf9fb462a31e8fcc83c8c0f3d2fb85e1f661aea0da8ef47eea422a",
+			"response_sha256": "6a5d803fa348308c1bbe4295afec707df51ee17f6274eb5b966689b5b299b43c"
+		},
+		{
+			"slug": "walmart-receipt-photo__a1",
+			"arm": "a1",
+			"case": "walmart-receipt-photo",
+			"endpoint": "https://api.superlinked.com",
+			"path": "/v1/generate/Qwen__Qwen3.8-27B-FP8",
+			"model": "Qwen/Qwen3.8-27B-FP8",
+			"model_revision": "8bd714204e67a1c6c81f84b0dc486b6a6e96e943c42ff488f6b3cbf936e07955",
+			"server_version": "0.7.3",
+			"status": 200,
+			"latency_s": 13.9962,
+			"attempts": 1,
+			"request": {
+				"method": "POST",
+				"body": {
+					"prompt": "Extract the document fields described by the JSON schema. Return only the JSON object.",
+					"max_new_tokens": 2048,
+					"images": [
+						{
+							"data": "<base64 of apps/site/public/reference/doc-field-extraction/walmart-receipt-photo.jpg, sha256 c2539253c267968e73782db70e6efd80f291fc6b48011a95a1f20664b901d414>",
+							"format": "jpeg"
+						}
+					],
+					"grammar": {
+						"json_schema": {
+							"type": "object",
+							"properties": {
+								"merchant": {
+									"type": "string",
+									"description": "Merchant name"
+								},
+								"store_phone": {
+									"type": "string",
+									"description": "Store telephone number printed on this receipt"
+								},
+								"store_address": {
+									"type": "string",
+									"description": "Street, city, state and ZIP"
+								},
+								"store_number": {
+									"type": "string",
+									"description": "Store number"
+								},
+								"purchase_date": {
+									"type": "string",
+									"description": "Purchase date, exactly as printed"
+								},
+								"subtotal": {
+									"type": "number",
+									"description": "Subtotal of all items before tax, not a single line"
+								},
+								"tax_rate_percent": {
+									"type": "number",
+									"description": "Tax rate in percent"
+								},
+								"tax": {
+									"type": "number",
+									"description": "Total tax charged"
+								},
+								"total": {
+									"type": "number",
+									"description": "Grand total charged, the figure the subtotal and tax add up to"
+								},
+								"payment_method": {
+									"type": "string",
+									"enum": [
+										"cash",
+										"credit",
+										"debit",
+										"ebt",
+										"gift_card"
+									],
+									"description": "How the purchase was paid"
+								},
+								"items_sold": {
+									"type": "integer",
+									"description": "The items-sold count printed on the receipt"
+								}
+							},
+							"required": [
+								"merchant",
+								"store_phone",
+								"store_address",
+								"store_number",
+								"purchase_date",
+								"subtotal",
+								"tax_rate_percent",
+								"tax",
+								"total",
+								"payment_method",
+								"items_sold"
+							]
+						},
+						"strict": true
+					}
+				}
+			},
+			"response": {
+				"headers": {
+					"date": "Tue, 22 Sep 2026 21:08:24 GMT",
+					"content-type": "application/json",
+					"x-sie-credits-debited": "84",
+					"x-sie-execution-binding-sha256": "68d32bec4c2abfc26467ba667b64d8c67ed43a70d95f8a1dbdb1d3ea1562aa25",
+					"x-sie-execution-identity-sha256": "7719d7b34e734a9238aa4e0a0da794dbea44c4e6e2e9b8d9a30486757875d23a",
+					"x-sie-model-revision": "8bd714204e67a1c6c81f84b0dc486b6a6e96e943c42ff488f6b3cbf936e07955",
+					"x-sie-request-id": "01a0caf2-95fd-74f3-b941-215650d7633b",
+					"x-sie-server-version": "0.7.3",
+					"x-sie-units-images": "1",
+					"x-sie-units-input-tokens": "1002",
+					"x-sie-units-output-tokens": "151",
+					"x-sie-version": "0.7.3",
+					"x-sie-worker": "queue:01a0caf2-95fd-74f3-b941-215650d7633b"
+				},
+				"body": {
+					"attempt_id": "e93931bdbcf74f4c92c7e22de6e42458",
+					"finish_reason": "stop",
+					"model": "Qwen/Qwen3.8-27B-FP8",
+					"text": "{\n    \"items_sold\": 19,\n    \"merchant\": \"Walmart\",\n    \"payment_method\": \"debit\",\n    \"purchase_date\": \"07/25/21\",\n    \"store_address\": \"630 N MAIN ST\\nNEWARK IN 46801\",\n    \"store_number\": \"0019\",\n    \"store_phone\": \"(260) 482-1429\",\n    \"subtotal\": 6.97,\n    \"tax\": 0.57,\n    \"tax_rate_percent\": 8.2,\n    \"total\": 7.54\n}",
+					"tpot_ms": 76.15566444370862,
+					"ttft_ms": 466.4971610000066,
+					"usage": {
+						"completion_tokens": 151,
+						"credits_charged": 84,
+						"images": 1,
+						"prompt_tokens": 1002,
+						"rate_book_version": "2026-09-05-production-bootstrap-v4",
+						"total_tokens": 1153
+					}
+				}
+			},
+			"request_sha256": "341cb70b89eacf90be199409c43a1809b8272ea1233780fda8c640fde43275fc",
+			"response_sha256": "c2e961c4e11968194cd138d903d1a9fe883d1fb8391cdf3ef9be8b6c3db0ba79"
+		},
+		{
+			"slug": "faa-8130-3-rebuilt-fuel-control__a2",
+			"arm": "a2",
+			"case": "faa-8130-3-rebuilt-fuel-control",
+			"endpoint": "https://api.superlinked.com",
+			"path": "/v1/chat/completions",
+			"model": "Qwen/Qwen3.8-27B-FP8",
+			"model_revision": "8bd714204e67a1c6c81f84b0dc486b6a6e96e943c42ff488f6b3cbf936e07955",
+			"server_version": "0.7.3",
+			"status": 200,
+			"latency_s": 17.6373,
+			"attempts": 1,
+			"request": {
+				"method": "POST",
+				"body": {
+					"model": "Qwen/Qwen3.8-27B-FP8",
+					"messages": [
+						{
+							"role": "system",
+							"content": "A first pass filled this JSON schema from a document. Each value must contain only what its own field is for, and nothing that belongs to another field or to no field. Return the same object with every such value corrected. Do not invent, and do not change a value you cannot correct from the field names and descriptions alone. Return only the JSON object.\n\nRequired JSON schema:\n{\n  \"type\": \"object\",\n  \"properties\": {\n    \"form_tracking_number\": {\n      \"type\": \"string\"\n    },\n    \"organization_name\": {\n      \"type\": \"string\",\n      \"description\": \"Block 4 organization name, without the address\"\n    },\n    \"work_order_number\": {\n      \"type\": \"string\"\n    },\n    \"item_description\": {\n      \"type\": \"string\"\n    },\n    \"part_number\": {\n      \"type\": \"string\"\n    },\n    \"quantity\": {\n      \"type\": \"integer\"\n    },\n    \"serial_number\": {\n      \"type\": \"string\"\n    },\n    \"status_work\": {\n      \"type\": \"string\"\n    },\n    \"remarks\": {\n      \"type\": \"string\"\n    },\n    \"block_13a_approved_design_data_checked\": {\n      \"type\": \"boolean\"\n    },\n    \"block_13a_non_approved_design_data_checked\": {\n      \"type\": \"boolean\"\n    },\n    \"block_14a_return_to_service_checked\": {\n      \"type\": \"boolean\"\n    },\n    \"block_14a_other_regulation_checked\": {\n      \"type\": \"boolean\"\n    },\n    \"approval_number\": {\n      \"type\": \"string\",\n      \"description\": \"Block 13c or 14c, whichever is filled\"\n    },\n    \"signer_name\": {\n      \"type\": \"string\"\n    },\n    \"signature_date\": {\n      \"type\": \"string\"\n    }\n  },\n  \"required\": [\n    \"form_tracking_number\",\n    \"organization_name\",\n    \"work_order_number\",\n    \"item_description\",\n    \"part_number\",\n    \"quantity\",\n    \"serial_number\",\n    \"status_work\",\n    \"remarks\",\n    \"block_13a_approved_design_data_checked\",\n    \"block_13a_non_approved_design_data_checked\",\n    \"block_14a_return_to_service_checked\",\n    \"block_14a_other_regulation_checked\",\n    \"approval_number\",\n    \"signer_name\",\n    \"signature_date\"\n  ]\n}"
+						},
+						{
+							"role": "user",
+							"content": "{\n  \"approval_number\": \"PC #62\",\n  \"block_13a_approved_design_data_checked\": false,\n  \"block_13a_non_approved_design_data_checked\": false,\n  \"block_14a_other_regulation_checked\": true,\n  \"block_14a_return_to_service_checked\": false,\n  \"form_tracking_number\": \"ACME-12345\",\n  \"item_description\": \"Fuel Control\",\n  \"organization_name\": \"Acme Airplane Company, 110 Aviation Place, Somewhere, OK (PC62)\",\n  \"part_number\": \"PW54667\",\n  \"quantity\": 1,\n  \"remarks\": \"Rebuilt (altered) to original PAH’s specifications.\",\n  \"serial_number\": \"N/A\",\n  \"signature_date\": \"30 Apr 2008\",\n  \"signer_name\": \"A. Inspector\",\n  \"status_work\": \"See Block 12\",\n  \"work_order_number\": \"WO 98765\"\n}"
+						}
+					],
+					"max_completion_tokens": 2048,
+					"response_format": {
+						"type": "json_schema",
+						"json_schema": {
+							"name": "doc_field_extraction",
+							"strict": true,
+							"schema": {
+								"type": "object",
+								"properties": {
+									"form_tracking_number": {
+										"type": "string"
+									},
+									"organization_name": {
+										"type": "string",
+										"description": "Block 4 organization name, without the address"
+									},
+									"work_order_number": {
+										"type": "string"
+									},
+									"item_description": {
+										"type": "string"
+									},
+									"part_number": {
+										"type": "string"
+									},
+									"quantity": {
+										"type": "integer"
+									},
+									"serial_number": {
+										"type": "string"
+									},
+									"status_work": {
+										"type": "string"
+									},
+									"remarks": {
+										"type": "string"
+									},
+									"block_13a_approved_design_data_checked": {
+										"type": "boolean"
+									},
+									"block_13a_non_approved_design_data_checked": {
+										"type": "boolean"
+									},
+									"block_14a_return_to_service_checked": {
+										"type": "boolean"
+									},
+									"block_14a_other_regulation_checked": {
+										"type": "boolean"
+									},
+									"approval_number": {
+										"type": "string",
+										"description": "Block 13c or 14c, whichever is filled"
+									},
+									"signer_name": {
+										"type": "string"
+									},
+									"signature_date": {
+										"type": "string"
+									}
+								},
+								"required": [
+									"form_tracking_number",
+									"organization_name",
+									"work_order_number",
+									"item_description",
+									"part_number",
+									"quantity",
+									"serial_number",
+									"status_work",
+									"remarks",
+									"block_13a_approved_design_data_checked",
+									"block_13a_non_approved_design_data_checked",
+									"block_14a_return_to_service_checked",
+									"block_14a_other_regulation_checked",
+									"approval_number",
+									"signer_name",
+									"signature_date"
+								]
+							}
+						}
+					}
+				}
+			},
+			"response": {
+				"headers": {
+					"date": "Tue, 22 Sep 2026 21:08:41 GMT",
+					"content-type": "application/json",
+					"x-sie-credits-debited": "78",
+					"x-sie-execution-binding-sha256": "68d32bec4c2abfc26467ba667b64d8c67ed43a70d95f8a1dbdb1d3ea1562aa25",
+					"x-sie-execution-identity-sha256": "7719d7b34e734a9238aa4e0a0da794dbea44c4e6e2e9b8d9a30486757875d23a",
+					"x-sie-model-revision": "8bd714204e67a1c6c81f84b0dc486b6a6e96e943c42ff488f6b3cbf936e07955",
+					"x-sie-request-id": "01a0caf2-cb00-7020-a959-1c9aefde40b8",
+					"x-sie-server-version": "0.7.3",
+					"x-sie-units-input-tokens": "845",
+					"x-sie-units-output-tokens": "225",
+					"x-sie-version": "0.7.3",
+					"x-sie-worker": "queue:01a0caf2-cb00-7020-a959-1c9aefde40b8"
+				},
+				"body": {
+					"choices": [
+						{
+							"finish_reason": "stop",
+							"index": 0,
+							"logprobs": null,
+							"message": {
+								"content": "{\n  \"approval_number\": \"PC #62\",\n  \"block_13a_approved_design_data_checked\": false,\n  \"block_13a_non_approved_design_data_checked\": false,\n  \"block_14a_other_regulation_checked\": true,\n  \"block_14a_return_to_service_checked\": false,\n  \"form_tracking_number\": \"ACME-12345\",\n  \"item_description\": \"Fuel Control\",\n  \"organization_name\": \"Acme Airplane Company\",\n  \"part_number\": \"PW54667\",\n  \"quantity\": 1,\n  \"remarks\": \"Rebuilt (altered) to original PAH’s specifications.\",\n  \"serial_number\": \"N/A\",\n  \"signature_date\": \"30 Apr 2008\",\n  \"signer_name\": \"A. Inspector\",\n  \"status_work\": \"See Block 12\",\n  \"work_order_number\": \"WO 98765\"\n}",
+								"role": "assistant"
+							}
+						}
+					],
+					"created": 1790111321,
+					"id": "chatcmpl-01a0caf2-cb00-7020-a959-1c9aefde40b8",
+					"model": "Qwen/Qwen3.8-27B-FP8",
+					"object": "chat.completion",
+					"system_fingerprint": "fp_3574fec4ad25145e",
+					"usage": {
+						"completion_tokens": 225,
+						"credits_charged": 78,
+						"prompt_tokens": 845,
+						"rate_book_version": "2026-09-05-production-bootstrap-v4",
+						"total_tokens": 1070
+					}
+				}
+			},
+			"request_sha256": "807996c9dc2767bab1a71ca06ead8db6ea943bb3891b734790c53f99a3d7d85b",
+			"response_sha256": "27a974e99c5fa2a84dd4e54d754c9c4a7cb1ebd4352bbe100556b337401205ce"
+		},
+		{
+			"slug": "faa-8130-3-export-flap__a2",
+			"arm": "a2",
+			"case": "faa-8130-3-export-flap",
+			"endpoint": "https://api.superlinked.com",
+			"path": "/v1/chat/completions",
+			"model": "Qwen/Qwen3.8-27B-FP8",
+			"model_revision": "8bd714204e67a1c6c81f84b0dc486b6a6e96e943c42ff488f6b3cbf936e07955",
+			"server_version": "0.7.3",
+			"status": 200,
+			"latency_s": 19.152,
+			"attempts": 1,
+			"request": {
+				"method": "POST",
+				"body": {
+					"model": "Qwen/Qwen3.8-27B-FP8",
+					"messages": [
+						{
+							"role": "system",
+							"content": "A first pass filled this JSON schema from a document. Each value must contain only what its own field is for, and nothing that belongs to another field or to no field. Return the same object with every such value corrected. Do not invent, and do not change a value you cannot correct from the field names and descriptions alone. Return only the JSON object.\n\nRequired JSON schema:\n{\n  \"type\": \"object\",\n  \"properties\": {\n    \"form_tracking_number\": {\n      \"type\": \"string\"\n    },\n    \"organization_name\": {\n      \"type\": \"string\",\n      \"description\": \"Block 4 organization name, without the address\"\n    },\n    \"work_order_number\": {\n      \"type\": \"string\"\n    },\n    \"item_description\": {\n      \"type\": \"string\"\n    },\n    \"part_number\": {\n      \"type\": \"string\"\n    },\n    \"quantity\": {\n      \"type\": \"integer\"\n    },\n    \"serial_number\": {\n      \"type\": \"string\"\n    },\n    \"status_work\": {\n      \"type\": \"string\"\n    },\n    \"remarks\": {\n      \"type\": \"string\"\n    },\n    \"block_13a_approved_design_data_checked\": {\n      \"type\": \"boolean\"\n    },\n    \"block_13a_non_approved_design_data_checked\": {\n      \"type\": \"boolean\"\n    },\n    \"block_14a_return_to_service_checked\": {\n      \"type\": \"boolean\"\n    },\n    \"block_14a_other_regulation_checked\": {\n      \"type\": \"boolean\"\n    },\n    \"approval_number\": {\n      \"type\": \"string\",\n      \"description\": \"Block 13c or 14c, whichever is filled\"\n    },\n    \"signer_name\": {\n      \"type\": \"string\"\n    },\n    \"signature_date\": {\n      \"type\": \"string\"\n    }\n  },\n  \"required\": [\n    \"form_tracking_number\",\n    \"organization_name\",\n    \"work_order_number\",\n    \"item_description\",\n    \"part_number\",\n    \"quantity\",\n    \"serial_number\",\n    \"status_work\",\n    \"remarks\",\n    \"block_13a_approved_design_data_checked\",\n    \"block_13a_non_approved_design_data_checked\",\n    \"block_14a_return_to_service_checked\",\n    \"block_14a_other_regulation_checked\",\n    \"approval_number\",\n    \"signer_name\",\n    \"signature_date\"\n  ]\n}"
+						},
+						{
+							"role": "user",
+							"content": "{\n  \"approval_number\": \"DMIR-000011-SW\",\n  \"block_13a_approved_design_data_checked\": true,\n  \"block_13a_non_approved_design_data_checked\": false,\n  \"block_14a_other_regulation_checked\": false,\n  \"block_14a_return_to_service_checked\": false,\n  \"form_tracking_number\": \"BE5432987\",\n  \"item_description\": \"Flap\",\n  \"organization_name\": \"Dave's Aircraft Parts Manufacturing\",\n  \"part_number\": \"C 54321\",\n  \"quantity\": 1,\n  \"remarks\": \"Export Airworthiness Approval – This article meets the special requirements of (enter country).\",\n  \"serial_number\": \"9876543\",\n  \"signature_date\": \"23 Oct 2007\",\n  \"signer_name\": \"A. Inspector\",\n  \"status_work\": \"NEW\",\n  \"work_order_number\": \"WO 2185\"\n}"
+						}
+					],
+					"max_completion_tokens": 2048,
+					"response_format": {
+						"type": "json_schema",
+						"json_schema": {
+							"name": "doc_field_extraction",
+							"strict": true,
+							"schema": {
+								"type": "object",
+								"properties": {
+									"form_tracking_number": {
+										"type": "string"
+									},
+									"organization_name": {
+										"type": "string",
+										"description": "Block 4 organization name, without the address"
+									},
+									"work_order_number": {
+										"type": "string"
+									},
+									"item_description": {
+										"type": "string"
+									},
+									"part_number": {
+										"type": "string"
+									},
+									"quantity": {
+										"type": "integer"
+									},
+									"serial_number": {
+										"type": "string"
+									},
+									"status_work": {
+										"type": "string"
+									},
+									"remarks": {
+										"type": "string"
+									},
+									"block_13a_approved_design_data_checked": {
+										"type": "boolean"
+									},
+									"block_13a_non_approved_design_data_checked": {
+										"type": "boolean"
+									},
+									"block_14a_return_to_service_checked": {
+										"type": "boolean"
+									},
+									"block_14a_other_regulation_checked": {
+										"type": "boolean"
+									},
+									"approval_number": {
+										"type": "string",
+										"description": "Block 13c or 14c, whichever is filled"
+									},
+									"signer_name": {
+										"type": "string"
+									},
+									"signature_date": {
+										"type": "string"
+									}
+								},
+								"required": [
+									"form_tracking_number",
+									"organization_name",
+									"work_order_number",
+									"item_description",
+									"part_number",
+									"quantity",
+									"serial_number",
+									"status_work",
+									"remarks",
+									"block_13a_approved_design_data_checked",
+									"block_13a_non_approved_design_data_checked",
+									"block_14a_return_to_service_checked",
+									"block_14a_other_regulation_checked",
+									"approval_number",
+									"signer_name",
+									"signature_date"
+								]
+							}
+						}
+					}
+				}
+			},
+			"response": {
+				"headers": {
+					"date": "Tue, 22 Sep 2026 21:09:00 GMT",
+					"content-type": "application/json",
+					"x-sie-credits-debited": "78",
+					"x-sie-execution-binding-sha256": "68d32bec4c2abfc26467ba667b64d8c67ed43a70d95f8a1dbdb1d3ea1562aa25",
+					"x-sie-execution-identity-sha256": "7719d7b34e734a9238aa4e0a0da794dbea44c4e6e2e9b8d9a30486757875d23a",
+					"x-sie-model-revision": "8bd714204e67a1c6c81f84b0dc486b6a6e96e943c42ff488f6b3cbf936e07955",
+					"x-sie-request-id": "01a0caf3-1089-7902-af59-e96973c275fe",
+					"x-sie-server-version": "0.7.3",
+					"x-sie-units-input-tokens": "842",
+					"x-sie-units-output-tokens": "238",
+					"x-sie-version": "0.7.3",
+					"x-sie-worker": "queue:01a0caf3-1089-7902-af59-e96973c275fe"
+				},
+				"body": {
+					"choices": [
+						{
+							"finish_reason": "stop",
+							"index": 0,
+							"logprobs": null,
+							"message": {
+								"content": "{\n  \"approval_number\": \"DMIR-000011-SW\",\n  \"block_13a_approved_design_data_checked\": true,\n  \"block_13a_non_approved_design_data_checked\": false,\n  \"block_14a_other_regulation_checked\": false,\n  \"block_14a_return_to_service_checked\": false,\n  \"form_tracking_number\": \"BE5432987\",\n  \"item_description\": \"Flap\",\n  \"organization_name\": \"Dave's Aircraft Parts Manufacturing\",\n  \"part_number\": \"C 54321\",\n  \"quantity\": 1,\n  \"remarks\": \"Export Airworthiness Approval – This article meets the special requirements of (enter country).\",\n  \"serial_number\": \"9876543\",\n  \"signature_date\": \"23 Oct 2007\",\n  \"signer_name\": \"A. Inspector\",\n  \"status_work\": \"NEW\",\n  \"work_order_number\": \"WO 2185\"\n}",
+								"role": "assistant"
+							}
+						}
+					],
+					"created": 1790111340,
+					"id": "chatcmpl-01a0caf3-1089-7902-af59-e96973c275fe",
+					"model": "Qwen/Qwen3.8-27B-FP8",
+					"object": "chat.completion",
+					"system_fingerprint": "fp_3574fec4ad25145e",
+					"usage": {
+						"completion_tokens": 238,
+						"credits_charged": 78,
+						"prompt_tokens": 842,
+						"rate_book_version": "2026-09-05-production-bootstrap-v4",
+						"total_tokens": 1080
+					}
+				}
+			},
+			"request_sha256": "e1ff0a3a854f15f2e8498ab86c8acbd53569123b4f9306720fec97eefd6f0c5f",
+			"response_sha256": "ac350d5af79f13e926b0866abfb0f01bbae980240b46731bfc813ccd86eea5dd"
+		},
+		{
+			"slug": "osha-300-log-example__a2",
+			"arm": "a2",
+			"case": "osha-300-log-example",
+			"endpoint": "https://api.superlinked.com",
+			"path": "/v1/chat/completions",
+			"model": "Qwen/Qwen3.8-27B-FP8",
+			"model_revision": "8bd714204e67a1c6c81f84b0dc486b6a6e96e943c42ff488f6b3cbf936e07955",
+			"server_version": "0.7.3",
+			"status": 200,
+			"latency_s": 48.237,
+			"attempts": 1,
+			"request": {
+				"method": "POST",
+				"body": {
+					"model": "Qwen/Qwen3.8-27B-FP8",
+					"messages": [
+						{
+							"role": "system",
+							"content": "A first pass filled this JSON schema from a document. Each value must contain only what its own field is for, and nothing that belongs to another field or to no field. Return the same object with every such value corrected. Do not invent, and do not change a value you cannot correct from the field names and descriptions alone. Return only the JSON object.\n\nRequired JSON schema:\n{\n  \"type\": \"object\",\n  \"properties\": {\n    \"establishment_name\": {\n      \"type\": \"string\"\n    },\n    \"city\": {\n      \"type\": \"string\"\n    },\n    \"state\": {\n      \"type\": \"string\"\n    },\n    \"cases\": {\n      \"type\": \"array\",\n      \"description\": \"One entry per filled row\",\n      \"items\": {\n        \"type\": \"object\",\n        \"properties\": {\n          \"case_number\": {\n            \"type\": \"integer\"\n          },\n          \"employee_name\": {\n            \"type\": \"string\"\n          },\n          \"job_title\": {\n            \"type\": \"string\"\n          },\n          \"date_of_injury\": {\n            \"type\": \"string\",\n            \"description\": \"month/day as written\"\n          },\n          \"location\": {\n            \"type\": \"string\"\n          },\n          \"description\": {\n            \"type\": \"string\"\n          },\n          \"outcome\": {\n            \"type\": \"string\",\n            \"enum\": [\n              \"death\",\n              \"days_away_from_work\",\n              \"job_transfer_or_restriction\",\n              \"other_recordable\"\n            ]\n          },\n          \"days_away_from_work\": {\n            \"type\": \"integer\",\n            \"description\": \"0 when blank\"\n          },\n          \"days_job_transfer_or_restriction\": {\n            \"type\": \"integer\",\n            \"description\": \"0 when blank\"\n          },\n          \"case_type\": {\n            \"type\": \"string\",\n            \"enum\": [\n              \"injury\",\n              \"skin_disorder\",\n              \"respiratory_condition\",\n              \"poisoning\",\n              \"hearing_loss\",\n              \"all_other_illnesses\"\n            ]\n          }\n        },\n        \"required\": [\n          \"case_number\",\n          \"employee_name\",\n          \"job_title\",\n          \"date_of_injury\",\n          \"location\",\n          \"description\",\n          \"outcome\",\n          \"days_away_from_work\",\n          \"days_job_transfer_or_restriction\",\n          \"case_type\"\n        ]\n      }\n    }\n  },\n  \"required\": [\n    \"establishment_name\",\n    \"city\",\n    \"state\",\n    \"cases\"\n  ]\n}"
+						},
+						{
+							"role": "user",
+							"content": "{\n  \"cases\": [\n    {\n      \"case_number\": 1,\n      \"case_type\": \"injury\",\n      \"date_of_injury\": \"5/25\",\n      \"days_away_from_work\": 12,\n      \"days_job_transfer_or_restriction\": 15,\n      \"description\": \"fracture, left arm and left leg, fell from ladder\",\n      \"employee_name\": \"Mark Bagnin\",\n      \"job_title\": \"Welder\",\n      \"location\": \"basement\",\n      \"outcome\": \"days_away_from_work\"\n    },\n    {\n      \"case_number\": 2,\n      \"case_type\": \"injury\",\n      \"date_of_injury\": \"7/12\",\n      \"days_away_from_work\": 0,\n      \"days_job_transfer_or_restriction\": 30,\n      \"description\": \"poisoning from lead fumes\",\n      \"employee_name\": \"Shana Alexander\",\n      \"job_title\": \"Foundry man\",\n      \"location\": \"pouring deck\",\n      \"outcome\": \"job_transfer_or_restriction\"\n    },\n    {\n      \"case_number\": 3,\n      \"case_type\": \"injury\",\n      \"date_of_injury\": \"8/5\",\n      \"days_away_from_work\": 7,\n      \"days_job_transfer_or_restriction\": 30,\n      \"description\": \"broken leg, fell over box\",\n      \"employee_name\": \"Sam Sander\",\n      \"job_title\": \"Electrician\",\n      \"location\": \"2nd floor storeroom\",\n      \"outcome\": \"days_away_from_work\"\n    },\n    {\n      \"case_number\": 4,\n      \"case_type\": \"injury\",\n      \"date_of_injury\": \"9/17\",\n      \"days_away_from_work\": 3,\n      \"days_job_transfer_or_restriction\": 0,\n      \"description\": \"back strain lifting a box\",\n      \"employee_name\": \"Ralph Bocciella\",\n      \"job_title\": \"Laborer\",\n      \"location\": \"packaging department\",\n      \"outcome\": \"other_recordable\"\n    },\n    {\n      \"case_number\": 5,\n      \"case_type\": \"injury\",\n      \"date_of_injury\": \"10/23\",\n      \"days_away_from_work\": 0,\n      \"days_job_transfer_or_restriction\": 0,\n      \"description\": \"dust in left eye\",\n      \"employee_name\": \"Jarrod Daniels\",\n      \"job_title\": \"Machine opr.\",\n      \"location\": \"production floor\",\n      \"outcome\": \"other_recordable\"\n    }\n  ],\n  \"city\": \"Anywhere\",\n  \"establishment_name\": \"XYZ company\",\n  \"state\": \"MA\"\n}"
+						}
+					],
+					"max_completion_tokens": 2048,
+					"response_format": {
+						"type": "json_schema",
+						"json_schema": {
+							"name": "doc_field_extraction",
+							"strict": true,
+							"schema": {
+								"type": "object",
+								"properties": {
+									"establishment_name": {
+										"type": "string"
+									},
+									"city": {
+										"type": "string"
+									},
+									"state": {
+										"type": "string"
+									},
+									"cases": {
+										"type": "array",
+										"description": "One entry per filled row",
+										"items": {
+											"type": "object",
+											"properties": {
+												"case_number": {
+													"type": "integer"
+												},
+												"employee_name": {
+													"type": "string"
+												},
+												"job_title": {
+													"type": "string"
+												},
+												"date_of_injury": {
+													"type": "string",
+													"description": "month/day as written"
+												},
+												"location": {
+													"type": "string"
+												},
+												"description": {
+													"type": "string"
+												},
+												"outcome": {
+													"type": "string",
+													"enum": [
+														"death",
+														"days_away_from_work",
+														"job_transfer_or_restriction",
+														"other_recordable"
+													]
+												},
+												"days_away_from_work": {
+													"type": "integer",
+													"description": "0 when blank"
+												},
+												"days_job_transfer_or_restriction": {
+													"type": "integer",
+													"description": "0 when blank"
+												},
+												"case_type": {
+													"type": "string",
+													"enum": [
+														"injury",
+														"skin_disorder",
+														"respiratory_condition",
+														"poisoning",
+														"hearing_loss",
+														"all_other_illnesses"
+													]
+												}
+											},
+											"required": [
+												"case_number",
+												"employee_name",
+												"job_title",
+												"date_of_injury",
+												"location",
+												"description",
+												"outcome",
+												"days_away_from_work",
+												"days_job_transfer_or_restriction",
+												"case_type"
+											]
+										}
+									}
+								},
+								"required": [
+									"establishment_name",
+									"city",
+									"state",
+									"cases"
+								]
+							}
+						}
+					}
+				}
+			},
+			"response": {
+				"headers": {
+					"date": "Tue, 22 Sep 2026 21:09:49 GMT",
+					"content-type": "application/json",
+					"x-sie-credits-debited": "140",
+					"x-sie-execution-binding-sha256": "68d32bec4c2abfc26467ba667b64d8c67ed43a70d95f8a1dbdb1d3ea1562aa25",
+					"x-sie-execution-identity-sha256": "7719d7b34e734a9238aa4e0a0da794dbea44c4e6e2e9b8d9a30486757875d23a",
+					"x-sie-model-revision": "8bd714204e67a1c6c81f84b0dc486b6a6e96e943c42ff488f6b3cbf936e07955",
+					"x-sie-request-id": "01a0caf3-5a99-7652-8333-aec0160dd3db",
+					"x-sie-server-version": "0.7.3",
+					"x-sie-units-input-tokens": "1289",
+					"x-sie-units-output-tokens": "654",
+					"x-sie-version": "0.7.3",
+					"x-sie-worker": "queue:01a0caf3-5a99-7652-8333-aec0160dd3db"
+				},
+				"body": {
+					"choices": [
+						{
+							"finish_reason": "stop",
+							"index": 0,
+							"logprobs": null,
+							"message": {
+								"content": "{\n  \"cases\": [\n    {\n      \"case_number\": 1,\n      \"case_type\": \"injury\",\n      \"date_of_injury\": \"5/25\",\n      \"days_away_from_work\": 12,\n      \"days_job_transfer_or_restriction\": 15,\n      \"description\": \"fracture, left arm and left leg, fell from ladder\",\n      \"employee_name\": \"Mark Bagnin\",\n      \"job_title\": \"Welder\",\n      \"location\": \"basement\",\n      \"outcome\": \"days_away_from_work\"\n    },\n    {\n      \"case_number\": 2,\n      \"case_type\": \"poisoning\",\n      \"date_of_injury\": \"7/12\",\n      \"days_away_from_work\": 0,\n      \"days_job_transfer_or_restriction\": 30,\n      \"description\": \"poisoning from lead fumes\",\n      \"employee_name\": \"Shana Alexander\",\n      \"job_title\": \"Foundry man\",\n      \"location\": \"pouring deck\",\n      \"outcome\": \"job_transfer_or_restriction\"\n    },\n    {\n      \"case_number\": 3,\n      \"case_type\": \"injury\",\n      \"date_of_injury\": \"8/5\",\n      \"days_away_from_work\": 7,\n      \"days_job_transfer_or_restriction\": 30,\n      \"description\": \"broken leg, fell over box\",\n      \"employee_name\": \"Sam Sander\",\n      \"job_title\": \"Electrician\",\n      \"location\": \"2nd floor storeroom\",\n      \"outcome\": \"days_away_from_work\"\n    },\n    {\n      \"case_number\": 4,\n      \"case_type\": \"injury\",\n      \"date_of_injury\": \"9/17\",\n      \"days_away_from_work\": 3,\n      \"days_job_transfer_or_restriction\": 0,\n      \"description\": \"back strain lifting a box\",\n      \"employee_name\": \"Ralph Bocciella\",\n      \"job_title\": \"Laborer\",\n      \"location\": \"packaging department\",\n      \"outcome\": \"days_away_from_work\"\n    },\n    {\n      \"case_number\": 5,\n      \"case_type\": \"injury\",\n      \"date_of_injury\": \"10/23\",\n      \"days_away_from_work\": 0,\n      \"days_job_transfer_or_restriction\": 0,\n      \"description\": \"dust in left eye\",\n      \"employee_name\": \"Jarrod Daniels\",\n      \"job_title\": \"Machine opr.\",\n      \"location\": \"production floor\",\n      \"outcome\": \"other_recordable\"\n    }\n  ],\n  \"city\": \"Anywhere\",\n  \"establishment_name\": \"XYZ company\",\n  \"state\": \"MA\"\n}",
+								"role": "assistant"
+							}
+						}
+					],
+					"created": 1790111388,
+					"id": "chatcmpl-01a0caf3-5a99-7652-8333-aec0160dd3db",
+					"model": "Qwen/Qwen3.8-27B-FP8",
+					"object": "chat.completion",
+					"system_fingerprint": "fp_3574fec4ad25145e",
+					"usage": {
+						"completion_tokens": 654,
+						"credits_charged": 140,
+						"prompt_tokens": 1289,
+						"rate_book_version": "2026-09-05-production-bootstrap-v4",
+						"total_tokens": 1943
+					}
+				}
+			},
+			"request_sha256": "610894a635b5782cd8b6ace52f1f7cb00d6419e99ff3e7f5893cb1423fded47e",
+			"response_sha256": "81750bcd2a681d421f29e61e89e41fce2b6b785648674507e12b6af9f14a1ecc"
+		},
+		{
+			"slug": "nist-srm-1155a-table-1__a2",
+			"arm": "a2",
+			"case": "nist-srm-1155a-table-1",
+			"endpoint": "https://api.superlinked.com",
+			"path": "/v1/chat/completions",
+			"model": "Qwen/Qwen3.8-27B-FP8",
+			"model_revision": "8bd714204e67a1c6c81f84b0dc486b6a6e96e943c42ff488f6b3cbf936e07955",
+			"server_version": "0.7.3",
+			"status": 200,
+			"latency_s": 69.5768,
+			"attempts": 1,
+			"request": {
+				"method": "POST",
+				"body": {
+					"model": "Qwen/Qwen3.8-27B-FP8",
+					"messages": [
+						{
+							"role": "system",
+							"content": "A first pass filled this JSON schema from a document. Each value must contain only what its own field is for, and nothing that belongs to another field or to no field. Return the same object with every such value corrected. Do not invent, and do not change a value you cannot correct from the field names and descriptions alone. Return only the JSON object.\n\nRequired JSON schema:\n{\n  \"type\": \"object\",\n  \"properties\": {\n    \"srm_number\": {\n      \"type\": \"string\"\n    },\n    \"certified_values\": {\n      \"type\": \"array\",\n      \"description\": \"Rows of Table 1, certified mass fraction values\",\n      \"items\": {\n        \"type\": \"object\",\n        \"properties\": {\n          \"element\": {\n            \"type\": \"string\"\n          },\n          \"symbol\": {\n            \"type\": \"string\"\n          },\n          \"mass_fraction_percent\": {\n            \"type\": \"number\"\n          },\n          \"expanded_uncertainty_percent\": {\n            \"type\": \"number\"\n          },\n          \"coverage_factor_k\": {\n            \"type\": \"number\"\n          }\n        },\n        \"required\": [\n          \"element\",\n          \"symbol\",\n          \"mass_fraction_percent\",\n          \"expanded_uncertainty_percent\",\n          \"coverage_factor_k\"\n        ]\n      }\n    }\n  },\n  \"required\": [\n    \"srm_number\",\n    \"certified_values\"\n  ]\n}"
+						},
+						{
+							"role": "user",
+							"content": "{\n  \"certified_values\": [\n    {\n      \"coverage_factor_k\": 2.45,\n      \"element\": \"Carbon (C)\",\n      \"expanded_uncertainty_percent\": 0.0036,\n      \"mass_fraction_percent\": 0.026,\n      \"symbol\": \"C\"\n    },\n    {\n      \"coverage_factor_k\": 2.26,\n      \"element\": \"Cobalt (Co)\",\n      \"expanded_uncertainty_percent\": 0.018,\n      \"mass_fraction_percent\": 0.225,\n      \"symbol\": \"Co\"\n    },\n    {\n      \"coverage_factor_k\": 2.2,\n      \"element\": \"Chromium (Cr)\",\n      \"expanded_uncertainty_percent\": 0.099,\n      \"mass_fraction_percent\": 17.803,\n      \"symbol\": \"Cr\"\n    },\n    {\n      \"coverage_factor_k\": 2.2,\n      \"element\": \"Copper (Cu)\",\n      \"expanded_uncertainty_percent\": 0.005,\n      \"mass_fraction_percent\": 0.2431,\n      \"symbol\": \"Cu\"\n    },\n    {\n      \"coverage_factor_k\": 2.0,\n      \"element\": \"Iron (Fe)\",\n      \"expanded_uncertainty_percent\": 0.12,\n      \"mass_fraction_percent\": 64.71,\n      \"symbol\": \"Fe\"\n    },\n    {\n      \"coverage_factor_k\": 2.06,\n      \"element\": \"Manganese (Mn)\",\n      \"expanded_uncertainty_percent\": 0.06,\n      \"mass_fraction_percent\": 1.593,\n      \"symbol\": \"Mn\"\n    },\n    {\n      \"coverage_factor_k\": 2.18,\n      \"element\": \"Molybdenum (Mo)\",\n      \"expanded_uncertainty_percent\": 0.015,\n      \"mass_fraction_percent\": 2.188,\n      \"symbol\": \"Mo\"\n    },\n    {\n      \"coverage_factor_k\": 3.18,\n      \"element\": \"Niobium (Nb)\",\n      \"expanded_uncertainty_percent\": 0.0014,\n      \"mass_fraction_percent\": 0.0082,\n      \"symbol\": \"Nb\"\n    },\n    {\n      \"coverage_factor_k\": 2.2,\n      \"element\": \"Nickel (Ni)\",\n      \"expanded_uncertainty_percent\": 0.056,\n      \"mass_fraction_percent\": 12.471,\n      \"symbol\": \"Ni\"\n    },\n    {\n      \"coverage_factor_k\": 2.11,\n      \"element\": \"Phosphorus (P)\",\n      \"expanded_uncertainty_percent\": 0.0012,\n      \"mass_fraction_percent\": 0.0271,\n      \"symbol\": \"P\"\n    },\n    {\n      \"coverage_factor_k\": 2.03,\n      \"element\": \"Silicon (Si)\",\n      \"expanded_uncertainty_percent\": 0.017,\n      \"mass_fraction_percent\": 0.521,\n      \"symbol\": \"Si\"\n    },\n    {\n      \"coverage_factor_k\": 2.45,\n      \"element\": \"Titanium (Ti)\",\n      \"expanded_uncertainty_percent\": 0.0012,\n      \"mass_fraction_percent\": 0.0039,\n      \"symbol\": \"Ti\"\n    },\n    {\n      \"coverage_factor_k\": 2.23,\n      \"element\": \"Vanadium (V)\",\n      \"expanded_uncertainty_percent\": 0.0046,\n      \"mass_fraction_percent\": 0.0725,\n      \"symbol\": \"V\"\n    },\n    {\n      \"coverage_factor_k\": 2.45,\n      \"element\": \"Tungsten (W)\",\n      \"expanded_uncertainty_percent\": 0.0059,\n      \"mass_fraction_percent\": 0.0809,\n      \"symbol\": \"W\"\n    }\n  ],\n  \"srm_number\": \"SRM 1155a\"\n}"
+						}
+					],
+					"max_completion_tokens": 2048,
+					"response_format": {
+						"type": "json_schema",
+						"json_schema": {
+							"name": "doc_field_extraction",
+							"strict": true,
+							"schema": {
+								"type": "object",
+								"properties": {
+									"srm_number": {
+										"type": "string"
+									},
+									"certified_values": {
+										"type": "array",
+										"description": "Rows of Table 1, certified mass fraction values",
+										"items": {
+											"type": "object",
+											"properties": {
+												"element": {
+													"type": "string"
+												},
+												"symbol": {
+													"type": "string"
+												},
+												"mass_fraction_percent": {
+													"type": "number"
+												},
+												"expanded_uncertainty_percent": {
+													"type": "number"
+												},
+												"coverage_factor_k": {
+													"type": "number"
+												}
+											},
+											"required": [
+												"element",
+												"symbol",
+												"mass_fraction_percent",
+												"expanded_uncertainty_percent",
+												"coverage_factor_k"
+											]
+										}
+									}
+								},
+								"required": [
+									"srm_number",
+									"certified_values"
+								]
+							}
+						}
+					}
+				}
+			},
+			"response": {
+				"headers": {
+					"date": "Tue, 22 Sep 2026 21:10:58 GMT",
+					"content-type": "application/json",
+					"x-sie-credits-debited": "166",
+					"x-sie-execution-binding-sha256": "68d32bec4c2abfc26467ba667b64d8c67ed43a70d95f8a1dbdb1d3ea1562aa25",
+					"x-sie-execution-identity-sha256": "7719d7b34e734a9238aa4e0a0da794dbea44c4e6e2e9b8d9a30486757875d23a",
+					"x-sie-model-revision": "8bd714204e67a1c6c81f84b0dc486b6a6e96e943c42ff488f6b3cbf936e07955",
+					"x-sie-request-id": "01a0caf4-16ca-71c2-b89c-868cd3620290",
+					"x-sie-server-version": "0.7.3",
+					"x-sie-units-input-tokens": "1336",
+					"x-sie-units-output-tokens": "956",
+					"x-sie-version": "0.7.3",
+					"x-sie-worker": "queue:01a0caf4-16ca-71c2-b89c-868cd3620290"
+				},
+				"body": {
+					"choices": [
+						{
+							"finish_reason": "stop",
+							"index": 0,
+							"logprobs": null,
+							"message": {
+								"content": "{\n  \"certified_values\": [\n    {\n      \"coverage_factor_k\": 2.45,\n      \"element\": \"Carbon\",\n      \"expanded_uncertainty_percent\": 0.0036,\n      \"mass_fraction_percent\": 0.026,\n      \"symbol\": \"C\"\n    },\n    {\n      \"coverage_factor_k\": 2.26,\n      \"element\": \"Cobalt\",\n      \"expanded_uncertainty_percent\": 0.018,\n      \"mass_fraction_percent\": 0.225,\n      \"symbol\": \"Co\"\n    },\n    {\n      \"coverage_factor_k\": 2.2,\n      \"element\": \"Chromium\",\n      \"expanded_uncertainty_percent\": 0.099,\n      \"mass_fraction_percent\": 17.803,\n      \"symbol\": \"Cr\"\n    },\n    {\n      \"coverage_factor_k\": 2.2,\n      \"element\": \"Copper\",\n      \"expanded_uncertainty_percent\": 0.005,\n      \"mass_fraction_percent\": 0.2431,\n      \"symbol\": \"Cu\"\n    },\n    {\n      \"coverage_factor_k\": 2.0,\n      \"element\": \"Iron\",\n      \"expanded_uncertainty_percent\": 0.12,\n      \"mass_fraction_percent\": 64.71,\n      \"symbol\": \"Fe\"\n    },\n    {\n      \"coverage_factor_k\": 2.06,\n      \"element\": \"Manganese\",\n      \"expanded_uncertainty_percent\": 0.06,\n      \"mass_fraction_percent\": 1.593,\n      \"symbol\": \"Mn\"\n    },\n    {\n      \"coverage_factor_k\": 2.18,\n      \"element\": \"Molybdenum\",\n      \"expanded_uncertainty_percent\": 0.015,\n      \"mass_fraction_percent\": 2.188,\n      \"symbol\": \"Mo\"\n    },\n    {\n      \"coverage_factor_k\": 3.18,\n      \"element\": \"Niobium\",\n      \"expanded_uncertainty_percent\": 0.0014,\n      \"mass_fraction_percent\": 0.0082,\n      \"symbol\": \"Nb\"\n    },\n    {\n      \"coverage_factor_k\": 2.2,\n      \"element\": \"Nickel\",\n      \"expanded_uncertainty_percent\": 0.056,\n      \"mass_fraction_percent\": 12.471,\n      \"symbol\": \"Ni\"\n    },\n    {\n      \"coverage_factor_k\": 2.11,\n      \"element\": \"Phosphorus\",\n      \"expanded_uncertainty_percent\": 0.0012,\n      \"mass_fraction_percent\": 0.0271,\n      \"symbol\": \"P\"\n    },\n    {\n      \"coverage_factor_k\": 2.03,\n      \"element\": \"Silicon\",\n      \"expanded_uncertainty_percent\": 0.017,\n      \"mass_fraction_percent\": 0.521,\n      \"symbol\": \"Si\"\n    },\n    {\n      \"coverage_factor_k\": 2.45,\n      \"element\": \"Titanium\",\n      \"expanded_uncertainty_percent\": 0.0012,\n      \"mass_fraction_percent\": 0.0039,\n      \"symbol\": \"Ti\"\n    },\n    {\n      \"coverage_factor_k\": 2.23,\n      \"element\": \"Vanadium\",\n      \"expanded_uncertainty_percent\": 0.0046,\n      \"mass_fraction_percent\": 0.0725,\n      \"symbol\": \"V\"\n    },\n    {\n      \"coverage_factor_k\": 2.45,\n      \"element\": \"Tungsten\",\n      \"expanded_uncertainty_percent\": 0.0059,\n      \"mass_fraction_percent\": 0.0809,\n      \"symbol\": \"W\"\n    }\n  ],\n  \"srm_number\": \"SRM 1155a\"\n}",
+								"role": "assistant"
+							}
+						}
+					],
+					"created": 1790111458,
+					"id": "chatcmpl-01a0caf4-16ca-71c2-b89c-868cd3620290",
+					"model": "Qwen/Qwen3.8-27B-FP8",
+					"object": "chat.completion",
+					"system_fingerprint": "fp_3574fec4ad25145e",
+					"usage": {
+						"completion_tokens": 956,
+						"credits_charged": 166,
+						"prompt_tokens": 1336,
+						"rate_book_version": "2026-09-05-production-bootstrap-v4",
+						"total_tokens": 2292
+					}
+				}
+			},
+			"request_sha256": "d4fd7d9dc038b1ffb1c28c9e2374f8b7478298bbba424b347e54f64f3e79bd57",
+			"response_sha256": "dc94ee37c789be17c11182c370c733375b7563b76f4ba667b24eaa60f34ccd79"
+		},
+		{
+			"slug": "wolters-kluwer-invoice__a2",
+			"arm": "a2",
+			"case": "wolters-kluwer-invoice",
+			"endpoint": "https://api.superlinked.com",
+			"path": "/v1/chat/completions",
+			"model": "Qwen/Qwen3.8-27B-FP8",
+			"model_revision": "8bd714204e67a1c6c81f84b0dc486b6a6e96e943c42ff488f6b3cbf936e07955",
+			"server_version": "0.7.3",
+			"status": 200,
+			"latency_s": 18.4914,
+			"attempts": 1,
+			"request": {
+				"method": "POST",
+				"body": {
+					"model": "Qwen/Qwen3.8-27B-FP8",
+					"messages": [
+						{
+							"role": "system",
+							"content": "A first pass filled this JSON schema from a document. Each value must contain only what its own field is for, and nothing that belongs to another field or to no field. Return the same object with every such value corrected. Do not invent, and do not change a value you cannot correct from the field names and descriptions alone. Return only the JSON object.\n\nRequired JSON schema:\n{\n  \"type\": \"object\",\n  \"properties\": {\n    \"invoice_number\": {\n      \"type\": \"string\"\n    },\n    \"invoice_date\": {\n      \"type\": \"string\"\n    },\n    \"customer_id\": {\n      \"type\": \"string\"\n    },\n    \"sold_to\": {\n      \"type\": \"string\",\n      \"description\": \"Organization name only\"\n    },\n    \"line_items\": {\n      \"type\": \"array\",\n      \"items\": {\n        \"type\": \"object\",\n        \"properties\": {\n          \"quantity\": {\n            \"type\": \"integer\"\n          },\n          \"item\": {\n            \"type\": \"string\"\n          },\n          \"unit_of_measure\": {\n            \"type\": \"string\"\n          },\n          \"media_description\": {\n            \"type\": \"string\"\n          },\n          \"amount\": {\n            \"type\": \"number\"\n          }\n        },\n        \"required\": [\n          \"quantity\",\n          \"item\",\n          \"unit_of_measure\",\n          \"media_description\",\n          \"amount\"\n        ]\n      }\n    },\n    \"subtotal\": {\n      \"type\": \"number\"\n    },\n    \"sales_tax\": {\n      \"type\": \"number\"\n    },\n    \"amount_due\": {\n      \"type\": \"number\"\n    },\n    \"currency\": {\n      \"type\": \"string\"\n    },\n    \"payment_terms\": {\n      \"type\": \"string\"\n    },\n    \"due_date\": {\n      \"type\": \"string\"\n    },\n    \"remit_to\": {\n      \"type\": \"string\",\n      \"description\": \"Payee name for checks\"\n    },\n    \"credit_card_type_checked\": {\n      \"type\": \"string\",\n      \"enum\": [\n        \"visa\",\n        \"mastercard\",\n        \"amex\",\n        \"other\",\n        \"none\"\n      ]\n    }\n  },\n  \"required\": [\n    \"invoice_number\",\n    \"invoice_date\",\n    \"customer_id\",\n    \"sold_to\",\n    \"line_items\",\n    \"subtotal\",\n    \"sales_tax\",\n    \"amount_due\",\n    \"currency\",\n    \"payment_terms\",\n    \"due_date\",\n    \"remit_to\",\n    \"credit_card_type_checked\"\n  ]\n}"
+						},
+						{
+							"role": "user",
+							"content": "{\n  \"amount_due\": 3900.0,\n  \"credit_card_type_checked\": \"visa\",\n  \"currency\": \"USD\",\n  \"customer_id\": \"UCSFD00005\",\n  \"due_date\": \"11 Sep 2016\",\n  \"invoice_date\": \"8/12/2016\",\n  \"invoice_number\": \"000277511\",\n  \"line_items\": [\n    {\n      \"amount\": 3900.0,\n      \"item\": \"OPEN ACCESS ARTICLE\",\n      \"media_description\": \"Academic Medicine\",\n      \"quantity\": 1,\n      \"unit_of_measure\": \"Each\"\n    }\n  ],\n  \"payment_terms\": \"NET 30\",\n  \"remit_to\": \"Wolters Kluwer Health, Inc.\\n16705 Collection Center Drive\\nChicago, IL 60693\",\n  \"sales_tax\": 0.0,\n  \"sold_to\": \"UCSF Department of Psychiatry\\n401 Parnassus Ave.\\nBox 0984-Mse\\nSan Francisco, CA 94143-0984\\nUnited States\",\n  \"subtotal\": 3900.0\n}"
+						}
+					],
+					"max_completion_tokens": 2048,
+					"response_format": {
+						"type": "json_schema",
+						"json_schema": {
+							"name": "doc_field_extraction",
+							"strict": true,
+							"schema": {
+								"type": "object",
+								"properties": {
+									"invoice_number": {
+										"type": "string"
+									},
+									"invoice_date": {
+										"type": "string"
+									},
+									"customer_id": {
+										"type": "string"
+									},
+									"sold_to": {
+										"type": "string",
+										"description": "Organization name only"
+									},
+									"line_items": {
+										"type": "array",
+										"items": {
+											"type": "object",
+											"properties": {
+												"quantity": {
+													"type": "integer"
+												},
+												"item": {
+													"type": "string"
+												},
+												"unit_of_measure": {
+													"type": "string"
+												},
+												"media_description": {
+													"type": "string"
+												},
+												"amount": {
+													"type": "number"
+												}
+											},
+											"required": [
+												"quantity",
+												"item",
+												"unit_of_measure",
+												"media_description",
+												"amount"
+											]
+										}
+									},
+									"subtotal": {
+										"type": "number"
+									},
+									"sales_tax": {
+										"type": "number"
+									},
+									"amount_due": {
+										"type": "number"
+									},
+									"currency": {
+										"type": "string"
+									},
+									"payment_terms": {
+										"type": "string"
+									},
+									"due_date": {
+										"type": "string"
+									},
+									"remit_to": {
+										"type": "string",
+										"description": "Payee name for checks"
+									},
+									"credit_card_type_checked": {
+										"type": "string",
+										"enum": [
+											"visa",
+											"mastercard",
+											"amex",
+											"other",
+											"none"
+										]
+									}
+								},
+								"required": [
+									"invoice_number",
+									"invoice_date",
+									"customer_id",
+									"sold_to",
+									"line_items",
+									"subtotal",
+									"sales_tax",
+									"amount_due",
+									"currency",
+									"payment_terms",
+									"due_date",
+									"remit_to",
+									"credit_card_type_checked"
+								]
+							}
+						}
+					}
+				}
+			},
+			"response": {
+				"headers": {
+					"date": "Tue, 22 Sep 2026 21:11:17 GMT",
+					"content-type": "application/json",
+					"x-sie-credits-debited": "85",
+					"x-sie-execution-binding-sha256": "68d32bec4c2abfc26467ba667b64d8c67ed43a70d95f8a1dbdb1d3ea1562aa25",
+					"x-sie-execution-identity-sha256": "7719d7b34e734a9238aa4e0a0da794dbea44c4e6e2e9b8d9a30486757875d23a",
+					"x-sie-model-revision": "8bd714204e67a1c6c81f84b0dc486b6a6e96e943c42ff488f6b3cbf936e07955",
+					"x-sie-request-id": "01a0caf5-26d3-7752-8182-929d0bbf7cfe",
+					"x-sie-server-version": "0.7.3",
+					"x-sie-units-input-tokens": "941",
+					"x-sie-units-output-tokens": "237",
+					"x-sie-version": "0.7.3",
+					"x-sie-worker": "queue:01a0caf5-26d3-7752-8182-929d0bbf7cfe"
+				},
+				"body": {
+					"choices": [
+						{
+							"finish_reason": "stop",
+							"index": 0,
+							"logprobs": null,
+							"message": {
+								"content": "{\n  \"amount_due\": 3900.0,\n  \"credit_card_type_checked\": \"visa\",\n  \"currency\": \"USD\",\n  \"customer_id\": \"UCSFD00005\",\n  \"due_date\": \"11 Sep 2016\",\n  \"invoice_date\": \"8/12/2016\",\n  \"invoice_number\": \"000277511\",\n  \"line_items\": [\n    {\n      \"amount\": 3900.0,\n      \"item\": \"OPEN ACCESS ARTICLE\",\n      \"media_description\": \"Academic Medicine\",\n      \"quantity\": 1,\n      \"unit_of_measure\": \"Each\"\n    }\n  ],\n  \"payment_terms\": \"NET 30\",\n  \"remit_to\": \"Wolters Kluwer Health, Inc.\",\n  \"sales_tax\": 0.0,\n  \"sold_to\": \"UCSF Department of Psychiatry\",\n  \"subtotal\": 3900.0\n}",
+								"role": "assistant"
+							}
+						}
+					],
+					"created": 1790111477,
+					"id": "chatcmpl-01a0caf5-26d3-7752-8182-929d0bbf7cfe",
+					"model": "Qwen/Qwen3.8-27B-FP8",
+					"object": "chat.completion",
+					"system_fingerprint": "fp_3574fec4ad25145e",
+					"usage": {
+						"completion_tokens": 237,
+						"credits_charged": 85,
+						"prompt_tokens": 941,
+						"rate_book_version": "2026-09-05-production-bootstrap-v4",
+						"total_tokens": 1178
+					}
+				}
+			},
+			"request_sha256": "7cd130cfce9f8ab82a9609af3ef04493757b102def96feef1a460febcc6abdfe",
+			"response_sha256": "899dcb2639bfbe602af3c3dc49af43d15173264f4a7287783f9ef7860004636d"
+		},
+		{
+			"slug": "usps-cn22-customs-declaration__a2",
+			"arm": "a2",
+			"case": "usps-cn22-customs-declaration",
+			"endpoint": "https://api.superlinked.com",
+			"path": "/v1/chat/completions",
+			"model": "Qwen/Qwen3.8-27B-FP8",
+			"model_revision": "8bd714204e67a1c6c81f84b0dc486b6a6e96e943c42ff488f6b3cbf936e07955",
+			"server_version": "0.7.3",
+			"status": 200,
+			"latency_s": 19.1087,
+			"attempts": 1,
+			"request": {
+				"method": "POST",
+				"body": {
+					"model": "Qwen/Qwen3.8-27B-FP8",
+					"messages": [
+						{
+							"role": "system",
+							"content": "A first pass filled this JSON schema from a document. Each value must contain only what its own field is for, and nothing that belongs to another field or to no field. Return the same object with every such value corrected. Do not invent, and do not change a value you cannot correct from the field names and descriptions alone. Return only the JSON object.\n\nRequired JSON schema:\n{\n  \"type\": \"object\",\n  \"properties\": {\n    \"tracking_number\": {\n      \"type\": \"string\"\n    },\n    \"contents_category\": {\n      \"type\": \"string\",\n      \"enum\": [\n        \"gift\",\n        \"documents\",\n        \"commercial_sample\",\n        \"returned_goods\",\n        \"other\"\n      ]\n    },\n    \"sender_name\": {\n      \"type\": \"string\"\n    },\n    \"sender_address\": {\n      \"type\": \"string\"\n    },\n    \"destination_city\": {\n      \"type\": \"string\"\n    },\n    \"destination_postal_code\": {\n      \"type\": \"string\"\n    },\n    \"destination_country\": {\n      \"type\": \"string\"\n    },\n    \"items\": {\n      \"type\": \"array\",\n      \"items\": {\n        \"type\": \"object\",\n        \"properties\": {\n          \"description\": {\n            \"type\": \"string\"\n          },\n          \"quantity\": {\n            \"type\": \"integer\"\n          },\n          \"weight_lb\": {\n            \"type\": \"integer\"\n          },\n          \"weight_oz\": {\n            \"type\": \"integer\"\n          },\n          \"value_usd\": {\n            \"type\": \"number\"\n          }\n        },\n        \"required\": [\n          \"description\",\n          \"quantity\",\n          \"weight_lb\",\n          \"weight_oz\",\n          \"value_usd\"\n        ]\n      }\n    },\n    \"total_weight_lb\": {\n      \"type\": \"integer\"\n    },\n    \"total_weight_oz\": {\n      \"type\": \"integer\"\n    },\n    \"total_value_usd\": {\n      \"type\": \"number\"\n    },\n    \"country_of_origin\": {\n      \"type\": \"string\"\n    },\n    \"declaration_date\": {\n      \"type\": \"string\"\n    }\n  },\n  \"required\": [\n    \"tracking_number\",\n    \"contents_category\",\n    \"sender_name\",\n    \"sender_address\",\n    \"destination_city\",\n    \"destination_postal_code\",\n    \"destination_country\",\n    \"items\",\n    \"total_weight_lb\",\n    \"total_weight_oz\",\n    \"total_value_usd\",\n    \"country_of_origin\",\n    \"declaration_date\"\n  ]\n}"
+						},
+						{
+							"role": "user",
+							"content": "{\n  \"contents_category\": \"other\",\n  \"country_of_origin\": \"US\",\n  \"declaration_date\": \"10/13/2015\",\n  \"destination_city\": \"KÖLN 50823\",\n  \"destination_country\": \"GERMANY\",\n  \"destination_postal_code\": \"50823\",\n  \"items\": [\n    {\n      \"description\": \"\\\"I edit Wikipedia\\\" Box T-shirt (Unisex) - X-Large\",\n      \"quantity\": 1,\n      \"value_usd\": 7.2,\n      \"weight_lb\": 0,\n      \"weight_oz\": 5\n    }\n  ],\n  \"sender_address\": \"SWAGBOT\\n210 E. Walnut Street\\nSuite 100\\nSpringfield MO 65806\",\n  \"sender_name\": \"SWAGBOT\",\n  \"total_value_usd\": 7.2,\n  \"total_weight_lb\": 0,\n  \"total_weight_oz\": 6,\n  \"tracking_number\": \"LZ 647 929 979 US\"\n}"
+						}
+					],
+					"max_completion_tokens": 2048,
+					"response_format": {
+						"type": "json_schema",
+						"json_schema": {
+							"name": "doc_field_extraction",
+							"strict": true,
+							"schema": {
+								"type": "object",
+								"properties": {
+									"tracking_number": {
+										"type": "string"
+									},
+									"contents_category": {
+										"type": "string",
+										"enum": [
+											"gift",
+											"documents",
+											"commercial_sample",
+											"returned_goods",
+											"other"
+										]
+									},
+									"sender_name": {
+										"type": "string"
+									},
+									"sender_address": {
+										"type": "string"
+									},
+									"destination_city": {
+										"type": "string"
+									},
+									"destination_postal_code": {
+										"type": "string"
+									},
+									"destination_country": {
+										"type": "string"
+									},
+									"items": {
+										"type": "array",
+										"items": {
+											"type": "object",
+											"properties": {
+												"description": {
+													"type": "string"
+												},
+												"quantity": {
+													"type": "integer"
+												},
+												"weight_lb": {
+													"type": "integer"
+												},
+												"weight_oz": {
+													"type": "integer"
+												},
+												"value_usd": {
+													"type": "number"
+												}
+											},
+											"required": [
+												"description",
+												"quantity",
+												"weight_lb",
+												"weight_oz",
+												"value_usd"
+											]
+										}
+									},
+									"total_weight_lb": {
+										"type": "integer"
+									},
+									"total_weight_oz": {
+										"type": "integer"
+									},
+									"total_value_usd": {
+										"type": "number"
+									},
+									"country_of_origin": {
+										"type": "string"
+									},
+									"declaration_date": {
+										"type": "string"
+									}
+								},
+								"required": [
+									"tracking_number",
+									"contents_category",
+									"sender_name",
+									"sender_address",
+									"destination_city",
+									"destination_postal_code",
+									"destination_country",
+									"items",
+									"total_weight_lb",
+									"total_weight_oz",
+									"total_value_usd",
+									"country_of_origin",
+									"declaration_date"
+								]
+							}
+						}
+					}
+				}
+			},
+			"response": {
+				"headers": {
+					"date": "Tue, 22 Sep 2026 21:11:36 GMT",
+					"content-type": "application/json",
+					"x-sie-credits-debited": "84",
+					"x-sie-execution-binding-sha256": "68d32bec4c2abfc26467ba667b64d8c67ed43a70d95f8a1dbdb1d3ea1562aa25",
+					"x-sie-execution-identity-sha256": "a65b53ec5bf3410cfab9a7528637eb259bb4181029364194d504c11da936cd2b",
+					"x-sie-model-revision": "8bd714204e67a1c6c81f84b0dc486b6a6e96e943c42ff488f6b3cbf936e07955",
+					"x-sie-request-id": "01a0caf5-6edc-7833-8c8c-005c10c52367",
+					"x-sie-server-version": "0.7.3",
+					"x-sie-units-input-tokens": "902",
+					"x-sie-units-output-tokens": "256",
+					"x-sie-version": "0.7.3",
+					"x-sie-worker": "queue:01a0caf5-6edc-7833-8c8c-005c10c52367"
+				},
+				"body": {
+					"choices": [
+						{
+							"finish_reason": "stop",
+							"index": 0,
+							"logprobs": null,
+							"message": {
+								"content": "{\n  \"contents_category\": \"other\",\n  \"country_of_origin\": \"US\",\n  \"declaration_date\": \"10/13/2015\",\n  \"destination_city\": \"KÖLN\",\n  \"destination_country\": \"GERMANY\",\n  \"destination_postal_code\": \"50823\",\n  \"items\": [\n    {\n      \"description\": \"\\\"I edit Wikipedia\\\" Box T-shirt (Unisex) - X-Large\",\n      \"quantity\": 1,\n      \"value_usd\": 7.2,\n      \"weight_lb\": 0,\n      \"weight_oz\": 5\n    }\n  ],\n  \"sender_address\": \"SWAGBOT\\n210 E. Walnut Street\\nSuite 100\\nSpringfield MO 65806\",\n  \"sender_name\": \"SWAGBOT\",\n  \"total_value_usd\": 7.2,\n  \"total_weight_lb\": 0,\n  \"total_weight_oz\": 6,\n  \"tracking_number\": \"LZ 647 929 979 US\"\n}",
+								"role": "assistant"
+							}
+						}
+					],
+					"created": 1790111496,
+					"id": "chatcmpl-01a0caf5-6edc-7833-8c8c-005c10c52367",
+					"model": "Qwen/Qwen3.8-27B-FP8",
+					"object": "chat.completion",
+					"system_fingerprint": "fp_3574fec4ad25145e",
+					"usage": {
+						"completion_tokens": 256,
+						"credits_charged": 84,
+						"prompt_tokens": 902,
+						"rate_book_version": "2026-09-05-production-bootstrap-v4",
+						"total_tokens": 1158
+					}
+				}
+			},
+			"request_sha256": "650743a75283daf79363e63d763e43f5b5b8fcbc3c428d6b97774c5df715ace6",
+			"response_sha256": "eb3da3b55a46e8b97641cef03740fa9ed9c37c6471fa0f488634baac406e6d31"
+		},
+		{
+			"slug": "dei-electricity-bill__a2",
+			"arm": "a2",
+			"case": "dei-electricity-bill",
+			"endpoint": "https://api.superlinked.com",
+			"path": "/v1/chat/completions",
+			"model": "Qwen/Qwen3.8-27B-FP8",
+			"model_revision": "8bd714204e67a1c6c81f84b0dc486b6a6e96e943c42ff488f6b3cbf936e07955",
+			"server_version": "0.7.3",
+			"status": 200,
+			"latency_s": 25.497,
+			"attempts": 1,
+			"request": {
+				"method": "POST",
+				"body": {
+					"model": "Qwen/Qwen3.8-27B-FP8",
+					"messages": [
+						{
+							"role": "system",
+							"content": "A first pass filled this JSON schema from a document. Each value must contain only what its own field is for, and nothing that belongs to another field or to no field. Return the same object with every such value corrected. Do not invent, and do not change a value you cannot correct from the field names and descriptions alone. Return only the JSON object.\n\nRequired JSON schema:\n{\n  \"type\": \"object\",\n  \"properties\": {\n    \"meter_number\": {\n      \"type\": \"string\"\n    },\n    \"meter_readings\": {\n      \"type\": \"array\",\n      \"items\": {\n        \"type\": \"object\",\n        \"properties\": {\n          \"register_type\": {\n            \"type\": \"string\"\n          },\n          \"current_reading\": {\n            \"type\": \"integer\"\n          },\n          \"previous_reading\": {\n            \"type\": \"integer\"\n          },\n          \"consumption_kwh\": {\n            \"type\": \"integer\"\n          }\n        },\n        \"required\": [\n          \"register_type\",\n          \"current_reading\",\n          \"previous_reading\",\n          \"consumption_kwh\"\n        ]\n      }\n    },\n    \"contracted_power_kva\": {\n      \"type\": \"number\"\n    },\n    \"next_reading_from\": {\n      \"type\": \"string\"\n    },\n    \"next_reading_to\": {\n      \"type\": \"string\"\n    },\n    \"supply_charges_eur\": {\n      \"type\": \"number\",\n      \"description\": \"Electricity supply charges subtotal\"\n    },\n    \"regulated_charges_eur\": {\n      \"type\": \"number\",\n      \"description\": \"Regulated charges subtotal\"\n    },\n    \"electricity_amount_eur\": {\n      \"type\": \"number\",\n      \"description\": \"Amount payable for electricity before VAT\"\n    },\n    \"vat_rate_percent\": {\n      \"type\": \"number\"\n    },\n    \"vat_eur\": {\n      \"type\": \"number\"\n    },\n    \"electricity_total_with_vat_eur\": {\n      \"type\": \"number\"\n    },\n    \"municipal_charges_eur\": {\n      \"type\": \"number\",\n      \"description\": \"Municipal charges subtotal\"\n    },\n    \"ert_fee_eur\": {\n      \"type\": \"number\",\n      \"description\": \"ERT public broadcaster fee\"\n    },\n    \"previous_unpaid_eur\": {\n      \"type\": \"number\"\n    },\n    \"total_due_eur\": {\n      \"type\": \"number\"\n    }\n  },\n  \"required\": [\n    \"meter_number\",\n    \"meter_readings\",\n    \"contracted_power_kva\",\n    \"next_reading_from\",\n    \"next_reading_to\",\n    \"supply_charges_eur\",\n    \"regulated_charges_eur\",\n    \"electricity_amount_eur\",\n    \"vat_rate_percent\",\n    \"vat_eur\",\n    \"electricity_total_with_vat_eur\",\n    \"municipal_charges_eur\",\n    \"ert_fee_eur\",\n    \"previous_unpaid_eur\",\n    \"total_due_eur\"\n  ]\n}"
+						},
+						{
+							"role": "user",
+							"content": "{\n  \"contracted_power_kva\": 25,\n  \"electricity_amount_eur\": 388.52,\n  \"electricity_total_with_vat_eur\": 423.0,\n  \"ert_fee_eur\": 6.62,\n  \"meter_number\": \"T18083\",\n  \"meter_readings\": [\n    {\n      \"consumption_kwh\": 2294,\n      \"current_reading\": 35579,\n      \"previous_reading\": 37873,\n      \"register_type\": \"11\"\n    },\n    {\n      \"consumption_kwh\": 695,\n      \"current_reading\": 13498,\n      \"previous_reading\": 14193,\n      \"register_type\": \"12\"\n    }\n  ],\n  \"municipal_charges_eur\": 58.17,\n  \"next_reading_from\": \"26/11/2015\",\n  \"next_reading_to\": \"02/12/2015\",\n  \"previous_unpaid_eur\": 287.98,\n  \"regulated_charges_eur\": 245.61,\n  \"supply_charges_eur\": 14.25,\n  \"total_due_eur\": 876.0,\n  \"vat_eur\": 47.97,\n  \"vat_rate_percent\": 13\n}"
+						}
+					],
+					"max_completion_tokens": 2048,
+					"response_format": {
+						"type": "json_schema",
+						"json_schema": {
+							"name": "doc_field_extraction",
+							"strict": true,
+							"schema": {
+								"type": "object",
+								"properties": {
+									"meter_number": {
+										"type": "string"
+									},
+									"meter_readings": {
+										"type": "array",
+										"items": {
+											"type": "object",
+											"properties": {
+												"register_type": {
+													"type": "string"
+												},
+												"current_reading": {
+													"type": "integer"
+												},
+												"previous_reading": {
+													"type": "integer"
+												},
+												"consumption_kwh": {
+													"type": "integer"
+												}
+											},
+											"required": [
+												"register_type",
+												"current_reading",
+												"previous_reading",
+												"consumption_kwh"
+											]
+										}
+									},
+									"contracted_power_kva": {
+										"type": "number"
+									},
+									"next_reading_from": {
+										"type": "string"
+									},
+									"next_reading_to": {
+										"type": "string"
+									},
+									"supply_charges_eur": {
+										"type": "number",
+										"description": "Electricity supply charges subtotal"
+									},
+									"regulated_charges_eur": {
+										"type": "number",
+										"description": "Regulated charges subtotal"
+									},
+									"electricity_amount_eur": {
+										"type": "number",
+										"description": "Amount payable for electricity before VAT"
+									},
+									"vat_rate_percent": {
+										"type": "number"
+									},
+									"vat_eur": {
+										"type": "number"
+									},
+									"electricity_total_with_vat_eur": {
+										"type": "number"
+									},
+									"municipal_charges_eur": {
+										"type": "number",
+										"description": "Municipal charges subtotal"
+									},
+									"ert_fee_eur": {
+										"type": "number",
+										"description": "ERT public broadcaster fee"
+									},
+									"previous_unpaid_eur": {
+										"type": "number"
+									},
+									"total_due_eur": {
+										"type": "number"
+									}
+								},
+								"required": [
+									"meter_number",
+									"meter_readings",
+									"contracted_power_kva",
+									"next_reading_from",
+									"next_reading_to",
+									"supply_charges_eur",
+									"regulated_charges_eur",
+									"electricity_amount_eur",
+									"vat_rate_percent",
+									"vat_eur",
+									"electricity_total_with_vat_eur",
+									"municipal_charges_eur",
+									"ert_fee_eur",
+									"previous_unpaid_eur",
+									"total_due_eur"
+								]
+							}
+						}
+					}
+				}
+			},
+			"response": {
+				"headers": {
+					"date": "Tue, 22 Sep 2026 21:12:01 GMT",
+					"content-type": "application/json",
+					"x-sie-credits-debited": "104",
+					"x-sie-execution-binding-sha256": "68d32bec4c2abfc26467ba667b64d8c67ed43a70d95f8a1dbdb1d3ea1562aa25",
+					"x-sie-execution-identity-sha256": "a65b53ec5bf3410cfab9a7528637eb259bb4181029364194d504c11da936cd2b",
+					"x-sie-model-revision": "8bd714204e67a1c6c81f84b0dc486b6a6e96e943c42ff488f6b3cbf936e07955",
+					"x-sie-request-id": "01a0caf5-b971-7851-bdbf-87260ff9305f",
+					"x-sie-server-version": "0.7.3",
+					"x-sie-units-input-tokens": "1095",
+					"x-sie-units-output-tokens": "348",
+					"x-sie-version": "0.7.3",
+					"x-sie-worker": "queue:01a0caf5-b971-7851-bdbf-87260ff9305f"
+				},
+				"body": {
+					"choices": [
+						{
+							"finish_reason": "stop",
+							"index": 0,
+							"logprobs": null,
+							"message": {
+								"content": "{\n  \"contracted_power_kva\": 25,\n  \"electricity_amount_eur\": 388.52,\n  \"electricity_total_with_vat_eur\": 423.0,\n  \"ert_fee_eur\": 6.62,\n  \"meter_number\": \"T18083\",\n  \"meter_readings\": [\n    {\n      \"consumption_kwh\": 2294,\n      \"current_reading\": 37873,\n      \"previous_reading\": 35579,\n      \"register_type\": \"11\"\n    },\n    {\n      \"consumption_kwh\": 695,\n      \"current_reading\": 14193,\n      \"previous_reading\": 13498,\n      \"register_type\": \"12\"\n    }\n  ],\n  \"municipal_charges_eur\": 58.17,\n  \"next_reading_from\": \"26/11/2015\",\n  \"next_reading_to\": \"02/12/2015\",\n  \"previous_unpaid_eur\": 287.98,\n  \"regulated_charges_eur\": 245.61,\n  \"supply_charges_eur\": 14.25,\n  \"total_due_eur\": 876.0,\n  \"vat_eur\": 47.97,\n  \"vat_rate_percent\": 13\n}",
+								"role": "assistant"
+							}
+						}
+					],
+					"created": 1790111521,
+					"id": "chatcmpl-01a0caf5-b971-7851-bdbf-87260ff9305f",
+					"model": "Qwen/Qwen3.8-27B-FP8",
+					"object": "chat.completion",
+					"system_fingerprint": "fp_3574fec4ad25145e",
+					"usage": {
+						"completion_tokens": 348,
+						"credits_charged": 104,
+						"prompt_tokens": 1095,
+						"rate_book_version": "2026-09-05-production-bootstrap-v4",
+						"total_tokens": 1443
+					}
+				}
+			},
+			"request_sha256": "a24dbd2ce501f585506ac5617b951ffcfa5675ed4e9fc201d216bedc2ad610bb",
+			"response_sha256": "07ac15ab79b6d9949f3901b7304b2269aa38c13876a6e705ca382b777d9aa295"
+		},
+		{
+			"slug": "walmart-receipt-photo__a2",
+			"arm": "a2",
+			"case": "walmart-receipt-photo",
+			"endpoint": "https://api.superlinked.com",
+			"path": "/v1/chat/completions",
+			"model": "Qwen/Qwen3.8-27B-FP8",
+			"model_revision": "8bd714204e67a1c6c81f84b0dc486b6a6e96e943c42ff488f6b3cbf936e07955",
+			"server_version": "0.7.3",
+			"status": 200,
+			"latency_s": 12.2428,
+			"attempts": 1,
+			"request": {
+				"method": "POST",
+				"body": {
+					"model": "Qwen/Qwen3.8-27B-FP8",
+					"messages": [
+						{
+							"role": "system",
+							"content": "A first pass filled this JSON schema from a document. Each value must contain only what its own field is for, and nothing that belongs to another field or to no field. Return the same object with every such value corrected. Do not invent, and do not change a value you cannot correct from the field names and descriptions alone. Return only the JSON object.\n\nRequired JSON schema:\n{\n  \"type\": \"object\",\n  \"properties\": {\n    \"merchant\": {\n      \"type\": \"string\"\n    },\n    \"store_phone\": {\n      \"type\": \"string\"\n    },\n    \"store_address\": {\n      \"type\": \"string\",\n      \"description\": \"Street, city, state and ZIP\"\n    },\n    \"store_number\": {\n      \"type\": \"string\"\n    },\n    \"purchase_date\": {\n      \"type\": \"string\"\n    },\n    \"subtotal\": {\n      \"type\": \"number\"\n    },\n    \"tax_rate_percent\": {\n      \"type\": \"number\"\n    },\n    \"tax\": {\n      \"type\": \"number\"\n    },\n    \"total\": {\n      \"type\": \"number\"\n    },\n    \"payment_method\": {\n      \"type\": \"string\",\n      \"enum\": [\n        \"cash\",\n        \"credit\",\n        \"debit\",\n        \"ebt\",\n        \"gift_card\"\n      ]\n    },\n    \"items_sold\": {\n      \"type\": \"integer\"\n    }\n  },\n  \"required\": [\n    \"merchant\",\n    \"store_phone\",\n    \"store_address\",\n    \"store_number\",\n    \"purchase_date\",\n    \"subtotal\",\n    \"tax_rate_percent\",\n    \"tax\",\n    \"total\",\n    \"payment_method\",\n    \"items_sold\"\n  ]\n}"
+						},
+						{
+							"role": "user",
+							"content": "{\n  \"items_sold\": 21,\n  \"merchant\": \"WALMART\",\n  \"payment_method\": \"debit\",\n  \"purchase_date\": \"07/25/21\",\n  \"store_address\": \"200 N MAIN ST\\nBAYARD WY 84713-129\",\n  \"store_number\": \"00109\",\n  \"store_phone\": \"307-675-4429\",\n  \"subtotal\": 6.97,\n  \"tax\": 0.5,\n  \"tax_rate_percent\": 7.18,\n  \"total\": 7.47\n}"
+						}
+					],
+					"max_completion_tokens": 2048,
+					"response_format": {
+						"type": "json_schema",
+						"json_schema": {
+							"name": "doc_field_extraction",
+							"strict": true,
+							"schema": {
+								"type": "object",
+								"properties": {
+									"merchant": {
+										"type": "string"
+									},
+									"store_phone": {
+										"type": "string"
+									},
+									"store_address": {
+										"type": "string",
+										"description": "Street, city, state and ZIP"
+									},
+									"store_number": {
+										"type": "string"
+									},
+									"purchase_date": {
+										"type": "string"
+									},
+									"subtotal": {
+										"type": "number"
+									},
+									"tax_rate_percent": {
+										"type": "number"
+									},
+									"tax": {
+										"type": "number"
+									},
+									"total": {
+										"type": "number"
+									},
+									"payment_method": {
+										"type": "string",
+										"enum": [
+											"cash",
+											"credit",
+											"debit",
+											"ebt",
+											"gift_card"
+										]
+									},
+									"items_sold": {
+										"type": "integer"
+									}
+								},
+								"required": [
+									"merchant",
+									"store_phone",
+									"store_address",
+									"store_number",
+									"purchase_date",
+									"subtotal",
+									"tax_rate_percent",
+									"tax",
+									"total",
+									"payment_method",
+									"items_sold"
+								]
+							}
+						}
+					}
+				}
+			},
+			"response": {
+				"headers": {
+					"date": "Tue, 22 Sep 2026 21:12:14 GMT",
+					"content-type": "application/json",
+					"x-sie-credits-debited": "54",
+					"x-sie-execution-binding-sha256": "68d32bec4c2abfc26467ba667b64d8c67ed43a70d95f8a1dbdb1d3ea1562aa25",
+					"x-sie-execution-identity-sha256": "7719d7b34e734a9238aa4e0a0da794dbea44c4e6e2e9b8d9a30486757875d23a",
+					"x-sie-model-revision": "8bd714204e67a1c6c81f84b0dc486b6a6e96e943c42ff488f6b3cbf936e07955",
+					"x-sie-request-id": "01a0caf6-1d31-7643-85ba-1f3095ab7ae9",
+					"x-sie-server-version": "0.7.3",
+					"x-sie-units-input-tokens": "587",
+					"x-sie-units-output-tokens": "158",
+					"x-sie-version": "0.7.3",
+					"x-sie-worker": "queue:01a0caf6-1d31-7643-85ba-1f3095ab7ae9"
+				},
+				"body": {
+					"choices": [
+						{
+							"finish_reason": "stop",
+							"index": 0,
+							"logprobs": null,
+							"message": {
+								"content": "{\n  \"items_sold\": 21,\n  \"merchant\": \"WALMART\",\n  \"payment_method\": \"debit\",\n  \"purchase_date\": \"07/25/21\",\n  \"store_address\": \"200 N MAIN ST, BAYARD, WY 84713-129\",\n  \"store_number\": \"00109\",\n  \"store_phone\": \"307-675-4429\",\n  \"subtotal\": 6.97,\n  \"tax\": 0.5,\n  \"tax_rate_percent\": 7.18,\n  \"total\": 7.47\n}",
+								"role": "assistant"
+							}
+						}
+					],
+					"created": 1790111533,
+					"id": "chatcmpl-01a0caf6-1d31-7643-85ba-1f3095ab7ae9",
+					"model": "Qwen/Qwen3.8-27B-FP8",
+					"object": "chat.completion",
+					"system_fingerprint": "fp_3574fec4ad25145e",
+					"usage": {
+						"completion_tokens": 158,
+						"credits_charged": 54,
+						"prompt_tokens": 587,
+						"rate_book_version": "2026-09-05-production-bootstrap-v4",
+						"total_tokens": 745
+					}
+				}
+			},
+			"request_sha256": "04942d770ccd15093d76a6085edda5d1f862b05d93d1dfa36c724ba1dad8de5d",
+			"response_sha256": "471b0a8ccd429c3faa97f729464ba2858cb2f6b2272cf61b8a68204cd7fac1a4"
+		},
+		{
+			"slug": "faa-8130-3-rebuilt-fuel-control__a3",
+			"arm": "a3",
+			"case": "faa-8130-3-rebuilt-fuel-control",
+			"endpoint": "https://api.superlinked.com",
+			"path": "/v1/generate/Qwen__Qwen3.8-27B-FP8",
+			"model": "Qwen/Qwen3.8-27B-FP8",
+			"model_revision": "8bd714204e67a1c6c81f84b0dc486b6a6e96e943c42ff488f6b3cbf936e07955",
+			"server_version": "0.7.3",
+			"status": 200,
+			"latency_s": 18.2,
+			"attempts": 1,
+			"request": {
+				"method": "POST",
+				"body": {
+					"prompt": "A first pass filled the JSON schema from this document and its answer is below. Check it against the page and return the same object with every wrong value corrected. Each value must contain only what its own field is for. Keep a value that is already right. Return only the JSON object.\n\nFirst pass:\n{\n  \"approval_number\": \"PC #62\",\n  \"block_13a_approved_design_data_checked\": false,\n  \"block_13a_non_approved_design_data_checked\": false,\n  \"block_14a_other_regulation_checked\": true,\n  \"block_14a_return_to_service_checked\": false,\n  \"form_tracking_number\": \"ACME-12345\",\n  \"item_description\": \"Fuel Control\",\n  \"organization_name\": \"Acme Airplane Company, 110 Aviation Place, Somewhere, OK (PC62)\",\n  \"part_number\": \"PW54667\",\n  \"quantity\": 1,\n  \"remarks\": \"Rebuilt (altered) to original PAH’s specifications.\",\n  \"serial_number\": \"N/A\",\n  \"signature_date\": \"30 Apr 2008\",\n  \"signer_name\": \"A. Inspector\",\n  \"status_work\": \"See Block 12\",\n  \"work_order_number\": \"WO 98765\"\n}",
+					"max_new_tokens": 2048,
+					"images": [
+						{
+							"data": "<base64 of apps/site/public/reference/doc-field-extraction/faa-8130-3-rebuilt-fuel-control.jpg, sha256 7eb7c4a806758fb7c3d7ceb86bc8a2d20b18277a9ee01370b9579144d2d32bb3>",
+							"format": "jpeg"
+						}
+					],
+					"grammar": {
+						"json_schema": {
+							"type": "object",
+							"properties": {
+								"form_tracking_number": {
+									"type": "string"
+								},
+								"organization_name": {
+									"type": "string",
+									"description": "Block 4 organization name, without the address"
+								},
+								"work_order_number": {
+									"type": "string"
+								},
+								"item_description": {
+									"type": "string"
+								},
+								"part_number": {
+									"type": "string"
+								},
+								"quantity": {
+									"type": "integer"
+								},
+								"serial_number": {
+									"type": "string"
+								},
+								"status_work": {
+									"type": "string"
+								},
+								"remarks": {
+									"type": "string"
+								},
+								"block_13a_approved_design_data_checked": {
+									"type": "boolean"
+								},
+								"block_13a_non_approved_design_data_checked": {
+									"type": "boolean"
+								},
+								"block_14a_return_to_service_checked": {
+									"type": "boolean"
+								},
+								"block_14a_other_regulation_checked": {
+									"type": "boolean"
+								},
+								"approval_number": {
+									"type": "string",
+									"description": "Block 13c or 14c, whichever is filled"
+								},
+								"signer_name": {
+									"type": "string"
+								},
+								"signature_date": {
+									"type": "string"
+								}
+							},
+							"required": [
+								"form_tracking_number",
+								"organization_name",
+								"work_order_number",
+								"item_description",
+								"part_number",
+								"quantity",
+								"serial_number",
+								"status_work",
+								"remarks",
+								"block_13a_approved_design_data_checked",
+								"block_13a_non_approved_design_data_checked",
+								"block_14a_return_to_service_checked",
+								"block_14a_other_regulation_checked",
+								"approval_number",
+								"signer_name",
+								"signature_date"
+							]
+						},
+						"strict": true
+					}
+				}
+			},
+			"response": {
+				"headers": {
+					"date": "Tue, 22 Sep 2026 21:12:32 GMT",
+					"content-type": "application/json",
+					"x-sie-credits-debited": "85",
+					"x-sie-execution-binding-sha256": "68d32bec4c2abfc26467ba667b64d8c67ed43a70d95f8a1dbdb1d3ea1562aa25",
+					"x-sie-execution-identity-sha256": "7719d7b34e734a9238aa4e0a0da794dbea44c4e6e2e9b8d9a30486757875d23a",
+					"x-sie-model-revision": "8bd714204e67a1c6c81f84b0dc486b6a6e96e943c42ff488f6b3cbf936e07955",
+					"x-sie-request-id": "01a0caf6-4e24-7d93-903c-27fec2033dd9",
+					"x-sie-server-version": "0.7.3",
+					"x-sie-units-images": "1",
+					"x-sie-units-input-tokens": "926",
+					"x-sie-units-output-tokens": "241",
+					"x-sie-version": "0.7.3",
+					"x-sie-worker": "queue:01a0caf6-4e24-7d93-903c-27fec2033dd9"
+				},
+				"body": {
+					"attempt_id": "fcf466d9d39e449a83de282d2de39f89",
+					"finish_reason": "stop",
+					"model": "Qwen/Qwen3.8-27B-FP8",
+					"text": "{\n  \"approval_number\": \"PC #62\",\n  \"block_13a_approved_design_data_checked\": false,\n  \"block_13a_non_approved_design_data_checked\": false,\n  \"block_14a_other_regulation_checked\": true,\n  \"block_14a_return_to_service_checked\": false,\n  \"form_tracking_number\": \"ACME-12345\",\n  \"item_description\": \"Fuel Control\",\n  \"organization_name\": \"Acme Airplane Company, 110 Aviation Place, Somewhere, OK (PC62)\",\n  \"part_number\": \"PW54667\",\n  \"quantity\": 1,\n  \"remarks\": \"Rebuilt (altered) to original PAH's specifications.\",\n  \"serial_number\": \"N/A\",\n  \"signature_date\": \"30 Apr 2008\",\n  \"signer_name\": \"A. Inspector\",\n  \"status_work\": \"See Block 12\",\n  \"work_order_number\": \"WO 98765\"\n}",
+					"tpot_ms": 70.72124909128631,
+					"ttft_ms": 296.88179599907016,
+					"usage": {
+						"completion_tokens": 241,
+						"credits_charged": 85,
+						"images": 1,
+						"prompt_tokens": 926,
+						"rate_book_version": "2026-09-05-production-bootstrap-v4",
+						"total_tokens": 1167
+					}
+				}
+			},
+			"request_sha256": "3307f1648bfd3e8d30053b93615fa020d2fe8c34cbb53948a6735bb435ceacd2",
+			"response_sha256": "ef03e8dcd73c6cb6c8a9a326ff0dfcb968bd5dfbc97ce3d4001f3e99edea8422"
+		},
+		{
+			"slug": "faa-8130-3-export-flap__a3",
+			"arm": "a3",
+			"case": "faa-8130-3-export-flap",
+			"endpoint": "https://api.superlinked.com",
+			"path": "/v1/generate/Qwen__Qwen3.8-27B-FP8",
+			"model": "Qwen/Qwen3.8-27B-FP8",
+			"model_revision": "8bd714204e67a1c6c81f84b0dc486b6a6e96e943c42ff488f6b3cbf936e07955",
+			"server_version": "0.7.3",
+			"status": 200,
+			"latency_s": 17.9908,
+			"attempts": 1,
+			"request": {
+				"method": "POST",
+				"body": {
+					"prompt": "A first pass filled the JSON schema from this document and its answer is below. Check it against the page and return the same object with every wrong value corrected. Each value must contain only what its own field is for. Keep a value that is already right. Return only the JSON object.\n\nFirst pass:\n{\n  \"approval_number\": \"DMIR-000011-SW\",\n  \"block_13a_approved_design_data_checked\": true,\n  \"block_13a_non_approved_design_data_checked\": false,\n  \"block_14a_other_regulation_checked\": false,\n  \"block_14a_return_to_service_checked\": false,\n  \"form_tracking_number\": \"BE5432987\",\n  \"item_description\": \"Flap\",\n  \"organization_name\": \"Dave's Aircraft Parts Manufacturing\",\n  \"part_number\": \"C 54321\",\n  \"quantity\": 1,\n  \"remarks\": \"Export Airworthiness Approval – This article meets the special requirements of (enter country).\",\n  \"serial_number\": \"9876543\",\n  \"signature_date\": \"23 Oct 2007\",\n  \"signer_name\": \"A. Inspector\",\n  \"status_work\": \"NEW\",\n  \"work_order_number\": \"WO 2185\"\n}",
+					"max_new_tokens": 2048,
+					"images": [
+						{
+							"data": "<base64 of apps/site/public/reference/doc-field-extraction/faa-8130-3-export-flap.jpg, sha256 943474c0ef3a1f598fdaf05febc2544fa3d0ca5efe7074c41b1fec12095d7e61>",
+							"format": "jpeg"
+						}
+					],
+					"grammar": {
+						"json_schema": {
+							"type": "object",
+							"properties": {
+								"form_tracking_number": {
+									"type": "string"
+								},
+								"organization_name": {
+									"type": "string",
+									"description": "Block 4 organization name, without the address"
+								},
+								"work_order_number": {
+									"type": "string"
+								},
+								"item_description": {
+									"type": "string"
+								},
+								"part_number": {
+									"type": "string"
+								},
+								"quantity": {
+									"type": "integer"
+								},
+								"serial_number": {
+									"type": "string"
+								},
+								"status_work": {
+									"type": "string"
+								},
+								"remarks": {
+									"type": "string"
+								},
+								"block_13a_approved_design_data_checked": {
+									"type": "boolean"
+								},
+								"block_13a_non_approved_design_data_checked": {
+									"type": "boolean"
+								},
+								"block_14a_return_to_service_checked": {
+									"type": "boolean"
+								},
+								"block_14a_other_regulation_checked": {
+									"type": "boolean"
+								},
+								"approval_number": {
+									"type": "string",
+									"description": "Block 13c or 14c, whichever is filled"
+								},
+								"signer_name": {
+									"type": "string"
+								},
+								"signature_date": {
+									"type": "string"
+								}
+							},
+							"required": [
+								"form_tracking_number",
+								"organization_name",
+								"work_order_number",
+								"item_description",
+								"part_number",
+								"quantity",
+								"serial_number",
+								"status_work",
+								"remarks",
+								"block_13a_approved_design_data_checked",
+								"block_13a_non_approved_design_data_checked",
+								"block_14a_return_to_service_checked",
+								"block_14a_other_regulation_checked",
+								"approval_number",
+								"signer_name",
+								"signature_date"
+							]
+						},
+						"strict": true
+					}
+				}
+			},
+			"response": {
+				"headers": {
+					"date": "Tue, 22 Sep 2026 21:12:50 GMT",
+					"content-type": "application/json",
+					"x-sie-credits-debited": "84",
+					"x-sie-execution-binding-sha256": "68d32bec4c2abfc26467ba667b64d8c67ed43a70d95f8a1dbdb1d3ea1562aa25",
+					"x-sie-execution-identity-sha256": "7719d7b34e734a9238aa4e0a0da794dbea44c4e6e2e9b8d9a30486757875d23a",
+					"x-sie-model-revision": "8bd714204e67a1c6c81f84b0dc486b6a6e96e943c42ff488f6b3cbf936e07955",
+					"x-sie-request-id": "01a0caf6-953d-7990-b98e-cd3d4d35745c",
+					"x-sie-server-version": "0.7.3",
+					"x-sie-units-images": "1",
+					"x-sie-units-input-tokens": "923",
+					"x-sie-units-output-tokens": "238",
+					"x-sie-version": "0.7.3",
+					"x-sie-worker": "queue:01a0caf6-953d-7990-b98e-cd3d4d35745c"
+				},
+				"body": {
+					"attempt_id": "4eae6d92a1c642f78d14d6635fe0477d",
+					"finish_reason": "stop",
+					"model": "Qwen/Qwen3.8-27B-FP8",
+					"text": "{\n  \"approval_number\": \"DMIR-000011-SW\",\n  \"block_13a_approved_design_data_checked\": true,\n  \"block_13a_non_approved_design_data_checked\": false,\n  \"block_14a_other_regulation_checked\": false,\n  \"block_14a_return_to_service_checked\": false,\n  \"form_tracking_number\": \"BE5432987\",\n  \"item_description\": \"Flap\",\n  \"organization_name\": \"Dave's Aircraft Parts Manufacturing\",\n  \"part_number\": \"C 54321\",\n  \"quantity\": 1,\n  \"remarks\": \"Export Airworthiness Approval – This article meets the special requirements of (enter country).\",\n  \"serial_number\": \"9876543\",\n  \"signature_date\": \"23 Oct 2007\",\n  \"signer_name\": \"A. Inspector\",\n  \"status_work\": \"NEW\",\n  \"work_order_number\": \"WO 2185\"\n}",
+					"tpot_ms": 70.763769,
+					"ttft_ms": 313.3819360009511,
+					"usage": {
+						"completion_tokens": 238,
+						"credits_charged": 84,
+						"images": 1,
+						"prompt_tokens": 923,
+						"rate_book_version": "2026-09-05-production-bootstrap-v4",
+						"total_tokens": 1161
+					}
+				}
+			},
+			"request_sha256": "9f965b3d98b3e6be8b662745d1997f8616ed5e362e6f917d5898a900dae3f2a3",
+			"response_sha256": "18a98786d3b57b35719ae4f8daec68a16c88d4899ca7428bfb1728ce43416056"
+		},
+		{
+			"slug": "osha-300-log-example__a3",
+			"arm": "a3",
+			"case": "osha-300-log-example",
+			"endpoint": "https://api.superlinked.com",
+			"path": "/v1/generate/Qwen__Qwen3.8-27B-FP8",
+			"model": "Qwen/Qwen3.8-27B-FP8",
+			"model_revision": "8bd714204e67a1c6c81f84b0dc486b6a6e96e943c42ff488f6b3cbf936e07955",
+			"server_version": "0.7.3",
+			"status": 200,
+			"latency_s": 49.079,
+			"attempts": 1,
+			"request": {
+				"method": "POST",
+				"body": {
+					"prompt": "A first pass filled the JSON schema from this document and its answer is below. Check it against the page and return the same object with every wrong value corrected. Each value must contain only what its own field is for. Keep a value that is already right. Return only the JSON object.\n\nFirst pass:\n{\n  \"cases\": [\n    {\n      \"case_number\": 1,\n      \"case_type\": \"injury\",\n      \"date_of_injury\": \"5/25\",\n      \"days_away_from_work\": 12,\n      \"days_job_transfer_or_restriction\": 15,\n      \"description\": \"fracture, left arm and left leg, fell from ladder\",\n      \"employee_name\": \"Mark Bagnin\",\n      \"job_title\": \"Welder\",\n      \"location\": \"basement\",\n      \"outcome\": \"days_away_from_work\"\n    },\n    {\n      \"case_number\": 2,\n      \"case_type\": \"injury\",\n      \"date_of_injury\": \"7/12\",\n      \"days_away_from_work\": 0,\n      \"days_job_transfer_or_restriction\": 30,\n      \"description\": \"poisoning from lead fumes\",\n      \"employee_name\": \"Shana Alexander\",\n      \"job_title\": \"Foundry man\",\n      \"location\": \"pouring deck\",\n      \"outcome\": \"job_transfer_or_restriction\"\n    },\n    {\n      \"case_number\": 3,\n      \"case_type\": \"injury\",\n      \"date_of_injury\": \"8/5\",\n      \"days_away_from_work\": 7,\n      \"days_job_transfer_or_restriction\": 30,\n      \"description\": \"broken leg, fell over box\",\n      \"employee_name\": \"Sam Sander\",\n      \"job_title\": \"Electrician\",\n      \"location\": \"2nd floor storeroom\",\n      \"outcome\": \"days_away_from_work\"\n    },\n    {\n      \"case_number\": 4,\n      \"case_type\": \"injury\",\n      \"date_of_injury\": \"9/17\",\n      \"days_away_from_work\": 3,\n      \"days_job_transfer_or_restriction\": 0,\n      \"description\": \"back strain lifting a box\",\n      \"employee_name\": \"Ralph Bocciella\",\n      \"job_title\": \"Laborer\",\n      \"location\": \"packaging department\",\n      \"outcome\": \"other_recordable\"\n    },\n    {\n      \"case_number\": 5,\n      \"case_type\": \"injury\",\n      \"date_of_injury\": \"10/23\",\n      \"days_away_from_work\": 0,\n      \"days_job_transfer_or_restriction\": 0,\n      \"description\": \"dust in left eye\",\n      \"employee_name\": \"Jarrod Daniels\",\n      \"job_title\": \"Machine opr.\",\n      \"location\": \"production floor\",\n      \"outcome\": \"other_recordable\"\n    }\n  ],\n  \"city\": \"Anywhere\",\n  \"establishment_name\": \"XYZ company\",\n  \"state\": \"MA\"\n}",
+					"max_new_tokens": 2048,
+					"images": [
+						{
+							"data": "<base64 of apps/site/public/reference/doc-field-extraction/osha-300-log-example.jpg, sha256 13c8dfb0439508cb9d7ace203a3f1810e2c5e9bb0923deddeb4654b7141e1799>",
+							"format": "jpeg"
+						}
+					],
+					"grammar": {
+						"json_schema": {
+							"type": "object",
+							"properties": {
+								"establishment_name": {
+									"type": "string"
+								},
+								"city": {
+									"type": "string"
+								},
+								"state": {
+									"type": "string"
+								},
+								"cases": {
+									"type": "array",
+									"description": "One entry per filled row",
+									"items": {
+										"type": "object",
+										"properties": {
+											"case_number": {
+												"type": "integer"
+											},
+											"employee_name": {
+												"type": "string"
+											},
+											"job_title": {
+												"type": "string"
+											},
+											"date_of_injury": {
+												"type": "string",
+												"description": "month/day as written"
+											},
+											"location": {
+												"type": "string"
+											},
+											"description": {
+												"type": "string"
+											},
+											"outcome": {
+												"type": "string",
+												"enum": [
+													"death",
+													"days_away_from_work",
+													"job_transfer_or_restriction",
+													"other_recordable"
+												]
+											},
+											"days_away_from_work": {
+												"type": "integer",
+												"description": "0 when blank"
+											},
+											"days_job_transfer_or_restriction": {
+												"type": "integer",
+												"description": "0 when blank"
+											},
+											"case_type": {
+												"type": "string",
+												"enum": [
+													"injury",
+													"skin_disorder",
+													"respiratory_condition",
+													"poisoning",
+													"hearing_loss",
+													"all_other_illnesses"
+												]
+											}
+										},
+										"required": [
+											"case_number",
+											"employee_name",
+											"job_title",
+											"date_of_injury",
+											"location",
+											"description",
+											"outcome",
+											"days_away_from_work",
+											"days_job_transfer_or_restriction",
+											"case_type"
+										]
+									}
+								}
+							},
+							"required": [
+								"establishment_name",
+								"city",
+								"state",
+								"cases"
+							]
+						},
+						"strict": true
+					}
+				}
+			},
+			"response": {
+				"headers": {
+					"date": "Tue, 22 Sep 2026 21:13:39 GMT",
+					"content-type": "application/json",
+					"x-sie-credits-debited": "167",
+					"x-sie-execution-binding-sha256": "68d32bec4c2abfc26467ba667b64d8c67ed43a70d95f8a1dbdb1d3ea1562aa25",
+					"x-sie-execution-identity-sha256": "7719d7b34e734a9238aa4e0a0da794dbea44c4e6e2e9b8d9a30486757875d23a",
+					"x-sie-model-revision": "8bd714204e67a1c6c81f84b0dc486b6a6e96e943c42ff488f6b3cbf936e07955",
+					"x-sie-request-id": "01a0caf6-dbb8-7e80-b1fb-a083b3f56aa6",
+					"x-sie-server-version": "0.7.3",
+					"x-sie-units-images": "1",
+					"x-sie-units-input-tokens": "1658",
+					"x-sie-units-output-tokens": "651",
+					"x-sie-version": "0.7.3",
+					"x-sie-worker": "queue:01a0caf6-dbb8-7e80-b1fb-a083b3f56aa6"
+				},
+				"body": {
+					"attempt_id": "1ae67add49c8413aa529b718db6a1dbf",
+					"finish_reason": "stop",
+					"model": "Qwen/Qwen3.8-27B-FP8",
+					"text": "{\n  \"cases\": [\n    {\n      \"case_number\": 1,\n      \"case_type\": \"injury\",\n      \"date_of_injury\": \"5/25\",\n      \"days_away_from_work\": 12,\n      \"days_job_transfer_or_restriction\": 15,\n      \"description\": \"fracture, left arm and left leg, fell from ladder\",\n      \"employee_name\": \"Mark Bagnin\",\n      \"job_title\": \"Welder\",\n      \"location\": \"basement\",\n      \"outcome\": \"days_away_from_work\"\n    },\n    {\n      \"case_number\": 2,\n      \"case_type\": \"injury\",\n      \"date_of_injury\": \"7/12\",\n      \"days_away_from_work\": 0,\n      \"days_job_transfer_or_restriction\": 30,\n      \"description\": \"poisoning from lead fumes\",\n      \"employee_name\": \"Shana Alexander\",\n      \"job_title\": \"Foundry man\",\n      \"location\": \"pouring deck\",\n      \"outcome\": \"job_transfer_or_restriction\"\n    },\n    {\n      \"case_number\": 3,\n      \"case_type\": \"injury\",\n      \"date_of_injury\": \"8/5\",\n      \"days_away_from_work\": 7,\n      \"days_job_transfer_or_restriction\": 30,\n      \"description\": \"broken leg, fell over box\",\n      \"employee_name\": \"Sam Sander\",\n      \"job_title\": \"Electrician\",\n      \"location\": \"2nd floor storeroom\",\n      \"outcome\": \"days_away_from_work\"\n    },\n    {\n      \"case_number\": 4,\n      \"case_type\": \"injury\",\n      \"date_of_injury\": \"9/17\",\n      \"days_away_from_work\": 3,\n      \"days_job_transfer_or_restriction\": 0,\n      \"description\": \"back strain lifting a box\",\n      \"employee_name\": \"Ralph Bocciella\",\n      \"job_title\": \"Laborer\",\n      \"location\": \"packaging department\",\n      \"outcome\": \"other_recordable\"\n    },\n    {\n      \"case_number\": 5,\n      \"case_type\": \"injury\",\n      \"date_of_injury\": \"10/23\",\n      \"days_away_from_work\": 0,\n      \"days_job_transfer_or_restriction\": 0,\n      \"description\": \"dust in left eye\",\n      \"employee_name\": \"Jarrod Daniels\",\n      \"job_title\": \"Machine opr.\",\n      \"location\": \"production floor\",\n      \"outcome\": \"other_recordable\"\n    }\n  ],\n  \"city\": \"Anywhere\",\n  \"establishment_name\": \"XYZ company\",\n  \"state\": \"MA\"\n}",
+					"tpot_ms": 73.46855395545315,
+					"ttft_ms": 320.8162919981987,
+					"usage": {
+						"completion_tokens": 651,
+						"credits_charged": 167,
+						"images": 1,
+						"prompt_tokens": 1658,
+						"rate_book_version": "2026-09-05-production-bootstrap-v4",
+						"total_tokens": 2309
+					}
+				}
+			},
+			"request_sha256": "3b1186a467e818a7a20cadcefbb0aabb3a26b7d5fbb727a0895e859e7f84699b",
+			"response_sha256": "e6f5bc61f7582e061c1c8931073daef15fec0c0c4f3639228423147a5bcd8c0f"
+		},
+		{
+			"slug": "nist-srm-1155a-table-1__a3",
+			"arm": "a3",
+			"case": "nist-srm-1155a-table-1",
+			"endpoint": "https://api.superlinked.com",
+			"path": "/v1/generate/Qwen__Qwen3.8-27B-FP8",
+			"model": "Qwen/Qwen3.8-27B-FP8",
+			"model_revision": "8bd714204e67a1c6c81f84b0dc486b6a6e96e943c42ff488f6b3cbf936e07955",
+			"server_version": "0.7.3",
+			"status": 200,
+			"latency_s": 71.8112,
+			"attempts": 1,
+			"request": {
+				"method": "POST",
+				"body": {
+					"prompt": "A first pass filled the JSON schema from this document and its answer is below. Check it against the page and return the same object with every wrong value corrected. Each value must contain only what its own field is for. Keep a value that is already right. Return only the JSON object.\n\nFirst pass:\n{\n  \"certified_values\": [\n    {\n      \"coverage_factor_k\": 2.45,\n      \"element\": \"Carbon (C)\",\n      \"expanded_uncertainty_percent\": 0.0036,\n      \"mass_fraction_percent\": 0.026,\n      \"symbol\": \"C\"\n    },\n    {\n      \"coverage_factor_k\": 2.26,\n      \"element\": \"Cobalt (Co)\",\n      \"expanded_uncertainty_percent\": 0.018,\n      \"mass_fraction_percent\": 0.225,\n      \"symbol\": \"Co\"\n    },\n    {\n      \"coverage_factor_k\": 2.2,\n      \"element\": \"Chromium (Cr)\",\n      \"expanded_uncertainty_percent\": 0.099,\n      \"mass_fraction_percent\": 17.803,\n      \"symbol\": \"Cr\"\n    },\n    {\n      \"coverage_factor_k\": 2.2,\n      \"element\": \"Copper (Cu)\",\n      \"expanded_uncertainty_percent\": 0.005,\n      \"mass_fraction_percent\": 0.2431,\n      \"symbol\": \"Cu\"\n    },\n    {\n      \"coverage_factor_k\": 2.0,\n      \"element\": \"Iron (Fe)\",\n      \"expanded_uncertainty_percent\": 0.12,\n      \"mass_fraction_percent\": 64.71,\n      \"symbol\": \"Fe\"\n    },\n    {\n      \"coverage_factor_k\": 2.06,\n      \"element\": \"Manganese (Mn)\",\n      \"expanded_uncertainty_percent\": 0.06,\n      \"mass_fraction_percent\": 1.593,\n      \"symbol\": \"Mn\"\n    },\n    {\n      \"coverage_factor_k\": 2.18,\n      \"element\": \"Molybdenum (Mo)\",\n      \"expanded_uncertainty_percent\": 0.015,\n      \"mass_fraction_percent\": 2.188,\n      \"symbol\": \"Mo\"\n    },\n    {\n      \"coverage_factor_k\": 3.18,\n      \"element\": \"Niobium (Nb)\",\n      \"expanded_uncertainty_percent\": 0.0014,\n      \"mass_fraction_percent\": 0.0082,\n      \"symbol\": \"Nb\"\n    },\n    {\n      \"coverage_factor_k\": 2.2,\n      \"element\": \"Nickel (Ni)\",\n      \"expanded_uncertainty_percent\": 0.056,\n      \"mass_fraction_percent\": 12.471,\n      \"symbol\": \"Ni\"\n    },\n    {\n      \"coverage_factor_k\": 2.11,\n      \"element\": \"Phosphorus (P)\",\n      \"expanded_uncertainty_percent\": 0.0012,\n      \"mass_fraction_percent\": 0.0271,\n      \"symbol\": \"P\"\n    },\n    {\n      \"coverage_factor_k\": 2.03,\n      \"element\": \"Silicon (Si)\",\n      \"expanded_uncertainty_percent\": 0.017,\n      \"mass_fraction_percent\": 0.521,\n      \"symbol\": \"Si\"\n    },\n    {\n      \"coverage_factor_k\": 2.45,\n      \"element\": \"Titanium (Ti)\",\n      \"expanded_uncertainty_percent\": 0.0012,\n      \"mass_fraction_percent\": 0.0039,\n      \"symbol\": \"Ti\"\n    },\n    {\n      \"coverage_factor_k\": 2.23,\n      \"element\": \"Vanadium (V)\",\n      \"expanded_uncertainty_percent\": 0.0046,\n      \"mass_fraction_percent\": 0.0725,\n      \"symbol\": \"V\"\n    },\n    {\n      \"coverage_factor_k\": 2.45,\n      \"element\": \"Tungsten (W)\",\n      \"expanded_uncertainty_percent\": 0.0059,\n      \"mass_fraction_percent\": 0.0809,\n      \"symbol\": \"W\"\n    }\n  ],\n  \"srm_number\": \"SRM 1155a\"\n}",
+					"max_new_tokens": 2048,
+					"images": [
+						{
+							"data": "<base64 of apps/site/public/reference/doc-field-extraction/nist-srm-1155a-table-1.png, sha256 5c1afbe2167777805bcc6d3f299303ba04e1ab30209d88533acb460b1c5dab8f>",
+							"format": "png"
+						}
+					],
+					"grammar": {
+						"json_schema": {
+							"type": "object",
+							"properties": {
+								"srm_number": {
+									"type": "string"
+								},
+								"certified_values": {
+									"type": "array",
+									"description": "Rows of Table 1, certified mass fraction values",
+									"items": {
+										"type": "object",
+										"properties": {
+											"element": {
+												"type": "string"
+											},
+											"symbol": {
+												"type": "string"
+											},
+											"mass_fraction_percent": {
+												"type": "number"
+											},
+											"expanded_uncertainty_percent": {
+												"type": "number"
+											},
+											"coverage_factor_k": {
+												"type": "number"
+											}
+										},
+										"required": [
+											"element",
+											"symbol",
+											"mass_fraction_percent",
+											"expanded_uncertainty_percent",
+											"coverage_factor_k"
+										]
+									}
+								}
+							},
+							"required": [
+								"srm_number",
+								"certified_values"
+							]
+						},
+						"strict": true
+					}
+				}
+			},
+			"response": {
+				"headers": {
+					"date": "Tue, 22 Sep 2026 21:14:51 GMT",
+					"content-type": "application/json",
+					"x-sie-credits-debited": "216",
+					"x-sie-execution-binding-sha256": "68d32bec4c2abfc26467ba667b64d8c67ed43a70d95f8a1dbdb1d3ea1562aa25",
+					"x-sie-execution-identity-sha256": "a65b53ec5bf3410cfab9a7528637eb259bb4181029364194d504c11da936cd2b",
+					"x-sie-model-revision": "8bd714204e67a1c6c81f84b0dc486b6a6e96e943c42ff488f6b3cbf936e07955",
+					"x-sie-request-id": "01a0caf7-9b1a-78f1-9f61-4a9c4e2fb940",
+					"x-sie-server-version": "0.7.3",
+					"x-sie-units-images": "1",
+					"x-sie-units-input-tokens": "2006",
+					"x-sie-units-output-tokens": "985",
+					"x-sie-version": "0.7.3",
+					"x-sie-worker": "queue:01a0caf7-9b1a-78f1-9f61-4a9c4e2fb940"
+				},
+				"body": {
+					"attempt_id": "9d3f1352d6dd47a0937d386738de2a1c",
+					"finish_reason": "stop",
+					"model": "Qwen/Qwen3.8-27B-FP8",
+					"text": "{\n  \"certified_values\": [\n    {\n      \"coverage_factor_k\": 2.45,\n      \"element\": \"Carbon (C)\",\n      \"expanded_uncertainty_percent\": 0.0036,\n      \"mass_fraction_percent\": 0.026,\n      \"symbol\": \"C\"\n    },\n    {\n      \"coverage_factor_k\": 2.26,\n      \"element\": \"Cobalt (Co)\",\n      \"expanded_uncertainty_percent\": 0.018,\n      \"mass_fraction_percent\": 0.225,\n      \"symbol\": \"Co\"\n    },\n    {\n      \"coverage_factor_k\": 2.2,\n      \"element\": \"Chromium (Cr)\",\n      \"expanded_uncertainty_percent\": 0.099,\n      \"mass_fraction_percent\": 17.803,\n      \"symbol\": \"Cr\"\n    },\n    {\n      \"coverage_factor_k\": 2.2,\n      \"element\": \"Copper (Cu)\",\n      \"expanded_uncertainty_percent\": 0.005,\n      \"mass_fraction_percent\": 0.2431,\n      \"symbol\": \"Cu\"\n    },\n    {\n      \"coverage_factor_k\": 2.0,\n      \"element\": \"Iron (Fe)\",\n      \"expanded_uncertainty_percent\": 0.12,\n      \"mass_fraction_percent\": 64.71,\n      \"symbol\": \"Fe\"\n    },\n    {\n      \"coverage_factor_k\": 2.06,\n      \"element\": \"Manganese (Mn)\",\n      \"expanded_uncertainty_percent\": 0.06,\n      \"mass_fraction_percent\": 1.593,\n      \"symbol\": \"Mn\"\n    },\n    {\n      \"coverage_factor_k\": 2.18,\n      \"element\": \"Molybdenum (Mo)\",\n      \"expanded_uncertainty_percent\": 0.015,\n      \"mass_fraction_percent\": 2.188,\n      \"symbol\": \"Mo\"\n    },\n    {\n      \"coverage_factor_k\": 3.18,\n      \"element\": \"Niobium (Nb)\",\n      \"expanded_uncertainty_percent\": 0.0014,\n      \"mass_fraction_percent\": 0.0082,\n      \"symbol\": \"Nb\"\n    },\n    {\n      \"coverage_factor_k\": 2.2,\n      \"element\": \"Nickel (Ni)\",\n      \"expanded_uncertainty_percent\": 0.056,\n      \"mass_fraction_percent\": 12.471,\n      \"symbol\": \"Ni\"\n    },\n    {\n      \"coverage_factor_k\": 2.11,\n      \"element\": \"Phosphorus (P)\",\n      \"expanded_uncertainty_percent\": 0.0012,\n      \"mass_fraction_percent\": 0.0271,\n      \"symbol\": \"P\"\n    },\n    {\n      \"coverage_factor_k\": 2.03,\n      \"element\": \"Silicon (Si)\",\n      \"expanded_uncertainty_percent\": 0.017,\n      \"mass_fraction_percent\": 0.521,\n      \"symbol\": \"Si\"\n    },\n    {\n      \"coverage_factor_k\": 2.45,\n      \"element\": \"Titanium (Ti)\",\n      \"expanded_uncertainty_percent\": 0.0012,\n      \"mass_fraction_percent\": 0.0039,\n      \"symbol\": \"Ti\"\n    },\n    {\n      \"coverage_factor_k\": 2.23,\n      \"element\": \"Vanadium (V)\",\n      \"expanded_uncertainty_percent\": 0.0046,\n      \"mass_fraction_percent\": 0.0725,\n      \"symbol\": \"V\"\n    },\n    {\n      \"coverage_factor_k\": 2.45,\n      \"element\": \"Tungsten (W)\",\n      \"expanded_uncertainty_percent\": 0.0059,\n      \"mass_fraction_percent\": 0.0809,\n      \"symbol\": \"W\"\n    }\n  ],\n  \"srm_number\": \"SRM 1155a\"\n}",
+					"tpot_ms": 71.70265984670051,
+					"ttft_ms": 413.1706829999757,
+					"usage": {
+						"completion_tokens": 985,
+						"credits_charged": 216,
+						"images": 1,
+						"prompt_tokens": 2006,
+						"rate_book_version": "2026-09-05-production-bootstrap-v4",
+						"total_tokens": 2991
+					}
+				}
+			},
+			"request_sha256": "a69aa1217822769d119401fd32039bac8898a3a2b46a9e99f1b1d2e2d0e46bd4",
+			"response_sha256": "c7ee061b3041a5bf53266f0d30c599928168a96bc32af509910c7decfb946731"
+		},
+		{
+			"slug": "wolters-kluwer-invoice__a3",
+			"arm": "a3",
+			"case": "wolters-kluwer-invoice",
+			"endpoint": "https://api.superlinked.com",
+			"path": "/v1/generate/Qwen__Qwen3.8-27B-FP8",
+			"model": "Qwen/Qwen3.8-27B-FP8",
+			"model_revision": "8bd714204e67a1c6c81f84b0dc486b6a6e96e943c42ff488f6b3cbf936e07955",
+			"server_version": "0.7.3",
+			"status": 200,
+			"latency_s": 22.3098,
+			"attempts": 1,
+			"request": {
+				"method": "POST",
+				"body": {
+					"prompt": "A first pass filled the JSON schema from this document and its answer is below. Check it against the page and return the same object with every wrong value corrected. Each value must contain only what its own field is for. Keep a value that is already right. Return only the JSON object.\n\nFirst pass:\n{\n  \"amount_due\": 3900.0,\n  \"credit_card_type_checked\": \"visa\",\n  \"currency\": \"USD\",\n  \"customer_id\": \"UCSFD00005\",\n  \"due_date\": \"11 Sep 2016\",\n  \"invoice_date\": \"8/12/2016\",\n  \"invoice_number\": \"000277511\",\n  \"line_items\": [\n    {\n      \"amount\": 3900.0,\n      \"item\": \"OPEN ACCESS ARTICLE\",\n      \"media_description\": \"Academic Medicine\",\n      \"quantity\": 1,\n      \"unit_of_measure\": \"Each\"\n    }\n  ],\n  \"payment_terms\": \"NET 30\",\n  \"remit_to\": \"Wolters Kluwer Health, Inc.\\n16705 Collection Center Drive\\nChicago, IL 60693\",\n  \"sales_tax\": 0.0,\n  \"sold_to\": \"UCSF Department of Psychiatry\\n401 Parnassus Ave.\\nBox 0984-Mse\\nSan Francisco, CA 94143-0984\\nUnited States\",\n  \"subtotal\": 3900.0\n}",
+					"max_new_tokens": 2048,
+					"images": [
+						{
+							"data": "<base64 of apps/site/public/reference/doc-field-extraction/wolters-kluwer-invoice.png, sha256 5aae590cd4523f802aafcb4e338404ad257c40b974cb7146ce5a6ead6557e91a>",
+							"format": "png"
+						}
+					],
+					"grammar": {
+						"json_schema": {
+							"type": "object",
+							"properties": {
+								"invoice_number": {
+									"type": "string"
+								},
+								"invoice_date": {
+									"type": "string"
+								},
+								"customer_id": {
+									"type": "string"
+								},
+								"sold_to": {
+									"type": "string",
+									"description": "Organization name only"
+								},
+								"line_items": {
+									"type": "array",
+									"items": {
+										"type": "object",
+										"properties": {
+											"quantity": {
+												"type": "integer"
+											},
+											"item": {
+												"type": "string"
+											},
+											"unit_of_measure": {
+												"type": "string"
+											},
+											"media_description": {
+												"type": "string"
+											},
+											"amount": {
+												"type": "number"
+											}
+										},
+										"required": [
+											"quantity",
+											"item",
+											"unit_of_measure",
+											"media_description",
+											"amount"
+										]
+									}
+								},
+								"subtotal": {
+									"type": "number"
+								},
+								"sales_tax": {
+									"type": "number"
+								},
+								"amount_due": {
+									"type": "number"
+								},
+								"currency": {
+									"type": "string"
+								},
+								"payment_terms": {
+									"type": "string"
+								},
+								"due_date": {
+									"type": "string"
+								},
+								"remit_to": {
+									"type": "string",
+									"description": "Payee name for checks"
+								},
+								"credit_card_type_checked": {
+									"type": "string",
+									"enum": [
+										"visa",
+										"mastercard",
+										"amex",
+										"other",
+										"none"
+									]
+								}
+							},
+							"required": [
+								"invoice_number",
+								"invoice_date",
+								"customer_id",
+								"sold_to",
+								"line_items",
+								"subtotal",
+								"sales_tax",
+								"amount_due",
+								"currency",
+								"payment_terms",
+								"due_date",
+								"remit_to",
+								"credit_card_type_checked"
+							]
+						},
+						"strict": true
+					}
+				}
+			},
+			"response": {
+				"headers": {
+					"date": "Tue, 22 Sep 2026 21:15:13 GMT",
+					"content-type": "application/json",
+					"x-sie-credits-debited": "116",
+					"x-sie-execution-binding-sha256": "68d32bec4c2abfc26467ba667b64d8c67ed43a70d95f8a1dbdb1d3ea1562aa25",
+					"x-sie-execution-identity-sha256": "a65b53ec5bf3410cfab9a7528637eb259bb4181029364194d504c11da936cd2b",
+					"x-sie-model-revision": "8bd714204e67a1c6c81f84b0dc486b6a6e96e943c42ff488f6b3cbf936e07955",
+					"x-sie-request-id": "01a0caf8-b3af-7392-a1d6-6994e8544722",
+					"x-sie-server-version": "0.7.3",
+					"x-sie-units-images": "1",
+					"x-sie-units-input-tokens": "1316",
+					"x-sie-units-output-tokens": "295",
+					"x-sie-version": "0.7.3",
+					"x-sie-worker": "queue:01a0caf8-b3af-7392-a1d6-6994e8544722"
+				},
+				"body": {
+					"attempt_id": "6b06c07fb2fa4545a90244a143da264b",
+					"finish_reason": "stop",
+					"model": "Qwen/Qwen3.8-27B-FP8",
+					"text": "{\n  \"amount_due\": 3900.0,\n  \"credit_card_type_checked\": \"visa\",\n  \"currency\": \"USD\",\n  \"customer_id\": \"UCSFD00005\",\n  \"due_date\": \"11 Sep 2016\",\n  \"invoice_date\": \"8/12/2016\",\n  \"invoice_number\": \"000277511\",\n  \"line_items\": [\n    {\n      \"amount\": 3900.0,\n      \"item\": \"OPEN ACCESS ARTICLE\",\n      \"media_description\": \"Academic Medicine\",\n      \"quantity\": 1,\n      \"unit_of_measure\": \"Each\"\n    }\n  ],\n  \"payment_terms\": \"NET 30\",\n  \"remit_to\": \"Wolters Kluwer Health, Inc.\\n16705 Collection Center Drive\\nChicago, IL 60693\",\n  \"sales_tax\": 0.0,\n  \"sold_to\": \"UCSF Department of Psychiatry\\n401 Parnassus Ave.\\nBox 0984-Mse\\nSan Francisco, CA 94143-0984\\nUnited States\",\n  \"subtotal\": 3900.0\n}",
+					"tpot_ms": 71.65416949491525,
+					"ttft_ms": 368.8091210000266,
+					"usage": {
+						"completion_tokens": 295,
+						"credits_charged": 116,
+						"images": 1,
+						"prompt_tokens": 1316,
+						"rate_book_version": "2026-09-05-production-bootstrap-v4",
+						"total_tokens": 1611
+					}
+				}
+			},
+			"request_sha256": "185b27738296812af4b534b3bb52d8bca133142e05250a797cb4eba53fb9d870",
+			"response_sha256": "ea3808621f8a4101e139e16fc10296373cb9ad9c5d04c6c8388a382076ecbaca"
+		},
+		{
+			"slug": "usps-cn22-customs-declaration__a3",
+			"arm": "a3",
+			"case": "usps-cn22-customs-declaration",
+			"endpoint": "https://api.superlinked.com",
+			"path": "/v1/generate/Qwen__Qwen3.8-27B-FP8",
+			"model": "Qwen/Qwen3.8-27B-FP8",
+			"model_revision": "8bd714204e67a1c6c81f84b0dc486b6a6e96e943c42ff488f6b3cbf936e07955",
+			"server_version": "0.7.3",
+			"status": 200,
+			"latency_s": 20.6332,
+			"attempts": 1,
+			"request": {
+				"method": "POST",
+				"body": {
+					"prompt": "A first pass filled the JSON schema from this document and its answer is below. Check it against the page and return the same object with every wrong value corrected. Each value must contain only what its own field is for. Keep a value that is already right. Return only the JSON object.\n\nFirst pass:\n{\n  \"contents_category\": \"other\",\n  \"country_of_origin\": \"US\",\n  \"declaration_date\": \"10/13/2015\",\n  \"destination_city\": \"KÖLN 50823\",\n  \"destination_country\": \"GERMANY\",\n  \"destination_postal_code\": \"50823\",\n  \"items\": [\n    {\n      \"description\": \"\\\"I edit Wikipedia\\\" Box T-shirt (Unisex) - X-Large\",\n      \"quantity\": 1,\n      \"value_usd\": 7.2,\n      \"weight_lb\": 0,\n      \"weight_oz\": 5\n    }\n  ],\n  \"sender_address\": \"SWAGBOT\\n210 E. Walnut Street\\nSuite 100\\nSpringfield MO 65806\",\n  \"sender_name\": \"SWAGBOT\",\n  \"total_value_usd\": 7.2,\n  \"total_weight_lb\": 0,\n  \"total_weight_oz\": 6,\n  \"tracking_number\": \"LZ 647 929 979 US\"\n}",
+					"max_new_tokens": 2048,
+					"images": [
+						{
+							"data": "<base64 of apps/site/public/reference/doc-field-extraction/usps-cn22-customs-declaration.jpg, sha256 84f5eb9bfcbe6037d87233f698062449d6843e5b86def0e59e19650b5faaabe7>",
+							"format": "jpeg"
+						}
+					],
+					"grammar": {
+						"json_schema": {
+							"type": "object",
+							"properties": {
+								"tracking_number": {
+									"type": "string"
+								},
+								"contents_category": {
+									"type": "string",
+									"enum": [
+										"gift",
+										"documents",
+										"commercial_sample",
+										"returned_goods",
+										"other"
+									]
+								},
+								"sender_name": {
+									"type": "string"
+								},
+								"sender_address": {
+									"type": "string"
+								},
+								"destination_city": {
+									"type": "string"
+								},
+								"destination_postal_code": {
+									"type": "string"
+								},
+								"destination_country": {
+									"type": "string"
+								},
+								"items": {
+									"type": "array",
+									"items": {
+										"type": "object",
+										"properties": {
+											"description": {
+												"type": "string"
+											},
+											"quantity": {
+												"type": "integer"
+											},
+											"weight_lb": {
+												"type": "integer"
+											},
+											"weight_oz": {
+												"type": "integer"
+											},
+											"value_usd": {
+												"type": "number"
+											}
+										},
+										"required": [
+											"description",
+											"quantity",
+											"weight_lb",
+											"weight_oz",
+											"value_usd"
+										]
+									}
+								},
+								"total_weight_lb": {
+									"type": "integer"
+								},
+								"total_weight_oz": {
+									"type": "integer"
+								},
+								"total_value_usd": {
+									"type": "number"
+								},
+								"country_of_origin": {
+									"type": "string"
+								},
+								"declaration_date": {
+									"type": "string"
+								}
+							},
+							"required": [
+								"tracking_number",
+								"contents_category",
+								"sender_name",
+								"sender_address",
+								"destination_city",
+								"destination_postal_code",
+								"destination_country",
+								"items",
+								"total_weight_lb",
+								"total_weight_oz",
+								"total_value_usd",
+								"country_of_origin",
+								"declaration_date"
+							]
+						},
+						"strict": true
+					}
+				}
+			},
+			"response": {
+				"headers": {
+					"date": "Tue, 22 Sep 2026 21:15:33 GMT",
+					"content-type": "application/json",
+					"x-sie-credits-debited": "113",
+					"x-sie-execution-binding-sha256": "68d32bec4c2abfc26467ba667b64d8c67ed43a70d95f8a1dbdb1d3ea1562aa25",
+					"x-sie-execution-identity-sha256": "7719d7b34e734a9238aa4e0a0da794dbea44c4e6e2e9b8d9a30486757875d23a",
+					"x-sie-model-revision": "8bd714204e67a1c6c81f84b0dc486b6a6e96e943c42ff488f6b3cbf936e07955",
+					"x-sie-request-id": "01a0caf9-0aec-7852-8aaa-955a74525251",
+					"x-sie-server-version": "0.7.3",
+					"x-sie-units-images": "1",
+					"x-sie-units-input-tokens": "1310",
+					"x-sie-units-output-tokens": "256",
+					"x-sie-version": "0.7.3",
+					"x-sie-worker": "queue:01a0caf9-0aec-7852-8aaa-955a74525251"
+				},
+				"body": {
+					"attempt_id": "a1f824fcbb704929847965878835ed16",
+					"finish_reason": "stop",
+					"model": "Qwen/Qwen3.8-27B-FP8",
+					"text": "{\n  \"contents_category\": \"other\",\n  \"country_of_origin\": \"US\",\n  \"declaration_date\": \"10/13/2015\",\n  \"destination_city\": \"KÖLN\",\n  \"destination_country\": \"GERMANY\",\n  \"destination_postal_code\": \"50823\",\n  \"items\": [\n    {\n      \"description\": \"\\\"I edit Wikipedia\\\" Box T-shirt (Unisex) - X-Large\",\n      \"quantity\": 1,\n      \"value_usd\": 7.2,\n      \"weight_lb\": 0,\n      \"weight_oz\": 5\n    }\n  ],\n  \"sender_address\": \"SWAGBOT\\n210 E. Walnut Street\\nSuite 100\\nSpringfield MO 65806\",\n  \"sender_name\": \"SWAGBOT\",\n  \"total_value_usd\": 7.2,\n  \"total_weight_lb\": 0,\n  \"total_weight_oz\": 6,\n  \"tracking_number\": \"LZ 647 929 979 US\"\n}",
+					"tpot_ms": 75.20655315625,
+					"ttft_ms": 445.4642119962955,
+					"usage": {
+						"completion_tokens": 256,
+						"credits_charged": 113,
+						"images": 1,
+						"prompt_tokens": 1310,
+						"rate_book_version": "2026-09-05-production-bootstrap-v4",
+						"total_tokens": 1566
+					}
+				}
+			},
+			"request_sha256": "8c5ea64f4cb323211dbc9fe3a93fe19112e35c37001c03da333f9cccc5f77d99",
+			"response_sha256": "8caafbe6b7de73b93a6859421a770c99d449db1049c36c0aff61b1ef3cf8a3fa"
+		},
+		{
+			"slug": "dei-electricity-bill__a3",
+			"arm": "a3",
+			"case": "dei-electricity-bill",
+			"endpoint": "https://api.superlinked.com",
+			"path": "/v1/generate/Qwen__Qwen3.8-27B-FP8",
+			"model": "Qwen/Qwen3.8-27B-FP8",
+			"model_revision": "8bd714204e67a1c6c81f84b0dc486b6a6e96e943c42ff488f6b3cbf936e07955",
+			"server_version": "0.7.3",
+			"status": 200,
+			"latency_s": 27.8027,
+			"attempts": 1,
+			"request": {
+				"method": "POST",
+				"body": {
+					"prompt": "A first pass filled the JSON schema from this document and its answer is below. Check it against the page and return the same object with every wrong value corrected. Each value must contain only what its own field is for. Keep a value that is already right. Return only the JSON object.\n\nFirst pass:\n{\n  \"contracted_power_kva\": 25,\n  \"electricity_amount_eur\": 388.52,\n  \"electricity_total_with_vat_eur\": 423.0,\n  \"ert_fee_eur\": 6.62,\n  \"meter_number\": \"T18083\",\n  \"meter_readings\": [\n    {\n      \"consumption_kwh\": 2294,\n      \"current_reading\": 35579,\n      \"previous_reading\": 37873,\n      \"register_type\": \"11\"\n    },\n    {\n      \"consumption_kwh\": 695,\n      \"current_reading\": 13498,\n      \"previous_reading\": 14193,\n      \"register_type\": \"12\"\n    }\n  ],\n  \"municipal_charges_eur\": 58.17,\n  \"next_reading_from\": \"26/11/2015\",\n  \"next_reading_to\": \"02/12/2015\",\n  \"previous_unpaid_eur\": 287.98,\n  \"regulated_charges_eur\": 245.61,\n  \"supply_charges_eur\": 14.25,\n  \"total_due_eur\": 876.0,\n  \"vat_eur\": 47.97,\n  \"vat_rate_percent\": 13\n}",
+					"max_new_tokens": 2048,
+					"images": [
+						{
+							"data": "<base64 of apps/site/public/reference/doc-field-extraction/dei-electricity-bill.jpg, sha256 05a4a1e9e22ac73340b44351dec80483ccc62173149728606ad02c617d8ebe32>",
+							"format": "jpeg"
+						}
+					],
+					"grammar": {
+						"json_schema": {
+							"type": "object",
+							"properties": {
+								"meter_number": {
+									"type": "string"
+								},
+								"meter_readings": {
+									"type": "array",
+									"items": {
+										"type": "object",
+										"properties": {
+											"register_type": {
+												"type": "string"
+											},
+											"current_reading": {
+												"type": "integer"
+											},
+											"previous_reading": {
+												"type": "integer"
+											},
+											"consumption_kwh": {
+												"type": "integer"
+											}
+										},
+										"required": [
+											"register_type",
+											"current_reading",
+											"previous_reading",
+											"consumption_kwh"
+										]
+									}
+								},
+								"contracted_power_kva": {
+									"type": "number"
+								},
+								"next_reading_from": {
+									"type": "string"
+								},
+								"next_reading_to": {
+									"type": "string"
+								},
+								"supply_charges_eur": {
+									"type": "number",
+									"description": "Electricity supply charges subtotal"
+								},
+								"regulated_charges_eur": {
+									"type": "number",
+									"description": "Regulated charges subtotal"
+								},
+								"electricity_amount_eur": {
+									"type": "number",
+									"description": "Amount payable for electricity before VAT"
+								},
+								"vat_rate_percent": {
+									"type": "number"
+								},
+								"vat_eur": {
+									"type": "number"
+								},
+								"electricity_total_with_vat_eur": {
+									"type": "number"
+								},
+								"municipal_charges_eur": {
+									"type": "number",
+									"description": "Municipal charges subtotal"
+								},
+								"ert_fee_eur": {
+									"type": "number",
+									"description": "ERT public broadcaster fee"
+								},
+								"previous_unpaid_eur": {
+									"type": "number"
+								},
+								"total_due_eur": {
+									"type": "number"
+								}
+							},
+							"required": [
+								"meter_number",
+								"meter_readings",
+								"contracted_power_kva",
+								"next_reading_from",
+								"next_reading_to",
+								"supply_charges_eur",
+								"regulated_charges_eur",
+								"electricity_amount_eur",
+								"vat_rate_percent",
+								"vat_eur",
+								"electricity_total_with_vat_eur",
+								"municipal_charges_eur",
+								"ert_fee_eur",
+								"previous_unpaid_eur",
+								"total_due_eur"
+							]
+						},
+						"strict": true
+					}
+				}
+			},
+			"response": {
+				"headers": {
+					"date": "Tue, 22 Sep 2026 21:16:01 GMT",
+					"content-type": "application/json",
+					"x-sie-credits-debited": "123",
+					"x-sie-execution-binding-sha256": "68d32bec4c2abfc26467ba667b64d8c67ed43a70d95f8a1dbdb1d3ea1562aa25",
+					"x-sie-execution-identity-sha256": "7719d7b34e734a9238aa4e0a0da794dbea44c4e6e2e9b8d9a30486757875d23a",
+					"x-sie-model-revision": "8bd714204e67a1c6c81f84b0dc486b6a6e96e943c42ff488f6b3cbf936e07955",
+					"x-sie-request-id": "01a0caf9-5bf9-7a21-80b0-396bd5f34e89",
+					"x-sie-server-version": "0.7.3",
+					"x-sie-units-images": "1",
+					"x-sie-units-input-tokens": "1354",
+					"x-sie-units-output-tokens": "348",
+					"x-sie-version": "0.7.3",
+					"x-sie-worker": "queue:01a0caf9-5bf9-7a21-80b0-396bd5f34e89"
+				},
+				"body": {
+					"attempt_id": "df45f23136944fa8851854c14646f329",
+					"finish_reason": "stop",
+					"model": "Qwen/Qwen3.8-27B-FP8",
+					"text": "{\n  \"contracted_power_kva\": 25,\n  \"electricity_amount_eur\": 388.52,\n  \"electricity_total_with_vat_eur\": 423.0,\n  \"ert_fee_eur\": 6.62,\n  \"meter_number\": \"T18083\",\n  \"meter_readings\": [\n    {\n      \"consumption_kwh\": 2294,\n      \"current_reading\": 37873,\n      \"previous_reading\": 35579,\n      \"register_type\": \"11\"\n    },\n    {\n      \"consumption_kwh\": 695,\n      \"current_reading\": 14193,\n      \"previous_reading\": 13498,\n      \"register_type\": \"12\"\n    }\n  ],\n  \"municipal_charges_eur\": 58.17,\n  \"next_reading_from\": \"26/11/2015\",\n  \"next_reading_to\": \"02/12/2015\",\n  \"previous_unpaid_eur\": 287.98,\n  \"regulated_charges_eur\": 245.61,\n  \"supply_charges_eur\": 14.25,\n  \"total_due_eur\": 876.0,\n  \"vat_eur\": 47.97,\n  \"vat_rate_percent\": 13\n}",
+					"tpot_ms": 75.57079062931035,
+					"ttft_ms": 442.74955900618806,
+					"usage": {
+						"completion_tokens": 348,
+						"credits_charged": 123,
+						"images": 1,
+						"prompt_tokens": 1354,
+						"rate_book_version": "2026-09-05-production-bootstrap-v4",
+						"total_tokens": 1702
+					}
+				}
+			},
+			"request_sha256": "b30e9d0ed4e32fb72feeb9b740d7aa05ef4de2b9be181d662fc30b66fc94331c",
+			"response_sha256": "0ff21c57394b55a0a723c44c6bcdfc6b0dd7b82ee29ce399d0156dff017a6518"
+		},
+		{
+			"slug": "walmart-receipt-photo__a3",
+			"arm": "a3",
+			"case": "walmart-receipt-photo",
+			"endpoint": "https://api.superlinked.com",
+			"path": "/v1/generate/Qwen__Qwen3.8-27B-FP8",
+			"model": "Qwen/Qwen3.8-27B-FP8",
+			"model_revision": "8bd714204e67a1c6c81f84b0dc486b6a6e96e943c42ff488f6b3cbf936e07955",
+			"server_version": "0.7.3",
+			"status": 200,
+			"latency_s": 13.5846,
+			"attempts": 1,
+			"request": {
+				"method": "POST",
+				"body": {
+					"prompt": "A first pass filled the JSON schema from this document and its answer is below. Check it against the page and return the same object with every wrong value corrected. Each value must contain only what its own field is for. Keep a value that is already right. Return only the JSON object.\n\nFirst pass:\n{\n  \"items_sold\": 21,\n  \"merchant\": \"WALMART\",\n  \"payment_method\": \"debit\",\n  \"purchase_date\": \"07/25/21\",\n  \"store_address\": \"200 N MAIN ST\\nBAYARD WY 84713-129\",\n  \"store_number\": \"00109\",\n  \"store_phone\": \"307-675-4429\",\n  \"subtotal\": 6.97,\n  \"tax\": 0.5,\n  \"tax_rate_percent\": 7.18,\n  \"total\": 7.47\n}",
+					"max_new_tokens": 2048,
+					"images": [
+						{
+							"data": "<base64 of apps/site/public/reference/doc-field-extraction/walmart-receipt-photo.jpg, sha256 c2539253c267968e73782db70e6efd80f291fc6b48011a95a1f20664b901d414>",
+							"format": "jpeg"
+						}
+					],
+					"grammar": {
+						"json_schema": {
+							"type": "object",
+							"properties": {
+								"merchant": {
+									"type": "string"
+								},
+								"store_phone": {
+									"type": "string"
+								},
+								"store_address": {
+									"type": "string",
+									"description": "Street, city, state and ZIP"
+								},
+								"store_number": {
+									"type": "string"
+								},
+								"purchase_date": {
+									"type": "string"
+								},
+								"subtotal": {
+									"type": "number"
+								},
+								"tax_rate_percent": {
+									"type": "number"
+								},
+								"tax": {
+									"type": "number"
+								},
+								"total": {
+									"type": "number"
+								},
+								"payment_method": {
+									"type": "string",
+									"enum": [
+										"cash",
+										"credit",
+										"debit",
+										"ebt",
+										"gift_card"
+									]
+								},
+								"items_sold": {
+									"type": "integer"
+								}
+							},
+							"required": [
+								"merchant",
+								"store_phone",
+								"store_address",
+								"store_number",
+								"purchase_date",
+								"subtotal",
+								"tax_rate_percent",
+								"tax",
+								"total",
+								"payment_method",
+								"items_sold"
+							]
+						},
+						"strict": true
+					}
+				}
+			},
+			"response": {
+				"headers": {
+					"date": "Tue, 22 Sep 2026 21:16:15 GMT",
+					"content-type": "application/json",
+					"x-sie-credits-debited": "99",
+					"x-sie-execution-binding-sha256": "68d32bec4c2abfc26467ba667b64d8c67ed43a70d95f8a1dbdb1d3ea1562aa25",
+					"x-sie-execution-identity-sha256": "7719d7b34e734a9238aa4e0a0da794dbea44c4e6e2e9b8d9a30486757875d23a",
+					"x-sie-model-revision": "8bd714204e67a1c6c81f84b0dc486b6a6e96e943c42ff488f6b3cbf936e07955",
+					"x-sie-request-id": "01a0caf9-c8ca-7fa0-b3d3-87f5e1eebce1",
+					"x-sie-server-version": "0.7.3",
+					"x-sie-units-images": "1",
+					"x-sie-units-input-tokens": "1205",
+					"x-sie-units-output-tokens": "158",
+					"x-sie-version": "0.7.3",
+					"x-sie-worker": "queue:01a0caf9-c8ca-7fa0-b3d3-87f5e1eebce1"
+				},
+				"body": {
+					"attempt_id": "db1b1e7921c64c1ea9f9778d392e45b3",
+					"finish_reason": "stop",
+					"model": "Qwen/Qwen3.8-27B-FP8",
+					"text": "{\n  \"items_sold\": 40,\n  \"merchant\": \"WALMART\",\n  \"payment_method\": \"debit\",\n  \"purchase_date\": \"07/25/21\",\n  \"store_address\": \"200 N MAIN ST\\nBAYARD WY 84713-129\",\n  \"store_number\": \"00109\",\n  \"store_phone\": \"307-675-4429\",\n  \"subtotal\": 6.97,\n  \"tax\": 0.50,\n  \"tax_rate_percent\": 7.18,\n  \"total\": 7.47\n}",
+					"tpot_ms": 72.6131028164557,
+					"ttft_ms": 354.65825000574114,
+					"usage": {
+						"completion_tokens": 158,
+						"credits_charged": 99,
+						"images": 1,
+						"prompt_tokens": 1205,
+						"rate_book_version": "2026-09-05-production-bootstrap-v4",
+						"total_tokens": 1363
+					}
+				}
+			},
+			"request_sha256": "df9ad8b71da87fac1fc14b8fa0d04f1f28234f728b738233d8fd05d252976fab",
+			"response_sha256": "a0b0bb32d59776827c5132c32b8716a6015c8ca56761369cdbcccb2adf9bd9f9"
+		}
+	]
+}

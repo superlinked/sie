@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
+use crate::config::{redact_url_userinfo, NatsCredentials};
 use crate::observability::metrics::{self as telemetry, ConfigOperation, ConfigOutcome};
 use crate::state::config_epoch::ConfigEpoch;
 use crate::state::model_registry::ModelRegistry;
@@ -34,6 +35,30 @@ fn notification_operation(notification: &ConfigNotification) -> ConfigOperation 
     } else {
         ConfigOperation::DeltaModel
     }
+}
+
+/// Why `msg` did not come from a plain client publish, or `None` when it did.
+///
+/// sie-config publishes config notifications, and the server emits JetStream
+/// advisories, with neither a reply subject nor headers. A NATS user that may
+/// manage JetStream streams or consumers can make the server itself deliver
+/// stored bytes to any subject, past that user's publish permissions: stream
+/// republish and direct-get replies carry `Nats-Stream`/`Nats-Sequence`
+/// headers, and consumer deliveries carry a `$JS.ACK` reply subject. Dropping
+/// those keeps these subjects limited to the NATS users allowed to publish on
+/// them.
+pub(crate) fn server_originated(msg: &async_nats::Message) -> Option<&'static str> {
+    if msg.reply.is_some() {
+        return Some("reply subject set");
+    }
+    let has_server_header = msg.headers.as_ref().is_some_and(|headers| {
+        headers.iter().any(|(name, _)| {
+            let name: &str = name.as_ref();
+            name.get(..5)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("nats-"))
+        })
+    });
+    has_server_header.then_some("JetStream header present")
 }
 
 /// Default trusted-producer allowlist for `sie.config.models._all`. Only
@@ -85,6 +110,7 @@ pub struct NatsManager {
     /// Allowlist of `producer_id` values whose notifications are applied.
     /// An empty `Vec` disables validation (trust any producer).
     trusted_producers: Vec<String>,
+    credentials: Option<NatsCredentials>,
 }
 
 impl NatsManager {
@@ -128,7 +154,14 @@ impl NatsManager {
             config_epoch,
             reconnect_notify: Arc::new(tokio::sync::Notify::new()),
             trusted_producers,
+            credentials: None,
         }
+    }
+
+    /// Authenticate the connection with these credentials.
+    pub fn with_credentials(mut self, credentials: Option<NatsCredentials>) -> Self {
+        self.credentials = credentials;
+        self
     }
 
     /// Test-only: current trusted-producer allowlist.
@@ -158,7 +191,12 @@ impl NatsManager {
 
         let reconnect_notify_clone = Arc::clone(&self.reconnect_notify);
 
-        let client = async_nats::ConnectOptions::new()
+        let mut options = async_nats::ConnectOptions::new();
+        if let Some(credentials) = &self.credentials {
+            options =
+                options.user_and_password(credentials.user.clone(), credentials.password.clone());
+        }
+        let client = options
             .retry_on_initial_connect()
             .connection_timeout(Duration::from_secs(5))
             .reconnect_delay_callback(|_attempts| Duration::from_secs(2))
@@ -193,7 +231,12 @@ impl NatsManager {
             .connect(&self.nats_url)
             .await?;
 
-        info!(url = %self.nats_url, gateway_id = %self.gateway_id, "connected to NATS");
+        info!(
+            url = %redact_url_userinfo(&self.nats_url),
+            user = self.credentials.as_ref().map_or("", |c| c.user.as_str()),
+            gateway_id = %self.gateway_id,
+            "connected to NATS"
+        );
         telemetry::set_messaging_client_ready(true);
         *self.client.write().await = Some(client);
 
@@ -230,6 +273,17 @@ impl NatsManager {
 
     async fn handle_subscription(&self, mut subscriber: async_nats::Subscriber) {
         while let Some(msg) = subscriber.next().await {
+            if let Some(reason) = server_originated(&msg) {
+                telemetry::record_config_operation(
+                    ConfigOperation::DeltaModel,
+                    ConfigOutcome::RejectedUntrusted,
+                );
+                warn!(
+                    reason,
+                    "dropping config notification that was not published directly by a client"
+                );
+                continue;
+            }
             let notification: ConfigNotification = match serde_json::from_slice(&msg.payload) {
                 Ok(n) => n,
                 Err(e) => {
@@ -372,6 +426,48 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use std::fs;
+
+    fn config_message(
+        reply: Option<&str>,
+        headers: Option<async_nats::HeaderMap>,
+    ) -> async_nats::Message {
+        async_nats::Message {
+            subject: SUBJECT_ALL.into(),
+            reply: reply.map(Into::into),
+            payload: bytes::Bytes::from_static(b"{}"),
+            headers,
+            status: None,
+            description: None,
+            length: 0,
+        }
+    }
+
+    #[test]
+    fn server_originated_accepts_only_plain_client_publishes() {
+        assert_eq!(server_originated(&config_message(None, None)), None);
+
+        let mut app_headers = async_nats::HeaderMap::new();
+        app_headers.insert("traceparent", "00-abc-def-01");
+        assert_eq!(
+            server_originated(&config_message(None, Some(app_headers))),
+            None
+        );
+
+        assert!(server_originated(&config_message(
+            Some("$JS.ACK.WORK_x.pushc.1.1.1.1.0"),
+            None
+        ))
+        .is_some());
+
+        for name in ["Nats-Stream", "nats-sequence", "NATS-SUBJECT"] {
+            let mut headers = async_nats::HeaderMap::new();
+            headers.insert(name, "WORK_x");
+            assert!(
+                server_originated(&config_message(None, Some(headers))).is_some(),
+                "{name}"
+            );
+        }
+    }
 
     #[test]
     fn test_config_notification_serde() {
@@ -856,6 +952,7 @@ profiles:
             "bundle_config_hash": "x",
             "model_id": "unknown/model",
             "future_field_we_dont_know_about": 42,
+            "bundle_adapters": {"default": ["sie_server.adapters.sentence_transformer"]},
             "model_config": ""
         }"#;
         let parsed: ConfigNotification = serde_json::from_str(json).unwrap();

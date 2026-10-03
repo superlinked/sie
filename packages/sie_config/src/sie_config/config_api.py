@@ -23,7 +23,10 @@ from sie_config.model_registry import (
     ModelRegistry,
     ProfileConflictError,
     parse_model_spec,
+    undeclared_upstreams,
+    validate_routing_config,
 )
+from sie_config.model_schema import model_config_schema_errors
 from sie_config.nats_publisher import NatsPublisher, PartialPublishError
 from sie_config.types import AuditEntry
 
@@ -173,6 +176,24 @@ def _get_write_lock(app_state: Any) -> asyncio.Lock:
     return existing_lock
 
 
+# Exports queue here, one at a time, before they take the write lock. The write
+# lock is FIFO, so without this a burst of N exports would put a write behind N
+# snapshot builds; with it, a write waits behind at most one.
+_APP_STATE_EXPORT_GATE_ATTR = "_config_export_gate"
+_APP_STATE_EXPORT_LOOP_ATTR = "_config_export_gate_loop"
+
+
+def _get_export_gate(app_state: Any) -> asyncio.Lock:
+    """Per-app export single-flight lock, event-loop-bound like the write lock."""
+    running_loop = asyncio.get_running_loop()
+    existing_gate = getattr(app_state, _APP_STATE_EXPORT_GATE_ATTR, None)
+    if existing_gate is None or getattr(app_state, _APP_STATE_EXPORT_LOOP_ATTR, None) is not running_loop:
+        existing_gate = asyncio.Lock()
+        setattr(app_state, _APP_STATE_EXPORT_GATE_ATTR, existing_gate)
+        setattr(app_state, _APP_STATE_EXPORT_LOOP_ATTR, running_loop)
+    return existing_gate
+
+
 def _get_idempotency_state(app_state: Any) -> _IdempotencyState:
     """Lazily fetch-or-create the per-app idempotency state.
 
@@ -305,7 +326,7 @@ def _emit_audit_log(
     body_bytes: int | None = None,
 ) -> None:
     """Emit a structured audit log entry for config API operations."""
-    token = request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
+    token = _extract_bearer_token(request.headers.get("Authorization", ""))
     token_id = hashlib.sha256(token.encode()).hexdigest()[:12] if token else None
 
     entry = AuditEntry(
@@ -339,6 +360,50 @@ def _validate_model_id(model_id: str) -> None:
             detail={
                 "error": "invalid_model_id",
                 "message": "Model ID must not end with '/status' (reserved for the gateway status endpoint).",
+            },
+        )
+
+
+def _reject_worker_schema_errors(config: dict[str, Any]) -> None:
+    """Reject a body with 422 when a worker's model-config schema would refuse it."""
+    details = model_config_schema_errors(config)
+    if details:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "validation_error", "details": details},
+        )
+
+
+_UPSTREAM_NAMES_ENV = "SIE_UPSTREAM_NAMES"
+
+
+def _declared_upstream_names() -> frozenset[str] | None:
+    """The upstreams the remote workers define, from a comma-separated list. Unset means unknown."""
+    raw = os.environ.get(_UPSTREAM_NAMES_ENV)
+    if raw is None:
+        return None
+    return frozenset(name for name in (part.strip() for part in raw.split(",")) if name)
+
+
+def _reject_undeclared_upstreams(model_id: str, profiles: dict[str, Any], written: dict[str, Any]) -> None:
+    """Reject with 422 a written remote profile that names an upstream outside ``SIE_UPSTREAM_NAMES``.
+
+    ``profiles`` is the model's profile set after the write, which ``extends`` resolves
+    against. Only the ``written`` profiles are checked.
+    """
+    declared = _declared_upstream_names()
+    if declared is None:
+        return
+    undeclared = undeclared_upstreams(profiles, written, declared)
+    if undeclared:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "validation_error",
+                "details": [
+                    {"message": f"Profile '{name}' of '{model_id}' names an undefined upstream {upstream!r}"}
+                    for name, upstream in undeclared.items()
+                ],
             },
         )
 
@@ -377,52 +442,93 @@ _PROD_ENVS = frozenset({"prod", "production"})
 _ENV_SIGNAL_VARS = ("SIE_DEPLOYMENT_ENV", "SIE_ENV")
 
 
-def _refuse_open_in_prod() -> None:
+# Read-scoped credentials, never accepted on a write. `SIE_CONFIG_READ_TOKEN`
+# is the one gateways and worker sidecars present and is accepted on every read
+# route; `SIE_AUTH_TOKEN` is the inference token and is accepted on every read
+# route except the export. `SIE_ADMIN_TOKEN` authorizes reads and writes.
+_INFERENCE_ENV_VAR = "SIE_AUTH_TOKEN"
+_READ_TOKEN_VARS = ("SIE_CONFIG_READ_TOKEN", _INFERENCE_ENV_VAR)
+
+
+def _refuse_open_in_prod(*, write: bool) -> None:
     """Raise 403 when no auth token is configured in a production environment."""
     if any(os.environ.get(var, "").strip().lower() in _PROD_ENVS for var in _ENV_SIGNAL_VARS):
+        required = "SIE_ADMIN_TOKEN" if write else "SIE_CONFIG_READ_TOKEN (or SIE_ADMIN_TOKEN)"
         raise HTTPException(
             status_code=403,
-            detail="config service requires SIE_ADMIN_TOKEN/SIE_AUTH_TOKEN in production "
-            "(refusing to serve unauthenticated)",
+            detail=f"config service requires {required} in production (refusing to serve unauthenticated)",
         )
 
 
-def _check_read_auth(request: Request) -> None:
-    """Validate read auth (inference token or admin token)."""
-    auth_token = os.environ.get("SIE_AUTH_TOKEN")
+def _extract_bearer_token(header: str) -> str:
+    """Token from an Authorization header.
+
+    Matches the gateway: trim, then a case-insensitive ``Bearer `` prefix
+    (RFC 7235), then trim the token. A raw value with no prefix is kept as-is
+    so existing clients that send the token alone still work.
+    """
+    value = header.strip()
+    if value.lower().startswith("bearer "):
+        return value[7:].strip()
+    return value
+
+
+def _token_matches(presented: str, expected: str) -> bool:
+    """Constant-time comparison that also accepts non-ASCII header values."""
+    return hmac.compare_digest(presented.encode(), expected.encode())
+
+
+def warn_if_read_token_is_admin_token() -> None:
+    """Log a startup warning when the config read token equals the admin token."""
+    read_token = os.environ.get("SIE_CONFIG_READ_TOKEN")
     admin_token = os.environ.get("SIE_ADMIN_TOKEN")
-    if auth_token is None and admin_token is None:
-        _refuse_open_in_prod()
+    if read_token is not None and admin_token is not None and _token_matches(read_token, admin_token):
+        logger.warning(
+            "SIE_CONFIG_READ_TOKEN equals SIE_ADMIN_TOKEN, so every holder of the read token can write configs; "
+            "give the read token its own value"
+        )
+
+
+def _configured_read_tokens() -> list[str]:
+    return [token for var in _READ_TOKEN_VARS if (token := os.environ.get(var)) is not None]
+
+
+def _check_read_auth(request: Request, *, accept_inference_token: bool = True) -> None:
+    """Validate read auth (a read-scoped token or the admin token)."""
+    configured = {
+        var: token for var in (*_READ_TOKEN_VARS, "SIE_ADMIN_TOKEN") if (token := os.environ.get(var)) is not None
+    }
+    if not configured:
+        _refuse_open_in_prod(write=False)
         return  # No auth configured (dev / self-host localhost posture)
 
-    token = request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
+    token = _extract_bearer_token(request.headers.get("Authorization", ""))
     if not token:
         raise HTTPException(status_code=401, detail="Missing Authorization header")
-    token_match = (auth_token is not None and hmac.compare_digest(token, auth_token)) or (
-        admin_token is not None and hmac.compare_digest(token, admin_token)
-    )
-    if not token_match:
+    accepted = [expected for var, expected in configured.items() if accept_inference_token or var != _INFERENCE_ENV_VAR]
+    matches = [_token_matches(token, expected) for expected in accepted]
+    if not any(matches):
         raise HTTPException(status_code=403, detail="Invalid token")
 
 
 def _check_write_auth(request: Request) -> None:
-    """Validate write auth (admin token, or inference token as fallback)."""
+    """Validate write auth (admin token only)."""
     admin_token = os.environ.get("SIE_ADMIN_TOKEN")
     if admin_token is None:
-        # If SIE_ADMIN_TOKEN is not set, refuse writes when SIE_AUTH_TOKEN
-        # is present (inference token must not implicitly grant write access).
-        if os.environ.get("SIE_AUTH_TOKEN"):
+        # A configured read-scoped token never implies write access, so writes
+        # stay closed rather than falling through to the open dev posture.
+        if _configured_read_tokens():
             raise HTTPException(
                 status_code=403,
-                detail="Write operations require SIE_ADMIN_TOKEN (inference token is not sufficient).",
+                detail="Write operations require SIE_ADMIN_TOKEN (read tokens are not sufficient).",
             )
-        _refuse_open_in_prod()
+        _refuse_open_in_prod(write=True)
         return  # No auth configured at all (dev / self-host localhost posture)
 
-    token = request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
+    token = _extract_bearer_token(request.headers.get("Authorization", ""))
     if not token:
         raise HTTPException(status_code=401, detail="Missing Authorization header")
-    if not hmac.compare_digest(token, admin_token):
+    if not _token_matches(token, admin_token):
         raise HTTPException(status_code=403, detail="Admin token required for config mutations")
 
 
@@ -586,6 +692,7 @@ async def add_model(request: Request) -> Response:
                 status_code=400,
                 detail={"error": "parse_error", "message": "Expected YAML mapping at top level"},
             )
+        _reject_worker_schema_errors(config)
 
         # Validate model ID before touching the registry
         model_id = config.get("sie_id", "")
@@ -623,6 +730,12 @@ async def add_model(request: Request) -> Response:
                 ) from e
 
             existing_config = model_registry.get_full_config(model_id)
+            written_profiles = config.get("profiles") or {}
+            _reject_undeclared_upstreams(
+                model_id,
+                {**((existing_config or {}).get("profiles") or {}), **written_profiles},
+                written_profiles,
+            )
             if existing_config:
                 conflicting_fields = []
                 for key, new_value in config.items():
@@ -690,7 +803,7 @@ async def add_model(request: Request) -> Response:
             #    Merge invariants (append-only):
             #      - Existing top-level fields that the new body omits
             #        are PRESERVED (minimal profile-append bodies must
-            #        not erase `description`, `default_bundle`, etc.).
+            #        not erase `hf_id`, `max_sequence_length`, etc.).
             #      - A new body may introduce top-level fields that the
             #        stored document doesn't have.
             #      - If both sides set the same non-`profiles` top-level
@@ -740,6 +853,14 @@ async def add_model(request: Request) -> Response:
                     merged_config["profiles"] = merged_profiles
                 else:
                     merged_config = dict(config)
+
+                try:
+                    validate_routing_config(merged_config)
+                except ValueError as e:
+                    raise HTTPException(
+                        status_code=422,
+                        detail={"error": "validation_error", "details": [{"message": str(e)}]},
+                    ) from e
 
                 config_yaml = yaml.dump(merged_config, default_flow_style=False, sort_keys=False)
 
@@ -812,6 +933,7 @@ async def add_model(request: Request) -> Response:
                 bundle_id: all_bundle_pool_config_hashes.get(bundle_id, {}) for bundle_id in affected_bundles
             }
             model_pool = model_registry.get_model_pool_name(model_id)
+            bundle_adapters = model_registry.get_bundle_adapters(affected_bundles)
 
             nats_publish_failed = False
             partial_publish_failed_bundles: list[str] = []
@@ -827,6 +949,7 @@ async def add_model(request: Request) -> Response:
                             model_config_yaml=config_yaml,
                             model_pool=model_pool,
                             bundle_pool_config_hashes=bundle_pool_config_hashes,
+                            bundle_adapters=bundle_adapters,
                         )
                     )
                 except PartialPublishError as e:
@@ -1019,6 +1142,7 @@ async def replace_model(request: Request, model_id: str) -> Response:
                 status_code=400,
                 detail={"error": "parse_error", "message": "Expected YAML mapping at top level"},
             )
+        _reject_worker_schema_errors(config)
 
         body_sie_id = config.get("sie_id")
         if body_sie_id and body_sie_id != model_id:
@@ -1043,6 +1167,8 @@ async def replace_model(request: Request, model_id: str) -> Response:
                     status_code=422,
                     detail={"error": "validation_error", "details": [{"message": str(e)}]},
                 ) from e
+            written_profiles = config.get("profiles") or {}
+            _reject_undeclared_upstreams(config["sie_id"], written_profiles, written_profiles)
 
             # Unchanged-content no-op: compare the incoming config against the
             # registry's current merged config. Equal => no epoch bump, no
@@ -1092,6 +1218,7 @@ async def replace_model(request: Request, model_id: str) -> Response:
                 bundle_id: all_bundle_pool_config_hashes.get(bundle_id, {}) for bundle_id in affected_bundles
             }
             model_pool = model_registry.get_model_pool_name(model_id)
+            bundle_adapters = model_registry.get_bundle_adapters(affected_bundles)
 
             nats_publish_failed = False
             partial_publish_failed_bundles: list[str] = []
@@ -1107,6 +1234,7 @@ async def replace_model(request: Request, model_id: str) -> Response:
                             model_config_yaml=config_yaml,
                             model_pool=model_pool,
                             bundle_pool_config_hashes=bundle_pool_config_hashes,
+                            bundle_adapters=bundle_adapters,
                         )
                     )
                 except PartialPublishError as e:
@@ -1558,17 +1686,27 @@ async def export_snapshot(request: Request) -> Response:
 
     We enforce consistency the cheapest way: take the per-app write
     lock around the snapshot. Writers serialize on the same lock so
-    the snapshot is always "between writes". Export is a rare
-    operation (gateway bootstrap + drift recovery), so the brief
-    write-path blockage is acceptable. Read-path handlers like
-    `/epoch`, `/models`, `/bundles` remain fully concurrent.
+    the snapshot is always "between writes". Each build blocks writes
+    for its duration, so exports first pass a per-app single-flight
+    gate: concurrent exports build one at a time and a write waits
+    behind at most one build, however many exports are queued.
+    Read-path handlers like `/epoch`, `/models`, `/bundles` remain
+    fully concurrent.
+
+    Auth: the snapshot carries the same model configs that
+    `GET /v1/configs/models/{id}` serves, plus bundle membership, pool names
+    and hashes, so gateways and worker sidecars fetch it with the config
+    read token (`SIE_CONFIG_READ_TOKEN`). The admin token also works. The
+    inference token (`SIE_AUTH_TOKEN`) does not, because each build holds
+    the write lock.
     """
-    _check_write_auth(request)  # admin-only
+    _check_read_auth(request, accept_inference_token=False)
     model_registry = _require_model_registry(request)
     config_store: ConfigStore | None = getattr(request.app.state, "config_store", None)
 
+    export_gate = _get_export_gate(request.app.state)
     write_lock = _get_write_lock(request.app.state)
-    async with write_lock:
+    async with export_gate, write_lock:
         epoch = (await asyncio.to_thread(config_store.read_epoch)) if config_store else 0
         api_models = set(await asyncio.to_thread(config_store.list_models)) if config_store else set()
 
@@ -1620,6 +1758,7 @@ async def export_snapshot(request: Request) -> Response:
             for bundle_id in model_registry.list_bundles()
         }
         bundle_pool_config_hashes = model_registry.compute_bundle_pool_config_hashes()
+        bundle_adapters = model_registry.get_bundle_adapters()
 
     snapshot = {
         "snapshot_version": 1,
@@ -1627,6 +1766,7 @@ async def export_snapshot(request: Request) -> Response:
         "generated_at": datetime.now(UTC).isoformat(),
         "bundle_config_hashes": bundle_config_hashes,
         "bundle_pool_config_hashes": bundle_pool_config_hashes,
+        "bundle_adapters": bundle_adapters,
         "models": models,
     }
     return Response(content=orjson.dumps(snapshot), media_type="application/json")

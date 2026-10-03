@@ -77,7 +77,10 @@ pub trait ModelAccessPolicy: Send + Sync {
     ///
     /// `ext` carries the request extensions, so an implementation can record the
     /// refusal on whatever per-request observability slot the deployment
-    /// installed. Consulted AFTER `visible`, so a caller who may not see the
+    /// installed. A refusal answered 503 records
+    /// [`AdmissionOutcome::ServingUnavailable`](crate::observability::metrics::AdmissionOutcome::ServingUnavailable),
+    /// so a temporary refusal is not counted as an authentication fault.
+    /// Consulted AFTER `visible`, so a caller who may not see the
     /// model has already been answered the not-found shape and this refusal can
     /// never become a cross-tenant existence oracle. The default returns `None`,
     /// so the OSS self-host build refuses nothing.
@@ -417,8 +420,26 @@ fn active_lease_values(
     })
 }
 
+/// Where the customer-facing `event="api_request"` audit record is emitted for
+/// one composition.
+///
+/// The record's `status` is read as the status the client received, so the
+/// [`AuditLayer`] has to sit outside everything that can replace a response.
+/// See the `middleware::audit` module docs for the full contract.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AuditPlacement {
+    /// Emit inside this route stack. Correct wherever nothing outside the core
+    /// rewrites a handler response — the OSS composition.
+    Core,
+    /// Omit the layer here. The caller installs [`AuditLayer`] itself, outside
+    /// every response-rewriting layer it adds, so the record carries the final
+    /// status when managed billing rewrites an inner 503 to 402.
+    #[allow(dead_code)] // Managed composition API; unused by the standalone gateway binary.
+    Composition,
+}
+
 pub fn create_router(state: Arc<AppState>, config: Arc<Config>) -> Router {
-    apply_request_telemetry(create_router_core(state, config))
+    apply_request_telemetry(create_router_core(state, config, AuditPlacement::Core))
 }
 
 /// Build the reusable gateway route stack without the outer request telemetry
@@ -427,10 +448,16 @@ pub fn create_router(state: Arc<AppState>, config: Arc<Config>) -> Router {
 /// Managed compositions add admission middleware and cloud-owned routes around
 /// this core, then call [`apply_request_telemetry`] after the final merge so
 /// early 401/402/403 responses are observed whenever a request signal is live.
-/// Standalone callers should use [`create_router`], which preserves the OSS
-/// composition and conditionally adds that layer.
-pub fn create_router_core(state: Arc<AppState>, config: Arc<Config>) -> Router {
-    Router::new()
+/// They also pass [`AuditPlacement::Composition`] and install the audit layer
+/// outside their own response-rewriting gates. Standalone callers should use
+/// [`create_router`], which preserves the OSS composition and conditionally
+/// adds that layer.
+pub fn create_router_core(
+    state: Arc<AppState>,
+    config: Arc<Config>,
+    audit: AuditPlacement,
+) -> Router {
+    let router = Router::new()
         // Status page
         .route("/", get(health::status_page))
         // Health endpoints
@@ -494,10 +521,14 @@ pub fn create_router_core(state: Arc<AppState>, config: Arc<Config>) -> Router {
         .route("/v1/encode/{*model}", post(proxy::proxy_encode))
         .route("/v1/score/{*model}", post(proxy::proxy_score))
         .route("/v1/extract/{*model}", post(proxy::proxy_extract))
-        .route("/v1/generate/{*model}", post(proxy::proxy_generate))
-        .layer(AuditLayer::new())
-        .layer(AuthLayer::new(config))
-        .with_state(state)
+        .route("/v1/generate/{*model}", post(proxy::proxy_generate));
+
+    let router = match audit {
+        AuditPlacement::Core => router.layer(AuditLayer::new()),
+        AuditPlacement::Composition => router,
+    };
+
+    router.layer(AuthLayer::new(config)).with_state(state)
 }
 
 #[cfg(test)]
@@ -885,19 +916,19 @@ mod capacity_snapshot_tests {
 
 #[cfg(test)]
 mod flat_404_tests {
-    //! Flat-404 wire contract for managed-service routes (#1757).
+    //! Flat-404 wire contract for unregistered compatibility routes.
     //!
     //! The Files, Batches, batch-cancel, and file-upload surfaces
     //! (`/v1/files*`, `/v1/batches*`, `/v1/batches/{id}/cancel`,
-    //! `POST /v1/files`) are OpenAI-compatible routes the *managed
-    //! service* fronts (see `sie_tools`/`sie_sdk` `.files`/`.batches`);
-    //! the inference-edge gateway does NOT back them. Because they are
-    //! not registered in [`create_router`] and there is no custom
-    //! `.fallback()`, axum's default fallback answers them with a
-    //! **flat 404**: status `404 Not Found` and an **empty body**.
+    //! `POST /v1/files`) are OpenAI-compatible routes that compatible
+    //! `.files`/`.batches` clients may call. The inference gateway does
+    //! not implement them. Because they are not registered in
+    //! [`create_router`] and there is no custom `.fallback()`, axum's
+    //! default fallback answers them with a **flat 404**: status
+    //! `404 Not Found` and an **empty body**.
     //!
-    //! That is the contract these tests pin: an unbacked managed-service
-    //! route returns a clean 404 with no body — never a leaky/verbose
+    //! That is the contract these tests pin: an unregistered compatibility
+    //! route returns a clean 404 with no body — never a leaky or verbose
     //! error envelope and never a 500. Contrast `config_api`'s
     //! `test_post_model_config_returns_405_method_not_allowed`, which
     //! covers a *registered* path hit with an unbacked method (405); an
@@ -931,6 +962,8 @@ mod flat_404_tests {
             k8s_port: 8080,
             health_mode: "ws".to_string(),
             nats_url: String::new(),
+            nats_user: String::new(),
+            nats_password: String::new(),
             nats_config_trusted_producers: vec!["sie-config".to_string()],
             // Auth disabled so requests reach the router and exercise the
             // route table itself — the flat 404 must come from the
@@ -947,12 +980,18 @@ mod flat_404_tests {
             multi_router: false,
             request_timeout: 30.0,
             max_stream_pending: 50_000,
+            max_lane_in_flight_items:
+                crate::queue::lane_admission::DEFAULT_MAX_LANE_IN_FLIGHT_ITEMS,
+            lane_backpressure_enforce: false,
             stream_max_age_s: 1_800,
+            stream_storage: crate::config::StreamStorage::Memory,
+            stream_num_replicas: 1,
             configured_gpus: Vec::new(),
             gpu_profile_map: HashMap::new(),
             configured_physical_lanes: Default::default(),
             static_queue_pools: Vec::new(),
             model_aliases: HashMap::new(),
+            published_model_aliases: Default::default(),
             bundles_dir: bundles_dir.to_string(),
             models_dir: models_dir.to_string(),
             payload_store_url: String::new(),
@@ -1010,7 +1049,7 @@ mod flat_404_tests {
         assert_eq!(
             status,
             StatusCode::NOT_FOUND,
-            "{method} {uri} must return a flat 404 (unbacked managed-service route), got {status}",
+            "{method} {uri} must return a flat 404 (unregistered compatibility route), got {status}",
         );
         // Explicitly guard against a 5xx masquerading — the route must be
         // rejected by the fallback, never reach a handler that could 500.
@@ -1026,6 +1065,55 @@ mod flat_404_tests {
             bytes.len(),
             String::from_utf8_lossy(&bytes),
         );
+    }
+
+    async fn post_pool(app: &Router, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/pools")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    #[tokio::test]
+    async fn test_create_pool_refuses_the_default_pool_name() {
+        let (app, _bundles_dir, _models_dir) = build_router();
+        for name in ["default", "DEFAULT"] {
+            let (status, body) =
+                post_pool(&app, serde_json::json!({"name": name, "gpus": {"l4": 0}})).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{name}");
+            assert_eq!(body["detail"]["code"], "POOL_OPERATION_FORBIDDEN");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_create_pool_rejects_limits_through_the_router() {
+        let (app, _bundles_dir, _models_dir) = build_router();
+        for body in [
+            serde_json::json!({"name": "bench", "gpus": {"l4": 1}, "minimum_worker_count": 99}),
+            serde_json::json!({"name": "bench", "gpus": {"l4": 1}, "ttl_seconds": 86_400}),
+            serde_json::json!({"name": "bench", "gpus": {"l4": 6}}),
+        ] {
+            let (status, detail) = post_pool(&app, body).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(detail["detail"]["code"], "INVALID_REQUEST");
+        }
+        let (status, _) = post_pool(
+            &app,
+            serde_json::json!({"name": "bench", "gpus": {"l4": 1}}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
     }
 
     #[tokio::test]

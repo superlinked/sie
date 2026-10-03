@@ -1,8 +1,11 @@
 from typing import TYPE_CHECKING, Any, Literal
 
 from fastapi import APIRouter, HTTPException, Request, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
+from sie_server.config.model import ModelConfig, RoutingPolicy, is_remote_adapter_path
+from sie_server.config.upstreams import installed_upstreams
+from sie_server.core.model_suggestions import suggestion_suffix
 from sie_server.types.responses import ErrorCode
 
 if TYPE_CHECKING:
@@ -61,11 +64,22 @@ class ModelCapabilities(BaseModel):
     alias).
     """
 
+    streaming: bool = True
     grammar: list[str] = []
     tools: bool = False
     code: bool = False
     sql: bool = False
     guard: bool = False
+
+
+class ModelRouting(BaseModel):
+    """How the bare model name is served."""
+
+    policy: Literal["remote_only", "fallback", "threshold"] | None = None
+    """``None`` means local capacity only."""
+
+    upstream_kind: Literal["sie", "openai"] | None = None
+    """Kind of the upstream a remote profile calls, ``None`` without one."""
 
 
 class ModelInfo(BaseModel):
@@ -98,6 +112,22 @@ class ModelInfo(BaseModel):
 
     capabilities: ModelCapabilities | None = None
     """Advertised generation capabilities, ``None`` for non-generate models."""
+
+    routing: ModelRouting = Field(default_factory=ModelRouting)
+    """Routing policy and upstream kind. Always present."""
+
+
+def _resolve_routing(config: ModelConfig) -> ModelRouting:
+    default = config.resolve_profile("default")
+    policy: RoutingPolicy
+    if is_remote_adapter_path(default.adapter_path):
+        policy, remote = "remote_only", default
+    elif config.routing is not None and config.routing.fallback_profile is not None:
+        policy, remote = config.routing.policy, config.resolve_profile(config.routing.fallback_profile)
+    else:
+        return ModelRouting()
+    upstream = installed_upstreams().get(remote.loadtime.get("upstream", ""))
+    return ModelRouting(policy=policy, upstream_kind=upstream.kind.value if upstream is not None else None)
 
 
 def _resolve_state_and_error(
@@ -155,6 +185,7 @@ def _resolve_capabilities(config: Any) -> ModelCapabilities | None:
         return None
     caps = generate.capabilities
     return ModelCapabilities(
+        streaming=caps.streaming,
         grammar=list(caps.grammar),
         tools=caps.tools,
         code=caps.code,
@@ -204,6 +235,7 @@ async def list_models(http_request: Request) -> ModelsListResponse:
                 profiles=profiles,
                 revision=getattr(config, "hf_revision", None),
                 capabilities=_resolve_capabilities(config),
+                routing=_resolve_routing(config),
             )
         )
 
@@ -234,7 +266,7 @@ async def get_model(model: str, http_request: Request) -> ModelInfo:
             status_code=status.HTTP_404_NOT_FOUND,
             detail={
                 "code": ErrorCode.MODEL_NOT_FOUND.value,
-                "message": f"Model '{model}' not found",
+                "message": f"Model '{model}' not found{suggestion_suffix(model, registry.model_names)}",
             },
         )
 
@@ -258,4 +290,5 @@ async def get_model(model: str, http_request: Request) -> ModelInfo:
         profiles=profiles,
         revision=getattr(config, "hf_revision", None),
         capabilities=_resolve_capabilities(config),
+        routing=_resolve_routing(config),
     )

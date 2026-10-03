@@ -13,9 +13,34 @@ from langchain_core.documents.compressor import BaseDocumentCompressor
 from pydantic import ConfigDict
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     from sie_sdk import SIEAsyncClient, SIEClient
+
+
+def _scores_by_index(results: Mapping[str, Any], count: int) -> list[float]:
+    """Map ScoreResult entries back to input positions by item_id.
+
+    Each input is sent with ``id=str(position)``, which the server echoes as
+    the entry's ``item_id``. Only an exact echo of a sent id is used: an entry
+    whose ``item_id`` is missing, not a string, or not a sent id is skipped
+    (that input keeps its 0.0 default), so a malformed entry can neither
+    crash the rerank nor mis-assign a score to the wrong input.
+
+    Args:
+        results: ScoreResult envelope from ``SIEClient.score()``.
+        count: Number of input items.
+
+    Returns:
+        Scores indexed by input position (0.0 for any unscored/invalid item).
+    """
+    positions = {str(index): index for index in range(count)}
+    scores = [0.0] * count
+    for entry in results.get("scores", []):
+        item_id = entry.get("item_id")
+        if isinstance(item_id, str) and item_id in positions:
+            scores[positions[item_id]] = float(entry.get("score", 0.0))
+    return scores
 
 
 class SIEReranker(BaseDocumentCompressor):
@@ -122,7 +147,7 @@ class SIEReranker(BaseDocumentCompressor):
         from sie_sdk.types import Item
 
         query_item = Item(text=query)
-        doc_items = [Item(text=doc.page_content) for doc in documents]
+        doc_items = [Item(text=doc.page_content, id=str(idx)) for idx, doc in enumerate(documents)]
 
         results = self.client.score(
             self.model,
@@ -159,7 +184,7 @@ class SIEReranker(BaseDocumentCompressor):
         from sie_sdk.types import Item
 
         query_item = Item(text=query)
-        doc_items = [Item(text=doc.page_content) for doc in documents]
+        doc_items = [Item(text=doc.page_content, id=str(idx)) for idx, doc in enumerate(documents)]
 
         results = await self.async_client.score(
             self.model,
@@ -174,39 +199,28 @@ class SIEReranker(BaseDocumentCompressor):
             return reranked[: self.top_k]
         return reranked
 
-    def _build_reranked_documents(self, documents: Sequence[Document], results: list[Any]) -> list[Document]:
+    def _build_reranked_documents(self, documents: Sequence[Document], results: Mapping[str, Any]) -> list[Document]:
         """Build reranked documents from score results.
 
         Args:
             documents: Original documents.
-            results: Score results from SIE.
+            results: ScoreResult envelope from ``SIEClient.score()``. Ranked
+                entries live under ``results["scores"]`` (each a ScoreEntry whose
+                ``item_id`` echoes the input position sent as the item ``id``,
+                plus ``score``), already sorted by relevance descending. The
+                envelope also carries ``results["request"]`` (request id) and
+                ``results["usage"]`` (token usage); those are available but
+                intentionally not plumbed through the LangChain contract.
 
         Returns:
-            Reranked documents with scores.
+            Reranked documents (relevance descending) with scores in metadata.
         """
-        reranked = []
-
-        for result in results:
-            # Handle dict or object result
-            if isinstance(result, dict):
-                idx = result.get("item_id", result.get("index", 0))
-                score = result.get("score", 0.0)
-            else:
-                idx = getattr(result, "item_id", getattr(result, "index", 0))
-                score = getattr(result, "score", 0.0)
-
-            # Parse index if it's a string
-            if isinstance(idx, str):
-                idx = int(idx)
-
-            if idx < len(documents):
-                doc = documents[idx]
-                # Create new document with score in metadata
-                reranked.append(
-                    Document(
-                        page_content=doc.page_content,
-                        metadata={**doc.metadata, "relevance_score": float(score)},
-                    )
-                )
-
-        return reranked
+        scores = _scores_by_index(results, len(documents))
+        order = sorted(range(len(documents)), key=lambda i: scores[i], reverse=True)
+        return [
+            Document(
+                page_content=documents[i].page_content,
+                metadata={**documents[i].metadata, "relevance_score": scores[i]},
+            )
+            for i in order
+        ]

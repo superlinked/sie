@@ -6,8 +6,7 @@ description: Extract people, organizations, dates, amounts, or custom labels fro
 # Extract Entities with Superlinked MCP
 
 Use the connected Superlinked MCP server to run zero-shot entity extraction on
-the SIE cluster. This mirrors the `extract-entities` flow from the `sie_tools`
-plugin in PR #1336, but uses the MCP `extract_entities` tool.
+the SIE cluster through the MCP `extract_entities` tool.
 
 ## Steps
 

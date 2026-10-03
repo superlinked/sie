@@ -15,11 +15,9 @@ tasks:
   # to fit the full generation benchmark pack (casehold prompts reach ~1.8k
   # tokens, gpqa ~1.3k) so the model is comparable to the rest of the fleet on
   # every task, while KV stays trivial at this size (112 KB/token → 4096 ≈
-  # 0.46 GB). The validation/co-residency harness, which packs two SGLang
-  # instances onto a single 22 GiB L4, does NOT depend on this default — it
-  # passes an explicit ``--max-seq-length``/``--context-length`` (see
-  # tools/bench_generation_matrix.py + run_generation_smoke.py) and caps itself
-  # to 1024 for that case.
+  # 0.46 GB). A deployment packing two SGLang instances onto one 22 GiB L4
+  # does NOT depend on this default: it passes an explicit
+  # ``--max-seq-length``/``--context-length`` and caps itself to 1024.
   #
   # ``context_length``, ``max_sequence_length``, and ``max_batch_tokens`` are
   # three independent knobs (per-request context, SGLang --context-length,
@@ -39,8 +37,8 @@ max_sequence_length: 4096
 # KV-cache memory math (Qwen3-0.6B, bf16):
 #   layers=28, kv_heads=8, head_dim=128, bytes_per_elem=2
 #   kv_bytes_per_token = 2 × 28 × 8 × 128 × 2 = 114,688 B ≈ 112 KB
-# At ctx=4096 a single request's KV is ~0.46 GB — negligible. The co-residency
-# harness still caps context explicitly when it has to share a card.
+# At ctx=4096 a single request's KV is ~0.46 GB — negligible. Co-resident
+# deployments can still cap context explicitly when sharing a card.
 profiles:
   default:
     max_batch_tokens: 4096
@@ -49,9 +47,8 @@ profiles:
     kv_budget_tokens: 8192
     adapter_options:
       loadtime:
-        # 0.8 leaves headroom on a 22 GiB L4 for a second SGLang instance
-        # (the validation harness co-residents worker + baseline). If the
-        # 0.6B is the only model on the card, 0.9 is fine.
+        # 0.8 leaves headroom on a 22 GiB L4 for a second SGLang instance. If
+        # the 0.6B is the only model on the card, 0.9 is fine.
         mem_fraction_static: 0.8
         served_model_name: Qwen/Qwen3-0.6B
         # Modal sandbox lacks flashinfer's JIT prerequisites; switch backends.

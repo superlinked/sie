@@ -251,7 +251,7 @@ class TestEncodeEndpoint:
     def test_encode_returns_model_load_failed_when_terminal(self, client: TestClient, mock_registry: MagicMock) -> None:
         """A registry-recorded terminal failure returns 502 MODEL_LOAD_FAILED.
 
-        Regression for sie-test#85: previously the API returned 503
+        Terminal-failure regression: previously the API returned 503
         MODEL_LOADING for any not-loaded model, which the SDK retried for
         5 minutes even on permanent gated/dependency failures. The new
         contract returns 502 MODEL_LOAD_FAILED with no Retry-After header

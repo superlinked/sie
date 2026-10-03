@@ -1,6 +1,28 @@
 .env
 .venv/
-data/pdfs/
-data/manifest.json
-runs/*
-!runs/.gitkeep
+__pycache__/
+*.pyc
+
+# Everything this example reads is fetched and everything it writes is output.
+#
+# data/          the recorded run, downloaded by `python3 fetch.py` from the
+#                pinned revision of superlinked/sie-task-evidence
+# pdfs/          the source PDFs, downloaded by `uv run fetch-documents`. Two
+#                are investor documents whose rights notes say not to
+#                redistribute the complete PDF, and the Docling paper is left
+#                fetch-only in deference to the same note even though it is
+#                CC BY 4.0. data/inputs/sources.json pins every URL, digest and
+#                byte length, which is what a reader needs to confirm they
+#                fetched the same bytes.
+# runs/          new run bundles written by `uv run convert-documents`
+# run-output/    evaluations written by `uv run eval-documents`
+#
+# This example used to commit data/ and runs/, because it had been built to
+# commit nothing at all and its published result -- "all 25 checks passed" --
+# then had no record behind it that anyone could check. The evidence is still
+# there to be checked; it now lives on Hugging Face rather than in this
+# repository, pinned by revision and by digest.
+data/
+pdfs/
+runs/
+run-output/

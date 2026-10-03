@@ -39,10 +39,12 @@ from sie_server.core.worker.types import (
     QueueFullError,
     RequestMetadata,
     WorkerConfig,
+    WorkerDrainedError,
     WorkerResult,
     WorkerStats,
 )
 from sie_server.observability.worker_telemetry import worker_telemetry, worker_telemetry_enabled
+from sie_server.types.inputs import InvalidInputError
 
 if TYPE_CHECKING:
     from sie_server.adapters.base import ModelAdapter
@@ -73,6 +75,52 @@ class PreformedScoreRequest:
     options: dict[str, Any] | None = None
     request_id: str | None = None
     timing: RequestTiming | None = None
+
+
+@dataclass(slots=True)
+class _InFlightBatch:
+    """A batch that has left its batcher but has not yet completed.
+
+    Between extraction and completion the batch's metadata lives only in
+    ``_process_batch``'s locals, so ``BatchFormer.drain_pending()`` cannot
+    see it and ``stop()``'s drain would miss it. This registration is the
+    handle that makes it reachable.
+
+    ``owner`` is the task running the dispatch. It is what distinguishes a
+    batch nothing will ever finish from one that is merely still running:
+    the sidecar's pre-formed path dispatches from a request task of its
+    own, concurrently with (and unaffected by) a ``stop()`` on the engine
+    loop, and failing *its* futures would be collateral damage.
+    """
+
+    token: int
+    metadata: list[RequestMetadata]
+    owner: asyncio.Task[Any] | None
+    orphaned: bool = False
+
+    def is_abandoned(self) -> bool:
+        """True when no dispatch will ever complete these futures."""
+        if self.orphaned:
+            return True
+        owner = self.owner
+        # ``cancelling() > 0`` covers the window where ``stop()`` has
+        # cancelled the process task but the cancellation has not finished
+        # unwinding — reachable because ``_do_unload`` runs ``stop()`` under
+        # ``asyncio.wait_for``, whose timeout can fire first.
+        return owner is None or owner.done() or owner.cancelling() > 0
+
+
+def _dispatch_width(adapter: object) -> int:
+    """Batches a worker may run at once through ``adapter`` (see ``BaseAdapter``)."""
+    declared = getattr(adapter, "max_concurrent_dispatch", None)
+    supports_lora = getattr(adapter, "supports_lora", None)
+    if not callable(declared) or (callable(supports_lora) and supports_lora()):
+        return 1
+    try:
+        width = int(declared())
+    except (TypeError, ValueError):
+        return 1
+    return max(1, width)
 
 
 class ModelWorker:
@@ -138,6 +186,15 @@ class ModelWorker:
         # dispatch, so the set_lora -> forward pair must be atomic.
         self._adapter_dispatch_lock = asyncio.Lock()
 
+        # Batches this worker may run at once. 1 (the default) is the classic
+        # single-batch dispatch. An adapter that fronts an out-of-process engine
+        # with its own continuous batching may declare more, so one batch
+        # waiting on its longest sequence does not hold back the queue behind
+        # it. Never for LoRA adapters: LoRA selection is adapter-global state.
+        self._dispatch_width = _dispatch_width(adapter)
+        self._dispatch_slots = asyncio.Semaphore(self._dispatch_width)
+        self._dispatch_tasks: set[asyncio.Task[None]] = set()
+
         # Initialize operation handlers (dependency injection point)
         if handlers is not None:
             self._handlers: dict[str, OperationHandler[Any]] = handlers
@@ -167,7 +224,9 @@ class ModelWorker:
 
         # Thread pool for running inference (doesn't block event loop)
         self._inference_executor = ThreadPoolExecutor(
-            max_workers=1,  # Single worker for GPU serialization
+            # One thread serialises in-process GPU work; an engine-backed
+            # adapter that allows concurrent dispatch gets one per batch.
+            max_workers=self._dispatch_width,
             thread_name_prefix="inference",
         )
 
@@ -227,6 +286,11 @@ class ModelWorker:
         self._stopping = False  # True when graceful stop has begun
         self._process_task: asyncio.Task[None] | None = None
         self._stats = WorkerStats()
+
+        # Batches currently between "extracted from a batcher" and
+        # "futures completed". See ``_InFlightBatch``.
+        self._in_flight: dict[int, _InFlightBatch] = {}
+        self._in_flight_seq = 0
 
         # Reactive OOM recovery — wraps the per-config-group dispatch. The
         # per-group dispatch closure is built inside ``_process_batch`` (it
@@ -327,26 +391,198 @@ class ModelWorker:
     async def stop(self) -> None:
         """Stop the background processing task.
 
-        Waits for pending batches to complete before returning.
+        Cancels the batch-processing loop, then fails every request the
+        worker still owes an answer — both work still queued in a batcher
+        and the batch that was in flight when the cancellation landed — so
+        each awaiter gets a fast retryable error instead of hanging on a
+        promise nothing will ever keep (see ``_fail_queued_requests``).
+
+        The executor join at the end is a *blocking* wait on the inference
+        thread. It runs off the event loop (see
+        ``_join_inference_executor``) so an eviction cannot stall unrelated
+        coroutines — health probes included.
         """
         if not self._running:
             return
 
         self._running = False
 
-        if self._process_task is not None:
-            self._process_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._process_task
-            self._process_task = None
+        try:
+            if self._process_task is not None:
+                self._process_task.cancel()
+                # The ``await`` is for its side effect: it lets the
+                # cancellation we just requested finish unwinding — which is
+                # what marks the in-flight batch orphaned — before teardown
+                # continues. ``suppress`` is deliberately broad. Re-raising a
+                # drain-timeout cancellation from here would skip the
+                # executor join and let ``_do_unload`` free VRAM under a live
+                # forward pass; see ``_join_inference_executor``.
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._process_task
+                self._process_task = None
+            # Concurrent dispatches unwind the same way the loop's own batch
+            # does: cancellation marks each in-flight batch orphaned, and the
+            # drain below fails its futures.
+            dispatches = list(self._dispatch_tasks)
+            for task in dispatches:
+                task.cancel()
+            for task in dispatches:
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+        finally:
+            # ``finally``, and before the executor join, for two reasons.
+            # The await above is a cancellation point: ``_do_unload`` runs
+            # ``stop()`` under ``asyncio.wait_for``, so a drain-timeout
+            # cancellation lands here as a ``CancelledError`` — a
+            # ``BaseException`` that no ``except Exception`` on the way out
+            # would catch. And the join below still waits for the inference
+            # thread, so draining after it would make every awaiter wait out
+            # a join it was never going to benefit from.
+            self._fail_queued_requests()
 
-        self._inference_executor.shutdown(wait=True)
+        await self._join_inference_executor()
         logger.info(
             "ModelWorker stopped (batches=%d, items=%d, tokens=%d)",
             self._stats.batches_processed,
             self._stats.items_processed,
             self._stats.total_tokens_processed,
         )
+
+    async def _join_inference_executor(self) -> None:
+        """Shut the inference pool down, waiting for its thread off-loop.
+
+        ``ThreadPoolExecutor.shutdown(wait=True)`` is a thread join. Called
+        directly it blocks the event loop for as long as the in-flight
+        forward pass takes, so *every* coroutine stops — health probes,
+        in-flight responses on other models, the metrics endpoint — not just
+        the model being evicted (design proposal
+        ``settlement-and-queue-scalability.md``, B6 part one).
+
+        Two steps, deliberately:
+
+        - ``shutdown(wait=False)`` first. It returns immediately and is the
+          part that actually matters for correctness: the pool stops
+          accepting new work right away, even if the join below never
+          completes.
+        - the join itself on a worker thread. ``shutdown`` is idempotent, so
+          calling it twice is safe.
+
+        The join is shielded, and re-awaited if we are cancelled. Moving it
+        off the loop must not also make it *skippable*: ``_do_unload`` calls
+        ``adapter.unload()`` right after ``stop()`` returns, and that frees
+        VRAM. A synchronous join could never be interrupted, so teardown was
+        ordered strictly after the last forward pass by construction; an
+        unshielded ``await`` would hand that guarantee back, letting a
+        drain-timeout cancellation start freeing device memory while the
+        inference thread is still inside a forward pass. The shield keeps
+        the ordering the blocking version gave for free.
+
+        Consequently this join is *not* bounded by ``drain_timeout_s``, by
+        design. Bounding it would mean tearing the adapter down underneath
+        running GPU work, which is a worse failure than a slow unload.
+        """
+        self._inference_executor.shutdown(wait=False)
+        loop = asyncio.get_running_loop()
+        join = loop.run_in_executor(None, functools.partial(self._inference_executor.shutdown, wait=True))
+        try:
+            await asyncio.shield(join)
+        except asyncio.CancelledError:
+            with contextlib.suppress(BaseException):
+                await asyncio.shield(join)
+            raise
+
+    def _fail_queued_requests(self) -> int:
+        """Fail every request the worker still owes an answer. Returns the count.
+
+        Two populations, both unreachable by the paths that normally
+        complete a future with an exception (the malformed-preformed-request
+        path, the per-batch error fan-out and OOM recovery all sit
+        downstream of a batch that was actually dispatched):
+
+        - **Queued.** Work still sitting in a ``BatchFormer``. ``stop()``
+          cancels the loop before it is ever selected. Every batcher is
+          drained, not just the base-model one — each LoRA holds its own
+          queue.
+        - **In flight.** A batch already extracted from its batcher when the
+          cancellation arrived. Its metadata lives only in
+          ``_process_batch``'s locals, and ``CancelledError`` is a
+          ``BaseException`` that unwinds straight past the ``except
+          Exception`` fan-out, so those futures were left unbroken too.
+          ``_process_batch`` hands ownership over by leaving its
+          registration in ``_in_flight``.
+
+        The awaiter would otherwise block until an outer timeout fires
+        (design proposal ``settlement-and-queue-scalability.md``, B6).
+
+        A multi-item request occupies one queue slot per item but has a
+        single future, so metadata is deduplicated by identity — across both
+        populations, since a request can have items in each.
+        Already-completed futures are left untouched, which keeps the call
+        idempotent and safe against a batch that resolved concurrently.
+
+        Synchronous by design: it is called from a ``finally`` that may be
+        unwinding a cancellation, where awaiting is not an option.
+        """
+        seen: set[int] = set()
+        failed = 0
+
+        for batcher in self._batchers.values():
+            for metadata in batcher.drain_pending():
+                failed += self._fail_one(metadata, seen)
+
+        for registration in self._take_abandoned_in_flight():
+            for metadata in registration.metadata:
+                failed += self._fail_one(metadata, seen)
+
+        if failed:
+            logger.warning(
+                "ModelWorker drain failed %d in-flight/queued request(s) for model '%s'",
+                failed,
+                self._model_name or "unknown",
+            )
+        return failed
+
+    def _fail_one(self, metadata: RequestMetadata, seen: set[int]) -> int:
+        """Fail one request's future if it is new and not already done.
+
+        Returns 1 when a future transitioned to failed, 0 otherwise, so
+        callers can accumulate a count without re-deriving the dedup.
+        """
+        meta_id = id(metadata)
+        if meta_id in seen:
+            return 0
+        seen.add(meta_id)
+        if metadata.future.done():
+            return 0
+        metadata.future.set_exception(
+            WorkerDrainedError(f"Model '{self._model_name or 'unknown'}' stopped before this request ran; retry")
+        )
+        return 1
+
+    def _register_in_flight(self, batch: FormattedBatch[HasCost, RequestMetadata]) -> _InFlightBatch:
+        """Record a batch as in flight and return its registration."""
+        self._in_flight_seq += 1
+        registration = _InFlightBatch(
+            token=self._in_flight_seq,
+            metadata=list(batch.metadata),
+            owner=asyncio.current_task(),
+        )
+        self._in_flight[registration.token] = registration
+        return registration
+
+    def _take_abandoned_in_flight(self) -> list[_InFlightBatch]:
+        """Remove and return the in-flight batches nothing will complete.
+
+        A registration whose owner is still alive and uncancelled is left
+        alone: the sidecar's pre-formed path dispatches from its own task
+        and may legitimately be mid-forward while the engine loop is being
+        stopped. Failing its futures would turn a request that is about to
+        succeed into a spurious retry.
+        """
+        abandoned = [registration for registration in self._in_flight.values() if registration.is_abandoned()]
+        for registration in abandoned:
+            self._in_flight.pop(registration.token, None)
+        return abandoned
 
     # =========================================================================
     # Submit Methods (Public API - unchanged signatures)
@@ -684,6 +920,17 @@ class ModelWorker:
             logger.debug("Created batcher for LoRA '%s'", lora)
         return self._batchers[lora]
 
+    def queue_full_error(self, n_items: int) -> QueueFullError | None:
+        """The refusal that ``n_items`` more items would meet now, or ``None`` when the queue takes them."""
+        max_queue = self._config.max_queue_size
+        if max_queue <= 0:
+            return None
+        current_pending = self.pending_count
+        if current_pending + n_items <= max_queue:
+            return None
+        msg = f"Queue full: {current_pending} items pending, cannot add {n_items} more (limit: {max_queue})"
+        return QueueFullError(msg, pending=current_pending, requested=n_items, limit=max_queue)
+
     def _check_queue_capacity(self, n_items: int) -> None:
         """Check if queue can accept n_items, raise QueueFullError if not.
 
@@ -696,13 +943,9 @@ class ModelWorker:
         if not self._running:
             msg = "ModelWorker is not running"
             raise RuntimeError(msg)
-        max_queue = self._config.max_queue_size
-        if max_queue > 0:
-            current_pending = self.pending_count
-            new_count = current_pending + n_items
-            if new_count > max_queue:
-                msg = f"Queue full: {current_pending} items pending, cannot add {n_items} more (limit: {max_queue})"
-                raise QueueFullError(msg)
+        error = self.queue_full_error(n_items)
+        if error is not None:
+            raise error
 
     def _create_future_and_timing(
         self,
@@ -814,6 +1057,13 @@ class ModelWorker:
             total_cost=total_cost,
         )
 
+        if self._dispatch_width > 1:
+            # No LoRA state to protect (see ``_dispatch_width``); bound the
+            # batches in flight instead of serialising them.
+            async with self._dispatch_slots:
+                await self._process_batch(synthetic_batch)
+            return futures
+
         async with self._adapter_dispatch_lock:
             self._adapter.set_active_lora(lora)
             await self._process_batch(synthetic_batch)
@@ -832,16 +1082,20 @@ class ModelWorker:
         Selects the batcher whose first pending request has waited the longest.
         This ensures fairness across LoRAs - no LoRA starves even with low traffic.
 
-        When the worker was idle (had to poll for requests), dispatches
-        immediately without waiting for batch timeout. This eliminates
-        unnecessary latency at low concurrency while preserving batching
-        efficiency when requests arrive during inference.
+        When the worker was idle (had to poll for requests), a short
+        accumulation window (``idle_coalesce_ms``, #2874) caps the coalesce
+        wait instead of dispatching immediately: bursty arrivals at an idle
+        worker fuse into one batch rather than degenerating into a train of
+        small serialized forwards, while a lone request only waits the small
+        cap once arrivals stop. Setting ``idle_coalesce_ms=0`` restores the
+        legacy immediate dispatch.
 
         Args:
             was_idle: Whether the worker was idle before this call. When True,
-                dispatches immediately without waiting for batch formation.
-                When False, uses the normal timeout/coalesce mechanism to
-                accumulate a proper batch.
+                dispatches after the capped idle accumulation window (or
+                immediately when the window is 0). When False, uses the
+                normal timeout/coalesce mechanism to accumulate a proper
+                batch.
 
         Returns:
             Tuple of (lora_name, batch, was_idle) where lora_name is None for
@@ -863,7 +1117,11 @@ class ModelWorker:
             if oldest_lora is not None or (oldest_lora is None and self._batchers[None].pending_count > 0):
                 # Found a batcher with pending items - get batch from it
                 selected_lora = oldest_lora if oldest_lora is not None else None
-                batch = await self._batchers[selected_lora].get_batch(immediate=was_idle)
+                idle_window_ms = self._config.idle_coalesce_ms
+                if was_idle and idle_window_ms > 0:
+                    batch = await self._batchers[selected_lora].get_batch(coalesce_cap_ms=idle_window_ms)
+                else:
+                    batch = await self._batchers[selected_lora].get_batch(immediate=was_idle)
                 return selected_lora, batch, was_idle
 
             # No batchers have pending items - worker is idle
@@ -924,6 +1182,9 @@ class ModelWorker:
     async def _process_loop(self) -> None:
         """Background loop that processes batches using FCFS across LoRAs."""
         logger.debug("Process loop started")
+        if self._dispatch_width > 1:
+            await self._process_loop_concurrent()
+            return
 
         # Track idle state across iterations. When idle, the next batch is
         # dispatched immediately (low-concurrency optimization). When busy
@@ -990,7 +1251,9 @@ class ModelWorker:
 
                 # Record instrumentation if enabled
                 if self._stats.instrumentation_enabled:
-                    # Lists are guaranteed to exist when instrumentation is enabled
+                    # Series are guaranteed to exist when instrumentation is enabled.
+                    # Each is a bounded deque, so these appends evict the oldest
+                    # sample instead of growing for the life of the process.
                     assert self._stats.batch_sizes is not None
                     assert self._stats.batch_tokens is not None
                     assert self._stats.batch_wait_ms is not None
@@ -1005,34 +1268,7 @@ class ModelWorker:
                     unique_requests = len({id(m) for m in batch.metadata})
                     self._stats.requests_per_batch.append(unique_requests)
 
-                # Track batch efficiency for adaptive controller
-                if self._efficiency_tracker is not None:
-                    self._efficiency_tracker.record(batch.total_cost, self._batch_config.max_batch_cost)
-
-                # Step the adaptive controller after processing. ``apply_step``
-                # owns the controller-output → _batch_config write-back (see
-                # AdaptiveBatchController); it is synchronous, so the in-place
-                # mutation stays safe against BatchFormer's async lock, which
-                # cannot interleave with it.
-                if self._adaptive_controller is not None and self._latency_tracker is not None:
-                    observed_p50 = self._latency_tracker.p50()
-                    fill_ratio = self._efficiency_tracker.mean_fill_ratio() if self._efficiency_tracker else None
-                    starvation_resets_before = self._adaptive_controller.starvation_resets
-                    self._adaptive_controller.apply_step(
-                        self._batch_config, observed_p50, fill_ratio, batch_size=batch.size
-                    )
-                    if telemetry is not None:
-                        telemetry.adaptive_snapshot(
-                            model=self._model_name or "other",
-                            profile="default",
-                            wait_ms=self._adaptive_controller.current_wait_ms,
-                            cost=self._adaptive_controller.current_batch_cost,
-                            observed_p50_ms=observed_p50,
-                            target_p50_ms=self._adaptive_controller.target_p50_ms,
-                            starvation_resets_delta=(
-                                self._adaptive_controller.starvation_resets - starvation_resets_before
-                            ),
-                        )
+                self._step_adaptive_controller(batch, telemetry)
 
                 # Log every 10 batches at INFO level for visibility
                 if self._stats.batches_processed % 10 == 0:
@@ -1062,13 +1298,140 @@ class ModelWorker:
 
         logger.debug("Process loop stopped")
 
+    def _step_adaptive_controller(self, batch: FormattedBatch[HasCost, RequestMetadata], telemetry: Any) -> None:
+        """Record a finished batch's efficiency and step the adaptive controller.
+
+        Runs on the worker's event loop after each dispatched batch, in both the
+        single-batch loop and concurrent dispatch. ``apply_step`` owns the
+        controller-output to ``_batch_config`` write-back (see
+        AdaptiveBatchController); it is synchronous, so the in-place mutation
+        stays safe against BatchFormer's async lock, which cannot interleave
+        with it.
+        """
+        if self._efficiency_tracker is not None:
+            self._efficiency_tracker.record(batch.total_cost, self._batch_config.max_batch_cost)
+        if self._adaptive_controller is not None and self._latency_tracker is not None:
+            observed_p50 = self._latency_tracker.p50()
+            fill_ratio = self._efficiency_tracker.mean_fill_ratio() if self._efficiency_tracker else None
+            starvation_resets_before = self._adaptive_controller.starvation_resets
+            self._adaptive_controller.apply_step(self._batch_config, observed_p50, fill_ratio, batch_size=batch.size)
+            if telemetry is not None:
+                telemetry.adaptive_snapshot(
+                    model=self._model_name or "other",
+                    profile="default",
+                    wait_ms=self._adaptive_controller.current_wait_ms,
+                    cost=self._adaptive_controller.current_batch_cost,
+                    observed_p50_ms=observed_p50,
+                    target_p50_ms=self._adaptive_controller.target_p50_ms,
+                    starvation_resets_delta=(self._adaptive_controller.starvation_resets - starvation_resets_before),
+                )
+
+    async def _process_loop_concurrent(self) -> None:
+        """Dispatch batches as soon as they form, up to ``_dispatch_width`` at once.
+
+        Used only for adapters that declare ``max_concurrent_dispatch() > 1``
+        and have no LoRA support, so there is no active-LoRA state to protect
+        and no ``set_active_lora`` call. Each batch is pulled as an idle worker
+        would, without waiting to coalesce: the engine behind the adapter does
+        the batching. A slot is taken only once a batch exists, so an idle
+        direct queue never holds a slot the pre-formed (sidecar) path needs.
+        While a pulled batch waits for a slot it is registered in flight, so
+        ``stop()`` fails its requests instead of losing them.
+        """
+        while self._running:
+            try:
+                _active_lora, batch, _ = await self._get_next_batch_fcfs(True)
+                if batch.size == 0:
+                    continue
+                waiting = self._register_in_flight(batch)
+                try:
+                    await self._dispatch_slots.acquire()
+                except asyncio.CancelledError:
+                    waiting.orphaned = not self._running
+                    if not waiting.orphaned:
+                        self._in_flight.pop(waiting.token, None)
+                    raise
+                self._in_flight.pop(waiting.token, None)
+                task = asyncio.create_task(self._dispatch_concurrently(batch))
+                self._dispatch_tasks.add(task)
+                task.add_done_callback(self._dispatch_tasks.discard)
+            except asyncio.CancelledError:
+                logger.debug("Process loop cancelled")
+                break
+            except Exception:
+                logger.exception("Error in process loop")
+
+        if self._stats.instrumentation_enabled:
+            logger.info("Worker stats summary:\n%s", self._stats.summary())
+        logger.debug("Process loop stopped")
+
+    async def _dispatch_concurrently(self, batch: FormattedBatch[HasCost, RequestMetadata]) -> None:
+        """Run one batch in its own task and free its dispatch slot after."""
+        try:
+            await self._process_batch(batch, engine_queue_owned=True)
+            self._record_runtime_batch(batch)
+            self._step_adaptive_controller(batch, worker_telemetry() if worker_telemetry_enabled() else None)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Error dispatching batch")
+        finally:
+            self._dispatch_slots.release()
+
     async def _process_batch(
         self,
         batch: FormattedBatch[HasCost, RequestMetadata],
         *,
         engine_queue_owned: bool = False,
     ) -> None:
-        """Process a single batch of requests.
+        """Process a single batch, tracking it as in flight while it runs.
+
+        The tracking is the whole point of this wrapper. Once a batch has
+        been extracted from its ``BatchFormer`` its metadata exists nowhere
+        else, so ``stop()``'s drain cannot reach it. A cancellation here —
+        the eviction path, where ``stop()`` cancels the process loop — is a
+        ``BaseException``: it unwinds past ``BatchExecutor``'s ``except
+        Exception`` fan-out without failing a single future, and the awaiter
+        hangs (design proposal ``settlement-and-queue-scalability.md``, B6).
+
+        So when the worker is stopping, the registration is deliberately
+        *not* popped on the cancellation path. That is an ownership handoff:
+        this dispatch is over and will complete nothing, and ``stop()``'s
+        ``_fail_queued_requests`` — which runs after the cancellation
+        finishes unwinding — becomes responsible for the futures.
+
+        The handoff is conditional on a stop actually being in progress, and
+        that condition is load-bearing rather than decorative. The sidecar's
+        pre-formed path reaches here on an IPC request task, and
+        ``IpcServer`` cancels its in-flight request tasks when its own drain
+        deadline expires (``ipc_server.py``). A cancellation on a *live*
+        worker has no ``stop()`` coming to collect after it, so retaining the
+        registration would pin an ``_InFlightBatch``, its metadata, the
+        prepared items and the future for the life of the process, once per
+        cancelled request. ``stop()`` clears ``_running`` before it cancels
+        anything, so the flag is already false for every cancellation the
+        handoff is meant to cover.
+        """
+        if batch.size == 0:
+            return
+
+        registration = self._register_in_flight(batch)
+        try:
+            await self._dispatch_batch(batch, engine_queue_owned=engine_queue_owned)
+        except asyncio.CancelledError:
+            registration.orphaned = not self._running
+            raise
+        finally:
+            if not registration.orphaned:
+                self._in_flight.pop(registration.token, None)
+
+    async def _dispatch_batch(
+        self,
+        batch: FormattedBatch[HasCost, RequestMetadata],
+        *,
+        engine_queue_owned: bool = False,
+    ) -> None:
+        """Run one batch: group, dispatch per config, fan results out.
 
         Items from different requests are batched together for inference if they
         share the same configuration. Delegates to operation handlers for the
@@ -1077,9 +1440,6 @@ class ModelWorker:
         Args:
             batch: Formatted batch ready for inference.
         """
-        if batch.size == 0:
-            return
-
         logger.debug(
             "Processing batch: size=%d, tokens=%d",
             batch.size,
@@ -1228,6 +1588,24 @@ class ModelWorker:
         self._stats.batches_processed += 1
         self._stats.total_tokens_processed += batch.total_tokens
 
+    def _config_key_or_fail(self, metadata: RequestMetadata) -> tuple[Any, ...] | None:
+        """Batching key for one request, or None after failing that request alone.
+
+        The key is built from caller-supplied fields. A value that cannot be
+        hashed must fail only the request that sent it, never the requests
+        batched with it.
+        """
+        try:
+            handler = self._handlers[metadata.operation]
+            config_key = (metadata.operation, *handler.make_config_key(metadata))
+            hash(config_key)
+        except Exception as exc:  # noqa: BLE001 -- isolate one malformed request from its batch
+            logger.warning("Rejecting request with an unbatchable configuration: %s", exc)
+            if not metadata.future.done():
+                metadata.future.set_exception(InvalidInputError(f"Request options cannot be processed: {exc}"))
+            return None
+        return config_key
+
     def _group_by_inference_config(
         self,
         batch: FormattedBatch[HasCost, RequestMetadata],
@@ -1253,9 +1631,9 @@ class ModelWorker:
         metadata_list = batch.metadata
         if len(metadata_list) > 1 and all(m is metadata_list[0] for m in metadata_list):
             first_meta = metadata_list[0]
-            handler = self._handlers[first_meta.operation]
-            handler_key = handler.make_config_key(first_meta)
-            config_key = (first_meta.operation, *handler_key)
+            config_key = self._config_key_or_fail(first_meta)
+            if config_key is None:
+                return {}
 
             items_list: list[Item] = []
             indices_list: list[int] = []
@@ -1271,11 +1649,14 @@ class ModelWorker:
             tuple[list[Item], list[RequestMetadata], list[int], list[HasCost]],
         ] = {}
 
+        failed: set[int] = set()
         for prepared_item, metadata in zip(batch.items, metadata_list, strict=True):
-            # Get handler and create config key
-            handler = self._handlers[metadata.operation]
-            handler_key = handler.make_config_key(metadata)
-            config_key = (metadata.operation, *handler_key)
+            if id(metadata) in failed:
+                continue
+            config_key = self._config_key_or_fail(metadata)
+            if config_key is None:
+                failed.add(id(metadata))
+                continue
 
             if config_key not in groups:
                 groups[config_key] = ([], [], [], [])

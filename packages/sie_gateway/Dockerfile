@@ -1,8 +1,8 @@
-FROM rust:1.97.0-slim-bookworm AS chef
+FROM rust:1.98.1-slim-bookworm@sha256:ebd900bae66fd508b466cef82d64a83a5fb34682e4c8b2797a42908bddc95a57 AS chef
 RUN cargo install cargo-chef --locked
 WORKDIR /app
 
-# The build runs at the workspace root (#2339): the root Cargo.toml/Cargo.lock
+# The build runs at the workspace root: the root Cargo.toml/Cargo.lock
 # plus every member's manifest+sources must be present for cargo to load the
 # workspace, and the binary is selected with `-p sie-gateway`.
 FROM chef AS planner

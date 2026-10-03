@@ -92,6 +92,7 @@ ADAPTIVE_COST_METRIC_NAME: Final = "sie.worker.scheduler.adaptive.cost"
 ADAPTIVE_P50_METRIC_NAME: Final = "sie.worker.scheduler.adaptive.p50"
 STARVATION_RESETS_METRIC_NAME: Final = "sie.worker.scheduler.starvation.resets"
 GENERATION_TTFT_METRIC_NAME: Final = "sie.worker.generation.ttft"
+GENERATION_WORKER_WAIT_METRIC_NAME: Final = "sie.worker.generation.worker_wait"
 GENERATION_TPOT_METRIC_NAME: Final = "sie.worker.generation.tpot"
 GENERATION_TOKENS_METRIC_NAME: Final = "sie.worker.generation.tokens"
 GENERATION_INFLIGHT_METRIC_NAME: Final = "sie.worker.generation.inflight"
@@ -102,6 +103,8 @@ GENERATION_DUPLICATE_PREVENTED_METRIC_NAME: Final = "sie.worker.generation.dupli
 GRAMMAR_COMPILE_DURATION_METRIC_NAME: Final = "sie.worker.generation.grammar.compile.duration"
 GRAMMAR_CACHE_LOOKUPS_METRIC_NAME: Final = "sie.worker.generation.grammar.cache.lookups"
 GRAMMAR_REQUESTS_METRIC_NAME: Final = "sie.worker.generation.grammar.requests"
+UPSTREAM_REFUSALS_METRIC_NAME: Final = "sie.worker.upstream.refusals"
+UPSTREAM_BREAKER_OPEN_METRIC_NAME: Final = "sie.worker.upstream.breaker.open"
 
 QUEUE_DURATION_BUCKETS_S: Final = (
     0.0001,
@@ -209,6 +212,9 @@ _DUPLICATE_PATHS: Final = frozenset({"first_chunk_fallback", _OTHER})
 _FLUSH_REASONS: Final = frozenset(
     {"cost_cap", "count_cap", "timeout", "coalesce", "single_oversize", "idle_bypass", "drain", "other"}
 )
+_UPSTREAM_REFUSALS: Final = frozenset({"rate_cap", "concurrency_cap", "breaker_open", _OTHER})
+_MAX_UPSTREAMS: Final = 16
+_REMOTE_ADAPTER_PREFIX: Final = "sie_server.adapters.remote."
 
 _METER_PROVIDER: MeterProvider | None = None
 
@@ -229,6 +235,11 @@ _catalog_admission_lock = Lock()
 # cannot create unbounded model/profile streams through configuration churn.
 _admitted_catalog_pairs: set[tuple[str, str]] = set()
 _catalog_collapse_warning_emitted = False
+# Upstream names come from the server's startup configuration. Admit the first
+# ones seen for the process lifetime and collapse the rest, so the upstream
+# attribute stays bounded like the catalog pairs.
+_upstream_admission_lock = Lock()
+_admitted_upstreams: set[str] = set()
 
 
 class WorkerTelemetryFacade(Protocol):
@@ -346,6 +357,8 @@ class WorkerTelemetryFacade(Protocol):
 
     def first_token_observed(self, *, model: object, grammar: object, duration_s: object) -> None: ...
 
+    def worker_wait_observed(self, *, model: object, grammar: object, duration_s: object) -> None: ...
+
     def stream_finished(
         self,
         *,
@@ -392,6 +405,10 @@ class WorkerTelemetryFacade(Protocol):
         duration_s: object,
     ) -> None: ...
 
+    def upstream_refused(self, *, upstream: object, refusal: object, requests: int = 1) -> None: ...
+
+    def upstream_breaker_changed(self, *, upstream: object, open: bool) -> None: ...
+
 
 class _NoopWorkerTelemetry:
     """Zero-work provider used until OTLP metrics are explicitly enabled."""
@@ -432,6 +449,9 @@ class _NoopWorkerTelemetry:
     def first_token_observed(self, **_: Any) -> None:
         return
 
+    def worker_wait_observed(self, **_: Any) -> None:
+        return
+
     def stream_finished(self, **_: Any) -> None:
         return
 
@@ -453,11 +473,19 @@ class _NoopWorkerTelemetry:
     def grammar_compile_completed(self, **_: Any) -> None:
         return
 
+    def upstream_refused(self, **_: Any) -> None:
+        return
+
+    def upstream_breaker_changed(self, **_: Any) -> None:
+        return
+
 
 class WorkerTelemetry:
     """Canonical engine instruments backed by one injected OTel meter."""
 
     def __init__(self, meter: Meter) -> None:
+        self._overflow_breakers_lock = Lock()
+        self._open_overflow_breakers: set[tuple[str, str]] = set()
         self._queue_duration = meter.create_histogram(
             QUEUE_DURATION_METRIC_NAME,
             unit="s",
@@ -573,6 +601,14 @@ class WorkerTelemetry:
             unit="s",
             description="Adapter-observed generation time to first non-empty token",
         )
+        self._generation_worker_wait = meter.create_histogram(
+            GENERATION_WORKER_WAIT_METRIC_NAME,
+            unit="s",
+            description=(
+                "Work receipt to adapter dispatch: validation, chat-template render,"
+                " and admission/capacity wait spent worker-side before the engine"
+            ),
+        )
         self._generation_tpot = meter.create_histogram(
             GENERATION_TPOT_METRIC_NAME,
             unit="s",
@@ -622,6 +658,16 @@ class WorkerTelemetry:
             GRAMMAR_REQUESTS_METRIC_NAME,
             unit="{request}",
             description="Structured-output generation requests by grammar backend and kind",
+        )
+        self._upstream_refusals = meter.create_counter(
+            UPSTREAM_REFUSALS_METRIC_NAME,
+            unit="{request}",
+            description="Upstream calls this server refused without sending, by the limit reached",
+        )
+        self._upstream_breaker_open = meter.create_gauge(
+            UPSTREAM_BREAKER_OPEN_METRIC_NAME,
+            unit="{upstream}",
+            description="Whether an upstream's circuit breaker is open",
         )
 
     def item_completed(
@@ -893,6 +939,19 @@ class WorkerTelemetry:
         if (duration := _nonnegative_float(duration_s)) is not None:
             self._generation_ttft.record(duration, self._generation_stream_attributes(model, grammar))
 
+    def worker_wait_observed(self, *, model: object, grammar: object, duration_s: object) -> None:
+        """Record the worker-side pre-adapter phase of one generation request.
+
+        Together with the adapter-side TTFT (``first_token_observed``, which
+        covers the engine's grammar preparation + prefill) and TPOT, this
+        splits the client-observed time-to-first-token into worker wait vs
+        engine pre-first-token vs decode — the phase evidence #3136 requires
+        for the structured-output stall. The ``grammar`` label lets dashboards
+        compare grammar-constrained cohorts against the ``none`` baseline.
+        """
+        if (duration := _nonnegative_float(duration_s)) is not None:
+            self._generation_worker_wait.record(duration, self._generation_stream_attributes(model, grammar))
+
     def stream_finished(
         self,
         *,
@@ -985,6 +1044,28 @@ class WorkerTelemetry:
                 "outcome": _enum(outcome, _GRAMMAR_OUTCOMES),
             },
         )
+
+    def upstream_refused(self, *, upstream: object, refusal: object, requests: int = 1) -> None:
+        if (count := _positive_int(requests)) is None:
+            return
+        self._upstream_refusals.add(
+            count, {**_upstream_attributes(upstream), "reason": _enum(refusal, _UPSTREAM_REFUSALS)}
+        )
+
+    def upstream_breaker_changed(self, *, upstream: object, open: bool) -> None:
+        attributes = _upstream_attributes(upstream)
+        if attributes["upstream"] != _OTHER:
+            self._upstream_breaker_open.set(1 if open else 0, attributes)
+            return
+        lane = attributes["lane"]
+        identity = (lane, str(upstream))
+        with self._overflow_breakers_lock:
+            if open:
+                self._open_overflow_breakers.add(identity)
+            else:
+                self._open_overflow_breakers.discard(identity)
+            any_open = any(breaker_lane == lane for breaker_lane, _ in self._open_overflow_breakers)
+            self._upstream_breaker_open.set(1 if any_open else 0, attributes)
 
     @staticmethod
     def _generation_stream_attributes(model: object, grammar: object) -> dict[str, str]:
@@ -1096,6 +1177,7 @@ def worker_resource_attributes() -> dict[str, str]:
         "service.instance.id": service_instance_id(),
         "deployment.environment": deployment_environment,
         "cloud.region": cloud_region,
+        **({"service.version": version} if (version := _clean_env("OTEL_SERVICE_VERSION")) else {}),
     }
 
 
@@ -1129,6 +1211,7 @@ def metric_views() -> list[View]:
         (INFERENCE_DURATION_METRIC_NAME, INFERENCE_DURATION_BUCKETS_S),
         (MODEL_LOAD_DURATION_METRIC_NAME, MODEL_LOAD_DURATION_BUCKETS_S),
         (GENERATION_TTFT_METRIC_NAME, TTFT_TPOT_BUCKETS_S),
+        (GENERATION_WORKER_WAIT_METRIC_NAME, TTFT_TPOT_BUCKETS_S),
         (GENERATION_TPOT_METRIC_NAME, TTFT_TPOT_BUCKETS_S),
         (GRAMMAR_COMPILE_DURATION_METRIC_NAME, TTFT_TPOT_BUCKETS_S),
     )
@@ -1168,6 +1251,7 @@ def metric_names() -> frozenset[str]:
             ADAPTIVE_P50_METRIC_NAME,
             STARVATION_RESETS_METRIC_NAME,
             GENERATION_TTFT_METRIC_NAME,
+            GENERATION_WORKER_WAIT_METRIC_NAME,
             GENERATION_TPOT_METRIC_NAME,
             GENERATION_TOKENS_METRIC_NAME,
             GENERATION_INFLIGHT_METRIC_NAME,
@@ -1178,6 +1262,8 @@ def metric_names() -> frozenset[str]:
             GRAMMAR_COMPILE_DURATION_METRIC_NAME,
             GRAMMAR_CACHE_LOOKUPS_METRIC_NAME,
             GRAMMAR_REQUESTS_METRIC_NAME,
+            UPSTREAM_REFUSALS_METRIC_NAME,
+            UPSTREAM_BREAKER_OPEN_METRIC_NAME,
         }
     )
 
@@ -1187,6 +1273,7 @@ def generation_metric_names() -> frozenset[str]:
     return frozenset(
         {
             GENERATION_TTFT_METRIC_NAME,
+            GENERATION_WORKER_WAIT_METRIC_NAME,
             GENERATION_TPOT_METRIC_NAME,
             GENERATION_TOKENS_METRIC_NAME,
             GENERATION_INFLIGHT_METRIC_NAME,
@@ -1355,9 +1442,23 @@ def _adapter_backend(adapter_path: str) -> str:
         return "candle"
     if ".sglang." in adapter_path:
         return "sglang"
+    if adapter_path.startswith(_REMOTE_ADAPTER_PREFIX):
+        return "remote"
     if adapter_path.startswith("sie_server.adapters."):
         return "python"
     return _OTHER
+
+
+def _upstream_attributes(upstream: object) -> dict[str, str]:
+    name = _bounded_release_value(upstream)
+    if name != _OTHER:
+        with _upstream_admission_lock:
+            if name not in _admitted_upstreams:
+                if len(_admitted_upstreams) >= _MAX_UPSTREAMS:
+                    name = _OTHER
+                else:
+                    _admitted_upstreams.add(name)
+    return {"upstream": name, "lane": _context.lane}
 
 
 def _bounded_release_value(value: object) -> str:

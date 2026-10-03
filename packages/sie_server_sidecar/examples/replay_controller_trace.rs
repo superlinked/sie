@@ -2,9 +2,9 @@
 //! [`AdaptiveBatchController`] and emit one `step` output per line on
 //! stdout.
 //!
-//! Used by `scripts/perf/replay-scheduler-trace.py` to validate that
-//! the Rust controller produces byte-identical (actually ULP-identical)
-//! outputs to Python on captured traces.
+//! Used to validate that the Rust controller produces floating-point outputs
+//! that are identical ULP-for-ULP to a reference implementation on captured
+//! traces.
 //!
 //! ## Trace format (JSONL on stdin)
 //!

@@ -17,8 +17,7 @@ small and predictable; both are supported by the xgrammar backend.
 
 GPU-VERIFY: the patterns here are correct by construction and unit-tested
 for shape, but have NOT been run end-to-end against xgrammar + Qwen3.5 on
-GPU. One verification pass (see ``deploy/demo-gcp/PRODUCTION_READINESS.md``
-§1) should confirm the backend accepts the pattern and the model
+GPU. One verification pass should confirm the backend accepts the pattern and the model
 terminates cleanly before relying on forced ``tool_choice`` in
 production. The failure mode if a pattern is rejected is a clean
 ``grammar_compile_failed`` terminal chunk, not a crash.
@@ -118,6 +117,8 @@ def build_tool_choice_grammar(
         pattern = _qwen_xml_force_regex(allowed)
     elif tool_call_format == "hermes_json":
         pattern = _hermes_json_force_regex(allowed)
+    elif tool_call_format == "glm_xml":
+        pattern = _glm_xml_force_regex(allowed)
     elif tool_call_format == "auto":
         # ``auto`` means the model's on-wire tool-call format could not be
         # confidently resolved from config. Guessing Qwen XML here would
@@ -188,4 +189,21 @@ def _hermes_json_force_regex(names: list[str]) -> str:
         + _INNER
         + r"\}\s*</tool_call>"
     )
+    return r"\s*(?:" + block + r"\s*)+"
+
+
+def _glm_xml_force_regex(names: list[str]) -> str:
+    """Force one-or-more GLM tool-call blocks.
+
+    A single block looks like::
+
+        <tool_call>NAME<arg_key>KEY</arg_key><arg_value>VALUE</arg_value></tool_call>
+
+    The name ends at the first ``<arg_key>`` or at ``</tool_call>`` for a call
+    without arguments, which pins it to the allowed set. Arguments are complete
+    key/value pairs so every accepted block parses; values stay free, as in the
+    other formats, and keys exclude ``<``/``>`` as the parser requires.
+    """
+    pair = r"<arg_key>[^<>]*</arg_key>\s*<arg_value>" + _INNER + r"</arg_value>\s*"
+    block = r"<tool_call>\s*" + _name_alternation(names) + r"\s*(?:" + pair + r")*</tool_call>"
     return r"\s*(?:" + block + r"\s*)+"

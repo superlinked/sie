@@ -9,6 +9,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import msgpack
 import pytest
 from sie_sdk import RequestError, ServerError, SIEAsyncClient, SIEClient
+from sie_sdk.client.errors import JobFailedError
+from sie_sdk.jobs import MalformedChunkError, decode_chunk_bytes, decode_result_item
 
 GW = "http://gw.test:8080"
 KEY = "sk-sie-testkey"
@@ -51,6 +53,50 @@ def _result_job(*refs: str) -> dict[str, Any]:
         "output": {
             "kind": "refs",
             "chunks": [{"seq": seq, "items": 1, "state": "succeeded", "ref": ref} for seq, ref in enumerate(refs)],
+        },
+    }
+
+
+def _mixed_chunk() -> bytes:
+    """One chunk ref carrying a successful item AND a failed sibling (both billed)."""
+    return msgpack.packb(
+        [
+            {
+                "success": True,
+                "id": "ok-1",
+                "units": {"input_tokens": 5},
+                "result_msgpack": msgpack.packb({"dense": {"dims": 2, "values": [0.1, 0.2]}}, use_bin_type=True),
+            },
+            {
+                "success": False,
+                "id": "bad-1",
+                "error": "tokenization failed",
+                "error_code": "INFERENCE_ERROR",
+            },
+        ],
+        use_bin_type=True,
+    )
+
+
+def _partial_failure_job() -> dict[str, Any]:
+    """A terminal `failed` job: chunk 0 published a ref (billed siblings); chunk 1 lost its results."""
+    return {
+        "id": "job-1",
+        "state": "failed",
+        "total_items": 3,
+        "settled_credits": 5,
+        "output": {
+            "kind": "refs",
+            "chunks": [
+                {
+                    "seq": 0,
+                    "items": 2,
+                    "state": "failed",
+                    "ref": "https://gw.test/chunk-0",
+                    "error": "1 of 2 items failed",
+                },
+                {"seq": 1, "items": 1, "state": "failed", "ref": None, "error": "result publication failed"},
+            ],
         },
     }
 
@@ -376,6 +422,172 @@ def test_results_does_not_refresh_unrelated_ref_failures(error: RequestError | S
         client.close()
 
 
+def test_decode_result_item_populates_error_and_surfaces_work_item_id() -> None:
+    ok = decode_result_item(
+        {
+            "success": True,
+            "id": "a",
+            "result_msgpack": msgpack.packb({"dense": {"dims": 2, "values": [0.1, 0.2]}}, use_bin_type=True),
+        }
+    )
+    assert ok["success"] is True
+    assert "error" not in ok  # a success carries no failure detail
+
+    bad = decode_result_item({"success": False, "work_item_id": "b", "error": "boom", "error_code": "INFERENCE_ERROR"})
+    assert bad["success"] is False
+    assert bad["id"] == "b"  # id surfaced from the wire `work_item_id`, never fabricated
+    assert bad["error"] == {"code": "INFERENCE_ERROR", "message": "boom"}
+
+
+def test_decode_result_item_preserves_falsy_but_valid_id() -> None:
+    # Item ids can be integers: id 0 (and empty-string id) are VALID and must not
+    # be replaced by work_item_id via a truthiness fallback. Assert the runtime
+    # type too — JobResultItem["id"] is typed str | int | None.
+    zero = decode_result_item({"success": True, "id": 0, "work_item_id": "wi-9"})
+    assert zero["id"] == 0
+    assert isinstance(zero["id"], int)
+    empty = decode_result_item({"success": True, "id": "", "work_item_id": "wi-9"})
+    assert empty["id"] == ""
+    assert isinstance(empty["id"], str)
+    # The work_item_id fallback only applies when id is genuinely absent (None).
+    assert decode_result_item({"success": False, "work_item_id": "wi-9"})["id"] == "wi-9"
+
+
+def test_decode_result_item_tolerates_malformed_payloads() -> None:
+    # A non-dict element (e.g. a bare int the wire never should send) degrades to
+    # a null result rather than raising out of the per-chunk decode loop.
+    item = decode_result_item(42)
+    assert item["id"] is None
+    assert item["success"] is None
+    assert "error" not in item
+    # A dict whose result_msgpack is garbage bytes still decodes (vector is None).
+    garbage_payload = decode_result_item({"success": True, "id": "x", "result_msgpack": b"\xc1\xc1 not msgpack"})
+    assert garbage_payload["id"] == "x"
+    assert garbage_payload["dense"] is None
+
+
+def test_decode_chunk_bytes_signals_malformed_refs_distinctly() -> None:
+    # Garbage bytes (not msgpack) → a distinct MalformedChunkError, not a silent
+    # empty list, so the caller can tell a decode fault from an unpublished chunk.
+    with pytest.raises(MalformedChunkError):
+        decode_chunk_bytes(b"\xc1\xc1\xc1 total garbage")
+    # Valid msgpack that is not a list of results is also malformed.
+    with pytest.raises(MalformedChunkError):
+        decode_chunk_bytes(msgpack.packb({"not": "a list"}, use_bin_type=True))
+    # A well-formed list still decodes normally.
+    good = decode_chunk_bytes(_mixed_chunk())
+    assert [it["id"] for it in good] == ["ok-1", "bad-1"]
+
+
+def test_results_confines_a_garbage_failed_chunk_ref_without_crashing() -> None:
+    job = {
+        "id": "job-1",
+        "state": "failed",
+        "total_items": 3,
+        "settled_credits": 5,
+        "output": {
+            "kind": "refs",
+            "chunks": [
+                {"seq": 0, "items": 2, "state": "failed", "ref": "https://gw.test/good"},
+                {"seq": 1, "items": 1, "state": "succeeded", "ref": "https://gw.test/garbage"},
+            ],
+        },
+    }
+    with patch("sie_sdk.client.sync.httpx.Client"):
+        client = SIEClient(GW, api_key=KEY)
+        with (
+            patch.object(client.jobs, "get", return_value=job),
+            patch.object(client.jobs, "_read_ref", side_effect=[_mixed_chunk(), b"\xc1\xc1 garbage"]),
+            pytest.warns(UserWarning, match="results are incomplete") as record,
+        ):
+            results = client.jobs.results("job-1")
+
+        # The good chunk's 2 items survive; the garbage ref contributes none, and
+        # the whole call does not crash on the decode error.
+        assert results["retrieved"] == 2
+        assert [it["id"] for it in results["items"]] == ["ok-1", "bad-1"]
+        messages = [str(w.message) for w in record]
+        # The malformed ref is flagged distinctly (a decode fault)...
+        assert any("could not be decoded" in m for m in messages)
+        # ...and the incompleteness warning stays NEUTRAL — no billing/publication
+        # claim, since a succeeded chunk with garbage bytes proves neither.
+        assert any("results are incomplete: retrieved 2 of 3" in m for m in messages)
+        assert not any("billed" in m or "publishing" in m for m in messages)
+        client.close()
+
+
+def test_results_surfaces_billed_successful_items_from_a_failed_chunk_and_warns() -> None:
+    with patch("sie_sdk.client.sync.httpx.Client"):
+        client = SIEClient(GW, api_key=KEY)
+        with (
+            patch.object(client.jobs, "get", return_value=_partial_failure_job()) as get_job,
+            patch.object(client.jobs, "_read_ref", return_value=_mixed_chunk()) as read_ref,
+            pytest.warns(UserWarning, match="incomplete: retrieved 2 of 3"),
+        ):
+            results = client.jobs.results("job-1")
+
+        # The `failed` chunk's ref is read (not dropped): its successful, already-billed
+        # sibling is surfaced, and the failed sibling carries its per-item error.
+        read_ref.assert_called_once_with("https://gw.test/chunk-0")
+        assert get_job.call_count == 1
+        assert results["retrieved"] == 2
+        assert results["state"] == "failed"
+        ok, bad = results["items"]
+        assert (ok["id"], ok["success"]) == ("ok-1", True)
+        assert ok["dense"].shape == (2,)
+        assert "error" not in ok
+        assert (bad["id"], bad["success"]) == ("bad-1", False)
+        assert bad["error"] == {"code": "INFERENCE_ERROR", "message": "tokenization failed"}
+        client.close()
+
+
+def test_results_on_non_terminal_job_raises_job_not_terminal_without_reading_refs() -> None:
+    running = {"id": "job-1", "state": "running", "total_items": 3, "output": {"kind": "refs", "chunks": []}}
+    with patch("sie_sdk.client.sync.httpx.Client"):
+        client = SIEClient(GW, api_key=KEY)
+        with (
+            patch.object(client.jobs, "get", return_value=running),
+            patch.object(client.jobs, "_read_ref") as read_ref,
+            pytest.raises(RequestError) as excinfo,
+        ):
+            client.jobs.results("job-1")
+
+        assert excinfo.value.code == "job_not_terminal"
+        assert excinfo.value.status_code == 409
+        read_ref.assert_not_called()
+        client.close()
+
+
+def test_wait_raise_on_failure_raises_job_failed_error_carrying_outcome() -> None:
+    failed = {
+        "id": "job-1",
+        "state": "failed",
+        "outcome": "reexecution_required",
+        "error_code": "RESULT_HANDLE_EXPIRED",
+    }
+    with patch("sie_sdk.client.sync.httpx.Client") as mock_client:
+        mock_client.return_value.request = MagicMock(return_value=_resp(200, failed))
+        client = SIEClient(GW, api_key=KEY)
+        with pytest.raises(JobFailedError) as excinfo:
+            client.jobs.wait("job-1", poll_s=0, raise_on_failure=True)
+        assert excinfo.value.state == "failed"
+        assert excinfo.value.outcome == "reexecution_required"
+        assert excinfo.value.error_code == "RESULT_HANDLE_EXPIRED"
+        assert excinfo.value.job_id == "job-1"
+        # Default stays back-compatible: the terminal doc is returned, not raised.
+        assert client.jobs.wait("job-1", poll_s=0)["state"] == "failed"
+        client.close()
+
+
+def test_wait_raise_on_failure_returns_succeeded_terminal_unchanged() -> None:
+    ok = {"id": "job-1", "state": "succeeded", "total_items": 2}
+    with patch("sie_sdk.client.sync.httpx.Client") as mock_client:
+        mock_client.return_value.request = MagicMock(return_value=_resp(200, ok))
+        client = SIEClient(GW, api_key=KEY)
+        assert client.jobs.wait("job-1", poll_s=0, raise_on_failure=True)["state"] == "succeeded"
+        client.close()
+
+
 # ---------------------------------------------------------------------------
 # async
 # ---------------------------------------------------------------------------
@@ -605,4 +817,93 @@ async def test_async_results_does_not_refresh_unrelated_ref_failures(error: Requ
     get_job.assert_awaited_once_with("job-1")
     read_ref.assert_awaited_once_with("https://gw.test/ref")
     assert excinfo.value is error
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_async_results_surfaces_billed_successful_items_from_a_failed_chunk_and_warns() -> None:
+    client = SIEAsyncClient(GW, api_key=KEY)
+    with (
+        patch.object(client.jobs, "get", new=AsyncMock(return_value=_partial_failure_job())),
+        patch.object(client.jobs, "_read_ref", new=AsyncMock(return_value=_mixed_chunk())) as read_ref,
+        pytest.warns(UserWarning, match="incomplete: retrieved 2 of 3"),
+    ):
+        results = await client.jobs.results("job-1")
+
+    read_ref.assert_awaited_once_with("https://gw.test/chunk-0")
+    assert results["retrieved"] == 2
+    ok, bad = results["items"]
+    assert (ok["id"], ok["success"]) == ("ok-1", True)
+    assert "error" not in ok
+    assert (bad["id"], bad["success"]) == ("bad-1", False)
+    assert bad["error"] == {"code": "INFERENCE_ERROR", "message": "tokenization failed"}
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_async_results_on_non_terminal_job_raises_job_not_terminal() -> None:
+    running = {"id": "job-1", "state": "running", "total_items": 3, "output": {"kind": "refs", "chunks": []}}
+    client = SIEAsyncClient(GW, api_key=KEY)
+    with (
+        patch.object(client.jobs, "get", new=AsyncMock(return_value=running)),
+        patch.object(client.jobs, "_read_ref", new=AsyncMock()) as read_ref,
+        pytest.raises(RequestError) as excinfo,
+    ):
+        await client.jobs.results("job-1")
+
+    assert excinfo.value.code == "job_not_terminal"
+    assert excinfo.value.status_code == 409
+    read_ref.assert_not_awaited()
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_async_wait_raise_on_failure_raises_job_failed_error_carrying_outcome() -> None:
+    failed = {
+        "id": "job-1",
+        "state": "failed",
+        "outcome": "reexecution_required",
+        "error_code": "RESULT_HANDLE_EXPIRED",
+    }
+    client = SIEAsyncClient(GW, api_key=KEY)
+    client._get = AsyncMock(return_value=_FakeAio(200, failed))
+    with pytest.raises(JobFailedError) as excinfo:
+        await client.jobs.wait("job-1", poll_s=0, raise_on_failure=True)
+    assert excinfo.value.state == "failed"
+    assert excinfo.value.outcome == "reexecution_required"
+    assert excinfo.value.error_code == "RESULT_HANDLE_EXPIRED"
+    # Default stays back-compatible: the terminal doc is returned, not raised.
+    assert (await client.jobs.wait("job-1", poll_s=0))["state"] == "failed"
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_async_results_confines_a_garbage_failed_chunk_ref_without_crashing() -> None:
+    job = {
+        "id": "job-1",
+        "state": "failed",
+        "total_items": 3,
+        "settled_credits": 5,
+        "output": {
+            "kind": "refs",
+            "chunks": [
+                {"seq": 0, "items": 2, "state": "failed", "ref": "https://gw.test/good"},
+                {"seq": 1, "items": 1, "state": "succeeded", "ref": "https://gw.test/garbage"},
+            ],
+        },
+    }
+    client = SIEAsyncClient(GW, api_key=KEY)
+    with (
+        patch.object(client.jobs, "get", new=AsyncMock(return_value=job)),
+        patch.object(client.jobs, "_read_ref", new=AsyncMock(side_effect=[_mixed_chunk(), b"\xc1\xc1 garbage"])),
+        pytest.warns(UserWarning, match="results are incomplete") as record,
+    ):
+        results = await client.jobs.results("job-1")
+
+    assert results["retrieved"] == 2
+    assert [it["id"] for it in results["items"]] == ["ok-1", "bad-1"]
+    messages = [str(w.message) for w in record]
+    assert any("could not be decoded" in m for m in messages)
+    assert any("results are incomplete: retrieved 2 of 3" in m for m in messages)
+    assert not any("billed" in m or "publishing" in m for m in messages)
     await client.close()

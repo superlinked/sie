@@ -1028,7 +1028,7 @@
       },
       "id": 70,
       "title": "Gateway Config, Queue, and Provisioning Event Rate",
-      "description": "Bounded gateway config operations, logical queue publishes/result waits, durability events, and provisioning responses.",
+      "description": "Bounded gateway config operations, logical queue publishes/result waits, durability events, provisioning responses, unsupported-model lane exclusions, and per-lane queue admission decisions. An unsupported-model exclusion is a lane passed over because a worker in it reports that it cannot serve the requested model, for example during a rollout that adds adapters to its bundle. A lane_admission outcome of shed_shadow is the decision the per-lane check would have taken with SIE_GATEWAY_LANE_BACKPRESSURE_ENFORCE on; it never changes admission, so it is how the shadow period is read before the flag is flipped.",
       "type": "timeseries",
       "fieldConfig": {
         "defaults": {
@@ -1076,6 +1076,16 @@
           "expr": "sum by (surface, http_status_code) (rate(sie_gateway_provisioning_responses_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\"}[$rate_window]))",
           "legendFormat": "provisioning {{surface}} / {{http_status_code}}",
           "refId": "E"
+        },
+        {
+          "expr": "sum by (pool, machine_profile, bundle, outcome) (rate(sie_gateway_queue_lane_admission_decisions_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\"}[$rate_window]))",
+          "legendFormat": "lane admission {{pool}}/{{machine_profile}}/{{bundle}} / {{outcome}}",
+          "refId": "F"
+        },
+        {
+          "expr": "sum(rate(sie_gateway_routing_unsupported_model_exclusions_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\"}[$rate_window]))",
+          "legendFormat": "unsupported-model lane exclusions",
+          "refId": "G"
         }
       ]
     },
@@ -1556,6 +1566,178 @@
           "refId": "A"
         }
       ]
+    },
+    {
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 101
+      },
+      "id": 115,
+      "type": "timeseries",
+      "title": "Work item age at execution",
+      "description": "Age of a work item at the instant the worker commits to executing it, measured from the gateway publish timestamp on its envelope, per operation. This is the TRANSPORT queue age and is not the same thing as the worker-local scheduler wait next to it: it spans broker enqueue, redelivery, pull, payload fetch, and scheduling. Recorded at every execution-commit point including generation, so no operation is missing; items that never execute (cancelled, payload-fetch failures, NAK-for-redelivery) are deliberately not counted. Read the 120s line against the client-facing request ceiling - work above it started after its caller could still have been waiting, which is work the cluster ran for nobody. The p50/p95 split says whether that is a tail or the steady state.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0
+        }
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le, operation) (rate(sie_worker_work_item_age_seconds_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker-sidecar\"}[$rate_window])))",
+          "legendFormat": "p50 {{operation}}",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, operation) (rate(sie_worker_work_item_age_seconds_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker-sidecar\"}[$rate_window])))",
+          "legendFormat": "p95 {{operation}}",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 109
+      },
+      "id": 116,
+      "type": "timeseries",
+      "title": "Key snapshot poll outcomes",
+      "description": "Effectiveness of the managed gateway's conditional key-snapshot poll. `not_modified` is the 304 fast path, where the control plane computed no body at all. `installed` is a 200 that advanced this replica's held version. `discarded` is the one to watch: a 200 whose body did NOT advance the version, so it was computed, serialised, transferred, parsed, and thrown away. A high discarded rate means the fast path is missing because something in the estate keeps bumping the global version inside the poll window. Managed-topology only; a self-hosted cluster does not poll a control plane and reports no series here.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "min": 0
+        }
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "expr": "sum by (outcome) (rate(sie_gateway_key_snapshot_polls_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\"}[$rate_window]))",
+          "legendFormat": "{{outcome}}/sec",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 109
+      },
+      "id": 117,
+      "type": "timeseries",
+      "title": "Settlement confirm on the buffered response path",
+      "description": "What a buffered managed response waits on before it is returned to the customer. The duration is the control-plane settlement confirmation only; compare it against sie_gateway_request_duration_seconds on the same producer to get the confirm's share of end-to-end buffered latency. The `skipped` outcome is a request that took no reservation and issued no control-plane call, so it is counted but contributes no duration. This panel mixes two units deliberately - the p95 series are seconds and the outcome series are events per second, as the legend labels say - so the axis unit is neutral rather than mislabelling the rates as durations. Managed-topology only.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        }
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, outcome) (rate(sie_gateway_settlement_confirm_duration_seconds_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\"}[$rate_window])))",
+          "legendFormat": "p95 confirm s {{outcome}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (outcome) (rate(sie_gateway_settlement_confirms_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\"}[$rate_window]))",
+          "legendFormat": "{{outcome}}/sec",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "description": "Pressure on the gateway's keyed worker pools, by pool and event. The two pools have deliberately opposite policies, so the two rates mean different things and carry different expectations.\n\n`inbox/saturated`: a shard queue filled and the decode task blocked rather than dropping. Dropping a result or a stream chunk is a correctness fault, so blocking is the intended behaviour. Expected to sit at zero; a sustained non-zero rate means results are arriving faster than that shard drains, which is worth correlating with decode latency and downstream handler time before concluding where the bottleneck is.\n\n`payload_cleanup/shed`: an offloaded-payload delete was dropped because its pool was full. This is by design and is recovered by the expiry reconcile, so a non-zero rate is not an error; it costs bounded blob residency until the next reconcile. Watch it for a sustained climb rather than for any activity at all.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 117
+      },
+      "id": 118,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (pool, event) (rate(sie_gateway_queue_worker_pool_events_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\"}[$__rate_interval]))",
+          "legendFormat": "{{pool}} {{event}}/sec",
+          "refId": "A"
+        }
+      ],
+      "title": "Gateway Queue Worker-Pool Backpressure and Shed",
+      "type": "timeseries"
     }
   ],
   "refresh": "10s",

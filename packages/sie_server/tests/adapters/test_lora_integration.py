@@ -5,7 +5,7 @@ Tests validate that LoRA profiles work correctly through the full server stack:
 - Interleaved requests with different LoRAs
 - Base model + LoRA coexistence
 
-Mark: integration (run with `mise run test -i packages/sie_server/tests/test_lora_integration.py`)
+Mark: integration (run with `mise run test -- -i packages/sie_server/tests/adapters/test_lora_integration.py`)
 """
 
 from __future__ import annotations

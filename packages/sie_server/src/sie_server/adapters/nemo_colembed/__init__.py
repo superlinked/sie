@@ -24,7 +24,6 @@ See: https://huggingface.co/nvidia/llama-nemoretriever-colembed-3b-v1
 
 from __future__ import annotations
 
-import io
 import logging
 import threading
 from pathlib import Path
@@ -40,7 +39,7 @@ from sie_server.adapters._types import ComputePrecision
 from sie_server.adapters._vision_patch_embed import rebind_vision_patch_embed
 from sie_server.core.inference_output import EncodeOutput
 from sie_server.core.postprocessor import MuveraConfig, MuveraPostprocessor
-from sie_server.types.inputs import media_bytes
+from sie_server.types.inputs import decode_image
 
 if TYPE_CHECKING:
     from sie_server.types.inputs import Item
@@ -491,20 +490,16 @@ class NemoColEmbedAdapter(BaseAdapter):
         Returns:
             EncodeOutput with multivector embeddings.
         """
-        from PIL import Image
-
         # Item is a TypedDict (dict) - no instance check needed
         pil_images = []
-        for item in items:
+        for i, item in enumerate(items):
             if not item.images or len(item.images) == 0:
                 raise ValueError(_ERR_NO_INPUT)
 
-            # Load first image from each item (ImageInput is also a TypedDict)
-            img_bytes = media_bytes(item.images[0], kind="image")
-            pil_img = Image.open(io.BytesIO(img_bytes))
-            if pil_img.mode != "RGB":
-                pil_img = pil_img.convert("RGB")
-            pil_images.append(pil_img)
+            # Load first image from each item; decode_image raises
+            # InvalidMediaError (-> 400 INVALID_INPUT) on non-bytes or
+            # undecodable payloads, and converts to RGB.
+            pil_images.append(decode_image(item.images[0], item_index=i, image_index=0))
 
         # v2 exposes ``forward_images`` (Qwen3-VL backbone); v1 exposes ``forward_passages``.
         forward = getattr(self._model, "forward_images", None) or self._model.forward_passages

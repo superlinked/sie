@@ -1,5 +1,6 @@
 sie_id: numind/NuNER_Zero-span
 hf_id: numind/NuNER_Zero-span
+hf_revision: 063b4dec1aaf626058e7c071657b15d52abffca0
 inputs:
   text: true
   image: false

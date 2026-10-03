@@ -1,5 +1,6 @@
 sie_id: opensearch-project/opensearch-neural-sparse-encoding-v1
 hf_id: opensearch-project/opensearch-neural-sparse-encoding-v1
+hf_revision: 708f7e68f4aada15c2d59144a5187c521da6d8db
 inputs:
   text: true
   image: false

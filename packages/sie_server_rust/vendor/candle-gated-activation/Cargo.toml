@@ -1,0 +1,31 @@
+[package]
+edition = "2021"
+name = "candle-gated-activation"
+version = "0.0.1"
+build = "build.rs"
+publish = false
+description = "CUDA gated activation kernels for Candle tensors."
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "candle_gated_activation"
+path = "src/lib.rs"
+
+[dependencies.candle]
+version = "0.10.2"
+features = ["cuda"]
+package = "candle-core"
+
+[dependencies.half]
+version = "2.3.1"
+features = ["num-traits"]
+
+[build-dependencies.anyhow]
+version = "1"
+features = ["backtrace"]
+
+[build-dependencies.num_cpus]
+version = "1.15.0"
+
+[build-dependencies.rayon]
+version = "1.7.0"

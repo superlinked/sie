@@ -20,7 +20,6 @@ Paper: https://arxiv.org/abs/2111.15664
 
 from __future__ import annotations
 
-import io
 import json
 import logging
 import re
@@ -33,7 +32,7 @@ from sie_server.adapters._base_adapter import BaseAdapter
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_NOT_LOADED, ComputePrecision
 from sie_server.core.inference_output import EncodeOutput, ExtractOutput
-from sie_server.types.inputs import media_bytes
+from sie_server.types.inputs import decode_image
 from sie_server.types.responses import Entity
 
 if TYPE_CHECKING:
@@ -261,13 +260,14 @@ class DonutAdapter(BaseAdapter):
 
         # Fallback to inline preprocessing
         all_entities = []
-        for item in items:
+        for i, item in enumerate(items):
             entities = self._extract_single(
                 item,
                 task=task,
                 instruction=instruction,
                 max_new_tokens=max_new_tokens,
                 num_beams=num_beams,
+                item_index=i,
             )
             all_entities.append(entities)
 
@@ -316,6 +316,7 @@ class DonutAdapter(BaseAdapter):
                     instruction=None,
                     max_new_tokens=max_new_tokens,
                     num_beams=num_beams,
+                    item_index=i,
                 )
                 all_entities.append(entities)
                 continue
@@ -369,6 +370,7 @@ class DonutAdapter(BaseAdapter):
         instruction: str | None,
         max_new_tokens: int,
         num_beams: int,
+        item_index: int | None = None,
     ) -> list[Entity]:
         """Extract from a single item.
 
@@ -382,18 +384,14 @@ class DonutAdapter(BaseAdapter):
         Returns:
             List of entities extracted from the item.
         """
-        from PIL import Image as PILImage
-
         # Validate input
         images = item.images
         if not images or len(images) == 0:
             raise ValueError(_ERR_NO_IMAGES)
 
-        # Load image
-        img_bytes = media_bytes(images[0], kind="image")
-        pil_img = PILImage.open(io.BytesIO(img_bytes))
-        if pil_img.mode != "RGB":
-            pil_img = pil_img.convert("RGB")
+        # Load image; decode_image raises InvalidMediaError (-> 400
+        # INVALID_INPUT) on non-bytes or undecodable payloads.
+        pil_img = decode_image(images[0], item_index=item_index, image_index=0)
 
         # Build decoder input prompt
         prompt = self._build_prompt(task, instruction)

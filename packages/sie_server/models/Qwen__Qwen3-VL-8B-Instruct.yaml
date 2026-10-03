@@ -1,0 +1,132 @@
+sie_id: "Qwen/Qwen3-VL-8B-Instruct"
+hf_id: "Qwen/Qwen3-VL-8B-Instruct"
+hf_revision: 0c351dd01ed87e9c1b53cbc748cba10e6187ff3b
+inputs:
+  # Video is served on the direct /v1/chat/completions route as one inline
+  # base64 ``video_url`` per request; the runtime samples frames per the
+  # ``video`` block of ``--mm-process-config`` below.
+  text: true
+  image: true
+  audio: false
+  video: true
+tasks:
+  encode: null
+  score: null
+  extract: null
+  generate:
+    # Native context is 262,144 tokens; the served window is 32K so one
+    # admission fits a 16K-token video plus the model-card VL output length.
+    context_length: 32768
+    # Model card VL recommendation: out_seq_length=16384.
+    max_output_tokens: 16384
+    # Every profile is non-speculative (no MTP/NEXTN head in the checkpoint),
+    # so the grammar-safe fallback is the same launch shape.
+    grammar_profile: no-spec
+    capabilities:
+      grammar: ["json_schema", "regex"]
+      streaming: true
+      # The chat template renders Hermes-style <tool_call>{json}</tool_call>.
+      tools: true
+max_sequence_length: 32768
+# KV-cache math (text_config, bf16): 36 layers x 8 KV heads x head_dim 128
+#   kv_bytes_per_token = 2 (k+v) x 36 x 8 x 128 x 2 B = 147,456 B = 144 KiB
+# RTX PRO 6000 (96 GB) at mem_fraction_static=0.85 with ~17.5 GB weights:
+#   (96 x 0.85 - 17.5) GB / 144 KiB ~= 430,000 tokens theoretical.
+# kv_budget_tokens admits two full 32K-context requests, leaving headroom for
+# vision-encoder activations on image/video prefill.
+profiles:
+  default:
+    max_batch_tokens: 32768
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.sglang.generation:SGLangGenerationAdapter
+    kv_budget_tokens: 65536
+    adapter_options:
+      loadtime:
+        mem_fraction_static: 0.85
+        served_model_name: Qwen/Qwen3-VL-8B-Instruct
+        grammar_backend: xgrammar
+        tool_call_parser: qwen25
+        speculative:
+          enabled: false
+        extra_launch_args:
+          - "--mm-process-config"
+          - '{"image":{"min_pixels":65536,"max_pixels":1003520},"video":{"fps":2,"max_frames":64,"total_pixels":8388608}}'
+      runtime:
+        first_chunk_timeout_s: 90
+        inter_chunk_timeout_s: 15
+        overall_timeout_s: 600
+        # Model card VL sampling: temperature 0.7, top_p 0.8, top_k 20,
+        # presence_penalty 1.5. min_new_tokens=1: on an untemplated native
+        # generate prompt the model emits EOS as its first token (empty text).
+        default_sampling:
+          temperature: 0.7
+          top_p: 0.8
+          top_k: 20
+          presence_penalty: 1.5
+          min_new_tokens: 1
+        stop_tokens:
+          - "<|im_end|>"
+  # RTX PRO 6000 (96 GB, sm_120) shape; identical launch to ``default``.
+  rtx-pro-6000:
+    max_batch_tokens: 32768
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.sglang.generation:SGLangGenerationAdapter
+    kv_budget_tokens: 65536
+    adapter_options:
+      loadtime:
+        mem_fraction_static: 0.85
+        served_model_name: Qwen/Qwen3-VL-8B-Instruct
+        grammar_backend: xgrammar
+        tool_call_parser: qwen25
+        speculative:
+          enabled: false
+        extra_launch_args:
+          - "--mm-process-config"
+          - '{"image":{"min_pixels":65536,"max_pixels":1003520},"video":{"fps":2,"max_frames":64,"total_pixels":8388608}}'
+      runtime:
+        first_chunk_timeout_s: 90
+        inter_chunk_timeout_s: 15
+        overall_timeout_s: 600
+        # Model card VL sampling: temperature 0.7, top_p 0.8, top_k 20,
+        # presence_penalty 1.5. min_new_tokens=1: on an untemplated native
+        # generate prompt the model emits EOS as its first token (empty text).
+        default_sampling:
+          temperature: 0.7
+          top_p: 0.8
+          top_k: 20
+          presence_penalty: 1.5
+          min_new_tokens: 1
+        stop_tokens:
+          - "<|im_end|>"
+  # Grammar-safe fallback; identical launch to ``default``.
+  no-spec:
+    max_batch_tokens: 32768
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.sglang.generation:SGLangGenerationAdapter
+    kv_budget_tokens: 65536
+    adapter_options:
+      loadtime:
+        mem_fraction_static: 0.85
+        served_model_name: Qwen/Qwen3-VL-8B-Instruct
+        grammar_backend: xgrammar
+        tool_call_parser: qwen25
+        speculative:
+          enabled: false
+        extra_launch_args:
+          - "--mm-process-config"
+          - '{"image":{"min_pixels":65536,"max_pixels":1003520},"video":{"fps":2,"max_frames":64,"total_pixels":8388608}}'
+      runtime:
+        first_chunk_timeout_s: 90
+        inter_chunk_timeout_s: 15
+        overall_timeout_s: 600
+        # Model card VL sampling: temperature 0.7, top_p 0.8, top_k 20,
+        # presence_penalty 1.5. min_new_tokens=1: on an untemplated native
+        # generate prompt the model emits EOS as its first token (empty text).
+        default_sampling:
+          temperature: 0.7
+          top_p: 0.8
+          top_k: 20
+          presence_penalty: 1.5
+          min_new_tokens: 1
+        stop_tokens:
+          - "<|im_end|>"

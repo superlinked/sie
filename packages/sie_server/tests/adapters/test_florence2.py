@@ -277,7 +277,8 @@ class TestFlorence2CpuInference:
 
     Guards the transformers-4.57 native-processor regression at the level that
     actually failed on staging: load the pinned checkpoint via the adapter and run
-    a real OCR + OD forward. Run with ``mise run test -- -m model``.
+    a real OCR + OD forward. Run this file with pytest's ``-m model`` marker
+    through the locked root project.
     """
 
     REVISION = "5ca5edf5bd017b9919c05d08aebef5e4c7ac3bac"

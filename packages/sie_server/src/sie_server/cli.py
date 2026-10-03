@@ -25,10 +25,13 @@ if sys.platform == "darwin":
 
 import hashlib
 import logging
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Annotated
 
+import click
 import typer
+from click.core import ParameterSource
 from sie_sdk.bundle_utils import (
     ModelAdapterInventory,
     find_bundle_for_model_adapters,
@@ -48,8 +51,17 @@ from sie_server.app.app_state_config import (
     AppStateConfig,
 )
 from sie_server.config.model import ModelConfig
+from sie_server.config.upstreams import (
+    REMOTE_SERVING_ENV,
+    UPSTREAMS_FILE_ENV,
+    UpstreamConfigError,
+    load_upstreams,
+    remote_serving_from_env,
+)
 from sie_server.core.deps import collect_bundle_deps
 from sie_server.core.loader import load_model_configs
+from sie_server.core.logging import configure_logging, is_valid_log_level, valid_log_levels
+from sie_server.core.model_suggestions import suggest_models
 from sie_server.main import run_server
 
 logger = logging.getLogger(__name__)
@@ -104,6 +116,34 @@ def parse_devices(value: str | None) -> list[str] | None:
         return None
     devices = [item.strip() for item in value.split(",") if item.strip()]
     return devices or None
+
+
+def _echo_suggestions(unknown: Iterable[str], known: Iterable[str]) -> None:
+    """Print a ``did you mean`` line per unresolved id, when one is confident.
+
+    Silent when nothing is close enough — a wrong guess is worse than none.
+    """
+    known = list(known)
+    for name in unknown:
+        suggestions = suggest_models(name, known)
+        if suggestions:
+            typer.echo(f"  '{name}': did you mean {', '.join(suggestions)}?", err=True)
+
+
+def _came_from_command_line(param: str) -> bool:
+    """Whether ``param`` was typed on the command line rather than defaulted.
+
+    Options carrying ``envvar=`` reach the handler populated from the
+    environment, indistinguishable from a typed flag by value alone. Click
+    records where each value came from, so ask it.
+
+    Returns ``False`` when there is no active Click context (direct calls in
+    tests), which keeps the lenient path — the strict one is opt-in.
+    """
+    ctx = click.get_current_context(silent=True)
+    if ctx is None:
+        return False
+    return ctx.get_parameter_source(param) == ParameterSource.COMMANDLINE
 
 
 def _canonical_model_id(value: str) -> str:
@@ -291,7 +331,7 @@ def serve(
     models_dir: str = typer.Option(
         DEFAULT_MODELS_DIR,
         "--models-dir",
-        help="Models directory (local path, s3://, gs://, abfs://, or abfss://)",
+        help="Models directory (local path, s3://, gs://, abfs(s)://, or oss://)",
     ),
     bundle: str | None = typer.Option(None, "--bundle", "-b", help="Bundle name to load (from bundles/ dir)"),
     models: str | None = typer.Option(None, "--models", "-m", help="Comma-separated model names to load"),
@@ -299,7 +339,7 @@ def serve(
     cluster_cache: str | None = typer.Option(
         None,
         "--cluster-cache",
-        help="Cluster cache URL (s3://, gs://, abfs://, or abfss://)",
+        help="Cluster cache URL (s3://, gs://, abfs(s)://, or oss://)",
     ),
     hf_fallback: bool = typer.Option(True, "--hf-fallback/--no-hf-fallback", help="Enable HuggingFace Hub fallback"),
     reload: bool = typer.Option(default=False, help="Enable auto-reload for development"),
@@ -317,11 +357,43 @@ def serve(
     ] = "info",
     preload: str | None = typer.Option(None, "--preload", help="Comma-separated model names to preload at startup"),
     json_logs: bool = typer.Option(False, "--json-logs", help="Enable structured JSON logging (for Loki)"),
+    upstreams_file: Annotated[
+        str | None,
+        typer.Option(
+            "--upstreams-file",
+            envvar=UPSTREAMS_FILE_ENV,
+            help="YAML file of upstreams for remote profiles. Credentials are named environment variables.",
+        ),
+    ] = None,
+    remote_serving: Annotated[
+        bool | None,
+        typer.Option(
+            "--remote-serving/--no-remote-serving",
+            help=(
+                "Global switch for remote profiles. Off refuses every remote profile and sends nothing upstream. "
+                f"Without the flag, {REMOTE_SERVING_ENV} decides: unset means on, anything unrecognised means off."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Start the SIE inference server."""
     from sie_sdk.storage import is_cloud_path
 
-    from sie_server.core.logging import configure_logging
+    # An explicit --log-level typo is an immediate, cheap-to-fix mistake at the
+    # command line, so reject it rather than starting a server that quietly
+    # ignores the flag. A bad SIE_LOG_LEVEL takes the softer path inside
+    # configure_logging (a loud warning, no crash) because it comes from a Helm
+    # value and must not crash-loop a pod.
+    #
+    # The parameter is bound to both, so the source has to be asked for
+    # explicitly: `envvar="SIE_LOG_LEVEL"` means an unset flag still arrives
+    # here carrying the environment's value.
+    if _came_from_command_line("log_level") and not is_valid_log_level(log_level):
+        typer.echo(
+            f"Error: Invalid --log-level {log_level!r}. Valid levels: {', '.join(valid_log_levels())}",
+            err=True,
+        )
+        raise typer.Exit(1)
 
     # Configure logging (supports JSON format for Loki compatibility)
     configure_logging(verbose=verbose, json_format=json_logs or None, level_name=log_level)
@@ -399,7 +471,16 @@ def serve(
         unknown = [m for m in model_filter if m not in all_configs]
         if unknown:
             typer.echo(f"Error: Unknown model(s): {', '.join(unknown)}", err=True)
-            typer.echo(f"Available models: {', '.join(sorted(all_configs.keys())[:10])}...", err=True)
+            # The old fallback printed the first ten ids alphabetically, which
+            # for this catalog is always the same Alibaba-NLP/BAAI block — no
+            # help at all for a mistyped Qwen id. Suggest per unknown id instead.
+            _echo_suggestions(unknown, all_configs)
+            # Deliberately does not echo --models-dir: it accepts cloud URLs
+            # (s3://, abfss://, ...) which can carry a SAS token or embedded
+            # credentials, and stderr is collected by CI and container log
+            # shippers. The caller just supplied the value, so naming the count
+            # is enough.
+            typer.echo(f"The configured models directory has {len(all_configs)} model configs.", err=True)
             raise typer.Exit(1)
 
     # Augment the filter with explicitly-allowed extra model ids (opt-in via
@@ -419,12 +500,13 @@ def serve(
         unknown_extra = [m for m in extras if m not in all_configs]
         if unknown_extra:
             typer.echo(f"Error: SIE_EXTRA_MODELS unknown model(s): {', '.join(unknown_extra)}", err=True)
+            _echo_suggestions(unknown_extra, all_configs)
             raise typer.Exit(1)
         model_filter = sorted(set(model_filter) | set(extras))
         typer.echo(f"Extra models added to filter: {', '.join(extras)}")
 
     # Explicit selectors must not escape a release image's dependency boundary.
-    # Local ``mise run serve -m ...`` has no initial known bundle and keeps the
+    # Local ``mise run serve -- -m ...`` has no initial known bundle and keeps the
     # ad-hoc dependency-resolution path in tools/mise_tasks/serve.bash.
     if baked_bundle and model_filter is not None:
         if model_adapters is not None:
@@ -559,6 +641,7 @@ def serve(
             invalid = [m for m in preload_models if m not in model_filter]
             if invalid:
                 typer.echo(f"Error: Preload model(s) not in model filter: {', '.join(invalid)}", err=True)
+                _echo_suggestions(invalid, model_filter)
                 raise typer.Exit(1)
         typer.echo(f"Preload: {len(preload_models)} models will be loaded at startup")
     else:
@@ -570,6 +653,7 @@ def serve(
                     invalid = [m for m in preload_models if m not in model_filter]
                     if invalid:
                         typer.echo(f"Error: Preload model(s) not in model filter: {', '.join(invalid)}", err=True)
+                        _echo_suggestions(invalid, model_filter)
                         raise typer.Exit(1)
                 typer.echo(f"Preload (from env): {len(preload_models)} models will be loaded at startup")
 
@@ -583,8 +667,27 @@ def serve(
             ]
             if invalid:
                 typer.echo(f"Error: Pinned model(s) not in model filter: {', '.join(invalid)}", err=True)
+                _echo_suggestions(invalid, model_filter)
                 raise typer.Exit(1)
         typer.echo(f"Pinned (from env): {len(pinned_models)} models will be kept resident")
+
+    if remote_serving is None:
+        remote_serving = remote_serving_from_env(os.environ.get(REMOTE_SERVING_ENV))
+    if upstreams_file:
+        # Same split as --log-level: a typed flag fails fast, a value from the
+        # environment (Helm) warns and loads no upstream rather than crash-loop.
+        # With no upstream loaded, nothing is sent outside this deployment.
+        try:
+            upstreams = load_upstreams(upstreams_file)
+        except UpstreamConfigError as exc:
+            if _came_from_command_line("upstreams_file"):
+                typer.echo(f"Error: {exc}", err=True)
+                raise typer.Exit(1) from None
+            typer.echo(f"Warning: {exc}. No upstream is loaded and remote serving is off.", err=True)
+            upstreams_file = None
+            remote_serving = False
+        else:
+            typer.echo(f"Upstreams: {', '.join(sorted(upstreams)) or 'none defined'}")
 
     config = AppStateConfig(
         models_dir=models_dir_resolved,
@@ -594,7 +697,11 @@ def serve(
         preload_models=preload_models,
         pinned_models=pinned_models,
         pool_name=pool_name,
+        upstreams_file=upstreams_file,
+        remote_serving=remote_serving,
     )
+    if upstreams_file and not remote_serving:
+        typer.echo("Remote serving: off. Every remote profile is refused.")
 
     uvicorn_log = "debug" if verbose else log_level.strip().lower()
     if uvicorn_log not in ("critical", "error", "warning", "info", "debug", "trace"):

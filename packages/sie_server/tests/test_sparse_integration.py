@@ -4,7 +4,7 @@ These tests validate that SIE's sparse adapter produces outputs that match
 sentence-transformers SparseEncoder directly.
 
 Requires: Real model weights (downloaded on first run)
-Mark: integration (run with `mise run test -m integration`)
+Mark: integration (run with `mise run test -- -i packages/sie_server/tests/test_sparse_integration.py`)
 """
 
 import numpy as np

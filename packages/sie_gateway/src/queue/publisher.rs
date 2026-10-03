@@ -18,9 +18,13 @@ use rmp::Marker;
 
 use super::dispatch::{DispatchDurability, PendingDispatchKind};
 use super::identity::canonical_work_item_id;
+use super::keyed_worker_pool::{KeyedWorkerPool, ShardKeyed};
+use super::lane_admission::{LaneAdmissionControl, LaneAdmissionOutcome, LaneKey, LaneReservation};
 use super::payload_store::PayloadStore;
+use super::stream_durability;
 use super::streaming::{
     ChunkApplied, ChunkEnvelope, ChunkError, NakEnvelope, StreamCollector, StreamOutcome,
+    StreamOutcomeOrigin,
 };
 use crate::endpoint::InferenceEndpoint;
 use crate::observability::metrics::{
@@ -35,6 +39,28 @@ pub(crate) const MAX_QUEUE_REQUEST_ITEMS: usize = 4_096;
 /// Bound simultaneous JetStream sends without serializing large valid batches.
 const MAX_CONCURRENT_INITIAL_PUBLISHES: usize = 64;
 const PUBLISH_ACK_COMPLETION_TIMEOUT: Duration = Duration::from_secs(6);
+
+/// Metric label for the inbox handler pool.
+const INBOX_POOL_NAME: &str = "inbox";
+/// Ordering domains for inbox work. A shard is a tokio task multiplexed onto
+/// the existing runtime workers, not a thread, so this is a concurrency width
+/// rather than a core count: wide enough that unrelated requests rarely share
+/// a shard, narrow enough to keep worst-case buffered bytes small.
+const INBOX_POOL_SHARDS: usize = 8;
+/// Queue depth per inbox shard. Deliberately shallow. A queued item is a fully
+/// decoded envelope whose size is bounded only by the NATS max payload, so
+/// `SHARDS * DEPTH` is what bounds the transient duplicate residency of result
+/// bytes ahead of the per-request reservation. With cleanup moved off them,
+/// the handlers are DashMap work plus a channel send, so a shallow queue is
+/// already enough to decouple decode from a momentarily slow handler.
+const INBOX_POOL_DEPTH: usize = 16;
+/// Metric label for the object-store cleanup pool.
+const CLEANUP_POOL_NAME: &str = "payload_cleanup";
+const CLEANUP_POOL_SHARDS: usize = 4;
+/// A queued cleanup item is one request id, so this queue can be deep without
+/// costing memory. It is still bounded; overflow falls back to the periodic
+/// `cleanup_expired` reconcile.
+const CLEANUP_POOL_DEPTH: usize = 256;
 
 const RESULT_CHUNK_KIND: &str = "result_chunk_v1";
 const MAX_RESULT_CHUNK_ITEM_BYTES: usize = 16 * 1_024 * 1_024;
@@ -218,6 +244,19 @@ pub struct ChatImage {
     pub format: Option<String>,
 }
 
+/// One video attached to a chat message, extracted from an OpenAI
+/// ``video_url`` data URI at the gateway. Same transport shape as
+/// :struct:`ChatImage`: a base64 payload string the sidecar normalizes to
+/// bounded msgpack binary before Python model execution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatVideo {
+    /// Base64-encoded video container bytes (standard alphabet, no ``data:`` prefix).
+    pub data: String,
+    /// Container hint derived from the payload's magic bytes (``"mp4"``, ``"mkv"``, ``"avi"``).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+}
+
 /// One ordered content part of a multimodal chat message — either a text
 /// fragment or an image placeholder (the bytes ride the message's flat
 /// ``images`` list, consumed in order as ``Image`` parts are encountered).
@@ -229,6 +268,7 @@ pub struct ChatImage {
 pub enum ContentPart {
     Text { text: String },
     Image,
+    Video,
 }
 
 /// One chat message in the OpenAI request shape. Role is validated
@@ -236,7 +276,7 @@ pub enum ContentPart {
 /// (multi-part text parts are concatenated). Any ``image_url`` parts are
 /// decoded into ``images`` and gated on the model's vision capability
 /// after model resolution.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
@@ -265,6 +305,11 @@ pub struct ChatMessage {
     /// engine is unchanged).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_parts: Option<Vec<ContentPart>>,
+    /// Video input decoded from the message's ``video_url`` content parts,
+    /// consumed in order as ``Video`` parts are encountered in
+    /// ``content_parts`` (always present when ``videos`` is).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub videos: Option<Vec<ChatVideo>>,
 }
 
 /// Structured-output grammar.
@@ -479,6 +524,10 @@ struct WorkItemRef<'a> {
     pub operation: &'a str,
     pub model_id: &'a str,
     pub profile_id: &'a str,
+    /// The model id the caller asked for, when routing dispatched the work to
+    /// another route of it (a profile variant). Absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_model: Option<&'a str>,
     pub engine: &'a str,
     pub pool_name: &'a str,
     #[serde(skip_serializing_if = "str::is_empty")]
@@ -505,6 +554,11 @@ struct WorkItemRef<'a> {
     pub router_id: &'a str,
     pub reply_subject: &'a str,
     pub timestamp: f64,
+    /// Absolute Unix-epoch seconds, on the same gateway clock as `timestamp`,
+    /// after which no caller waits for this item. Omitted when unknown; older
+    /// workers ignore the unknown map field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deadline: Option<f64>,
     /// Rolling-upgrade negotiation for `result_chunk_v1` specifically. Older
     /// workers ignore this unknown map field; workers must keep publishing the
     /// legacy one-shot ``WorkResult`` unless it is true. A future chunk version
@@ -519,6 +573,12 @@ struct WorkItemRef<'a> {
     pub tracestate: Option<&'a str>,
 }
 
+/// The requested model id a work item carries: present only when it differs
+/// from the route the work runs on.
+fn requested_model_on_wire<'a>(display_model: &'a str, model: &str) -> Option<&'a str> {
+    (!display_model.is_empty() && display_model != model).then_some(display_model)
+}
+
 /// Per-request context that every [`WorkItemRef`] in a batch borrows
 /// from. Grouping these lets us build the per-item view with a single
 /// struct literal and keeps `publish_single` / `publish_score` from
@@ -527,6 +587,7 @@ struct WorkItemShared<'a> {
     request_id: &'a str,
     endpoint: &'a str,
     model: &'a str,
+    display_model: Option<&'a str>,
     pool: &'a str,
     admission_pool: &'a str,
     gpu: &'a str,
@@ -536,6 +597,7 @@ struct WorkItemShared<'a> {
     reply_subject: &'a str,
     params: &'a WorkParams,
     timestamp: f64,
+    deadline: Option<f64>,
     /// W3C trace context captured once at publish-call time. The
     /// shared block is what every per-item [`WorkItemRef`] borrows
     /// from, so the propagator runs once per request rather than
@@ -665,6 +727,10 @@ pub struct WorkResult {
     /// observed resource shape. Optional for rolling/self-host compatibility.
     #[serde(default)]
     pub execution_identity_sha256: Option<String>,
+    /// Runtime-independent release and deployment-route binding. Optional for
+    /// rolling/self-host compatibility.
+    #[serde(default)]
+    pub execution_binding_sha256: Option<String>,
 }
 
 /// One bounded fragment of a named-msgpack encoded [`WorkResult`].
@@ -720,6 +786,12 @@ pub struct UnitCounts {
     /// MessagePack field order is preserved.
     #[serde(default)]
     pub output_tokens: Option<u64>,
+    /// Score only: the part of `input_tokens` that is the caller's own text
+    /// (query, post-truncation document and any supplied instruction, each
+    /// tokenized alone), excluding the adapter's prompt-template tokens.
+    /// Never above `input_tokens`. Appended last, like `output_tokens`.
+    #[serde(default)]
+    pub content_input_tokens: Option<u64>,
 }
 
 struct CachedStreamInfo {
@@ -799,13 +871,34 @@ fn accumulate_pending_generation_group(
     group.oldest_request_age_ms = group.oldest_request_age_ms.max(age_ms);
 }
 
+/// The shape of the `WORK_POOL_{pool}` streams this gateway creates.
+///
+/// Grouped rather than passed as loose constructor arguments because the
+/// three move together: they are the part of the stream config that the
+/// worker sidecars must mirror exactly (`SIE_STREAM_MAX_AGE_S`,
+/// `SIE_STREAM_STORAGE`, `SIE_STREAM_REPLICAS`, all rendered onto both by
+/// Helm), since whoever creates a stream first wins.
+#[derive(Debug, Clone, Copy)]
+pub struct WorkStreamConfig {
+    pub max_age: Duration,
+    /// Storage backing. Defaults to `Memory`, which is the only behaviour
+    /// that existed before the knob: queued work lives in the broker's RAM
+    /// and a NATS restart erases it. See [`crate::config::StreamStorage`]
+    /// for the trade-off and [`WorkPublisher::ensure_stream`] for why an
+    /// existing stream's storage type is reported rather than reconciled.
+    pub storage: jetstream::stream::StorageType,
+    /// JetStream replica count (default 1). Unlike `storage`, this IS
+    /// reconcilable in place.
+    pub num_replicas: usize,
+}
+
 pub struct WorkPublisher {
     jetstream: jetstream::Context,
     router_id: String,
     payload_store: Arc<dyn PayloadStore>,
     result_timeout: Duration,
     max_stream_pending: u64,
-    stream_max_age: Duration,
+    stream: WorkStreamConfig,
     /// Pools we've already `get_or_create_stream`'d for, keyed by pool
     /// name so we skip the admin-API round trip on subsequent
     /// requests. The value is the pre-computed JetStream stream name
@@ -817,6 +910,10 @@ pub struct WorkPublisher {
     /// primes it synchronously in [`Self::ensure_stream`] so we
     /// don't fail-open during the initial monitor interval.
     stream_info_cache: DashMap<String, CachedStreamInfo>,
+    /// Per-lane in-flight accounting (B5, first half). Complements
+    /// `max_stream_pending`, which is whole-stream and therefore pool-wide.
+    /// Its decision is always computed; whether it sheds is its own flag.
+    lane_admission: LaneAdmissionControl,
     pending_results: DashMap<String, ResultCollector>,
     /// Process-wide result-chunk reservation pool shared by every pending
     /// request owned by this publisher.
@@ -845,6 +942,15 @@ pub struct WorkPublisher {
     /// tolerate ``None`` (cancellation simply becomes a no-op).
     nats_client: tokio::sync::RwLock<Option<async_nats::Client>>,
     inbox_handle: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Runs inbox handlers off the single decode task, keyed by request id so
+    /// one request's messages stay strictly ordered while different requests
+    /// proceed concurrently. Created on the first
+    /// [`Self::start_inbox_subscription`] and reused across NATS reconnects,
+    /// so a re-subscribe never abandons already-queued work.
+    inbox_pool: tokio::sync::OnceCell<KeyedWorkerPool<InboxWork>>,
+    /// Runs object-store payload deletes off both the decode task and the
+    /// inbox handlers. See [`Self::defer_cleanup`] for the bound policy.
+    cleanup_pool: tokio::sync::OnceCell<KeyedWorkerPool<CleanupWork>>,
     /// H9 — first-chunk-fallback rate-limit buckets, keyed by
     /// ``"{model}|{pool}"``. Each bucket gates calls into
     /// [`Self::republish_to_pool`] tagged with the
@@ -930,6 +1036,10 @@ struct ResultCollector {
     direct_fallback_republished_indices: BTreeSet<usize>,
     direct_fallback_payloads: Vec<Option<Vec<u8>>>,
     direct_fallback_republished: bool,
+    /// Per-lane in-flight reservation, released when this collector drops.
+    /// Every terminal path (completion, timeout, publish failure, the expiry
+    /// sweep) drops the collector, so no path needs its own release call.
+    _lane_reservation: Option<LaneReservation>,
 }
 
 #[derive(Debug)]
@@ -1467,6 +1577,7 @@ fn fail_pending_result_chunk_request(
             worker_direct: false,
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
+            execution_binding_sha256: None,
         })
         .collect();
     if let Some(sender) = collector.sender.take() {
@@ -1646,6 +1757,12 @@ fn monitor_publish_acks(
     DispatchDurability::from_future(
         async move { await_publish_acks(&request_id, context, acks).await },
     )
+}
+
+/// The request's result wait as an absolute instant on the envelope clock.
+fn work_item_deadline(timestamp: f64, result_timeout: Duration) -> Option<f64> {
+    let deadline = timestamp + result_timeout.as_secs_f64();
+    (timestamp > 0.0 && deadline.is_finite()).then_some(deadline)
 }
 
 pub(crate) fn initial_publish_ack_count(endpoint: &str, request_items: usize) -> usize {
@@ -1882,6 +1999,23 @@ impl PublishTarget {
             } => machine_profile,
         }
     }
+
+    pub fn bundle(&self) -> &str {
+        match self {
+            PublishTarget::Worker { bundle, .. } | PublishTarget::Pool { bundle, .. } => bundle,
+        }
+    }
+
+    /// The `(pool, machine_profile, bundle)` lane this target publishes onto.
+    ///
+    /// Both variants share it: a worker-direct target is one worker inside the
+    /// same lane as its pool fallback, so per-lane admission accounting covers
+    /// direct dispatch too — the blind spot recorded in
+    /// [`WorkPublisher::check_backpressure`]'s doc block, where a saturated
+    /// worker inbox reads as a healthy pool stream, does not apply here.
+    pub fn lane(&self) -> LaneKey {
+        LaneKey::new(self.pool(), self.machine_profile(), self.bundle())
+    }
 }
 
 /// Peek the top-level `kind` discriminator on an already-decoded
@@ -1903,6 +2037,173 @@ fn envelope_kind(value: &rmpv::Value) -> Option<&str> {
                 };
             }
         }
+    }
+    None
+}
+
+/// One decoded inbox message together with the request it belongs to.
+///
+/// Produced only by [`inbox_work_for_payload`], which owns the single msgpack
+/// decode. Handing this — rather than the raw payload — to the worker pool is
+/// what keeps the "decode exactly once, on the decode task" property while
+/// the handlers run elsewhere.
+#[derive(Debug)]
+enum InboxWork {
+    ResultChunk(Box<ResultChunkV1>),
+    /// A `result_chunk_v1` envelope that failed to decode. The request is
+    /// known (from the fast-path peek) and must be failed, and that failure
+    /// has to be ordered against the request's other inbox work.
+    ResultChunkDecodeFailure {
+        request_id: String,
+    },
+    Chunk(Box<ChunkEnvelope>),
+    Nak(Box<NakEnvelope>),
+    Result(Box<WorkResult>),
+}
+
+/// Every variant carries exactly one request id, so all of a request's inbox
+/// work lands on one shard and is handled in arrival order.
+impl ShardKeyed for InboxWork {
+    fn shard_key(&self) -> &str {
+        match self {
+            Self::ResultChunk(chunk) => &chunk.request_id,
+            Self::ResultChunkDecodeFailure { request_id } => request_id,
+            Self::Chunk(chunk) => &chunk.request_id,
+            Self::Nak(nak) => &nak.request_id,
+            Self::Result(result) => &result.request_id,
+        }
+    }
+}
+
+/// Turn one raw inbox payload into the work its handler needs, or `None` when
+/// the message is to be dropped.
+///
+/// This is the entire decode side of the inbox loop, extracted from
+/// [`WorkPublisher::handle_inbox`] so it is unit-testable without a broker.
+/// In order:
+///
+/// 1. Fast path — peek `request_id` out of the raw bytes and drop the message
+///    outright when this gateway tracks no such request, without decoding it.
+/// 2. Decode the msgpack payload **exactly once** into an `rmpv::Value`.
+/// 3. Peek the `kind` discriminator on that decoded value and convert the
+///    *same* value into the typed envelope via `rmpv::ext::from_value` — never
+///    a second decode from the raw slice. Older code re-decoded up to three
+///    times per chunk, which is the hot path for streaming generation.
+///
+/// Only the exact v1 discriminator enters the v1 decoder. That fails malformed
+/// exact-v1 envelopes closed while preserving forward compatibility for
+/// ordinary/future `WorkResult` fields such as `total_bytes`.
+fn inbox_work_for_payload(payload: &[u8], is_tracked: impl Fn(&str) -> bool) -> Option<InboxWork> {
+    let request_id_hint = extract_request_id_fast(payload);
+    if let Some(request_id) = request_id_hint {
+        if !is_tracked(request_id) {
+            debug!(
+                request_id = %request_id,
+                "fast-path skip: result for unknown request"
+            );
+            return None;
+        }
+    }
+
+    let value: rmpv::Value = match rmp_serde::from_slice(payload) {
+        Ok(value) => value,
+        Err(e) => {
+            warn!(error = %e, "failed to decode inbox payload");
+            return None;
+        }
+    };
+
+    match envelope_kind(&value) {
+        Some(RESULT_CHUNK_KIND) => match rmpv::ext::from_value::<ResultChunkV1>(value) {
+            Ok(chunk) => Some(InboxWork::ResultChunk(Box::new(chunk))),
+            Err(e) => {
+                telemetry::record_queue_result_chunk_received(None);
+                telemetry::record_queue_result_chunk_rejection(
+                    telemetry::QueueResultChunkRejectionReason::Decode,
+                );
+                warn!(error = %e, "failed to decode result chunk envelope");
+                request_id_hint.map(|request_id| InboxWork::ResultChunkDecodeFailure {
+                    request_id: request_id.to_string(),
+                })
+            }
+        },
+        // Chunk envelopes feed the streaming aggregator.
+        Some("chunk") => match rmpv::ext::from_value::<ChunkEnvelope>(value) {
+            Ok(chunk) => Some(InboxWork::Chunk(Box::new(chunk))),
+            Err(e) => {
+                warn!(error = %e, "failed to decode chunk envelope");
+                None
+            }
+        },
+        // Worker-emitted NAK. The publisher republishes the cached work item
+        // to the pool subject; if the republish fails we surface a
+        // transport-style terminal outcome to the HTTP handler.
+        Some("nak") => match rmpv::ext::from_value::<NakEnvelope>(value) {
+            Ok(nak) => Some(InboxWork::Nak(Box::new(nak))),
+            Err(e) => {
+                warn!(error = %e, "failed to decode nak envelope");
+                None
+            }
+        },
+        // Anything else (encode/score/extract WorkResults — an array-shaped
+        // payload, or a map with an unknown/absent `kind`) flows to the
+        // ResultCollector path.
+        _ => match rmpv::ext::from_value::<WorkResult>(value) {
+            Ok(result) => Some(InboxWork::Result(Box::new(result))),
+            Err(e) => {
+                warn!(error = %e, "failed to decode inbox result");
+                None
+            }
+        },
+    }
+}
+
+/// Deferred object-store cleanup for one finished request.
+///
+/// Both variants are best-effort deletes with an independent backstop in
+/// [`WorkPublisher::cleanup_expired`], which is what makes it safe to shed
+/// them at the queue bound.
+#[derive(Debug)]
+enum CleanupWork {
+    /// Non-streaming request payload blobs (`offloaded_payload_keys`).
+    Payloads(String),
+    /// Offloaded generate blob for a streaming request (`offloaded_streams`).
+    Generate(String),
+}
+
+impl ShardKeyed for CleanupWork {
+    fn shard_key(&self) -> &str {
+        match self {
+            Self::Payloads(request_id) | Self::Generate(request_id) => request_id,
+        }
+    }
+}
+
+/// Hand one cleanup to the pool, or give it back for the caller to run inline.
+///
+/// Extracted from [`WorkPublisher::defer_cleanup`] so the hand-off policy is
+/// unit-testable without a live JetStream context (matching the treatment of
+/// [`cleanup_offloaded_payloads_inner`] for issue #1471).
+///
+/// * `pool` present and with room — queued, `None`. **The caller does not
+///   await the object-store round trip.**
+/// * `pool` present and saturated — shed, `None`. Safe because
+///   [`WorkPublisher::cleanup_expired`] reconciles orphaned keys every 10s.
+/// * `pool` absent (a publisher with no inbox subscription) — `Some(work)`,
+///   so cleanup still happens inline rather than being silently skipped.
+fn queue_cleanup(
+    pool: Option<&KeyedWorkerPool<CleanupWork>>,
+    work: CleanupWork,
+) -> Option<CleanupWork> {
+    let Some(pool) = pool else {
+        return Some(work);
+    };
+    let request_id = work.shard_key().to_string();
+    if !pool.try_dispatch(work) {
+        debug!(
+            request_id = %request_id,
+            "cleanup queue saturated — leaving the blob to the periodic reconcile"
+        );
     }
     None
 }
@@ -2216,6 +2517,92 @@ fn already_republished_nak_decision(
     AlreadyRepublishedNakDecision::Fail
 }
 
+/// Pool-wide admission from one cached `WORK_POOL_{pool}` snapshot.
+///
+/// `num_pending` is a whole-stream count and a stream is per pool, so this
+/// number cannot tell a hot model's backlog from a cold model's. That is the
+/// defect [`check_lane_backpressure`] addresses; this stays exactly as it was
+/// and remains the sole gate whenever per-lane enforcement is off.
+///
+/// Free function so the composition of the two checks is testable without a
+/// live broker.
+fn pool_backpressure_error(info: &CachedStreamInfo, max_stream_pending: u64) -> Option<String> {
+    if info.num_consumers == 0 {
+        return Some("no consumers available for work stream".to_string());
+    }
+    if info.num_pending > max_stream_pending {
+        return Some(format!(
+            "backpressure: {} pending messages exceeds threshold {}",
+            info.num_pending, max_stream_pending
+        ));
+    }
+    None
+}
+
+/// Evaluate one publish against its lane's own in-flight ceiling.
+///
+/// The decision is computed on every publish regardless of the enforcement
+/// flag, and recorded, so it can be evaluated against production traffic
+/// before it is acted on. With enforcement off this always returns `Ok`, which
+/// leaves [`pool_backpressure_error`] as the only gate — today's behaviour
+/// exactly.
+///
+/// Returns the reservation the caller must keep alive for the lifetime of the
+/// request; dropping it releases the lane.
+fn check_lane_backpressure(
+    lane_admission: &LaneAdmissionControl,
+    lane: &LaneKey,
+    items: u64,
+) -> Result<Option<LaneReservation>, String> {
+    let admission = lane_admission.admit(lane, items);
+    // Lane labels are bounded by the deployment's physical lane catalog. A
+    // lane outside it is logged but not counted rather than counted under a
+    // synthetic label — see `gateway_lane_admission_domain` in
+    // `telemetry/contract.yaml`.
+    if let Some(resolved) = lane_admission.resolve(lane) {
+        telemetry::record_queue_lane_admission_decision(&resolved, admission.outcome);
+    }
+    match admission.outcome {
+        LaneAdmissionOutcome::Admitted => Ok(admission.reservation),
+        LaneAdmissionOutcome::ShedShadow => {
+            debug!(
+                pool = %lane.pool,
+                machine_profile = %lane.machine_profile,
+                bundle = %lane.bundle,
+                in_flight = admission.in_flight,
+                threshold = admission.threshold,
+                "lane backpressure would shed this publish (shadow mode; not enforced)"
+            );
+            Ok(admission.reservation)
+        }
+        LaneAdmissionOutcome::ShedEnforced => {
+            warn!(
+                pool = %lane.pool,
+                machine_profile = %lane.machine_profile,
+                bundle = %lane.bundle,
+                in_flight = admission.in_flight,
+                threshold = admission.threshold,
+                "lane backpressure shed this publish"
+            );
+            // The "backpressure:" prefix is load-bearing: it is what
+            // `QueuePublishOutcome::from_error` classifies on and what
+            // `handlers::proxy::record_publish_failure` matches to return the
+            // same 503 + `Retry-After` as a pool-wide shed and to record
+            // pending demand so KEDA scales the saturated lane.
+            //
+            // The lane's identity stays out of the message. This string
+            // reaches the client in the `QUEUE_UNAVAILABLE` body, and a pool
+            // name is operator-defined and may encode tenant context. The
+            // `warn!` above and the decision metric carry the identity. The
+            // wording still distinguishes a lane shed from the pool-wide one.
+            Err(format!(
+                "backpressure: work lane saturated ({} in-flight items exceeds threshold {})",
+                admission.in_flight, admission.threshold
+            ))
+        }
+    }
+}
+
 impl WorkPublisher {
     pub fn new(
         jetstream: jetstream::Context,
@@ -2223,7 +2610,7 @@ impl WorkPublisher {
         payload_store: Arc<dyn PayloadStore>,
         result_timeout: Duration,
         max_stream_pending: u64,
-        stream_max_age: Duration,
+        stream: WorkStreamConfig,
     ) -> Self {
         Self {
             jetstream,
@@ -2231,9 +2618,13 @@ impl WorkPublisher {
             payload_store,
             result_timeout,
             max_stream_pending,
-            stream_max_age,
+            stream: WorkStreamConfig {
+                num_replicas: stream.num_replicas.max(1),
+                ..stream
+            },
             ensured_streams: DashMap::new(),
             stream_info_cache: DashMap::new(),
+            lane_admission: LaneAdmissionControl::default(),
             pending_results: DashMap::new(),
             result_chunk_budget: Arc::clone(&RESULT_CHUNK_BUDGET),
             pending_streams: DashMap::new(),
@@ -2241,10 +2632,22 @@ impl WorkPublisher {
             offloaded_payload_keys: DashMap::new(),
             nats_client: tokio::sync::RwLock::new(None),
             inbox_handle: tokio::sync::Mutex::new(None),
+            inbox_pool: tokio::sync::OnceCell::new(),
+            cleanup_pool: tokio::sync::OnceCell::new(),
             fallback_buckets: DashMap::new(),
             fallback_rate_per_sec: FALLBACK_RATE_PER_SEC_DEFAULT,
             fallback_burst: FALLBACK_BURST_DEFAULT,
         }
+    }
+
+    /// Install the deployment's per-lane admission policy.
+    ///
+    /// Constructed separately from [`Self::new`] because it is a policy, not
+    /// part of the queue's wiring: [`Self::new`] installs the shadow-mode
+    /// default so a publisher built without one still records the decision.
+    pub fn with_lane_admission(mut self, lane_admission: LaneAdmissionControl) -> Self {
+        self.lane_admission = lane_admission;
+        self
     }
 
     /// Try to consume one first-chunk-fallback token for ``(model, pool)``.
@@ -2284,6 +2687,11 @@ impl WorkPublisher {
     /// Returns the cached JetStream stream name as an `Arc<str>` so
     /// callers can avoid rebuilding `format!("WORK_POOL_{pool}")` on
     /// the hot path.
+    ///
+    /// Reconciliation of an existing stream covers `subjects`, `max_age`,
+    /// `discard`, and `num_replicas`. It deliberately does NOT cover
+    /// `storage`: JetStream refuses an in-place storage-type change, so a
+    /// mismatch is logged as a warning and the stream is left as-is.
     pub async fn ensure_stream(&self, pool: &str) -> Result<Arc<str>, String> {
         if let Some(existing) = self.ensured_streams.get(pool) {
             return Ok(Arc::clone(&existing));
@@ -2299,9 +2707,19 @@ impl WorkPublisher {
                 name: name.clone(),
                 subjects,
                 retention: jetstream::stream::RetentionPolicy::WorkQueue,
-                storage: jetstream::stream::StorageType::Memory,
-                max_age: self.stream_max_age,
+                // Configurable via `SIE_STREAM_STORAGE` / `SIE_STREAM_REPLICAS`;
+                // defaults are `Memory` / 1, i.e. unchanged from before the knob
+                // existed. Must match the worker sidecars — whoever creates the
+                // stream first wins.
+                storage: self.stream.storage,
+                num_replicas: self.stream.num_replicas,
+                max_age: self.stream.max_age,
                 max_messages: 100_000,
+                // Must match the sidecar's stream creators: at the
+                // `max_messages` cap the broker rejects the new publish
+                // (surfacing on the existing 503 queue-unavailable path)
+                // instead of silently discarding the oldest queued work.
+                discard: jetstream::stream::DiscardPolicy::New,
                 ..Default::default()
             })
             .await
@@ -2329,9 +2747,9 @@ impl WorkPublisher {
             );
         }
         let observed_max_age = stream.cached_info().config.max_age;
-        if observed_max_age != self.stream_max_age {
+        if observed_max_age != self.stream.max_age {
             let mut updated = stream.cached_info().config.clone();
-            updated.max_age = self.stream_max_age;
+            updated.max_age = self.stream.max_age;
             self.jetstream
                 .update_stream(updated)
                 .await
@@ -2344,10 +2762,43 @@ impl WorkPublisher {
             info!(
                 stream = %name,
                 observed_max_age_s = observed_max_age.as_secs(),
-                desired_max_age_s = self.stream_max_age.as_secs(),
+                desired_max_age_s = self.stream.max_age.as_secs(),
                 "reconciled JetStream stream max_age"
             );
         }
+        // Repair pre-existing streams created with the async-nats default
+        // (`Old`), which silently discards the oldest queued work at the
+        // `max_messages` cap instead of rejecting the new publish.
+        let observed_discard = stream.cached_info().config.discard;
+        if observed_discard != jetstream::stream::DiscardPolicy::New {
+            let mut updated = stream.cached_info().config.clone();
+            updated.discard = jetstream::stream::DiscardPolicy::New;
+            self.jetstream
+                .update_stream(updated)
+                .await
+                .map_err(|e| format!("update stream {} discard: {}", name, e))?;
+            stream = self
+                .jetstream
+                .get_stream(name.clone())
+                .await
+                .map_err(|e| format!("refresh stream {} after discard update: {}", name, e))?;
+            info!(
+                stream = %name,
+                observed_discard = ?observed_discard,
+                "reconciled JetStream stream discard policy to New (reject publishes at cap)"
+            );
+        }
+        // Durability reconcile policy (replicas repaired, storage reported
+        // but never repaired) is shared with the DLQ stream — see
+        // `queue::stream_durability` for why the two fields differ.
+        stream_durability::reconcile_num_replicas(
+            &self.jetstream,
+            &mut stream,
+            &name,
+            self.stream.num_replicas,
+        )
+        .await?;
+        stream_durability::warn_on_storage_mismatch(&stream, &name, self.stream.storage);
 
         // Prime the backpressure cache so the very first request to
         // this pool sees real consumer/pending numbers instead of
@@ -2394,20 +2845,22 @@ impl WorkPublisher {
     /// pick it up. Tighter per-worker admission is M5+ work (tracked
     /// alongside the §6 mixed-pool fairness scheduler).
     fn check_backpressure(&self, pool: &str) -> Result<(), String> {
-        if let Some(info) = self.stream_info_cache.get(pool) {
-            if info.num_consumers == 0 {
-                return Err("no consumers available for work stream".to_string());
-            }
-            if info.num_pending > self.max_stream_pending {
-                return Err(format!(
-                    "backpressure: {} pending messages exceeds threshold {}",
-                    info.num_pending, self.max_stream_pending
-                ));
-            }
-        }
         // No cached info yet (ensure_stream failed to prime) — allow
         // through; the monitor task will fill the cache shortly.
-        Ok(())
+        let Some(info) = self.stream_info_cache.get(pool) else {
+            return Ok(());
+        };
+        pool_backpressure_error(&info, self.max_stream_pending).map_or(Ok(()), Err)
+    }
+
+    /// Evaluate this publish against its lane's own in-flight ceiling, on top
+    /// of the pool-wide [`Self::check_backpressure`].
+    fn check_lane_backpressure(
+        &self,
+        lane: &LaneKey,
+        items: u64,
+    ) -> Result<Option<LaneReservation>, String> {
+        check_lane_backpressure(&self.lane_admission, lane, items)
     }
 
     /// Clear cached stream state on NATS reconnect.
@@ -2473,6 +2926,7 @@ impl WorkPublisher {
         admission_pool: &str,
         endpoint: &str,
         model: &str,
+        display_model: &str,
         engine: &str,
         bundle_config_hash: &str,
         items: Vec<rmpv::Value>,
@@ -2497,6 +2951,7 @@ impl WorkPublisher {
                 admission_pool,
                 endpoint,
                 model,
+                display_model,
                 engine,
                 bundle_config_hash,
                 items,
@@ -2524,6 +2979,7 @@ impl WorkPublisher {
         admission_pool: &str,
         endpoint: &str,
         model: &str,
+        display_model: &str,
         engine: &str,
         bundle_config_hash: &str,
         items: Vec<rmpv::Value>,
@@ -2547,6 +3003,16 @@ impl WorkPublisher {
 
         // Check backpressure (lock-free read from background-updated cache)
         self.check_backpressure(&pool)?;
+        let total_items = if endpoint == "score" || endpoint == "generate" {
+            1
+        } else {
+            items.len() as u32
+        };
+        // Then the lane this request actually lands on. The reservation lives
+        // in the result collector below; if any of the early returns between
+        // here and that insert fires, dropping it releases the lane.
+        let lane_reservation =
+            self.check_lane_backpressure(&target.lane(), u64::from(total_items))?;
 
         // UUIDv7 keeps the leading 48 bits as a big-endian Unix
         // millisecond timestamp, so lexicographic / B-tree-indexed
@@ -2555,11 +3021,6 @@ impl WorkPublisher {
         // extra fields. v4 gave us uniqueness but nothing else.
         let request_id = uuid::Uuid::now_v7().to_string();
         let reply_subject = format!("_INBOX.{}.{}", self.router_id, request_id);
-        let total_items = if endpoint == "score" || endpoint == "generate" {
-            1
-        } else {
-            items.len() as u32
-        };
 
         let subject = target.subject();
         let (pool_fallback_subject, direct_fallback_worker_id) = match (&target, endpoint) {
@@ -2599,6 +3060,7 @@ impl WorkPublisher {
                 direct_fallback_republished_indices: BTreeSet::new(),
                 direct_fallback_payloads: vec![None; total_items as usize],
                 direct_fallback_republished: false,
+                _lane_reservation: lane_reservation,
             },
         );
         let mut publish_guard = PendingPublishGuard::new(Arc::clone(self), request_id.clone());
@@ -2624,6 +3086,7 @@ impl WorkPublisher {
             request_id: &request_id,
             endpoint,
             model,
+            display_model: requested_model_on_wire(display_model, model),
             pool: &pool,
             admission_pool,
             gpu: &gpu,
@@ -2633,6 +3096,7 @@ impl WorkPublisher {
             reply_subject: &reply_subject,
             params,
             timestamp,
+            deadline: work_item_deadline(timestamp, self.result_timeout),
             traceparent: traceparent.as_deref(),
             tracestate: tracestate.as_deref(),
         });
@@ -2680,9 +3144,11 @@ impl WorkPublisher {
                             )
                             .await
                             {
-                                self.pending_results.remove(&request_id);
-                                self.cleanup_offloaded_payloads(&request_id).await;
-                                self.cleanup_offloaded_generate(&request_id).await;
+                                self.abort_pending_dispatch(
+                                    &request_id,
+                                    PendingDispatchKind::Result,
+                                )
+                                .await;
                                 return Err(format!("{e}; {ack_error}"));
                             }
                             if let Some(mut entry) = self.pending_results.get_mut(&request_id) {
@@ -2921,6 +3387,7 @@ impl WorkPublisher {
             operation: shared.endpoint,
             model_id: shared.model,
             profile_id: "default",
+            display_model: shared.display_model,
             engine: shared.engine,
             pool_name: shared.pool,
             admission_pool: shared.admission_pool,
@@ -2943,6 +3410,7 @@ impl WorkPublisher {
             router_id: shared.router_id,
             reply_subject: shared.reply_subject,
             timestamp: shared.timestamp,
+            deadline: shared.deadline,
             accepts_result_chunks: true,
             traceparent: shared.traceparent,
             tracestate: shared.tracestate,
@@ -2972,22 +3440,34 @@ impl WorkPublisher {
             // mid-`put` may still have landed the blob, so it must stay eligible
             // for cleanup.
             record_offloaded_payload_key(&self.offloaded_payload_keys, shared.request_id, &ref_key);
-            if let Err(e) = self.payload_store.put(&ref_key, &score_payload).await {
-                telemetry::record_queue_event(QueueEvent::PayloadOffload, QueueEventOutcome::Error);
-                warn!(error = %e, "failed to offload score payload, sending inline");
-            } else {
-                telemetry::record_queue_event(
-                    QueueEvent::PayloadOffload,
-                    QueueEventOutcome::Success,
-                );
-                let offloaded = WorkItemRef {
-                    query_item: None,
-                    query_payload_ref: Some(&ref_key),
-                    score_items: None,
-                    ..ref_item
-                };
-                encoded = rmp_serde::to_vec_named(&offloaded)
-                    .map_err(|e| format!("msgpack encode offloaded score: {}", e))?;
+            match put_payload_for_plain_queue_key(
+                self.payload_store.as_ref(),
+                &ref_key,
+                &score_payload,
+            )
+            .await
+            {
+                Err(e) => {
+                    telemetry::record_queue_event(
+                        QueueEvent::PayloadOffload,
+                        QueueEventOutcome::Error,
+                    );
+                    warn!(error = %e, "failed to offload score payload, sending inline");
+                }
+                Ok(queue_key) => {
+                    telemetry::record_queue_event(
+                        QueueEvent::PayloadOffload,
+                        QueueEventOutcome::Success,
+                    );
+                    let offloaded = WorkItemRef {
+                        query_item: None,
+                        query_payload_ref: Some(&queue_key),
+                        score_items: None,
+                        ..ref_item
+                    };
+                    encoded = rmp_serde::to_vec_named(&offloaded)
+                        .map_err(|e| format!("msgpack encode offloaded score: {}", e))?;
+                }
             }
         }
 
@@ -3080,6 +3560,9 @@ impl WorkPublisher {
         // the batch path. The stream collector replaces ResultCollector.
         self.ensure_stream(&pool).await?;
         self.check_backpressure(&pool)?;
+        // One streamed generation is one queued work item, so it reserves one
+        // in-flight unit on its lane.
+        let lane_reservation = self.check_lane_backpressure(&target.lane(), 1)?;
 
         if params.generate.is_none() {
             return Err("generate request missing 'prompt' / 'max_new_tokens'".to_string());
@@ -3102,6 +3585,7 @@ impl WorkPublisher {
         // ``:no-spec`` dispatch variant (#1324).
         collector.display_model = display_model.to_string();
         collector.pool_fallback_subject = Some(pool_fallback_subject.clone());
+        collector.lane_reservation = lane_reservation;
         // Capture the activity handle before the collector moves into
         // ``pending_streams`` so the caller never has to re-look it up
         // (eliminates the .expect() race window where an error path
@@ -3116,6 +3600,7 @@ impl WorkPublisher {
             request_id: &request_id,
             endpoint: "generate",
             model: &model,
+            display_model: requested_model_on_wire(display_model, &model),
             pool: &pool,
             admission_pool,
             gpu: &machine_profile,
@@ -3125,6 +3610,7 @@ impl WorkPublisher {
             reply_subject: &reply_subject,
             params,
             timestamp,
+            deadline: None,
             traceparent: traceparent.as_deref(),
             tracestate: tracestate.as_deref(),
         };
@@ -3224,6 +3710,9 @@ impl WorkPublisher {
         let machine_profile = target.machine_profile().to_string();
         self.ensure_stream(&pool).await?;
         self.check_backpressure(&pool)?;
+        // One streamed generation is one queued work item, so it reserves one
+        // in-flight unit on its lane.
+        let lane_reservation = self.check_lane_backpressure(&target.lane(), 1)?;
 
         if params.generate.is_none() {
             return Err("generate request missing 'prompt' / 'max_new_tokens'".to_string());
@@ -3247,6 +3736,7 @@ impl WorkPublisher {
         // ``:no-spec`` dispatch variant (#1324).
         collector.display_model = display_model.to_string();
         collector.pool_fallback_subject = Some(pool_fallback_subject.clone());
+        collector.lane_reservation = lane_reservation;
         let chunk_rx = collector.install_chunk_tap();
         self.pending_streams.insert(request_id.clone(), collector);
 
@@ -3257,6 +3747,7 @@ impl WorkPublisher {
             request_id: &request_id,
             endpoint: "generate",
             model: &model,
+            display_model: requested_model_on_wire(display_model, &model),
             pool: &pool,
             admission_pool,
             gpu: &machine_profile,
@@ -3266,6 +3757,7 @@ impl WorkPublisher {
             reply_subject: &reply_subject,
             params,
             timestamp,
+            deadline: None,
             traceparent: traceparent.as_deref(),
             tracestate: tracestate.as_deref(),
         };
@@ -3331,10 +3823,14 @@ impl WorkPublisher {
     /// Removal happens before the awaited object-store deletes, so request
     /// state stops accumulating even if cleanup needs the periodic retry
     /// backstop. Both cleanup helpers are idempotent and exact-key scoped.
+    /// A failed ACK does not prove the broker discarded the message, so
+    /// non-streaming work is also signalled with `work_cancel` before its
+    /// offloaded input is deleted, exactly like other request abandonment.
     pub async fn abort_pending_dispatch(&self, request_id: &str, kind: PendingDispatchKind) {
         match kind {
             PendingDispatchKind::Result => {
                 self.pending_results.remove(request_id);
+                self.publish_work_cancel(request_id).await;
             }
             PendingDispatchKind::Stream => {
                 self.pending_streams.remove(request_id);
@@ -3389,12 +3885,16 @@ impl WorkPublisher {
             error: Some(crate::queue::streaming::ChunkError {
                 code: code.to_string(),
                 message: message.to_string(),
+                param: None,
+                retry_after_s: None,
             }),
+            origin: StreamOutcomeOrigin::GatewaySynthetic,
             tool_calls: None,
             logprobs: None,
             candidates: Vec::new(),
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
+            execution_binding_sha256: None,
         };
         if let Some(sender) = collector.sender.take() {
             if sender.send(outcome).is_err() {
@@ -3515,6 +4015,7 @@ impl WorkPublisher {
             operation: shared.endpoint,
             model_id: shared.model,
             profile_id: "default",
+            display_model: shared.display_model,
             engine: shared.engine,
             pool_name: shared.pool,
             admission_pool: shared.admission_pool,
@@ -3537,6 +4038,7 @@ impl WorkPublisher {
             router_id: shared.router_id,
             reply_subject: shared.reply_subject,
             timestamp: shared.timestamp,
+            deadline: shared.deadline,
             accepts_result_chunks: true,
             traceparent: shared.traceparent,
             tracestate: shared.tracestate,
@@ -3561,19 +4063,31 @@ impl WorkPublisher {
             let gen_blob = rmp_serde::to_vec_named(generate)
                 .map_err(|e| format!("msgpack encode offloaded generate: {}", e))?;
             offload_key = format!("{}_0.bin", shared.request_id);
-            if let Err(e) = self.payload_store.put(&offload_key, &gen_blob).await {
-                telemetry::record_queue_event(QueueEvent::PayloadOffload, QueueEventOutcome::Error);
-                warn!(error = %e, "failed to offload generate payload, sending inline");
-            } else {
-                telemetry::record_queue_event(
-                    QueueEvent::PayloadOffload,
-                    QueueEventOutcome::Success,
-                );
-                ref_item.generate = None;
-                ref_item.payload_ref = Some(&offload_key);
-                encoded = rmp_serde::to_vec_named(&ref_item)
-                    .map_err(|e| format!("msgpack encode offloaded generate item: {}", e))?;
-                self.offloaded_streams.insert(shared.request_id.to_string());
+            match put_payload_for_plain_queue_key(
+                self.payload_store.as_ref(),
+                &offload_key,
+                &gen_blob,
+            )
+            .await
+            {
+                Err(e) => {
+                    telemetry::record_queue_event(
+                        QueueEvent::PayloadOffload,
+                        QueueEventOutcome::Error,
+                    );
+                    warn!(error = %e, "failed to offload generate payload, sending inline");
+                }
+                Ok(queue_key) => {
+                    telemetry::record_queue_event(
+                        QueueEvent::PayloadOffload,
+                        QueueEventOutcome::Success,
+                    );
+                    ref_item.generate = None;
+                    ref_item.payload_ref = Some(&queue_key);
+                    encoded = rmp_serde::to_vec_named(&ref_item)
+                        .map_err(|e| format!("msgpack encode offloaded generate item: {}", e))?;
+                    self.offloaded_streams.insert(shared.request_id.to_string());
+                }
             }
         }
 
@@ -3797,6 +4311,7 @@ impl WorkPublisher {
             operation: shared.endpoint,
             model_id: shared.model,
             profile_id: "default",
+            display_model: shared.display_model,
             engine: shared.engine,
             pool_name: shared.pool,
             admission_pool: shared.admission_pool,
@@ -3819,6 +4334,7 @@ impl WorkPublisher {
             router_id: shared.router_id,
             reply_subject: shared.reply_subject,
             timestamp: shared.timestamp,
+            deadline: shared.deadline,
             accepts_result_chunks: true,
             traceparent: shared.traceparent,
             tracestate: shared.tracestate,
@@ -3847,18 +4363,30 @@ impl WorkPublisher {
                 shared.request_id,
                 &offload_key,
             );
-            if let Err(e) = self.payload_store.put(&offload_key, &item_msgpack).await {
-                telemetry::record_queue_event(QueueEvent::PayloadOffload, QueueEventOutcome::Error);
-                warn!(error = %e, "failed to offload payload, sending inline");
-            } else {
-                telemetry::record_queue_event(
-                    QueueEvent::PayloadOffload,
-                    QueueEventOutcome::Success,
-                );
-                ref_item.item = None;
-                ref_item.payload_ref = Some(&offload_key);
-                encoded = rmp_serde::to_vec_named(&ref_item)
-                    .map_err(|e| format!("msgpack encode offloaded: {}", e))?;
+            match put_payload_for_plain_queue_key(
+                self.payload_store.as_ref(),
+                &offload_key,
+                &item_msgpack,
+            )
+            .await
+            {
+                Err(e) => {
+                    telemetry::record_queue_event(
+                        QueueEvent::PayloadOffload,
+                        QueueEventOutcome::Error,
+                    );
+                    warn!(error = %e, "failed to offload payload, sending inline");
+                }
+                Ok(queue_key) => {
+                    telemetry::record_queue_event(
+                        QueueEvent::PayloadOffload,
+                        QueueEventOutcome::Success,
+                    );
+                    ref_item.item = None;
+                    ref_item.payload_ref = Some(&queue_key);
+                    encoded = rmp_serde::to_vec_named(&ref_item)
+                        .map_err(|e| format!("msgpack encode offloaded: {}", e))?;
+                }
             }
         }
 
@@ -4039,7 +4567,104 @@ impl WorkPublisher {
                     let _ = sender.send(results);
                 }
 
+                self.defer_cleanup(CleanupWork::Payloads(request_id.clone()))
+                    .await;
+            }
+        }
+    }
+
+    /// The keyed pool that runs inbox handlers off the decode task.
+    ///
+    /// The handler holds a `Weak` so the pool tasks never keep the publisher
+    /// alive on their own, and a dropped publisher makes them no-ops.
+    async fn inbox_pool(self: &Arc<Self>) -> &KeyedWorkerPool<InboxWork> {
+        self.inbox_pool
+            .get_or_init(|| async {
+                let publisher = Arc::downgrade(self);
+                KeyedWorkerPool::new(
+                    INBOX_POOL_NAME,
+                    INBOX_POOL_SHARDS,
+                    INBOX_POOL_DEPTH,
+                    move |work: InboxWork| {
+                        let publisher = publisher.clone();
+                        async move {
+                            let Some(publisher) = publisher.upgrade() else {
+                                return;
+                            };
+                            publisher.apply_inbox_work(work).await;
+                        }
+                    },
+                )
+            })
+            .await
+    }
+
+    /// The keyed pool that runs object-store cleanup off every hot path.
+    async fn cleanup_pool(self: &Arc<Self>) -> &KeyedWorkerPool<CleanupWork> {
+        self.cleanup_pool
+            .get_or_init(|| async {
+                let publisher = Arc::downgrade(self);
+                KeyedWorkerPool::new(
+                    CLEANUP_POOL_NAME,
+                    CLEANUP_POOL_SHARDS,
+                    CLEANUP_POOL_DEPTH,
+                    move |work: CleanupWork| {
+                        let publisher = publisher.clone();
+                        async move {
+                            let Some(publisher) = publisher.upgrade() else {
+                                return;
+                            };
+                            publisher.run_cleanup(work).await;
+                        }
+                    },
+                )
+            })
+            .await
+    }
+
+    /// Run one decoded inbox message's handler. Called only from an inbox
+    /// worker task, never from the decode task.
+    async fn apply_inbox_work(&self, work: InboxWork) {
+        match work {
+            InboxWork::ResultChunk(chunk) => self.handle_result_chunk(*chunk).await,
+            InboxWork::ResultChunkDecodeFailure { request_id } => {
+                self.fail_result_chunk_request(&request_id).await;
+            }
+            InboxWork::Chunk(chunk) => self.handle_chunk(*chunk).await,
+            InboxWork::Nak(nak) => self.handle_nak(*nak).await,
+            InboxWork::Result(result) => self.handle_result(*result).await,
+        }
+    }
+
+    /// Queue object-store cleanup for a finished request instead of awaiting
+    /// it here.
+    ///
+    /// Cleanup is an object-store round trip. Awaiting it on a hot path — for
+    /// the completion funnels below, historically the single inbox decode task
+    /// — stalls every other in-flight request in the process, which is the
+    /// defect this exists to remove.
+    ///
+    /// **At the bound this sheds rather than blocks.** Both cleanups are
+    /// already best-effort with an independent backstop: `cleanup_expired`
+    /// reconciles `offloaded_payload_keys` and `offloaded_streams` against the
+    /// in-flight maps every 10s and retries whatever is orphaned. So a shed
+    /// enqueue costs at most one reconcile interval of object-store residency
+    /// and nothing else, whereas blocking would put the stall back on the
+    /// caller. This is the opposite policy from the inbox pool, where nothing
+    /// may be dropped.
+    async fn defer_cleanup(&self, work: CleanupWork) {
+        if let Some(work) = queue_cleanup(self.cleanup_pool.get(), work) {
+            self.run_cleanup(work).await;
+        }
+    }
+
+    async fn run_cleanup(&self, work: CleanupWork) {
+        match work {
+            CleanupWork::Payloads(request_id) => {
                 self.cleanup_offloaded_payloads(&request_id).await;
+            }
+            CleanupWork::Generate(request_id) => {
+                self.cleanup_offloaded_generate(&request_id).await;
             }
         }
     }
@@ -4057,6 +4682,12 @@ impl WorkPublisher {
             let mut slot = self.nats_client.write().await;
             *slot = Some(client.clone());
         }
+
+        // Bring both worker pools up before the first message can arrive.
+        // They are `OnceCell`s, so a reconnect re-subscribe reuses the running
+        // pools instead of abandoning whatever they still have queued.
+        self.inbox_pool().await;
+        self.cleanup_pool().await;
 
         let inbox_subject = format!("_INBOX.{}.>", self.router_id);
 
@@ -4082,77 +4713,38 @@ impl WorkPublisher {
         Ok(())
     }
 
-    async fn handle_inbox(&self, mut subscriber: async_nats::Subscriber) {
+    /// The single inbox decode task.
+    ///
+    /// It now only decodes (exactly once per message, in
+    /// [`inbox_work_for_payload`]) and hands the typed result to the keyed
+    /// worker pool. Handlers no longer run here, so one slow handler cannot
+    /// hold up decode for every other in-flight request in the process.
+    async fn handle_inbox(self: &Arc<Self>, mut subscriber: async_nats::Subscriber) {
+        let pool = self.inbox_pool().await;
         while let Some(msg) = subscriber.next().await {
-            // Fast-path: extract request_id without full deserialization.
-            // DashMap contains_key is lock-free.
-            let request_id_hint = extract_request_id_fast(&msg.payload);
-            if let Some(request_id) = request_id_hint {
-                if !self.pending_results.contains_key(request_id)
-                    && !self.pending_streams.contains_key(request_id)
-                {
-                    debug!(
-                        request_id = %request_id,
-                        "fast-path skip: result for unknown request"
-                    );
-                    continue;
-                }
-            }
-
-            // Decode the msgpack payload exactly once into an
-            // `rmpv::Value`, peek the `kind` discriminator on the decoded
-            // value, then convert the *same* value into the typed
-            // envelope via `rmpv::ext::from_value` — no second decode
-            // from the raw slice. The previous code re-decoded the
-            // payload up to three times per chunk (`is_chunk_envelope`
-            // peek + `is_nak_envelope` peek + the typed `from_slice`),
-            // which is the hot path for streaming generation.
-            let value: rmpv::Value = match rmp_serde::from_slice(&msg.payload) {
-                Ok(v) => v,
-                Err(e) => {
-                    warn!(error = %e, "failed to decode inbox payload");
-                    continue;
-                }
+            // DashMap contains_key is lock-free; this is the fast-path skip
+            // that keeps unknown-request traffic from ever being decoded.
+            let Some(work) = inbox_work_for_payload(&msg.payload, |request_id| {
+                self.pending_results.contains_key(request_id)
+                    || self.pending_streams.contains_key(request_id)
+            }) else {
+                continue;
             };
 
-            // Only the exact v1 discriminator enters the v1 decoder. This
-            // fails malformed exact-v1 envelopes closed while preserving
-            // forward compatibility for ordinary/future WorkResult fields
-            // such as `total_bytes`.
-            match envelope_kind(&value) {
-                Some(RESULT_CHUNK_KIND) => match rmpv::ext::from_value::<ResultChunkV1>(value) {
-                    Ok(chunk) => self.handle_result_chunk(chunk).await,
-                    Err(e) => {
-                        telemetry::record_queue_result_chunk_received(None);
-                        telemetry::record_queue_result_chunk_rejection(
-                            telemetry::QueueResultChunkRejectionReason::Decode,
-                        );
-                        warn!(error = %e, "failed to decode result chunk envelope");
-                        if let Some(request_id) = request_id_hint {
-                            self.fail_result_chunk_request(request_id).await;
-                        }
-                    }
-                },
-                // Chunk envelopes feed the streaming aggregator.
-                Some("chunk") => match rmpv::ext::from_value::<ChunkEnvelope>(value) {
-                    Ok(chunk) => self.handle_chunk(chunk).await,
-                    Err(e) => warn!(error = %e, "failed to decode chunk envelope"),
-                },
-                // Worker-emitted NAK. The publisher republishes the
-                // cached work item to the pool subject; if the republish
-                // fails we surface a transport-style terminal outcome to
-                // the HTTP handler.
-                Some("nak") => match rmpv::ext::from_value::<NakEnvelope>(value) {
-                    Ok(nak) => self.handle_nak(nak).await,
-                    Err(e) => warn!(error = %e, "failed to decode nak envelope"),
-                },
-                // Anything else (encode/score/extract WorkResults — an
-                // array-shaped payload, or a map with an unknown/absent
-                // `kind`) flows to the ResultCollector path.
-                _ => match rmpv::ext::from_value::<WorkResult>(value) {
-                    Ok(result) => self.handle_result(result).await,
-                    Err(e) => warn!(error = %e, "failed to decode inbox result"),
-                },
+            // Bounded hand-off keyed by request id: all of one request's
+            // messages take the same shard and stay in arrival order, while
+            // different requests run concurrently.
+            //
+            // At the bound this blocks rather than sheds. A dropped message
+            // here would be a lost result (request times out) or a lost chunk
+            // (`StreamCollector::apply` sees a `seq` gap and fails the stream
+            // with `transport_failure`) — a throughput fix must not buy
+            // itself a new failure mode. Blocking is also never worse than
+            // the behaviour this replaces, where *every* message was handled
+            // inline on this task.
+            if !pool.dispatch(work).await {
+                warn!("inbox worker pool unavailable — ending inbox loop");
+                break;
             }
         }
 
@@ -4402,6 +4994,11 @@ impl WorkPublisher {
                                     .usage
                                     .as_ref()
                                     .map(|usage| u64::from(usage.completion_tokens)),
+                                cached_prompt_tokens: completed
+                                    .usage
+                                    .as_ref()
+                                    .and_then(|usage| usage.cached_prompt_tokens())
+                                    .map(u64::from),
                             },
                         );
                     }
@@ -4414,8 +5011,12 @@ impl WorkPublisher {
                         }
                     }
                     // Stream finished — drop any offloaded generate blob now
-                    // (the periodic reconcile is only the failure-path backstop).
-                    self.cleanup_offloaded_generate(&request_id).await;
+                    // (the periodic reconcile is only the failure-path
+                    // backstop). Queued, not awaited: this funnel runs on an
+                    // inbox worker, and an object-store round trip here would
+                    // hold up every other request sharing that shard.
+                    self.defer_cleanup(CleanupWork::Generate(request_id.clone()))
+                        .await;
                 }
             }
             ChunkApplied::SeqGap => {
@@ -4582,12 +5183,16 @@ impl WorkPublisher {
                     error: Some(ChunkError {
                         code: "shutdown".to_string(),
                         message: "gateway shutdown before stream completed".to_string(),
+                        param: None,
+                        retry_after_s: None,
                     }),
+                    origin: StreamOutcomeOrigin::GatewaySynthetic,
                     tool_calls: None,
                     logprobs: None,
                     candidates: Vec::new(),
                     executed_bundle_config_hash: None,
                     execution_identity_sha256: None,
+                    execution_binding_sha256: None,
                 });
                 if let Some(sender) = collector.sender.take() {
                     if sender.send(outcome).is_err() {
@@ -4638,6 +5243,18 @@ fn record_offloaded_payload_key(
         .entry(request_id.to_string())
         .or_default()
         .insert(key.to_string());
+}
+
+/// Persist one payload while preserving the queue's plain-key wire contract.
+/// Cloud stores return a canonical full URL for operator visibility, but the
+/// publisher must queue the same safe key that cleanup later deletes.
+async fn put_payload_for_plain_queue_key(
+    payload_store: &dyn PayloadStore,
+    key: &str,
+    payload: &[u8],
+) -> Result<String, String> {
+    let _canonical_reference = payload_store.put(key, payload).await?;
+    Ok(key.to_owned())
 }
 
 /// Delete the object-store blobs an offloaded request wrote or attempted. No-op
@@ -4714,6 +5331,182 @@ pub fn encode_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two lanes on one pool, differing only in machine profile. The pool-wide
+    /// check cannot tell them apart — the whole point of B5's first half.
+    fn hot_lane() -> LaneKey {
+        LaneKey::new("shared", "h100", "default")
+    }
+
+    fn cold_lane() -> LaneKey {
+        LaneKey::new("shared", "a10g", "default")
+    }
+
+    fn lane_control(enforce: bool) -> LaneAdmissionControl {
+        LaneAdmissionControl::new(
+            10,
+            enforce,
+            crate::state::demand_tracker::PhysicalLaneCatalog::default(),
+        )
+    }
+
+    /// Fill `lane` past its ceiling and hold the reservations.
+    fn saturate(control: &LaneAdmissionControl, lane: &LaneKey) -> Option<LaneReservation> {
+        check_lane_backpressure(control, lane, 11).expect("first publish is admitted")
+    }
+
+    /// Enforced: the deep lane sheds and a cold lane on the SAME pool still
+    /// admits.
+    ///
+    /// Reverting to pool-granular backpressure makes this fail: a pool-wide
+    /// gate reads one `num_pending` for the whole `WORK_POOL_shared` stream,
+    /// so it either admits both lanes or sheds both. There is no pool-wide
+    /// arrangement of inputs under which one of these two assertions holds
+    /// and the other does not.
+    #[test]
+    fn a_saturated_lane_sheds_only_that_lane() {
+        let control = lane_control(true);
+        let _held = saturate(&control, &hot_lane());
+
+        let hot = check_lane_backpressure(&control, &hot_lane(), 1);
+        let cold = check_lane_backpressure(&control, &cold_lane(), 1);
+
+        assert!(hot.is_err(), "the saturated lane must shed");
+        assert!(
+            cold.is_ok(),
+            "a cold lane on the same pool must still admit"
+        );
+    }
+
+    /// Shadow mode records the decision and changes nothing about admission.
+    #[test]
+    fn shadow_mode_records_the_decision_without_changing_admission() {
+        let shadow = lane_control(false);
+        let _held = saturate(&shadow, &hot_lane());
+
+        // Identical lane state to `a_saturated_lane_sheds_only_that_lane`.
+        assert!(
+            check_lane_backpressure(&shadow, &hot_lane(), 1).is_ok(),
+            "shadow mode must not shed"
+        );
+        // The decision itself is still computed, and it is a shed.
+        assert_eq!(
+            shadow.admit(&hot_lane(), 1).outcome,
+            LaneAdmissionOutcome::ShedShadow
+        );
+    }
+
+    /// Flag off reproduces today's behaviour exactly: the pool-wide check is
+    /// the only gate, and it is byte-for-byte the message it always was.
+    #[test]
+    fn the_flag_off_leaves_pool_wide_backpressure_as_the_only_gate() {
+        let shadow = lane_control(false);
+        let _held = saturate(&shadow, &hot_lane());
+        assert!(check_lane_backpressure(&shadow, &hot_lane(), 4_096).is_ok());
+
+        let healthy = CachedStreamInfo {
+            num_pending: 10,
+            num_consumers: 1,
+        };
+        assert_eq!(pool_backpressure_error(&healthy, 50_000), None);
+
+        let saturated_pool = CachedStreamInfo {
+            num_pending: 50_001,
+            num_consumers: 1,
+        };
+        assert_eq!(
+            pool_backpressure_error(&saturated_pool, 50_000).as_deref(),
+            Some("backpressure: 50001 pending messages exceeds threshold 50000")
+        );
+
+        let no_consumers = CachedStreamInfo {
+            num_pending: 0,
+            num_consumers: 0,
+        };
+        assert_eq!(
+            pool_backpressure_error(&no_consumers, 50_000).as_deref(),
+            Some("no consumers available for work stream")
+        );
+    }
+
+    /// The pool-wide gate is unchanged and still applies with enforcement on:
+    /// per-lane admission is added in front of it, not substituted for it.
+    #[test]
+    fn the_pool_wide_gate_survives_enforcement() {
+        let control = lane_control(true);
+        assert!(check_lane_backpressure(&control, &cold_lane(), 1).is_ok());
+
+        let saturated_pool = CachedStreamInfo {
+            num_pending: 50_001,
+            num_consumers: 1,
+        };
+        assert!(pool_backpressure_error(&saturated_pool, 50_000).is_some());
+    }
+
+    /// An enforced lane shed must classify exactly like a pool-wide shed, so
+    /// it reaches the client as the same 503 + `Retry-After` and records
+    /// pending demand for the saturated lane (`record_publish_failure`).
+    #[test]
+    fn an_enforced_lane_shed_classifies_as_backpressure() {
+        let control = lane_control(true);
+        let _held = saturate(&control, &hot_lane());
+        let error = check_lane_backpressure(&control, &hot_lane(), 1).expect_err("shed");
+
+        assert_eq!(
+            QueuePublishOutcome::from_error(&error),
+            QueuePublishOutcome::Backpressure
+        );
+        assert!(error.to_ascii_lowercase().contains("backpressure"));
+        assert!(
+            error.contains("work lane saturated"),
+            "a lane shed must read differently from a pool-wide shed: {error}"
+        );
+        // The message reaches the client. Pool names are operator-defined and
+        // may encode tenant context, so lane identity stays in the log and the
+        // decision metric.
+        for token in ["shared", "h100", "default"] {
+            assert!(
+                !error.contains(token),
+                "lane identity must not reach the client body: {error}"
+            );
+        }
+    }
+
+    /// Releasing a request's reservation reopens its lane, and only its lane.
+    #[test]
+    fn releasing_a_request_reopens_its_own_lane() {
+        let control = lane_control(true);
+        {
+            let _held = saturate(&control, &hot_lane());
+            assert!(check_lane_backpressure(&control, &hot_lane(), 1).is_err());
+        }
+        assert_eq!(control.in_flight(&hot_lane()), 0);
+        assert!(check_lane_backpressure(&control, &hot_lane(), 1).is_ok());
+    }
+
+    /// A worker-direct target and its pool fallback are the same lane, so
+    /// direct dispatch is accounted too — the blind spot `check_backpressure`
+    /// documents for the pool-wide count.
+    #[test]
+    fn worker_direct_and_pool_targets_share_one_lane() {
+        let direct = PublishTarget::Worker {
+            pool: "shared".to_string(),
+            machine_profile: "h100".to_string(),
+            bundle: "default".to_string(),
+            model: "BAAI/bge-m3".to_string(),
+            worker_id: "worker-1".to_string(),
+        };
+        let fanout = PublishTarget::Pool {
+            pool: "shared".to_string(),
+            machine_profile: "h100".to_string(),
+            bundle: "default".to_string(),
+            // A different model on the same lane shares the accounting: the
+            // lane is the physical worker set, not the model.
+            model: "intfloat/e5-base-v2".to_string(),
+        };
+        assert_eq!(direct.lane(), fanout.lane());
+        assert_eq!(direct.lane(), hot_lane());
+    }
 
     #[test]
     fn unit_counts_decodes_legacy_positional_array_without_field_shift() {
@@ -4807,6 +5600,55 @@ mod tests {
                 Ok(())
             }
         }
+    }
+
+    struct FullReferencePayloadStore {
+        full_reference: String,
+        puts: std::sync::Mutex<Vec<(String, usize)>>,
+        deleted: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl PayloadStore for FullReferencePayloadStore {
+        async fn put(&self, key: &str, data: &[u8]) -> Result<String, String> {
+            self.puts.lock().unwrap().push((key.to_owned(), data.len()));
+            Ok(self.full_reference.clone())
+        }
+
+        async fn delete(&self, key: &str) -> Result<(), String> {
+            self.deleted.lock().unwrap().push(key.to_owned());
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn large_oss_payload_queues_plain_key_and_cleans_exact_key() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../wire-fixtures/oss_payload_store.json"
+        ))
+        .unwrap();
+        let key = fixture["plain_key"].as_str().unwrap();
+        let store = FullReferencePayloadStore {
+            full_reference: fixture["full_reference"].as_str().unwrap().to_owned(),
+            puts: std::sync::Mutex::new(Vec::new()),
+            deleted: std::sync::Mutex::new(Vec::new()),
+        };
+        let payload = vec![0; PAYLOAD_OFFLOAD_THRESHOLD + 1];
+        let offloaded: DashMap<String, BTreeSet<String>> = DashMap::new();
+        record_offloaded_payload_key(&offloaded, "request_00000000", key);
+
+        let queued_ref = put_payload_for_plain_queue_key(&store, key, &payload)
+            .await
+            .unwrap();
+        assert_eq!(queued_ref, key, "the queue must retain the safe plain key");
+        assert_eq!(
+            store.puts.lock().unwrap().as_slice(),
+            &[(key.to_owned(), PAYLOAD_OFFLOAD_THRESHOLD + 1)]
+        );
+
+        cleanup_offloaded_payloads_inner(&store, &offloaded, "request_00000000").await;
+        assert_eq!(store.deleted.lock().unwrap().as_slice(), &[key.to_owned()]);
+        assert!(!offloaded.contains_key("request_00000000"));
     }
 
     // Common case (issue #1471): a small/inline request that never offloaded a
@@ -5016,6 +5858,278 @@ mod tests {
         );
     }
 
+    // --- B4: payload cleanup must not run on the caller's task ---
+
+    /// A payload store whose `delete` never returns, standing in for a slow
+    /// object-store round trip.
+    struct HangingDeleteStore {
+        attempted: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl PayloadStore for HangingDeleteStore {
+        async fn put(&self, _key: &str, _data: &[u8]) -> Result<String, String> {
+            Ok(String::new())
+        }
+
+        async fn delete(&self, key: &str) -> Result<(), String> {
+            self.attempted.lock().unwrap().push(key.to_string());
+            std::future::pending::<()>().await;
+            Ok(())
+        }
+    }
+
+    fn hanging_cleanup_pool(
+        attempted: Arc<std::sync::Mutex<Vec<String>>>,
+        shards: usize,
+        depth: usize,
+    ) -> KeyedWorkerPool<CleanupWork> {
+        let offloaded: Arc<DashMap<String, BTreeSet<String>>> = Arc::new(DashMap::new());
+        KeyedWorkerPool::new("test-cleanup", shards, depth, move |work: CleanupWork| {
+            let store = HangingDeleteStore {
+                attempted: Arc::clone(&attempted),
+            };
+            let offloaded = Arc::clone(&offloaded);
+            async move {
+                let CleanupWork::Payloads(request_id) = work else {
+                    return;
+                };
+                record_offloaded_payload_key(
+                    &offloaded,
+                    &request_id,
+                    &format!("{request_id}_0.bin"),
+                );
+                cleanup_offloaded_payloads_inner(&store, &offloaded, &request_id).await;
+            }
+        })
+    }
+
+    /// The second half of B4: completing a request used to await an
+    /// object-store delete on the inbox decode task, stalling decode for every
+    /// other in-flight request. Handing the cleanup to the pool must return
+    /// immediately even while the delete is wedged.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn queue_cleanup_does_not_await_the_object_store_delete() {
+        let attempted = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let pool = hanging_cleanup_pool(Arc::clone(&attempted), 1, 4);
+
+        // A hung delete must not be observable by the caller at all: this
+        // returns without ever awaiting the store.
+        assert!(
+            queue_cleanup(Some(&pool), CleanupWork::Payloads("req-hang".to_string())).is_none(),
+            "a live cleanup pool takes ownership of the work"
+        );
+
+        // The delete really is in flight on the pool, not on this task.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while attempted.lock().unwrap().is_empty() {
+            assert!(Instant::now() < deadline, "cleanup never reached the store");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            attempted.lock().unwrap().clone(),
+            vec!["req-hang_0.bin".to_string()],
+            "the queued cleanup must be the one that ran"
+        );
+    }
+
+    /// Without a pool (a publisher that never started an inbox subscription)
+    /// the work comes back so the caller still runs it inline. Cleanup is
+    /// never silently skipped.
+    #[tokio::test]
+    async fn queue_cleanup_returns_work_when_there_is_no_pool() {
+        let work = queue_cleanup(None, CleanupWork::Generate("req-inline".to_string()));
+        assert!(
+            matches!(work, Some(CleanupWork::Generate(id)) if id == "req-inline"),
+            "no pool must hand the work back for inline execution"
+        );
+    }
+
+    /// At the bound the cleanup pool sheds rather than blocking, because the
+    /// periodic `cleanup_expired` reconcile is an independent retry path for
+    /// exactly these keys.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn queue_cleanup_sheds_at_the_bound_and_the_reconcile_still_deletes() {
+        let attempted = Arc::new(std::sync::Mutex::new(Vec::new()));
+        // One shard, depth one, and every delete hangs: one item is taken by
+        // the worker, one fills the queue, everything after that is shed.
+        let pool = hanging_cleanup_pool(Arc::clone(&attempted), 1, 1);
+        assert!(queue_cleanup(Some(&pool), CleanupWork::Payloads("a".to_string())).is_none());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(queue_cleanup(Some(&pool), CleanupWork::Payloads("b".to_string())).is_none());
+
+        // Shed: taken off the caller's hands, but never enqueued. The caller
+        // still does not block.
+        let shed_started = Instant::now();
+        assert!(queue_cleanup(Some(&pool), CleanupWork::Payloads("c".to_string())).is_none());
+        assert!(
+            shed_started.elapsed() < Duration::from_millis(500),
+            "shedding must not block the caller"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            attempted.lock().unwrap().clone(),
+            vec!["a_0.bin".to_string()],
+            "the shed request must not have reached the store"
+        );
+
+        // The backstop: the shed request's keys are still tracked, and the
+        // reconcile path deletes them on its next sweep.
+        let offloaded: DashMap<String, BTreeSet<String>> = DashMap::new();
+        record_offloaded_payload_key(&offloaded, "c", "c_0.bin");
+        let orphaned = collect_orphaned_offloaded_payload_requests(&offloaded, |_request_id| false);
+        assert_eq!(
+            orphaned,
+            vec!["c".to_string()],
+            "a shed cleanup must still be discoverable by the periodic reconcile"
+        );
+        let store = CountingPayloadStore::default();
+        cleanup_offloaded_payloads_inner(&store, &offloaded, "c").await;
+        assert_eq!(
+            store.deleted.lock().unwrap().clone(),
+            vec!["c_0.bin".to_string()],
+            "the reconcile must delete what the bound shed"
+        );
+    }
+
+    /// Live end-to-end proof of both B4 moves against the real inbox loop.
+    ///
+    /// One request completes with an object-store delete that never returns.
+    /// Before this change that delete was awaited on the single decode task,
+    /// so every other in-flight request in the process stopped: the second
+    /// request's chunks would never be handled and its outcome would never
+    /// arrive. Now the cleanup is queued and decode keeps running, so the
+    /// second request completes — with its chunks in order.
+    ///
+    /// NATS-gated like the other live tests here: a no-op pass when
+    /// `NATS_URL` is unset so the hermetic run stays green.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn inbox_decode_survives_a_wedged_cleanup_and_keeps_stream_order() {
+        let Ok(url) = std::env::var("NATS_URL") else {
+            eprintln!("skipping: NATS_URL not set");
+            return;
+        };
+        let client =
+            match tokio::time::timeout(Duration::from_secs(2), async_nats::connect(&url)).await {
+                Ok(Ok(c)) => c,
+                _ => {
+                    eprintln!("skipping: could not connect to NATS at {url}");
+                    return;
+                }
+            };
+        let context = async_nats::jetstream::new(client.clone());
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let router_id = format!("b4router{nanos}");
+
+        let attempted = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let publisher = Arc::new(WorkPublisher::new(
+            context,
+            router_id.clone(),
+            Arc::new(HangingDeleteStore {
+                attempted: Arc::clone(&attempted),
+            }),
+            Duration::from_secs(30),
+            1024,
+            WorkStreamConfig {
+                max_age: Duration::from_secs(300),
+                storage: jetstream::stream::StorageType::Memory,
+                num_replicas: 1,
+            },
+        ));
+        publisher
+            .start_inbox_subscription(&client)
+            .await
+            .expect("start inbox subscription");
+
+        // `wedged` completes first and its cleanup delete never returns.
+        //
+        // Both requests are deliberately placed on the SAME inbox shard, so
+        // the live request is strictly serialized behind the wedged request's
+        // handler. Sharding alone therefore cannot rescue it: it completes
+        // only because that handler declines to await the object-store
+        // delete. This is the assertion the cleanup move owns.
+        let wedged = format!("wedged-{nanos}");
+        let shard = crate::queue::keyed_worker_pool::shard_index(&wedged, INBOX_POOL_SHARDS);
+        let live = (0..1_000)
+            .map(|n| format!("live-{nanos}-{n}"))
+            .find(|id| crate::queue::keyed_worker_pool::shard_index(id, INBOX_POOL_SHARDS) == shard)
+            .expect("a live request id sharing the wedged request's shard");
+        let (wedged_tx, _wedged_rx) = oneshot::channel();
+        publisher.pending_streams.insert(
+            wedged.clone(),
+            StreamCollector::new(wedged_tx, "m".to_string(), "default".to_string()),
+        );
+        publisher.offloaded_streams.insert(wedged.clone());
+
+        // `live` must still complete, in order, behind it.
+        let (live_tx, live_rx) = oneshot::channel();
+        publisher.pending_streams.insert(
+            live.clone(),
+            StreamCollector::new(live_tx, "m".to_string(), "default".to_string()),
+        );
+
+        let subject = format!("_INBOX.{router_id}.reply");
+        let terminal = |request_id: &str, seq: u32| {
+            rmp_serde::to_vec_named(&WireChunk {
+                kind: "chunk",
+                request_id,
+                seq,
+                text_delta: "",
+                done: true,
+            })
+            .expect("encode terminal")
+        };
+
+        // Wedge the cleanup path first.
+        client
+            .publish(subject.clone(), terminal(&wedged, 0).into())
+            .await
+            .expect("publish wedged terminal");
+
+        // Then a long interleaved stream for the live request.
+        const CHUNKS: u32 = 64;
+        for seq in 0..CHUNKS {
+            client
+                .publish(subject.clone(), wire_chunk(&live, seq).into())
+                .await
+                .expect("publish live chunk");
+        }
+        client
+            .publish(subject.clone(), terminal(&live, CHUNKS).into())
+            .await
+            .expect("publish live terminal");
+        client.flush().await.expect("flush inbox publishes");
+
+        let outcome = tokio::time::timeout(Duration::from_secs(10), live_rx)
+            .await
+            .expect("a wedged cleanup must not stall decode for other requests")
+            .expect("live outcome sender must not be dropped");
+
+        // Ordering: `StreamCollector::apply` drops a chunk whose seq is not
+        // greater than the watermark and fails the stream on a forward gap, so
+        // any reordering shows up as short/failed text here.
+        assert_eq!(
+            outcome.text,
+            "tok".repeat(CHUNKS as usize),
+            "every chunk must be applied exactly once, in seq order"
+        );
+        assert!(
+            outcome.error.is_none(),
+            "no seq gap may be observed: {:?}",
+            outcome.error
+        );
+
+        // And the wedged cleanup really did start — off the decode task.
+        assert_eq!(
+            attempted.lock().unwrap().clone(),
+            vec![format!("{wedged}_0.bin")],
+            "the wedged request's delete must be in flight on the cleanup pool"
+        );
+    }
+
     #[derive(Debug, Clone, Serialize, Deserialize)]
     struct WorkItem {
         pub work_item_id: String,
@@ -5026,6 +6140,8 @@ mod tests {
         pub model_id: String,
         #[serde(default)]
         pub profile_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub display_model: Option<String>,
         #[serde(default)]
         pub engine: String,
         pub pool_name: String,
@@ -5067,6 +6183,8 @@ mod tests {
         pub reply_subject: String,
         #[serde(default)]
         pub timestamp: f64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub deadline: Option<f64>,
         #[serde(default)]
         pub accepts_result_chunks: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -5111,6 +6229,252 @@ mod tests {
         );
     }
 
+    /// Live JetStream reconcile test for the work-stream discard policy
+    /// (architecture-review finding B3). A stream created by a pre-fix
+    /// gateway carries the async-nats default `DiscardPolicy::Old`, which
+    /// silently drops the oldest queued work at the `max_messages` cap;
+    /// `ensure_stream` must repair it to `New` (and create fresh streams
+    /// with `New`) so a full queue rejects the publish onto the loud 503
+    /// path instead. NATS-gated like the other live tests here: a no-op
+    /// pass when `NATS_URL` is unset so the hermetic run stays green.
+    #[tokio::test]
+    async fn test_ensure_stream_reconciles_discard_policy_to_new() {
+        let Ok(url) = std::env::var("NATS_URL") else {
+            eprintln!("skipping: NATS_URL not set");
+            return;
+        };
+        let client =
+            match tokio::time::timeout(Duration::from_secs(2), async_nats::connect(&url)).await {
+                Ok(Ok(c)) => c,
+                _ => {
+                    eprintln!("skipping: could not connect to NATS at {url}");
+                    return;
+                }
+            };
+        let context = async_nats::jetstream::new(client);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let stream_max_age = Duration::from_secs(300);
+
+        // Pre-create the pool stream exactly as a pre-fix gateway did:
+        // no `discard` field, so the async-nats default (`Old`) sticks.
+        let legacy_pool = format!("discardold{nanos}");
+        let legacy_stream_name = stream_name(&legacy_pool);
+        let mut legacy_stream = context
+            .get_or_create_stream(jetstream::stream::Config {
+                name: legacy_stream_name.clone(),
+                subjects: vec![format!("sie.work.{legacy_pool}.*.*.*")],
+                retention: jetstream::stream::RetentionPolicy::WorkQueue,
+                storage: jetstream::stream::StorageType::Memory,
+                max_age: stream_max_age,
+                max_messages: 100_000,
+                ..Default::default()
+            })
+            .await
+            .expect("create legacy work stream");
+        assert_eq!(
+            legacy_stream
+                .info()
+                .await
+                .expect("legacy stream info")
+                .config
+                .discard,
+            jetstream::stream::DiscardPolicy::Old,
+            "precondition: the legacy creation path must yield the Old default"
+        );
+
+        let publisher = Arc::new(WorkPublisher::new(
+            context.clone(),
+            "it-router".to_string(),
+            Arc::new(crate::queue::payload_store::DisabledPayloadStore),
+            Duration::from_secs(5),
+            1024,
+            WorkStreamConfig {
+                max_age: stream_max_age,
+                storage: jetstream::stream::StorageType::Memory,
+                num_replicas: 1,
+            },
+        ));
+        publisher
+            .ensure_stream(&legacy_pool)
+            .await
+            .expect("ensure_stream over the legacy stream");
+        let mut reconciled = context
+            .get_stream(&legacy_stream_name)
+            .await
+            .expect("get reconciled stream");
+        assert_eq!(
+            reconciled
+                .info()
+                .await
+                .expect("reconciled stream info")
+                .config
+                .discard,
+            jetstream::stream::DiscardPolicy::New,
+            "ensure_stream must repair a pre-existing stream's discard policy to New"
+        );
+
+        // Fresh-create path: a pool with no pre-existing stream must get
+        // `New` at creation time.
+        let fresh_pool = format!("discardnew{nanos}");
+        publisher
+            .ensure_stream(&fresh_pool)
+            .await
+            .expect("ensure_stream fresh create");
+        let mut fresh = context
+            .get_stream(stream_name(&fresh_pool))
+            .await
+            .expect("get fresh stream");
+        assert_eq!(
+            fresh
+                .info()
+                .await
+                .expect("fresh stream info")
+                .config
+                .discard,
+            jetstream::stream::DiscardPolicy::New,
+            "ensure_stream must create fresh streams with discard New"
+        );
+
+        context
+            .delete_stream(&legacy_stream_name)
+            .await
+            .expect("delete legacy test stream");
+        context
+            .delete_stream(stream_name(&fresh_pool))
+            .await
+            .expect("delete fresh test stream");
+    }
+
+    /// Live JetStream contract test for the work-stream durability knobs
+    /// (architecture-review finding B1). Pins three things:
+    ///
+    /// 1. `SIE_STREAM_STORAGE` / `SIE_STREAM_REPLICAS` reach the created
+    ///    stream, so `file` actually produces a file-backed stream.
+    /// 2. NATS REJECTS an in-place storage-type change. This is the reason
+    ///    `ensure_stream` warns instead of reconciling storage, so the
+    ///    behaviour is asserted rather than assumed.
+    /// 3. `num_replicas` IS reconciled on an existing stream (the one knob
+    ///    of the two that JetStream will change in place).
+    ///
+    /// NATS-gated like the other live tests here.
+    #[tokio::test]
+    async fn test_ensure_stream_storage_is_configurable_but_not_reconcilable() {
+        let Ok(url) = std::env::var("NATS_URL") else {
+            eprintln!("skipping: NATS_URL not set");
+            return;
+        };
+        let client =
+            match tokio::time::timeout(Duration::from_secs(2), async_nats::connect(&url)).await {
+                Ok(Ok(c)) => c,
+                _ => {
+                    eprintln!("skipping: could not connect to NATS at {url}");
+                    return;
+                }
+            };
+        let context = async_nats::jetstream::new(client);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let stream_max_age = Duration::from_secs(300);
+
+        // A file-backed publisher must create a file-backed stream.
+        let file_pool = format!("storagefile{nanos}");
+        let file_publisher = Arc::new(WorkPublisher::new(
+            context.clone(),
+            "it-router".to_string(),
+            Arc::new(crate::queue::payload_store::DisabledPayloadStore),
+            Duration::from_secs(5),
+            1024,
+            WorkStreamConfig {
+                max_age: stream_max_age,
+                storage: jetstream::stream::StorageType::File,
+                num_replicas: 1,
+            },
+        ));
+        file_publisher
+            .ensure_stream(&file_pool)
+            .await
+            .expect("ensure_stream with File storage");
+        let mut file_stream = context
+            .get_stream(stream_name(&file_pool))
+            .await
+            .expect("get file-backed stream");
+        let file_config = file_stream
+            .info()
+            .await
+            .expect("file-backed stream info")
+            .config
+            .clone();
+        assert_eq!(
+            file_config.storage,
+            jetstream::stream::StorageType::File,
+            "SIE_STREAM_STORAGE=file must produce a file-backed stream"
+        );
+
+        // The core finding: JetStream refuses to change storage in place.
+        let mut wants_memory = file_config.clone();
+        wants_memory.storage = jetstream::stream::StorageType::Memory;
+        let update_err = context.update_stream(wants_memory).await.err();
+        // NATS 2.12 answers this with err_code 10052,
+        // "stream configuration update can not change storage type".
+        assert!(
+            update_err.is_some(),
+            "JetStream is expected to reject an in-place storage-type change; \
+             if this ever starts succeeding, ensure_stream can reconcile storage \
+             instead of only warning"
+        );
+        eprintln!("in-place storage change rejected by NATS: {update_err:?}");
+
+        // So a publisher configured for Memory over that same File stream
+        // must NOT fail and must NOT mutate it — it warns and moves on.
+        let memory_publisher = Arc::new(WorkPublisher::new(
+            context.clone(),
+            "it-router".to_string(),
+            Arc::new(crate::queue::payload_store::DisabledPayloadStore),
+            Duration::from_secs(5),
+            1024,
+            WorkStreamConfig {
+                max_age: stream_max_age,
+                storage: jetstream::stream::StorageType::Memory,
+                num_replicas: 1,
+            },
+        ));
+        memory_publisher
+            .ensure_stream(&file_pool)
+            .await
+            .expect("a storage mismatch must not fail ensure_stream");
+        assert_eq!(
+            context
+                .get_stream(stream_name(&file_pool))
+                .await
+                .expect("re-get stream")
+                .info()
+                .await
+                .expect("stream info after mismatch")
+                .config
+                .storage,
+            jetstream::stream::StorageType::File,
+            "ensure_stream must leave a diverging stream's storage untouched"
+        );
+
+        // Replicas, unlike storage, ARE reconciled. A single-node NATS caps
+        // R at 1, so only assert the no-op direction there; the reconcile
+        // path itself is exercised by the R1 -> R1 equality short-circuit.
+        assert_eq!(
+            file_config.num_replicas, 1,
+            "default replica count must stay 1"
+        );
+
+        context
+            .delete_stream(stream_name(&file_pool))
+            .await
+            .expect("delete file-backed test stream");
+    }
+
     fn result_collector(
         total_items: usize,
     ) -> (ResultCollector, oneshot::Receiver<Vec<WorkResult>>) {
@@ -5146,6 +6510,7 @@ mod tests {
                 direct_fallback_republished_indices: BTreeSet::new(),
                 direct_fallback_payloads: vec![None; total_items],
                 direct_fallback_republished: false,
+                _lane_reservation: None,
             },
             rx,
         )
@@ -5194,6 +6559,7 @@ mod tests {
             worker_direct: false,
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
+            execution_binding_sha256: None,
         }
     }
 
@@ -5797,6 +7163,7 @@ mod tests {
                     worker_direct: false,
                     executed_bundle_config_hash: None,
                     execution_identity_sha256: None,
+                    execution_binding_sha256: None,
                 }),
                 None,
             ],
@@ -5815,6 +7182,7 @@ mod tests {
             direct_fallback_republished_indices: BTreeSet::new(),
             direct_fallback_payloads: vec![Some(vec![0]), Some(vec![1]), Some(vec![2])],
             direct_fallback_republished: false,
+            _lane_reservation: None,
         };
 
         let (subject, worker_id, payloads) =
@@ -5847,6 +7215,7 @@ mod tests {
             direct_fallback_republished_indices: BTreeSet::new(),
             direct_fallback_payloads: vec![None],
             direct_fallback_republished: false,
+            _lane_reservation: None,
         };
 
         let first = WorkResult {
@@ -5868,6 +7237,7 @@ mod tests {
             worker_direct: false,
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
+            execution_binding_sha256: None,
         };
         let duplicate = WorkResult {
             result_msgpack: vec![2],
@@ -5909,6 +7279,7 @@ mod tests {
             direct_fallback_republished_indices: BTreeSet::from([0]),
             direct_fallback_payloads: vec![Some(vec![0])],
             direct_fallback_republished: true,
+            _lane_reservation: None,
         };
 
         let stale_direct = WorkResult {
@@ -5930,6 +7301,7 @@ mod tests {
             worker_direct: true,
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
+            execution_binding_sha256: None,
         };
         let pool_result = WorkResult {
             result_msgpack: vec![2],
@@ -6128,6 +7500,7 @@ mod tests {
             operation: "encode".to_string(),
             model_id: "BAAI/bge-m3".to_string(),
             profile_id: String::new(),
+            display_model: None,
             engine: "pytorch".to_string(),
             pool_name: "default".to_string(),
             admission_pool: "default".to_string(),
@@ -6153,6 +7526,7 @@ mod tests {
             router_id: "router-1".to_string(),
             reply_subject: "_INBOX.r1.req-1".to_string(),
             timestamp: 1700000000.0,
+            deadline: None,
             accepts_result_chunks: true,
             traceparent: None,
             tracestate: None,
@@ -6160,6 +7534,15 @@ mod tests {
 
         let encoded = rmp_serde::to_vec_named(&item).unwrap();
         let decoded: WorkItem = rmp_serde::from_slice(&encoded).unwrap();
+        let wire: rmpv::Value = rmp_serde::from_slice(&encoded).unwrap();
+        assert!(
+            wire.as_map()
+                .unwrap()
+                .iter()
+                .all(|(key, _)| key.as_str() != Some("deadline")),
+            "an unknown deadline must stay off the wire"
+        );
+        assert_eq!(decoded.deadline, None);
 
         assert_eq!(decoded.work_item_id, "req-1.0");
         assert_eq!(decoded.request_id, "req-1");
@@ -6220,6 +7603,7 @@ mod tests {
             operation: "encode".to_string(),
             model_id: "BAAI/bge-m3".to_string(),
             profile_id: "default".to_string(),
+            display_model: Some("org/requested".to_string()),
             engine: "pytorch".to_string(),
             pool_name: "default".to_string(),
             admission_pool: "tenant".to_string(),
@@ -6245,6 +7629,7 @@ mod tests {
             router_id: "router-1".to_string(),
             reply_subject: "_INBOX.router-1.req-ref".to_string(),
             timestamp: 1_700_000_000.5,
+            deadline: Some(1_700_000_120.5),
             accepts_result_chunks: true,
             traceparent: None,
             tracestate: None,
@@ -6264,6 +7649,7 @@ mod tests {
             operation: &owned.operation,
             model_id: &owned.model_id,
             profile_id: &owned.profile_id,
+            display_model: owned.display_model.as_deref(),
             engine: &owned.engine,
             pool_name: &owned.pool_name,
             admission_pool: &owned.admission_pool,
@@ -6286,6 +7672,7 @@ mod tests {
             router_id: &owned.router_id,
             reply_subject: &owned.reply_subject,
             timestamp: owned.timestamp,
+            deadline: owned.deadline,
             accepts_result_chunks: true,
             traceparent: owned.traceparent.as_deref(),
             tracestate: owned.tracestate.as_deref(),
@@ -6303,6 +7690,25 @@ mod tests {
         assert_eq!(decoded.work_item_id, owned.work_item_id);
         assert_eq!(decoded.item, owned.item);
         assert_eq!(decoded.options, owned.options);
+        assert_eq!(decoded.deadline, owned.deadline);
+
+        #[derive(Deserialize)]
+        struct PreDeadlineWorkItem {
+            request_id: String,
+            timestamp: f64,
+        }
+        let legacy: PreDeadlineWorkItem = rmp_serde::from_slice(&ref_bytes).unwrap();
+        assert_eq!(legacy.request_id, owned.request_id);
+        assert_eq!(legacy.timestamp, owned.timestamp);
+    }
+
+    #[test]
+    fn work_item_deadline_is_the_publish_timestamp_plus_the_result_wait() {
+        assert_eq!(
+            work_item_deadline(1_700_000_000.25, Duration::from_millis(120_500)),
+            Some(1_700_000_120.75)
+        );
+        assert_eq!(work_item_deadline(0.0, Duration::from_secs(120)), None);
     }
 
     #[test]
@@ -6325,6 +7731,7 @@ mod tests {
             units: Some(UnitCounts {
                 input_tokens: None,
                 pairs: None,
+                content_input_tokens: None,
                 pages: None,
                 images: None,
                 audio_ms: Some(1_001),
@@ -6334,6 +7741,9 @@ mod tests {
             worker_direct: true,
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
+            execution_binding_sha256: Some(
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
+            ),
         };
 
         let encoded = rmp_serde::to_vec(&result).unwrap();
@@ -6345,6 +7755,10 @@ mod tests {
         assert_eq!(decoded.result_msgpack, vec![5, 6, 7]);
         assert_eq!(decoded.units.and_then(|units| units.audio_ms), Some(1_001));
         assert!(decoded.worker_direct);
+        assert_eq!(
+            decoded.execution_binding_sha256.as_deref(),
+            Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+        );
     }
 
     #[test]
@@ -6416,6 +7830,7 @@ mod tests {
             operation: "encode".to_string(),
             model_id: "model".to_string(),
             profile_id: String::new(),
+            display_model: None,
             engine: String::new(),
             pool_name: "default".to_string(),
             admission_pool: String::new(),
@@ -6438,6 +7853,7 @@ mod tests {
             router_id: String::new(),
             reply_subject: "_INBOX.r1.req-2".to_string(),
             timestamp: 0.0,
+            deadline: None,
             accepts_result_chunks: true,
             traceparent: None,
             tracestate: None,
@@ -6491,6 +7907,183 @@ mod tests {
         assert_eq!(PAYLOAD_OFFLOAD_THRESHOLD, 1_048_576);
     }
 
+    // --- B4: decode-side classification (`inbox_work_for_payload`) ---
+
+    /// Minimal streaming chunk on the wire. Every other `ChunkEnvelope` field
+    /// carries a serde default, so this is what a worker's smallest legal
+    /// chunk decodes from.
+    #[derive(Serialize)]
+    struct WireChunk<'a> {
+        kind: &'a str,
+        request_id: &'a str,
+        seq: u32,
+        text_delta: &'a str,
+        done: bool,
+    }
+
+    #[derive(Serialize)]
+    struct WireNak<'a> {
+        kind: &'a str,
+        request_id: &'a str,
+        reason: &'a str,
+    }
+
+    fn wire_chunk(request_id: &str, seq: u32) -> Vec<u8> {
+        rmp_serde::to_vec_named(&WireChunk {
+            kind: "chunk",
+            request_id,
+            seq,
+            text_delta: "tok",
+            done: false,
+        })
+        .expect("encode chunk")
+    }
+
+    fn wire_work_result(request_id: &str) -> Vec<u8> {
+        rmp_serde::to_vec(&WorkResult {
+            work_item_id: format!("{request_id}.0"),
+            request_id: request_id.to_string(),
+            item_index: 0,
+            success: true,
+            result_msgpack: vec![1, 2, 3],
+            error: None,
+            error_code: None,
+            inference_ms: None,
+            queue_ms: None,
+            processing_ms: None,
+            worker_id: None,
+            tokenization_ms: None,
+            postprocessing_ms: None,
+            payload_fetch_ms: None,
+            units: None,
+            worker_direct: false,
+            executed_bundle_config_hash: None,
+            execution_identity_sha256: None,
+            execution_binding_sha256: None,
+        })
+        .expect("encode work result")
+    }
+
+    /// The fast path is a mitigation this change must preserve: a result for a
+    /// request this gateway no longer tracks is dropped without decoding.
+    #[test]
+    fn inbox_work_skips_untracked_requests_without_decoding() {
+        assert!(
+            inbox_work_for_payload(&wire_chunk("req-gone", 7), |_| false).is_none(),
+            "an untracked request must be dropped on the fast path"
+        );
+        // Same payload, now tracked — it decodes.
+        assert!(matches!(
+            inbox_work_for_payload(&wire_chunk("req-gone", 7), |_| true),
+            Some(InboxWork::Chunk(_))
+        ));
+    }
+
+    #[test]
+    fn inbox_work_routes_each_envelope_kind_to_its_handler() {
+        let chunk = inbox_work_for_payload(&wire_chunk("req-a", 3), |_| true);
+        match chunk {
+            Some(InboxWork::Chunk(envelope)) => {
+                assert_eq!(envelope.request_id, "req-a");
+                assert_eq!(envelope.seq, 3);
+            }
+            other => panic!("expected a stream chunk, got {other:?}"),
+        }
+
+        let nak_payload = rmp_serde::to_vec_named(&WireNak {
+            kind: "nak",
+            request_id: "req-b",
+            reason: "kv_budget",
+        })
+        .expect("encode nak");
+        match inbox_work_for_payload(&nak_payload, |_| true) {
+            Some(InboxWork::Nak(nak)) => {
+                assert_eq!(nak.request_id, "req-b");
+                assert_eq!(nak.reason, "kv_budget");
+            }
+            other => panic!("expected a nak, got {other:?}"),
+        }
+
+        let transfer = ResultChunkV1 {
+            kind: RESULT_CHUNK_KIND.to_string(),
+            work_item_id: "req-c.0".to_string(),
+            request_id: "req-c".to_string(),
+            item_index: 0,
+            transfer_digest: vec![0u8; 32],
+            chunk_index: 0,
+            chunk_count: 1,
+            total_bytes: 3,
+            payload: vec![1, 2, 3],
+        };
+        let transfer_payload = rmp_serde::to_vec_named(&transfer).expect("encode result chunk");
+        match inbox_work_for_payload(&transfer_payload, |_| true) {
+            Some(InboxWork::ResultChunk(decoded)) => assert_eq!(*decoded, transfer),
+            other => panic!("expected a result chunk transfer, got {other:?}"),
+        }
+
+        match inbox_work_for_payload(&wire_work_result("req-d"), |_| true) {
+            Some(InboxWork::Result(result)) => assert_eq!(result.request_id, "req-d"),
+            other => panic!("expected a WorkResult, got {other:?}"),
+        }
+    }
+
+    /// A malformed exact-v1 transfer still has to fail its request, and that
+    /// failure has to be ordered against the request's other inbox work — so
+    /// it becomes a work item under the same key rather than running on the
+    /// decode task.
+    #[test]
+    fn inbox_work_turns_a_malformed_transfer_into_keyed_failure_work() {
+        // Right discriminator, wrong shape: `chunk_index` is a string.
+        #[derive(Serialize)]
+        struct BadTransfer<'a> {
+            kind: &'a str,
+            request_id: &'a str,
+            chunk_index: &'a str,
+        }
+        let payload = rmp_serde::to_vec_named(&BadTransfer {
+            kind: RESULT_CHUNK_KIND,
+            request_id: "req-bad",
+            chunk_index: "not-a-number",
+        })
+        .expect("encode malformed transfer");
+
+        match inbox_work_for_payload(&payload, |_| true) {
+            Some(work @ InboxWork::ResultChunkDecodeFailure { .. }) => {
+                assert_eq!(
+                    work.shard_key(),
+                    "req-bad",
+                    "the failure must be keyed to the failing request"
+                );
+            }
+            other => panic!("expected keyed failure work, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inbox_work_drops_undecodable_payloads() {
+        assert!(inbox_work_for_payload(&[0xc1], |_| true).is_none());
+    }
+
+    /// Every variant keys on its own request id, which is what puts all of one
+    /// request's inbox work on a single shard.
+    #[test]
+    fn inbox_work_keys_on_the_request_id() {
+        let cases = [
+            wire_chunk("req-key", 0),
+            wire_work_result("req-key"),
+            rmp_serde::to_vec_named(&WireNak {
+                kind: "nak",
+                request_id: "req-key",
+                reason: "kv_budget",
+            })
+            .expect("encode nak"),
+        ];
+        for payload in cases {
+            let work = inbox_work_for_payload(&payload, |_| true).expect("decoded work");
+            assert_eq!(work.shard_key(), "req-key");
+        }
+    }
+
     // --- Fast-path request_id extraction tests ---
 
     #[test]
@@ -6514,6 +8107,7 @@ mod tests {
             worker_direct: false,
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
+            execution_binding_sha256: None,
         };
         let encoded = rmp_serde::to_vec(&result).unwrap();
         let extracted = extract_request_id_fast(&encoded);
@@ -6541,6 +8135,7 @@ mod tests {
             worker_direct: false,
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
+            execution_binding_sha256: None,
         };
         let encoded = rmp_serde::to_vec_named(&result).unwrap();
         let extracted = extract_request_id_fast(&encoded);
@@ -6585,6 +8180,7 @@ mod tests {
             worker_direct: false,
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
+            execution_binding_sha256: None,
         };
         let encoded = rmp_serde::to_vec(&result).unwrap();
         let extracted = extract_request_id_fast(&encoded);
@@ -6739,6 +8335,7 @@ mod tests {
                 format: Some("png".to_string()),
             }]),
             content_parts: None,
+            videos: None,
         };
         let mp = rmp_serde::to_vec_named(&msg).unwrap();
         // (1) sidecar step: decode as serde_json::Value — MUST succeed.
@@ -6757,6 +8354,42 @@ mod tests {
     /// NATS→sidecar(``serde_json::Value``)→worker round-trip, preserving the
     /// text↔image ORDER and the internally-tagged shape the worker parses
     /// (``{"type":"text","text":…}`` / ``{"type":"image"}``).
+    #[test]
+    fn test_chat_message_videos_survive_sidecar_serde_json_value() {
+        let msg = ChatMessage {
+            role: "user".to_string(),
+            content: "what happens?".to_string(),
+            videos: Some(vec![ChatVideo {
+                data: "AAAAGGZ0eXA=".to_string(),
+                format: Some("mp4".to_string()),
+            }]),
+            content_parts: Some(vec![
+                ContentPart::Video,
+                ContentPart::Text {
+                    text: "what happens?".to_string(),
+                },
+            ]),
+            ..ChatMessage::default()
+        };
+        let value = serde_json::to_value(&msg).unwrap();
+        assert_eq!(value["videos"][0]["data"], "AAAAGGZ0eXA=");
+        assert_eq!(value["videos"][0]["format"], "mp4");
+        assert_eq!(
+            value["content_parts"][0],
+            serde_json::json!({"type": "video"})
+        );
+        assert!(value.get("images").is_none());
+        let back: ChatMessage = serde_json::from_value(value).unwrap();
+        assert_eq!(back.videos.unwrap()[0].data, "AAAAGGZ0eXA=");
+        let plain = serde_json::to_value(ChatMessage {
+            role: "user".to_string(),
+            content: "hi".to_string(),
+            ..ChatMessage::default()
+        })
+        .unwrap();
+        assert!(plain.get("videos").is_none());
+    }
+
     #[test]
     fn test_content_parts_ordering_survives_sidecar_round_trip() {
         let msg = ChatMessage {
@@ -6787,6 +8420,7 @@ mod tests {
                     text: "which has a cat?".to_string(),
                 },
             ]),
+            videos: None,
         };
         let mp = rmp_serde::to_vec_named(&msg).unwrap();
         // (1) sidecar step: decode as serde_json::Value — MUST succeed.
@@ -6879,6 +8513,7 @@ mod tests {
             operation: "generate".to_string(),
             model_id: "m".to_string(),
             profile_id: "default".to_string(),
+            display_model: None,
             engine: "pytorch".to_string(),
             pool_name: "p".to_string(),
             admission_pool: String::new(),
@@ -6901,6 +8536,7 @@ mod tests {
             router_id: String::new(),
             reply_subject: "_INBOX.r.req-x".to_string(),
             timestamp: 1.0,
+            deadline: None,
             accepts_result_chunks: true,
             traceparent: None,
             tracestate: None,
@@ -7029,6 +8665,7 @@ mod tests {
             operation: "generate".to_string(),
             model_id: "m".to_string(),
             profile_id: "default".to_string(),
+            display_model: None,
             engine: "pytorch".to_string(),
             pool_name: "p".to_string(),
             admission_pool: String::new(),
@@ -7051,6 +8688,7 @@ mod tests {
             router_id: String::new(),
             reply_subject: "_INBOX.r.req-tp".to_string(),
             timestamp: 1.0,
+            deadline: None,
             accepts_result_chunks: true,
             traceparent: Some(tp.to_string()),
             tracestate: Some(ts.to_string()),
@@ -7074,6 +8712,7 @@ mod tests {
             operation: "generate".to_string(),
             model_id: "m".to_string(),
             profile_id: "default".to_string(),
+            display_model: None,
             engine: "pytorch".to_string(),
             pool_name: "p".to_string(),
             admission_pool: String::new(),
@@ -7096,6 +8735,7 @@ mod tests {
             router_id: String::new(),
             reply_subject: "_INBOX.r.req-tp2".to_string(),
             timestamp: 1.0,
+            deadline: None,
             accepts_result_chunks: true,
             traceparent: None,
             tracestate: None,
@@ -7355,6 +8995,150 @@ mod tests {
         );
     }
 
+    /// NATS-gated: a work item carries `display_model` only when the caller
+    /// asked for a model other than the route the work runs on, on the batch
+    /// and on the generation publish path alike.
+    #[tokio::test]
+    async fn work_items_carry_the_requested_model_only_when_it_differs() {
+        use futures_util::StreamExt;
+
+        let Ok(url) = std::env::var("NATS_URL") else {
+            eprintln!("skipping: NATS_URL not set");
+            return;
+        };
+        let client =
+            match tokio::time::timeout(Duration::from_secs(2), async_nats::connect(&url)).await {
+                Ok(Ok(c)) => c,
+                _ => {
+                    eprintln!("skipping: could not connect to NATS at {url}");
+                    return;
+                }
+            };
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let pool = format!("itdisplay{nanos}");
+        let publisher = Arc::new(WorkPublisher::new(
+            async_nats::jetstream::new(client.clone()),
+            "it-router".to_string(),
+            Arc::new(crate::queue::payload_store::DisabledPayloadStore),
+            Duration::from_secs(5),
+            1024,
+            WorkStreamConfig {
+                max_age: Duration::from_secs(300),
+                storage: jetstream::stream::StorageType::Memory,
+                num_replicas: 1,
+            },
+        ));
+        let subjects = format!("sie.work.{pool}.>");
+        let stream = async_nats::jetstream::new(client.clone())
+            .get_or_create_stream(jetstream::stream::Config {
+                name: stream_name(&pool),
+                subjects: vec![subjects.clone()],
+                retention: jetstream::stream::RetentionPolicy::WorkQueue,
+                storage: jetstream::stream::StorageType::Memory,
+                max_age: Duration::from_secs(300),
+                max_messages: 100_000,
+                discard: jetstream::stream::DiscardPolicy::New,
+                ..Default::default()
+            })
+            .await
+            .expect("create work stream");
+        stream
+            .create_consumer(jetstream::consumer::pull::Config {
+                durable_name: Some("itworker".to_string()),
+                filter_subject: subjects.clone(),
+                ..Default::default()
+            })
+            .await
+            .expect("create work consumer");
+        let mut sub = client.subscribe(subjects).await.expect("subscribe");
+        client.flush().await.expect("flush");
+        let target = |model: &str| PublishTarget::Pool {
+            pool: pool.clone(),
+            machine_profile: "l4".to_string(),
+            bundle: "default".to_string(),
+            model: model.to_string(),
+        };
+        async fn next_work_item(sub: &mut async_nats::Subscriber) -> (String, Option<String>) {
+            let msg = tokio::time::timeout(Duration::from_secs(5), sub.next())
+                .await
+                .expect("timed out waiting for the published work item")
+                .expect("subscription closed before a message arrived");
+            let work: WorkItem = rmp_serde::from_slice(&msg.payload).expect("decode work item");
+            (work.model_id, work.display_model)
+        }
+        let mut published = Vec::new();
+
+        for (model, display_model) in [
+            ("acme/model", "acme/model"),
+            ("acme/model:remote", "acme/model"),
+        ] {
+            let items = vec![rmpv::Value::Map(vec![(
+                rmpv::Value::from("text"),
+                rmpv::Value::from("hello"),
+            )])];
+            let (_request_id, _rx, durability) = publisher
+                .publish_work(
+                    target(model),
+                    &pool,
+                    "encode",
+                    model,
+                    display_model,
+                    "pytorch",
+                    "",
+                    items,
+                    &WorkParams::default(),
+                )
+                .await
+                .expect("publish_work");
+            durability.wait().await.expect("durable publish ACK");
+            published.push(next_work_item(&mut sub).await);
+        }
+        let generate = WorkParams {
+            generate: Some(GenerateParams {
+                input: GenerateInput::Prompt {
+                    prompt: "hi".to_string(),
+                },
+                max_new_tokens: 4,
+                ..Default::default()
+            }),
+            ..WorkParams::default()
+        };
+        let (_request_id, _rx, _notify, durability) = publisher
+            .publish_generate_streaming(
+                target("acme/model:remote"),
+                "acme/model",
+                "pytorch",
+                "",
+                &generate,
+                &pool,
+            )
+            .await
+            .expect("publish_generate_streaming");
+        durability.wait().await.expect("durable publish ACK");
+        published.push(next_work_item(&mut sub).await);
+
+        assert_eq!(
+            published,
+            vec![
+                ("acme/model".to_string(), None),
+                (
+                    "acme/model:remote".to_string(),
+                    Some("acme/model".to_string())
+                ),
+                (
+                    "acme/model:remote".to_string(),
+                    Some("acme/model".to_string())
+                ),
+            ]
+        );
+        let _ = async_nats::jetstream::new(client.clone())
+            .delete_stream(stream_name(&pool))
+            .await;
+    }
+
     /// Integration test (issue #1500): drive a real `WorkPublisher` encode
     /// publish over a live NATS/JetStream broker, with the inbound trace
     /// context scoped over the publish via `with_context` exactly as
@@ -7404,7 +9188,11 @@ mod tests {
             Arc::new(crate::queue::payload_store::DisabledPayloadStore),
             Duration::from_secs(5),
             1024,
-            Duration::from_secs(300),
+            WorkStreamConfig {
+                max_age: Duration::from_secs(300),
+                storage: jetstream::stream::StorageType::Memory,
+                num_replicas: 1,
+            },
         ));
 
         let target = PublishTarget::Pool {
@@ -7429,6 +9217,7 @@ mod tests {
                 storage: jetstream::stream::StorageType::Memory,
                 max_age: Duration::from_secs(300),
                 max_messages: 100_000,
+                discard: jetstream::stream::DiscardPolicy::New,
                 ..Default::default()
             })
             .await
@@ -7478,7 +9267,7 @@ mod tests {
         // Mirror the handler: scope the inbound context over the publish.
         let (_request_id, _rx, durability) = publisher
             .publish_work(
-                target, &pool, "encode", model, "pytorch", "", items, &params,
+                target, &pool, "encode", model, model, "pytorch", "", items, &params,
             )
             .with_context(cx)
             .await
@@ -7511,6 +9300,284 @@ mod tests {
         let _ = async_nats::jetstream::new(client.clone())
             .delete_stream(stream_name(&pool))
             .await;
+    }
+
+    /// NATS-gated: every non-streaming item carries the request's absolute
+    /// deadline, and a durability failure on a non-streaming dispatch sends
+    /// the request-wide `work_cancel` that workers honour before execution.
+    #[tokio::test]
+    async fn publish_work_stamps_deadline_and_failed_durability_cancels_work() {
+        use futures_util::StreamExt;
+
+        let Ok(url) = std::env::var("NATS_URL") else {
+            eprintln!("skipping: NATS_URL not set");
+            return;
+        };
+        let client =
+            match tokio::time::timeout(Duration::from_secs(2), async_nats::connect(&url)).await {
+                Ok(Ok(c)) => c,
+                _ => {
+                    eprintln!("skipping: could not connect to NATS at {url}");
+                    return;
+                }
+            };
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let pool = format!("deadlinepool{nanos}");
+        let router_id = format!("deadlinegw{nanos}");
+        let model = "BAAI__bge-m3";
+        let result_timeout = Duration::from_secs(7);
+
+        let publisher = Arc::new(WorkPublisher::new(
+            async_nats::jetstream::new(client.clone()),
+            router_id.clone(),
+            Arc::new(crate::queue::payload_store::DisabledPayloadStore),
+            result_timeout,
+            1024,
+            WorkStreamConfig {
+                max_age: Duration::from_secs(300),
+                storage: jetstream::stream::StorageType::Memory,
+                num_replicas: 1,
+            },
+        ));
+        publisher
+            .start_inbox_subscription(&client)
+            .await
+            .expect("start inbox subscription");
+
+        let target = PublishTarget::Pool {
+            pool: pool.clone(),
+            machine_profile: "l4".to_string(),
+            bundle: "default".to_string(),
+            model: model.to_string(),
+        };
+        let subject = target.subject();
+        let stream = async_nats::jetstream::new(client.clone())
+            .get_or_create_stream(jetstream::stream::Config {
+                name: stream_name(&pool),
+                subjects: vec![format!("sie.work.{pool}.*.*.*")],
+                retention: jetstream::stream::RetentionPolicy::WorkQueue,
+                storage: jetstream::stream::StorageType::Memory,
+                max_age: Duration::from_secs(300),
+                max_messages: 100_000,
+                discard: jetstream::stream::DiscardPolicy::New,
+                ..Default::default()
+            })
+            .await
+            .expect("create work stream");
+        stream
+            .create_consumer(jetstream::consumer::pull::Config {
+                durable_name: Some("deadlineworker".to_string()),
+                filter_subject: subject.clone(),
+                ..Default::default()
+            })
+            .await
+            .expect("create work consumer");
+
+        let mut work_sub = client.subscribe(subject.clone()).await.expect("subscribe");
+        let mut cancel_sub = client
+            .subscribe(format!("work_cancel.{router_id}.>"))
+            .await
+            .expect("subscribe work_cancel");
+        client.flush().await.expect("flush");
+
+        let items = ["first", "second"]
+            .into_iter()
+            .map(|text| {
+                rmpv::Value::Map(vec![(
+                    rmpv::Value::String("text".into()),
+                    rmpv::Value::String(text.into()),
+                )])
+            })
+            .collect();
+        let (request_id, _rx, durability) = publisher
+            .publish_work(
+                target,
+                &pool,
+                "encode",
+                model,
+                model,
+                "pytorch",
+                "",
+                items,
+                &WorkParams::default(),
+            )
+            .await
+            .expect("publish_work");
+        durability.wait().await.expect("durable publish ACK");
+
+        for _ in 0..2 {
+            let msg = tokio::time::timeout(Duration::from_secs(5), work_sub.next())
+                .await
+                .expect("timed out waiting for a published work item")
+                .expect("subscription closed before a message arrived");
+            let work: WorkItem =
+                rmp_serde::from_slice(&msg.payload).expect("decode work-item envelope");
+            assert_eq!(work.request_id, request_id);
+            let deadline = work
+                .deadline
+                .expect("non-streaming work must carry a deadline");
+            assert!(
+                (deadline - work.timestamp - result_timeout.as_secs_f64()).abs() < 1e-6,
+                "deadline {deadline} must be the publish timestamp {} plus the result wait",
+                work.timestamp
+            );
+        }
+
+        publisher
+            .abort_pending_dispatch(&request_id, PendingDispatchKind::Result)
+            .await;
+        let cancel = tokio::time::timeout(Duration::from_secs(5), cancel_sub.next())
+            .await
+            .expect("a failed non-streaming dispatch must publish work_cancel")
+            .expect("cancel subscription closed");
+        assert_eq!(
+            cancel.subject.as_str(),
+            format!("work_cancel.{router_id}.{request_id}")
+        );
+
+        publisher
+            .abort_pending_dispatch("streaming-request", PendingDispatchKind::Stream)
+            .await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(250), cancel_sub.next())
+                .await
+                .is_err(),
+            "a streaming dispatch failure keeps the generation cancel contract"
+        );
+
+        let _ = async_nats::jetstream::new(client.clone())
+            .delete_stream(stream_name(&pool))
+            .await;
+    }
+
+    /// Real publisher regression for native OSS-shaped payload stores. This is
+    /// NATS-gated like the adjacent publish-span integration test: point
+    /// `NATS_URL` at an ephemeral memory-backed JetStream server to exercise
+    /// public `publish_work` and its real terminal cleanup path.
+    #[tokio::test]
+    async fn publisher_large_oss_payload_emits_plain_ref_and_terminal_delete() {
+        use futures_util::StreamExt;
+
+        if std::env::var("SIE_RUN_NATS_PUBLISHER_TEST").as_deref() != Ok("1") {
+            eprintln!("skipping: SIE_RUN_NATS_PUBLISHER_TEST=1 was not requested");
+            return;
+        }
+        let url =
+            std::env::var("NATS_URL").expect("mandatory publisher regression requires NATS_URL");
+        let client = tokio::time::timeout(Duration::from_secs(2), async_nats::connect(&url))
+            .await
+            .expect("timed out connecting mandatory publisher regression to NATS")
+            .expect("failed to connect mandatory publisher regression to NATS");
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let pool = format!("osspayload{nanos}");
+        let model = "BAAI__bge-m3";
+        let store = Arc::new(FullReferencePayloadStore {
+            full_reference: "oss://sie-wire-fixture/payloads/provider-returned-full-ref.bin"
+                .to_owned(),
+            puts: std::sync::Mutex::new(Vec::new()),
+            deleted: std::sync::Mutex::new(Vec::new()),
+        });
+        let publisher = Arc::new(WorkPublisher::new(
+            async_nats::jetstream::new(client.clone()),
+            "oss-publisher-test".to_owned(),
+            store.clone(),
+            Duration::from_secs(5),
+            1024,
+            WorkStreamConfig {
+                max_age: Duration::from_secs(300),
+                storage: jetstream::stream::StorageType::Memory,
+                num_replicas: 1,
+            },
+        ));
+        let target = PublishTarget::Pool {
+            pool: pool.clone(),
+            machine_profile: "a10".to_owned(),
+            bundle: "default".to_owned(),
+            model: model.to_owned(),
+        };
+        let subject = target.subject();
+        let context = async_nats::jetstream::new(client.clone());
+        let stream = context
+            .get_or_create_stream(jetstream::stream::Config {
+                name: stream_name(&pool),
+                subjects: vec![format!("sie.work.{pool}.*.*.*")],
+                retention: jetstream::stream::RetentionPolicy::WorkQueue,
+                storage: jetstream::stream::StorageType::Memory,
+                max_age: Duration::from_secs(300),
+                max_messages: 100_000,
+                discard: jetstream::stream::DiscardPolicy::New,
+                ..Default::default()
+            })
+            .await
+            .expect("create OSS publisher test stream");
+        stream
+            .create_consumer(jetstream::consumer::pull::Config {
+                durable_name: Some("oss-payload-worker".to_owned()),
+                filter_subject: subject.clone(),
+                ..Default::default()
+            })
+            .await
+            .expect("create OSS publisher test consumer");
+        let mut subscription = client.subscribe(subject).await.expect("subscribe");
+        client.flush().await.expect("flush subscription");
+
+        let params = WorkParams {
+            output_types: None,
+            instruction: None,
+            is_query: false,
+            options: None,
+            labels: None,
+            output_schema: None,
+            query_item: None,
+            generate: None,
+            routing_key: None,
+            prompt_cache_key: None,
+        };
+        let items = vec![rmpv::Value::Map(vec![(
+            rmpv::Value::String("image".into()),
+            rmpv::Value::Binary(vec![7; PAYLOAD_OFFLOAD_THRESHOLD + 1024]),
+        )])];
+        let (request_id, _rx, durability) = publisher
+            .publish_work(
+                target, &pool, "encode", model, model, "pytorch", "", items, &params,
+            )
+            .await
+            .expect("publish oversized work item");
+        durability.wait().await.expect("durable publish ACK");
+
+        let message = tokio::time::timeout(Duration::from_secs(5), subscription.next())
+            .await
+            .expect("timed out waiting for oversized work item")
+            .expect("subscription closed before oversized work item");
+        let work: WorkItem = rmp_serde::from_slice(&message.payload).expect("decode work item");
+        let expected_key = format!("{request_id}_0.bin");
+        assert!(work.item.is_none());
+        assert_eq!(work.payload_ref.as_deref(), Some(expected_key.as_str()));
+        {
+            let puts = store.puts.lock().unwrap();
+            assert_eq!(puts.len(), 1);
+            assert_eq!(puts[0].0, expected_key);
+            assert!(puts[0].1 > PAYLOAD_OFFLOAD_THRESHOLD);
+        }
+
+        assert!(publisher.drop_pending_result(&request_id));
+        publisher.finish_abandoned_work(&request_id).await;
+        assert_eq!(
+            store.deleted.lock().unwrap().as_slice(),
+            std::slice::from_ref(&expected_key)
+        );
+        assert!(!publisher.offloaded_payload_keys.contains_key(&request_id));
+
+        context
+            .delete_stream(stream_name(&pool))
+            .await
+            .expect("delete OSS publisher test stream");
     }
 
     // ----- H9 — first-chunk-fallback rate limit ---------------------

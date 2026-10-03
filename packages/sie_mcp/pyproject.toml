@@ -1,7 +1,7 @@
 [project]
 name = "sie-mcp"
-version = "0.1.0"
-description = "SIE MCP edge - hosted MCP server exposing SIE document jobs (Req 12)"
+version = "0.9.0"
+description = "SIE MCP edge - hosted MCP server exposing SIE document jobs"
 requires-python = ">=3.12,<3.13"
 license = { text = "Apache-2.0" }
 dependencies = [
@@ -13,7 +13,7 @@ dependencies = [
     # Post-validation of cluster output against the requested schema. Already a
     # transitive dependency via ``mcp``; declared directly since we import it.
     "jsonschema>=4",
-    # VL-OCR routing (#1307): rasterize scanned/complex PDF pages for the VL-OCR model.
+    # VL-OCR routing: rasterize scanned or complex PDF pages for the VL-OCR model.
     "pypdfium2>=5.6.0",
     "pillow>=12.2.0",
 ]

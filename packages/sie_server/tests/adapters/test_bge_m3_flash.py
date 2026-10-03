@@ -83,8 +83,8 @@ class TestBGEM3YamlConfig:
         return ModelConfig(**raw)
 
     def test_score_task_enabled(self, config: ModelConfig) -> None:
-        # Regression guard for sie-internal#728: bge-m3 was advertised as a
-        # scoring model but the YAML had `score: null`, causing /v1/score
+        # Regression guard: bge-m3 was advertised as a scoring model but the
+        # YAML had `score: null`, causing /v1/score
         # requests to be rejected before reaching the adapter.
         assert config.tasks.score is not None
 

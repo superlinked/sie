@@ -6,7 +6,7 @@ of ChromaDB workflows using SIE embeddings.
 Run with: pytest -m integration integrations/sie_chroma/tests/
 
 Prerequisites:
-    mise run serve -d cpu -p 8080
+    mise run serve -- -d cpu -p 8080
 
 ChromaDB Use Cases Demonstrated:
 - Semantic search over document collections

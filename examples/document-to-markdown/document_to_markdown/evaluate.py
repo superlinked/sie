@@ -10,7 +10,7 @@ from pathlib import Path
 from rich.console import Console
 from rich.table import Table
 
-from document_to_markdown.config import load_config, select_documents
+from document_to_markdown.config import is_fetched_bundle, load_config, select_documents
 
 console = Console()
 
@@ -71,7 +71,7 @@ def _evaluate_markdown(
     return checks
 
 
-def evaluate_run(run_dir: Path, slugs: list[str]) -> bool:
+def evaluate_run(run_dir: Path, slugs: list[str], out_path: Path | None = None) -> bool:
     config = load_config()
     documents = select_documents(config, slugs)
     rows = []
@@ -103,7 +103,16 @@ def evaluate_run(run_dir: Path, slugs: list[str]) -> bool:
         "passed": passed_all,
         "documents": rows,
     }
-    (run_dir / "evaluation.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+    # Into the run bundle, because verify-run requires an evaluation.json
+    # there and a local run that cannot be verified is worse than useless.
+    # The exception is a bundle written by `python3 fetch.py`, which carries
+    # the marker below: its evaluation.json is pinned by a digest the fetch
+    # checked, and overwriting it would leave the bytes disagreeing with the
+    # manifest. Those go to run-output/ so both copies survive to be compared.
+    fetched = is_fetched_bundle(run_dir)
+    destination = out_path or (Path("run-output/evaluation.json") if fetched else run_dir / "evaluation.json")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     table = Table("Document", "Checks", "Result")
     for row in rows:
         table.add_row(
@@ -112,6 +121,15 @@ def evaluate_run(run_dir: Path, slugs: list[str]) -> bool:
             "[green]pass[/]" if row["passed"] == row["total"] else "[red]fail[/]",
         )
     console.print(table)
+    console.print(f"Wrote {destination}")
+
+    recorded_path = run_dir / "evaluation.json"
+    if recorded_path.exists() and recorded_path != destination:
+        recorded = json.loads(recorded_path.read_text(encoding="utf-8"))
+        here = {row["slug"]: (row["passed"], row["total"]) for row in rows}
+        there = {row["slug"]: (row["passed"], row["total"]) for row in recorded["documents"]}
+        agree = {slug: totals for slug, totals in there.items() if here.get(slug) == totals}
+        console.print(f"{len(agree)} of {len(there)} documents score the same as the recorded {recorded_path.name}")
     return passed_all
 
 
@@ -119,8 +137,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run deterministic checks against a saved conversion")
     parser.add_argument("run_dir", type=Path)
     parser.add_argument("slugs", nargs="*", default=["all"])
+    parser.add_argument(
+        "--out",
+        type=Path,
+        help="where to write evaluation.json (default: into the run bundle, or run-output/ for a fetched one)",
+    )
     args = parser.parse_args()
-    if not evaluate_run(args.run_dir, args.slugs):
+    if not evaluate_run(args.run_dir, args.slugs, args.out):
         raise SystemExit(1)
 
 

@@ -1,0 +1,782 @@
+{
+  "$defs": {
+    "AdapterOptions": {
+      "additionalProperties": false,
+      "properties": {
+        "loadtime": {
+          "additionalProperties": true,
+          "title": "Loadtime",
+          "type": "object"
+        },
+        "runtime": {
+          "additionalProperties": true,
+          "title": "Runtime",
+          "type": "object"
+        }
+      },
+      "title": "AdapterOptions",
+      "type": "object"
+    },
+    "EmbeddingDim": {
+      "additionalProperties": false,
+      "properties": {
+        "dim": {
+          "title": "Dim",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "dim"
+      ],
+      "title": "EmbeddingDim",
+      "type": "object"
+    },
+    "EncodeTask": {
+      "additionalProperties": false,
+      "properties": {
+        "dense": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EmbeddingDim"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "sparse": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EmbeddingDim"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "multivector": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EmbeddingDim"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "title": "EncodeTask",
+      "type": "object"
+    },
+    "ExtractTask": {
+      "additionalProperties": false,
+      "properties": {},
+      "title": "ExtractTask",
+      "type": "object"
+    },
+    "GenerateCapabilities": {
+      "additionalProperties": false,
+      "description": "Generation capability flags advertised by the model config.\n\nGateway-readable surface; used by ``proxy_generate`` to enforce that a\nrequested grammar / tools / streaming flavour is actually supported.\n``grammar`` accepts ``json_schema``, ``regex``, and ``ebnf``; the\ncapability gate at the gateway uses this list to reject unsupported\nkinds before any work hits the queue.",
+      "properties": {
+        "grammar": {
+          "default": [],
+          "items": {
+            "enum": [
+              "json_schema",
+              "regex",
+              "ebnf"
+            ],
+            "type": "string"
+          },
+          "title": "Grammar",
+          "type": "array"
+        },
+        "streaming": {
+          "default": true,
+          "title": "Streaming",
+          "type": "boolean"
+        },
+        "tools": {
+          "default": false,
+          "title": "Tools",
+          "type": "boolean"
+        },
+        "code": {
+          "default": false,
+          "title": "Code",
+          "type": "boolean"
+        },
+        "sql": {
+          "default": false,
+          "title": "Sql",
+          "type": "boolean"
+        },
+        "guard": {
+          "default": false,
+          "title": "Guard",
+          "type": "boolean"
+        }
+      },
+      "title": "GenerateCapabilities",
+      "type": "object"
+    },
+    "GenerateTask": {
+      "additionalProperties": false,
+      "description": "Generation task declaration.\n\n``context_length`` is the maximum shared prompt-plus-completion envelope by\ndefault. Encoder-decoder adapters may instead declare independent axes, in\nwhich case it bounds encoder input and ``max_output_tokens`` independently\ncaps decoder output. The gateway uses ``max_output_tokens`` for\npre-admission, and the worker authoritatively enforces it as the per-request\nhard cap on ``max_new_tokens`` before adapter dispatch.\n\n``chat_template_kwargs`` are a bounded operator-owned mapping forwarded\nto the tokenizer's ``apply_chat_template(**kwargs)`` call when the worker\nrenders an OpenAI-shaped ``messages`` request. The accepted schema covers\n``enable_thinking`` and Granite Guardian's bounded ``guardian_config``;\nunknown keys and invalid nested shapes fail at config load. Empty dict by\ndefault \u2014 non-chat / prompt-shape requests ignore the field.\n\n``prewarm_grammars`` is an optional list of grammars to compile at\nmodel-load time so the cold-start TTFT for these schemas excludes\nOutlines compile cost. See :class:`PrewarmGrammar` for the entry\nshape; the worker iterates the list once on boot and silently\ncontinues past individual compile failures (which are surfaced via\n``sie.worker.generation.grammar.compile.duration`` with\n``phase=\"prewarm\", outcome=\"error\"``).\n\n``kv_budget_tokens`` for admission control lives on\n:class:`ProfileConfig` rather than here, because the\nbudget is a per-worker/per-profile shape rather than a per-task\nsemantic.\n\n``grammar_profile`` optionally names a profile that grammar-constrained\nrequests (OpenAI ``response_format`` / SIE-native ``grammar``) must run on.\nWhen set, the gateway rewrites such a request's model id to the\n``{sie_id}:{grammar_profile}`` variant so it is served by that profile,\nwhile unconstrained requests keep the request's resolved profile. A\nprofile may override this with its own grammar-safe sibling so context,\nhardware launch shape, and thinking mode remain unchanged. A directly\ninheriting explicit variant may remain selected when its resolved launch\nsettings are already grammar-safe. This exists\nbecause some throughput optimisations are incompatible with\ndecode-time grammar enforcement \u2014 notably NEXTN/MTP speculative decoding\nbypasses SGLang's Outlines FSM (leaks out-of-schema keys, truncates\nmid-JSON), so a model whose default profile is speculative points\n``grammar_profile`` at a non-speculative profile (e.g. ``no-spec``). ``None``\n(default) means no rewrite \u2014 grammar runs on the request's resolved profile.",
+      "properties": {
+        "context_length": {
+          "title": "Context Length",
+          "type": "integer"
+        },
+        "max_output_tokens": {
+          "title": "Max Output Tokens",
+          "type": "integer"
+        },
+        "capabilities": {
+          "$ref": "#/$defs/GenerateCapabilities",
+          "default": {
+            "grammar": [],
+            "streaming": true,
+            "tools": false,
+            "code": false,
+            "sql": false,
+            "guard": false
+          }
+        },
+        "chat_template_kwargs": {
+          "additionalProperties": true,
+          "title": "Chat Template Kwargs",
+          "type": "object"
+        },
+        "prewarm_grammars": {
+          "items": {
+            "$ref": "#/$defs/PrewarmGrammar"
+          },
+          "title": "Prewarm Grammars",
+          "type": "array"
+        },
+        "grammar_profile": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Grammar Profile"
+        }
+      },
+      "required": [
+        "context_length",
+        "max_output_tokens"
+      ],
+      "title": "GenerateTask",
+      "type": "object"
+    },
+    "InputModalities": {
+      "additionalProperties": false,
+      "properties": {
+        "text": {
+          "default": true,
+          "title": "Text",
+          "type": "boolean"
+        },
+        "image": {
+          "default": false,
+          "title": "Image",
+          "type": "boolean"
+        },
+        "audio": {
+          "default": false,
+          "title": "Audio",
+          "type": "boolean"
+        },
+        "video": {
+          "default": false,
+          "title": "Video",
+          "type": "boolean"
+        },
+        "document": {
+          "default": false,
+          "title": "Document",
+          "type": "boolean"
+        }
+      },
+      "title": "InputModalities",
+      "type": "object"
+    },
+    "PrewarmGrammar": {
+      "additionalProperties": false,
+      "description": "Operator-declared grammar to compile during model load.\n\nPre-compiling hot schemas/regexes at worker boot moves Outlines compile\ncost out of cold-start TTFT. Each entry corresponds to one ``(kind, value)``\npair that would otherwise be compiled lazily on first request.\n\n``name`` is a human-readable label used in log lines and is otherwise\ninformational \u2014 the cache key is derived from ``value`` via\n:func:`~sie_server.types.grammar.hash_grammar`. ``kind`` must be one\nof :data:`PrewarmGrammarKind` (the narrower per-capability surface,\nnot the full :data:`GrammarKind` literal). ``value`` matches the\non-wire shape: a JSON Schema ``dict`` for ``kind: json_schema`` and\na regex/EBNF ``str`` for ``kind: regex`` / ``kind: ebnf``.",
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "json_schema",
+            "regex",
+            "ebnf"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "title": "Value"
+        }
+      },
+      "required": [
+        "name",
+        "kind",
+        "value"
+      ],
+      "title": "PrewarmGrammar",
+      "type": "object"
+    },
+    "ProfileAdaptiveBatching": {
+      "additionalProperties": false,
+      "description": "Per-model adaptive batching overrides.\n\nAll fields are optional. None means inherit from engine config or parent\nprofile. This enables fieldwise merge: a child profile can override one\nfield while inheriting the rest from the parent or engine defaults.",
+      "properties": {
+        "target_p50_ms": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Target P50 Ms"
+        },
+        "calibration_multiplier": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Calibration Multiplier"
+        },
+        "min_target_p50_ms": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Min Target P50 Ms"
+        },
+        "max_target_p50_ms": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Target P50 Ms"
+        },
+        "min_wait_ms": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Min Wait Ms"
+        },
+        "max_wait_ms": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Wait Ms"
+        },
+        "gain": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Gain"
+        },
+        "integral_gain": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Integral Gain"
+        }
+      },
+      "title": "ProfileAdaptiveBatching",
+      "type": "object"
+    },
+    "ProfileConfig": {
+      "additionalProperties": false,
+      "description": "Per-profile configuration.\n\n``kv_budget_tokens`` is the per-worker KV-cache budget\nused by the streaming admission controller to reject requests whose\n``input_tokens_estimate + max_new_tokens`` would push the worker\nover capacity. **Required** (positive int) for profiles whose\n``adapter_path`` resolves to a ``GenerationAdapter`` subclass \u2014\ni.e. for any profile attached to a model with ``tasks.generate``\nset. Calibration of the actual value lives in the calibration\nfollow-up; until then the model YAML may carry a sentinel\nplaceholder, but a missing / zero / negative value at config-load\ntime is a hard error pointing operators at the calibration\ndeliverable.\n\n``admission_enabled`` gates admission control per\nprofile. ``None`` defers to the ``SIE_GENERATION_ADMISSION`` env\nvar (default-off until the calibration ablation flips it); explicit\n``True`` / ``False`` wins unless the env var is set to ``on`` or\n``off`` (which override the profile in both directions).\n\n``max_output_tokens`` optionally overrides the model-level generation cap\nfor the materialized ``model:profile`` variant. This lets a long-context\nreasoning profile expose the checkpoint's supported decode budget without\nweakening the conservative cap on the bare model or shorter profiles.\n\n``chat_template_kwargs`` optionally overrides the same bounded model-level\n:class:`GenerateTask` defaults for the materialized ``model:profile``\nvariant. This keeps tokenizer render presets such as explicit thinking\nmode on the profile identity while preserving the bare model's safer\nnon-thinking default. The profile mapping is merged over the task mapping;\nrequest-time kwargs are still applied later by the generation processor.\n\n``grammar_profile`` optionally overrides the model-level grammar fallback\nfor this concrete profile. It must name a non-default sibling profile. The\ngateway uses it only for constrained requests, allowing a long-context or\nthinking profile to route to a non-speculative twin without losing its\ncontext window, hardware launch shape, or tokenizer mode.",
+      "properties": {
+        "extends": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Extends"
+        },
+        "max_batch_tokens": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Batch Tokens"
+        },
+        "compute_precision": {
+          "anyOf": [
+            {
+              "enum": [
+                "float16",
+                "bfloat16",
+                "float32"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Compute Precision"
+        },
+        "adapter_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Adapter Path"
+        },
+        "adapter_options": {
+          "$ref": "#/$defs/AdapterOptions",
+          "default": {
+            "loadtime": {},
+            "runtime": {}
+          }
+        },
+        "adaptive_batching": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProfileAdaptiveBatching"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "kv_budget_tokens": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Kv Budget Tokens"
+        },
+        "admission_enabled": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Admission Enabled"
+        },
+        "max_output_tokens": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Output Tokens"
+        },
+        "chat_template_kwargs": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Chat Template Kwargs"
+        },
+        "grammar_profile": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Grammar Profile"
+        }
+      },
+      "title": "ProfileConfig",
+      "type": "object"
+    },
+    "RoutingConfig": {
+      "additionalProperties": false,
+      "description": "How a request for the bare model name chooses between the local and the remote profile.\n\n``remote_only`` is the policy of a ``remote_backed`` model: every request is\nserved by its remote profile. Under ``fallback`` the local profile serves,\nand ``fallback_profile`` serves when local capacity refuses for one of\n``triggers`` before it accepts the work. Under ``threshold`` the remote\nprofile serves until demand stays above ``wake_above`` for ``window_s``,\nand serves again once demand stays below ``sleep_below`` for\n``cooldown_s``. A request that names a profile is never routed.",
+      "properties": {
+        "policy": {
+          "enum": [
+            "remote_only",
+            "fallback",
+            "threshold"
+          ],
+          "title": "Policy",
+          "type": "string"
+        },
+        "fallback_profile": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Fallback Profile"
+        },
+        "triggers": {
+          "anyOf": [
+            {
+              "items": {
+                "enum": [
+                  "provisioning",
+                  "model_loading",
+                  "saturated",
+                  "unhealthy"
+                ],
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Triggers"
+        },
+        "wake_above": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Wake Above"
+        },
+        "sleep_below": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sleep Below"
+        },
+        "window_s": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Window S"
+        },
+        "cooldown_s": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cooldown S"
+        }
+      },
+      "required": [
+        "policy"
+      ],
+      "title": "RoutingConfig",
+      "type": "object"
+    },
+    "ScoreTask": {
+      "additionalProperties": false,
+      "properties": {},
+      "title": "ScoreTask",
+      "type": "object"
+    },
+    "Tasks": {
+      "additionalProperties": false,
+      "properties": {
+        "encode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EncodeTask"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "score": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScoreTask"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "extract": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExtractTask"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "generate": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GenerateTask"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "title": "Tasks",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "sie_id": {
+      "title": "Sie Id",
+      "type": "string"
+    },
+    "hf_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Hf Id"
+    },
+    "hf_revision": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Hf Revision"
+    },
+    "hf_tokenizer_dependencies": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "title": "Hf Tokenizer Dependencies",
+      "type": "object"
+    },
+    "weights_path": {
+      "anyOf": [
+        {
+          "format": "path",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Weights Path"
+    },
+    "package_backed": {
+      "default": false,
+      "title": "Package Backed",
+      "type": "boolean"
+    },
+    "remote_backed": {
+      "default": false,
+      "title": "Remote Backed",
+      "type": "boolean"
+    },
+    "routing": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RoutingConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "pool": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Pool"
+    },
+    "inputs": {
+      "$ref": "#/$defs/InputModalities",
+      "default": {
+        "text": true,
+        "image": false,
+        "audio": false,
+        "video": false,
+        "document": false
+      }
+    },
+    "tasks": {
+      "$ref": "#/$defs/Tasks"
+    },
+    "max_sequence_length": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Max Sequence Length"
+    },
+    "profiles": {
+      "additionalProperties": {
+        "$ref": "#/$defs/ProfileConfig"
+      },
+      "title": "Profiles",
+      "type": "object"
+    }
+  },
+  "required": [
+    "sie_id",
+    "tasks",
+    "profiles"
+  ],
+  "title": "ModelConfig",
+  "type": "object"
+}

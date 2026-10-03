@@ -7,7 +7,7 @@
  * mirror the Python SDK's `sie_sdk.jobs`.
  */
 
-import { RequestError } from "./errors.js";
+import { MalformedChunkError, RequestError } from "./errors.js";
 import { unpackMessage } from "./msgpack.js";
 
 /** Job lifecycle state (queued → running → terminal). */
@@ -300,13 +300,38 @@ export interface JobStatus {
   output?: { kind?: string; chunks?: JobChunk[] };
 }
 
-/** One decoded per-item result retrieved from a finished job's chunk refs. */
+/**
+ * Stable per-item job failure (mirrors the Python SDK's `JobItemErrorDetail`).
+ *
+ * Decoded from the failed item's `WorkResult` in a chunk ref: `code` is the
+ * worker's `error_code` and `message` its free-text `error`. Either may be
+ * absent, so both keys are optional.
+ */
+export interface JobItemErrorDetail {
+  code?: string;
+  message?: string;
+}
+
+/**
+ * One decoded per-item result retrieved from a finished job's chunk refs.
+ *
+ * A `failed` chunk still writes a result ref carrying every item's
+ * `WorkResult` — successful siblings AND the failures — so `success`
+ * distinguishes them and `error` carries the failure reason when the item did
+ * not succeed.
+ */
 export interface JobResultItem {
-  id: string | null;
+  /**
+   * Per-item id echoed from the item's `WorkResult` (`id` or the wire's
+   * `work_item_id`). Ids may be numbers, so `0` is a valid id, not absent.
+   */
+  id: string | number | null;
   success: boolean | null;
   units: unknown;
   dims: number | null;
   dense: number[] | Float32Array | null;
+  /** Why this item failed; absent on a success (and on a bare-count chunk error). */
+  error?: JobItemErrorDetail;
 }
 
 /** A finished job's decoded results — the chunk refs read and unpacked. */
@@ -681,9 +706,43 @@ function denseInfo(dense: unknown): {
   return { dims: vector != null ? vector.length : null, vector };
 }
 
-/** Decode one WorkResult map (from a chunk ref) into a per-item result. */
-export function decodeResultItem(result: Record<string, unknown>): JobResultItem {
-  const payload = result.result_msgpack;
+/**
+ * Extract a per-item failure from a `WorkResult` map (`error`/`error_code`).
+ *
+ * The gateway writes every item's `WorkResult` into the chunk ref — including
+ * failures, each carrying its own `error` (free text) and `error_code` — so a
+ * caller can see WHY a specific item failed. Returns `undefined` when the item
+ * reports no failure signal (a success, or a bare-count chunk error with no
+ * per-item detail).
+ */
+function resultItemError(result: Record<string, unknown>): JobItemErrorDetail | undefined {
+  const code = result.error_code;
+  const message = result.error;
+  if (code == null && message == null) return undefined;
+  // Only strings reach the public shape. These values come off the wire
+  // unvalidated, and this path now reads FAILED chunks too, so a non-string
+  // `error_code` would otherwise be asserted straight through and violate
+  // `JobItemErrorDetail` for the caller.
+  const detail: JobItemErrorDetail = {};
+  if (typeof code === "string") detail.code = code;
+  if (typeof message === "string") detail.message = message;
+  // A failure signalled only by non-string junk still counts as a failure;
+  // returning `{}` keeps `error` present (truthy check) without lying about
+  // the code or message.
+  return detail;
+}
+
+/**
+ * Decode one WorkResult map (from a chunk ref) into a per-item result.
+ *
+ * A failed item carries no `result_msgpack` but does carry `success: false`
+ * plus an `error`/`error_code` pair, which surfaces as {@link
+ * JobResultItem.error}.
+ */
+export function decodeResultItem(result: unknown): JobResultItem {
+  const rec: Record<string, unknown> =
+    result != null && typeof result === "object" ? (result as Record<string, unknown>) : {};
+  const payload = rec.result_msgpack;
   let decoded: Record<string, unknown> | null = null;
   if (payload instanceof Uint8Array) {
     try {
@@ -694,18 +753,48 @@ export function decodeResultItem(result: Record<string, unknown>): JobResultItem
   }
   const dense = decoded && typeof decoded === "object" ? decoded.dense : null;
   const { dims, vector } = denseInfo(dense);
-  return {
-    id: (result.id as string) ?? null,
-    success: (result.success as boolean) ?? null,
-    units: result.units ?? null,
+  // The wire id is `work_item_id`; older/inline results use `id`. The bare-count
+  // chunk error names no ids, so a per-item id comes only from the item's own
+  // WorkResult (never fabricated). `??` (not `||`) so a falsy-but-valid id — the
+  // number `0` or an empty string — is preserved rather than replaced.
+  // Validated, not asserted: an id of `{}` or a `success` of `"false"` would
+  // otherwise be cast straight into the public shape. Anything off-contract
+  // degrades to `null` rather than misrepresenting the wire.
+  const rawId = rec.id ?? rec.work_item_id ?? null;
+  const id = typeof rawId === "string" || typeof rawId === "number" ? rawId : null;
+  const item: JobResultItem = {
+    id,
+    success: typeof rec.success === "boolean" ? rec.success : null,
+    units: rec.units ?? null,
     dims,
     dense: vector,
   };
+  const error = resultItemError(rec);
+  if (error !== undefined) item.error = error;
+  return item;
 }
 
-/** Decode a chunk ref's msgpack `WorkResult` array into per-item results. */
+/**
+ * Decode a chunk ref's msgpack `WorkResult` array into per-item results.
+ *
+ * @throws {MalformedChunkError} If the ref's bytes are not decodable msgpack or
+ * do not decode to a list. The caller confines this (one bad chunk cannot sink
+ * the whole `jobs.results()` call) and reports it as a decode fault, distinct
+ * from an unpublished chunk. Per-item decoding stays defensive (see
+ * {@link decodeResultItem}).
+ */
 export function decodeChunkBytes(raw: Uint8Array): JobResultItem[] {
-  const results = unpackMessage<unknown>(raw);
-  if (!Array.isArray(results)) return [];
-  return results.map((r) => decodeResultItem(r as Record<string, unknown>));
+  let results: unknown;
+  try {
+    results = unpackMessage<unknown>(raw);
+  } catch (error) {
+    // Normalize any decode failure to one signal.
+    throw new MalformedChunkError(
+      `chunk ref bytes are not decodable msgpack: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  if (!Array.isArray(results)) {
+    throw new MalformedChunkError("chunk ref bytes did not decode to a WorkResult array");
+  }
+  return results.map((r) => decodeResultItem(r));
 }

@@ -1,5 +1,6 @@
 sie_id: Salesforce/SFR-Embedding-Mistral
 hf_id: Salesforce/SFR-Embedding-Mistral
+hf_revision: 33a60fe7b5e00b9414981280c571e8a4f9f42f1b
 inputs:
   text: true
   image: false

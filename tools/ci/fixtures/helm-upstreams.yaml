@@ -1,0 +1,118 @@
+# Helm `upstreams` values, and the server upstreams file the chart must render
+# from them. tools/ci/tests/test_helm_render.py renders `values` and compares
+# the result with `rendered`; tools/ci/tests/test_helm_upstreams_contract.py
+# loads `rendered` with the server's own parser and requires it to use every
+# upstream field the server defines.
+values:
+  team-sie:
+    kind: sie
+    base_url: https://sie.example.internal/
+    api_key_secret:
+      name: team-sie-upstream
+      key: api-key
+    proxy_url: http://proxy.example.internal:3128
+    breaker: {failures: 3, window_s: 12.5, cooldown_s: 45}
+    rate_cap:
+      requests_per_minute: 600
+      max_concurrency: 32
+  open-host:
+    kind: openai
+    base_url: https://host.example.com/v1
+    rate_cap:
+      requests_per_minute: 300
+      max_concurrency: 16
+    endpoints: [embeddings, rerank]
+    set_params:
+      provider: {data_collection: deny}
+    strip_params: [user]
+rendered:
+  upstreams:
+    team-sie:
+      kind: sie
+      base_url: https://sie.example.internal/
+      api_key_secret: SIE_UPSTREAM_KEY_TEAM_SIE
+      proxy_url: http://proxy.example.internal:3128
+      breaker: {failures: 3, window_s: 12.5, cooldown_s: 45}
+      rate_cap:
+        requests_per_minute: 600
+        max_concurrency: 32
+    open-host:
+      kind: openai
+      base_url: https://host.example.com/v1
+      rate_cap:
+        requests_per_minute: 300
+        max_concurrency: 16
+      endpoints: [embeddings, rerank]
+      set_params:
+        provider: {data_collection: deny}
+      strip_params: [user]
+# URLs the chart and the server must judge alike: `tls: true` checks a
+# base_url, which needs https outside loopback, and `tls: false` a proxy_url.
+# tools/ci/tests/test_helm_render.py renders each one, and
+# tools/ci/tests/test_helm_upstreams_contract.py passes each one to the
+# server's validate_upstream_url.
+urls:
+  - {url: "https://sie.example.internal", tls: true, accepted: true}
+  - {url: "https://sie.example.internal:8443/v1", tls: true, accepted: true}
+  - {url: "https://sie.example.internal:65535", tls: true, accepted: true}
+  - {url: "https://sie.example.internal:0443", tls: true, accepted: true}
+  - {url: "https://12345", tls: true, accepted: true}
+  - {url: "https://[2001:db8::1]:9443", tls: true, accepted: true}
+  - {url: "http://127.0.0.1:9000", tls: true, accepted: true}
+  - {url: "http://127.255.255.255", tls: true, accepted: true}
+  - {url: "http://LOCALHOST:8080", tls: true, accepted: true}
+  - {url: "http://[::1]:8080", tls: true, accepted: true}
+  - {url: "https://sie.example.internal:65536", tls: true, accepted: false}
+  - {url: "https://sie.example.internal:99999", tls: true, accepted: false}
+  - {url: "https://[::1]:99999", tls: true, accepted: false}
+  - {url: "https://sie.example.internal:443:1", tls: true, accepted: false}
+  - {url: "https://%73ie.example.internal", tls: true, accepted: false}
+  - {url: "https://[fe80::1%25eth0]", tls: true, accepted: false}
+  - {url: "https://:443/v1", tls: true, accepted: false}
+  - {url: "https:///v1", tls: true, accepted: false}
+  - {url: "http://127.999.999.999:8080", tls: true, accepted: false}
+  - {url: "http://127.000.000.001", tls: true, accepted: false}
+  - {url: "https://256.0.0.1", tls: true, accepted: false}
+  - {url: "http://127.1", tls: true, accepted: false}
+  - {url: "http://sie.example.internal", tls: true, accepted: false}
+  - {url: "https://user@sie.example.internal", tls: true, accepted: false}
+  - {url: "https://sie.example.internal/v1?x=1", tls: true, accepted: false}
+  - {url: "ftp://sie.example.internal", tls: true, accepted: false}
+  - {url: "http://proxy.example.internal:3128", tls: false, accepted: true}
+  - {url: "http://proxy.example.internal:99999", tls: false, accepted: false}
+  - {url: "http://%70roxy.example.internal", tls: false, accepted: false}
+  - {url: "http://:3128", tls: false, accepted: false}
+# Upstream definitions the chart and the server must judge alike, merged over
+# `base_url: https://host.example.com/v1` and a rate cap. The same two tests
+# check them.
+definitions:
+  - {accepted: true, upstream: {kind: openai, endpoints: [chat, embeddings], strip_params: [user, seed], set_params: {provider: {data_collection: deny}, deep: {a: {a: {a: {a: {a: {a: {a: {a: deep}}}}}}}}}}}
+  - {accepted: true, upstream: {kind: openai, endpoints: [completions], set_params: {p0: 0, p1: 1, p2: 2, p3: 3, p4: 4, p5: 5, p6: 6, p7: 7, p8: 8, p9: 9, p10: 10, p11: 11, p12: 12, p13: 13, p14: 14, p15: 15, p16: 16, p17: 17, p18: 18, p19: 19, p20: 20, p21: 21, p22: 22, p23: 23, p24: 24, p25: 25, p26: 26, p27: 27, p28: 28, p29: 29, p30: 30, p31: 31}}}
+  - {accepted: false, upstream: {kind: openai}}
+  - {accepted: false, upstream: {kind: openai, endpoints: []}}
+  - {accepted: false, upstream: {kind: openai, endpoints: [chat, chat]}}
+  - {accepted: false, upstream: {kind: openai, endpoints: [images]}}
+  - {accepted: false, upstream: {kind: sie, endpoints: [chat]}}
+  - {accepted: false, upstream: {kind: sie, set_params: {temperature: 0}}}
+  - {accepted: false, upstream: {kind: openai, endpoints: [chat], set_params: {model: other}}}
+  - {accepted: false, upstream: {kind: openai, endpoints: [chat], set_params: {1st: x}}}
+  - {accepted: false, upstream: {kind: openai, endpoints: [chat], set_params: {deep: {a: {a: {a: {a: {a: {a: {a: {a: {a: deep}}}}}}}}}}}}
+  - {accepted: false, upstream: {kind: openai, endpoints: [chat], set_params: {p0: 0, p1: 1, p2: 2, p3: 3, p4: 4, p5: 5, p6: 6, p7: 7, p8: 8, p9: 9, p10: 10, p11: 11, p12: 12, p13: 13, p14: 14, p15: 15, p16: 16, p17: 17, p18: 18, p19: 19, p20: 20, p21: 21, p22: 22, p23: 23, p24: 24, p25: 25, p26: 26, p27: 27, p28: 28, p29: 29, p30: 30, p31: 31, p32: 32}}}
+  - {accepted: false, upstream: {kind: openai, endpoints: [chat], strip_params: [input]}}
+  - {accepted: false, upstream: {kind: openai, endpoints: [chat], strip_params: [has-dash]}}
+  - {accepted: false, upstream: {kind: openai, endpoints: [chat], strip_params: [user, user]}}
+  - {accepted: false, upstream: {kind: openai, endpoints: [chat], strip_params: [p0, p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p13, p14, p15, p16, p17, p18, p19, p20, p21, p22, p23, p24, p25, p26, p27, p28, p29, p30, p31, p32]}}
+  - {accepted: false, upstream: {kind: openai, endpoints: [chat], set_params: {user: x}, strip_params: [user]}}
+
+  - {accepted: true, upstream: {kind: sie, breaker: {failures: 3, window_s: 12.5, cooldown_s: 45}}}
+  - {accepted: true, upstream: {kind: sie, breaker: {}}}
+  - {accepted: true, upstream: {kind: sie, breaker: {window_s: 0.5}}}
+  - {accepted: false, upstream: {kind: sie, breaker: null}}
+  - {accepted: false, upstream: {kind: sie, breaker: {unexpected: 3}}}
+  - {accepted: false, upstream: {kind: sie, breaker: {failures: 0}}}
+  - {accepted: false, upstream: {kind: sie, breaker: {failures: 1.5}}}
+  - {accepted: false, upstream: {kind: sie, breaker: {failures: 1001}}}
+  - {accepted: false, upstream: {kind: sie, breaker: {window_s: -1}}}
+  - {accepted: false, upstream: {kind: sie, breaker: {window_s: 3601}}}
+  - {accepted: false, upstream: {kind: sie, breaker: {cooldown_s: 0}}}
+  - {accepted: false, upstream: {kind: sie, breaker: {cooldown_s: 3601}}}

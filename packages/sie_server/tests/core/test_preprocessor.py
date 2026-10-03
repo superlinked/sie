@@ -9,6 +9,7 @@ from PIL import Image
 from sie_server.core.prepared import ImagePayload, PreparedItem, TextPayload
 from sie_server.core.preprocessor import ImagePreprocessor, Preprocessor, TextPreprocessor
 from sie_server.core.preprocessor.image import OpenCLIPImagePreprocessor
+from sie_server.core.preprocessor.vision import DetectionPreprocessor
 from sie_server.types.inputs import ImageInput, InvalidMediaError, Item
 
 
@@ -626,8 +627,12 @@ class TestImagePreprocessor:
         indices = [item.original_index for item in batch.items]
         assert indices == [0, 1, 2]
 
-    def test_prepare_skips_items_without_images(self, mock_processor, mock_config, sample_image_bytes):
-        """Items without images are skipped."""
+    def test_prepare_text_items_pass_through_aligned(self, mock_processor, mock_config, sample_image_bytes):
+        """Text-only items yield empty-payload entries so the batch stays 1:1.
+
+        Dropping them starved the worker's per-item completion check and a
+        mixed text+image request hung forever (#3136).
+        """
         preprocessor = ImagePreprocessor(mock_processor, "test-model")
 
         items: list[Item] = [
@@ -638,10 +643,34 @@ class TestImagePreprocessor:
 
         batch = preprocessor.prepare(items, config=mock_config)
 
-        assert batch.size == 1
-        assert batch.total_cost == 1
-        # Only item at index 1 has image
-        assert batch.items[0].original_index == 1
+        assert batch.size == 3
+        assert batch.total_cost == 3
+        assert [item.original_index for item in batch.items] == [0, 1, 2]
+        assert batch.items[0].payload.pixel_values is None
+        assert batch.items[1].payload.pixel_values is not None
+        assert batch.items[2].payload.pixel_values is None
+
+    def test_collate_skips_text_passthrough_entries(self, mock_processor, mock_config, sample_image_bytes):
+        """collate() stacks only image payloads from a mixed prepared batch (#3136)."""
+        preprocessor = ImagePreprocessor(mock_processor, "test-model")
+        items: list[Item] = [
+            Item(text="text only"),
+            Item(images=[ImageInput(data=sample_image_bytes, format="jpeg")]),
+        ]
+        batch = preprocessor.prepare(items, config=mock_config)
+
+        result = preprocessor.collate(batch.items, device="cpu")
+
+        assert result["pixel_values"].shape[0] == 1
+
+    def test_collate_all_text_passthrough_returns_empty_tensor(self, mock_processor, mock_config):
+        """A prepared batch of only passthrough entries collates to an empty tensor."""
+        preprocessor = ImagePreprocessor(mock_processor, "test-model")
+        batch = preprocessor.prepare([Item(text="text only")], config=mock_config)
+
+        result = preprocessor.collate(batch.items, device="cpu")
+
+        assert result["pixel_values"].numel() == 0
 
     def test_prepare_rejects_str_image_data(self, mock_processor, mock_config):
         """Non-bytes image data raises a structured error (defense-in-depth, #1026).
@@ -656,6 +685,26 @@ class TestImagePreprocessor:
         items = [Item(images=[{"data": "aGVsbG8=", "format": "png"}])]
 
         with pytest.raises(InvalidMediaError, match="image data must be bytes, got str"):
+            preprocessor.prepare(items, config=mock_config)
+
+    def test_prepare_rejects_undecodable_image_bytes_naming_the_item(self, mock_processor, mock_config):
+        """Valid base64-decoded non-image bytes raise a typed error naming the item.
+
+        PIL's UnidentifiedImageError is an OSError, which missed the
+        ValueError -> 400 INVALID_INPUT mapping and surfaced as a 500
+        INFERENCE_ERROR leaking a BytesIO repr. decode_image maps it to
+        InvalidMediaError with the msgspec-style JSON path.
+        """
+        preprocessor = ImagePreprocessor(mock_processor, "test-model")
+        items = [
+            Item(text="fine"),
+            Item(images=[ImageInput(data=b"valid base64, not an image", format="png")]),
+        ]
+
+        with pytest.raises(
+            InvalidMediaError,
+            match=r"image data is not a decodable image - at `\$\.items\[1\]\.images\[0\]\.data`",
+        ):
             preprocessor.prepare(items, config=mock_config)
 
     def test_prepare_rgba_conversion(self, mock_processor, mock_config):
@@ -790,8 +839,19 @@ class TestOpenCLIPImagePreprocessor:
         assert item.payload.pixel_values[0, 0, 0].item() == 640.0
         assert item.payload.pixel_values[1, 0, 0].item() == 480.0
 
-    def test_prepare_skips_text_only_items(self, fake_val_preproc, mock_config, sample_image_bytes):
-        """Items without images are skipped; original_index of image items is preserved."""
+    def test_prepare_rejects_undecodable_image_bytes_naming_the_item(self, fake_val_preproc, mock_config):
+        """Same typed-400 contract as ImagePreprocessor for the open_clip path."""
+        preprocessor = OpenCLIPImagePreprocessor(fake_val_preproc, "test-model")
+        items = [Item(images=[ImageInput(data=b"valid base64, not an image", format="png")])]
+
+        with pytest.raises(
+            InvalidMediaError,
+            match=r"image data is not a decodable image - at `\$\.items\[0\]\.images\[0\]\.data`",
+        ):
+            preprocessor.prepare(items, config=mock_config)
+
+    def test_prepare_text_items_pass_through_aligned(self, fake_val_preproc, mock_config, sample_image_bytes):
+        """Text-only items yield empty-payload entries so the batch stays 1:1 (#3136)."""
         preprocessor = OpenCLIPImagePreprocessor(fake_val_preproc, "test-model")
         items: list[Item] = [
             Item(text="text only"),
@@ -801,9 +861,25 @@ class TestOpenCLIPImagePreprocessor:
 
         batch = preprocessor.prepare(items, config=mock_config)
 
-        assert batch.size == 1
-        assert batch.total_cost == 1
-        assert batch.items[0].original_index == 1
+        assert batch.size == 3
+        assert batch.total_cost == 3
+        assert [item.original_index for item in batch.items] == [0, 1, 2]
+        assert batch.items[0].payload.pixel_values is None
+        assert batch.items[1].payload.pixel_values is not None
+        assert batch.items[2].payload.pixel_values is None
+
+    def test_collate_skips_text_passthrough_entries(self, fake_val_preproc, mock_config, sample_image_bytes):
+        """collate() stacks only image payloads from a mixed prepared batch (#3136)."""
+        preprocessor = OpenCLIPImagePreprocessor(fake_val_preproc, "test-model")
+        items: list[Item] = [
+            Item(text="text only"),
+            Item(images=[ImageInput(data=sample_image_bytes, format="jpeg")]),
+        ]
+        batch = preprocessor.prepare(items, config=mock_config)
+
+        result = preprocessor.collate(batch.items, device="cpu")
+
+        assert result["pixel_values"].shape[0] == 1
 
     def test_prepare_rgba_conversion(self, fake_val_preproc, mock_config):
         """RGBA images are converted to RGB before val_preproc."""
@@ -1046,3 +1122,39 @@ class TestNemoColEmbedPreprocessor:
         assert result["pixel_values"].numel() == 0
         assert result["input_ids"].numel() == 0
         assert result["attention_mask"].numel() == 0
+
+
+class TestDetectionPreprocessorMaxSide:
+    """An oversized photo is shrunk before the image processor, and boxes still map to the pixels sent."""
+
+    @staticmethod
+    def _jpeg(width: int, height: int) -> bytes:
+        buf = io.BytesIO()
+        Image.new("RGB", (width, height), (120, 40, 200)).save(buf, "JPEG")
+        return buf.getvalue()
+
+    def _prepare(self, width: int, height: int, max_side: int | None) -> tuple[tuple[int, int], tuple[int, int]]:
+        seen: dict[str, tuple[int, int]] = {}
+
+        def fake_processor(*, images, return_tensors):
+            seen["size"] = images.size
+            return {"pixel_values": torch.zeros(1, 3, 4, 4)}
+
+        pre = DetectionPreprocessor(image_processor=fake_processor, model_name="m", max_side=max_side)
+        item = Item(images=[{"data": self._jpeg(width, height), "format": "jpeg"}])
+        batch = pre.prepare([item], config=MagicMock())
+        return seen["size"], batch.items[0].payload.original_size
+
+    def test_large_photo_is_shrunk_but_keeps_its_original_size(self) -> None:
+        processed, original = self._prepare(8192, 1728, 1920)
+        assert processed == (1920, 405)
+        assert original == (8192, 1728)
+
+    def test_photo_within_the_cap_is_untouched(self) -> None:
+        processed, original = self._prepare(1920, 1080, 1920)
+        assert processed == (1920, 1080)
+        assert original == (1920, 1080)
+
+    def test_no_cap_keeps_the_old_behaviour(self) -> None:
+        processed, _ = self._prepare(4000, 3000, None)
+        assert processed == (4000, 3000)

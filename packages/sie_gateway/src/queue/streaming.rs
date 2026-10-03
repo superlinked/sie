@@ -27,9 +27,11 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, oneshot, Notify};
 
+use crate::http_error::openai_code;
 use crate::observability::metrics::{
     self as telemetry, GenerationEvent, GenerationEventOutcome, GenerationEventReason,
 };
+use crate::queue::lane_admission::LaneReservation;
 
 /// Broadcast channel capacity for the per-request SSE chunk tap.
 ///
@@ -105,6 +107,10 @@ pub struct ChunkEnvelope {
     /// chunk; older and self-host workers omit it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_identity_sha256: Option<String>,
+    /// Runtime-independent release/deployment binding. Managed workers stamp
+    /// it atomically with the full execution identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_binding_sha256: Option<String>,
 }
 
 fn is_zero_u32(v: &u32) -> bool {
@@ -170,7 +176,7 @@ fn default_tool_call_type() -> String {
 }
 
 /// Wire-level allowlist for ``finish_reason`` values produced by the
-/// worker. OpenAI canonical values plus the SIE-internal additions for
+/// worker. OpenAI canonical values plus the gateway-specific additions for
 /// gateway-driven cancellation and error surfacing. Keep in lockstep with
 /// ``GenerationChunk.finish_reason`` in the Python adapter.
 fn is_known_finish_reason(reason: &str) -> bool {
@@ -187,6 +193,7 @@ fn is_known_finish_reason(reason: &str) -> bool {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(from = "WorkerUsageBlock")]
 pub struct UsageBlock {
     #[serde(default)]
     pub prompt_tokens: u32,
@@ -194,6 +201,69 @@ pub struct UsageBlock {
     pub completion_tokens: u32,
     #[serde(default)]
     pub total_tokens: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub images: Option<u32>,
+    /// Host-measured GPU time for a sealed custom-model request. This is
+    /// absent from catalog-worker terminals and older worker versions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu_second: Option<u64>,
+    /// OpenAI-compatible prompt-token breakdown. Absent when the worker's
+    /// engine does not report prefix-cache hits (and from older workers).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_tokens_details: Option<PromptTokensDetails>,
+}
+
+impl UsageBlock {
+    /// Prompt tokens served from the engine's prefix cache, clamped to
+    /// `prompt_tokens`. `None` when the worker did not report a count.
+    pub fn cached_prompt_tokens(&self) -> Option<u32> {
+        self.prompt_tokens_details
+            .as_ref()
+            .map(|details| details.cached_tokens.min(self.prompt_tokens))
+    }
+}
+
+/// The usage block exactly as a worker sent it. Decoding goes through this so
+/// the cached count is clamped to `prompt_tokens` once, before any surface
+/// serializes the block back out.
+#[derive(Deserialize)]
+struct WorkerUsageBlock {
+    #[serde(default)]
+    prompt_tokens: u32,
+    #[serde(default)]
+    completion_tokens: u32,
+    #[serde(default)]
+    total_tokens: u32,
+    #[serde(default)]
+    images: Option<u32>,
+    #[serde(default)]
+    gpu_second: Option<u64>,
+    #[serde(default)]
+    prompt_tokens_details: Option<PromptTokensDetails>,
+}
+
+impl From<WorkerUsageBlock> for UsageBlock {
+    fn from(raw: WorkerUsageBlock) -> Self {
+        let prompt_tokens_details = raw
+            .prompt_tokens_details
+            .map(|details| PromptTokensDetails {
+                cached_tokens: details.cached_tokens.min(raw.prompt_tokens),
+            });
+        Self {
+            prompt_tokens: raw.prompt_tokens,
+            completion_tokens: raw.completion_tokens,
+            total_tokens: raw.total_tokens,
+            images: raw.images,
+            gpu_second: raw.gpu_second,
+            prompt_tokens_details,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PromptTokensDetails {
+    #[serde(default)]
+    pub cached_tokens: u32,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -202,9 +272,144 @@ pub struct ChunkError {
     pub code: String,
     #[serde(default)]
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub param: Option<String>,
+    /// Operator-configured OOM retry hint. Additive for mixed-version
+    /// gateway/worker rollouts; absent from older workers and non-capacity
+    /// errors. The gateway validates code + bounds before trusting it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after_s: Option<u16>,
 }
 
+impl ChunkError {
+    /// Classify the worker discriminator before it crosses a public edge.
+    pub(crate) fn client_safe_code(&self) -> &'static str {
+        client_safe_worker_error_code(&self.code)
+    }
+
+    /// Accept only the server config's validated 1..=60 second domain and
+    /// only on the RESOURCE_EXHAUSTED error class that owns this hint.
+    pub(crate) fn validated_retry_after_s(&self) -> Option<u16> {
+        match (self.code.as_str(), self.retry_after_s) {
+            ("RESOURCE_EXHAUSTED", Some(value @ 1..=60)) => Some(value),
+            _ => None,
+        }
+    }
+
+    /// Treat worker terminal messages as untrusted. Expected typed/client
+    /// errors remain exact; generic backend and grammar-internal failures use
+    /// stable public text so mixed-version workers cannot disclose internals.
+    pub(crate) fn client_safe_message(&self) -> &str {
+        client_safe_worker_error_message(&self.code, &self.message)
+    }
+
+    /// Treat worker terminal parameters as untrusted. Only the typed
+    /// unsupported-field contract and its finite public field set currently
+    /// own a public parameter; every other code or value fails closed until
+    /// explicitly admitted here.
+    pub(crate) fn client_safe_param(&self) -> Option<&str> {
+        client_safe_worker_error_param(&self.code, self.param.as_deref())
+    }
+}
+
+/// Terminal model load failure (non-retryable). Matches the server's HTTP 502
+/// contract so the SDK short-circuits before exhausting its loading retry budget.
+pub(crate) const MODEL_LOAD_FAILED_ERROR_CODE: &str = "MODEL_LOAD_FAILED";
+pub(crate) const MODEL_LOAD_FAILED_PUBLIC_MESSAGE: &str = "The requested model failed to load.";
+pub(crate) const UNKNOWN_WORKER_ERROR_PUBLIC_MESSAGE: &str =
+    "Generation terminated with an upstream error.";
+
+/// Return the closed public discriminator for a worker terminal error.
+///
+/// Worker error metadata is untrusted even after the queue has bound it to a
+/// request. Every reviewed code maps to its canonical public spelling; future,
+/// malformed, or secret-bearing values collapse to the generic terminal code.
+pub(crate) fn client_safe_worker_error_code(code: &str) -> &'static str {
+    match code {
+        "inference_error" => "inference_error",
+        "grammar_compile_failed" => "grammar_compile_failed",
+        "INPUT_TOO_LONG" => "INPUT_TOO_LONG",
+        "MODEL_LOADING" => "MODEL_LOADING",
+        "MODEL_OUTPUT_PARSE_ERROR" => "MODEL_OUTPUT_PARSE_ERROR",
+        "RESOURCE_EXHAUSTED" => "RESOURCE_EXHAUSTED",
+        "COLD_START_RATE_LIMITED" => "COLD_START_RATE_LIMITED",
+        "LORA_LOADING" => "LORA_LOADING",
+        MODEL_LOAD_FAILED_ERROR_CODE => MODEL_LOAD_FAILED_ERROR_CODE,
+        "PAYLOAD_TOO_LARGE" => "PAYLOAD_TOO_LARGE",
+        openai_code::CANCELLED => openai_code::CANCELLED,
+        openai_code::CONTEXT_EXCEEDED => openai_code::CONTEXT_EXCEEDED,
+        openai_code::EMPTY_MODEL_OUTPUT => openai_code::EMPTY_MODEL_OUTPUT,
+        openai_code::INVALID_GUARD_VERDICT => openai_code::INVALID_GUARD_VERDICT,
+        "grammar_invalid" => "grammar_invalid",
+        "invalid_request" => "invalid_request",
+        "parallel_tool_calls_violated" => "parallel_tool_calls_violated",
+        "rate_limit_exceeded" => "rate_limit_exceeded",
+        "tool_call_parse_error" => "tool_call_parse_error",
+        "transport_failure" => "transport_failure",
+        "unsupported_field" => "unsupported_field",
+        _ => "inference_error",
+    }
+}
+
+pub(crate) fn client_safe_worker_error_message<'a>(code: &str, message: &'a str) -> &'a str {
+    match client_safe_worker_error_code(code) {
+        MODEL_LOAD_FAILED_ERROR_CODE => MODEL_LOAD_FAILED_PUBLIC_MESSAGE,
+        "inference_error" if code == "inference_error" => "internal error during generation",
+        "inference_error" => UNKNOWN_WORKER_ERROR_PUBLIC_MESSAGE,
+        "grammar_compile_failed" => "internal error compiling grammar",
+        _ => message,
+    }
+}
+
+pub(crate) fn client_safe_worker_error_param<'a>(
+    code: &str,
+    param: Option<&'a str>,
+) -> Option<&'a str> {
+    match (client_safe_worker_error_code(code), param) {
+        ("unsupported_field", Some(param))
+            if CLIENT_SAFE_UNSUPPORTED_GENERATION_PARAMS.contains(&param) =>
+        {
+            Some(param)
+        }
+        _ => None,
+    }
+}
+
+/// Public generation fields that an adapter may reject through
+/// `GenerationUnsupportedFieldError`, plus the response-mode `stream` flag
+/// supplied separately to `GenerationAdapter::preflight_generate`. Keeping
+/// this finite prevents a worker from selecting the otherwise-safe
+/// `unsupported_field` code to disclose an arbitrary parameter string.
+const CLIENT_SAFE_UNSUPPORTED_GENERATION_PARAMS: &[&str] = &[
+    "prompt",
+    "max_new_tokens",
+    "temperature",
+    "top_p",
+    "stop",
+    "frequency_penalty",
+    "presence_penalty",
+    "top_k",
+    "repetition_penalty",
+    "min_new_tokens",
+    "grammar",
+    "seed",
+    "logit_bias",
+    "logprobs",
+    "top_logprobs",
+    "images",
+    "videos",
+    "stream",
+];
+
 /// Outcome delivered to the HTTP handler once a terminal chunk arrives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamOutcomeOrigin {
+    /// A real worker terminal was first copied to the ordered chunk tap.
+    WorkerTerminal,
+    /// The gateway terminated transport state without a worker terminal.
+    GatewaySynthetic,
+}
+
 #[derive(Debug)]
 pub struct StreamOutcome {
     pub text: String,
@@ -214,6 +419,7 @@ pub struct StreamOutcome {
     pub ttft_ms: Option<f64>,
     pub tpot_ms: Option<f64>,
     pub error: Option<ChunkError>,
+    pub origin: StreamOutcomeOrigin,
     /// Aggregated OpenAI tool calls observed across the request's
     /// chunk stream. ``None`` when no tool calls were emitted. Each
     /// entry is the fully-assembled ``{id, type, function: {name,
@@ -233,6 +439,7 @@ pub struct StreamOutcome {
     pub candidates: Vec<CandidateData>,
     pub executed_bundle_config_hash: Option<String>,
     pub execution_identity_sha256: Option<String>,
+    pub execution_binding_sha256: Option<String>,
 }
 
 /// Fully-assembled tool call ready to surface on the non-streaming
@@ -355,6 +562,8 @@ pub struct StreamCollector {
     /// non-attestable while preserving ordinary streaming compatibility.
     execution_identity_sha256: Option<String>,
     execution_identity_consistent: bool,
+    execution_binding_sha256: Option<String>,
+    execution_binding_consistent: bool,
     /// Attempt id of the most recently abandoned attempt. Usually set by
     /// [`Self::bump_attempt_generation`] from the old ``current_attempt_id``;
     /// NAK-driven republish may also fill it from the NAK envelope when the
@@ -388,6 +597,11 @@ pub struct StreamCollector {
     /// than surfacing an empty body. Overwritten on every bump; a
     /// successful new attempt (no rewind) simply never reads it.
     snapshot: Option<AttemptSnapshot>,
+    /// Per-lane in-flight reservation, released when this collector drops.
+    /// Installed by the publish path after the lane admission check; `None`
+    /// on a collector built outside it. See
+    /// [`crate::queue::lane_admission`].
+    pub lane_reservation: Option<LaneReservation>,
 }
 
 /// State saved by ``bump_attempt_generation`` so a failed-publish
@@ -405,6 +619,8 @@ struct AttemptSnapshot {
     last_applied_seq: Option<u32>,
     execution_identity_sha256: Option<String>,
     execution_identity_consistent: bool,
+    execution_binding_sha256: Option<String>,
+    execution_binding_consistent: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -443,9 +659,12 @@ impl StreamCollector {
             logprobs: Vec::new(),
             execution_identity_sha256: None,
             execution_identity_consistent: true,
+            execution_binding_sha256: None,
+            execution_binding_consistent: true,
             abandoned_attempt_id: None,
             client_disconnected: Arc::new(AtomicBool::new(false)),
             snapshot: None,
+            lane_reservation: None,
         }
     }
 
@@ -519,6 +738,8 @@ impl StreamCollector {
             last_applied_seq: self.last_applied_seq,
             execution_identity_sha256: self.execution_identity_sha256.clone(),
             execution_identity_consistent: self.execution_identity_consistent,
+            execution_binding_sha256: self.execution_binding_sha256.clone(),
+            execution_binding_consistent: self.execution_binding_consistent,
         });
         // Record the abandoned attempt id so the ``None`` latch arm of
         // ``apply`` refuses to re-latch on a stale leftover chunk from
@@ -537,6 +758,8 @@ impl StreamCollector {
         self.output_event_count = 0;
         self.execution_identity_sha256 = None;
         self.execution_identity_consistent = true;
+        self.execution_binding_sha256 = None;
+        self.execution_binding_consistent = true;
         // ``chunks`` / ``tool_calls_by_index`` were already emptied by
         // the ``std::mem::take`` above. Dropping the partial text from
         // the abandoned attempt prevents a mid-stream republish
@@ -594,6 +817,8 @@ impl StreamCollector {
             self.last_applied_seq = snap.last_applied_seq;
             self.execution_identity_sha256 = snap.execution_identity_sha256;
             self.execution_identity_consistent = snap.execution_identity_consistent;
+            self.execution_binding_sha256 = snap.execution_binding_sha256;
+            self.execution_binding_consistent = snap.execution_binding_consistent;
         } else {
             // Defensive: a rewind with no matching snapshot (should not
             // happen — every rewind follows a bump). Fall back to the
@@ -607,6 +832,8 @@ impl StreamCollector {
             self.output_event_count = 0;
             self.execution_identity_sha256 = None;
             self.execution_identity_consistent = true;
+            self.execution_binding_sha256 = None;
+            self.execution_binding_consistent = true;
         }
         // The abandoned-id guard is meaningless once we have rewound
         // back onto the prior attempt: clear it so the restored
@@ -759,6 +986,23 @@ impl StreamCollector {
             }
         }
 
+        match chunk.execution_binding_sha256.as_ref() {
+            Some(value) if is_lower_sha256(value) && self.execution_binding_consistent => {
+                if let Some(current) = self.execution_binding_sha256.as_ref() {
+                    if current != value {
+                        self.execution_binding_consistent = false;
+                        self.execution_binding_sha256 = None;
+                    }
+                } else {
+                    self.execution_binding_sha256 = Some(value.clone());
+                }
+            }
+            _ => {
+                self.execution_binding_consistent = false;
+                self.execution_binding_sha256 = None;
+            }
+        }
+
         let now = Instant::now();
         // Arm ``first_chunk_at`` on the first applied chunk that carries
         // ANY payload — text OR tool-call deltas. Tool-call deltas ride
@@ -782,13 +1026,32 @@ impl StreamCollector {
         }
         self.last_chunk_at = Some(now);
 
-        // Fan out to the SSE tap before mutating ``chunks`` so the
-        // forwarded envelope reflects the wire-level chunk (including
-        // an empty terminal ``text_delta``). The clone is per-chunk
-        // and only happens when a tap is installed; non-streaming
-        // requests pay nothing extra.
+        // Fan out to the SSE tap before mutating ``chunks``. Terminal
+        // execution evidence is authoritative only when both digests
+        // were valid and unanimous across the complete stream.
         if let Some(tap) = self.chunk_tap.as_ref() {
-            let _ = tap.send(chunk.clone());
+            let mut tapped_chunk = chunk.clone();
+            if tapped_chunk.done {
+                let evidence =
+                    if self.execution_identity_consistent && self.execution_binding_consistent {
+                        self.execution_identity_sha256
+                            .clone()
+                            .zip(self.execution_binding_sha256.clone())
+                    } else {
+                        None
+                    };
+                match evidence {
+                    Some((identity, binding)) => {
+                        tapped_chunk.execution_identity_sha256 = Some(identity);
+                        tapped_chunk.execution_binding_sha256 = Some(binding);
+                    }
+                    None => {
+                        tapped_chunk.execution_identity_sha256 = None;
+                        tapped_chunk.execution_binding_sha256 = None;
+                    }
+                }
+            }
+            let _ = tap.send(tapped_chunk);
         }
 
         if !chunk.text_delta.is_empty() {
@@ -901,6 +1164,10 @@ impl StreamCollector {
             Some(self.logprobs.clone())
         };
 
+        let complete_execution_evidence = self.execution_identity_consistent
+            && self.execution_binding_consistent
+            && self.execution_identity_sha256.is_some()
+            && self.execution_binding_sha256.is_some();
         Some(StreamOutcome {
             text,
             finish_reason: meta.finish_reason.clone(),
@@ -909,13 +1176,16 @@ impl StreamCollector {
             ttft_ms,
             tpot_ms,
             error: meta.error.clone(),
+            origin: StreamOutcomeOrigin::WorkerTerminal,
             tool_calls,
             logprobs,
             candidates: meta.candidates.clone(),
             executed_bundle_config_hash: meta.executed_bundle_config_hash.clone(),
-            execution_identity_sha256: self
-                .execution_identity_consistent
+            execution_identity_sha256: complete_execution_evidence
                 .then(|| self.execution_identity_sha256.clone())
+                .flatten(),
+            execution_binding_sha256: complete_execution_evidence
+                .then(|| self.execution_binding_sha256.clone())
                 .flatten(),
         })
     }
@@ -977,6 +1247,8 @@ pub struct NakEnvelope {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
 
     fn _make_chunk(attempt: &str, seq: u32, text: &str, done: bool) -> ChunkEnvelope {
@@ -991,6 +1263,9 @@ mod tests {
             finish_reason: if done { Some("stop".to_string()) } else { None },
             usage: if done {
                 Some(UsageBlock {
+                    gpu_second: None,
+                    images: None,
+                    prompt_tokens_details: None,
                     prompt_tokens: 5,
                     completion_tokens: 3,
                     total_tokens: 8,
@@ -1006,6 +1281,7 @@ mod tests {
             choice_index: 0,
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
+            execution_binding_sha256: None,
         }
     }
 
@@ -1023,6 +1299,8 @@ mod tests {
         term.error = Some(ChunkError {
             code: "MODEL_LOADING".to_string(),
             message: "Model 'Qwen/Qwen3-4B-Instruct-2507' is loading; retry later.".to_string(),
+            param: None,
+            retry_after_s: None,
         });
 
         assert_eq!(c.apply(term), ChunkApplied::Terminal);
@@ -1033,6 +1311,244 @@ mod tests {
         assert_eq!(outcome.attempt_id, "req-load.0:model-loading");
         assert_eq!(err.code, "MODEL_LOADING");
         assert!(err.message.contains("retry later"));
+    }
+
+    #[test]
+    fn test_resource_exhausted_retry_hint_is_additive_and_fail_closed() {
+        let decode = |retry_after_s: serde_json::Value, code: &str| {
+            let bytes = rmp_serde::to_vec_named(&serde_json::json!({
+                "kind": "chunk",
+                "request_id": "req-retry",
+                "done": true,
+                "error": {
+                    "code": code,
+                    "message": "capacity",
+                    "retry_after_s": retry_after_s,
+                },
+            }))
+            .expect("encode test envelope");
+            rmp_serde::from_slice::<ChunkEnvelope>(&bytes)
+        };
+
+        let valid = decode(serde_json::json!(12), "RESOURCE_EXHAUSTED").expect("valid hint");
+        assert_eq!(valid.error.unwrap().validated_retry_after_s(), Some(12));
+
+        for value in [serde_json::json!(0), serde_json::json!(61)] {
+            let decoded = decode(value, "RESOURCE_EXHAUSTED").expect("typed but out-of-range hint");
+            assert_eq!(decoded.error.unwrap().validated_retry_after_s(), None);
+        }
+        let wrong_code = decode(serde_json::json!(12), "MODEL_LOADING").expect("typed hint");
+        assert_eq!(wrong_code.error.unwrap().validated_retry_after_s(), None);
+
+        for value in [
+            serde_json::json!(-1),
+            serde_json::json!("12"),
+            serde_json::json!(1.5),
+            serde_json::json!(true),
+        ] {
+            assert!(decode(value, "RESOURCE_EXHAUSTED").is_err());
+        }
+
+        let explicit_null = decode(serde_json::Value::Null, "RESOURCE_EXHAUSTED")
+            .expect("explicit null remains backwards compatible");
+        assert_eq!(explicit_null.error.unwrap().validated_retry_after_s(), None);
+
+        let legacy_bytes = rmp_serde::to_vec_named(&serde_json::json!({
+            "kind": "chunk",
+            "request_id": "req-legacy",
+            "done": true,
+            "error": {"code": "RESOURCE_EXHAUSTED", "message": "capacity"},
+        }))
+        .expect("encode legacy envelope");
+        let legacy: ChunkEnvelope =
+            rmp_serde::from_slice(&legacy_bytes).expect("legacy worker decodes");
+        assert_eq!(legacy.error.unwrap().validated_retry_after_s(), None);
+    }
+
+    #[test]
+    fn test_terminal_usage_carries_optional_gpu_seconds() {
+        let decode = |gpu_second: Option<serde_json::Value>| {
+            let mut usage = serde_json::json!({
+                "prompt_tokens": 3,
+                "completion_tokens": 5,
+                "total_tokens": 8,
+            });
+            if let Some(value) = gpu_second {
+                usage["gpu_second"] = value;
+            }
+            let bytes = rmp_serde::to_vec_named(&usage).expect("encode usage block");
+            rmp_serde::from_slice::<UsageBlock>(&bytes)
+        };
+
+        let measured = decode(Some(serde_json::json!(7))).expect("measured GPU time decodes");
+        assert_eq!(measured.gpu_second, Some(7));
+        assert_eq!(serde_json::to_value(measured).unwrap()["gpu_second"], 7);
+
+        let legacy = decode(None).expect("older usage block decodes");
+        assert_eq!(legacy.gpu_second, None);
+        assert!(serde_json::to_value(legacy)
+            .unwrap()
+            .get("gpu_second")
+            .is_none());
+
+        for invalid in [
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+            serde_json::json!(true),
+        ] {
+            assert!(decode(Some(invalid)).is_err());
+        }
+    }
+
+    #[test]
+    fn test_worker_error_public_contract_fails_closed_for_parameters() {
+        let public_message = "PUBLIC_MESSAGE";
+        let secret_param = "SENSITIVE_PARAM_SENTINEL";
+        let cases = [
+            ("unsupported_field", "top_k", public_message, Some("top_k")),
+            ("unsupported_field", secret_param, public_message, None),
+            ("invalid_request", "top_k", public_message, None),
+            (
+                "inference_error",
+                secret_param,
+                "internal error during generation",
+                None,
+            ),
+            (
+                "grammar_compile_failed",
+                secret_param,
+                "internal error compiling grammar",
+                None,
+            ),
+            (
+                "future_adapter_error",
+                "top_k",
+                UNKNOWN_WORKER_ERROR_PUBLIC_MESSAGE,
+                None,
+            ),
+        ];
+
+        for (code, param, expected_message, expected_param) in cases {
+            let error = ChunkError {
+                code: code.to_string(),
+                message: public_message.to_string(),
+                param: Some(param.to_string()),
+                retry_after_s: None,
+            };
+            assert_eq!(error.client_safe_message(), expected_message, "{code}");
+            assert_eq!(error.client_safe_param(), expected_param, "{code}");
+        }
+
+        for param in CLIENT_SAFE_UNSUPPORTED_GENERATION_PARAMS {
+            assert_eq!(
+                client_safe_worker_error_param("unsupported_field", Some(param)),
+                Some(*param),
+                "the reviewed public generation field set must stay synchronized"
+            );
+        }
+    }
+
+    #[test]
+    fn test_client_safe_unsupported_generation_params_are_python_safe() {
+        let python_source =
+            include_str!("../../../sie_server/src/sie_server/adapters/_generation_base.py");
+        let declaration = [
+            "_CLIENT_SAFE_UNSUPPORTED_GENERATION_PARAMS = frozenset(",
+            "_CLIENT_SAFE_GENERATION_PARAMS = frozenset(",
+        ]
+        .into_iter()
+        .find_map(|marker| python_source.split_once(marker).map(|(_, suffix)| suffix))
+        .expect("Python generation parameter allowlist must exist");
+        let declaration = declaration
+            .split_once('{')
+            .expect("Python generation parameter allowlist must open")
+            .1
+            .split_once('}')
+            .expect("Python generation parameter allowlist must close")
+            .0;
+        let python_params: BTreeSet<_> = declaration
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix('"')?.strip_suffix("\","))
+            .collect();
+        let rust_params: BTreeSet<_> = CLIENT_SAFE_UNSUPPORTED_GENERATION_PARAMS
+            .iter()
+            .copied()
+            .collect();
+
+        assert!(rust_params.contains("stream"));
+        assert!(rust_params.is_subset(&python_params));
+    }
+
+    #[test]
+    fn test_every_code_the_worker_publishes_as_client_safe_is_kept() {
+        let python_source =
+            include_str!("../../../sie_server/src/sie_server/adapters/_generation_base.py");
+        let declaration = python_source
+            .split_once("_CLIENT_SAFE_GENERATION_ERROR_CODES = frozenset(")
+            .expect("Python client-safe generation error codes must exist")
+            .1
+            .split_once('{')
+            .expect("Python client-safe generation error codes must open")
+            .1
+            .split_once('}')
+            .expect("Python client-safe generation error codes must close")
+            .0;
+        let python_codes: BTreeSet<_> = declaration
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix('"')?.strip_suffix("\","))
+            .collect();
+
+        assert!(python_codes.contains("INPUT_TOO_LONG"));
+        for code in python_codes {
+            assert_eq!(client_safe_worker_error_code(code), code, "{code}");
+        }
+    }
+
+    #[test]
+    fn test_worker_error_public_contract_preserves_only_sanctioned_codes() {
+        for code in [
+            "inference_error",
+            "grammar_compile_failed",
+            "INPUT_TOO_LONG",
+            "MODEL_LOADING",
+            "MODEL_OUTPUT_PARSE_ERROR",
+            "RESOURCE_EXHAUSTED",
+            "COLD_START_RATE_LIMITED",
+            "LORA_LOADING",
+            MODEL_LOAD_FAILED_ERROR_CODE,
+            "PAYLOAD_TOO_LARGE",
+            "cancelled",
+            "context_exceeded",
+            "empty_model_output",
+            "invalid_guard_verdict",
+            "grammar_invalid",
+            "invalid_request",
+            "parallel_tool_calls_violated",
+            "rate_limit_exceeded",
+            "tool_call_parse_error",
+            "transport_failure",
+            "unsupported_field",
+        ] {
+            assert_eq!(client_safe_worker_error_code(code), code, "{code}");
+        }
+        assert_eq!(
+            client_safe_worker_error_code("SENSITIVE_WORKER_ERROR_CODE_SENTINEL"),
+            "inference_error"
+        );
+        assert_eq!(
+            client_safe_worker_error_message(
+                MODEL_LOAD_FAILED_ERROR_CODE,
+                "SENSITIVE_WORKER_FAILURE_SENTINEL"
+            ),
+            MODEL_LOAD_FAILED_PUBLIC_MESSAGE
+        );
+        assert_eq!(
+            client_safe_worker_error_message(
+                "SENSITIVE_WORKER_ERROR_CODE_SENTINEL",
+                "SENSITIVE_WORKER_FAILURE_SENTINEL"
+            ),
+            UNKNOWN_WORKER_ERROR_PUBLIC_MESSAGE
+        );
     }
 
     /// Multi-candidate (`n>1`): the terminal chunk carries a `candidates`
@@ -1111,12 +1627,15 @@ mod tests {
     #[test]
     fn test_collector_requires_execution_identity_on_every_chunk() {
         let identity = "a".repeat(64);
+        let binding = "b".repeat(64);
         let (tx, _rx) = oneshot::channel();
         let mut consistent = StreamCollector::new(tx, "m".to_string(), "p".to_string());
         let mut delta = _make_chunk("att-A", 0, "Hi", false);
         delta.execution_identity_sha256 = Some(identity.clone());
+        delta.execution_binding_sha256 = Some(binding.clone());
         let mut terminal = _make_chunk("att-A", 1, "", true);
         terminal.execution_identity_sha256 = Some(identity.clone());
+        terminal.execution_binding_sha256 = Some(binding.clone());
         assert_eq!(consistent.apply(delta), ChunkApplied::Delta);
         assert_eq!(consistent.apply(terminal), ChunkApplied::Terminal);
         assert_eq!(
@@ -1127,13 +1646,23 @@ mod tests {
                 .as_deref(),
             Some(identity.as_str())
         );
+        assert_eq!(
+            consistent
+                .build_outcome()
+                .expect("terminal")
+                .execution_binding_sha256
+                .as_deref(),
+            Some(binding.as_str())
+        );
 
         let (tx, _rx) = oneshot::channel();
         let mut mismatching = StreamCollector::new(tx, "m".to_string(), "p".to_string());
         let mut delta = _make_chunk("att-B", 0, "Hi", false);
         delta.execution_identity_sha256 = Some(identity);
+        delta.execution_binding_sha256 = Some(binding.clone());
         let mut terminal = _make_chunk("att-B", 1, "", true);
         terminal.execution_identity_sha256 = Some("b".repeat(64));
+        terminal.execution_binding_sha256 = Some("c".repeat(64));
         assert_eq!(mismatching.apply(delta), ChunkApplied::Delta);
         assert_eq!(mismatching.apply(terminal), ChunkApplied::Terminal);
         assert!(mismatching
@@ -1141,11 +1670,17 @@ mod tests {
             .expect("terminal")
             .execution_identity_sha256
             .is_none());
+        assert!(mismatching
+            .build_outcome()
+            .expect("terminal")
+            .execution_binding_sha256
+            .is_none());
 
         let (tx, _rx) = oneshot::channel();
         let mut missing = StreamCollector::new(tx, "m".to_string(), "p".to_string());
         let mut delta = _make_chunk("att-C", 0, "Hi", false);
         delta.execution_identity_sha256 = Some("c".repeat(64));
+        delta.execution_binding_sha256 = Some(binding);
         assert_eq!(missing.apply(delta), ChunkApplied::Delta);
         assert_eq!(
             missing.apply(_make_chunk("att-C", 1, "", true)),
@@ -1155,6 +1690,11 @@ mod tests {
             .build_outcome()
             .expect("terminal")
             .execution_identity_sha256
+            .is_none());
+        assert!(missing
+            .build_outcome()
+            .expect("terminal")
+            .execution_binding_sha256
             .is_none());
     }
 
@@ -1210,6 +1750,9 @@ mod tests {
         collector.last_output_at = Some(first + std::time::Duration::from_millis(400));
         collector.output_event_count = 2;
         collector.final_meta.as_mut().expect("terminal").usage = Some(UsageBlock {
+            gpu_second: None,
+            images: None,
+            prompt_tokens_details: None,
             prompt_tokens: 1,
             completion_tokens: 4,
             total_tokens: 5,
@@ -1324,6 +1867,49 @@ mod tests {
         collector.apply(_make_chunk("att-A", 1, "next", false));
         let got = tap.recv().await.unwrap();
         assert_eq!(got.text_delta, "next");
+    }
+
+    #[tokio::test]
+    async fn test_collector_tap_terminal_evidence_requires_stream_unanimity() {
+        let identity = "a".repeat(64);
+        let binding = "b".repeat(64);
+        let (tx, _rx) = oneshot::channel();
+        let mut collector = StreamCollector::new(tx, "m".to_string(), "p".to_string());
+        let mut tap = collector.install_chunk_tap();
+        let mut delta = _make_chunk("att-A", 0, "Hi", false);
+        delta.execution_identity_sha256 = Some(identity.clone());
+        delta.execution_binding_sha256 = Some(binding.clone());
+        collector.apply(delta);
+        tap.recv().await.unwrap();
+        let mut terminal = _make_chunk("att-A", 1, "", true);
+        terminal.execution_identity_sha256 = Some(identity.clone());
+        terminal.execution_binding_sha256 = Some(binding.clone());
+        collector.apply(terminal);
+        let tapped_terminal = tap.recv().await.unwrap();
+        assert_eq!(
+            tapped_terminal.execution_identity_sha256.as_deref(),
+            Some(identity.as_str())
+        );
+        assert_eq!(
+            tapped_terminal.execution_binding_sha256.as_deref(),
+            Some(binding.as_str())
+        );
+
+        let (tx, _rx) = oneshot::channel();
+        let mut collector = StreamCollector::new(tx, "m".to_string(), "p".to_string());
+        let mut tap = collector.install_chunk_tap();
+        let mut delta = _make_chunk("att-B", 0, "Hi", false);
+        delta.execution_identity_sha256 = Some(identity);
+        delta.execution_binding_sha256 = Some(binding);
+        collector.apply(delta);
+        tap.recv().await.unwrap();
+        let mut terminal = _make_chunk("att-B", 1, "", true);
+        terminal.execution_identity_sha256 = Some("c".repeat(64));
+        terminal.execution_binding_sha256 = Some("d".repeat(64));
+        collector.apply(terminal);
+        let tapped_terminal = tap.recv().await.unwrap();
+        assert!(tapped_terminal.execution_identity_sha256.is_none());
+        assert!(tapped_terminal.execution_binding_sha256.is_none());
     }
 
     /// JetStream redelivery within an attempt re-sends a chunk with the

@@ -1,11 +1,11 @@
-"""VL-OCR quality routing for ``docs_to_markdown`` (#1307).
+"""VL-OCR quality routing for ``docs_to_markdown``.
 
 Born-digital documents convert cleanly through Docling, but scanned / image-only
 pages carry no text layer for Docling to read — its built-in OCR is the baseline
 this path improves on. We rasterize such pages and route them to a vision-language
-OCR model (MinerU2.5-Pro, the provisional default pinned in :mod:`sie_mcp.config`;
-the committed engine choice is owned by Req 1's OCR-engine ADR, #955), then stitch
-the per-page markdown back together in page order.
+OCR model (MinerU2.5-Pro, the provisional default pinned in
+:mod:`sie_mcp.config`), then stitch the per-page markdown back together in page
+order.
 
 Two return shapes have to be reconciled here: Docling fills
 ``ExtractResult["data"]["markdown"]``, whereas MinerU returns generated text in

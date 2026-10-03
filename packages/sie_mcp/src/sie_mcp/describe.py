@@ -1,4 +1,4 @@
-"""``describe_image`` — the Req 12 image-understanding job (#1310).
+"""The ``describe_image`` image-understanding job.
 
 Stateless orchestration over two existing SIE primitives, run entirely
 client-side in the MCP edge so the gateway and workers stay stateless per

@@ -1,6 +1,7 @@
 """Tests for model weight caching hierarchy."""
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -17,6 +18,48 @@ from sie_sdk.cache import (
     populate_cluster_cache,
 )
 from sie_sdk.exceptions import GatedModelError
+from sie_sdk.storage import OSSBackend
+
+
+@pytest.fixture(autouse=True)
+def offline_hf_metadata():
+    with patch("huggingface_hub.file_exists", return_value=False) as metadata:
+        yield metadata
+
+
+class FakeOSSCacheBucket:
+    """Small hierarchical OSS fake backed by realistic HF cache objects."""
+
+    def __init__(self, objects: dict[str, bytes]) -> None:
+        self.objects = objects
+
+    def list_objects_v2(
+        self,
+        *,
+        prefix: str,
+        delimiter: str,
+        continuation_token: str,
+        max_keys: int,
+    ) -> SimpleNamespace:
+        assert continuation_token == ""
+        matching = [key for key in sorted(self.objects) if key.startswith(prefix)]
+        object_keys: list[str] = []
+        prefix_keys: set[str] = set()
+        for key in matching:
+            relative = key[len(prefix) :]
+            if delimiter and delimiter in relative:
+                prefix_keys.add(f"{prefix}{relative.split(delimiter, maxsplit=1)[0]}{delimiter}")
+            else:
+                object_keys.append(key)
+        return SimpleNamespace(
+            object_list=[SimpleNamespace(key=key) for key in object_keys[:max_keys]],
+            prefix_list=sorted(prefix_keys)[:max_keys],
+            is_truncated=False,
+            next_continuation_token="",
+        )
+
+    def get_object_to_file(self, key: str, filename: str) -> None:
+        Path(filename).write_bytes(self.objects[key])
 
 
 class TestGetCacheConfig:
@@ -76,6 +119,13 @@ class TestGetCacheConfig:
         config = get_cache_config()
 
         assert config.cluster_cache == "abfs://models@sieacct.dfs.core.windows.net/models"
+
+    def test_cluster_cache_oss(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SIE_CLUSTER_CACHE", "oss://my-bucket/models")
+
+        config = get_cache_config()
+
+        assert config.cluster_cache == "oss://my-bucket/models"
 
     def test_hf_fallback_disabled(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """SIE_HF_FALLBACK=false disables HF fallback."""
@@ -180,6 +230,7 @@ class TestEnsureModelCached:
         config = CacheConfig(
             local_cache=local_cache,
             cluster_cache="s3://my-bucket/cache",
+            hf_fallback=False,
         )
 
         # Mock the storage backend
@@ -190,18 +241,17 @@ class TestEnsureModelCached:
             # Simulate model exists in cluster cache (snapshots prefix non-empty)
             mock_backend.has_children.return_value = True
 
-            # list_dirs returns subdirectories - we need to simulate the HF cache structure
-            # First call lists snapshots dir contents, subsequent calls return empty
-            list_dirs_calls = [["abc123"], []]  # abc123 is a snapshot, then no more subdirs
-            mock_backend.list_dirs.side_effect = lambda _: list_dirs_calls.pop(0) if list_dirs_calls else []
-            mock_backend.list_files.return_value = iter(["model.bin"])
+            cluster_root = "s3://my-bucket/cache/models--BAAI--bge-m3"
+            directories = {cluster_root: ["snapshots"], f"{cluster_root}/snapshots": ["abc123"]}
+            mock_backend.list_dirs.side_effect = lambda path: directories.get(path, [])
+            mock_backend.list_files.side_effect = lambda path: ["model.bin"] if path.endswith("/abc123") else []
+            mock_backend.download_file.side_effect = lambda _source, destination: destination.write_bytes(b"weights")
 
-            ensure_model_cached("BAAI/bge-m3", config)
+            result = ensure_model_cached("BAAI/bge-m3", config)
 
-            # Should call backend methods
+            assert result == local_cache / "models--BAAI--bge-m3"
+            assert is_model_cached("BAAI/bge-m3", config)
             mock_backend.has_children.assert_called()
-            # Result depends on whether files were actually downloaded
-            # In mocked scenario, we just verify the logic flow
 
     def test_model_not_in_cluster_cache(self, tmp_path: Path) -> None:
         """Raises error if model not in cluster cache and HF fallback disabled."""
@@ -218,6 +268,31 @@ class TestEnsureModelCached:
 
             with pytest.raises(RuntimeError, match="not found in local or cluster cache"):
                 ensure_model_cached("BAAI/bge-m3", config)
+
+    def test_realistic_hf_snapshot_tree_downloads_from_oss(self, tmp_path: Path) -> None:
+        model_root = "models/models--openai--clip-vit-base-patch32"
+        snapshot = "0123456789abcdef"
+        objects = {
+            f"{model_root}/refs/main": snapshot.encode(),
+            f"{model_root}/blobs/config-hash": b"{}",
+            f"{model_root}/snapshots/{snapshot}/config.json": b'{"model_type":"clip"}',
+            f"{model_root}/snapshots/{snapshot}/model.safetensors": b"weights",
+        }
+        backend = OSSBackend()
+        backend._buckets["model-cache"] = FakeOSSCacheBucket(objects)
+        config = CacheConfig(
+            local_cache=tmp_path,
+            cluster_cache="oss://model-cache/models",
+            hf_fallback=False,
+        )
+
+        with patch("sie_sdk.cache.get_storage_backend", return_value=backend):
+            result = ensure_model_cached("openai/clip-vit-base-patch32", config)
+
+        assert result == tmp_path / "models--openai--clip-vit-base-patch32"
+        assert (result / "refs" / "main").read_text() == snapshot
+        assert (result / "snapshots" / snapshot / "config.json").read_text() == '{"model_type":"clip"}'
+        assert (result / "snapshots" / snapshot / "model.safetensors").read_bytes() == b"weights"
 
 
 class TestCacheHierarchy:

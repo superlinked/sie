@@ -440,7 +440,8 @@ def sie_docker_server() -> Generator[str]:
 
     Set SIE_DOCKER_IMAGE env var to use a pre-built image (skips build).
 
-    Regression test for: https://github.com/superlinked/sie-internal/issues/10
+    Without SIE_DOCKER_IMAGE this guards the full container build and startup
+    path; with a pre-built image it guards startup only.
     """
     docker_client = _get_docker_client()
 

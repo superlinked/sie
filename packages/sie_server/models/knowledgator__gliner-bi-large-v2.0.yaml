@@ -1,0 +1,25 @@
+sie_id: knowledgator/gliner-bi-large-v2.0
+hf_id: knowledgator/gliner-bi-large-v2.0
+hf_revision: 71eec1d5fe57684cd6669ad8a1e1e3e7401a9a55
+hf_tokenizer_dependencies:
+  BAAI/bge-base-en-v1.5: a5beb1e3e68b9ab74eb54cfd186867f64f240e1a
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: null
+  extract: {}
+max_sequence_length: 1024
+profiles:
+  default:
+    max_batch_tokens: 16384
+    compute_precision: float16
+    adapter_path: sie_server.adapters.gliner_bi:GLiNERBiAdapter
+    adapter_options:
+      loadtime: {}
+      runtime:
+        threshold: 0.3
+        precompute_labels: true

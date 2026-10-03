@@ -5,11 +5,10 @@
 {{- $hooks := "pre-delete" -}}
 {{- if not .Values.autoscaling.enabled -}}
 {{- /*
-  pre-upgrade removes ScaledObjects while a bundled source KEDA controller is
-  still present. A failed upgrade is repaired and retried forward; rollback is
-  intentionally unsupported.
+  pre-upgrade and pre-rollback remove ScaledObjects while a bundled source KEDA
+  controller is still present.
 */ -}}
-{{- $hooks = "pre-upgrade,pre-delete" -}}
+{{- $hooks = "pre-upgrade,pre-rollback,pre-delete" -}}
 {{- end -}}
 apiVersion: v1
 kind: ServiceAccount
@@ -99,27 +98,23 @@ spec:
               # exact selector solely so a direct disable upgrade does not
               # leave the old HPA control path active.
               LEGACY_SELECTOR='app.kubernetes.io/name={{ include "sie-cluster.name" . }},app.kubernetes.io/instance={{ .Release.Name }},app.kubernetes.io/part-of=sie,app.kubernetes.io/managed-by=Helm,app.kubernetes.io/component in (worker,gateway),helm.sh/chart=sie-cluster-0.6.20,app.kubernetes.io/version=v0.6.20,!sie.superlinked.com/scaler-managed'
-              if ! resources="$(kubectl api-resources --api-group=keda.sh 2>/dev/null)"; then
-                echo "FAILED: Kubernetes API discovery failed before KEDA cleanup" >&2
-                exit 1
-              fi
-              if ! printf '%s\n' "$resources" | grep -q '^scaledobjects'; then
+              api_error=""
+              if ! api_error="$(kubectl get --raw /apis/keda.sh/v1alpha1 2>&1 >/dev/null)"; then
+                if ! printf '%s\n' "$api_error" | grep -Eq 'Error from server \(NotFound\):|the server could not find the requested resource'; then
+                  echo "FAILED: Kubernetes API discovery failed before KEDA cleanup" >&2
+                  exit 1
+                fi
                 echo "KEDA API is absent; nothing to clean"
                 exit 0
               fi
               for selector in "$MANAGED_SELECTOR" "$LEGACY_SELECTOR"; do
-                kubectl delete scaledobjects -n "$NAMESPACE" -l "$selector" \
+                kubectl delete scaledobjects.keda.sh -n "$NAMESPACE" -l "$selector" \
                   --ignore-not-found --wait=true
-                if [ -n "$(kubectl get scaledobjects -n "$NAMESPACE" -l "$selector" -o name)" ]; then
+                if [ -n "$(kubectl get scaledobjects.keda.sh -n "$NAMESPACE" -l "$selector" -o name)" ]; then
                   echo "FAILED: release-owned ScaledObjects remain after cleanup" >&2
                   exit 1
                 fi
               done
               echo "Release-owned KEDA ScaledObjects removed"
           resources:
-            requests:
-              cpu: 50m
-              memory: 64Mi
-            limits:
-              cpu: 100m
-              memory: 128Mi
+            {{- include "sie-cluster.hooks.resources" . | nindent 12 }}

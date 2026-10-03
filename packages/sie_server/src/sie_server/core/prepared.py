@@ -85,7 +85,7 @@ class PreparedItem[T: Payload]:
         cost: Per-modality batching budget in modality-native units (text =
             token count, image = 1, tiled vision = tile count). NOT comparable
             across modalities; the BatchFormer sum is only meaningful within
-            one modality. See docs/adr/0004.
+            one modality.
         original_index: Position in original request for result reordering.
     """
 
@@ -301,7 +301,7 @@ LightOnOCRPreparedItem = PreparedItem[LightOnOCRPayload]
 class PaddleOCRVLPayload(Payload):
     """Preprocessed PaddleOCR-VL input ready for extraction.
 
-    PaddleOCR-VL combines a NaViT-style SigLIP vision encoder with an
+    PaddleOCR-VL-1.5 combines a NaViT-style SigLIP vision encoder with an
     ERNIE-4.5-0.3B decoder. The processor tokenizes a chat-template prompt
     and emits a Qwen-VL-style ``image_grid_thw`` alongside ``pixel_values``.
     """

@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 
 class ConfigStore:
-    """Config store backed by local filesystem, S3, GCS, or Azure Blob.
+    """Mutable config store backed by local filesystem, S3, GCS, or Azure Blob.
 
     The backend is auto-detected from the base_dir URL scheme:
     - Local path (e.g., /tmp/config-store) -> LocalBackend
@@ -25,10 +25,21 @@ class ConfigStore:
 
     Args:
         base_dir: Root path for config storage. Accepts local path, s3://, gs://, abfs://, or abfss://.
+
+    Note:
+        Alibaba OSS is supported for model/cache objects, but not here: OSS
+        PutObject cannot satisfy the non-empty ETag compare-and-swap contract
+        required by mutable config epochs.
     """
 
     def __init__(self, base_dir: str) -> None:
         self._base_dir = base_dir.rstrip("/")
+        if self._base_dir.startswith("oss://"):
+            raise ValueError(
+                "Alibaba OSS cannot be used as a mutable ConfigStore because OSS PutObject "
+                "cannot satisfy the required epoch compare-and-swap contract; use local/PVC, s3://, gs://, "
+                "or abfs(s):// storage"
+            )
         self._backend: StorageBackend = get_storage_backend(self._base_dir)
         self._models_path = join_path(self._base_dir, "models")
         self._epoch_path = join_path(self._base_dir, "epoch")

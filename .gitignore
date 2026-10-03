@@ -1,4 +1,6 @@
 # Byte-compiled / optimized / DLL files
+.codex/artifacts/worktree-task/
+
 __pycache__/
 *.py[codz]
 *$py.class
@@ -142,10 +144,8 @@ celerybeat.pid
 
 # Environments
 .env
-# Managed-service cloud provisioning secrets (cloud-provision / deploy/cloud).
-# Vendor credentials live in the env or a gitignored secrets file, never the
-# repo (audit §1/§14). Belt-and-braces so a local copy can never be committed.
-*.sie-cloud-secrets.env
+# Local service credential bundles must never be committed.
+*-secrets.env
 .env.cloud
 .venv
 env/
@@ -244,33 +244,6 @@ override.tf.json
 # tfvars files may contain secrets
 *.tfvars
 *.tfvars.json
-# Reviewed worker-AMI release contracts contain only immutable public package,
-# AMI, and Terraform backend coordinates; the release workflow accepts only
-# committed files from this exact internal path.
-!deploy/terraform/aws/internal-examples/cloud-benchmark-runner/worker-ami/releases/*.tfvars.json
-# Exception: this edge tfvars carries only a Secrets Manager ARN (a resource
-# identifier, not a secret) so the staging-us edge apply needs no manual -var.
-!deploy/cloud/terraform/aws-edge/staging-us.tfvars
-# This dev adoption contract contains only public AWS resource identifiers; it
-# is checked in so a reviewed plan cannot silently target a different orphan
-# VPC/listener through an operator-local tfvars file.
-!deploy/cloud/terraform/dev-controlplane-https-adoption/dev-us.tfvars
-!deploy/cloud/terraform/dev-controlplane-https-adoption/.terraform.lock.hcl
-# Managed release roots commit their exact provider selections. Release
-# preflights and applies use these read-only instead of selecting a newer
-# compatible provider during a long-running deployment.
-!deploy/cloud/terraform/release-infrastructure/.terraform.lock.hcl
-!deploy/cloud/terraform/aws-controlplane/.terraform.lock.hcl
-!deploy/cloud/terraform/aws-edge/.terraform.lock.hcl
-!deploy/cloud/terraform/s3-state/.terraform.lock.hcl
-!deploy/cloud/terraform/vercel/.terraform.lock.hcl
-!deploy/cloud/terraform/console-preview/.terraform.lock.hcl
-!deploy/cloud/terraform/examples/dev/.terraform.lock.hcl
-!deploy/cloud/terraform/examples/dev-eu/.terraform.lock.hcl
-!deploy/cloud/terraform/examples/staging/.terraform.lock.hcl
-!deploy/cloud/terraform/examples/staging-eu/.terraform.lock.hcl
-!deploy/cloud/terraform/examples/prod-us/.terraform.lock.hcl
-# Keep .terraform.lock.hcl for reproducibility (provider versions)
 
 # Node.js
 node_modules/
@@ -294,12 +267,7 @@ tmp/
 .tmp/
 .local/
 
-.requirements-modal.txt
-.mpa-i6pn-*-requirements-modal.txt
 b6_results.json
-# Raw dev-cloud load-test reports are local artifacts, not source-controlled baselines.
-packages/sie_cloud/bench/results/dev-us-*/
-
 # Personal mise overrides (per-developer toolchain tweaks, e.g. rustup
 # component naming differences across rustup versions).
 mise.local.toml

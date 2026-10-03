@@ -299,6 +299,237 @@ correct on overlays.
 {{- end }}
 
 {{/*
+Deployment environment passed to sie-config as SIE_DEPLOYMENT_ENV. sie-config
+refuses unauthenticated /v1/configs requests when it is "prod" or "production".
+*/}}
+{{- define "sie-cluster.config.deploymentEnv" -}}
+{{- if and .Values.telemetry .Values.telemetry.deploymentEnv -}}
+{{- .Values.telemetry.deploymentEnv | toString -}}
+{{- else -}}
+production
+{{- end -}}
+{{- end }}
+
+{{/*
+Data key of the admin-token Secret (config.auth.adminTokenSecretKey). Fails the
+render when it is empty or null.
+*/}}
+{{- define "sie-cluster.config.adminTokenSecretKey" -}}
+{{- $key := default "" .Values.config.auth.adminTokenSecretKey | toString | trim -}}
+{{- if not $key -}}
+{{- fail "config.auth.adminTokenSecretKey is empty. Set it to the Secret key that holds the sie-config admin token (the chart default is SIE_ADMIN_TOKEN)." -}}
+{{- end -}}
+{{- $key -}}
+{{- end }}
+
+{{- define "sie-cluster.config.generatedAdminTokenSecretName" -}}
+{{- printf "%s-admin-token" (include "sie-cluster.config.serviceName" .) -}}
+{{- end }}
+
+{{/*
+"true" when the chart generates the admin-token Secret: no
+config.auth.adminTokenSecretName, and config.auth.generateAdminToken is not
+false. An absent key counts as true, so `helm upgrade --reuse-values` from a
+release that predates the key keeps the default. An empty value also counts as
+true.
+*/}}
+{{- define "sie-cluster.config.generatesAdminToken" -}}
+{{- $auth := .Values.config.auth | default dict -}}
+{{- if and (not $auth.adminTokenSecretName) (ne (dig "generateAdminToken" true $auth | toString | trim | lower) "false") -}}
+true
+{{- end -}}
+{{- end }}
+
+{{/*
+Secret holding the sie-config admin (write) token, which only sie-config reads:
+config.auth.adminTokenSecretName when set, otherwise the chart-generated
+Secret, otherwise empty (no token).
+*/}}
+{{- define "sie-cluster.config.adminTokenSecretName" -}}
+{{- if .Values.config.auth.adminTokenSecretName -}}
+{{- .Values.config.auth.adminTokenSecretName -}}
+{{- else if include "sie-cluster.config.generatesAdminToken" . -}}
+{{- include "sie-cluster.config.generatedAdminTokenSecretName" . -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Data key of the read-token Secret (config.auth.readTokenSecretKey). An absent
+key, as after `helm upgrade --reuse-values` from a release that predates it,
+takes the default; an empty value fails the render.
+*/}}
+{{- define "sie-cluster.config.readTokenSecretKey" -}}
+{{- $key := dig "readTokenSecretKey" "SIE_CONFIG_READ_TOKEN" (.Values.config.auth | default dict) | default "" | toString | trim -}}
+{{- if not $key -}}
+{{- fail "config.auth.readTokenSecretKey is empty. Set it to the Secret key that holds the sie-config read token (the chart default is SIE_CONFIG_READ_TOKEN)." -}}
+{{- end -}}
+{{- $key -}}
+{{- end }}
+
+{{- define "sie-cluster.config.generatedReadTokenSecretName" -}}
+{{- printf "%s-read-token" (include "sie-cluster.config.serviceName" .) -}}
+{{- end }}
+
+{{/*
+"true" when the chart generates the read-token Secret: sie-config has an admin
+token, config.auth.readTokenSecretName is empty, and
+config.auth.generateReadToken is not false. Absent keys take their defaults,
+so `helm upgrade --reuse-values` from a release that predates them generates
+the Secret. An empty generateReadToken also counts as true.
+*/}}
+{{- define "sie-cluster.config.generatesReadToken" -}}
+{{- $auth := .Values.config.auth | default dict -}}
+{{- if and (include "sie-cluster.config.adminTokenSecretName" .) (not (dig "readTokenSecretName" "" $auth)) (ne (dig "generateReadToken" true $auth | toString | trim | lower) "false") -}}
+true
+{{- end -}}
+{{- end }}
+
+{{/*
+Secret holding the read-scoped sie-config token that sie-config accepts on
+reads and the gateway and worker sidecars present: config.auth.readTokenSecretName
+when set, otherwise the chart-generated Secret, otherwise empty (no token).
+*/}}
+{{- define "sie-cluster.config.readTokenSecretName" -}}
+{{- $name := dig "readTokenSecretName" "" (.Values.config.auth | default dict) -}}
+{{- if $name -}}
+{{- $name -}}
+{{- else if include "sie-cluster.config.generatesReadToken" . -}}
+{{- include "sie-cluster.config.generatedReadTokenSecretName" . -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Env entry SIE_CONFIG_SERVICE_TOKEN for a sie-config consumer (the gateway or a
+worker sidecar): the read token, or an empty value when the chart runs no
+sie-config or sie-config has no read token, so the consumer never falls back to
+presenting SIE_ADMIN_TOKEN.
+*/}}
+{{- define "sie-cluster.config.serviceTokenEnv" -}}
+{{- $secret := "" -}}
+{{- if .Values.config.enabled -}}
+{{- $secret = include "sie-cluster.config.readTokenSecretName" . -}}
+{{- end -}}
+- name: SIE_CONFIG_SERVICE_TOKEN
+{{- if $secret }}
+  valueFrom:
+    secretKeyRef:
+      name: {{ $secret }}
+      key: {{ include "sie-cluster.config.readTokenSecretKey" . }}
+{{- else }}
+  value: ""
+{{- end }}
+{{- end }}
+
+{{/*
+Data key of the gateway's inbound admin-token Secret
+(gateway.auth.adminTokenSecretKey), with the same absent-key default and
+empty-value failure as the sie-config keys.
+*/}}
+{{- define "sie-cluster.gateway.adminTokenSecretKey" -}}
+{{- $key := dig "adminTokenSecretKey" "SIE_ADMIN_TOKEN" (.Values.gateway.auth | default dict) | default "" | toString | trim -}}
+{{- if not $key -}}
+{{- fail "gateway.auth.adminTokenSecretKey is empty. Set it to the Secret key that holds the gateway admin token (the chart default is SIE_ADMIN_TOKEN)." -}}
+{{- end -}}
+{{- $key -}}
+{{- end }}
+
+{{/*
+Chart-generated token Secret: a random 64-character token on first install,
+and the existing token on upgrade (read with lookup and validated rather than
+replaced). Kept on uninstall. Args (dict): root, name (Secret), key (data key),
+keySetting and nameSetting (the values paths named in validation errors).
+*/}}
+{{- define "sie-cluster.config.generatedTokenSecret" -}}
+{{- $token := randAlphaNum 64 | b64enc -}}
+{{- with lookup "v1" "Secret" (include "sie-cluster.namespace" $.root) $.name -}}
+{{- $existing := index (.data | default dict) $.key | default "" -}}
+{{- include "sie-cluster.config.validateReusedToken" (dict "name" $.name "key" $.key "data" $existing "keySetting" $.keySetting "nameSetting" $.nameSetting) -}}
+{{- $token = $existing -}}
+{{- end }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ .name }}
+  namespace: {{ include "sie-cluster.namespace" .root }}
+  labels:
+    {{- include "sie-cluster.config.labels" .root | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+type: Opaque
+data:
+  {{ .key | quote }}: {{ $token | quote }}
+{{- end }}
+
+{{/*
+Fail when an existing chart-generated token Secret has no value under the
+configured key, or a value shorter than 32 characters, instead of replacing the
+token that running pods hold. Args (dict): name (Secret), key (data key), data
+(base64 value, empty when the key is missing), keySetting and nameSetting (the
+values paths for the Secret key and an operator-managed Secret).
+*/}}
+{{- define "sie-cluster.config.validateReusedToken" -}}
+{{- if not .data -}}
+{{- fail (printf "Secret %s exists but has no %s key. If %s was renamed, set it back to the key the Secret holds. If the Secret was created by hand, set %s to it so the chart uses it unchanged. Otherwise restore the key, or delete the Secret so the chart generates a new token, then restart sie-config, the gateway, and the workers." .name .key .keySetting .nameSetting) -}}
+{{- else if lt (len (b64dec .data)) 32 -}}
+{{- fail (printf "Secret %s holds a %s value shorter than 32 characters. Replace it with a random value of at least 32 characters, or delete the Secret so the chart generates a new token, then restart sie-config, the gateway, and the workers." .name .key) -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Fail the render when the sie-config tokens are not kept apart or sie-config
+would run without an admin token outside staging, development, or ci:
+- an admin token without a read token leaves the gateway and worker sidecars
+  without a credential;
+- a read token or gateway admin token that is the same Secret key as the
+  sie-config admin token hands the write credential to every gateway or worker
+  sidecar, and a gateway admin token that is the read token's Secret key lets
+  every worker sidecar call the gateway admin routes;
+- without an admin token, production ("prod" or "production") refuses every
+  write (and every read without a read token), and any other value leaves the
+  API unauthenticated.
+*/}}
+{{- define "sie-cluster.config.validateAuth" -}}
+{{- $admin := include "sie-cluster.config.adminTokenSecretName" . -}}
+{{- $read := include "sie-cluster.config.readTokenSecretName" . -}}
+{{- if and $admin (not $read) -}}
+{{- fail "sie-config has an admin token but no read token (config.auth.generateReadToken=false and config.auth.readTokenSecretName is empty), so the gateway and worker sidecars would have no credential to load the model catalog. Set config.auth.readTokenSecretName to an existing Secret, or set config.auth.generateReadToken=true so the chart generates one." -}}
+{{- end -}}
+{{- $adminRef := "" -}}
+{{- if $admin -}}
+{{- $adminRef = printf "%s/%s" $admin (include "sie-cluster.config.adminTokenSecretKey" .) -}}
+{{- end -}}
+{{- $readRef := "" -}}
+{{- if $read -}}
+{{- $readRef = printf "%s/%s" $read (include "sie-cluster.config.readTokenSecretKey" .) -}}
+{{- end -}}
+{{- if and $adminRef (eq $readRef $adminRef) -}}
+{{- fail (printf "config.auth.readTokenSecretName and readTokenSecretKey point at the sie-config admin token (%s), which would give every gateway and worker sidecar write access to the model catalog. Store the read token in a different Secret or key." $adminRef) -}}
+{{- end -}}
+{{- with dig "adminTokenSecretName" "" (.Values.gateway.auth | default dict) -}}
+{{- $gatewayRef := printf "%s/%s" . (include "sie-cluster.gateway.adminTokenSecretKey" $) -}}
+{{- if and $adminRef (eq $gatewayRef $adminRef) -}}
+{{- fail (printf "gateway.auth.adminTokenSecretName and adminTokenSecretKey point at the sie-config admin token (%s), which would give every gateway pod write access to the model catalog. Create a separate Secret for the gateway admin token." $gatewayRef) -}}
+{{- end -}}
+{{- if and $readRef (eq $gatewayRef $readRef) -}}
+{{- fail (printf "gateway.auth.adminTokenSecretName and adminTokenSecretKey point at the sie-config read token (%s), which every worker sidecar holds, so any worker sidecar could call the gateway admin routes. Create a separate Secret for the gateway admin token." $gatewayRef) -}}
+{{- end -}}
+{{- end -}}
+{{- if not $admin -}}
+{{- $env := include "sie-cluster.config.deploymentEnv" . | trim | lower -}}
+{{- $production := has $env (list "prod" "production") -}}
+{{- if or $production (not (has $env (list "staging" "development" "ci"))) -}}
+{{- $effect := "serve /v1/configs without authentication" -}}
+{{- if $read -}}
+{{- $effect = "refuse every config write and serve only reads that present the read token" -}}
+{{- else if $production -}}
+{{- $effect = "refuse every /v1/configs request and the gateway could not load the model catalog" -}}
+{{- end -}}
+{{- fail (printf "sie-config would run with telemetry.deploymentEnv=%q and no admin token (config.auth.generateAdminToken=false and config.auth.adminTokenSecretName is empty), so it would %s. Running without an admin token is supported only for telemetry.deploymentEnv staging, development, or ci. Otherwise set config.auth.adminTokenSecretName to an existing Secret, or set config.auth.generateAdminToken=true so the chart generates one." $env $effect) -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
 Worker StatefulSet name for a pool
 */}}
 {{- define "sie-cluster.worker.name" -}}
@@ -321,6 +552,55 @@ Gateway service name (used for worker discovery)
 {{- $fullname := include "sie-cluster.fullname" . }}
 {{- printf "%s-gateway" $fullname }}
 {{- end }}
+
+{{/*
+Gateway preStop sleep (seconds), read once so the Deployment's lifecycle hook
+and the derived grace period below can never disagree.
+Consume with: include "sie-cluster.gateway.preStopSleepSeconds" .
+*/}}
+{{- define "sie-cluster.gateway.preStopSleepSeconds" -}}
+{{- $drain := default (dict) (default (dict) .Values.gateway).drain -}}
+{{- $preStopS := int (dig "preStopSleepSeconds" 10 $drain) -}}
+{{- if lt $preStopS 0 -}}
+{{- fail (printf "gateway.drain.preStopSleepSeconds must be >= 0, got %d: a negative sleep renders an invalid preStop hook and shortens the derived terminationGracePeriodSeconds" $preStopS) -}}
+{{- end -}}
+{{- $preStopS -}}
+{{- end -}}
+
+{{/*
+Gateway terminationGracePeriodSeconds, DERIVED from the gateway drain budget so
+the two numbers cannot drift apart.
+
+Shutting a gateway pod down is three serial phases, and the grace period is the
+single clock covering all of them (kubelet starts it when the pod goes
+Terminating, i.e. before preStop runs):
+
+  1. gateway.drain.preStopSleepSeconds — preStop sleep. The pod is already out
+     of the EndpointSlice, but kube-proxy/ingress dataplane updates are
+     eventually consistent, so it keeps serving newly-arriving requests. No
+     SIGTERM is delivered during this window.
+  2. gateway.drain.inFlightSeconds — axum graceful shutdown after SIGTERM. It is
+     unbounded in the binary (packages/sie_gateway/src/main.rs), so this value
+     is the real bound: the longest response the gateway may still be carrying,
+     including SSE generation streams and queued-result waits.
+  3. QUEUE_DRAIN_S — the fixed post-serve `drain_pending(5s)` in the same file,
+     which lets already-published work items land their NATS `_INBOX` replies
+     instead of dying with the subscription.
+
+Whatever is still running when the grace period expires is SIGKILLed, which is
+exactly the mid-response connection cut this budget exists to prevent.
+Consume with: include "sie-cluster.gateway.terminationGracePeriodSeconds" .
+*/}}
+{{- define "sie-cluster.gateway.terminationGracePeriodSeconds" -}}
+{{- $drain := default (dict) (default (dict) .Values.gateway).drain -}}
+{{- $preStopS := int (include "sie-cluster.gateway.preStopSleepSeconds" .) -}}
+{{- $inFlightS := int (dig "inFlightSeconds" 120 $drain) -}}
+{{- if lt $inFlightS 0 -}}
+{{- fail (printf "gateway.drain.inFlightSeconds must be >= 0, got %d: a negative budget shortens the grace period below the gateway's own fixed queue drain, so in-flight work is SIGKILLed" $inFlightS) -}}
+{{- end -}}
+{{- $queueDrainS := 5 -}}
+{{- add $preStopS $inFlightS $queueDrainS -}}
+{{- end -}}
 
 {{/*
 In-cluster URL used by workers to ask the gateway whether they are admitted
@@ -410,6 +690,30 @@ Consume with: include "sie-cluster.ingress.hosts" . | fromJsonArray
 {{- end -}}
 {{- end -}}
 {{- $hosts | toJson -}}
+{{- end -}}
+
+{{/*
+nginx proxy read/send timeout (seconds) for every SIE ingress, derived from
+`workers.common.modelReadyTimeoutSec` so the edge budget cannot drift below the
+cold-load budget it fronts.
+
+The first request against an unloaded model produces no response bytes until
+the worker finishes loading it (up to modelReadyTimeoutSec), and nginx's
+proxy-read-timeout applies to exactly that no-first-byte window. An edge
+timeout below the load budget turns a healthy cold start into a 504 plus a
+client retry that can re-enter the same wait. Already-streaming responses are
+unaffected — the read timeout resets on each chunk.
+
++60s covers serving the request itself once the model is ready; the 600s floor
+preserves the chart's historical minimum when modelReadyTimeoutSec is lowered
+(note that `ingress.annotations` cannot lower it either — sprig `merge` keeps
+the destination's value, so the chart's nginx defaults win over user keys).
+Consume with: include "sie-cluster.ingress.proxyTimeoutSeconds" .
+*/}}
+{{- define "sie-cluster.ingress.proxyTimeoutSeconds" -}}
+{{- $workersCommon := default (dict) (default (dict) .Values.workers).common -}}
+{{- $modelReadyTimeoutS := int (dig "modelReadyTimeoutSec" 900 $workersCommon) -}}
+{{- max (add $modelReadyTimeoutS 60) 600 -}}
 {{- end -}}
 
 {{/*
@@ -516,6 +820,211 @@ Runs from NOTES.txt so every install/upgrade is checked, regardless of which (or
 {{- end }}
 
 {{/*
+Strict boolean opt-in: only a YAML boolean true enables it. Any other non-null
+value fails the render so a quoted "false" can never read as true.
+Args (dict): value, path.
+*/}}
+{{- define "sie-cluster.optIn" -}}
+{{- $value := .value -}}
+{{- if not (or (kindIs "invalid" $value) (kindIs "bool" $value)) -}}
+{{- fail (printf "%s must be a boolean (true or false), got %q" .path (toString $value)) -}}
+{{- end -}}
+{{- if and (kindIs "bool" $value) $value -}}true{{- end -}}
+{{- end }}
+
+{{/*
+The SIE_AUTH_MODE the gateway container receives, as JSON {"mode", "known"}.
+gateway.auth.mode is passed verbatim; a later gateway.extraEnv entry named
+SIE_AUTH_MODE replaces it. An override without a literal value (valueFrom) is
+not known at render time.
+*/}}
+{{- define "sie-cluster.gateway.effectiveAuthMode" -}}
+{{- $gateway := default (dict) .Values.gateway -}}
+{{- $mode := toString (dig "auth" "mode" "none" $gateway) -}}
+{{- $known := true -}}
+{{- range $entry := (default (list) $gateway.extraEnv) -}}
+{{- if and (kindIs "map" $entry) (eq (toString (index $entry "name")) "SIE_AUTH_MODE") -}}
+{{- if hasKey $entry "value" -}}
+{{- $mode = toString (index $entry "value") -}}
+{{- $known = true -}}
+{{- else -}}
+{{- $mode = "" -}}
+{{- $known = false -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- dict "mode" $mode "known" $known | toJson -}}
+{{- end }}
+
+{{/*
+"true" when the gateway enforces token auth: the effective SIE_AUTH_MODE is
+known and is exactly static or token, the values the gateway accepts.
+*/}}
+{{- define "sie-cluster.gateway.authenticates" -}}
+{{- $auth := include "sie-cluster.gateway.effectiveAuthMode" . | fromJson -}}
+{{- if and $auth.known (has $auth.mode (list "static" "token")) -}}true{{- end -}}
+{{- end }}
+
+{{/*
+Validation: gateway auth values. The gateway accepts exactly none, "", static,
+and token, and refuses every request when token auth has no token.
+*/}}
+{{- define "sie-cluster.validateGatewayAuth" -}}
+{{- $gateway := default (dict) .Values.gateway -}}
+{{- $auth := include "sie-cluster.gateway.effectiveAuthMode" . | fromJson -}}
+{{- if $auth.known -}}
+{{- if not (has $auth.mode (list "none" "" "static" "token")) -}}
+{{- fail (printf "gateway auth mode %q is not supported; set gateway.auth.mode (or a gateway.extraEnv SIE_AUTH_MODE override) to none, static, or token." $auth.mode) -}}
+{{- end -}}
+{{- if has $auth.mode (list "static" "token") -}}
+{{- $tokenSource := dig "auth" "tokenSecretName" "" $gateway -}}
+{{- range $entry := (default (list) $gateway.extraEnv) -}}
+{{- if and (kindIs "map" $entry) (has (toString (index $entry "name")) (list "SIE_AUTH_TOKEN" "SIE_AUTH_TOKENS")) -}}
+{{- $tokenSource = "extraEnv" -}}
+{{- end -}}
+{{- end -}}
+{{- if not $tokenSource -}}
+{{- fail (printf "gateway auth mode %q needs tokens: set gateway.auth.tokenSecretName to a Secret holding comma-separated tokens, or the gateway refuses every request." $auth.mode) -}}
+{{- end -}}
+{{- else if dig "auth" "tokenSecretName" "" $gateway -}}
+{{- fail "gateway.auth.tokenSecretName is set but gateway auth mode is none: the gateway treats tokens without token auth as a misconfiguration and refuses every request with 500. Set gateway.auth.mode=static to enforce the tokens, or clear gateway.auth.tokenSecretName." -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Validation: the oauth2-proxy edge (auth.enabled) is enforced only by an
+ingress-nginx controller, which honours the nginx.ingress.kubernetes.io/auth-*
+annotations; auth.ingress.acceptedControllers lists the IngressClass
+spec.controller values that count (default k8s.io/ingress-nginx). With cluster
+access the chart looks up the IngressClass named by ingress.className. When it
+is empty, the API server assigns one of the classes marked as default, so every
+default class must use an accepted controller. An offline render (helm
+template) cannot see IngressClasses and cannot tell ingress-nginx from other
+controllers that also use the class name nginx, so it accepts only
+ingress.className=nginx.
+*/}}
+{{- define "sie-cluster.validateOauth2EdgeController" -}}
+{{- $className := toString (default "" .Values.ingress.className) -}}
+{{- $accepted := list -}}
+{{- range $controller := (default (list "k8s.io/ingress-nginx") (dig "ingress" "acceptedControllers" nil (default (dict) .Values.auth))) -}}
+{{- $accepted = append $accepted (toString $controller) -}}
+{{- end -}}
+{{- $classes := lookup "networking.k8s.io/v1" "IngressClass" "" "" -}}
+{{- $items := list -}}
+{{- if $classes -}}
+{{- $items = default (list) $classes.items -}}
+{{- end -}}
+{{- if $items -}}
+{{- $candidates := list -}}
+{{- range $class := $items -}}
+{{- $metadata := default (dict) $class.metadata -}}
+{{- $annotations := default (dict) $metadata.annotations -}}
+{{- if $className -}}
+{{- if eq (toString $metadata.name) $className -}}
+{{- $candidates = append $candidates $class -}}
+{{- end -}}
+{{- else if eq (toString (index $annotations "ingressclass.kubernetes.io/is-default-class")) "true" -}}
+{{- $candidates = append $candidates $class -}}
+{{- end -}}
+{{- end -}}
+{{- if not $candidates -}}
+{{- if $className -}}
+{{- fail (printf "auth.enabled=true needs an ingress-nginx IngressClass for the gateway Ingress, but no IngressClass named %q exists in the cluster." $className) -}}
+{{- end -}}
+{{- fail "auth.enabled=true needs an ingress-nginx IngressClass for the gateway Ingress, but ingress.className is empty and no IngressClass is marked as the cluster default." -}}
+{{- end -}}
+{{- range $class := $candidates -}}
+{{- $controller := toString (dig "spec" "controller" "" $class) -}}
+{{- if not (has $controller $accepted) -}}
+{{- fail (printf "auth.enabled=true puts the oauth2-proxy edge in front of the gateway through ingress-nginx auth annotations, but IngressClass %q%s uses controller %q, which is not in auth.ingress.acceptedControllers %v; other controllers, such as the NGINX Inc controller (nginx.org/ingress-controller), ignore those annotations, so the gateway would be published without that check. Use an ingress-nginx IngressClass, add its controller to auth.ingress.acceptedControllers, or enable gateway auth (gateway.auth.mode=static) and set auth.enabled=false." (toString (dig "metadata" "name" "" $class)) (ternary "" " (a default IngressClass, which the API server may assign to the Ingress)" (ne $className "")) $controller $accepted) -}}
+{{- end -}}
+{{- end -}}
+{{- else if ne $className "nginx" -}}
+{{- fail (printf "auth.enabled=true puts the oauth2-proxy edge in front of the gateway through ingress-nginx auth annotations. This render cannot inspect IngressClasses (for example helm template), so it accepts only ingress.className=nginx and cannot verify the controller behind %q. Use ingress.className=nginx with ingress-nginx, install with cluster access so the chart can check the IngressClass controller, or enable gateway auth (gateway.auth.mode=static) and set auth.enabled=false." $className) -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Validation: a gateway Ingress needs authentication and TLS.
+Authentication is gateway token auth, the oauth2-proxy edge (auth.enabled,
+enforced through ingress-nginx annotations; see
+sie-cluster.validateOauth2EdgeController), or the explicit
+ingress.allowUnauthenticated opt-in. A hostname is not access
+control. TLS is ingress.tlsConfig.enabled with at least one host (the chart
+renders no TLS block without one), ingress.tlsConfig.mode=disabled as an
+explicit statement that TLS terminates upstream, or the explicit
+ingress.allowPlaintext opt-in.
+*/}}
+{{- define "sie-cluster.validateIngressExposure" -}}
+{{- if .Values.ingress.enabled -}}
+{{- $allowUnauthenticated := include "sie-cluster.optIn" (dict "value" .Values.ingress.allowUnauthenticated "path" "ingress.allowUnauthenticated") -}}
+{{- $allowPlaintext := include "sie-cluster.optIn" (dict "value" .Values.ingress.allowPlaintext "path" "ingress.allowPlaintext") -}}
+{{- $edgeAuth := dig "enabled" false (default (dict) .Values.auth) -}}
+{{- if $edgeAuth -}}
+{{- include "sie-cluster.validateOauth2EdgeController" . -}}
+{{- end -}}
+{{- $gatewayAuth := include "sie-cluster.gateway.authenticates" . -}}
+{{- if not (or $gatewayAuth $edgeAuth $allowUnauthenticated) -}}
+{{- $auth := include "sie-cluster.gateway.effectiveAuthMode" . | fromJson -}}
+{{- fail (printf "Refusing to render the gateway Ingress: nothing authenticates its requests (effective SIE_AUTH_MODE=%q, auth.enabled=false), so it would publish the inference and pool APIs to anyone who can reach the ingress controller. A hostname or TLS is not access control. Enable gateway auth (gateway.auth.mode=static with gateway.auth.tokenSecretName) or the oauth2-proxy edge (auth.enabled=true with ingress-nginx), or set ingress.allowUnauthenticated=true to publish it without authentication." $auth.mode) -}}
+{{- end -}}
+{{- $hosts := include "sie-cluster.ingress.hosts" . | fromJsonArray -}}
+{{- $tls := include "sie-cluster.ingressTlsConfig" . | fromYaml -}}
+{{- $upstreamTls := eq (toString (default "byo" $tls.mode)) "disabled" -}}
+{{- $ingressTls := and $tls.enabled (gt (len $hosts) 0) -}}
+{{- if not (or $upstreamTls $ingressTls $allowPlaintext) -}}
+{{- fail "Refusing to render the gateway Ingress without TLS: tokens and session cookies would cross the network in plaintext. Set ingress.hosts with ingress.tlsConfig.enabled=true (the Ingress carries TLS only for named hosts, so an IP-only self-signed certificate is not supported for the gateway Ingress), set ingress.tlsConfig.mode=disabled when TLS terminates upstream of the Ingress, or set ingress.allowPlaintext=true to serve plain HTTP." -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Validation: the MCP edge Ingress carries connector secrets and OAuth tokens,
+so it needs TLS (ingress.tlsConfig.enabled, or mode=disabled when TLS
+terminates upstream) or the explicit mcpEdge.ingress.allowPlaintext opt-in.
+*/}}
+{{- define "sie-cluster.validateMcpEdgeIngressTls" -}}
+{{- $tls := include "sie-cluster.ingressTlsConfig" . | fromYaml -}}
+{{- $upstreamTls := eq (toString (default "byo" $tls.mode)) "disabled" -}}
+{{- $allowPlaintext := include "sie-cluster.optIn" (dict "value" (dig "ingress" "allowPlaintext" nil (default (dict) .Values.mcpEdge)) "path" "mcpEdge.ingress.allowPlaintext") -}}
+{{- if not (or $tls.enabled $upstreamTls $allowPlaintext) -}}
+{{- fail "Refusing to render the MCP edge Ingress without TLS: it carries connector secrets and OAuth tokens. Set ingress.tlsConfig.enabled=true, set ingress.tlsConfig.mode=disabled when TLS terminates upstream of the Ingress, or set mcpEdge.ingress.allowPlaintext=true to serve plain HTTP." -}}
+{{- end -}}
+{{- if and $tls.enabled (eq (toString $tls.mode) "self-signed") -}}
+{{- fail (printf "ingress.tlsConfig.mode=self-signed issues its certificate into %q for the gateway hosts only; nothing issues the MCP edge certificate (Secret %q) for mcpEdge.ingress.host. Use ingress.tlsConfig.mode=cert-manager, or mode=byo with that Secret created, or mode=disabled when TLS terminates upstream of the Ingress." (toString $tls.secretName) (printf "%s-tls" (include "sie-cluster.mcpEdge.serviceName" .))) -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Validation: a gateway Service of type LoadBalancer or NodePort is reachable
+from outside the cluster on most managed Kubernetes platforms, so it needs
+gateway token auth or the explicit gateway.service.allowUnauthenticated
+opt-in, and, because the gateway serves plain HTTP, the explicit
+gateway.service.allowPlaintext acknowledgement. sie-config accepts unauthenticated writes unless an admin token is
+configured (outside a production deployment environment), so its Service
+stays ClusterIP.
+*/}}
+{{- define "sie-cluster.validateServiceExposure" -}}
+{{- $serviceType := toString (dig "service" "type" "ClusterIP" (default (dict) .Values.gateway)) -}}
+{{- if has $serviceType (list "LoadBalancer" "NodePort") -}}
+{{- $allowUnauthenticated := include "sie-cluster.optIn" (dict "value" (dig "service" "allowUnauthenticated" nil (default (dict) .Values.gateway)) "path" "gateway.service.allowUnauthenticated") -}}
+{{- if not (or (include "sie-cluster.gateway.authenticates" .) $allowUnauthenticated) -}}
+{{- fail (printf "Refusing to render gateway.service.type=%s without gateway auth: the Service is reachable from outside the cluster on most managed platforms and would publish the inference and pool APIs. Enable gateway auth (gateway.auth.mode=static with gateway.auth.tokenSecretName), or set gateway.service.allowUnauthenticated=true." $serviceType) -}}
+{{- end -}}
+{{- $allowPlaintext := include "sie-cluster.optIn" (dict "value" (dig "service" "allowPlaintext" nil (default (dict) .Values.gateway)) "path" "gateway.service.allowPlaintext") -}}
+{{- if not $allowPlaintext -}}
+{{- fail (printf "Refusing to render gateway.service.type=%s without an explicit TLS decision: the gateway serves plain HTTP, so tokens would cross the network in cleartext unless the load balancer terminates TLS. Prefer an Ingress with TLS, or configure TLS termination through provider annotations in gateway.service.annotations and set gateway.service.allowPlaintext=true to acknowledge that the gateway itself serves HTTP." $serviceType) -}}
+{{- end -}}
+{{- end -}}
+{{- $config := default (dict) .Values.config -}}
+{{- $configServiceType := toString (dig "service" "type" "ClusterIP" $config) -}}
+{{- if and $config.enabled (ne $configServiceType "ClusterIP") -}}
+{{- fail (printf "config.service.type=%s is not supported: sie-config is the configuration write authority and must stay ClusterIP. Reach it in-cluster or through kubectl port-forward." $configServiceType) -}}
+{{- end -}}
+{{- end }}
+
+{{/*
 KEDA apply hook: ServiceAccount name
 */}}
 {{/*
@@ -552,6 +1061,10 @@ Args (dict): base, suffix.
 {{/* Immutable multi-architecture kubectl image used by privileged KEDA hooks. */}}
 {{- define "sie-cluster.keda.hookImage" -}}
 alpine/k8s:1.29.10@sha256:a1f03afdc59b1acde5e740ed855079c7361505d6fed9d9c6069c8c3307264348
+{{- end }}
+
+{{- define "sie-cluster.hooks.resources" -}}
+{{- toYaml .Values.hooks.resources -}}
 {{- end }}
 
 {{/* Explicit kubectl credentials for hook containers. */}}
@@ -642,20 +1155,24 @@ Resolution order:
      exposes the cache URL as "<scheme>://<bucket-or-container>/models" by
      convention, so the auto-derivation strips a trailing "/models" segment
      before appending "/payloads". The resulting layout is:
-       <bucket-or-container>/models/...    weights (managed by sie-admin cache)
+       <bucket-or-container>/models/...    weights (populated separately)
        <bucket-or-container>/payloads/...  large work-item refs (managed by gateway)
-     These siblings live at the bucket/container root, which is what the
-     workload IAM grants are scoped to in all three (AWS, GCP, Azure)
-     terraform modules.
+     Managed-storage payload object access is scoped to payloads/: AWS grants
+     object actions on payloads/* and conditions bucket-level ListBucket on
+     that prefix; GCP conditions payload get/create/delete on payloads/ but
+     grants storage.objects.list separately bucket-wide; and Azure conditions
+     blob data actions on payloads/ while exempting Blob.List from the path
+     condition; and Alibaba grants payload object actions on payloads/* while
+     conditioning bucket-level ListObjects on models/* and payloads/*. The
+     legacy GCP BYO-bucket path grants objectViewer bucket-wide; operators own
+     IAM scoping for other explicitly configured BYO storage.
   3. Otherwise -> empty string (payload store is off, no env vars rendered).
 
 Supported URL schemes: s3:// (AWS), gs:// (GCP), abfs:// + abfss:// (Azure
-Data Lake Storage Gen2 / Blob with hierarchical namespace enabled). The
-Azure scheme variant is treated identically to the AWS/GCP variants for
-the derivation step — the trailing "/models" → "/payloads" swap works
-the same way because Azure URLs follow the same
-"<scheme>://<container>@<account>.dfs.core.windows.net/<prefix>"
-convention exposed by the deploy/terraform/azure module.
+Data Lake Storage Gen2 / Blob with hierarchical namespace enabled), and
+oss:// (Alibaba Cloud). The trailing "/models" -> "/payloads" derivation
+works for every supported URL shape, including the ADLS Gen2
+"<scheme>://<container>@<account>.dfs.core.windows.net/<prefix>" form.
 
 Templates that consume this should treat a non-empty result as "payload
 store enabled" and an empty result as "off".
@@ -790,6 +1307,661 @@ consume the same queuePool/machineProfile/bundle tuple.
 {{- end -}}
 {{- end -}}
 {{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+"true" when an enabled worker lane serves the `remote` bundle. Remote lanes are
+the only workers that receive the upstreams file and upstream credentials.
+*/}}
+{{- define "sie-cluster.worker.remoteLaneEnabled" -}}
+{{- $enabled := false -}}
+{{- range $poolName, $pool := .Values.workers.pools -}}
+{{- if $pool.enabled -}}
+{{- range $bundleName, $bundleCfg := $pool.bundles -}}
+{{- if and (eq $bundleName "remote") (dig "enabled" true $bundleCfg) -}}
+{{- $enabled = true -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if $enabled }}true{{ end -}}
+{{- end }}
+
+{{/*
+"true" when remote lanes receive the upstreams file and credentials: a remote
+lane is enabled and workers.remote.serving is not false.
+*/}}
+{{- define "sie-cluster.upstreams.delivered" -}}
+{{- if and (eq (include "sie-cluster.worker.remoteLaneEnabled" .) "true") (dig "remote" "serving" true .Values.workers) -}}
+true
+{{- end -}}
+{{- end }}
+
+{{/*
+The upstreams file is a Secret, not a ConfigMap: it says where each credential
+is sent, and the gateway's Role may write every ConfigMap in the namespace.
+*/}}
+{{/*
+SIE_UPSTREAM_NAMES for sie-config: the names of the upstreams the remote lanes
+define, from the same values the upstreams Secret is rendered from, or empty
+when no remote lane is enabled, so sie-config refuses every remote profile.
+*/}}
+{{- define "sie-cluster.upstreams.names" -}}
+{{- if eq (include "sie-cluster.worker.remoteLaneEnabled" .) "true" -}}
+{{- keys (default dict .Values.upstreams) | sortAlpha | join "," -}}
+{{- end -}}
+{{- end }}
+
+{{- define "sie-cluster.upstreams.secretName" -}}
+{{- printf "%s-upstreams" (include "sie-cluster.fullname" .) -}}
+{{- end }}
+
+{{- define "sie-cluster.worker.remoteServiceAccountName" -}}
+{{- printf "%s-worker-remote" (include "sie-cluster.fullname" .) -}}
+{{- end }}
+
+{{/*
+"true" when the remote lanes' own NetworkPolicy renders: a remote lane is
+enabled and workers.remote.networkPolicy.enabled is not false.
+*/}}
+{{- define "sie-cluster.worker.remoteNetworkPolicyEnabled" -}}
+{{- if and (eq (include "sie-cluster.worker.remoteLaneEnabled" .) "true") (dig "remote" "networkPolicy" "enabled" true .Values.workers) -}}
+true
+{{- end -}}
+{{- end }}
+
+{{/*
+Ranges the remote lanes never reach through allowedCidrs, as a JSON list: a
+fixed base that values cannot remove (private, carrier-grade NAT, link-local
+and metadata addresses, IPv6 unique-local, link-local and NAT64 prefixes),
+followed by workers.remote.networkPolicy.extraDeniedCidrs.
+*/}}
+{{- define "sie-cluster.worker.remoteDeniedCidrs" -}}
+{{- $denied := list "10.0.0.0/8" "172.16.0.0/12" "192.168.0.0/16" "100.64.0.0/10" "169.254.0.0/16" "168.63.129.16/32" "fc00::/7" "fe80::/10" "64:ff9b::/96" "64:ff9b:1::/48" -}}
+{{- range $index, $cidr := (dig "remote" "networkPolicy" "extraDeniedCidrs" list .Values.workers) -}}
+{{- if not (and (kindIs "string" $cidr) (regexMatch "^[0-9A-Fa-f:.]+/[0-9]{1,3}$" $cidr)) -}}
+{{- fail (printf "workers.remote.networkPolicy.extraDeniedCidrs[%d] must be a CIDR" $index) -}}
+{{- end -}}
+{{- $validator := ternary "sie-cluster.cidr.ipv6" "sie-cluster.cidr.ipv4" (contains ":" $cidr) -}}
+{{- $_ := include $validator (dict "cidr" $cidr "field" (printf "workers.remote.networkPolicy.extraDeniedCidrs[%d]" $index)) -}}
+{{- $denied = append $denied $cidr -}}
+{{- end -}}
+{{- toJson $denied -}}
+{{- end }}
+
+{{/*
+An IPv4 CIDR as JSON {"ip": <address as an integer>, "prefix": <length>}.
+Args (dict): cidr, field.
+*/}}
+{{- define "sie-cluster.cidr.ipv4" -}}
+{{- $octet := "(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])" -}}
+{{- if not (regexMatch (printf "^%s\\.%s\\.%s\\.%s/(3[0-2]|[12]?[0-9])$" $octet $octet $octet $octet) .cidr) -}}
+{{- fail (printf "%s must be an IPv4 CIDR" .field) -}}
+{{- end -}}
+{{- $parts := regexSplit "[./]" .cidr -1 -}}
+{{- $ip := add (mul (atoi (index $parts 0)) 16777216) (mul (atoi (index $parts 1)) 65536) (mul (atoi (index $parts 2)) 256) (atoi (index $parts 3)) -}}
+{{- $prefix := atoi (index $parts 4) -}}
+{{- $scale := 1 -}}
+{{- range until (int (sub 32 $prefix)) -}}
+{{- $scale = mul $scale 2 -}}
+{{- end -}}
+{{- if ne (mod $ip $scale) 0 -}}
+{{- fail (printf "%s must be an IPv4 CIDR with a network address" .field) -}}
+{{- end -}}
+{{- dict "ip" $ip "prefix" $prefix | toJson -}}
+{{- end }}
+
+{{/*
+Validate an IPv6 CIDR and return its prefix as JSON. IPv4 tails occupy two
+hextets; :: must compress at least one. Args (dict): cidr, field.
+*/}}
+{{- define "sie-cluster.cidr.ipv6" -}}
+{{- $field := .field -}}
+{{- if not (and (kindIs "string" .cidr) (regexMatch "^[0-9A-Fa-f:.]+/(12[0-8]|1[01][0-9]|[1-9]?[0-9])$" .cidr)) -}}
+{{- fail (printf "%s must be an IPv6 CIDR" $field) -}}
+{{- end -}}
+{{- $cidrParts := splitList "/" .cidr -}}
+{{- $address := first $cidrParts -}}
+{{- if contains "." $address -}}
+{{- $tail := last (splitList ":" $address) -}}
+{{- $v4 := include "sie-cluster.cidr.ipv4" (dict "cidr" (printf "%s/32" $tail) "field" $field) | fromJson -}}
+{{- $address = printf "%s%x:%x" (trimSuffix $tail $address) (int (div (int64 $v4.ip) 65536)) (int (mod (int64 $v4.ip) 65536)) -}}
+{{- end -}}
+{{- $parts := splitList "::" $address -}}
+{{- $groups := list -}}
+{{- range $part := $parts -}}
+{{- if $part -}}
+{{- $groups = concat $groups (splitList ":" $part) -}}
+{{- end -}}
+{{- end -}}
+{{- range $group := $groups -}}
+{{- if not (regexMatch "^[0-9A-Fa-f]{1,4}$" $group) -}}
+{{- fail (printf "%s must be an IPv6 CIDR" $field) -}}
+{{- end -}}
+{{- end -}}
+{{- if not (or (and (eq (len $parts) 1) (eq (len $groups) 8)) (and (eq (len $parts) 2) (lt (len $groups) 8))) -}}
+{{- fail (printf "%s must be an IPv6 CIDR" $field) -}}
+{{- end -}}
+{{- if eq (len $parts) 2 -}}
+{{- $expanded := regexFindAll "[0-9A-Fa-f]+" (first $parts) -1 -}}
+{{- range until (int (sub 8 (len $groups))) -}}
+{{- $expanded = append $expanded "0" -}}
+{{- end -}}
+{{- $groups = concat $expanded (regexFindAll "[0-9A-Fa-f]+" (last $parts) -1) -}}
+{{- end -}}
+{{- $digits := dict "0" 0 "1" 1 "2" 2 "3" 3 "4" 4 "5" 5 "6" 6 "7" 7 "8" 8 "9" 9 "a" 10 "b" 11 "c" 12 "d" 13 "e" 14 "f" 15 -}}
+{{- $values := list -}}
+{{- range $group := $groups -}}
+{{- $value := 0 -}}
+{{- range $digit := splitList "" (lower $group) -}}
+{{- $value = add (mul $value 16) (get $digits $digit) -}}
+{{- end -}}
+{{- $values = append $values $value -}}
+{{- end -}}
+{{- if and (eq (index $values 0) 0) (eq (index $values 1) 0) (eq (index $values 2) 0) (eq (index $values 3) 0) (eq (index $values 4) 0) (eq (index $values 5) 65535) -}}
+{{- fail (printf "%s must be an IPv6 CIDR without an IPv4-mapped address" $field) -}}
+{{- end -}}
+{{- $prefix := atoi (last $cidrParts) -}}
+{{- range $index, $value := $values -}}
+{{- $bits := max 0 (min 16 (sub $prefix (mul $index 16))) -}}
+{{- $scale := 1 -}}
+{{- range until (int (sub 16 $bits)) -}}
+{{- $scale = mul $scale 2 -}}
+{{- end -}}
+{{- if ne (mod $value $scale) 0 -}}
+{{- fail (printf "%s must be an IPv6 CIDR with a network address" $field) -}}
+{{- end -}}
+{{- end -}}
+{{- dict "prefix" $prefix | toJson -}}
+{{- end }}
+
+{{/*
+"true" when the IPv4 block `inner` lies inside `outer`. Two CIDR blocks are
+either nested or disjoint. Args (dict): inner, outer (from sie-cluster.cidr.ipv4).
+*/}}
+{{- define "sie-cluster.cidr.ipv4Within" -}}
+{{- if ge (int .inner.prefix) (int .outer.prefix) -}}
+{{- $scale := 1 -}}
+{{- range until (int (sub 32 (int .outer.prefix))) -}}
+{{- $scale = mul $scale 2 -}}
+{{- end -}}
+{{- if eq (div (int64 .inner.ip) $scale) (div (int64 .outer.ip) $scale) -}}
+true
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Fail unless every NetworkPolicy peer is scoped: a podSelector or
+namespaceSelector with matchLabels or matchExpressions, or an ipBlock whose
+prefix length is above 0. Args (dict): peers, path.
+*/}}
+{{- define "sie-cluster.networkPolicy.validatePeers" -}}
+{{- $path := .path -}}
+{{- range $index, $peer := .peers -}}
+{{- $scoped := false -}}
+{{- if kindIs "map" $peer -}}
+{{- if and (hasKey $peer "ipBlock") (or (hasKey $peer "podSelector") (hasKey $peer "namespaceSelector")) -}}
+{{- fail (printf "%s[%d] cannot combine ipBlock with podSelector or namespaceSelector." $path $index) -}}
+{{- end -}}
+{{- range $selectorKey := list "podSelector" "namespaceSelector" -}}
+{{- $selector := index $peer $selectorKey -}}
+{{- if and (kindIs "map" $selector) (or $selector.matchLabels $selector.matchExpressions) -}}
+{{- $scoped = true -}}
+{{- end -}}
+{{- end -}}
+{{- if $peer.ipBlock -}}
+{{- $cidr := toString (dig "cidr" "" (default (dict) $peer.ipBlock)) -}}
+{{- if or (not $cidr) (regexMatch "/0+$" (trim $cidr)) -}}
+{{- fail (printf "%s[%d] admits every address: give the ipBlock a prefix length above 0." $path $index) -}}
+{{- end -}}
+{{- $validator := ternary "sie-cluster.cidr.ipv6" "sie-cluster.cidr.ipv4" (contains ":" $cidr) -}}
+{{- $_ := include $validator (dict "cidr" $cidr "field" (printf "%s[%d].ipBlock.cidr" $path $index)) -}}
+{{- $scoped = true -}}
+{{- end -}}
+{{- end -}}
+{{- if not $scoped -}}
+{{- fail (printf "%s[%d] admits every destination: give it a podSelector or namespaceSelector with matchLabels or matchExpressions, or an ipBlock." $path $index) -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Fail unless every NetworkPolicy port names a port and spans at most 60000
+ports. Args (dict): ports, path.
+*/}}
+{{- define "sie-cluster.networkPolicy.validatePorts" -}}
+{{- $path := .path -}}
+{{- range $index, $port := .ports -}}
+{{- if not (and (kindIs "map" $port) $port.port) -}}
+{{- fail (printf "%s[%d] admits every port: set port." $path $index) -}}
+{{- end -}}
+{{- $numeric := or (kindIs "int" $port.port) (kindIs "int64" $port.port) (kindIs "float64" $port.port) -}}
+{{- if $numeric -}}
+{{- if not (and (eq (float64 $port.port) (floor (float64 $port.port))) (ge (float64 $port.port) 1.0) (le (float64 $port.port) 65535.0)) -}}
+{{- fail (printf "%s[%d].port must be an integer between 1 and 65535." $path $index) -}}
+{{- end -}}
+{{- end -}}
+{{- if not (kindIs "invalid" $port.endPort) -}}
+{{- $integral := list -}}
+{{- range $value := list $port.port $port.endPort -}}
+{{- $integral = append $integral (or (kindIs "int" $value) (kindIs "int64" $value) (and (kindIs "float64" $value) (eq (float64 $value) (floor (float64 $value))))) -}}
+{{- end -}}
+{{- if not (index $integral 0) -}}
+{{- fail (printf "%s[%d] sets endPort, which needs a numeric port, not a named one." $path $index) -}}
+{{- end -}}
+{{- if not (index $integral 1) -}}
+{{- fail (printf "%s[%d].endPort must be an integer." $path $index) -}}
+{{- end -}}
+{{- if or (lt (int64 $port.endPort) 1) (gt (int64 $port.endPort) 65535) -}}
+{{- fail (printf "%s[%d].endPort must be between 1 and 65535." $path $index) -}}
+{{- end -}}
+{{- if lt (int64 $port.endPort) (int64 $port.port) -}}
+{{- fail (printf "%s[%d].endPort must be at least port." $path $index) -}}
+{{- end -}}
+{{- if gt (sub (int64 $port.endPort) (int64 $port.port)) 60000 -}}
+{{- fail (printf "%s[%d] spans nearly every port: list the ports instead." $path $index) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Environment variable that carries one upstream's credential on remote lanes.
+Upstream names hold no underscore, so the mapping is one to one.
+*/}}
+{{- define "sie-cluster.upstream.keyEnvName" -}}
+{{- printf "SIE_UPSTREAM_KEY_%s" (. | replace "-" "_" | upper) -}}
+{{- end }}
+
+{{/*
+The server's upstreams file, rendered from `upstreams`. Each credential is
+referenced by the name of the environment variable that remote lanes fill from
+the upstream's Secret.
+*/}}
+{{- define "sie-cluster.upstreams.file" -}}
+{{- $rendered := dict -}}
+{{- range $name, $upstream := (default dict .Values.upstreams) -}}
+{{- $rateCap := dict "requests_per_minute" (int64 $upstream.rate_cap.requests_per_minute) "max_concurrency" (int64 $upstream.rate_cap.max_concurrency) -}}
+{{- $entry := dict "kind" $upstream.kind "base_url" $upstream.base_url "rate_cap" $rateCap -}}
+{{- if $upstream.proxy_url -}}
+{{- $_ := set $entry "proxy_url" $upstream.proxy_url -}}
+{{- end -}}
+{{- range $field := list "endpoints" "set_params" "strip_params" "breaker" -}}
+{{- with index $upstream $field -}}
+{{- $_ := set $entry $field . -}}
+{{- end -}}
+{{- end -}}
+{{- if $upstream.api_key_secret -}}
+{{- $_ := set $entry "api_key_secret" (include "sie-cluster.upstream.keyEnvName" $name) -}}
+{{- end -}}
+{{- $_ := set $rendered $name $entry -}}
+{{- end -}}
+{{- dict "upstreams" $rendered | toYaml -}}
+{{- end }}
+
+{{/*
+Nesting depth of a value: 0 for a scalar, one more than its deepest member for
+a map or a list.
+*/}}
+{{- define "sie-cluster.upstreams.jsonDepth" -}}
+{{- if or (kindIs "map" .) (kindIs "slice" .) -}}
+{{- $deepest := 0 -}}
+{{- range $_, $member := . -}}
+{{- $depth := include "sie-cluster.upstreams.jsonDepth" $member | atoi -}}
+{{- if gt $depth $deepest -}}
+{{- $deepest = $depth -}}
+{{- end -}}
+{{- end -}}
+{{- add1 $deepest -}}
+{{- else -}}
+0
+{{- end -}}
+{{- end }}
+
+{{/*
+Check one upstream URL the way the server does. Messages never repeat the
+value, because a rejected URL can carry a credential.
+
+Args (dict): url, field, requireTls.
+*/}}
+{{- define "sie-cluster.upstreams.validateUrl" -}}
+{{- $url := .url -}}
+{{- if not (kindIs "string" $url) -}}
+{{- fail (printf "%s must be a URL string" .field) -}}
+{{- end -}}
+{{- if not (regexMatch "^[\\x21-\\x7e]+$" $url) -}}
+{{- fail (printf "%s must be printable ASCII without spaces" .field) -}}
+{{- end -}}
+{{- if or (contains "?" $url) (contains "#" $url) -}}
+{{- fail (printf "%s must not carry a query or a fragment" .field) -}}
+{{- end -}}
+{{- if not (regexMatch "^https?://[^/@]*(/.*)?$" $url) -}}
+{{- fail (printf "%s must be an http or https URL that names a host and carries no credentials" .field) -}}
+{{- end -}}
+{{- $authority := regexReplaceAll "^https?://([^/]*).*$" $url "${1}" -}}
+{{- if contains "%" $authority -}}
+{{- fail (printf "%s must not percent-encode the host" .field) -}}
+{{- end -}}
+{{- $host := "" -}}
+{{- $port := "" -}}
+{{- if regexMatch "^\\[[0-9A-Fa-f:.]*\\](:[0-9]*)?$" $authority -}}
+{{- $host = regexReplaceAll "^\\[([^\\]]*)\\].*$" $authority "${1}" -}}
+{{- $port = regexReplaceAll "^\\[[^\\]]*\\]:?" $authority "" -}}
+{{- else if regexMatch "^[^:\\[\\]]*(:[0-9]*)?$" $authority -}}
+{{- $host = regexReplaceAll ":.*$" $authority "" -}}
+{{- $port = regexReplaceAll "^[^:]*:?" $authority "" -}}
+{{- else -}}
+{{- fail (printf "%s is not a valid URL" .field) -}}
+{{- end -}}
+{{- if not $host -}}
+{{- fail (printf "%s must name a host" .field) -}}
+{{- end -}}
+{{- $significantPort := regexReplaceAll "^0+" $port "" -}}
+{{- if and $port (or (not $significantPort) (gt (len $significantPort) 5) (gt (atoi (default "0" $significantPort)) 65535)) -}}
+{{- fail (printf "%s is not a valid URL: a port is 1 to 65535" .field) -}}
+{{- end -}}
+{{- $octet := "(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])" -}}
+{{- if and (regexMatch "^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$" $host) (not (regexMatch (printf "^%s\\.%s\\.%s\\.%s$" $octet $octet $octet $octet) $host)) -}}
+{{- fail (printf "%s is not a valid URL" .field) -}}
+{{- end -}}
+{{- $loopback := or (eq (lower $host) "localhost") (eq $host "::1") (regexMatch (printf "^127\\.%s\\.%s\\.%s$" $octet $octet $octet) $host) -}}
+{{- if and .requireTls (hasPrefix "http://" $url) (not $loopback) -}}
+{{- fail (printf "%s must use https outside loopback" .field) -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Check the fields of an upstream of kind openai the way the server does: the
+endpoints it offers, and the request fields set or stripped on every call.
+Names that fail the pattern are not repeated. Args (dict): upstream, path.
+*/}}
+{{- define "sie-cluster.upstreams.validateOpenaiFields" -}}
+{{- $upstream := .upstream -}}
+{{- $path := .path -}}
+{{- $reserved := list "documents" "encoding_format" "input" "messages" "model" "n" "prompt" "query" "stream" "stream_options" "top_n" -}}
+{{- $namePattern := "^[A-Za-z_][A-Za-z0-9_]{0,63}$" -}}
+{{- if eq $upstream.kind "sie" -}}
+{{- range $field := list "endpoints" "set_params" "strip_params" -}}
+{{- if index $upstream $field -}}
+{{- fail (printf "%s: kind sie takes no %s" $path $field) -}}
+{{- end -}}
+{{- end -}}
+{{- else -}}
+{{- $endpoints := $upstream.endpoints -}}
+{{- if not (and (kindIs "slice" $endpoints) $endpoints) -}}
+{{- fail (printf "%s.endpoints: kind openai must declare the endpoints it offers, from completions, chat, embeddings and rerank" $path) -}}
+{{- end -}}
+{{- range $index, $endpoint := $endpoints -}}
+{{- if not (has $endpoint (list "completions" "chat" "embeddings" "rerank")) -}}
+{{- fail (printf "%s.endpoints[%d] must be completions, chat, embeddings or rerank" $path $index) -}}
+{{- end -}}
+{{- end -}}
+{{- if ne (len (uniq $endpoints)) (len $endpoints) -}}
+{{- fail (printf "%s.endpoints lists the same entry more than once" $path) -}}
+{{- end -}}
+{{- end -}}
+{{- $setParams := $upstream.set_params -}}
+{{- if not (kindIs "invalid" $setParams) -}}
+{{- if not (kindIs "map" $setParams) -}}
+{{- fail (printf "%s.set_params must map request fields to values" $path) -}}
+{{- end -}}
+{{- if gt (len $setParams) 32 -}}
+{{- fail (printf "%s.set_params sets at most 32 fields" $path) -}}
+{{- end -}}
+{{- $position := 0 -}}
+{{- range $name, $value := $setParams -}}
+{{- $position = add1 $position -}}
+{{- if not (regexMatch $namePattern $name) -}}
+{{- fail (printf "%s.set_params: field %d, counting in name order, is not a field name; use letters, digits and underscores, at most 64 characters, not starting with a digit" $path $position) -}}
+{{- end -}}
+{{- if has $name $reserved -}}
+{{- fail (printf "%s.set_params cannot set %q, which the server sends itself" $path $name) -}}
+{{- end -}}
+{{- if gt (include "sie-cluster.upstreams.jsonDepth" $value | atoi) 8 -}}
+{{- fail (printf "%s.set_params: field %d, counting in name order, nests deeper than 8 levels" $path $position) -}}
+{{- end -}}
+{{- end -}}
+{{- if gt (len (toJson $setParams)) 16384 -}}
+{{- fail (printf "%s.set_params is larger than 16384 bytes as JSON" $path) -}}
+{{- end -}}
+{{- end -}}
+{{- $stripParams := $upstream.strip_params -}}
+{{- if not (kindIs "invalid" $stripParams) -}}
+{{- if not (kindIs "slice" $stripParams) -}}
+{{- fail (printf "%s.strip_params must list request field names" $path) -}}
+{{- end -}}
+{{- if gt (len $stripParams) 32 -}}
+{{- fail (printf "%s.strip_params strips at most 32 fields" $path) -}}
+{{- end -}}
+{{- range $index, $name := $stripParams -}}
+{{- if not (and (kindIs "string" $name) (regexMatch $namePattern $name)) -}}
+{{- fail (printf "%s.strip_params[%d] is not a field name; use letters, digits and underscores, at most 64 characters, not starting with a digit" $path $index) -}}
+{{- end -}}
+{{- if has $name $reserved -}}
+{{- fail (printf "%s.strip_params cannot strip %q, which the server sends itself" $path $name) -}}
+{{- end -}}
+{{- if and (kindIs "map" $setParams) (hasKey $setParams $name) -}}
+{{- fail (printf "%s: set_params and strip_params both name %q" $path $name) -}}
+{{- end -}}
+{{- end -}}
+{{- if ne (len (uniq $stripParams)) (len $stripParams) -}}
+{{- fail (printf "%s.strip_params lists the same entry more than once" $path) -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Validate `upstreams` against the server's upstreams file format, keep each
+upstream's Secret out of every container other than the remote lanes' workers,
+and require a NetworkPolicy in front of the remote lanes. Messages name a
+position instead of repeating a map key that failed validation, because a
+credential pasted as a key would otherwise be printed.
+*/}}
+{{- define "sie-cluster.upstreams.validate" -}}
+{{- $root := . -}}
+{{- $upstreams := default dict $root.Values.upstreams -}}
+{{- if not (kindIs "map" $upstreams) -}}
+{{- fail "upstreams must map upstream names to definitions" -}}
+{{- end -}}
+{{- $serving := dig "remote" "serving" true $root.Values.workers -}}
+{{- if not (kindIs "bool" $serving) -}}
+{{- fail "workers.remote.serving must be a boolean" -}}
+{{- end -}}
+{{- $chartSecretKeys := list -}}
+{{- $hfCache := $root.Values.workers.common.hfCache | default dict -}}
+{{- with $hfCache.tokenSecret -}}
+{{- $chartSecretKeys = append $chartSecretKeys (dict "owner" "workers.common.hfCache.tokenSecret" "ref" (printf "%s/%s" . $hfCache.tokenSecretKey)) -}}
+{{- end -}}
+{{- $gatewayAuth := $root.Values.gateway.auth | default dict -}}
+{{- with $gatewayAuth.tokenSecretName -}}
+{{- $chartSecretKeys = append $chartSecretKeys (dict "owner" "gateway.auth.tokenSecretName" "ref" (printf "%s/%s" . $gatewayAuth.tokenSecretKey)) -}}
+{{- end -}}
+{{- with $gatewayAuth.adminTokenSecretName -}}
+{{- $chartSecretKeys = append $chartSecretKeys (dict "owner" "gateway.auth.adminTokenSecretName" "ref" (printf "%s/%s" . (include "sie-cluster.gateway.adminTokenSecretKey" $root))) -}}
+{{- end -}}
+{{- with include "sie-cluster.config.readTokenSecretName" $root -}}
+{{- $chartSecretKeys = append $chartSecretKeys (dict "owner" "the sie-config read token" "ref" (printf "%s/%s" . (include "sie-cluster.config.readTokenSecretKey" $root))) -}}
+{{- end -}}
+{{- with include "sie-cluster.config.adminTokenSecretName" $root -}}
+{{- $chartSecretKeys = append $chartSecretKeys (dict "owner" "the sie-config admin token" "ref" (printf "%s/%s" . (include "sie-cluster.config.adminTokenSecretKey" $root))) -}}
+{{- end -}}
+{{- range $secretName := $root.Values.global.imagePullSecrets -}}
+{{- range $key := list ".dockerconfigjson" ".dockercfg" -}}
+{{- $chartSecretKeys = append $chartSecretKeys (dict "owner" "global.imagePullSecrets" "ref" (printf "%s/%s" $secretName $key)) -}}
+{{- end -}}
+{{- end -}}
+{{- $oauthSecret := $root.Values.auth.oauth2Proxy.secret -}}
+{{- with $oauthSecret.name -}}
+{{- $secretName := . -}}
+{{- range $keyField := list "clientIDKey" "clientSecretKey" "cookieSecretKey" -}}
+{{- $chartSecretKeys = append $chartSecretKeys (dict "owner" (printf "auth.oauth2Proxy.secret.%s" $keyField) "ref" (printf "%s/%s" $secretName (index $oauthSecret $keyField))) -}}
+{{- end -}}
+{{- end -}}
+{{- $betterStack := $root.Values.observability.otel.collector.betterStack -}}
+{{- with $betterStack.existingSecret -}}
+{{- $chartSecretKeys = append $chartSecretKeys (dict "owner" "observability.otel.collector.betterStack.existingSecret" "ref" (printf "%s/%s" . $betterStack.tokenKey)) -}}
+{{- end -}}
+{{- $mcp := $root.Values.mcpEdge -}}
+{{- if or $mcp.connectorSecrets $mcp.existingSecretName -}}
+{{- $chartSecretKeys = append $chartSecretKeys (dict "owner" "the MCP connector secrets" "ref" (printf "%s/connector-secrets" (include "sie-cluster.mcpEdge.secretName" $root))) -}}
+{{- end -}}
+{{- with $mcp.clusterApiKey.existingSecretName -}}
+{{- $chartSecretKeys = append $chartSecretKeys (dict "owner" "mcpEdge.clusterApiKey.existingSecretName" "ref" (printf "%s/%s" . $mcp.clusterApiKey.secretKey)) -}}
+{{- end -}}
+{{- $tls := include "sie-cluster.ingressTlsConfig" $root | fromYaml -}}
+{{- $tlsSecrets := list (dict "owner" "the ingress TLS certificate" "name" $tls.secretName) (dict "owner" "the MCP ingress TLS certificate" "name" (printf "%s-tls" (include "sie-cluster.mcpEdge.serviceName" $root))) -}}
+{{- $rootCA := dig "selfSigned" "rootCA" dict $tls -}}
+{{- $namespace := include "sie-cluster.namespace" $root -}}
+{{- if eq (default $namespace $rootCA.namespace) $namespace -}}
+{{- $tlsSecrets = append $tlsSecrets (dict "owner" "the ingress root CA" "name" $rootCA.secretName) -}}
+{{- end -}}
+{{- range $tlsSecret := $tlsSecrets -}}
+{{- if $tlsSecret.name -}}
+{{- range $key := list "tls.crt" "tls.key" -}}
+{{- $chartSecretKeys = append $chartSecretKeys (dict "owner" $tlsSecret.owner "ref" (printf "%s/%s" $tlsSecret.name $key)) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if include "sie-cluster.nats.authEnabled" $root -}}
+{{- $components := include "sie-cluster.nats.authComponents" $root | fromJsonArray -}}
+{{- if dig "config" "cluster" "enabled" false $root.Values.nats -}}
+{{- $components = append $components "route" -}}
+{{- end -}}
+{{- range $component := $components -}}
+{{- $natsSecret := include "sie-cluster.nats.authSecretName" (dict "auth" $root.Values.nats.auth "release" $root.Release.Name "component" $component) -}}
+{{- $chartSecretKeys = append $chartSecretKeys (dict "owner" (printf "the NATS %s password" $component) "ref" (printf "%s/password" $natsSecret)) -}}
+{{- end -}}
+{{- end -}}
+{{- $upstreamsSecretName := include "sie-cluster.upstreams.secretName" $root -}}
+{{- $upstreamsFileRef := printf "%s/upstreams.yaml" $upstreamsSecretName -}}
+{{- if $upstreams -}}
+{{- range $chartSecretKey := $chartSecretKeys -}}
+{{- if eq $chartSecretKey.ref $upstreamsFileRef -}}
+{{- fail (printf "%s reads the upstreams file: only the worker container of a remote lane may hold upstream configuration" $chartSecretKey.owner) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- $chartSecretKeys = append $chartSecretKeys (dict "owner" "the upstreams file" "ref" $upstreamsFileRef) -}}
+{{- $secretNames := list -}}
+{{- if $upstreams -}}
+{{- $secretNames = append $secretNames $upstreamsSecretName -}}
+{{- end -}}
+{{- $position := 0 -}}
+{{- range $name, $upstream := $upstreams -}}
+{{- $position = add1 $position -}}
+{{- if not (regexMatch "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$" $name) -}}
+{{- fail (printf "upstreams: entry %d, counting in name order, is not an upstream name; use lowercase letters, digits and hyphens, at most 63 characters, starting and ending with a letter or digit" $position) -}}
+{{- end -}}
+{{- if not (kindIs "map" $upstream) -}}
+{{- fail (printf "upstreams: entry %d, counting in name order, must be a map" $position) -}}
+{{- end -}}
+{{- $path := printf "upstreams.%s" $name -}}
+{{- $fieldPosition := 0 -}}
+{{- range $field, $_ := $upstream -}}
+{{- $fieldPosition = add1 $fieldPosition -}}
+{{- if not (has $field (list "kind" "base_url" "api_key_secret" "rate_cap" "proxy_url" "endpoints" "set_params" "strip_params" "breaker")) -}}
+{{- fail (printf "%s: field %d, counting in name order, is not an upstream field; use kind, base_url, api_key_secret, rate_cap, proxy_url, endpoints, set_params, strip_params and breaker" $path $fieldPosition) -}}
+{{- end -}}
+{{- end -}}
+{{- if not (has $upstream.kind (list "sie" "openai")) -}}
+{{- fail (printf "%s.kind must be sie or openai" $path) -}}
+{{- end -}}
+{{- include "sie-cluster.upstreams.validateOpenaiFields" (dict "upstream" $upstream "path" $path) -}}
+{{- include "sie-cluster.upstreams.validateUrl" (dict "url" $upstream.base_url "field" (printf "%s.base_url" $path) "requireTls" true) -}}
+{{- if not (kindIs "invalid" $upstream.proxy_url) -}}
+{{- include "sie-cluster.upstreams.validateUrl" (dict "url" $upstream.proxy_url "field" (printf "%s.proxy_url" $path) "requireTls" false) -}}
+{{- if not (hasPrefix "https://" $upstream.base_url) -}}
+{{- fail (printf "%s.proxy_url requires an https base_url" $path) -}}
+{{- end -}}
+{{- end -}}
+{{- $rateCap := $upstream.rate_cap -}}
+{{- if not (kindIs "map" $rateCap) -}}
+{{- fail (printf "%s.rate_cap is required: set requests_per_minute and max_concurrency" $path) -}}
+{{- end -}}
+{{- $fieldPosition = 0 -}}
+{{- range $field, $_ := $rateCap -}}
+{{- $fieldPosition = add1 $fieldPosition -}}
+{{- if not (has $field (list "requests_per_minute" "max_concurrency")) -}}
+{{- fail (printf "%s.rate_cap: field %d, counting in name order, is not a rate cap field; use requests_per_minute and max_concurrency" $path $fieldPosition) -}}
+{{- end -}}
+{{- end -}}
+{{- range $field := list "requests_per_minute" "max_concurrency" -}}
+{{- $limit := index $rateCap $field -}}
+{{- if not (and (or (kindIs "int" $limit) (kindIs "int64" $limit) (kindIs "float64" $limit)) (eq (float64 $limit) (floor (float64 $limit))) (gt (float64 $limit) 0.0)) -}}
+{{- fail (printf "%s.rate_cap.%s must be a positive integer" $path $field) -}}
+{{- end -}}
+{{- end -}}
+{{- if hasKey $upstream "breaker" -}}
+{{- $breaker := $upstream.breaker -}}
+{{- if not (kindIs "map" $breaker) -}}
+{{- fail (printf "%s.breaker must map failures, window_s and cooldown_s" $path) -}}
+{{- end -}}
+{{- $fieldPosition = 0 -}}
+{{- range $field, $limit := $breaker -}}
+{{- $fieldPosition = add1 $fieldPosition -}}
+{{- if not (has $field (list "failures" "window_s" "cooldown_s")) -}}
+{{- fail (printf "%s.breaker: field %d, counting in name order, is not a breaker field" $path $fieldPosition) -}}
+{{- end -}}
+{{- $maximum := ternary 1000.0 3600.0 (eq $field "failures") -}}
+{{- $numeric := or (kindIs "int" $limit) (kindIs "int64" $limit) (kindIs "float64" $limit) -}}
+{{- if not (and $numeric (gt (float64 $limit) 0.0) (le (float64 $limit) $maximum)) -}}
+{{- fail (printf "%s.breaker.%s must be positive and at most %g" $path $field $maximum) -}}
+{{- end -}}
+{{- if and (eq $field "failures") (ne (float64 $limit) (floor (float64 $limit))) -}}
+{{- fail (printf "%s.breaker.failures must be an integer" $path) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if not (kindIs "invalid" $upstream.api_key_secret) -}}
+{{- $secret := $upstream.api_key_secret -}}
+{{- if not (kindIs "map" $secret) -}}
+{{- fail (printf "%s.api_key_secret must name a Kubernetes Secret as {name, key}; a credential never goes in values" $path) -}}
+{{- end -}}
+{{- $fieldPosition = 0 -}}
+{{- range $field, $_ := $secret -}}
+{{- $fieldPosition = add1 $fieldPosition -}}
+{{- if not (has $field (list "name" "key")) -}}
+{{- fail (printf "%s.api_key_secret: field %d, counting in name order, is not a field; use name and key" $path $fieldPosition) -}}
+{{- end -}}
+{{- end -}}
+{{- if not (and (kindIs "string" $secret.name) (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" (toString $secret.name)) (le (len (toString $secret.name)) 253)) -}}
+{{- fail (printf "%s.api_key_secret.name must be a Kubernetes Secret name" $path) -}}
+{{- end -}}
+{{- if not (and (kindIs "string" $secret.key) (regexMatch "^[-._a-zA-Z0-9]+$" (toString $secret.key)) (le (len (toString $secret.key)) 253)) -}}
+{{- fail (printf "%s.api_key_secret.key must be a Secret data key" $path) -}}
+{{- end -}}
+{{- $ref := printf "%s/%s" $secret.name $secret.key -}}
+{{- range $chartSecretKey := $chartSecretKeys -}}
+{{- if eq $chartSecretKey.ref $ref -}}
+{{- fail (printf "%s.api_key_secret and %s name the same Secret key (%s). An upstream credential must reach only the remote lanes' workers, and no other credential may be sent upstream: give the upstream its own Secret key." $path $chartSecretKey.owner $ref) -}}
+{{- end -}}
+{{- end -}}
+{{- $secretNames = append $secretNames $secret.name -}}
+{{- end -}}
+{{- end -}}
+{{- $sources := list (dict "path" "gateway.extraEnv" "entries" $root.Values.gateway.extraEnv) (dict "path" "workers.common.extraEnv" "entries" $root.Values.workers.common.extraEnv) (dict "path" "workers.common.workerSidecar.extraEnv" "entries" $root.Values.workers.common.workerSidecar.extraEnv) -}}
+{{- range $poolName, $pool := $root.Values.workers.pools -}}
+{{- range $bundleName, $bundleCfg := (default dict $pool.bundles) -}}
+{{- if ne $bundleName "remote" -}}
+{{- $sources = append $sources (dict "path" (printf "workers.pools.%s.bundles.%s.extraEnv" $poolName $bundleName) "entries" (dig "extraEnv" list (default dict $bundleCfg))) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- range $source := $sources -}}
+{{- range $entry := (default list $source.entries) -}}
+{{- $secretName := dig "valueFrom" "secretKeyRef" "name" "" $entry -}}
+{{- if and $secretName (has $secretName $secretNames) -}}
+{{- fail (printf "%s reads the upstream Secret %q: only the worker container of a remote lane may hold an upstream credential" $source.path $secretName) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if and (eq (include "sie-cluster.worker.remoteLaneEnabled" $root) "true") (not (dig "networkPolicy" "enabled" false $root.Values.workers)) (ne (include "sie-cluster.worker.remoteNetworkPolicyEnabled" $root) "true") -}}
+{{- fail "a remote lane needs a NetworkPolicy: keep workers.remote.networkPolicy.enabled=true (the default) or set workers.networkPolicy.enabled=true. The worker API has no authentication of its own, so without a NetworkPolicy any pod in the cluster could call a remote lane directly and spend its upstream credentials." -}}
+{{- end -}}
+{{- if and (eq (include "sie-cluster.worker.remoteLaneEnabled" $root) "true") (ne (include "sie-cluster.worker.remoteNetworkPolicyEnabled" $root) "true") (dig "networkPolicy" "extraIngress" list $root.Values.workers) -}}
+{{- fail "workers.networkPolicy.extraIngress cannot be set while a remote lane is enabled and workers.remote.networkPolicy.enabled is false: workers.networkPolicy then also selects the remote lane, so every extraIngress source could call it directly and spend its upstream credentials." -}}
 {{- end -}}
 {{- end }}
 
@@ -1264,10 +2436,11 @@ port; pods without a named child port are simply not endpoints for that port.
 {{- range $poolName, $pool := $root.Values.workers.pools -}}
 {{- if $pool.enabled -}}
 {{- $gpuCount := int $pool.gpu.count -}}
+{{- $deviceGroup := dig "deviceGroup" false (default dict $pool.gpu) -}}
 {{- $poolSidecar := default dict $pool.sidecar -}}
 {{- $emulatedChildCount := int (dig "emulatedChildCount" 0 $poolSidecar) -}}
 {{- $count := 1 -}}
-{{- if gt $gpuCount 1 -}}
+{{- if and (gt $gpuCount 1) (not $deviceGroup) -}}
 {{- $count = $gpuCount -}}
 {{- else if gt $emulatedChildCount 1 -}}
 {{- $count = $emulatedChildCount -}}

@@ -16,6 +16,9 @@ static OPENAPI_DOC: LazyLock<utoipa::openapi::OpenApi> = LazyLock::new(|| {
 static OPENAPI_JSON: LazyLock<String> = LazyLock::new(|| {
     let mut value = serde_json::to_value(&*OPENAPI_DOC).expect("OpenAPI document should serialize");
     apply_gateway_openapi_overrides(&mut value);
+    // Keep the published spec's key order stable and sorted, independent of
+    // serde_json's `preserve_order` insertion order.
+    let value = crate::canonical_json::sorted(&value);
     serde_json::to_string_pretty(&value).expect("OpenAPI document should serialize") + "\n"
 });
 
@@ -83,6 +86,8 @@ static OPENAPI_JSON: LazyLock<String> = LazyLock::new(|| {
         AllItemsFailedResponse,
         BundleRoutingConflictDetail,
         BundleConflictResponse,
+        AudioInput,
+        VideoInput,
         DocumentInput,
         DenseVector,
         EncodeParams,
@@ -104,6 +109,7 @@ static OPENAPI_JSON: LazyLock<String> = LazyLock::new(|| {
         ModelCapabilitiesWire,
         ModelConfigStatusResponse,
         ModelInfoWire,
+        ModelRoutingWire,
         ModelsResponse,
         OpenAiModelObject,
         ModelNotFoundDetail,
@@ -115,6 +121,7 @@ static OPENAPI_JSON: LazyLock<String> = LazyLock::new(|| {
         OpenAIEmbeddingEncodingFormat,
         OpenAIEmbeddingInput,
         OpenAIEmbeddingRequest,
+        OpenAIEmbeddingTokenSource,
         OpenAIEmbeddingUsage,
         OpenAIEmbeddingVector,
         OpenAIEmbeddingsListResponse,
@@ -128,6 +135,7 @@ static OPENAPI_JSON: LazyLock<String> = LazyLock::new(|| {
         GenerateChunk,
         GenerateChunkError,
         GenerateUsage,
+        PromptTokensDetails,
         ChatCompletionRequest,
         ChatCompletionMessage,
         ChatTemplateKwargs,
@@ -164,6 +172,7 @@ static OPENAPI_JSON: LazyLock<String> = LazyLock::new(|| {
         ScoreResponse,
         SparseVector,
         TimingInfo,
+        Usage,
         crate::types::pool::AssignedWorker,
         crate::types::worker::WorkerInfo
     )),
@@ -273,6 +282,23 @@ fn apply_gateway_openapi_overrides(value: &mut Value) {
             "description": "SIE bearer token. Mutating pool/config/admin routes require the configured admin token; other protected routes accept a normal gateway token."
         }
     });
+
+    if let Some(chunk) = value
+        .get_mut("components")
+        .and_then(|components| components.get_mut("schemas"))
+        .and_then(|schemas| schemas.get_mut("GenerateChunk"))
+    {
+        chunk["oneOf"] = json!([
+            {
+                "required": ["execution_identity_sha256", "execution_binding_sha256"],
+                "properties": {"done": {"const": true}, "error": {"type": "null"}}
+            },
+            {"not": {"anyOf": [
+                {"required": ["execution_identity_sha256"]},
+                {"required": ["execution_binding_sha256"]}
+            ]}}
+        ]);
+    }
 
     if let Some(create_pool) = value
         .get_mut("components")
@@ -404,6 +430,14 @@ fn patch_queue_request_batch_limits(value: &mut Value) {
         .and_then(|properties| properties.get_mut("items"))
     {
         items["maxItems"] = json!(crate::handlers::proxy::MAX_SCORE_ITEMS);
+    }
+
+    if let Some(labels) = schemas
+        .get_mut("ExtractParams")
+        .and_then(|schema| schema.get_mut("properties"))
+        .and_then(|properties| properties.get_mut("labels"))
+    {
+        labels["maxItems"] = json!(crate::handlers::proxy::MAX_EXTRACT_LABELS);
     }
 
     if let Some(variants) = schemas
@@ -823,7 +857,9 @@ fn patch_chat_message_schema(value: &mut Value) {
                             (`image_url` / `input_image`) carrying a base64 `data:` URI are \
                             accepted for generation models that declare `inputs.image`; non-vision models \
                             reject with 400 unsupported_field and remote (non-`data:`) URLs \
-                            reject with 400 invalid_request. May be \
+                            reject with 400 invalid_request. One `video_url` part per request \
+                            (`{url: \"data:video/<subtype>;base64,...\"}`, MP4/MOV, WebM/Matroska \
+                            or AVI) is accepted for generation models that declare `inputs.video`. May be \
                             `null` on a `role:\"assistant\"` message that carries `tool_calls`.",
             "oneOf": [
                 {"type": "string"},
@@ -833,7 +869,7 @@ fn patch_chat_message_schema(value: &mut Value) {
                         "type": "object",
                         "required": ["type"],
                         "properties": {
-                            "type": {"type": "string", "enum": ["text", "input_text", "image_url", "input_image"]},
+                            "type": {"type": "string", "enum": ["text", "input_text", "image_url", "input_image", "video_url"]},
                             "text": {"type": "string"},
                             "image_url": {
                                 "description": "Image payload for `image_url` / `input_image` parts: a base64 `data:` URI, either as a bare string or as `{ \"url\": \"data:...\" }`. Remote (non-`data:`) URLs reject with 400 invalid_request.",
@@ -841,6 +877,13 @@ fn patch_chat_message_schema(value: &mut Value) {
                                     {"type": "string"},
                                     {"type": "object", "properties": {"url": {"type": "string"}}},
                                 ],
+                            },
+                            "video_url": {
+                                "description": "Video payload for `video_url` parts: `{ \"url\": \"data:video/<subtype>;base64,...\" }` with no other keys. The container is identified from its bytes (MP4/MOV, WebM/Matroska, AVI). Remote URLs reject with 400 invalid_request.",
+                                "type": "object",
+                                "required": ["url"],
+                                "additionalProperties": false,
+                                "properties": {"url": {"type": "string"}},
                             },
                         },
                     },
@@ -1258,6 +1301,14 @@ fn patch_responses_path(value: &mut Value) {
                                         "input_tokens": {"type": "integer", "minimum": 0},
                                         "output_tokens": {"type": "integer", "minimum": 0},
                                         "total_tokens": {"type": "integer", "minimum": 0},
+                                        "input_tokens_details": {
+                                            "type": "object",
+                                            "additionalProperties": false,
+                                            "required": ["cached_tokens"],
+                                            "properties": {
+                                                "cached_tokens": {"type": "integer", "minimum": 0},
+                                            },
+                                        },
                                     },
                                 },
                             },
@@ -1354,11 +1405,14 @@ fn inject_inference_response_headers(paths: &mut serde_json::Map<String, Value>)
     let queue_success_headers = json!({
         "X-SIE-Version": header("Gateway package version that handled the request"),
         "X-SIE-Server-Version": header("Gateway-compatible server version advertised by this gateway"),
-        "X-SIE-Model-Revision": header(
-            "Immutable deployed bundle/config execution revision that handled the request, when available",
+        "X-SIE-Model-Revision": sha256_header(
+            "Executed bundle/config SHA-256, distinct from the catalog weights revision (for example, a 40-hex Hugging Face commit). Buffered responses only: present when the routing snapshot has a model revision and all successful worker results report its expected config hash. Omitted when evidence is unavailable or mismatched, and always omitted on SSE because headers precede terminal execution evidence.",
         ),
         "X-SIE-Execution-Identity-SHA256": sha256_header(
-            "Worker-origin SHA-256 identity of the immutable release and realized serving resources, when available",
+            "Worker-origin SHA-256 identity of the immutable release and realized serving resources, when available on buffered responses. SSE carries optional execution evidence in the successful terminal event instead of headers.",
+        ),
+        "X-SIE-Execution-Binding-SHA256": sha256_header(
+            "Worker-origin runtime-independent SHA-256 binding of the release and deployment route, when available on buffered responses. SSE carries optional execution evidence in the successful terminal event instead of headers.",
         ),
         "X-SIE-Request-Id": header("Gateway request id for queue-backed inference"),
         "X-SIE-Worker": header("Logical queue worker tag that produced the response"),
@@ -1740,7 +1794,9 @@ pub struct OpenAIEmbeddingRequest {
     pub input: OpenAIEmbeddingInput,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encoding_format: Option<OpenAIEmbeddingEncodingFormat>,
-    /// Accepted but ignored; the gateway returns the model's native dimension.
+    /// Requested embedding width. SIE always returns the model's native dense
+    /// width, so this is accepted only when it equals that width; any other
+    /// value is rejected with 400 `unsupported_field` rather than ignored.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dimensions: Option<u32>,
     /// Accepted but ignored; kept for OpenAI SDK compatibility.
@@ -1778,8 +1834,23 @@ pub struct OpenAIEmbeddingDataEntry {
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct OpenAIEmbeddingUsage {
+    /// Exact post-tokenization input tokens when `sie_token_source` is
+    /// `worker`; a character-based approximation when it is
+    /// `character_estimate`.
     pub prompt_tokens: u64,
+    /// Equal to `prompt_tokens`; embeddings produce no output tokens.
     pub total_tokens: u64,
+    /// SIE extension. `worker` when the counts above are the model's own
+    /// post-tokenization measurement, `character_estimate` when the serving
+    /// path reported no counts and the numbers are approximate.
+    pub sie_token_source: OpenAIEmbeddingTokenSource,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenAIEmbeddingTokenSource {
+    Worker,
+    CharacterEstimate,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -1952,11 +2023,26 @@ pub struct GenerateRequest {
     pub safety_identifier: Option<String>,
 }
 
+/// Breakdown of the prompt tokens in one generation request.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct PromptTokensDetails {
+    /// Prompt tokens served from the engine's prefix cache instead of being
+    /// prefilled. Never exceeds `prompt_tokens`.
+    pub cached_tokens: u32,
+}
+
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct GenerateUsage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
     pub total_tokens: u32,
+    /// Number of input images observed by the worker after successful execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(minimum = 1)]
+    pub images: Option<u32>,
+    /// Omitted when the serving engine does not report prefix-cache hits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_tokens_details: Option<PromptTokensDetails>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -1978,6 +2064,13 @@ pub struct GenerateResponse {
 pub struct GenerateChunkError {
     pub code: String,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub param: Option<String>,
+    /// Authoritative retry hint in seconds for RESOURCE_EXHAUSTED only; null
+    /// for other terminal errors.
+    #[schema(minimum = 1, maximum = 60)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after_s: Option<u16>,
 }
 
 /// One JSON payload from a SIE-native generation SSE ``data:`` event.
@@ -2000,6 +2093,18 @@ pub struct GenerateChunk {
     pub logprobs: Option<Vec<Value>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<GenerateChunkError>,
+    /// Worker-origin execution identity, only on a successful terminal event.
+    /// Optional complete pair with execution_binding_sha256; older or
+    /// self-hosted deployments may omit both. Not a catalog weights revision
+    /// or the executed bundle/config hash.
+    #[schema(pattern = "^[0-9a-f]{64}$", nullable = false)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_identity_sha256: Option<String>,
+    /// Worker-origin execution binding, only on a successful terminal event
+    /// together with execution_identity_sha256. Both are lowercase SHA-256 digests.
+    #[schema(pattern = "^[0-9a-f]{64}$", nullable = false)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_binding_sha256: Option<String>,
 }
 
 // ── /v1/chat/completions schemas ──────────────────────────────────
@@ -2259,6 +2364,13 @@ pub struct ChatCompletionUsage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
     pub total_tokens: u32,
+    /// Number of input images observed by the worker after successful execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(minimum = 1)]
+    pub images: Option<u32>,
+    /// Omitted when the serving engine does not report prefix-cache hits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_tokens_details: Option<PromptTokensDetails>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -2536,6 +2648,40 @@ pub struct ModelInfoWire {
     pub capabilities: Option<ModelCapabilitiesWire>,
     #[serde(default)]
     pub pending_generation: crate::queue::publisher::PendingGenerationSnapshot,
+    /// How the bare model name is served: the routing policy and the kind of
+    /// upstream a remote profile calls. Emitted on every entry.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub routing: Option<ModelRoutingWire>,
+    /// Short task-tier names that resolve to this model, for example
+    /// ``["rerank-fast"]``. Send one anywhere a model id is accepted and it
+    /// resolves to this entry, billed at this model's rate.
+    ///
+    /// Always present, and empty when the model has none. Only names declared
+    /// by the released catalog or by operator configuration appear here.
+    //
+    // Maintainer note, deliberately a non-doc comment: everything above this
+    // line is published verbatim as the field's description in the public
+    // OpenAPI document, so implementation rationale must not join it.
+    //
+    // Deliberately NOT `#[serde(default)]`: that would drop the field from the
+    // schema's `required` set, and a generated client would then type it
+    // optional and force a null check on something the handler always emits.
+    // The always-emit guarantee is the whole reason the empty list is sent
+    // rather than omitted, so the schema has to carry it. `ModelInfoWire` is a
+    // documentation type — nothing deserializes it — so requiring the field
+    // cannot break parsing of an older payload.
+    pub aliases: Vec<String>,
+}
+
+/// Routing summary on a ``GET /v1/models`` entry.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ModelRoutingWire {
+    /// ``remote_only``, ``fallback`` or ``threshold``. ``null`` means local
+    /// capacity only.
+    pub policy: Option<String>,
+    /// ``sie`` or ``openai``: the kind of upstream a remote profile calls.
+    /// ``null`` without one.
+    pub upstream_kind: Option<String>,
 }
 
 /// Capability summary surfaced on each entry of ``GET /v1/models``.
@@ -2551,6 +2697,10 @@ pub struct ModelInfoWire {
 /// alias). Treat them as "can do this", not "guaranteed to score X".
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct ModelCapabilitiesWire {
+    /// Whether the model supports incremental public generation output.
+    /// Defaults to true for generation models when omitted from older configs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub streaming: Option<bool>,
     /// Union of LoRA served-names across profiles. Back-compat summary
     /// for consumers that don't care about profile scope; validation
     /// MUST go through ``profile_lora_adapters``.
@@ -2674,6 +2824,10 @@ pub struct ModelAckBundleStatus {
     pub total_eligible_workers: usize,
     pub acked_workers: Vec<String>,
     pub pending_workers: Vec<String>,
+    /// Workers that report the expected hash but cannot serve this model, for
+    /// example during a rollout that adds its adapter to the bundle.
+    #[serde(default)]
+    pub unsupported_workers: Vec<String>,
     pub acked: bool,
 }
 
@@ -2709,8 +2863,50 @@ pub struct ResolveConfigResponse {
     pub profiles: Vec<String>,
 }
 
+// Native media bytes (`ImageInput` / `AudioInput` / `VideoInput` /
+// `DocumentInput` below) carry ONE spelling per ingress, and the schema has to
+// name the JSON one.
+//
+// A bare `Vec<u8>` renders as an ARRAY OF INTEGERS, which is not an encoding
+// this edge accepts: `decode_native_media_object_data` converts a base64
+// **string** into msgpack `bin` and leaves every other shape untouched, so an
+// array would reach the worker as an array and fail its typed `bytes` decode.
+// A client generated from that schema is broken before it sends a byte, which
+// defeats the point of publishing a schema at all.
+//
+// On the msgpack ingress the same field is native `bin` and needs no
+// transcoding. `content_encoding` describes the JSON spelling — the only one
+// an OpenAPI-generated client can produce.
+
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct ImageInput {
+    /// Media bytes. Base64-encoded on the JSON path; native binary on the msgpack path.
+    #[schema(value_type = String, content_encoding = "base64")]
+    pub data: Vec<u8>,
+    #[serde(default)]
+    pub format: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct AudioInput {
+    /// Media bytes. Base64-encoded on the JSON path; native binary on the msgpack path.
+    #[schema(value_type = String, content_encoding = "base64")]
+    pub data: Vec<u8>,
+    #[serde(default)]
+    pub format: Option<String>,
+    // The audio preprocessor rejects a non-positive rate outright
+    // ("audio.sample_rate must be a positive integer or null"), so the bound
+    // belongs in the published contract rather than only in the error path.
+    /// Sample rate in Hz. Must be positive.
+    #[serde(default)]
+    #[schema(exclusive_minimum = 0)]
+    pub sample_rate: Option<u32>,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct VideoInput {
+    /// Media bytes. Base64-encoded on the JSON path; native binary on the msgpack path.
+    #[schema(value_type = String, content_encoding = "base64")]
     pub data: Vec<u8>,
     #[serde(default)]
     pub format: Option<String>,
@@ -2718,6 +2914,8 @@ pub struct ImageInput {
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct DocumentInput {
+    /// Media bytes. Base64-encoded on the JSON path; native binary on the msgpack path.
+    #[schema(value_type = String, content_encoding = "base64")]
     pub data: Vec<u8>,
     #[serde(default)]
     pub format: Option<String>,
@@ -2731,6 +2929,10 @@ pub struct ItemInput {
     pub text: Option<String>,
     #[serde(default)]
     pub images: Option<Vec<ImageInput>>,
+    #[serde(default)]
+    pub audio: Option<AudioInput>,
+    #[serde(default)]
+    pub video: Option<VideoInput>,
     #[serde(default)]
     pub document: Option<DocumentInput>,
     #[serde(default)]
@@ -2884,6 +3086,17 @@ pub struct ScoreUsage {
     pub images: Option<u64>,
 }
 
+/// Authoritative worker-emitted usage. Post-tokenization counts, never a
+/// character estimate. A reported `0` is a measurement (a request that read no
+/// text); an absent block means the serving path could not count. Structurally
+/// identical to `ScoreUsage`, which shipped this shape first.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct Usage {
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub images: Option<u64>,
+}
+
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct RerankResponse {
     pub model: String,
@@ -2948,6 +3161,8 @@ pub struct EncodeResponse {
     pub items: Vec<EncodeResult>,
     #[serde(default)]
     pub timing: Option<TimingInfo>,
+    #[serde(default)]
+    pub usage: Option<Usage>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -2996,6 +3211,8 @@ pub struct ExtractResult {
 pub struct ExtractResponse {
     pub model: String,
     pub items: Vec<ExtractResult>,
+    #[serde(default)]
+    pub usage: Option<Usage>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -3031,6 +3248,51 @@ mod tests {
     fn openapi_document_has_gateway_metadata() {
         let doc = ApiDoc::openapi();
         assert_eq!(doc.info.title, "SIE Gateway");
+    }
+
+    /// Every native media `data` field must advertise the ONE JSON encoding
+    /// the ingress accepts: a base64 string.
+    ///
+    /// `handlers::proxy::decode_native_media_object_data` transcodes a base64
+    /// **string** into msgpack `bin` and passes every other shape through
+    /// untouched, so anything else this schema advertised — an array of
+    /// integers (the bare `Vec<u8>` rendering), or `format: binary` meaning
+    /// raw octets — would generate a client whose requests die at the
+    /// worker's typed `bytes` decode. The companion runtime test is
+    /// `handlers::proxy::tests::test_parse_queue_request_json_decodes_native_media_data_to_binary`;
+    /// this one holds the published contract to the same rule so the two
+    /// cannot drift apart.
+    #[test]
+    fn openapi_documents_media_bytes_as_base64_strings() {
+        let spec: serde_json::Value = serde_json::from_str(&OPENAPI_JSON).unwrap();
+        for schema in ["ImageInput", "AudioInput", "VideoInput", "DocumentInput"] {
+            let data = &spec["components"]["schemas"][schema]["properties"]["data"];
+            assert_eq!(
+                data["type"], "string",
+                "{schema}.data must be a string, not an array of integers"
+            );
+            assert_eq!(
+                data["contentEncoding"], "base64",
+                "{schema}.data must declare base64 content encoding"
+            );
+            assert!(
+                data.get("format").is_none(),
+                "{schema}.data must not claim `format` (binary means raw octets): {data}"
+            );
+        }
+    }
+
+    /// The audio preprocessor rejects a non-positive `sample_rate`, so the
+    /// schema has to say so rather than leaving a generated client to send a
+    /// zero and learn about the rule from a 400.
+    #[test]
+    fn openapi_documents_positive_audio_sample_rate() {
+        let spec: serde_json::Value = serde_json::from_str(&OPENAPI_JSON).unwrap();
+        let sample_rate = &spec["components"]["schemas"]["AudioInput"]["properties"]["sample_rate"];
+        assert_eq!(
+            sample_rate["exclusiveMinimum"], 0,
+            "AudioInput.sample_rate must advertise its positive bound: {sample_rate}"
+        );
     }
 
     #[test]
@@ -3102,7 +3364,8 @@ mod tests {
         assert!(spec["paths"]["/readyz"]["get"]["description"]
             .as_str()
             .unwrap()
-            .contains("never returns 503"));
+            .contains("Readiness never depends on worker health"));
+        assert!(spec["paths"]["/readyz"]["get"]["responses"]["503"].is_object());
         assert_eq!(spec["paths"]["/openapi.json"]["get"]["security"], json!([]));
         // The rendered reference at /docs must be reachable without a token
         // when auth is on, so client codegen + discovery still work.
@@ -3347,9 +3610,57 @@ mod tests {
             chunk["properties"]["error"]["oneOf"][1]["$ref"],
             "#/components/schemas/GenerateChunkError"
         );
+        for field in ["execution_identity_sha256", "execution_binding_sha256"] {
+            assert_eq!(chunk["properties"][field]["pattern"], "^[0-9a-f]{64}$");
+            assert!(!chunk["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(field)));
+        }
+        assert_eq!(
+            chunk["oneOf"],
+            json!([
+                {
+                    "required": ["execution_identity_sha256", "execution_binding_sha256"],
+                    "properties": {"done": {"const": true}, "error": {"type": "null"}}
+                },
+                {"not": {"anyOf": [
+                    {"required": ["execution_identity_sha256"]},
+                    {"required": ["execution_binding_sha256"]}
+                ]}}
+            ])
+        );
+        let revision = &spec["paths"]["/v1/generate/{model}"]["post"]["responses"]["200"]
+            ["headers"]["X-SIE-Model-Revision"];
+        assert_eq!(revision["schema"]["pattern"], "^[0-9a-f]{64}$");
+        let description = revision["description"].as_str().unwrap();
+        assert!(description.contains("catalog weights revision"));
+        assert!(description.contains("always omitted on SSE"));
+        let chunk_error = &spec["components"]["schemas"]["GenerateChunkError"];
+        assert_eq!(
+            chunk_error["properties"]["param"]["type"],
+            json!(["string", "null"])
+        );
+        assert_eq!(chunk_error["required"], json!(["code", "message"]));
+        assert_eq!(
+            chunk_error["properties"]["retry_after_s"]["type"],
+            json!(["integer", "null"])
+        );
+        assert_eq!(chunk_error["properties"]["retry_after_s"]["minimum"], 1);
+        assert_eq!(chunk_error["properties"]["retry_after_s"]["maximum"], 60);
         assert_eq!(
             chunk["properties"]["logprobs"]["type"],
             json!(["array", "null"])
+        );
+    }
+
+    #[test]
+    fn openapi_json_documents_streaming_model_capability() {
+        let spec: serde_json::Value = serde_json::from_str(&OPENAPI_JSON).unwrap();
+        assert_eq!(
+            spec["components"]["schemas"]["ModelCapabilitiesWire"]["properties"]["streaming"]
+                ["type"],
+            json!(["boolean", "null"]),
         );
     }
 
@@ -3690,6 +4001,12 @@ mod tests {
                     .is_some(),
                 "{path} missing documented worker execution identity header"
             );
+            assert!(
+                responses["200"]["headers"]
+                    .get("X-SIE-Execution-Binding-SHA256")
+                    .is_some(),
+                "{path} missing documented stable execution binding header"
+            );
         }
 
         let pool_post = &spec["paths"]["/v1/pools"]["post"]["responses"];
@@ -3756,6 +4073,7 @@ mod tests {
                 "X-SIE-Request-Id",
                 "X-SIE-Model-Revision",
                 "X-SIE-Execution-Identity-SHA256",
+                "X-SIE-Execution-Binding-SHA256",
             ] {
                 assert!(
                     headers.get(name).is_some(),
@@ -3764,6 +4082,10 @@ mod tests {
             }
             assert_eq!(
                 headers["X-SIE-Execution-Identity-SHA256"]["schema"]["pattern"],
+                "^[0-9a-f]{64}$"
+            );
+            assert_eq!(
+                headers["X-SIE-Execution-Binding-SHA256"]["schema"]["pattern"],
                 "^[0-9a-f]{64}$"
             );
         }
@@ -3855,6 +4177,11 @@ mod tests {
             spec["components"]["schemas"]["ScoreRequest"]["properties"]["items"]["maxItems"],
             json!(crate::handlers::proxy::MAX_SCORE_ITEMS),
             "ScoreRequest must document the stricter runtime score-item limit",
+        );
+        assert_eq!(
+            spec["components"]["schemas"]["ExtractParams"]["properties"]["labels"]["maxItems"],
+            json!(crate::handlers::proxy::MAX_EXTRACT_LABELS),
+            "ExtractParams must document the runtime label limit",
         );
         let embedding_input_variants = spec["components"]["schemas"]["OpenAIEmbeddingInput"]
             ["oneOf"]

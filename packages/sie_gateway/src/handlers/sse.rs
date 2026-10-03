@@ -52,8 +52,10 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::observability::lifecycle::{ErrorClass, Lifecycle, Outcome};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
+use opentelemetry::trace::FutureExt;
 use serde_json::{json, Value};
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::ReceiverStream;
@@ -62,7 +64,9 @@ use tracing::{debug, info, warn};
 use crate::observability::metrics as telemetry;
 use crate::queue::dispatch::{PendingDispatchKind, WorkDispatcher};
 use crate::queue::publisher;
-use crate::queue::streaming::{ChunkEnvelope, StreamOutcome};
+use crate::queue::streaming::{
+    is_lower_sha256, ChunkEnvelope, ChunkError, StreamOutcome, StreamOutcomeOrigin,
+};
 use crate::server::AppState;
 use crate::state::demand_tracker::{DemandTracker, PhysicalLane};
 
@@ -230,16 +234,12 @@ pub async fn build_sse_response(params: SseParams<'_>) -> Response {
                     "no_consumers",
                 );
                 Some(crate::handlers::proxy::PROVISIONING_RETRY_AFTER)
-            } else if lower.contains("backpressure") {
-                telemetry::record_rejected_request(
-                    state.demand_tracker.as_ref(),
-                    &physical_lane,
-                    "backpressure",
-                );
-                state.demand_tracker.record(&physical_lane);
-                Some("5")
             } else {
-                None
+                // Shared with the buffered and streaming paths rather than
+                // re-derived here: this arm used to match only "backpressure"
+                // and so missed the broker's own stream-full rejection, which
+                // means the same thing.
+                crate::handlers::proxy::record_publish_failure(state, &physical_lane, &lower)
             };
             return crate::handlers::proxy::build_streaming_publish_failed_for_sse(&e, retry_after);
         }
@@ -261,7 +261,7 @@ pub async fn build_sse_response(params: SseParams<'_>) -> Response {
         .map(|g| g.max_new_tokens)
         .unwrap_or(512);
     let timeout_config = crate::handlers::proxy::generation_timeout_config(
-        state,
+        state.model_registry.as_ref(),
         &dispatch_model,
         &work_params,
         max_new_tokens,
@@ -305,31 +305,35 @@ pub async fn build_sse_response(params: SseParams<'_>) -> Response {
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
-    tokio::spawn(async move {
-        run_sse_driver(SseDriverArgs {
-            event_tx,
-            chunk_rx,
-            outcome_rx,
-            durability_completion,
-            publisher: driver_publisher,
-            demand_tracker: driver_demand_tracker,
-            physical_lane: driver_physical_lane,
-            request_id: driver_request_id,
-            model: driver_model.clone(),
-            pool: driver_pool.clone(),
-            bundle: driver_bundle,
-            gpu: driver_gpu,
-            endpoint,
-            stream_chat_id,
-            created,
-            first_chunk_timeout: timeout_config.first_chunk,
-            inter_chunk_timeout: timeout_config.inter_chunk,
-            overall_timeout: effective_overall,
-            was_direct_dispatched,
-            pool_fallback_lane_worker_count,
-        })
-        .await;
-    });
+    let context = opentelemetry::Context::current();
+    tokio::spawn(
+        async move {
+            run_sse_driver(SseDriverArgs {
+                event_tx,
+                chunk_rx,
+                outcome_rx,
+                durability_completion,
+                publisher: driver_publisher,
+                demand_tracker: driver_demand_tracker,
+                physical_lane: driver_physical_lane,
+                request_id: driver_request_id,
+                model: driver_model.clone(),
+                pool: driver_pool.clone(),
+                bundle: driver_bundle,
+                gpu: driver_gpu,
+                endpoint,
+                stream_chat_id,
+                created,
+                first_chunk_timeout: timeout_config.first_chunk,
+                inter_chunk_timeout: timeout_config.inter_chunk,
+                overall_timeout: effective_overall,
+                was_direct_dispatched,
+                pool_fallback_lane_worker_count,
+            })
+            .await;
+        }
+        .with_context(context),
+    );
 
     let stream = ReceiverStream::new(event_rx);
     let sse = Sse::new(stream).keep_alive(KeepAlive::default());
@@ -510,6 +514,12 @@ async fn wait_for_terminal_durability(
 /// timeout fires the SSE response has already started (`200 OK` +
 /// headers sent).
 async fn run_sse_driver(args: SseDriverArgs) {
+    let lifecycle = crate::observability::tracing::request_telemetry_enabled()
+        .then(|| Lifecycle::generation_stream(opentelemetry::Context::current()));
+    run_sse_driver_with_lifecycle(args, lifecycle).await;
+}
+
+async fn run_sse_driver_with_lifecycle(args: SseDriverArgs, mut lifecycle: Option<Lifecycle>) {
     let SseDriverArgs {
         event_tx,
         mut chunk_rx,
@@ -533,9 +543,26 @@ async fn run_sse_driver(args: SseDriverArgs) {
         pool_fallback_lane_worker_count,
     } = args;
     let wait_start = std::time::Instant::now();
-    let record_wait = |outcome| {
-        telemetry::record_queue_result_wait("generate", outcome, wait_start.elapsed());
-    };
+    macro_rules! record_wait {
+        ($outcome:expr) => {{
+            let outcome = $outcome;
+            telemetry::record_queue_result_wait("generate", outcome, wait_start.elapsed());
+            if let Some(lifecycle) = lifecycle.as_mut() {
+                let (outcome, class) = match outcome {
+                    telemetry::QueueResultOutcome::Success => (Outcome::Success, ErrorClass::None),
+                    telemetry::QueueResultOutcome::Cancelled => {
+                        (Outcome::Cancelled, ErrorClass::Cancelled)
+                    }
+                    telemetry::QueueResultOutcome::Timeout => (Outcome::Error, ErrorClass::Timeout),
+                    telemetry::QueueResultOutcome::WorkerError => {
+                        (Outcome::Error, ErrorClass::Worker)
+                    }
+                    _ => (Outcome::Error, ErrorClass::Transport),
+                };
+                lifecycle.finish(outcome, class);
+            }
+        }};
+    }
 
     // Install the cancel-on-drop guard. Mirrors
     // `run_streaming_generate`: a normal completion path defuses it;
@@ -618,7 +645,7 @@ async fn run_sse_driver(args: SseDriverArgs) {
             )
             .await;
             send_done(&event_tx).await;
-            record_wait(telemetry::QueueResultOutcome::Timeout);
+            record_wait!(telemetry::QueueResultOutcome::Timeout);
             cancel_guard.defuse();
             publisher.publish_cancel(&request_id).await;
             publisher.drop_pending_stream(&request_id);
@@ -702,7 +729,7 @@ async fn run_sse_driver(args: SseDriverArgs) {
             )
             .await;
             send_done(&event_tx).await;
-            record_wait(telemetry::QueueResultOutcome::Timeout);
+            record_wait!(telemetry::QueueResultOutcome::Timeout);
             cancel_guard.defuse();
             publisher.publish_cancel(&request_id).await;
             publisher.drop_pending_stream(&request_id);
@@ -722,7 +749,7 @@ async fn run_sse_driver(args: SseDriverArgs) {
                 )
                 .await;
                 send_done(&event_tx).await;
-                record_wait(telemetry::QueueResultOutcome::Timeout);
+                record_wait!(telemetry::QueueResultOutcome::Timeout);
                 cancel_guard.defuse();
                 publisher.publish_cancel(&request_id).await;
                 publisher.drop_pending_stream(&request_id);
@@ -758,7 +785,7 @@ async fn run_sse_driver(args: SseDriverArgs) {
                         )
                         .await;
                         send_done(&event_tx).await;
-                        record_wait(telemetry::QueueResultOutcome::DurabilityError);
+                        record_wait!(telemetry::QueueResultOutcome::DurabilityError);
                         cancel_guard.defuse();
                         return;
                     }
@@ -775,7 +802,7 @@ async fn run_sse_driver(args: SseDriverArgs) {
                         )
                         .await;
                         send_done(&event_tx).await;
-                        record_wait(telemetry::QueueResultOutcome::DurabilityError);
+                        record_wait!(telemetry::QueueResultOutcome::DurabilityError);
                         cancel_guard.defuse();
                         return;
                     }
@@ -790,7 +817,7 @@ async fn run_sse_driver(args: SseDriverArgs) {
             // explicitly to the receiver's lifecycle closes that leak.
             _ = event_tx.closed() => {
                 debug!(request_id = %request_id, "SSE receiver dropped; tearing down driver");
-                record_wait(telemetry::QueueResultOutcome::Cancelled);
+                record_wait!(telemetry::QueueResultOutcome::Cancelled);
                 telemetry::record_generation_event(
                     telemetry::GenerationEvent::Cancellation,
                     if first_seen {
@@ -810,11 +837,11 @@ async fn run_sse_driver(args: SseDriverArgs) {
                 .await;
                 return;
             }
-            // Terminal outcome arm. Ordered before the chunk-tap recv so
-            // a synthesised terminal error (NAK + pool-republish failure,
-            // surfaced via `fail_pending_stream`) wins over the generic
-            // broadcast-`Closed` path that fires when the collector is
-            // torn down at the same instant.
+            // Terminal outcome arm. A worker outcome is only a completion
+            // signal: its exact terminal was already queued on the ordered
+            // chunk tap, so this arm must never bypass that tap. A gateway-
+            // synthesized outcome has no tap terminal and must win over the
+            // broadcast-`Closed` path that races collector teardown.
             outcome = &mut outcome_rx, if !outcome_done => {
                 // One-shot: never poll the resolved receiver again (it
                 // would panic). All branches below either return or
@@ -822,36 +849,39 @@ async fn run_sse_driver(args: SseDriverArgs) {
                 outcome_done = true;
                 match outcome {
                     Ok(o) => {
-                        if let Some(err) = o.error {
+                        if o.origin == StreamOutcomeOrigin::GatewaySynthetic {
+                            let Some(err) = o.error else {
+                                // Defensive fallback for an impossible
+                                // synthetic success: let the closed tap emit
+                                // its ordinary transport-failure diagnostic.
+                                continue;
+                            };
                             // Emit the typed code/message (e.g.
                             // rate_limit_exceeded → 429-equivalent inside
                             // the stream) instead of a generic
                             // transport_failure. Same error shape as the
                             // worker-error chunk path below.
-                            send_error_chunk(
+                            send_synthetic_error_chunk(
                                 &event_tx,
                                 &endpoint,
                                 &stream_chat_id,
                                 created,
                                 &model,
                                 &request_id,
-                                &err.code,
-                                &err.message,
+                                &err,
                             )
                             .await;
                             send_done(&event_tx).await;
-                            record_wait(telemetry::QueueResultOutcome::WorkerError);
+                            record_wait!(telemetry::QueueResultOutcome::WorkerError);
                             cancel_guard.defuse();
                             publisher.drop_pending_stream(&request_id);
                             return;
                         }
-                        // A success outcome resolved here means the terminal
-                        // chunk was already forwarded through the tap (which
-                        // fires the oneshot on the same terminal apply). The
-                        // chunk arm's `is_terminal` branch owns the `[DONE]`;
-                        // latch that the generation completed server-side so the
-                        // Lagged arm can skip a pointless cancel of an
-                        // already-finished request. See #1602.
+                        // Every worker outcome means its terminal is already
+                        // queued on the tap (tap send precedes outcome build).
+                        // Drain the tap in order; that preserves all buffered
+                        // deltas plus the terminal's real seq/usage/TTFT and
+                        // execution identity. The terminal arm owns `[DONE]`.
                         stream_succeeded = true;
                         continue;
                     }
@@ -908,7 +938,7 @@ async fn run_sse_driver(args: SseDriverArgs) {
                 )
                 .await;
                 send_done(&event_tx).await;
-                record_wait(telemetry::QueueResultOutcome::WorkerError);
+                record_wait!(telemetry::QueueResultOutcome::WorkerError);
                 cancel_guard.defuse();
                 // Only cancel the worker if the generation is still in flight.
                 // A request whose terminal outcome already resolved Ok has
@@ -942,7 +972,7 @@ async fn run_sse_driver(args: SseDriverArgs) {
                     .await;
                     send_done(&event_tx).await;
                 }
-                record_wait(if stream_succeeded {
+                record_wait!(if stream_succeeded {
                     telemetry::QueueResultOutcome::Success
                 } else {
                     telemetry::QueueResultOutcome::ChannelClosed
@@ -953,6 +983,16 @@ async fn run_sse_driver(args: SseDriverArgs) {
         };
 
         // Non-stale chunk arrived. Update timing trackers.
+        if !chunk.text_delta.is_empty()
+            || chunk
+                .tool_calls
+                .as_ref()
+                .is_some_and(|calls| !calls.is_empty())
+        {
+            if let Some(lifecycle) = lifecycle.as_mut() {
+                lifecycle.first_token();
+            }
+        }
         first_seen = true;
         last_chunk_at = Some(tokio::time::Instant::now());
 
@@ -988,7 +1028,7 @@ async fn run_sse_driver(args: SseDriverArgs) {
                     )
                     .await;
                     send_done(&event_tx).await;
-                    record_wait(telemetry::QueueResultOutcome::DurabilityError);
+                    record_wait!(telemetry::QueueResultOutcome::DurabilityError);
                     cancel_guard.defuse();
                     // Tear the stream down like the sibling durability arm
                     // below. This exit writes no usage surface, so it never
@@ -1013,7 +1053,7 @@ async fn run_sse_driver(args: SseDriverArgs) {
                     )
                     .await;
                     send_done(&event_tx).await;
-                    record_wait(telemetry::QueueResultOutcome::DurabilityError);
+                    record_wait!(telemetry::QueueResultOutcome::DurabilityError);
                     cancel_guard.defuse();
                     publisher.publish_cancel(&request_id).await;
                     publisher.drop_pending_stream(&request_id);
@@ -1021,7 +1061,7 @@ async fn run_sse_driver(args: SseDriverArgs) {
                 }
                 TerminalDurabilityWait::ClientClosed => {
                     debug!(request_id = %request_id, "SSE receiver dropped while awaiting terminal durability");
-                    record_wait(telemetry::QueueResultOutcome::Cancelled);
+                    record_wait!(telemetry::QueueResultOutcome::Cancelled);
                     telemetry::record_generation_event(
                         telemetry::GenerationEvent::Cancellation,
                         telemetry::GenerationEventReason::MidStream,
@@ -1050,7 +1090,7 @@ async fn run_sse_driver(args: SseDriverArgs) {
                     )
                     .await;
                     send_done(&event_tx).await;
-                    record_wait(telemetry::QueueResultOutcome::Timeout);
+                    record_wait!(telemetry::QueueResultOutcome::Timeout);
                     cancel_guard.defuse();
                     publisher.publish_cancel(&request_id).await;
                     publisher.drop_pending_stream(&request_id);
@@ -1121,7 +1161,7 @@ async fn run_sse_driver(args: SseDriverArgs) {
                 // a detached task and can race the outer return / next
                 // request).
                 debug!(request_id = %request_id, "SSE client disconnected mid-stream");
-                record_wait(telemetry::QueueResultOutcome::Cancelled);
+                record_wait!(telemetry::QueueResultOutcome::Cancelled);
                 telemetry::record_generation_event(
                     telemetry::GenerationEvent::Cancellation,
                     if first_seen {
@@ -1155,8 +1195,10 @@ async fn run_sse_driver(args: SseDriverArgs) {
                 let _ = send_event(&event_tx, Event::default().data(body.to_string())).await;
             }
             send_done(&event_tx).await;
-            record_wait(if chunk.error.is_some() {
+            record_wait!(if chunk.error.is_some() {
                 telemetry::QueueResultOutcome::WorkerError
+            } else if chunk.finish_reason.as_deref() == Some("cancelled") {
+                telemetry::QueueResultOutcome::Cancelled
             } else {
                 telemetry::QueueResultOutcome::Success
             });
@@ -1263,17 +1305,16 @@ fn build_chat_chunk_event(
     });
     if let Some(err) = chunk.error.as_ref() {
         if let Some(obj) = body.as_object_mut() {
-            obj.insert(
-                "error".to_string(),
-                json!({
-                    "message": err.message,
-                    "type": worker_error_openai_type_for(&err.code),
-                    "param": Value::Null,
-                    "code": err.code,
-                }),
-            );
+            obj.insert("error".to_string(), worker_error_value(err, true));
+            // Gateway request id, in-band on the ERROR chunk only (#3136):
+            // a streamed response has no terminal headers, and the
+            // ``chatcmpl-*`` id is not the correlation key server logs use.
+            // Additive top-level member — named to match the SIE-native
+            // generate error chunk — that OpenAI clients ignore.
+            obj.insert("request_id".to_string(), json!(chunk.request_id));
         }
     }
+    insert_terminal_execution_evidence(&mut body, chunk);
     body
 }
 
@@ -1286,14 +1327,16 @@ fn build_text_completion_chunk_event(
     model: &str,
     chunk: &ChunkEnvelope,
 ) -> Value {
-    let finish = if chunk.done {
+    let finish = if chunk.done && chunk.error.is_some() {
+        Value::Null
+    } else if chunk.done {
         Value::String(
             map_chat_finish_reason(chunk.finish_reason.as_deref().unwrap_or("stop")).to_string(),
         )
     } else {
         Value::Null
     };
-    json!({
+    let mut body = json!({
         "id": id,
         "object": "text_completion",
         "created": created,
@@ -1306,7 +1349,15 @@ fn build_text_completion_chunk_event(
             "index": 0,
             "finish_reason": finish,
         }],
-    })
+    });
+    if let Some(err) = chunk.error.as_ref() {
+        if let Some(object) = body.as_object_mut() {
+            object.insert("error".to_string(), worker_error_value(err, true));
+            object.insert("request_id".to_string(), json!(chunk.request_id));
+        }
+    }
+    insert_terminal_execution_evidence(&mut body, chunk);
+    body
 }
 
 /// Build the optional trailing usage-only chunk (OpenAI
@@ -1338,11 +1389,7 @@ fn build_usage_only_chunk_event(
         _ => return None,
     };
     let usage = chunk.usage.as_ref()?;
-    let mut usage_body = json!({
-        "prompt_tokens": usage.prompt_tokens,
-        "completion_tokens": usage.completion_tokens,
-        "total_tokens": usage.total_tokens,
-    });
+    let mut usage_body = json!(usage);
     merge_terminal_usage_extras(&mut usage_body, terminal_extras);
     Some(json!({
         "id": id,
@@ -1394,6 +1441,25 @@ fn merge_terminal_usage_extras(usage: &mut Value, extras: &[(String, Value)]) {
     }
 }
 
+fn insert_terminal_execution_evidence(body: &mut Value, chunk: &ChunkEnvelope) {
+    if !chunk.done || chunk.error.is_some() {
+        return;
+    }
+    let (Some(identity), Some(binding)) = (
+        chunk.execution_identity_sha256.as_deref(),
+        chunk.execution_binding_sha256.as_deref(),
+    ) else {
+        return;
+    };
+    if !is_lower_sha256(identity) || !is_lower_sha256(binding) {
+        return;
+    }
+    if let Some(object) = body.as_object_mut() {
+        object.insert("execution_identity_sha256".to_string(), json!(identity));
+        object.insert("execution_binding_sha256".to_string(), json!(binding));
+    }
+}
+
 /// SIE-native generate chunk shape.
 fn build_generate_chunk_event(chunk: &ChunkEnvelope, terminal_extras: &[(String, Value)]) -> Value {
     let mut body = json!({
@@ -1407,11 +1473,7 @@ fn build_generate_chunk_event(chunk: &ChunkEnvelope, terminal_extras: &[(String,
             obj.insert("finish_reason".to_string(), json!(fr));
         }
         if let Some(u) = chunk.usage.as_ref() {
-            let mut usage = json!({
-                "prompt_tokens": u.prompt_tokens,
-                "completion_tokens": u.completion_tokens,
-                "total_tokens": u.total_tokens,
-            });
+            let mut usage = json!(u);
             merge_terminal_usage_extras(&mut usage, terminal_extras);
             obj.insert("usage".to_string(), usage);
         }
@@ -1422,16 +1484,29 @@ fn build_generate_chunk_event(chunk: &ChunkEnvelope, terminal_extras: &[(String,
             obj.insert("logprobs".to_string(), json!(logprobs));
         }
         if let Some(err) = chunk.error.as_ref() {
-            obj.insert(
-                "error".to_string(),
-                json!({
-                    "code": err.code,
-                    "message": err.message,
-                }),
-            );
+            obj.insert("error".to_string(), worker_error_value(err, false));
         }
     }
+    insert_terminal_execution_evidence(&mut body, chunk);
     body
+}
+
+fn worker_error_value(error: &ChunkError, include_openai_type: bool) -> Value {
+    let code = error.client_safe_code();
+    let mut object = serde_json::Map::new();
+    object.insert("message".to_string(), json!(error.client_safe_message()));
+    if include_openai_type {
+        object.insert(
+            "type".to_string(),
+            json!(worker_error_openai_type_for(code)),
+        );
+    }
+    object.insert("param".to_string(), json!(error.client_safe_param()));
+    object.insert("code".to_string(), json!(code));
+    if let Some(retry_after_s) = error.validated_retry_after_s() {
+        object.insert("retry_after_s".to_string(), json!(retry_after_s));
+    }
+    Value::Object(object)
 }
 
 /// Emit a synthesized error chunk (gateway-side timeout or
@@ -1470,7 +1545,11 @@ async fn send_error_chunk(
                 "type": "server_error",
                 "param": Value::Null,
                 "code": code,
-            }
+            },
+            // Gateway request id, in-band on the ERROR chunk only (#3136) —
+            // additive, mirrors the generate-shape member below so SDK
+            // consumers can correlate stream failures with gateway logs.
+            "request_id": request_id,
         }),
         SseEndpoint::Generate => json!({
             "request_id": request_id,
@@ -1488,7 +1567,49 @@ async fn send_error_chunk(
             "system_fingerprint": crate::handlers::proxy::system_fingerprint(model),
             "choices": [{"text": "", "index": 0, "finish_reason": Value::Null, "logprobs": Value::Null}],
             "error": { "message": message, "type": "server_error", "param": Value::Null, "code": code },
+            "request_id": request_id,
         }),
+    };
+    let _ = tx.send(Ok(Event::default().data(body.to_string()))).await;
+}
+
+/// Emit a gateway-synthesized terminal error when no worker tap terminal exists.
+#[allow(clippy::too_many_arguments)]
+async fn send_synthetic_error_chunk(
+    tx: &tokio::sync::mpsc::Sender<Result<Event, Infallible>>,
+    endpoint: &SseEndpoint,
+    chat_id: &str,
+    created: u64,
+    model: &str,
+    request_id: &str,
+    error: &ChunkError,
+) {
+    let chunk = ChunkEnvelope {
+        kind: "chunk".to_string(),
+        request_id: request_id.to_string(),
+        attempt_id: String::new(),
+        seq: 0,
+        text_delta: String::new(),
+        done: true,
+        is_first: false,
+        finish_reason: Some("error".to_string()),
+        usage: None,
+        ttft_ms: None,
+        error: Some(error.clone()),
+        tool_calls: None,
+        logprobs: None,
+        candidates: Vec::new(),
+        choice_index: 0,
+        executed_bundle_config_hash: None,
+        execution_identity_sha256: None,
+        execution_binding_sha256: None,
+    };
+    let body = match endpoint {
+        SseEndpoint::Chat { .. } => build_chat_chunk_event(chat_id, created, model, &chunk, false),
+        SseEndpoint::Completion { .. } => {
+            build_text_completion_chunk_event(chat_id, created, model, &chunk)
+        }
+        SseEndpoint::Generate => build_generate_chunk_event(&chunk, &[]),
     };
     let _ = tx.send(Ok(Event::default().data(body.to_string()))).await;
 }
@@ -1538,7 +1659,8 @@ fn worker_error_openai_type_for(code: &str) -> &'static str {
 mod tests {
     use super::*;
     use crate::queue::streaming::{
-        ChunkEnvelope, ChunkError, ToolCallDeltaWire, ToolCallFunctionWire, UsageBlock,
+        ChunkApplied, ChunkEnvelope, ChunkError, ToolCallDeltaWire, ToolCallFunctionWire,
+        UsageBlock,
     };
 
     mod client_disconnect_grace {
@@ -1554,13 +1676,15 @@ mod tests {
             DispatchDurability, DispatchError, PendingGenerationSnapshot, WorkDispatcher,
         };
         use crate::queue::publisher::{PublishTarget, WorkParams};
-        use crate::queue::streaming::{ChunkEnvelope, StreamOutcome, UsageBlock};
+        use crate::queue::streaming::{
+            ChunkEnvelope, StreamOutcome, StreamOutcomeOrigin, UsageBlock,
+        };
 
         /// Records exactly which teardown the SSE driver chose. The two are
         /// transport-identical and differ only in the billing signal they emit,
         /// so the choice IS the behaviour under test.
         #[derive(Default)]
-        struct TeardownRecorder {
+        pub(super) struct TeardownRecorder {
             cancels: AtomicUsize,
             plain_drops: AtomicUsize,
             disconnect_drops: AtomicUsize,
@@ -1574,6 +1698,7 @@ mod tests {
                 _admission_pool: &str,
                 _endpoint: &str,
                 _model: &str,
+                _display_model: &str,
                 _engine: &str,
                 _bundle_config_hash: &str,
                 _items: Vec<rmpv::Value>,
@@ -1690,6 +1815,9 @@ mod tests {
                 // whose usage is the count-so-far.
                 finish_reason: "cancelled".to_string(),
                 usage: Some(UsageBlock {
+                    gpu_second: None,
+                    images: None,
+                    prompt_tokens_details: None,
                     prompt_tokens: 5,
                     completion_tokens,
                     total_tokens: 5 + completion_tokens,
@@ -1698,11 +1826,13 @@ mod tests {
                 ttft_ms: None,
                 tpot_ms: None,
                 error: None,
+                origin: StreamOutcomeOrigin::WorkerTerminal,
                 tool_calls: None,
                 logprobs: None,
                 candidates: Vec::new(),
                 executed_bundle_config_hash: None,
                 execution_identity_sha256: None,
+                execution_binding_sha256: None,
             }
         }
 
@@ -1849,6 +1979,433 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Copy)]
+    enum WorkerTerminalDelivery {
+        BackloggedBeforeFirstPoll,
+        AfterFirstDelta,
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn live_driver_records_structural_error_before_and_after_first_delta() {
+        use opentelemetry::trace::TracerProvider;
+        use tracing_subscriber::prelude::*;
+        let exporter = opentelemetry_sdk::trace::InMemorySpanExporter::default();
+        let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+            // Other tests change the process sampler environment; capture spans deterministically.
+            .with_sampler(opentelemetry_sdk::trace::Sampler::AlwaysOn)
+            .with_simple_exporter(exporter.clone())
+            .build();
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test")));
+        let _guard = tracing::subscriber::set_default(subscriber);
+        // Keep two dispatchers alive so subscriber-less sibling tests cannot
+        // cache shared callsites as disabled through tracing-core's fast path.
+        let _callsite_guard = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+        for delivery in [
+            WorkerTerminalDelivery::BackloggedBeforeFirstPoll,
+            WorkerTerminalDelivery::AfterFirstDelta,
+        ] {
+            let _ = run_driver_worker_error_race(
+                SseEndpoint::Generate,
+                delivery,
+                ChunkError {
+                    code: "inference_error".into(),
+                    message: "sensitive diagnostic".into(),
+                    param: None,
+                    retry_after_s: None,
+                },
+            )
+            .await;
+        }
+        let spans = exporter.get_finished_spans().unwrap();
+        let streams: Vec<_> = spans
+            .iter()
+            .filter(|span| span.name == "gateway.generation_stream")
+            .collect();
+        assert_eq!(streams.len(), 2);
+        assert!(streams
+            .iter()
+            .all(|span| span.status == opentelemetry::trace::Status::error("")));
+        assert!(streams.iter().all(|span| span.events.is_empty()));
+    }
+
+    async fn run_driver_worker_error_race(
+        endpoint: SseEndpoint,
+        delivery: WorkerTerminalDelivery,
+        error: ChunkError,
+    ) -> Vec<String> {
+        use crate::queue::streaming::StreamCollector;
+        use crate::state::demand_tracker::PhysicalLaneCatalog;
+
+        let recorder = Arc::new(client_disconnect_grace::TeardownRecorder::default());
+        let publisher: Arc<dyn WorkDispatcher> = recorder as Arc<dyn WorkDispatcher>;
+        let catalog = PhysicalLaneCatalog::try_from_raw([(
+            "default".to_string(),
+            "default".to_string(),
+            "default".to_string(),
+        )])
+        .expect("catalog");
+        let demand_tracker = Arc::new(DemandTracker::new(catalog));
+        let physical_lane = demand_tracker
+            .resolve_lane("default", "default", "default")
+            .expect("lane");
+
+        let (collector_tx, _collector_rx) = tokio::sync::oneshot::channel();
+        let mut collector = StreamCollector::new(
+            collector_tx,
+            "test/model".to_string(),
+            "default".to_string(),
+        );
+        let chunk_rx = collector.install_chunk_tap();
+        let (outcome_tx, outcome_rx) = tokio::sync::oneshot::channel();
+        let (durability_tx, durability_completion) = tokio::sync::oneshot::channel();
+        durability_tx
+            .send(Ok::<(), String>(()))
+            .expect("durability receiver is live");
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(8);
+
+        let args = SseDriverArgs {
+            event_tx,
+            chunk_rx,
+            outcome_rx,
+            durability_completion,
+            publisher,
+            demand_tracker,
+            physical_lane,
+            request_id: "req-test".to_string(),
+            model: "test/model".to_string(),
+            pool: "default".to_string(),
+            bundle: "default".to_string(),
+            gpu: "test".to_string(),
+            endpoint,
+            stream_chat_id: "chatcmpl-test".to_string(),
+            created: 1,
+            first_chunk_timeout: Duration::from_secs(30),
+            inter_chunk_timeout: Duration::from_secs(30),
+            overall_timeout: Duration::from_secs(60),
+            was_direct_dispatched: false,
+            pool_fallback_lane_worker_count: 1,
+        };
+
+        let mut payloads = Vec::new();
+        if matches!(delivery, WorkerTerminalDelivery::AfterFirstDelta) {
+            use tracing::instrument::WithSubscriber;
+            let driver = tokio::spawn(
+                run_sse_driver_with_lifecycle(
+                    args,
+                    Some(Lifecycle::generation_stream(
+                        opentelemetry::Context::current(),
+                    )),
+                )
+                .with_current_subscriber(),
+            );
+            assert!(matches!(
+                collector.apply(_delta_chunk(41, "partial")),
+                ChunkApplied::Delta
+            ));
+            let event = tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
+                .await
+                .expect("delta event timeout")
+                .expect("delta event")
+                .expect("infallible event");
+            payloads.push(_event_data(event).await);
+
+            let mut terminal = _terminal_chunk("error", None);
+            terminal.seq = 42;
+            terminal.usage = Some(UsageBlock {
+                gpu_second: None,
+                images: None,
+                prompt_tokens_details: None,
+                prompt_tokens: 3,
+                completion_tokens: 2,
+                total_tokens: 5,
+            });
+            terminal.ttft_ms = Some(17.5);
+            terminal.executed_bundle_config_hash = Some("a".repeat(64));
+            terminal.execution_identity_sha256 = Some("b".repeat(64));
+            terminal.error = Some(error);
+            assert!(matches!(collector.apply(terminal), ChunkApplied::Terminal));
+            outcome_tx
+                .send(collector.build_outcome().expect("terminal outcome"))
+                .expect("outcome receiver is live");
+            driver.await.expect("driver task");
+        } else {
+            assert!(matches!(
+                collector.apply(_delta_chunk(41, "partial")),
+                ChunkApplied::Delta
+            ));
+            let mut terminal = _terminal_chunk("error", None);
+            terminal.seq = 42;
+            terminal.usage = Some(UsageBlock {
+                gpu_second: None,
+                images: None,
+                prompt_tokens_details: None,
+                prompt_tokens: 3,
+                completion_tokens: 2,
+                total_tokens: 5,
+            });
+            terminal.ttft_ms = Some(17.5);
+            terminal.executed_bundle_config_hash = Some("a".repeat(64));
+            terminal.execution_identity_sha256 = Some("b".repeat(64));
+            terminal.error = Some(error);
+            assert!(matches!(collector.apply(terminal), ChunkApplied::Terminal));
+            outcome_tx
+                .send(collector.build_outcome().expect("terminal outcome"))
+                .expect("outcome receiver is live");
+            run_sse_driver_with_lifecycle(
+                args,
+                Some(Lifecycle::generation_stream(
+                    opentelemetry::Context::current(),
+                )),
+            )
+            .await;
+        }
+
+        loop {
+            let Some(event) = tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
+                .await
+                .expect("driver event timeout")
+            else {
+                break;
+            };
+            payloads.push(_event_data(event.expect("infallible event")).await);
+        }
+        payloads
+    }
+
+    #[tokio::test]
+    async fn live_driver_worker_error_outcome_preserves_full_contract_before_and_after_delta() {
+        for delivery in [
+            WorkerTerminalDelivery::BackloggedBeforeFirstPoll,
+            WorkerTerminalDelivery::AfterFirstDelta,
+        ] {
+            for endpoint in [
+                SseEndpoint::Chat {
+                    include_usage: true,
+                },
+                SseEndpoint::Completion {
+                    include_usage: true,
+                },
+                SseEndpoint::Generate,
+            ] {
+                let payloads = run_driver_worker_error_race(
+                    endpoint,
+                    delivery,
+                    ChunkError {
+                        code: "RESOURCE_EXHAUSTED".to_string(),
+                        message: "scheduler full".to_string(),
+                        param: Some("model".to_string()),
+                        retry_after_s: Some(12),
+                    },
+                )
+                .await;
+                assert_eq!(
+                    payloads
+                        .iter()
+                        .filter(|value| value.as_str() == "[DONE]")
+                        .count(),
+                    1
+                );
+                assert_eq!(payloads.last().expect("done"), "[DONE]");
+                let json_payloads = payloads[..payloads.len() - 1]
+                    .iter()
+                    .map(|payload| {
+                        serde_json::from_str::<Value>(payload).expect("worker event JSON")
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    json_payloads.len(),
+                    3 - usize::from(matches!(endpoint, SseEndpoint::Generate))
+                );
+                let delta = &json_payloads[0];
+                match endpoint {
+                    SseEndpoint::Chat { .. } => {
+                        assert_eq!(delta["choices"][0]["delta"]["content"], "partial")
+                    }
+                    SseEndpoint::Completion { .. } => {
+                        assert_eq!(delta["choices"][0]["text"], "partial")
+                    }
+                    SseEndpoint::Generate => {
+                        assert_eq!(delta["seq"], 41);
+                        assert_eq!(delta["text_delta"], "partial");
+                    }
+                }
+                let error_payload = json_payloads
+                    .iter()
+                    .find(|payload| payload.get("error").is_some())
+                    .expect("worker error event");
+                assert_eq!(error_payload["error"]["code"], "RESOURCE_EXHAUSTED");
+                assert!(error_payload["error"]["param"].is_null());
+                assert_eq!(error_payload["error"]["retry_after_s"], 12);
+                match endpoint {
+                    SseEndpoint::Chat { .. } | SseEndpoint::Completion { .. } => {
+                        assert_eq!(error_payload["error"]["type"], "server_error");
+                    }
+                    SseEndpoint::Generate => {
+                        assert!(error_payload["error"].get("type").is_none());
+                        assert_eq!(error_payload["seq"], 42);
+                        assert_eq!(error_payload["usage"]["prompt_tokens"], 3);
+                        assert_eq!(error_payload["usage"]["completion_tokens"], 2);
+                        assert_eq!(error_payload["ttft_ms"], 17.5);
+                    }
+                }
+                if !matches!(endpoint, SseEndpoint::Generate) {
+                    let usage = json_payloads
+                        .iter()
+                        .find(|payload| payload["choices"] == json!([]))
+                        .expect("usage-only event");
+                    assert_eq!(usage["usage"]["prompt_tokens"], 3);
+                    assert_eq!(usage["usage"]["completion_tokens"], 2);
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn live_driver_surfaces_synthetic_only_outcome_when_tap_closes() {
+        use crate::state::demand_tracker::PhysicalLaneCatalog;
+
+        for endpoint in [
+            SseEndpoint::Chat {
+                include_usage: false,
+            },
+            SseEndpoint::Completion {
+                include_usage: false,
+            },
+            SseEndpoint::Generate,
+        ] {
+            let recorder = Arc::new(client_disconnect_grace::TeardownRecorder::default());
+            let publisher: Arc<dyn WorkDispatcher> = recorder as Arc<dyn WorkDispatcher>;
+            let catalog = PhysicalLaneCatalog::try_from_raw([(
+                "default".to_string(),
+                "default".to_string(),
+                "default".to_string(),
+            )])
+            .expect("catalog");
+            let demand_tracker = Arc::new(DemandTracker::new(catalog));
+            let physical_lane = demand_tracker
+                .resolve_lane("default", "default", "default")
+                .expect("lane");
+            let (chunk_tx, chunk_rx) = tokio::sync::broadcast::channel(4);
+            drop(chunk_tx);
+            let (outcome_tx, outcome_rx) = tokio::sync::oneshot::channel();
+            outcome_tx
+                .send(StreamOutcome {
+                    text: String::new(),
+                    finish_reason: "error".to_string(),
+                    usage: None,
+                    attempt_id: String::new(),
+                    ttft_ms: None,
+                    tpot_ms: None,
+                    error: Some(ChunkError {
+                        code: "rate_limit_exceeded".to_string(),
+                        message: "pool republish failed".to_string(),
+                        param: None,
+                        retry_after_s: None,
+                    }),
+                    origin: StreamOutcomeOrigin::GatewaySynthetic,
+                    tool_calls: None,
+                    logprobs: None,
+                    candidates: Vec::new(),
+                    executed_bundle_config_hash: None,
+                    execution_identity_sha256: None,
+                    execution_binding_sha256: None,
+                })
+                .expect("outcome receiver is live");
+            let (durability_tx, durability_completion) = tokio::sync::oneshot::channel();
+            durability_tx
+                .send(Ok::<(), String>(()))
+                .expect("durability receiver is live");
+            let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(4);
+
+            run_sse_driver(SseDriverArgs {
+                event_tx,
+                chunk_rx,
+                outcome_rx,
+                durability_completion,
+                publisher,
+                demand_tracker,
+                physical_lane,
+                request_id: "req-synthetic".to_string(),
+                model: "test/model".to_string(),
+                pool: "default".to_string(),
+                bundle: "default".to_string(),
+                gpu: "test".to_string(),
+                endpoint,
+                stream_chat_id: "chatcmpl-synthetic".to_string(),
+                created: 1,
+                first_chunk_timeout: Duration::from_secs(30),
+                inter_chunk_timeout: Duration::from_secs(30),
+                overall_timeout: Duration::from_secs(60),
+                was_direct_dispatched: false,
+                pool_fallback_lane_worker_count: 1,
+            })
+            .await;
+
+            let error = _event_data(
+                event_rx
+                    .recv()
+                    .await
+                    .expect("synthetic error event")
+                    .expect("infallible event"),
+            )
+            .await;
+            let done = _event_data(
+                event_rx
+                    .recv()
+                    .await
+                    .expect("done event")
+                    .expect("infallible event"),
+            )
+            .await;
+            let error: Value = serde_json::from_str(&error).expect("synthetic error JSON");
+            assert_eq!(error["error"]["code"], "rate_limit_exceeded");
+            assert_eq!(error["error"]["message"], "pool republish failed");
+            assert_eq!(done, "[DONE]");
+            assert!(event_rx.recv().await.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn live_driver_worker_validation_error_keeps_openai_type_and_exact_param() {
+        for endpoint in [
+            SseEndpoint::Chat {
+                include_usage: false,
+            },
+            SseEndpoint::Completion {
+                include_usage: false,
+            },
+            SseEndpoint::Generate,
+        ] {
+            let payloads = run_driver_worker_error_race(
+                endpoint,
+                WorkerTerminalDelivery::BackloggedBeforeFirstPoll,
+                ChunkError {
+                    code: "unsupported_field".to_string(),
+                    message: "top_k is unavailable".to_string(),
+                    param: Some("top_k".to_string()),
+                    retry_after_s: None,
+                },
+            )
+            .await;
+            let error_payload = payloads
+                .iter()
+                .filter_map(|payload| serde_json::from_str::<Value>(payload).ok())
+                .find(|payload| payload.get("error").is_some())
+                .expect("worker error JSON");
+            assert_eq!(error_payload["error"]["code"], "unsupported_field");
+            assert_eq!(error_payload["error"]["param"], "top_k");
+            match endpoint {
+                SseEndpoint::Chat { .. } | SseEndpoint::Completion { .. } => {
+                    assert_eq!(error_payload["error"]["type"], "invalid_request_error");
+                }
+                SseEndpoint::Generate => {
+                    assert!(error_payload["error"].get("type").is_none());
+                }
+            }
+        }
+    }
+
     #[tokio::test]
     async fn terminal_durability_ready_wins_over_closed_client_and_deadline() {
         let (event_tx, event_rx) = tokio::sync::mpsc::channel(1);
@@ -1951,6 +2508,7 @@ mod tests {
             choice_index: 0,
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
+            execution_binding_sha256: None,
         }
     }
 
@@ -1973,6 +2531,7 @@ mod tests {
             choice_index: 0,
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
+            execution_binding_sha256: None,
         }
     }
 
@@ -2060,6 +2619,53 @@ mod tests {
     }
 
     #[test]
+    fn test_sse_text_completion_model_load_failed_uses_safe_public_message() {
+        let mut chunk = _terminal_chunk("error", None);
+        chunk.error = Some(ChunkError {
+            code: crate::queue::streaming::MODEL_LOAD_FAILED_ERROR_CODE.to_string(),
+            message: "SENSITIVE_WORKER_FAILURE_SENTINEL".to_string(),
+            param: None,
+            retry_after_s: None,
+        });
+
+        let value = build_text_completion_chunk_event("cmpl-1", 0, "m", &chunk);
+        assert!(value["choices"][0]["finish_reason"].is_null());
+        assert_eq!(
+            value["error"]["code"],
+            crate::queue::streaming::MODEL_LOAD_FAILED_ERROR_CODE
+        );
+        assert_eq!(
+            value["error"]["message"],
+            crate::queue::streaming::MODEL_LOAD_FAILED_PUBLIC_MESSAGE
+        );
+        assert_eq!(value["error"]["type"], "server_error");
+        assert!(value["error"]["param"].is_null());
+        assert!(!value
+            .to_string()
+            .contains("SENSITIVE_WORKER_FAILURE_SENTINEL"));
+    }
+
+    #[test]
+    fn test_build_text_completion_chunk_event_preserves_worker_error() {
+        let mut chunk = _terminal_chunk("error", None);
+        chunk.error = Some(ChunkError {
+            code: "unsupported_field".to_string(),
+            message: "top_k is unavailable".to_string(),
+            param: Some("top_k".to_string()),
+            retry_after_s: None,
+        });
+
+        let value = build_text_completion_chunk_event("cmpl-1", 0, "m", &chunk);
+
+        assert!(value["choices"][0]["finish_reason"].is_null());
+        assert_eq!(value["error"]["code"], "unsupported_field");
+        assert_eq!(value["error"]["type"], "invalid_request_error");
+        assert_eq!(value["error"]["param"], "top_k");
+        assert_eq!(value["error"]["message"], "top_k is unavailable");
+        assert_eq!(value["request_id"], "req-test");
+    }
+
+    #[test]
     fn test_sse_chat_subsequent_chunk_omits_role() {
         let chunk = _delta_chunk(1, " world");
         let v = build_chat_chunk_event("chatcmpl-1", 1_700_000_000, "m", &chunk, false);
@@ -2087,20 +2693,106 @@ mod tests {
         assert_eq!(v["choices"][0]["finish_reason"], "length");
     }
 
+    #[test]
+    fn test_sse_successful_terminal_exposes_execution_evidence() {
+        let identity = "a".repeat(64);
+        let binding = "b".repeat(64);
+        let mut chunk = _terminal_chunk("stop", None);
+        chunk.execution_identity_sha256 = Some(identity.clone());
+        chunk.execution_binding_sha256 = Some(binding.clone());
+
+        for value in [
+            build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false),
+            build_text_completion_chunk_event("cmpl-1", 0, "m", &chunk),
+            build_generate_chunk_event(&chunk, &[]),
+        ] {
+            assert_eq!(value["execution_identity_sha256"], identity);
+            assert_eq!(value["execution_binding_sha256"], binding);
+        }
+    }
+
+    #[test]
+    fn test_sse_execution_evidence_requires_complete_successful_terminal_pair() {
+        let mut delta = _delta_chunk(0, "Hi");
+        delta.execution_identity_sha256 = Some("a".repeat(64));
+        delta.execution_binding_sha256 = Some("b".repeat(64));
+        let mut partial = _terminal_chunk("stop", None);
+        partial.execution_identity_sha256 = Some("a".repeat(64));
+        let mut error = _terminal_chunk("error", None);
+        error.execution_identity_sha256 = Some("a".repeat(64));
+        error.execution_binding_sha256 = Some("b".repeat(64));
+        error.error = Some(ChunkError {
+            code: "transport_failure".to_string(),
+            message: "upstream gone".to_string(),
+            param: None,
+            retry_after_s: None,
+        });
+
+        for value in [
+            build_generate_chunk_event(&delta, &[]),
+            build_generate_chunk_event(&partial, &[]),
+            build_generate_chunk_event(&error, &[]),
+        ] {
+            assert!(value.get("execution_identity_sha256").is_none());
+            assert!(value.get("execution_binding_sha256").is_none());
+        }
+    }
+
     /// Worker-error chunks surface an ``error`` block alongside the
     /// normal envelope and trigger the SDK error path.
     #[test]
     fn test_sse_chat_error_chunk_attaches_error_block() {
         let mut chunk = _terminal_chunk("error", None);
         chunk.error = Some(ChunkError {
-            code: "context_exceeded".to_string(),
-            message: "prompt too long".to_string(),
+            code: "unsupported_field".to_string(),
+            message: "top_k is unavailable".to_string(),
+            param: Some("top_k".to_string()),
+            retry_after_s: None,
         });
         let v = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false);
-        assert_eq!(v["error"]["code"], "context_exceeded");
-        assert_eq!(v["error"]["type"], "context_length_exceeded");
-        assert!(v["error"]["param"].is_null());
-        assert_eq!(v["error"]["message"], "prompt too long");
+        assert_eq!(v["error"]["code"], "unsupported_field");
+        assert_eq!(v["error"]["type"], "invalid_request_error");
+        assert_eq!(v["error"]["param"], "top_k");
+        assert_eq!(v["error"]["message"], "top_k is unavailable");
+        // #3136: the ERROR chunk carries the gateway request id in-band
+        // (additive member; OpenAI clients ignore it) so SDK consumers can
+        // correlate stream failures with gateway logs.
+        assert_eq!(v["request_id"], "req-test");
+    }
+
+    #[test]
+    fn test_sse_chat_model_load_failed_uses_safe_public_message() {
+        let mut chunk = _terminal_chunk("error", None);
+        chunk.error = Some(ChunkError {
+            code: crate::queue::streaming::MODEL_LOAD_FAILED_ERROR_CODE.to_string(),
+            message: "SENSITIVE_WORKER_FAILURE_SENTINEL".to_string(),
+            param: None,
+            retry_after_s: None,
+        });
+
+        let value = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false);
+        assert_eq!(
+            value["error"]["code"],
+            crate::queue::streaming::MODEL_LOAD_FAILED_ERROR_CODE
+        );
+        assert_eq!(
+            value["error"]["message"],
+            crate::queue::streaming::MODEL_LOAD_FAILED_PUBLIC_MESSAGE
+        );
+        assert!(!value
+            .to_string()
+            .contains("SENSITIVE_WORKER_FAILURE_SENTINEL"));
+    }
+
+    /// #3136 scope guard: ``request_id`` rides ERROR chunks only — normal
+    /// deltas and clean terminals keep the exact pre-existing chat shape.
+    #[test]
+    fn test_sse_chat_non_error_chunks_omit_request_id() {
+        let delta = build_chat_chunk_event("chatcmpl-1", 0, "m", &_delta_chunk(0, "Hi"), true);
+        assert!(delta.get("request_id").is_none());
+        let terminal =
+            build_chat_chunk_event("chatcmpl-1", 0, "m", &_terminal_chunk("stop", None), false);
+        assert!(terminal.get("request_id").is_none());
     }
 
     // ── Generate (SIE-native) chunk shape ─────────────────────────
@@ -2135,6 +2827,9 @@ mod tests {
         let chunk = _terminal_chunk(
             "stop",
             Some(UsageBlock {
+                gpu_second: None,
+                images: None,
+                prompt_tokens_details: None,
                 prompt_tokens: 10,
                 completion_tokens: 7,
                 total_tokens: 17,
@@ -2156,10 +2851,204 @@ mod tests {
         chunk.error = Some(ChunkError {
             code: "transport_failure".to_string(),
             message: "upstream gone".to_string(),
+            param: None,
+            retry_after_s: None,
         });
         let v = build_generate_chunk_event(&chunk, &[]);
         assert_eq!(v["error"]["code"], "transport_failure");
         assert_eq!(v["error"]["message"], "upstream gone");
+    }
+
+    #[test]
+    fn test_sse_generate_model_load_failed_uses_safe_public_message() {
+        let mut chunk = _terminal_chunk("error", None);
+        chunk.error = Some(ChunkError {
+            code: crate::queue::streaming::MODEL_LOAD_FAILED_ERROR_CODE.to_string(),
+            message: "SENSITIVE_WORKER_FAILURE_SENTINEL".to_string(),
+            param: None,
+            retry_after_s: None,
+        });
+
+        let value = build_generate_chunk_event(&chunk, &[]);
+        assert_eq!(
+            value["error"]["code"],
+            crate::queue::streaming::MODEL_LOAD_FAILED_ERROR_CODE
+        );
+        assert_eq!(
+            value["error"]["message"],
+            crate::queue::streaming::MODEL_LOAD_FAILED_PUBLIC_MESSAGE
+        );
+        assert!(!value
+            .to_string()
+            .contains("SENSITIVE_WORKER_FAILURE_SENTINEL"));
+    }
+
+    #[test]
+    fn test_sse_unknown_worker_errors_fail_closed_on_all_generation_shapes() {
+        let mut chunk = _terminal_chunk("error", None);
+        chunk.error = Some(ChunkError {
+            code: "SENSITIVE_WORKER_ERROR_CODE_SENTINEL".to_string(),
+            message: "SENSITIVE_WORKER_FAILURE_SENTINEL".to_string(),
+            param: None,
+            retry_after_s: None,
+        });
+
+        let values = [
+            build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false),
+            build_text_completion_chunk_event("cmpl-1", 0, "m", &chunk),
+            build_generate_chunk_event(&chunk, &[]),
+        ];
+        for value in values {
+            assert_eq!(value["error"]["code"], "inference_error");
+            assert_eq!(
+                value["error"]["message"],
+                crate::queue::streaming::UNKNOWN_WORKER_ERROR_PUBLIC_MESSAGE
+            );
+            let serialized = value.to_string();
+            assert!(!serialized.contains("SENSITIVE_WORKER_ERROR_CODE_SENTINEL"));
+            assert!(!serialized.contains("SENSITIVE_WORKER_FAILURE_SENTINEL"));
+        }
+    }
+
+    #[test]
+    fn test_sse_payload_too_large_preserves_worker_code_on_all_generation_shapes() {
+        let mut chunk = _terminal_chunk("error", None);
+        chunk.error = Some(ChunkError {
+            code: "PAYLOAD_TOO_LARGE".to_string(),
+            message: "payload exceeds limit".to_string(),
+            param: None,
+            retry_after_s: None,
+        });
+
+        for value in [
+            build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false),
+            build_text_completion_chunk_event("cmpl-1", 0, "m", &chunk),
+            build_generate_chunk_event(&chunk, &[]),
+        ] {
+            assert_eq!(value["error"]["code"], "PAYLOAD_TOO_LARGE");
+            assert_eq!(value["error"]["message"], "payload exceeds limit");
+        }
+    }
+
+    #[test]
+    fn worker_error_sse_shapes_preserve_validated_retry_after() {
+        let mut chunk = _terminal_chunk("error", None);
+        chunk.error = Some(ChunkError {
+            code: "RESOURCE_EXHAUSTED".to_string(),
+            message: "resource pressure".to_string(),
+            param: Some("model".to_string()),
+            retry_after_s: Some(12),
+        });
+
+        let chat = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false);
+        let completion = build_text_completion_chunk_event("cmpl-1", 0, "m", &chunk);
+        let generate = build_generate_chunk_event(&chunk, &[]);
+
+        for value in [&chat, &completion, &generate] {
+            assert_eq!(value["error"]["retry_after_s"], 12);
+            assert!(value["error"]["param"].is_null());
+        }
+    }
+
+    #[test]
+    fn worker_error_sse_shapes_omit_untrusted_or_wrong_code_retry_after() {
+        for error in [
+            ChunkError {
+                code: "RESOURCE_EXHAUSTED".to_string(),
+                message: "resource pressure".to_string(),
+                param: None,
+                retry_after_s: Some(61),
+            },
+            ChunkError {
+                code: "MODEL_LOADING".to_string(),
+                message: "draining".to_string(),
+                param: None,
+                retry_after_s: Some(12),
+            },
+        ] {
+            let mut chunk = _terminal_chunk("error", None);
+            chunk.error = Some(error);
+
+            for value in [
+                build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false),
+                build_text_completion_chunk_event("cmpl-1", 0, "m", &chunk),
+                build_generate_chunk_event(&chunk, &[]),
+            ] {
+                assert!(value["error"].get("retry_after_s").is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn worker_inference_error_sse_shapes_sanitize_untrusted_message() {
+        let sentinel = "SENSITIVE_BACKEND_SENTINEL";
+        let mut chunk = _terminal_chunk("error", None);
+        chunk.error = Some(ChunkError {
+            code: "inference_error".to_string(),
+            message: sentinel.to_string(),
+            param: Some(sentinel.to_string()),
+            retry_after_s: None,
+        });
+
+        let chat = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false);
+        let completion = build_text_completion_chunk_event("cmpl-1", 0, "m", &chunk);
+        let generate = build_generate_chunk_event(&chunk, &[]);
+
+        for value in [&chat, &completion, &generate] {
+            assert_eq!(
+                value["error"]["message"],
+                "internal error during generation"
+            );
+            assert!(value["error"]["param"].is_null());
+            assert!(!value.to_string().contains(sentinel));
+        }
+    }
+
+    #[test]
+    fn worker_grammar_compile_error_sanitizes_untrusted_message() {
+        let sentinel = "SENSITIVE_GRAMMAR_SENTINEL";
+        let mut chunk = _terminal_chunk("error", None);
+        chunk.error = Some(ChunkError {
+            code: "grammar_compile_failed".to_string(),
+            message: sentinel.to_string(),
+            param: Some(sentinel.to_string()),
+            retry_after_s: None,
+        });
+
+        let value = build_generate_chunk_event(&chunk, &[]);
+
+        assert_eq!(
+            value["error"]["message"],
+            "internal error compiling grammar"
+        );
+        assert!(value["error"]["param"].is_null());
+        assert!(!value.to_string().contains(sentinel));
+    }
+
+    #[test]
+    fn unknown_worker_error_sse_shapes_sanitize_untrusted_message() {
+        let sentinel = "SENSITIVE_WORKER_ERROR_CODE_SENTINEL";
+        let mut chunk = _terminal_chunk("error", None);
+        chunk.error = Some(ChunkError {
+            code: sentinel.to_string(),
+            message: sentinel.to_string(),
+            param: Some(sentinel.to_string()),
+            retry_after_s: None,
+        });
+
+        let chat = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false);
+        let completion = build_text_completion_chunk_event("cmpl-1", 0, "m", &chunk);
+        let generate = build_generate_chunk_event(&chunk, &[]);
+
+        for value in [&chat, &completion, &generate] {
+            assert_eq!(
+                value["error"]["message"],
+                crate::queue::streaming::UNKNOWN_WORKER_ERROR_PUBLIC_MESSAGE
+            );
+            assert_eq!(value["error"]["code"], "inference_error");
+            assert!(value["error"]["param"].is_null());
+            assert!(!value.to_string().contains(sentinel));
+        }
     }
 
     // ── Synthesized error chunks (gateway-side timeouts) ──────────
@@ -2188,6 +3077,9 @@ mod tests {
         assert!(v["choices"][0]["finish_reason"].is_null());
         assert_eq!(v["error"]["code"], "first_chunk_timeout");
         assert_eq!(v["error"]["type"], "server_error");
+        // #3136: gateway-synthesized chat error chunks carry the gateway
+        // request id in-band, mirroring the generate shape.
+        assert_eq!(v["request_id"], "req-1");
     }
 
     #[tokio::test]
@@ -2210,6 +3102,72 @@ mod tests {
         assert_eq!(v["done"], true);
         assert_eq!(v["finish_reason"], "error");
         assert_eq!(v["error"]["code"], "overall_timeout");
+    }
+
+    #[tokio::test]
+    async fn test_sse_outcome_worker_errors_use_safe_contract_on_all_endpoints() {
+        let cases = [
+            (
+                crate::queue::streaming::MODEL_LOAD_FAILED_ERROR_CODE,
+                crate::queue::streaming::MODEL_LOAD_FAILED_ERROR_CODE,
+                crate::queue::streaming::MODEL_LOAD_FAILED_PUBLIC_MESSAGE,
+            ),
+            (
+                "SENSITIVE_WORKER_ERROR_CODE_SENTINEL",
+                "inference_error",
+                crate::queue::streaming::UNKNOWN_WORKER_ERROR_PUBLIC_MESSAGE,
+            ),
+            (
+                "model_load_failed",
+                "inference_error",
+                crate::queue::streaming::UNKNOWN_WORKER_ERROR_PUBLIC_MESSAGE,
+            ),
+        ];
+
+        for (worker_code, expected_code, expected_message) in cases {
+            for endpoint in [
+                SseEndpoint::Generate,
+                SseEndpoint::Chat {
+                    include_usage: false,
+                },
+                SseEndpoint::Completion {
+                    include_usage: false,
+                },
+            ] {
+                let error = ChunkError {
+                    code: worker_code.to_string(),
+                    message: "SENSITIVE_WORKER_FAILURE_SENTINEL".to_string(),
+                    param: None,
+                    retry_after_s: None,
+                };
+                let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+                send_synthetic_error_chunk(&tx, &endpoint, "cmpl-1", 1, "m", "req-1", &error).await;
+                send_done(&tx).await;
+
+                let error_event = rx.recv().await.expect("error event").expect("valid event");
+                let value: Value = serde_json::from_str(&_event_data(error_event).await)
+                    .expect("valid worker error JSON");
+                assert_eq!(value["error"]["code"], expected_code);
+                assert_eq!(value["error"]["message"], expected_message);
+                assert!(!value
+                    .to_string()
+                    .contains("SENSITIVE_WORKER_FAILURE_SENTINEL"));
+                match endpoint {
+                    SseEndpoint::Generate => {
+                        assert_eq!(value["finish_reason"], "error");
+                    }
+                    SseEndpoint::Chat { .. } | SseEndpoint::Completion { .. } => {
+                        assert!(value["choices"][0]["finish_reason"].is_null());
+                        assert_eq!(value["error"]["type"], "server_error");
+                        assert!(value["error"]["param"].is_null());
+                        assert_eq!(value["request_id"], "req-1");
+                    }
+                }
+
+                let done_event = rx.recv().await.expect("done event").expect("valid event");
+                assert_eq!(_event_data(done_event).await, "[DONE]");
+            }
+        }
     }
 
     #[tokio::test]
@@ -2289,6 +3247,9 @@ mod tests {
         collector.apply(_terminal_chunk(
             "stop",
             Some(UsageBlock {
+                gpu_second: None,
+                images: None,
+                prompt_tokens_details: None,
                 prompt_tokens: 2,
                 completion_tokens: 2,
                 total_tokens: 4,
@@ -2324,6 +3285,9 @@ mod tests {
         let terminal = _terminal_chunk(
             "stop",
             Some(UsageBlock {
+                gpu_second: None,
+                images: None,
+                prompt_tokens_details: None,
                 prompt_tokens: 5,
                 completion_tokens: 7,
                 total_tokens: 12,
@@ -2357,6 +3321,86 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_sse_usage_forwards_worker_cached_prompt_tokens() {
+        let usage: UsageBlock = serde_json::from_value(json!({
+            "prompt_tokens": 120,
+            "completion_tokens": 4,
+            "total_tokens": 124,
+            "prompt_tokens_details": {"cached_tokens": 96},
+        }))
+        .expect("worker usage with prompt_tokens_details decodes");
+        assert_eq!(usage.cached_prompt_tokens(), Some(96));
+        let terminal = _terminal_chunk("stop", Some(usage));
+
+        let chat = build_usage_only_chunk_event(
+            SseEndpoint::Chat {
+                include_usage: true,
+            },
+            "cmpl-1",
+            1700,
+            "m",
+            &terminal,
+            &[],
+        )
+        .expect("usage chunk");
+        assert_eq!(
+            chat["usage"]["prompt_tokens_details"],
+            json!({"cached_tokens": 96})
+        );
+        let native = build_generate_chunk_event(&terminal, &[]);
+        assert_eq!(
+            native["usage"]["prompt_tokens_details"],
+            json!({"cached_tokens": 96})
+        );
+
+        let legacy: UsageBlock = serde_json::from_value(json!({
+            "prompt_tokens": 120,
+            "completion_tokens": 4,
+            "total_tokens": 124,
+        }))
+        .expect("usage from a worker without cache reporting decodes");
+        assert_eq!(legacy.cached_prompt_tokens(), None);
+        let native = build_generate_chunk_event(&_terminal_chunk("stop", Some(legacy)), &[]);
+        assert!(native["usage"].get("prompt_tokens_details").is_none());
+    }
+
+    #[test]
+    fn test_cached_prompt_tokens_never_exceed_prompt_tokens() {
+        let usage: UsageBlock = serde_json::from_value(json!({
+            "prompt_tokens": 10,
+            "completion_tokens": 1,
+            "total_tokens": 11,
+            "prompt_tokens_details": {"cached_tokens": 64},
+        }))
+        .expect("decodes");
+        assert_eq!(usage.cached_prompt_tokens(), Some(10));
+
+        // Every surface serializes the decoded block, so the clamp must hold
+        // on the wire too, not only through the accessor.
+        let terminal = _terminal_chunk("stop", Some(usage));
+        let chat = build_usage_only_chunk_event(
+            SseEndpoint::Chat {
+                include_usage: true,
+            },
+            "cmpl-1",
+            1700,
+            "m",
+            &terminal,
+            &[],
+        )
+        .expect("usage chunk");
+        assert_eq!(
+            chat["usage"]["prompt_tokens_details"],
+            json!({"cached_tokens": 10})
+        );
+        let native = build_generate_chunk_event(&terminal, &[]);
+        assert_eq!(
+            native["usage"]["prompt_tokens_details"],
+            json!({"cached_tokens": 10})
+        );
+    }
+
     /// No usage chunk without the opt-in, and never a synthesised one: a
     /// terminal that carried no authoritative usage reports nothing.
     #[test]
@@ -2364,6 +3408,9 @@ mod tests {
         let terminal = _terminal_chunk(
             "stop",
             Some(UsageBlock {
+                gpu_second: None,
+                images: None,
+                prompt_tokens_details: None,
                 prompt_tokens: 5,
                 completion_tokens: 7,
                 total_tokens: 12,
@@ -2409,6 +3456,9 @@ mod tests {
         let terminal = _terminal_chunk(
             "stop",
             Some(UsageBlock {
+                gpu_second: None,
+                images: None,
+                prompt_tokens_details: None,
                 prompt_tokens: 5,
                 completion_tokens: 7,
                 total_tokens: 12,
@@ -2474,6 +3524,9 @@ mod tests {
         let terminal = _terminal_chunk(
             "stop",
             Some(UsageBlock {
+                gpu_second: None,
+                images: None,
+                prompt_tokens_details: None,
                 prompt_tokens: 5,
                 completion_tokens: 7,
                 total_tokens: 12,
@@ -2508,6 +3561,9 @@ mod tests {
         let terminal = _terminal_chunk(
             "stop",
             Some(UsageBlock {
+                gpu_second: None,
+                images: None,
+                prompt_tokens_details: None,
                 prompt_tokens: 5,
                 completion_tokens: 7,
                 total_tokens: 12,
@@ -2579,6 +3635,8 @@ mod tests {
         err_chunk.error = Some(ChunkError {
             code: "rate_limit_exceeded".to_string(),
             message: "saturated".to_string(),
+            param: None,
+            retry_after_s: None,
         });
         collector.apply(err_chunk);
         let got = tap.recv().await.unwrap();
@@ -2590,6 +3648,40 @@ mod tests {
         let g = build_generate_chunk_event(&got, &[]);
         assert_eq!(g["error"]["code"], "rate_limit_exceeded");
         assert_eq!(g["done"], true);
+    }
+
+    #[tokio::test]
+    async fn text_completion_preserves_pre_first_and_mid_stream_worker_errors() {
+        for preceding_delta in [false, true] {
+            let (tx, _rx) = tokio::sync::oneshot::channel();
+            let mut collector =
+                crate::queue::streaming::StreamCollector::new(tx, "m".to_string(), "p".to_string());
+            let mut tap = collector.install_chunk_tap();
+            if preceding_delta {
+                collector.apply(_delta_chunk(0, "partial"));
+                let delta = tap.recv().await.unwrap();
+                let value = build_text_completion_chunk_event("cmpl-1", 0, "m", &delta);
+                assert_eq!(value["choices"][0]["text"], "partial");
+                assert!(value.get("error").is_none());
+            }
+
+            let mut error = _terminal_chunk("error", None);
+            error.seq = if preceding_delta { 1 } else { 0 };
+            error.error = Some(ChunkError {
+                code: "unsupported_field".to_string(),
+                message: "top_k is unavailable".to_string(),
+                param: Some("top_k".to_string()),
+                retry_after_s: None,
+            });
+            collector.apply(error);
+
+            let terminal = tap.recv().await.unwrap();
+            let value = build_text_completion_chunk_event("cmpl-1", 0, "m", &terminal);
+            assert_eq!(value["error"]["code"], "unsupported_field");
+            assert_eq!(value["error"]["param"], "top_k");
+            assert!(value["choices"][0]["finish_reason"].is_null());
+            assert_eq!(value["request_id"], "req-test");
+        }
     }
 
     /// `/v1/generate/{model}` (SIE-native) uses the simpler shape —
@@ -2604,6 +3696,9 @@ mod tests {
         collector.apply(_terminal_chunk(
             "stop",
             Some(UsageBlock {
+                gpu_second: None,
+                images: None,
+                prompt_tokens_details: None,
                 prompt_tokens: 1,
                 completion_tokens: 1,
                 total_tokens: 2,
@@ -2658,6 +3753,7 @@ mod tests {
             choice_index: 0,
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
+            execution_binding_sha256: None,
         };
         let v = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, true);
         let delta = &v["choices"][0]["delta"];

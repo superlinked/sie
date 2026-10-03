@@ -21,13 +21,20 @@ queued requests. Routing both paths through this helper keeps them in lockstep.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import math
-from typing import TYPE_CHECKING, Any
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from sie_server.types.inputs import InvalidInputError
+from sie_server.types.overflow_policy import VALID_OVERFLOW_POLICIES
 
 if TYPE_CHECKING:
     from sie_server.config.model import ModelConfig, ResolvedProfile
+
+logger = logging.getLogger(__name__)
 
 
 def _resolve_profile_or_raise(
@@ -44,15 +51,40 @@ def _resolve_profile_or_raise(
         raise InvalidInputError(str(exc)) from exc
 
 
+class InvalidOverflowPolicyError(InvalidInputError):
+    """``options.overflow_policy`` is not one of ``VALID_OVERFLOW_POLICIES``."""
+
+
+def check_overflow_policy(options: dict[str, Any]) -> None:
+    """Reject an ``overflow_policy`` that is not one of the valid policy names.
+
+    Raises:
+        InvalidOverflowPolicyError: The value is not a string naming a valid policy.
+    """
+    overflow_policy = options.get("overflow_policy")
+    if overflow_policy is not None and (
+        not isinstance(overflow_policy, str) or overflow_policy not in VALID_OVERFLOW_POLICIES
+    ):
+        raise InvalidOverflowPolicyError(
+            f"Invalid overflow_policy: {overflow_policy!r}. Must be one of {sorted(VALID_OVERFLOW_POLICIES)}."
+        )
+
+
 def merge_runtime_options_with_profile(
     config: ModelConfig,
     request_options: dict[str, Any] | None,
 ) -> tuple[dict[str, Any], ResolvedProfile]:
-    """Return merged adapter options and the profile used to derive them."""
+    """Return merged adapter options and the profile used to derive them.
+
+    Raises:
+        InvalidInputError: The request selects an unknown or malformed profile, or
+            the merged ``overflow_policy`` is not a valid policy name.
+    """
     resolved = _resolve_profile_or_raise(config, request_options)
     merged: dict[str, Any] = dict(resolved.runtime)
     if request_options:
         merged |= {key: value for key, value in request_options.items() if key != "profile"}
+    check_overflow_policy(merged)
     return merged, resolved
 
 
@@ -76,7 +108,7 @@ def merge_runtime_options(
 
     Raises:
         InvalidInputError: If ``request_options`` selects a malformed or
-            unknown profile.
+            unknown profile, or the merged ``overflow_policy`` is invalid.
     """
     merged, _ = merge_runtime_options_with_profile(config, request_options)
     return merged
@@ -91,6 +123,8 @@ _GENERATION_RUNTIME_KEYS = frozenset(
         "overall_timeout_s",
     }
 )
+# The gateway rejects a request timeout that does not fit in its duration type.
+_MAX_REQUEST_TIMEOUT_S = 2.0**64
 _GENERATION_SAMPLING_KEYS = {
     "temperature": "temperature",
     "top_p": "top_p",
@@ -99,6 +133,19 @@ _GENERATION_SAMPLING_KEYS = {
     "top_k": "top_k",
     "min_new_tokens": "min_tokens",
     "seed": "seed",
+}
+# Sampler defaults for a grammar-constrained request (``json_schema``,
+# ``regex``, or ``ebnf``). They sit above the profile's ``default_sampling``
+# and below every caller-set value (typed request fields and
+# ``options.default_sampling``). A profile's chat recipe is tuned for prose:
+# sampled temperature makes extracted values change between identical calls,
+# and presence or frequency penalties push against the repeated keys, quotes,
+# and braces that JSON needs. ``top_p``, ``top_k``, and ``min_p`` have no
+# effect at temperature 0, so they are left as the profile sets them.
+GRAMMAR_SAMPLING_DEFAULTS: dict[str, float] = {
+    "temperature": 0.0,
+    "presence_penalty": 0.0,
+    "frequency_penalty": 0.0,
 }
 
 
@@ -109,6 +156,26 @@ def _is_finite_number(value: object) -> bool:
         return math.isfinite(float(value))
     except OverflowError:
         return False
+
+
+def grammar_default_sampling(
+    profile_sampling: object,
+    request_sampling: object = None,
+) -> dict[str, Any]:
+    """Return the sampler defaults for a grammar-constrained request.
+
+    Layers, lowest first: the profile's ``default_sampling``,
+    :data:`GRAMMAR_SAMPLING_DEFAULTS`, then the request's
+    ``options.default_sampling``. Typed request fields still win over the
+    result because callers only fill fields the request left unset.
+    """
+    merged: dict[str, Any] = {}
+    if isinstance(profile_sampling, dict):
+        merged.update(cast("dict[str, Any]", profile_sampling))
+    merged.update(GRAMMAR_SAMPLING_DEFAULTS)
+    if isinstance(request_sampling, dict):
+        merged.update(cast("dict[str, Any]", request_sampling))
+    return merged
 
 
 def apply_generation_runtime_options(
@@ -122,6 +189,10 @@ def apply_generation_runtime_options(
     ``**options`` seam. Validate the currently governed runtime surface and
     translate it here so unsupported options fail closed instead of leaking to
     adapter kwargs or being silently ignored.
+
+    When ``generate_params`` carries a ``grammar``, the sampler defaults come
+    from :func:`grammar_default_sampling`: temperature and the presence and
+    frequency penalties default to 0 unless the caller set them.
     """
     if request_options is not None and not isinstance(request_options, dict):
         raise ValueError("'options' must be an object")
@@ -143,15 +214,21 @@ def apply_generation_runtime_options(
         if "stop_tokens" in request_options and not isinstance(request_options["stop_tokens"], list):
             raise ValueError("'options.stop_tokens' must be an array of non-empty strings")
         for key in ("first_chunk_timeout_s", "inter_chunk_timeout_s", "overall_timeout_s"):
-            value = request_options.get(key)
-            if key in request_options and (isinstance(value, bool) or not isinstance(value, int | float) or value <= 0):
+            if key not in request_options:
+                continue
+            value = request_options[key]
+            if isinstance(value, bool) or not isinstance(value, int | float) or value <= 0:
                 raise ValueError(f"'options.{key}' must be a positive number")
+            if _is_finite_number(value) and float(value) >= _MAX_REQUEST_TIMEOUT_S:
+                raise ValueError(f"'options.{key}' must be less than 2^64 seconds")
 
     runtime = merge_runtime_options(config, request_options)
     profile_sampling = config.resolve_profile("default").runtime.get("default_sampling")
     request_sampling = request_options.get("default_sampling") if request_options else None
     if isinstance(profile_sampling, dict) and isinstance(request_sampling, dict):
         runtime["default_sampling"] = {**profile_sampling, **request_sampling}
+    if generate_params.get("grammar") is not None:
+        runtime["default_sampling"] = grammar_default_sampling(profile_sampling, request_sampling)
     result = dict(generate_params)
 
     # The typed request maximum is a hard caller limit. Reject an explicit
@@ -221,3 +298,149 @@ def apply_generation_runtime_options(
             raise ValueError(f"'options.{key}' must be a positive number")
 
     return result
+
+
+_GENERATION_CLOSE_TIMEOUT_S = 2.0
+_EXHAUSTED = object()
+_GENERATION_CLEANUP_TASKS: set[asyncio.Task[Any]] = set()
+
+
+@dataclass(frozen=True, slots=True)
+class GenerationTimeouts:
+    """Governed generation timeouts in seconds; ``None`` leaves that bound off."""
+
+    first_chunk_s: float | None = None
+    overall_s: float | None = None
+
+
+class GenerationTimeoutError(TimeoutError):
+    """A buffered generation exceeded a governed timeout.
+
+    ``code`` matches the gateway's generation timeout codes, so a direct server
+    and a gateway report the same expiry the same way.
+    """
+
+    def __init__(self, kind: Literal["first_chunk", "overall"]) -> None:
+        self.kind = kind
+        self.code = f"{kind}_timeout"
+        super().__init__(f"Generation aborted: {kind} timeout")
+
+
+def _timeout_seconds(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, int | float) or not _is_finite_number(value):
+        return None
+    return float(value) if value > 0 else None
+
+
+def resolve_generation_timeouts(
+    config: ModelConfig,
+    request_options: dict[str, Any] | None,
+) -> GenerationTimeouts:
+    """Resolve the profile and request ``first_chunk_timeout_s`` / ``overall_timeout_s``.
+
+    Call after :func:`apply_generation_runtime_options` has validated the same
+    options.
+    """
+    runtime = merge_runtime_options(config, request_options)
+    return GenerationTimeouts(
+        first_chunk_s=_timeout_seconds(runtime.get("first_chunk_timeout_s")),
+        overall_s=_timeout_seconds(runtime.get("overall_timeout_s")),
+    )
+
+
+async def bound_generation[ChunkT](
+    chunks: AsyncIterator[ChunkT],
+    timeouts: GenerationTimeouts,
+) -> AsyncIterator[ChunkT]:
+    """Yield ``chunks`` under the first-chunk and overall timeouts.
+
+    On expiry the pending read is cancelled, which aborts the engine request,
+    and :class:`GenerationTimeoutError` is raised. Engine cleanup is waited for
+    at most ``_GENERATION_CLOSE_TIMEOUT_S``; cleanup still running then keeps
+    going in the background, so a hung abort cannot hold back the response and
+    is not itself cancelled.
+    """
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    first_chunk_at = None if timeouts.first_chunk_s is None else started + timeouts.first_chunk_s
+    overall_at = None if timeouts.overall_s is None else started + timeouts.overall_s
+    received_first = False
+    pending_read: asyncio.Task[Any] | None = None
+    cleanup_by: float | None = None
+    try:
+        while True:
+            pending: list[tuple[float, Literal["first_chunk", "overall"]]] = []
+            if first_chunk_at is not None and not received_first:
+                pending.append((first_chunk_at, "first_chunk"))
+            if overall_at is not None:
+                pending.append((overall_at, "overall"))
+            if not pending:
+                chunk = await _next_chunk(chunks)
+            else:
+                deadline, kind = min(pending, key=lambda entry: entry[0])
+                read = asyncio.ensure_future(_next_chunk(chunks))
+                pending_read = read
+                try:
+                    done, _ = await asyncio.wait({read}, timeout=max(0.0, deadline - loop.time()))
+                except BaseException:
+                    read.cancel()
+                    raise
+                if read not in done:
+                    read.cancel()
+                    cleanup_by = loop.time() + _GENERATION_CLOSE_TIMEOUT_S
+                    await asyncio.wait({read}, timeout=_GENERATION_CLOSE_TIMEOUT_S)
+                    if read.done():
+                        _log_cleanup_failure(read, "cancelled generation read")
+                    raise GenerationTimeoutError(kind)
+                pending_read = None
+                chunk = read.result()
+            if chunk is _EXHAUSTED:
+                return
+            received_first = True
+            yield cast("ChunkT", chunk)
+    finally:
+        if pending_read is not None and not pending_read.done():
+            _finish_in_background(pending_read, "cancelled generation read")
+        else:
+            budget = _GENERATION_CLOSE_TIMEOUT_S if cleanup_by is None else cleanup_by - loop.time()
+            await _close_within(chunks, budget)
+
+
+async def _next_chunk(chunks: AsyncIterator[Any]) -> Any:
+    try:
+        return await anext(chunks)
+    except StopAsyncIteration:
+        return _EXHAUSTED
+
+
+async def _aclose(chunks: Any) -> None:
+    await chunks.aclose()
+
+
+async def _close_within(chunks: AsyncIterator[Any], budget_s: float) -> None:
+    if getattr(chunks, "aclose", None) is None:
+        return
+    close = asyncio.ensure_future(_aclose(chunks))
+    done, _ = await asyncio.wait({close}, timeout=max(0.0, budget_s))
+    if close not in done:
+        _finish_in_background(close, "generation stream close")
+        return
+    _log_cleanup_failure(close, "generation stream close")
+
+
+def _finish_in_background(task: asyncio.Task[Any], context: str) -> None:
+    _GENERATION_CLEANUP_TASKS.add(task)
+
+    def _done(finished: asyncio.Task[Any]) -> None:
+        _GENERATION_CLEANUP_TASKS.discard(finished)
+        _log_cleanup_failure(finished, context)
+
+    task.add_done_callback(_done)
+
+
+def _log_cleanup_failure(task: asyncio.Task[Any], context: str) -> None:
+    if task.cancelled():
+        return
+    error = task.exception()
+    if error is not None and not isinstance(error, asyncio.CancelledError):
+        logger.warning("%s failed after the generation outcome was decided", context, exc_info=error)

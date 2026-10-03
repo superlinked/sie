@@ -175,12 +175,16 @@ impl From<String> for DispatchError {
 #[async_trait]
 pub trait WorkDispatcher: Send + Sync {
     #[allow(clippy::too_many_arguments)]
+    /// `model` is the route the work runs on. `display_model` is the model id
+    /// the caller asked for, which logs and accounting downstream report;
+    /// equal to `model` unless routing chose a profile variant of it.
     async fn publish_work(
         self: Arc<Self>,
         target: PublishTarget,
         admission_pool: &str,
         endpoint: &str,
         model: &str,
+        display_model: &str,
         engine: &str,
         bundle_config_hash: &str,
         items: Vec<rmpv::Value>,
@@ -347,6 +351,7 @@ impl WorkDispatcher for WorkPublisher {
         admission_pool: &str,
         endpoint: &str,
         model: &str,
+        display_model: &str,
         engine: &str,
         bundle_config_hash: &str,
         items: Vec<rmpv::Value>,
@@ -365,6 +370,7 @@ impl WorkDispatcher for WorkPublisher {
             admission_pool,
             endpoint,
             model,
+            display_model,
             engine,
             bundle_config_hash,
             items,
@@ -582,6 +588,7 @@ mod performance_tests {
             _admission_pool: &str,
             _endpoint: &str,
             _model: &str,
+            _display_model: &str,
             _engine: &str,
             _bundle_config_hash: &str,
             _items: Vec<rmpv::Value>,
@@ -718,6 +725,7 @@ mod performance_tests {
                     black_box("default"),
                     black_box("encode"),
                     black_box("catalog/model"),
+                    black_box("catalog/model"),
                     black_box("benchmark"),
                     black_box(""),
                     Vec::new(),
@@ -756,6 +764,7 @@ mod performance_tests {
                     black_box(target.clone()),
                     black_box("default"),
                     black_box("encode"),
+                    black_box("catalog/model"),
                     black_box("catalog/model"),
                     black_box("benchmark"),
                     black_box(""),

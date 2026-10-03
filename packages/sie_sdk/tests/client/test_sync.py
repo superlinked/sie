@@ -18,7 +18,7 @@ class TestSIEClientInit:
             mock_client.assert_called_once()
             call_kwargs = mock_client.call_args.kwargs
             assert call_kwargs["base_url"] == "http://localhost:8080"
-            assert call_kwargs["timeout"] == 30.0
+            assert call_kwargs["timeout"] == httpx.Timeout(150.0, connect=10.0)
             assert call_kwargs["headers"]["Content-Type"] == "application/msgpack"
             assert "limits" not in call_kwargs
             client.close()
@@ -37,7 +37,15 @@ class TestSIEClientInit:
         with patch("sie_sdk.client.sync.httpx.Client") as mock_client:
             client = SIEClient("http://localhost:8080", timeout_s=60.0)
             call_kwargs = mock_client.call_args.kwargs
-            assert call_kwargs["timeout"] == 60.0
+            assert call_kwargs["timeout"] == httpx.Timeout(60.0, connect=60.0)
+            client.close()
+
+    def test_connect_and_read_timeouts_override_timeout_s(self) -> None:
+        """Phase-specific timeouts override the combined ``timeout_s``."""
+        with patch("sie_sdk.client.sync.httpx.Client") as mock_client:
+            client = SIEClient("http://localhost:8080", timeout_s=60.0, connect_timeout_s=5.0, read_timeout_s=300.0)
+            call_kwargs = mock_client.call_args.kwargs
+            assert call_kwargs["timeout"] == httpx.Timeout(300.0, connect=5.0)
             client.close()
 
     def test_api_key_sets_auth_header(self) -> None:
@@ -210,9 +218,11 @@ class TestEncode:
         mock_response.status_code = 200
         revision = "a" * 64
         execution_identity = "b" * 64
+        execution_binding = "c" * 64
         mock_response.headers = {
             "X-SIE-Model-Revision": revision,
             "X-SIE-Execution-Identity-SHA256": execution_identity,
+            "X-SIE-Execution-Binding-SHA256": execution_binding,
             "X-SIE-Request-ID": "req-encode",
             "X-SIE-Units-Input-Tokens": "2",
             "X-SIE-Units-Pairs": "3",
@@ -261,6 +271,7 @@ class TestEncode:
                 },
                 "credits_debited": 19,
                 "execution_identity_sha256": execution_identity,
+                "execution_binding_sha256": execution_binding,
             }
             assert client.last_model_revision == revision
             client.close()
@@ -646,6 +657,7 @@ class TestListModels:
                     "dims": {},
                     "max_sequence_length": 32768,
                     "capabilities": {
+                        "streaming": False,
                         "grammar": ["json_schema", "regex"],
                         "tools": True,
                         "code": True,
@@ -662,6 +674,7 @@ class TestListModels:
             models = client.list_models()
 
             caps: ModelCapabilities = models[0]["capabilities"]
+            assert caps["streaming"] is False
             assert caps["grammar"] == ["json_schema", "regex"]
             assert caps["tools"] is True
             assert caps["code"] is True
@@ -783,6 +796,7 @@ class TestScore:
         mock_response.headers = {
             "X-SIE-Request-ID": "req-score",
             "X-SIE-Units-Pairs": "3",
+            "X-SIE-Units-Content-Input-Tokens": "40",
             "X-SIE-Credits-Debited": "7",
         }
         mock_response.content = msgpack.packb(
@@ -820,7 +834,7 @@ class TestScore:
             assert result["usage"] == {"input_tokens": 91, "images": 2}
             assert result["request"] == {
                 "id": "req-score",
-                "usage": {"pairs": 3},
+                "usage": {"pairs": 3, "content_input_tokens": 40},
                 "credits_debited": 7,
             }
             client.close()

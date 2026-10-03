@@ -361,3 +361,23 @@ class TestSparseEncoderVisionAdapter:
         assert adapter.dims.sparse == VOCAB
         adapter.unload()
         assert adapter.dims.sparse is None
+
+
+def test_extract_input_rejects_undecodable_bytes_with_typed_error() -> None:
+    """Non-image bytes are a typed InvalidMediaError (-> 400), not a PIL OSError 500."""
+    from sie_server.types.inputs import InvalidMediaError, Item
+
+    adapter = SparseEncoderVisionAdapter("org/model")
+
+    with pytest.raises(InvalidMediaError, match="image data is not a decodable image"):
+        adapter._extract_input(Item(images=[{"data": b"valid base64, but not an image"}]))
+
+
+def test_extract_input_names_the_enclosing_item_index() -> None:
+    """encode() enumerates items into _extract_input, so a NON-first item is named."""
+    from sie_server.types.inputs import InvalidMediaError, Item
+
+    adapter = SparseEncoderVisionAdapter("org/model")
+
+    with pytest.raises(InvalidMediaError, match=r"at `\$\.items\[2\]\.images\[0\]\.data`"):
+        adapter._extract_input(Item(images=[{"data": b"valid base64, but not an image"}]), item_index=2)

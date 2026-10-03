@@ -9,9 +9,9 @@
 //! shared Python/Rust package: adapters are standalone deliverables, and
 //! we want adapter authors to vendor the protocol like any other API client.
 //! General sidecar/Python schema parity is checked by
-//! `tools/ci/check_ipc_types_parity.py`; the response-chunk v1 subset and its
-//! limits are pinned across all three peers by
-//! `tools/ci/check_response_chunk_protocol.py`.
+//! `tools/check_ipc_types_parity.py`; the response-chunk v1 subset and its
+//! limits are pinned across the public IPC and NATS peers by
+//! `tools/check_response_chunk_protocol.py`.
 //!
 //! Wire format: `[4-byte BE length][msgpack body]`, where `body` is a
 //! msgpack **map** encoding `RequestEnvelope` / `ResponseEnvelope`.
@@ -204,9 +204,10 @@ pub enum ReadinessState {
     /// Terminal, non-retryable load failure. The Python executor
     /// reports this when the registry holds a PERMANENT `LoadFailure`
     /// (`cooldown=permanent`: `GATED` / `NOT_FOUND` / `DEPENDENCY` /
-    /// `UNKNOWN`) — the same classification the direct-HTTP
-    /// `check_not_failed` gate and the Modal lane's
-    /// `worker_runtime._terminal_load_failure` use for #1786. It exists
+    /// `CONFIG`, or a transient failure that exhausted its attempt budget)
+    /// — the same classification used by the gateway readiness gate. A
+    /// transient failure still in its cooldown is reported as `RetryLater`
+    /// instead. It exists
     /// so the sidecar can DISTINGUISH "still loading" (retry) from
     /// "dead on arrival" (dead-letter): on `Failed` the dispatcher stops
     /// re-driving `EnsureModelReady` and publishes a typed
@@ -319,6 +320,11 @@ pub struct ApplyModelConfigRequest {
     #[serde(default)]
     pub profiles_added: Vec<String>,
     pub model_config: String,
+    /// Adapter modules of the control-plane bundle definition that
+    /// `bundle_config_hash` was scoped by. Absent when the control plane did
+    /// not send one; the worker then uses its image's bundle file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle_adapters: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -327,6 +333,11 @@ pub struct ApplyModelConfigResponse {
     pub bundle_config_hash: String,
     #[serde(default)]
     pub config_version: u64,
+    /// Routable model ids in the bundle scope the worker cannot serve.
+    /// Absent from workers that predate the field, which serve every model
+    /// their hash covers.
+    #[serde(default)]
+    pub unsupported_models: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -341,6 +352,8 @@ pub struct ReplaceModelConfigsRequest {
     pub epoch: u64,
     pub bundle_config_hash: String,
     pub models: Vec<ReplaceModelConfigEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle_adapters: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -353,6 +366,8 @@ pub struct ReplaceModelConfigsResponse {
     pub applied_models: Vec<String>,
     #[serde(default)]
     pub applied_profiles: Vec<String>,
+    #[serde(default)]
+    pub unsupported_models: Vec<String>,
 }
 
 // -----------------------------------------------------------------------------
@@ -865,6 +880,10 @@ pub struct UnitCounts {
     /// preserve the legacy positional MessagePack field order.
     #[serde(default)]
     pub pairs: Option<u64>,
+    /// Score only: the part of `input_tokens` that is the caller's own text,
+    /// excluding prompt-template tokens. Never above `input_tokens`.
+    #[serde(default)]
+    pub content_input_tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

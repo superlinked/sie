@@ -117,9 +117,9 @@ def test_extract_oom_maps_to_503_resource_exhausted(failure: BaseException) -> N
     assert "Extraction" in detail["message"] or "extract" in detail["message"].lower()
 
 
-def test_extract_non_oom_keeps_500_inference_error() -> None:
-    """Regression guard: a non-OOM exception still maps to 500 INFERENCE_ERROR."""
-    client = _build_client(RuntimeError("model produced bad shape"))
+def test_extract_non_oom_keeps_500_inference_error_without_leaking_details() -> None:
+    """A non-OOM exception maps to a sanitized 500 INFERENCE_ERROR."""
+    client = _build_client(RuntimeError("sensitive extraction detail"))
 
     response = client.post(
         "/v1/extract/test-extractor",
@@ -132,6 +132,8 @@ def test_extract_non_oom_keeps_500_inference_error() -> None:
     body = response.json()
     detail = body.get("detail", body)
     assert detail["code"] == "INFERENCE_ERROR"
+    assert detail["message"] == "internal error during extraction"
+    assert "sensitive extraction detail" not in response.text
 
 
 def test_extract_oom_retry_after_honours_engine_config() -> None:

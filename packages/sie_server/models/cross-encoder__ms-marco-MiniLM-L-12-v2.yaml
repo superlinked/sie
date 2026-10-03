@@ -1,5 +1,6 @@
 sie_id: cross-encoder/ms-marco-MiniLM-L-12-v2
 hf_id: cross-encoder/ms-marco-MiniLM-L-12-v2
+hf_revision: 7b0235231ca2674cb8ca8f022859a6eba2b1c968
 inputs:
   text: true
   image: false

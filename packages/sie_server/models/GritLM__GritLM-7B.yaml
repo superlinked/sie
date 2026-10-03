@@ -1,5 +1,6 @@
 sie_id: GritLM/GritLM-7B
 hf_id: GritLM/GritLM-7B
+hf_revision: cb7f7ffb99c0c24ca2c325d798d7ef5c455d5339
 inputs:
   text: true
   image: false

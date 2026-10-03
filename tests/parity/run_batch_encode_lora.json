@@ -1,0 +1,78 @@
+{
+  "description": "RunBatch with op=encode, two valid items + one invalid (encode payload missing) + a non-empty lora_key. Pins Python adapter_call_loop invariants for the sie-worker sidecar contract: invalid-before-valid ordering, preserved identity for invalid payloads, and lora_key plumbing into per-item options['lora'].",
+  "input": {
+    "model_id": "test/parity-encode",
+    "batch_id": 42,
+    "lora_key": "shared-lora",
+    "total_cost": 100,
+    "items": [
+      {
+        "op": "encode",
+        "encode": {
+          "work_item_id": "w0",
+          "request_id": "r0",
+          "item_index": 0,
+          "total_items": 3,
+          "timestamp": 0.0,
+          "item": {"text": "hello"},
+          "options": null
+        }
+      },
+      {
+        "op": "encode",
+        "work_item_id": "w1",
+        "request_id": "r1",
+        "item_index": 1,
+        "encode": null
+      },
+      {
+        "op": "encode",
+        "encode": {
+          "work_item_id": "w2",
+          "request_id": "r2",
+          "item_index": 2,
+          "total_items": 3,
+          "timestamp": 0.0,
+          "item": {"text": "world"},
+          "options": null
+        }
+      }
+    ]
+  },
+  "expected_canonical_outcomes": [
+    {
+      "work_item_id": "w1",
+      "request_id": "r1",
+      "item_index": 1,
+      "disposition": "publish_error_and_ack",
+      "error_code": "run_batch_invalid_item"
+    },
+    {
+      "work_item_id": "w0",
+      "request_id": "r0",
+      "item_index": 0,
+      "disposition": "publish_and_ack",
+      "error_code": null
+    },
+    {
+      "work_item_id": "w2",
+      "request_id": "r2",
+      "item_index": 2,
+      "disposition": "publish_and_ack",
+      "error_code": null
+    }
+  ],
+  "expected_lora_in_options": "shared-lora",
+  "notes": {
+    "elided_fields": [
+      "inference_ms",
+      "tokenization_ms",
+      "postprocessing_ms",
+      "result_msgpack",
+      "raw_output",
+      "error",
+      "nak_delay_ms"
+    ],
+    "rationale": "inference_ms / tokenization_ms / postprocessing_ms are wall-clock dependent. result_msgpack / raw_output are backend-specific (different model weights produce different bytes). error text is human-readable and may legitimately differ. nak_delay_ms is set only on retry paths which this fixture doesn't exercise."
+  }
+}

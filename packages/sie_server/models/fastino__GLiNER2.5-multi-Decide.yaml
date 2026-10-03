@@ -1,0 +1,27 @@
+# GLiNER2.5-multi-Decide: multilingual typed-decision classifier (mDeBERTa-v3-base
+# encoder, boundary architecture; trained with max_len 4096 words), loaded through
+# gliner2 2.x AutoExtractor. Served from the transformers5 bundle, which pins gliner2 2.x.
+sie_id: fastino/GLiNER2.5-multi-Decide
+hf_id: fastino/GLiNER2.5-multi-Decide
+hf_revision: 6bc1d43d201b0691e733626389af8c57eea3ea68
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: null
+  extract: {}
+# Tokens per item: every question's prompt and labels, then the document. The
+# checkpoint config sets max_len 4096 (gliner2 counts it in words), and the
+# tokenizer sets no length limit; 2048 tokens stays within both.
+max_sequence_length: 2048
+profiles:
+  default:
+    max_batch_tokens: 16384
+    compute_precision: float16
+    adapter_path: sie_server.adapters.gliner2.decide:GLiNER2DecideAdapter
+    adapter_options:
+      loadtime: {}
+      runtime: {}

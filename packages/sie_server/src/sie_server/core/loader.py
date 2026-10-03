@@ -1,3 +1,4 @@
+import difflib
 import importlib
 import importlib.util
 import inspect
@@ -26,6 +27,7 @@ from sie_server.config.model import (
     ProfileConfig,
     ResolvedProfile,
     is_immutable_revision,
+    is_remote_adapter_path,
     lora_entry_ref,
 )
 from sie_server.config.package_artifacts import (
@@ -34,6 +36,12 @@ from sie_server.config.package_artifacts import (
     PACKAGE_ARTIFACT_MODE_KEY,
     PackageArtifactMode,
     verify_staged_package_artifacts,
+)
+from sie_server.config.serving_artifacts import (
+    SERVING_ARTIFACT_COMPUTE_TYPE_KEY,
+    SERVING_ARTIFACT_KEY,
+    SERVING_ARTIFACT_PATH_KEY,
+    VerifiedServingArtifact,
 )
 from sie_server.core.inference import AttentionBackend
 
@@ -117,7 +125,7 @@ def load_model_configs(models_dir: Path | str, *, require_pinned_revision: bool 
     """Load all model configs from a directory (local or cloud).
 
     Args:
-        models_dir: Path to the models directory (local path, s3://, gs://, abfs://, or abfss://).
+        models_dir: Path to the models directory (local path, s3://, gs://, abfs(s)://, or oss://).
         require_pinned_revision: When True, reject any HF-backed config that does not pin an
             immutable ``hf_revision``. Off by default so the full dev catalog
             (which carries an unpinned long tail) still loads; the managed serving/staging
@@ -263,6 +271,7 @@ def _expand_profile_variants(configs: dict[str, ModelConfig]) -> None:
             variant_updates: dict[str, Any] = {
                 "sie_id": variant_id,
                 "profiles": variant_profiles,
+                "routing": None,
             }
             loadtime = resolved.loadtime if resolved is not None else profile.adapter_options.loadtime
             profile_chat_template_kwargs = (
@@ -367,6 +376,99 @@ def load_model_config(config_path: Path) -> ModelConfig:
     return ModelConfig(**raw_config)
 
 
+_LOADTIME_PASSTHROUGH_ALLOWLIST = frozenset(
+    {
+        # Forwarded verbatim into the HuggingFace config/loader by the flash
+        # encoder adapters, which take them through **kwargs by design.
+        "config_kwargs",
+        "trust_remote_code",
+        # Read by the Apple-silicon generation path, which selects a sibling
+        # repo rather than a constructor parameter.
+        "mlx_repo",
+    }
+)
+"""Load-time keys that reach an adapter through ``**kwargs`` on purpose.
+
+These are genuinely absorbed rather than named, so the rule below can be
+strict without breaking an existing profile.
+"""
+
+
+_LOADER_OWNED_LOADTIME_KEYS = frozenset(
+    {
+        SERVING_ARTIFACT_KEY,
+        PACKAGE_ARTIFACT_MODE_KEY,
+        PACKAGE_ARTIFACT_MANIFEST_PATH_KEY,
+        PACKAGE_ARTIFACT_MANIFEST_SHA256_KEY,
+    }
+)
+"""Load-time keys the loader consumes instead of forwarding.
+
+``_build_adapter_kwargs`` pops each of these and instantiates the adapter with
+the parameters it derives from them, so no adapter names the declared spelling
+and measuring one against a constructor signature rejects a valid profile.
+``test_catalog_loadtime_options.py`` holds this set and the allowlist above to
+the shipped catalog.
+"""
+
+
+def _accepted_adapter_parameters(adapter_class: type) -> set[str]:
+    """Return every keyword any ``__init__`` in the class's MRO names.
+
+    The chain matters: a thin subclass that forwards ``**kwargs`` to its parent
+    accepts the parent's keywords, and treating only its own signature as the
+    contract would reject options that work today.
+    """
+    names: set[str] = set()
+    for klass in adapter_class.__mro__:
+        initializer = klass.__dict__.get("__init__")
+        if initializer is None:
+            continue
+        try:
+            names |= set(inspect.signature(initializer).parameters)
+        except (TypeError, ValueError):
+            continue
+    return names
+
+
+def reject_unknown_loadtime_options(
+    adapter_class: type,
+    loadtime: Mapping[str, Any],
+    *,
+    model_name: str,
+) -> None:
+    """Fail a load whose profile sets an option the adapter cannot receive.
+
+    Every adapter accepts ``**kwargs`` for forward compatibility, so an option
+    the constructor does not name is not rejected by Python. It is silently
+    dropped. That is how a mistyped ``tensor_parallel_size`` serves one
+    accelerator while the deployment reserves several, and the same silence
+    hides a mistyped precision, cache budget or grammar backend.
+
+    Raises:
+        ValueError: Naming the unknown keys, the adapter, and the closest
+            accepted spelling where one is obvious.
+    """
+    accepted = _accepted_adapter_parameters(adapter_class)
+    unknown = sorted(
+        key
+        for key in loadtime
+        if key not in accepted and key not in _LOADTIME_PASSTHROUGH_ALLOWLIST and key not in _LOADER_OWNED_LOADTIME_KEYS
+    )
+    if not unknown:
+        return
+    hints: list[str] = []
+    for key in unknown:
+        close = difflib.get_close_matches(key, sorted(accepted), n=1, cutoff=0.8)
+        hints.append(f"{key!r}" + (f" (did you mean {close[0]!r}?)" if close else ""))
+    msg = (
+        f"Model '{model_name}': adapter {adapter_class.__name__} does not accept load-time "
+        f"option(s) {', '.join(hints)}. An unrecognised option is dropped rather than applied, "
+        "so the model would serve with a different configuration than the profile declares."
+    )
+    raise ValueError(msg)
+
+
 def resolve_adapter_path(
     config: ModelConfig,
     model_dir: Path,
@@ -403,6 +505,42 @@ def resolve_adapter_path(
     return f"{full_path}:{class_part}"
 
 
+def resolve_adapter_class(config: ModelConfig, model_dir: Path) -> type[ModelAdapter]:
+    """Import the adapter class a config names, without instantiating it.
+
+    Raises:
+        ValueError: If the adapter path is malformed.
+        ImportError: If the adapter module or class cannot be found.
+    """
+    adapter_path = resolve_adapter_path(config, model_dir)
+
+    # Parse module:class
+    if ":" not in adapter_path:
+        msg = f"Invalid adapter path '{adapter_path}': expected 'module:ClassName'"
+        raise ValueError(msg)
+
+    module_path, class_name = adapter_path.rsplit(":", 1)
+
+    if module_path.startswith("sie_server."):
+        # Built-in adapter: import normally
+        return _import_builtin_adapter(module_path, class_name)
+    # Custom adapter: load from file path
+    return _import_custom_adapter(Path(module_path), class_name)
+
+
+def validate_loadtime_options(config: ModelConfig, model_dir: Path) -> None:
+    """Refuse a profile whose load-time options its adapter cannot receive.
+
+    The same check ``load_adapter`` makes, available before a caller commits
+    resources to the load.
+    """
+    reject_unknown_loadtime_options(
+        resolve_adapter_class(config, model_dir),
+        config.resolve_profile("default").loadtime,
+        model_name=config.sie_id,
+    )
+
+
 def load_adapter(
     config: ModelConfig,
     model_dir: Path,
@@ -410,6 +548,7 @@ def load_adapter(
     device: str,
     default_compute_precision: ComputePrecision = "float16",
     attention_backend: AttentionBackend = "auto",
+    verified_serving_artifact: VerifiedServingArtifact | None = None,
 ) -> ModelAdapter:
     """Load and instantiate a model adapter.
 
@@ -428,22 +567,7 @@ def load_adapter(
             doesn't support the config's output types.
         ImportError: If adapter module/class not found.
     """
-    adapter_path = resolve_adapter_path(config, model_dir)
-
-    # Parse module:class
-    if ":" not in adapter_path:
-        msg = f"Invalid adapter path '{adapter_path}': expected 'module:ClassName'"
-        raise ValueError(msg)
-
-    module_path, class_name = adapter_path.rsplit(":", 1)
-
-    # Load the adapter class
-    if module_path.startswith("sie_server."):
-        # Built-in adapter: import normally
-        adapter_class = _import_builtin_adapter(module_path, class_name)
-    else:
-        # Custom adapter: load from file path
-        adapter_class = _import_custom_adapter(Path(module_path), class_name)
+    adapter_class = resolve_adapter_class(config, model_dir)
 
     # Instantiate with config values. The engine-level default compute precision
     # is fp32 off-CUDA (numerically safe on CPU/MPS for models we have not verified
@@ -454,7 +578,17 @@ def load_adapter(
     effective_default_precision: ComputePrecision = (
         default_compute_precision if device.startswith("cuda") else "float32"
     )
-    adapter_kwargs = _build_adapter_kwargs(config, effective_default_precision)
+    reject_unknown_loadtime_options(
+        adapter_class,
+        config.resolve_profile("default").loadtime,
+        model_name=config.sie_id,
+    )
+
+    adapter_kwargs = _build_adapter_kwargs(
+        config,
+        effective_default_precision,
+        verified_serving_artifact=verified_serving_artifact,
+    )
 
     # MPS bfloat16 support is incomplete in torch and can HANG model load (verified:
     # bge-m3 bf16 load wedges at ~1% CPU on Apple Silicon). fp16 is the MPS-verified
@@ -496,6 +630,17 @@ def load_adapter(
                 "Could not inspect adapter constructor for default_sampling support; skipping default_sampling wiring.",
                 exc_info=True,
             )
+
+    try:
+        constructor_parameters = inspect.signature(adapter_class.__init__).parameters
+    except (TypeError, ValueError):
+        constructor_parameters = {}
+    for keyword, dim in (
+        ("sparse_dim", config.dims.get("sparse")),
+        ("multivector_dim", config.dims.get("multivector")),
+    ):
+        if dim is not None and keyword in constructor_parameters and keyword not in adapter_kwargs:
+            adapter_kwargs[keyword] = dim
 
     # Instantiate adapter using factory method for device-aware selection
     # All adapters inherit create_for_device() from ModelAdapter base class
@@ -611,9 +756,16 @@ def _import_custom_adapter(file_path: Path, class_name: str) -> type[ModelAdapte
     return getattr(module, class_name)
 
 
+def serves_remotely(config: ModelConfig) -> bool:
+    """Whether ``config`` is served by a remote adapter: no local weights, no accelerator, no outbound call to load."""
+    return "default" in config.profiles and is_remote_adapter_path(config.resolve_profile("default").adapter_path)
+
+
 def _build_adapter_kwargs(
     config: ModelConfig,
     default_compute_precision: ComputePrecision,
+    *,
+    verified_serving_artifact: VerifiedServingArtifact | None = None,
 ) -> dict[str, Any]:
     """Build keyword arguments for adapter instantiation.
 
@@ -630,8 +782,10 @@ def _build_adapter_kwargs(
     # Determine model path: weights_path takes precedence over hf_id.
     # package_backed adapters (e.g., Docling) carry their own weights via the
     # installed package and intentionally have neither hf_id nor weights_path.
+    # A remote adapter is served by an upstream and uses no local weights.
+    remote = serves_remotely(config)
     model_name_or_path: str | Path | None
-    if config.package_backed:
+    if config.package_backed or config.remote_backed or remote:
         model_name_or_path = None
     elif config.weights_path is not None:
         model_name_or_path = config.weights_path
@@ -661,6 +815,25 @@ def _build_adapter_kwargs(
 
     kwargs.update(resolved.loadtime)
 
+    serving_artifact = config.serving_artifact_declaration()
+    kwargs.pop(SERVING_ARTIFACT_KEY, None)
+    if serving_artifact is not None:
+        if verified_serving_artifact is None:
+            raise ValueError(
+                f"Model '{config.sie_id}' declares a derived serving artifact but the loader did not verify it"
+            )
+        if (
+            verified_serving_artifact.repo_id != serving_artifact.repo_id
+            or verified_serving_artifact.revision != serving_artifact.revision
+            or verified_serving_artifact.manifest_sha256 != serving_artifact.manifest_sha256
+            or verified_serving_artifact.compute_type != serving_artifact.compute_type
+        ):
+            raise ValueError(f"Model '{config.sie_id}' received a stale or mismatched verified serving artifact")
+        kwargs[SERVING_ARTIFACT_PATH_KEY] = verified_serving_artifact.root
+        kwargs[SERVING_ARTIFACT_COMPUTE_TYPE_KEY] = verified_serving_artifact.compute_type
+        kwargs.pop("model_name_or_path", None)
+        kwargs.pop("revision", None)
+
     # Adapter constructors take ``lora_paths`` as served-name -> bare path/id
     # (the sglang ``--lora-paths`` shape). A pinned ``{id, revision}`` value
     # (#2113) is a *config* spelling: collapse it to the bare id here so no
@@ -673,7 +846,7 @@ def _build_adapter_kwargs(
             served: lora_entry_ref(value)[0] if value else value for served, value in lora_paths.items()
         }
 
-    if config.package_backed:
+    if config.package_backed and not remote:
         declaration = config.package_artifact_declaration
         offline = any(
             os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}

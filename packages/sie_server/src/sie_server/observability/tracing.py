@@ -30,6 +30,8 @@ from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
+from sie_server.observability.batch_fanin import BatchFanInSpanProcessor
+from sie_server.observability.lifecycle import setup_lifecycle_logs, shutdown_lifecycle_logs
 from sie_server.observability.worker_telemetry import worker_resource_attributes
 
 if TYPE_CHECKING:
@@ -143,6 +145,7 @@ def setup_tracing(app: FastAPI) -> None:
         No-op unless SIE_TRACING_ENABLED is true and an OTLP endpoint is set.
         All configuration is via standard OTel environment variables.
     """
+    setup_lifecycle_logs()
     if not is_tracing_enabled():
         logger.debug("Tracing disabled (SIE_TRACING_ENABLED not set)")
         return
@@ -180,7 +183,7 @@ def setup_tracing(app: FastAPI) -> None:
     # can't stall on an unreachable collector.
     try:
         exporter = _build_span_exporter(config)
-        provider.add_span_processor(BatchSpanProcessor(exporter))
+        provider.add_span_processor(BatchFanInSpanProcessor(BatchSpanProcessor(exporter)))
         logger.info(
             "OTLP exporter configured for endpoint: %s (%s)",
             _endpoint_origin_for_log(config.endpoint),
@@ -215,6 +218,7 @@ def shutdown_tracing() -> None:
     ``setup_tracing`` — each export attempt inside ``provider.shutdown()`` is
     capped, so this returns promptly even when the collector is down.
     """
+    shutdown_lifecycle_logs()
     global _provider
     provider = _provider
     if provider is None:

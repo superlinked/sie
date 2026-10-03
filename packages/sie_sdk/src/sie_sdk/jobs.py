@@ -19,11 +19,10 @@ from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import urlsplit
 
-import msgpack
-import msgpack_numpy
 import numpy as np
 
-from sie_sdk.types import JobChunk, JobResultItem
+from sie_sdk._msgpack import unpackb as unpack_msgpack
+from sie_sdk.types import JobChunk, JobItemErrorDetail, JobResultItem
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
@@ -54,9 +53,6 @@ _POSTGRES_SCHEMA_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_$]{0,62}\Z", re.ASCI
 # generating it inside ``submit``/``execute`` would turn a retry into a new
 # mutation.
 _CONNECTOR_IDEMPOTENCY_KEY_MAX_BYTES = 256
-
-# msgpack + the numpy codec are hard deps of the SDK, so always importable here.
-_RESULT_OBJECT_HOOK = msgpack_numpy.decode
 
 
 def _norm_item(item: Any, index: int) -> dict[str, Any]:
@@ -358,29 +354,66 @@ def _dense_info(dense: Any) -> tuple[int | None, NDArray[Any] | None]:
     return (int(vector.shape[0]) if vector is not None else None), vector
 
 
+def _result_item_error(result: Mapping[str, Any]) -> JobItemErrorDetail | None:
+    """Extract a per-item failure from a ``WorkResult`` map (``error``/``error_code``).
+
+    The gateway writes every item's ``WorkResult`` into the chunk ref — including
+    failures, each carrying its own ``error`` (free text) and ``error_code`` — so
+    a caller can see WHY a specific item failed. Returns ``None`` when the item
+    reports no failure signal (a success, or a bare-count chunk error with no
+    per-item detail).
+    """
+    code = result.get("error_code")
+    message = result.get("error")
+    if code is None and message is None:
+        return None
+    detail: JobItemErrorDetail = {}
+    if code is not None:
+        detail["code"] = code
+    if message is not None:
+        detail["message"] = message
+    return detail
+
+
 def decode_result_item(result: Any) -> JobResultItem:
     """Decode one WorkResult map (from a chunk ref) into a per-item result.
 
     The chunk's ``result_msgpack`` bytes carry the same wire shape the realtime
     path returns per item; the dense vector decodes to a numpy array (SDK-native,
-    like :meth:`SIEClient.encode`).
+    like :meth:`SIEClient.encode`). A failed item carries no ``result_msgpack``
+    but does carry ``success=False`` plus an ``error``/``error_code`` pair, which
+    surfaces as :data:`JobResultItem.error`.
     """
     payload = result.get("result_msgpack") if isinstance(result, dict) else None
     decoded: Any = None
     if isinstance(payload, (bytes, bytearray)):
         try:
-            decoded = msgpack.unpackb(payload, raw=False, object_hook=_RESULT_OBJECT_HOOK)
+            decoded = unpack_msgpack(bytes(payload), numeric_arrays=True)
         except Exception:  # noqa: BLE001 - a malformed payload should not abort retrieval
             decoded = None
     dense = decoded.get("dense") if isinstance(decoded, dict) else None
     dims, vector = _dense_info(dense)
+    if isinstance(result, dict):
+        # The wire id is ``work_item_id``; older/inline results use ``id``. The
+        # bare-count chunk error names no ids, so a per-item id comes only from
+        # the item's own WorkResult (never fabricated). Fall back on an explicit
+        # ``is None`` check, not ``or``: a falsy-but-valid id (integer ``0`` or an
+        # empty string) is a real id and must be preserved, not replaced.
+        item_id = result.get("id")
+        if item_id is None:
+            item_id = result.get("work_item_id")
+    else:
+        item_id = None
     item: JobResultItem = {
-        "id": result.get("id") if isinstance(result, dict) else None,
+        "id": item_id,
         "success": result.get("success") if isinstance(result, dict) else None,
         "units": result.get("units") if isinstance(result, dict) else None,
         "dims": dims,
         "dense": vector,
     }
+    error = _result_item_error(result) if isinstance(result, dict) else None
+    if error is not None:
+        item["error"] = error
     return item
 
 
@@ -402,9 +435,33 @@ def job_chunks(job_doc: Mapping[str, Any]) -> list[JobChunk]:
     ]
 
 
+class MalformedChunkError(Exception):
+    """A chunk ref's bytes could not be decoded as a msgpack ``WorkResult`` array.
+
+    Distinct from a chunk that published no ref at all: the bytes exist but are
+    garbage (not msgpack, or not a list). That is a DECODE fault, not evidence of
+    failed publication or billing, so the caller flags it separately and never
+    conflates it with a genuinely-unpublished, already-billed chunk.
+    """
+
+
 def decode_chunk_bytes(raw: bytes) -> list[JobResultItem]:
-    """Decode a chunk ref's msgpack ``WorkResult`` array into per-item results."""
-    results = msgpack.unpackb(raw, raw=False)
+    """Decode a chunk ref's msgpack ``WorkResult`` array into per-item results.
+
+    Raises:
+        MalformedChunkError: If the ref's bytes are not decodable msgpack or do
+            not decode to a list. The caller confines this (one bad chunk cannot
+            sink the whole ``jobs.results()`` call) and reports it as a decode
+            fault, distinct from an unpublished chunk. Per-item decoding stays
+            defensive (see :func:`decode_result_item`).
+    """
+    try:
+        results = unpack_msgpack(raw, numeric_arrays=False)
+    except Exception as exc:
+        # Normalize any decode failure (FormatError, ExtraData, ...) to one signal.
+        msg = "chunk ref bytes are not decodable msgpack"
+        raise MalformedChunkError(msg) from exc
     if not isinstance(results, list):
-        return []
+        msg = f"chunk ref decoded to {type(results).__name__}, not a WorkResult list"
+        raise MalformedChunkError(msg)
     return [decode_result_item(r) for r in results]

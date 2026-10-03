@@ -127,7 +127,6 @@ class TestSyncGenerateMalformedRetryAfter:
     """
 
     def test_perpetual_503_provisioning_nan_does_not_crash_and_is_bounded(self) -> None:
-        from sie_sdk.client.errors import ProvisioningError
 
         def _resp_503_provisioning_nan() -> MagicMock:
             response = MagicMock()
@@ -174,12 +173,13 @@ class TestAsyncGenerateMalformedRetryAfter:
     within a small budget (no busy-loop) and raise the expected loading /
     provisioning error.
 
-    The defining assertion is on the *delay value* every ``asyncio.sleep``
-    receives: before the fix the malformed header was passed through, so
+    Before the fix the malformed header was passed through, so
     ``asyncio.sleep(nan)`` / ``asyncio.sleep(-10)`` returned INSTANTLY and the
     loop busy-spun (~1000 attempts in 0.3s). After the fix the hint is
-    discarded and the default delay (capped to remaining budget) is used, so
-    every sleep is finite, non-negative, and the attempt count stays tiny.
+    discarded and the default 5s delay applies; since that exceeds the tiny
+    0.3s budget, ``generate()`` raises the typed ``ModelLoadingError``
+    immediately (no sleep, single attempt) instead of sleeping through the
+    budget.
     """
 
     @pytest.mark.asyncio
@@ -212,14 +212,16 @@ class TestAsyncGenerateMalformedRetryAfter:
                 try:
                     # Tiny budget; if the malformed Retry-After busy-loops, the
                     # call count explodes into the hundreds/thousands.
-                    with pytest.raises((ModelLoadingError, ProvisioningError)):
+                    with pytest.raises(ModelLoadingError):
                         await client.generate("m", prompt="hi", max_new_tokens=8, provision_timeout_s=0.3)
                 finally:
                     await client.close()
 
-        # No busy-loop: every sleep delay is finite and non-negative (the
-        # malformed -10 / nan hint was discarded), and the attempt count stays
-        # bounded over the 0.3s budget.
-        assert slept, "expected at least one retry sleep"
+        # No busy-loop: the malformed -10 / nan hint was discarded, so the
+        # default 5s delay applies; it exceeds the 0.3s budget, so the SDK
+        # raises the typed ModelLoadingError immediately — no sleeps, single
+        # attempt. (Before the fix the hint was passed through and asyncio
+        # slept instantly, busy-spinning for hundreds of attempts.)
+        assert slept == []
         assert all(math.isfinite(d) and d >= 0 for d in slept)
-        assert 0 < client._post.call_count < 50
+        assert client._post.call_count == 1

@@ -1,0 +1,73 @@
+name: Release native audio asset
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+      tag_name:
+        required: true
+        type: string
+      sha:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    container: quay.io/pypa/manylinux_2_28_x86_64@sha256:4dc41da7df20400310c80d162a2fe2d2c2f3d9734d8dec20f6b9843711618deb
+    timeout-minutes: 30
+    outputs:
+      filename: ${{ steps.contract.outputs.filename }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+        with:
+          version: 2026.7.11
+          install: false
+          cache: false
+      - name: Install pinned native build tools
+        run: |
+          mise --no-config install python@3.12.12 uv@0.5.31 zig@0.13.0 rust@1.98.1
+          test "$(mise --no-config exec python@3.12.12 uv@0.5.31 zig@0.13.0 rust@1.98.1 -- rustc --version | cut -d' ' -f2)" = 1.98.1
+          test "$(mise --no-config exec python@3.12.12 uv@0.5.31 zig@0.13.0 rust@1.98.1 -- cargo --version | cut -d' ' -f2)" = 1.98.1
+          test "$(mise --no-config exec python@3.12.12 uv@0.5.31 zig@0.13.0 rust@1.98.1 -- zig version)" = 0.13.0
+      - id: contract
+        name: Validate exact release identity and asset filename
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_TAG: ${{ inputs.tag_name }}
+          RELEASE_SHA: ${{ inputs.sha }}
+        run: |
+          set -euo pipefail
+          test "$RELEASE_TAG" = "v$RELEASE_VERSION"
+          test "$(git -c safe.directory="$GITHUB_WORKSPACE" rev-parse HEAD)" = "$RELEASE_SHA"
+          filename="$(mise --no-config exec python@3.12.12 uv@0.5.31 zig@0.13.0 rust@1.98.1 -- python -c 'import runpy; print(runpy.run_path("packages/sie_audio_prep/build_wheel.py")["AUDIO_WHEEL_FILENAME"])')"
+          test "$filename" = "sie_audio_prep-$RELEASE_VERSION-cp312-abi3-manylinux_2_28_x86_64.whl"
+          echo "filename=$filename" >> "$GITHUB_OUTPUT"
+      - name: Build and validate exact Linux wheel
+        run: >-
+          mise --no-config exec python@3.12.12 uv@0.5.31 zig@0.13.0 rust@1.98.1 --
+          python tools/ci/build_audio_prep_release_asset.py --out dist
+      - name: Record exact tested wheel and original run provenance
+        run: >-
+          mise --no-config exec python@3.12.12 -- python -m tools.ci.release_artifact stamp
+          --directory dist --kind audio --version '${{ inputs.version }}' --tag-name '${{ inputs.tag_name }}'
+          --source-revision '${{ inputs.sha }}' --run-id '${{ github.run_id }}'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: audio-prep-${{ inputs.version }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30

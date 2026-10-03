@@ -5,6 +5,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from sie_sdk import RequestError
 from sie_weaviate import EnrichedDocument, SIEDocumentEnricher
 
 
@@ -138,16 +139,15 @@ class TestSIEDocumentEnricher:
         enricher._client = mock_sie_client
 
         # Manually set up a result with duplicate entities
-        mock_sie_client.extract = MagicMock(
-            return_value=[
-                {
-                    "entities": [
-                        {"text": "John", "label": "person", "score": 0.9, "start": 0, "end": 4},
-                        {"text": "John", "label": "person", "score": 0.8, "start": 20, "end": 24},
-                    ],
-                }
-            ]
-        )
+        mock_sie_client.extract.side_effect = None
+        mock_sie_client.extract.return_value = [
+            {
+                "entities": [
+                    {"text": "John", "label": "person", "score": 0.9, "start": 0, "end": 4},
+                    {"text": "John", "label": "person", "score": 0.8, "start": 20, "end": 24},
+                ],
+            }
+        ]
 
         docs = enricher.enrich(["John met John."])
 
@@ -328,3 +328,34 @@ class TestSIEDocumentEnricherAsync:
             pass
 
         mock_sie_async_client.close.assert_called_once()
+
+
+def test_enrich_raises_on_item_error(mock_sie_client: MagicMock, extract_item_error: dict[str, str]) -> None:
+    mock_sie_client.extract.side_effect = None
+    mock_sie_client.extract.return_value = [
+        {"entities": [], "relations": [], "classifications": [], "objects": [], "error": dict(extract_item_error)}
+    ]
+    enricher = SIEDocumentEnricher()
+    enricher._client = mock_sie_client
+
+    with pytest.raises(RequestError, match="Extraction failed") as excinfo:
+        enricher.enrich(["text"])
+
+    assert excinfo.value.code == extract_item_error["code"]
+
+
+@pytest.mark.asyncio
+async def test_aenrich_raises_on_item_error(
+    mock_sie_async_client: AsyncMock, extract_item_error: dict[str, str]
+) -> None:
+    mock_sie_async_client.extract.side_effect = None
+    mock_sie_async_client.extract.return_value = [
+        {"entities": [], "relations": [], "classifications": [], "objects": [], "error": dict(extract_item_error)}
+    ]
+    enricher = SIEDocumentEnricher()
+    enricher._async_client = mock_sie_async_client
+
+    with pytest.raises(RequestError, match="Extraction failed") as excinfo:
+        await enricher.aenrich(["text"])
+
+    assert excinfo.value.code == extract_item_error["code"]

@@ -1,5 +1,6 @@
 sie_id: intfloat/multilingual-e5-large-instruct
 hf_id: intfloat/multilingual-e5-large-instruct
+hf_revision: 274baa43b0e13e37fafa6428dbc7938e62e5c439
 inputs:
   text: true
   image: false

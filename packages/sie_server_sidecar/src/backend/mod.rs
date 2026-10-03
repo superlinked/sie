@@ -71,6 +71,7 @@
 //!   block shutdown indefinitely.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 
@@ -210,6 +211,19 @@ pub trait InferenceBackend: Send + Sync {
             "run_batch not implemented on {}",
             self.name()
         )))
+    }
+
+    /// [`Self::run_batch`] for work that callers still wait on for `budget`.
+    /// Transport-backed implementations wait at least `budget` as well as
+    /// their configured request timeout; in-process backends have no
+    /// transport timeout, so the default ignores it.
+    async fn run_batch_with_budget(
+        &self,
+        req: RunBatchRequest,
+        budget: Option<Duration>,
+    ) -> Result<BatchOutcome, BackendError> {
+        let _ = budget;
+        self.run_batch(req).await
     }
 
     /// Graceful shutdown. Called once when the worker has stopped

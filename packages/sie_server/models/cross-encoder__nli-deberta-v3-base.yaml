@@ -1,5 +1,6 @@
 sie_id: cross-encoder/nli-deberta-v3-base
 hf_id: cross-encoder/nli-deberta-v3-base
+hf_revision: 6c749ce3425cd33b46d187e45b92bbf96ee12ec7
 inputs:
   text: true
   image: false

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import io
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -11,7 +10,7 @@ from sie_server.adapters._base_adapter import BaseAdapter
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_NOT_LOADED, ComputePrecision
 from sie_server.core.inference_output import EncodeOutput, ExtractOutput
-from sie_server.types.inputs import media_bytes
+from sie_server.types.inputs import decode_image
 from sie_server.types.responses import Entity
 
 if TYPE_CHECKING:
@@ -292,13 +291,14 @@ class MinerUVLAdapter(BaseAdapter):
             )
 
         all_entities = []
-        for item in items:
+        for i, item in enumerate(items):
             entities = self._extract_single(
                 item,
                 task=task,
                 instruction=instruction,
                 max_new_tokens=max_new_tokens,
                 num_beams=num_beams,
+                item_index=i,
             )
             all_entities.append(entities)
         return ExtractOutput(entities=all_entities)
@@ -326,6 +326,7 @@ class MinerUVLAdapter(BaseAdapter):
                         instruction=instruction,
                         max_new_tokens=max_new_tokens,
                         num_beams=num_beams,
+                        item_index=i,
                     )
                 )
                 continue
@@ -362,17 +363,15 @@ class MinerUVLAdapter(BaseAdapter):
         instruction: str | None,
         max_new_tokens: int,
         num_beams: int,
+        item_index: int | None = None,
     ) -> list[Entity]:
-        from PIL import Image as PILImage
-
         images = item.images
         if not images:
             raise ValueError(_ERR_NO_IMAGES)
 
-        img_bytes = media_bytes(images[0], kind="image")
-        pil_img = PILImage.open(io.BytesIO(img_bytes))
-        if pil_img.mode != "RGB":
-            pil_img = pil_img.convert("RGB")
+        # decode_image raises InvalidMediaError (-> 400 INVALID_INPUT) on
+        # non-bytes or undecodable payloads.
+        pil_img = decode_image(images[0], item_index=item_index, image_index=0)
 
         messages = self._build_messages(task=task, instruction=instruction)
         text = self._processor.apply_chat_template(

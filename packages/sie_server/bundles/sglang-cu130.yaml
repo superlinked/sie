@@ -1,0 +1,87 @@
+name: sglang-cu130
+priority: 20
+default: false
+# GPU platform this bundle targets — selects packages/sie_server/Dockerfile.cuda13
+# and tags images ``cuda13-sglang-cu130`` (not ``cuda12-*``). The pinned engine
+# needs torch cu130 on a CUDA 13 devel runtime (see below). Read by the
+# image build. Bundles without this field default to ``cuda12``.
+platform: cuda13
+# General CUDA 13 / cu130 SGLang worker image, introduced for Google Gemma 4
+# (see issue #1415) and shared by every profile that requires this newer engine
+# and toolchain closure, including Qwen3.6 and Qwen3.8 native-window profiles.
+#
+# VALIDATED on a Modal L4 (driver 580.95.05 / CUDA 13.0) on 2026-06-18:
+# google/gemma-4-E2B-it serves end-to-end on sglang 0.5.13 — the gemma4
+# reasoning/tool parsers load, Gemma4ForConditionalGeneration loads weights,
+# and /v1/chat/completions returns 200 (with --disable-cuda-graph, which the
+# model configs set via adapter_options.loadtime.disable_cuda_graph).
+#
+# Kept SEPARATE from the `sglang` bundle so its older Qwen3.x profiles stay on
+# sglang 0.5.10.post1 / torch 2.9.1. Qwen3.6-27B native-window
+# variants opt into this image through the generic CUDA 13 adapter; their
+# thinking variants add the strict-thinking behavior. The rest of the Qwen
+# catalog remains untouched.
+#
+# VERSION NOTE: Gemma 4 first shipped in sglang 0.5.11, but 0.5.11's bundled
+# JIT kernel (jit_kernel/csrc/elementwise/activation.cuh) fails to compile
+# under strict nvcc — "select_kernel ... expected a type, got
+# ActivationKind::kSiLU" — confirmed broken on BOTH CUDA 12.9 and 13.0. 0.5.13
+# fixed it, and this bundle pinned 0.5.13 until the move to 0.5.20 below.
+#
+# Now pinned to 0.5.20, which is the first release carrying the ``glm5_next``
+# model (python/sglang/srt/models/glm5_next.py, EntryClass
+# ``Glm5NextForConditionalGeneration``). 0.5.13 has no such module, so the
+# architecture cannot load on it at any width. 0.5.20 moves its own exact pins
+# with it: torch 2.11 -> 2.13 (cu130 wheels exist for both), transformers
+# 5.8.1 -> 5.12.1, flashinfer-python 0.6.12 -> 0.6.18, sgl-deep-gemm
+# 0.1.2 -> 0.2.0, sglang-kernel 0.4.3 -> 0.4.7, apache-tvm-ffi 0.1.9 -> 0.1.11,
+# and it adds humming-kernels and quack-kernels. xgrammar stays at 0.2.1.
+# Those versions are sglang's own ``==`` pins, not choices made here.
+#
+# 0.5.20 also renames launch flags SIE uses. ``--mamba-scheduler-strategy`` is
+# now ``--mamba-radix-cache-strategy``; ``--cuda-graph-max-bs`` is split into
+# ``--cuda-graph-max-bs-decode`` and ``--cuda-graph-max-bs-prefill``; and
+# ``--disable-piecewise-cuda-graph`` is gone, the prefill-phase graph it turned
+# off now controlled by ``--disable-prefill-cuda-graph``. The adapters routed
+# here and the profiles that use them carry the new names. The ``sglang``
+# bundle's engine keeps the old ones.
+#
+# The bundle's image carries torch (cu130) on a CUDA 13 base — built by
+# the dedicated ``cuda13`` platform (packages/sie_server/Dockerfile.cuda13),
+# selected via the ``platform: cuda13`` field above. The shared base venv still
+# ships its own torch, so the cu130 image carries two torches (~+3 GB); slimming
+# torch out of sie-server core would remove that.
+#
+# Distinct thin adapter modules scope routing here because bundle compatibility
+# keys on module paths. Gemma models use `...sglang.gemma`; Qwen profiles that
+# require the newer generic engine or token filter use `...sglang.cuda13`.
+# Qwen routes without that explicit adapter remain on the shared `sglang`
+# bundle.
+adapters:
+- sie_server.adapters.sglang.gemma
+- sie_server.adapters.sglang.cuda13
+deps:
+  # sglang 0.5.20 (see the VERSION NOTE above). Verified transitive resolution
+  # on the Modal cu130 image:
+  #   torch==2.13.0 (cu130), transformers==5.12.1, kernels==0.14.1,
+  #   sgl-deep-gemm==0.2.0, sglang-kernel==0.4.7, and
+  #   flashinfer-python==0.6.18 (the exact SGLang 0.5.20 closure).
+  # These resolve from the cu130 wheel indexes at build/serve time
+  # (download.pytorch.org/whl/cu130 + https://docs.sglang.ai/whl/cu130/),
+  # supplied by the build (Dockerfile.cuda13 / Modal image). torch,
+  # transformers, and kernels are intentionally NOT re-pinned here — sglang's
+  # own exact pins drive them. (sglang declares a bare unpinned `kernels`, so
+  # without its transitive pin uv would grab the latest, which breaks sglang's
+  # import — let sglang constrain it.)
+  sglang: '==0.5.20'
+  # Structured-output backend the Gemma model configs select
+  # (tasks.generate ... grammar_backend: xgrammar). Pinned to the version
+  # sglang 0.5.20 resolves, to prevent silent drift (mirrors the sglang
+  # bundle's rationale). NOTE: this engine uses xgrammar 0.2.x, not the 0.1.32
+  # the sglang bundle pins for the older engine.
+  xgrammar: '==0.2.1'
+  # XGrammar 0.2.1 imports ``tvm_ffi`` while its package metadata leaves the
+  # dependency open at >=0.1.9. SGLang 0.5.20 pins apache-tvm-ffi==0.1.11
+  # exactly, so declare the same version explicitly: this keeps the import in
+  # the image and lets the bundle resolve as one compatible dependency set.
+  apache-tvm-ffi: '==0.1.11'

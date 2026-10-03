@@ -1,0 +1,32 @@
+sie_id: knowledgator/opir-multitask-large-v1.0
+hf_id: knowledgator/opir-multitask-large-v1.0
+hf_revision: 69bb27407d66eab4797049d36ba75eef3579335b
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: null
+  extract: {}
+max_sequence_length: 1024  # trained with 1024-token inputs
+profiles:
+  default:
+    max_batch_tokens: 16384
+    compute_precision: null
+    adapter_path: sie_server.adapters.gliclass:GLiClassAdapter
+    adapter_options:
+      loadtime:
+        classification_type: single-label
+        # Replay forwards as CUDA graphs over bucketed lengths; "off" runs them eagerly.
+        # See "GLiClass CUDA graphs" in packages/sie_server/README.md.
+        cuda_graphs: bucketed
+      runtime:
+        threshold: 0.0
+  multi-label:
+    extends: default
+    adapter_options:
+      runtime:
+        classification_type: multi-label
+        threshold: 0.0

@@ -10,7 +10,7 @@
   "devDependencies": {
     "typescript": "^5.9.3"
   },
-  "packageManager": "pnpm@9.15.0",
+  "packageManager": "pnpm@9.15.9",
   "workspaces": [
     "packages/sie_ts_sdk",
     "integrations/sie_ts_langchain",
@@ -23,8 +23,11 @@
       "esbuild": ">=0.25.0",
       "form-data": ">=4.0.4",
       "langsmith": ">=0.6.0",
+      "picomatch": ">=4.0.4",
+      "postcss": ">=8.5.10",
       "protobufjs": ">=7.5.8",
       "qs": ">=6.15.2",
+      "rollup": ">=4.59.0",
       "tar": ">=7.5.11",
       "uuid": ">=11.1.1",
       "vite": "^6.4.2",

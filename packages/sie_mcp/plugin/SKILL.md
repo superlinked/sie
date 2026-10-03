@@ -42,9 +42,11 @@ markdown.
 
 The tool response also includes a `metadata` object with two distinct figures: a live
 per-call `markdown_tokens_estimate` (a rough ~4 chars/token count of *this* response — an
-estimate, not a billed figure) and `token_reduction`, the committed #1311 benchmark
+estimate, not a billed figure) and `token_reduction`, the reference benchmark
 measurement of markdown vs direct document ingestion. Surface these if the user asks how
-much was saved; the exact percentages and the benchmark path are in the metadata.
+much was saved; the exact percentages and measurement run are in the metadata. Its
+`source` is a stable, public-safe run label; `issue` is `null` because no public issue
+tracks that committed measurement.
 
 ## summarize document
 
@@ -160,5 +162,5 @@ pixels reach the calling model.
 `docs_to_markdown`, `summarize_document`, `extract_entities`, `redact_pii`,
 `describe_image`, `extract_structured`, and `generate_structured` are all served by the
 Superlinked MCP connector. Configure the connector with your **connector secret** —
-credentials are never pasted into the chat. For this POC the connector secret is provided
-by your cluster operator; self-serve issuance arrives with the managed service.
+credentials are never pasted into the chat. The connector secret is provided by your
+cluster operator.

@@ -1,5 +1,6 @@
 sie_id: EmergentMethods/gliner_large_news-v2.1
 hf_id: EmergentMethods/gliner_large_news-v2.1
+hf_revision: 1af0cd2ce3b4a2c660849f6c3a10c7a7bac3c6c6
 inputs:
   text: true
   image: false

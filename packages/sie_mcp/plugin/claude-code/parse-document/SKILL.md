@@ -5,10 +5,8 @@ description: Convert a PDF, scan, image of a page, or office file to clean markd
 
 # Parse a Document with Superlinked MCP
 
-Use the connected Superlinked MCP server to convert the source file to markdown,
-then work from the markdown artifact. This mirrors the `parse-document` flow from
-the `sie_tools` plugin in PR #1336, but uses the MCP `docs_to_markdown` tool
-instead of the gateway-backed `~/.sie/bin/sie` wrapper.
+Use the connected Superlinked MCP server to convert the source file to markdown
+through the MCP `docs_to_markdown` tool, then work from the markdown artifact.
 
 ## Steps
 

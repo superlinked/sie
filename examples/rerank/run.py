@@ -1,222 +1,88 @@
+"""Inspect recorded cases offline, or explicitly run a bounded SIE trial."""
+
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
-import math
 import os
-from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
 
-ROOT = Path(__file__).resolve().parent
-CASES_PATH = ROOT / "data" / "cases.json"
-SOURCES_PATH = ROOT / "data" / "sources.json"
+from score import MODEL_REVISION, load, score
+
 MODEL = "Qwen/Qwen3-Reranker-4B"
-ARTIFACT_NAMES = {
-    "sec_filing_amendment": "sec-restatement",
-    "cms_lower_limb_orthosis": "cms-orthosis-documentation",
-    "ntsb_detector_alert": "ntsb-bearing-alert",
-    "scotus_two_contracts": "supreme-court-arbitration",
+RULES = {
+    "in-force": "Return the final rule the agency has adopted on this subject, not a proposed rule. A proposal that is still open for comment is not relevant.",
+    "proposed": "Return the proposed rule the agency has published for comment on this subject, not a final rule. A rule already adopted is not relevant.",
 }
 
 
-def read_json(path: Path) -> Any:
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-def write_json(path: Path, value: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(value, indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
-
-
-def sha256_bytes(value: bytes) -> str:
-    return hashlib.sha256(value).hexdigest()
-
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def to_jsonable(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {str(key): to_jsonable(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [to_jsonable(item) for item in value]
-    if hasattr(value, "model_dump"):
-        return to_jsonable(value.model_dump())
-    if hasattr(value, "tolist"):
-        return to_jsonable(value.tolist())
-    return value
-
-
-def load_and_verify_inputs() -> tuple[dict[str, Any], dict[str, Any]]:
-    cases = read_json(CASES_PATH)
-    sources = read_json(SOURCES_PATH)
-    policy = cases.get("integrity_policy", {})
-    if policy.get("synthetic_or_paraphrased_evidence") is not False:
-        raise ValueError("Cases must reject synthetic or paraphrased evidence")
-    if sources.get("synthetic_or_paraphrased_evidence") is not False:
-        raise ValueError("Source manifest must reject synthetic evidence")
-    if cases.get("model") != MODEL:
-        raise ValueError(f"Expected model {MODEL}")
-    if set(cases["cases"]) != set(ARTIFACT_NAMES):
-        raise ValueError("Case set changed")
-
-    known_sources = sources["sources"]
-    for case_id, case in cases["cases"].items():
-        if not case["query_provenance"].startswith("authored evaluation query"):
-            raise ValueError(f"Missing query provenance for {case_id}")
-        candidate_ids: set[str] = set()
-        for candidate in case["candidates"]:
-            candidate_id = candidate["id"]
-            if candidate_id in candidate_ids:
-                raise ValueError(f"Duplicate candidate {candidate_id}")
-            candidate_ids.add(candidate_id)
-            source = known_sources.get(candidate["source_id"])
-            if source is None:
-                raise ValueError(f"Unknown source for {candidate_id}")
-            actual = sha256_bytes(candidate["text"].encode("utf-8"))
-            if actual != candidate["sha256"]:
-                raise ValueError(f"Source excerpt changed for {candidate_id}")
-            canonical = source.get("excerpts", {}).get(candidate_id)
-            if canonical is None:
-                raise ValueError(f"Missing canonical excerpt for {candidate_id}")
-            if candidate["locator"] != canonical["locator"] or actual != canonical["sha256"]:
-                raise ValueError(f"Canonical excerpt changed for {candidate_id}")
-        if case["expected_top_candidate_id"] not in candidate_ids:
-            raise ValueError(f"Expected top candidate missing for {case_id}")
-    return cases, sources
-
-
-def build_audit_envelope(case_id: str, case: dict[str, Any]) -> dict[str, Any]:
+def envelope(case: dict, arm: str) -> dict:
     return {
-        "method": "SIEClient.score",
-        "endpoint": f"/v1/score/{MODEL}",
-        "model": MODEL,
-        "query": {
-            "id": f"{case_id}-query",
-            "text": case["query"],
-        },
-        "items": [
-            {
-                "id": candidate["id"],
-                "text": candidate["text"],
-                "source_id": candidate["source_id"],
-                "source_excerpt_sha256": candidate["sha256"],
-            }
-            for candidate in case["candidates"]
-        ],
-        "wait_for_capacity": True,
-        "provision_timeout_s": 900,
+        "query": {"text": case["query"]},
+        "items": [{"id": item["id"], "text": item["text"]} for item in case["candidates"]],
+        "instruction": RULES[arm],
     }
-
-
-def validate_response(
-    case_id: str,
-    case: dict[str, Any],
-    response: dict[str, Any],
-) -> dict[str, Any]:
-    if response.get("model") != MODEL:
-        raise ValueError(f"Unexpected model in response for {case_id}")
-    if response.get("query_id") != f"{case_id}-query":
-        raise ValueError(f"Unexpected query ID for {case_id}")
-    score_rows = response.get("scores")
-    if not isinstance(score_rows, list):
-        raise TypeError(f"Missing score list for {case_id}")
-    scores: list[dict[Any, Any]] = []
-    for index, row in enumerate(score_rows):
-        if not isinstance(row, dict):
-            raise TypeError(f"Invalid score row at index {index}")
-        scores.append(row)
-
-    expected_ids = {candidate["id"] for candidate in case["candidates"]}
-    observed_ids = {row.get("item_id") for row in scores}
-    if observed_ids != expected_ids or len(scores) != len(expected_ids):
-        raise ValueError(f"Candidate coverage changed for {case_id}")
-    ranks: list[int] = []
-    for row in scores:
-        rank = row.get("rank")
-        if type(rank) is not int:
-            raise ValueError(f"Invalid rank for {row.get('item_id')}")
-        ranks.append(rank)
-    ranks.sort()
-    if ranks != list(range(len(scores))):
-        raise ValueError(f"Ranks are incomplete for {case_id}")
-    for row in scores:
-        score = row.get("score")
-        if isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(score):
-            raise ValueError(f"Invalid score for {row.get('item_id')}")
-    top = min(scores, key=lambda row: row["rank"])
-    expected_top = case["expected_top_candidate_id"]
-    if top["item_id"] != expected_top:
-        raise ValueError(f"{case_id}: expected {expected_top}, received {top['item_id']}")
-    return {
-        "passed": True,
-        "expected_top_candidate_id": expected_top,
-        "observed_top_candidate_id": top["item_id"],
-        "candidate_count": len(scores),
-    }
-
-
-def run_cases(selected_case: str | None) -> dict[str, Any]:
-    from sie_sdk import Item, SIEClient
-
-    cases, _ = load_and_verify_inputs()
-    base_url = os.environ.get("SIE_BASE_URL", "http://127.0.0.1:8080")
-    api_key = os.environ.get("SIE_API_KEY") or None
-    client = SIEClient(base_url, api_key=api_key, timeout_s=900)
-    results: dict[str, Any] = {}
-
-    for case_id, case in cases["cases"].items():
-        if selected_case and case_id != selected_case:
-            continue
-        response = client.score(
-            MODEL,
-            Item(id=f"{case_id}-query", text=case["query"]),
-            [Item(id=candidate["id"], text=candidate["text"]) for candidate in case["candidates"]],
-            wait_for_capacity=True,
-            provision_timeout_s=900,
-        )
-        raw = to_jsonable(response)
-        evaluation = validate_response(case_id, case, raw)
-        results[case_id] = {
-            "audit_envelope": build_audit_envelope(case_id, case),
-            "raw_response": raw,
-            "evaluation": evaluation,
-        }
-    if not results:
-        raise ValueError(f"Unknown case: {selected_case}")
-    return {
-        "completed_at_utc": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-        "endpoint": base_url,
-        "model": MODEL,
-        "cases": results,
-    }
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Rank exact primary-source passages with public SIE")
-    parser.add_argument("--case", choices=sorted(ARTIFACT_NAMES))
-    parser.add_argument("--output", type=Path)
-    return parser.parse_args()
 
 
 def main() -> None:
-    args = parse_args()
-    result = run_cases(args.case)
-    if args.output:
-        write_json(args.output, result)
-        print(f"Wrote {args.output}")
-    else:
-        print(json.dumps(result, indent=2, ensure_ascii=False))
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--data", type=Path, default=Path(__file__).parent / "data")
+    parser.add_argument("--check", action="store_true", help="validate every recorded model offline")
+    parser.add_argument("--show", help="print both request envelopes for this case ID")
+    parser.add_argument("--record", action="store_true", help="run inference; may incur API charges")
+    parser.add_argument("--limit", type=int, default=1, help="case limit for an explicit trial (default: one)")
+    parser.add_argument("--base-url", default=os.environ.get("SIE_BASE_URL", "https://api.superlinked.com"))
+    parser.add_argument("--out", type=Path, default=Path("trial.json"))
+    args = parser.parse_args()
+    cases = load(args.data / "inputs/cases_test.json")["cases"]
+    if args.show:
+        found = next((case for case in cases if case["id"] == args.show), None)
+        if found is None:
+            raise SystemExit("Unknown case ID")
+        print(json.dumps({arm: envelope(found, arm) for arm in RULES}, indent=2))
+        return
+    if not args.record:
+        result = score(args.data)
+        print(
+            f"Verified {result['cases']} questions, {result['candidatesPerQuery']} candidates and all seven recorded models."
+        )
+        return
+    if not 1 <= args.limit <= len(cases):
+        raise SystemExit("--limit must be between 1 and 499")
+    if args.out.exists():
+        raise SystemExit("--out already exists; choose a new file to preserve previous trials")
+    from sie_sdk import Item, SIEClient
+
+    client = SIEClient(args.base_url, api_key=os.environ.get("SIE_API_KEY", ""), timeout_s=300)
+    models = client.list_models()
+    listed = models if isinstance(models, list) else models.get("models", [])
+    served = next(
+        (model.get("revision") for model in listed if isinstance(model, dict) and model.get("name") == MODEL), None
+    )
+    if served != MODEL_REVISION:
+        raise SystemExit("Endpoint does not report the recorded model revision; no inference sent")
+    results = []
+    for case in cases[: args.limit]:
+        for arm, instruction in RULES.items():
+            response = client.score(
+                MODEL,
+                Item(text=case["query"]),
+                [Item(id=item["id"], text=item["text"]) for item in case["candidates"]],
+                instruction=instruction,
+                wait_for_capacity=True,
+                provision_timeout_s=900,
+            )
+            ids = {item["id"] for item in case["candidates"]}
+            returned = response["scores"]
+            if len(returned) != len(ids) or {item["item_id"] for item in returned} != ids:
+                raise SystemExit("Response candidate set differs; trial not written")
+            results.append(
+                {"case": case["id"], "arm": arm, "model_revision": client.last_model_revision, "response": response}
+            )
+    with args.out.open("x", encoding="utf-8") as output:
+        json.dump(results, output, indent=2)
+        output.write("\n")
+    print(f"Recorded {len(results)} trial calls in {args.out}. These do not replace the published study.")
 
 
 if __name__ == "__main__":

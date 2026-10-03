@@ -20,6 +20,7 @@ import {
   ServerError,
 } from "../src/errors.js";
 import { packMessage, unpackMessage } from "../src/msgpack.js";
+import type { SIEClientOptions } from "../src/types.js";
 
 // Mock fetch globally
 const mockFetch = vi.fn();
@@ -55,6 +56,153 @@ function createMsgpackResponse(
   });
 }
 
+type TerminalOperation = "encode" | "score" | "extract";
+
+function terminalPayload(operation: TerminalOperation): Record<string, unknown> {
+  if (operation === "encode") {
+    return { model: "m", items: [{ dense: { values: new Float32Array([0.5]) } }] };
+  }
+  if (operation === "score") {
+    return { model: "m", scores: [{ item_id: "0", score: 0.5, rank: 0 }] };
+  }
+  return { model: "m", items: [{ entities: [] }] };
+}
+
+async function invokeTerminal(client: SIEClient, operation: TerminalOperation): Promise<unknown> {
+  if (operation === "encode") return client.encode("m", { text: "input" });
+  if (operation === "score") return client.score("m", { text: "query" }, [{ text: "candidate" }]);
+  return client.extract("m", { text: "input" }, { labels: ["entity"] });
+}
+
+describe("SIEClient terminal Modal continuations", () => {
+  beforeEach(() => {
+    mockFetch.mockReset();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it.each(["encode", "score", "extract"] as const)(
+    "consumes a same-origin %s continuation by authenticated MsgPack GET",
+    async (operation) => {
+      const path = `/v1/${operation}/m?__modal_attempt_token=opaque`;
+      mockFetch
+        .mockResolvedValueOnce(new Response(null, { status: 303, headers: { Location: path } }))
+        .mockResolvedValueOnce(createMsgpackResponse(terminalPayload(operation)));
+
+      const client = new SIEClient("https://gateway.example.test", { apiKey: "secret" });
+      await invokeTerminal(client, operation);
+
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+      expect(mockFetch.mock.calls[0]?.[1]).toMatchObject({ method: "POST", redirect: "manual" });
+      expect(mockFetch.mock.calls[1]?.[0]).toBe(`https://gateway.example.test${path}`);
+      expect(mockFetch.mock.calls[1]?.[1]).toMatchObject({ method: "GET", redirect: "manual" });
+      const headers = mockFetch.mock.calls[1]?.[1]?.headers as Record<string, string>;
+      expect(headers.Accept).toBe("application/msgpack");
+      expect(headers.Authorization).toBe("Bearer secret");
+    },
+  );
+
+  it("preserves MsgPack credentials across every continuation hop", async () => {
+    mockFetch
+      .mockResolvedValueOnce(
+        new Response(null, {
+          status: 303,
+          headers: { Location: "/result?__modal_attempt_token=one" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(null, {
+          status: 303,
+          headers: { Location: "/result?__modal_attempt_token=two" },
+        }),
+      )
+      .mockResolvedValueOnce(createMsgpackResponse(terminalPayload("encode")));
+
+    const client = new SIEClient("https://gateway.example.test", { apiKey: "secret" });
+    await client.encode("m", { text: "input" });
+
+    expect(mockFetch).toHaveBeenCalledTimes(3);
+    const signals = mockFetch.mock.calls.map((call) => (call[1] as RequestInit).signal);
+    expect(signals.every((signal) => signal instanceof AbortSignal)).toBe(true);
+    expect(new Set(signals).size).toBe(signals.length);
+    for (const call of mockFetch.mock.calls.slice(1)) {
+      const init = call[1] as RequestInit;
+      const headers = init.headers as Record<string, string>;
+      expect(init).toMatchObject({ method: "GET", redirect: "manual" });
+      expect(headers.Accept).toBe("application/msgpack");
+      expect(headers.Authorization).toBe("Bearer secret");
+    }
+  });
+
+  it("does not replay the POST when continuation retrieval fails", async () => {
+    mockFetch
+      .mockResolvedValueOnce(
+        new Response(null, {
+          status: 303,
+          headers: { Location: "/result?__modal_attempt_token=opaque" },
+        }),
+      )
+      .mockRejectedValueOnce(new TypeError("fetch failed"));
+
+    const client = new SIEClient("https://gateway.example.test", {
+      provisionTimeout: 60_000,
+    });
+
+    await expect(
+      client.encode("m", { text: "input" }, { waitForCapacity: true }),
+    ).rejects.toBeInstanceOf(SIEConnectionError);
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(mockFetch.mock.calls[0]?.[1].method).toBe("POST");
+    expect(mockFetch.mock.calls[1]?.[1].method).toBe("GET");
+  });
+
+  it("refuses a continuation GET after the provisioning budget expires", async () => {
+    vi.spyOn(Date, "now").mockReturnValueOnce(0).mockReturnValueOnce(0).mockReturnValue(60_001);
+    mockFetch.mockResolvedValueOnce(
+      new Response(null, {
+        status: 303,
+        headers: { Location: "/result?__modal_attempt_token=opaque" },
+      }),
+    );
+    const client = new SIEClient("https://gateway.example.test", {
+      provisionTimeout: 60_000,
+    });
+
+    await expect(client.encode("m", { text: "input" })).rejects.toBeInstanceOf(ProvisioningError);
+    expect(mockFetch).toHaveBeenCalledOnce();
+  });
+
+  it("fails closed when browser Fetch hides a manual redirect", async () => {
+    mockFetch.mockResolvedValueOnce({ type: "opaqueredirect" } as Response);
+    const client = new SIEClient("https://gateway.example.test");
+
+    await expect(client.encode("m", { text: "input" })).rejects.toMatchObject({
+      name: "SIEConnectionError",
+      kind: "other",
+    });
+    expect(mockFetch).toHaveBeenCalledOnce();
+  });
+
+  it("raises ProvisioningError when the continuation hop limit is exhausted", async () => {
+    mockFetch.mockImplementation(async () =>
+      Promise.resolve(
+        new Response(null, {
+          status: 303,
+          headers: { Location: "/result?__modal_attempt_token=opaque" },
+        }),
+      ),
+    );
+    const client = new SIEClient("https://gateway.example.test");
+
+    await expect(client.encode("m", { text: "input" })).rejects.toThrow(
+      /remained in flight after 20 continuation hops/,
+    );
+    expect(mockFetch).toHaveBeenCalledTimes(21);
+  });
+});
+
 describe("SIEClient construction", () => {
   beforeEach(() => {
     mockFetch.mockClear();
@@ -73,6 +221,30 @@ describe("SIEClient construction", () => {
   it("should return normalized URL from getBaseUrl() without trailing slash", () => {
     const client = new SIEClient("http://localhost:8080/");
     expect(client.getBaseUrl()).toBe("http://localhost:8080");
+  });
+
+  it("rejects a baseUrl without an http(s) scheme or host at construction", () => {
+    // Previously `new SIEClient("localhost:8080")` surfaced only at request
+    // time as a fetch TypeError — silently retried for the whole provision
+    // budget with zero logging. Hostless inputs like `http://:8080` throw in
+    // `new URL()` and are rejected. `new URL()` also NORMALIZES `http:/v1`,
+    // `http:///v1`, `https:///v1` to a bogus host "v1" (WHATWG slash
+    // coalescing), so the constructor additionally requires a real
+    // `scheme://<authority>` — those wrong-host inputs are rejected too.
+    for (const bad of [
+      "localhost:8080",
+      "example.com",
+      "ftp://host:21",
+      "not a url",
+      "",
+      "http://:8080",
+      "https://:443",
+      "http:/v1",
+      "http:///v1",
+      "https:///v1",
+    ]) {
+      expect(() => new SIEClient(bad)).toThrow(/absolute http\(s\) URL with a host/);
+    }
   });
 
   it("should normalize base URL by removing trailing slash", async () => {
@@ -131,6 +303,71 @@ describe("SIEClient construction", () => {
     const fetchCall = mockFetch.mock.calls[0];
     const headers = fetchCall?.[1]?.headers as Record<string, string>;
     expect(headers.Authorization).toBe("Bearer sk-test-key");
+  });
+});
+
+describe("SIEClient construction - timeout unit (timeoutMs vs timeout)", () => {
+  beforeEach(() => {
+    mockFetch.mockReset();
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  // A fetch that never resolves until its AbortSignal fires, then rejects with
+  // an AbortError — the way a real per-request timeout surfaces. The client's
+  // internal `setTimeout(abort, timeout)` (faked here) drives the abort, so the
+  // effective timeout is observable via the "Request timeout after <n>ms"
+  // message the client raises.
+  function mockHangingFetch(): void {
+    mockFetch.mockImplementation(
+      (_url: string, init?: RequestInit) =>
+        new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => {
+            reject(Object.assign(new Error("The user aborted a request."), { name: "AbortError" }));
+          });
+        }),
+    );
+  }
+
+  // Drive one encode to its timeout abort and return the ms value the client
+  // actually aborted at, parsed from the timeout message.
+  async function effectiveTimeoutMs(options: SIEClientOptions): Promise<number> {
+    mockHangingFetch();
+    const client = new SIEClient("http://localhost:8080", options);
+    // Attach the handler synchronously so advancing timers cannot surface an
+    // unhandled rejection before we await the result.
+    const settled = client.encode("bge-m3", { text: "test" }, { waitForCapacity: false }).then(
+      () => {
+        throw new Error("expected a timeout rejection");
+      },
+      (err: unknown) => err as Error,
+    );
+    await vi.advanceTimersByTimeAsync(1_000_000);
+    const err = await settled;
+    await client.close();
+    const match = /Request timeout after (\d+)ms/.exec(err.message);
+    if (!match) {
+      throw new Error(`unexpected error message: ${err.message}`);
+    }
+    return Number(match[1]);
+  }
+
+  it("applies timeoutMs as the milliseconds timeout", async () => {
+    expect(await effectiveTimeoutMs({ timeoutMs: 1234 })).toBe(1234);
+  });
+
+  it("treats the deprecated timeout alias as the same milliseconds value", async () => {
+    // Same numeric value under either key must yield the same effective abort.
+    expect(await effectiveTimeoutMs({ timeout: 1234 })).toBe(
+      await effectiveTimeoutMs({ timeoutMs: 1234 }),
+    );
+  });
+
+  it("prefers timeoutMs over the deprecated timeout when both are set", async () => {
+    expect(await effectiveTimeoutMs({ timeoutMs: 1234, timeout: 9999 })).toBe(1234);
   });
 });
 
@@ -200,8 +437,10 @@ describe("SIEClient.encode() - basic usage", () => {
         {
           "x-sie-request-id": "req-encode",
           "x-sie-execution-identity-sha256": "a".repeat(64),
+          "x-sie-execution-binding-sha256": "b".repeat(64),
           "x-sie-units-input-tokens": "11",
           "x-sie-units-pairs": "2",
+          "x-sie-units-content-input-tokens": "9",
           "x-sie-units-images": "1",
           "x-sie-units-pages": "3",
           "x-sie-units-output-tokens": "5",
@@ -219,9 +458,11 @@ describe("SIEClient.encode() - basic usage", () => {
     expect(results[0]?.request).toEqual({
       id: "req-encode",
       executionIdentitySha256: "a".repeat(64),
+      executionBindingSha256: "b".repeat(64),
       usage: {
         inputTokens: 11,
         pairs: 2,
+        contentInputTokens: 9,
         images: 1,
         pages: 3,
         outputTokens: 5,
@@ -239,6 +480,7 @@ describe("SIEClient.encode() - basic usage", () => {
       createMsgpackResponse({ items: [{ dense: { values: new Float32Array([0.1]) } }] }, 200, {
         "x-sie-request-id": "réq-bad",
         "x-sie-execution-identity-sha256": "A".repeat(64),
+        "x-sie-execution-binding-sha256": "B".repeat(64),
         "x-sie-units-input-tokens": "01",
         "x-sie-units-pairs": "2",
         "x-sie-credits-debited": "9007199254740992",
@@ -667,6 +909,91 @@ describe("SIEClient retry on connection errors and provisioning 503s", () => {
     ).rejects.toThrow(SIEConnectionError);
     expect(mockFetch).toHaveBeenCalledTimes(1);
 
+    await client.close();
+  });
+
+  it("should NOT retry a URL-parse TypeError (permanent config error)", async () => {
+    // A malformed request URL is not a transient network failure: retrying
+    // it silently for the whole provision budget can never succeed.
+    const client = new SIEClient("http://localhost:8080", {
+      timeout: 30_000,
+      provisionTimeout: 60_000,
+    });
+
+    const parseError = new TypeError("Failed to parse URL from localhost:8080/v1/encode/bge-m3");
+    (parseError as TypeError & { cause?: { code: string } }).cause = { code: "ERR_INVALID_URL" };
+    mockFetch.mockRejectedValueOnce(parseError);
+
+    const err = await client
+      .encode("bge-m3", { text: "test" }, { waitForCapacity: true })
+      .catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(SIEConnectionError);
+    expect((err as SIEConnectionError).kind).toBe("other");
+    expect((err as SIEConnectionError).message).toContain("absolute http(s) URL");
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+
+    await client.close();
+  });
+
+  it("should warn once on the first connect retry", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const client = new SIEClient("http://localhost:8080", {
+      timeout: 30_000,
+      provisionTimeout: 60_000,
+    });
+
+    mockFetch
+      .mockRejectedValueOnce(new TypeError("fetch failed"))
+      .mockRejectedValueOnce(new TypeError("fetch failed"))
+      .mockResolvedValueOnce(
+        createMsgpackResponse({
+          items: [{ dense: { values: new Float32Array([0.1, 0.2]) } }],
+        }),
+      );
+
+    const promise = client.encode("bge-m3", { text: "test" }, { waitForCapacity: true });
+    // Two retries at DEFAULT_RETRY_DELAY = 5_000ms each.
+    await vi.advanceTimersByTimeAsync(10_000);
+    await promise;
+
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(String(warnSpy.mock.calls[0]?.[0])).toContain("http://localhost:8080");
+
+    warnSpy.mockRestore();
+    await client.close();
+  });
+
+  it("logs only the origin (no credentials, path, or query) in the connect-retry warning", async () => {
+    // A baseUrl carrying `user:secret@` AND a
+    // `?access_token=` query param must leak neither — only scheme://host:port.
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const client = new SIEClient(
+      "https://user:s3cr3t-token@gateway.example.test:8443/v1?access_token=querysecret",
+      {
+        timeout: 30_000,
+        provisionTimeout: 60_000,
+      },
+    );
+
+    mockFetch.mockRejectedValueOnce(new TypeError("fetch failed")).mockResolvedValueOnce(
+      createMsgpackResponse({
+        items: [{ dense: { values: new Float32Array([0.1, 0.2]) } }],
+      }),
+    );
+
+    const promise = client.encode("bge-m3", { text: "test" }, { waitForCapacity: true });
+    await vi.advanceTimersByTimeAsync(5_000);
+    await promise;
+
+    const warned = String(warnSpy.mock.calls[0]?.[0]);
+    expect(warned).not.toContain("s3cr3t-token");
+    expect(warned).not.toContain("querysecret");
+    expect(warned).not.toContain("user:");
+    expect(warned).not.toContain("access_token");
+    expect(warned).toContain("https://gateway.example.test:8443");
+
+    warnSpy.mockRestore();
     await client.close();
   });
 
@@ -1262,6 +1589,22 @@ describe("SIEClient.score() - reranking", () => {
     expect(result.scores[0]?.rank).toBe(0);
     expect(result.scores[0]?.score).toBeCloseTo(0.95);
     expect(result.usage).toEqual({ inputTokens: 91, images: 2 });
+  });
+
+  it("should expose the content-token breakdown of score usage", async () => {
+    mockFetch.mockResolvedValueOnce(
+      createMsgpackResponse({
+        model: "Qwen/Qwen3-Reranker-0.6B",
+        scores: [{ item_id: "doc-1", score: 0.9, rank: 0 }],
+        usage: { input_tokens: 80, input_tokens_details: { content_tokens: 7 } },
+      }),
+    );
+
+    const result = await client.score("Qwen/Qwen3-Reranker-0.6B", { text: "query" }, [
+      { text: "doc" },
+    ]);
+
+    expect(result.usage).toEqual({ inputTokens: 80, inputTokensDetails: { contentTokens: 7 } });
   });
 
   it("should use correct URL with model in path", async () => {

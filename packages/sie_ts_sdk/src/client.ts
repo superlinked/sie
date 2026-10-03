@@ -8,18 +8,18 @@
  * const client = new SIEClient("http://localhost:8080");
  *
  * // Encode single item
- * const result = await client.encode("bge-m3", { text: "Hello world" });
+ * const result = await client.encode("BAAI/bge-m3", { text: "Hello world" });
  * console.log(result.dense); // Float32Array
  *
  * // Batch encode
- * const results = await client.encode("bge-m3", [
+ * const results = await client.encode("BAAI/bge-m3", [
  *   { text: "First document" },
  *   { text: "Second document" },
  * ]);
  *
  * // With GPU routing and auto-retry for capacity
  * const resultWithGpu = await client.encode(
- *   "bge-m3",
+ *   "BAAI/bge-m3",
  *   { text: "Hello" },
  *   { gpu: "l4", waitForCapacity: true },
  * );
@@ -29,7 +29,9 @@
  */
 
 import {
+  JobFailedError,
   LoraLoadingError,
+  MalformedChunkError,
   ModelLoadingError,
   PoolError,
   ProvisioningError,
@@ -68,6 +70,7 @@ import {
   ESTIMATE_PATH,
   buildEstimateEnvelope,
   getErrorCode,
+  getErrorParam,
   getRetryAfter,
   handleError,
   parseCapacityInfo,
@@ -75,12 +78,19 @@ import {
   parseExtractResults,
   parseGenerateResult,
   parseScoreResult,
+  readRequestId,
   settledChargeFields,
   throwIfEstimateUnroutable,
   throwIfInputTooLong,
   throwIfModelLoadFailed,
+  validateBatchResultCount,
+  validateRequestId,
 } from "./internal/parsing.js";
-import { nextOomRetryDelay, withProvisioningRetry } from "./internal/provisioning.js";
+import {
+  admissionRetryDelay,
+  nextOomRetryDelay,
+  withProvisioningRetry,
+} from "./internal/provisioning.js";
 import { applyRetryJitter } from "./internal/retry.js";
 import {
   type JobResultItem,
@@ -134,11 +144,72 @@ import type {
   ScoreResult,
   StatusMessage,
   StreamGenerateOptions,
+  WireModelInfo,
+} from "./types.js";
+import {
+  FALLBACK_ERROR_PATTERN,
+  FALLBACK_REASONS,
+  type FallbackReason,
+  SERVED_BY_VALUES,
+  type ServedBy,
+  UPSTREAM_NAME_PATTERN,
 } from "./types.js";
 import { SDK_VERSION } from "./version.js";
 
 const JOB_RESULT_NOT_FOUND_ERROR_CODE = "RESULT_NOT_FOUND";
 const JOB_RESULT_REF_MAX_REFRESHES = 3;
+
+/**
+ * `jobs.results()` decodes chunk refs into per-item results. A non-terminal job
+ * has no stable result set: its ref list is still growing, so decoding one would
+ * return a partial subset indistinguishable from a partial-FAILURE subset. The
+ * SDK refuses with this code rather than return a misleading partial.
+ */
+const JOB_NOT_TERMINAL_ERROR_CODE = "job_not_terminal";
+
+/**
+ * Wire keys `GET /v1/models/{model}` merges in for vanilla OpenAI
+ * "retrieve model" clients. They are OpenAI-envelope scaffolding, not SIE
+ * model metadata (`id` duplicates `name`; `object`/`owned_by` are constants;
+ * `created` is a fixed sentinel), so `ModelInfo` neither declares nor carries
+ * them. Pinned as deliberately excluded in
+ * `packages/wire-fixtures/model_info.json`.
+ */
+type OpenAiCompatModelKeys = Partial<Record<"id" | "object" | "created" | "owned_by", unknown>>;
+
+/**
+ * Map a wire `/v1/models` entry to the client-facing shape.
+ *
+ * Total by construction: every key except the three camelCase renames and the
+ * OpenAI-compat keys flows through the rest spread, so a field added to the
+ * endpoint reaches callers without a code change here — only `ModelInfo` and
+ * `WireModelInfo` need to declare it. The previous hardcoded allowlist silently
+ * dropped everything it did not name.
+ */
+function toModelInfo(wire: WireModelInfo): ModelInfo {
+  const {
+    max_sequence_length,
+    last_error,
+    pending_generation,
+    aliases,
+    id: _id,
+    object: _object,
+    created: _created,
+    owned_by: _ownedBy,
+    ...rest
+  } = wire as WireModelInfo & OpenAiCompatModelKeys;
+
+  return {
+    ...rest,
+    // The one normalized field. A gateway always sends `aliases`, but a single
+    // SIE server omits it entirely, and the rest spread would then hand the
+    // caller `undefined` for a field `ModelInfo` declares as always present.
+    aliases: aliases ?? [],
+    ...(max_sequence_length !== undefined ? { maxSequenceLength: max_sequence_length } : {}),
+    ...(last_error !== undefined ? { lastError: last_error } : {}),
+    ...(pending_generation !== undefined ? { pendingGeneration: pending_generation } : {}),
+  };
+}
 
 /** The `client.jobs` batch namespace. */
 export interface JobsNamespace {
@@ -159,14 +230,36 @@ export interface JobsNamespace {
     recoveryAttemptOrdinal: number,
     idempotencyKey: string,
   ): Promise<JobStatus>;
-  /** Retrieve a finished job's chunk refs and decode the per-item results. */
+  /**
+   * Retrieve a terminal job's chunk refs and decode the per-item results.
+   *
+   * Every chunk that published a ref is read — including a `failed` chunk,
+   * whose ref carries its SUCCESSFUL (already-billed) siblings alongside the
+   * per-item failures; only chunks with no ref at all are skipped. Each item's
+   * `success` and `error` distinguish the two.
+   *
+   * Throws a `job_not_terminal` `RequestError` (409) when the job has not
+   * reached a terminal state — decoding one then would return a partial subset
+   * indistinguishable from a partial-failure subset. Warns (via `console.warn`)
+   * when fewer items are retrieved than `total_items`, and separately when a
+   * chunk ref's bytes could not be decoded.
+   */
   results(jobId: string): Promise<JobResults>;
   /**
    * Poll `get` until the job reaches a terminal state, then return its status.
    * Throws a `job_wait_timeout` `RequestError` if `timeoutMs` elapses first.
    * Mirrors the Python SDK's `jobs.wait` (default 600s timeout, 2s poll).
+   *
+   * With `raiseOnFailure: true` a non-successful terminal
+   * (`failed`/`suspended`/`cancelled`) throws {@link JobFailedError} carrying
+   * the status doc's `outcome`/`error_code`, so the failure is actionable
+   * without re-reading the doc. The default is unchanged and back-compatible:
+   * every terminal (and the `planned` plan phase) is returned as-is.
    */
-  wait(jobId: string, options?: { timeoutMs?: number; pollMs?: number }): Promise<JobStatus>;
+  wait(
+    jobId: string,
+    options?: { timeoutMs?: number; pollMs?: number; raiseOnFailure?: boolean },
+  ): Promise<JobStatus>;
 }
 
 /** The `client.connections` namespace (org-scoped connector auth). */
@@ -251,6 +344,51 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+const SIE_BASE_URL_ENV = "SIE_BASE_URL";
+const SIE_API_KEY_ENV = "SIE_API_KEY";
+
+/**
+ * Read a non-blank environment variable. Undefined outside Node-like runtimes
+ * and where reading the environment is not permitted (Deno without --allow-env
+ * throws).
+ */
+function readEnv(name: string): string | undefined {
+  try {
+    const value = globalThis.process?.env?.[name]?.trim();
+    return value ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function urlOrigin(url: string): string | undefined {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "http:" || parsed.protocol === "https:" ? parsed.origin : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * `SIE_API_KEY`, scoped to the origin named by `SIE_BASE_URL`. Connection
+ * requests reuse the client's key, so a control-plane URL on another origin
+ * requires an explicit key.
+ */
+function envApiKeyFor(baseUrl: string, controlPlaneUrl: string | undefined): string | undefined {
+  const apiKey = readEnv(SIE_API_KEY_ENV);
+  const envOrigin = urlOrigin(readEnv(SIE_BASE_URL_ENV) ?? "");
+  if (!apiKey || envOrigin === undefined || urlOrigin(baseUrl) !== envOrigin) {
+    return undefined;
+  }
+  if (controlPlaneUrl && urlOrigin(controlPlaneUrl) !== envOrigin) {
+    throw new TypeError(
+      `${SIE_API_KEY_ENV} is scoped to the ${SIE_BASE_URL_ENV} origin and is not sent to controlPlaneUrl on another origin; pass apiKey explicitly.`,
+    );
+  }
+  return apiKey;
+}
+
 const CONTENT_SAFE_MEDIA_TYPES = new Set([
   "application/json",
   "application/problem+json",
@@ -306,6 +444,8 @@ function parseNonnegativeMeterHeader(headers: Headers, name: string): number | u
   return Number.isSafeInteger(parsed) ? parsed : undefined;
 }
 
+const REMOTE_HEADER = "X-SIE-Remote";
+
 /**
  * Parse optional request-scoped metadata from one successful terminal response.
  *
@@ -331,10 +471,31 @@ function parseRequestMetadata(headers: Headers, body?: unknown): RequestMetadata
   if (executionIdentitySha256 !== null && /^[0-9a-f]{64}$/.test(executionIdentitySha256)) {
     metadata.executionIdentitySha256 = executionIdentitySha256;
   }
+  const executionBindingSha256 = headers.get("x-sie-execution-binding-sha256");
+  if (executionBindingSha256 !== null && /^[0-9a-f]{64}$/.test(executionBindingSha256)) {
+    metadata.executionBindingSha256 = executionBindingSha256;
+  }
+  const servedBy = headers.get("x-sie-served-by");
+  if (servedBy !== null && (SERVED_BY_VALUES as readonly string[]).includes(servedBy)) {
+    metadata.servedBy = servedBy as ServedBy;
+  }
+  const upstream = headers.get("x-sie-upstream");
+  if (upstream !== null && UPSTREAM_NAME_PATTERN.test(upstream)) {
+    metadata.upstream = upstream;
+  }
+  const fallbackReason = headers.get("x-sie-fallback-reason");
+  if (fallbackReason !== null && (FALLBACK_REASONS as readonly string[]).includes(fallbackReason)) {
+    metadata.fallbackReason = fallbackReason as FallbackReason;
+  }
+  const fallbackError = headers.get("x-sie-fallback-error");
+  if (fallbackError !== null && FALLBACK_ERROR_PATTERN.test(fallbackError)) {
+    metadata.fallbackError = fallbackError;
+  }
 
   const usageHeaders = {
     inputTokens: "x-sie-units-input-tokens",
     pairs: "x-sie-units-pairs",
+    contentInputTokens: "x-sie-units-content-input-tokens",
     images: "x-sie-units-images",
     pages: "x-sie-units-pages",
     outputTokens: "x-sie-units-output-tokens",
@@ -585,24 +746,202 @@ async function itemsForExtractWire(items: ExtractItem[]): Promise<ExtractItemFor
  * normal delta. Defined at module scope so it has zero coupling to
  * `SIEClient` state.
  */
+function validatedStreamRetryAfter(error: {
+  code?: string;
+  retry_after_s?: unknown;
+}): number | undefined {
+  const value = error.retry_after_s;
+  return error.code === RESOURCE_EXHAUSTED_ERROR_CODE &&
+    typeof value === "number" &&
+    Number.isInteger(value) &&
+    value >= 1 &&
+    value <= 60
+    ? value * 1_000
+    : undefined;
+}
+
+function validatedStreamErrorParam(error: { param?: unknown }): string | null | undefined {
+  return typeof error.param === "string" || error.param === null ? error.param : undefined;
+}
+
 function extractChatChunkError(chunk: ChatCompletionChunk): SIEStreamError | null {
-  const err = (
-    chunk as ChatCompletionChunk & {
-      error?: { message?: string; type?: string; param?: string | null; code?: string };
-    }
-  ).error;
-  if (!err) return null;
-  return new SIEStreamError(err.message ?? "stream error", {
-    code: err.code,
-    errorType: err.type,
-    param: err.param,
+  if (!chunk.error) return null;
+  // The gateway request id rides in-band on the chat error chunk too (#3136)
+  // — the `chatcmpl-*` id is not the correlation key gateway logs use, and
+  // streamed responses have no terminal headers. Forward it for correlation.
+  const requestId = validateRequestId(chunk.request_id);
+  return new SIEStreamError(chunk.error.message ?? "stream error", {
+    code: chunk.error.code,
+    errorType: chunk.error.type,
+    param: validatedStreamErrorParam(chunk.error),
+    requestId,
+    retryAfter: validatedStreamRetryAfter(chunk.error),
   });
+}
+
+/**
+ * Return only the `scheme://host[:port]` origin of `url`.
+ *
+ * Path, query, fragment, and any `user:password@` userinfo are dropped, so a
+ * baseUrl carrying embedded credentials OR a token query parameter never
+ * reaches a log line. Logging uses only —
+ * requests still target the real URL. Falls back to a placeholder if the URL
+ * cannot be parsed, so a malformed value never leaks verbatim.
+ */
+function urlOriginForLogging(url: string): string {
+  try {
+    const parsed = new URL(url);
+    // `parsed.host` is host[:port]; `parsed.origin` would work for http(s)
+    // but is "null" for opaque origins, so build it explicitly.
+    return `${parsed.protocol}//${parsed.host}`;
+  } catch {
+    return "<redacted-url>";
+  }
+}
+
+/**
+ * Fetch failure codes worth retrying: the connection could not be made, or the
+ * peer dropped it before a response arrived. Mirrors the Python SDK's
+ * transient connect errnos plus undici's own connect-timeout and socket codes.
+ */
+const TRANSIENT_FETCH_ERROR_CODES: ReadonlySet<string> = new Set([
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "ETIMEDOUT",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "ENETDOWN",
+  "EHOSTDOWN",
+  "EAI_AGAIN",
+  "EPIPE",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_SOCKET",
+]);
+
+/** Timeouts undici raises after the request was sent; never retried. */
+const SENT_REQUEST_TIMEOUT_CODES: ReadonlySet<string> = new Set([
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_BODY_TIMEOUT",
+]);
+
+/** Error codes on a fetch failure's `cause` chain, including aggregated causes. */
+function fetchErrorCodes(error: unknown): string[] {
+  const codes: string[] = [];
+  let current: unknown = error;
+  for (let depth = 0; depth < 5 && typeof current === "object" && current !== null; depth += 1) {
+    const { code, errors, cause } = current as {
+      code?: unknown;
+      errors?: unknown;
+      cause?: unknown;
+    };
+    if (typeof code === "string") codes.push(code);
+    if (Array.isArray(errors)) {
+      for (const inner of errors) {
+        const innerCode = (inner as { code?: unknown } | null)?.code;
+        if (typeof innerCode === "string") codes.push(innerCode);
+      }
+    }
+    current = cause;
+  }
+  return codes;
+}
+
+/**
+ * Convert a `fetch()` `TypeError` into a typed connection error.
+ *
+ * A URL-parse failure (e.g. a scheme-less baseUrl: Node throws
+ * `TypeError: Failed to parse URL …` with `cause.code === "ERR_INVALID_URL"`)
+ * is a permanent configuration error, NOT a transient network failure —
+ * classify it as kind `"other"` so the connect-retry loops never spin on it,
+ * and point at the fix. The remaining failures are classified by the error
+ * codes on the `cause` chain: transient connection codes keep kind
+ * `"connect"`; a timeout after the request was sent is `"timeout"`; any other
+ * code (DNS name not found, TLS or certificate failures) is permanent and
+ * `"other"`. A failure without a code (browser `fetch`) stays `"connect"`.
+ */
+function connectionErrorFromFetchTypeError(error: TypeError): SIEConnectionError {
+  const codes = fetchErrorCodes(error);
+  if (
+    codes.includes("ERR_INVALID_URL") ||
+    error.message.includes("Failed to parse URL") ||
+    error.message.includes("Invalid URL")
+  ) {
+    return new SIEConnectionError(
+      `Invalid request URL (${error.message}). baseUrl must be an absolute http(s) URL, e.g. "http://localhost:8080".`,
+      "other",
+    );
+  }
+  if (codes.length === 0) {
+    return new SIEConnectionError(`Connection failed: ${error.message}`, "connect");
+  }
+  const detail = `${error.message} (${codes.join(", ")})`;
+  if (codes.some((code) => SENT_REQUEST_TIMEOUT_CODES.has(code))) {
+    return new SIEConnectionError(
+      `Request timed out waiting for the response: ${detail}. Not retried because the server may already be processing the request.`,
+      "timeout",
+    );
+  }
+  if (codes.every((code) => TRANSIENT_FETCH_ERROR_CODES.has(code))) {
+    return new SIEConnectionError(`Connection failed: ${detail}`, "connect");
+  }
+  return new SIEConnectionError(`Connection failed: ${detail}`, "other");
+}
+
+const MODAL_CONTINUATION_MAX_HOPS = 20;
+const MODAL_ATTEMPT_TOKEN_QUERY_KEY = "__modal_attempt_token";
+
+/** Resolve only Modal's documented result URL on the exact configured origin. */
+function modalContinuationUrl(baseUrl: string, response: Response): string | undefined {
+  if (response.status !== 303) return undefined;
+  const location = response.headers.get("location");
+  const hasControlCharacter = [...(location ?? "")].some((character) => {
+    const codePoint = character.codePointAt(0) ?? 0;
+    return codePoint <= 0x1f || codePoint === 0x7f;
+  });
+  if (!location || location.length > 8192 || hasControlCharacter) {
+    return undefined;
+  }
+  try {
+    const base = new URL(baseUrl);
+    const resolved = new URL(location, `${baseUrl.replace(/\/$/, "")}/`);
+    const tokens = resolved.searchParams.getAll(MODAL_ATTEMPT_TOKEN_QUERY_KEY);
+    if (
+      resolved.origin !== base.origin ||
+      resolved.username !== "" ||
+      resolved.password !== "" ||
+      resolved.hash !== "" ||
+      tokens.length !== 1 ||
+      tokens[0] === ""
+    ) {
+      return undefined;
+    }
+    return resolved.toString();
+  } catch {
+    return undefined;
+  }
+}
+
+function requireVisibleManualRedirect(response: Response): void {
+  if (response.type === "opaqueredirect") {
+    throw new SIEConnectionError(
+      "Modal result continuations require a server-side Fetch runtime that exposes manual redirect status and Location",
+      "other",
+    );
+  }
 }
 
 /** SIE-native chunk variant — see `sse.rs::build_generate_chunk_event`. */
 function extractGenerateChunkError(chunk: GenerateChunk): SIEStreamError | null {
   if (!chunk.error) return null;
-  return new SIEStreamError(chunk.error.message, { code: chunk.error.code });
+  // The gateway request id rides in-band on the error chunk (streamed
+  // responses have no terminal headers), so forward it for correlation (#3136).
+  const requestId = validateRequestId(chunk.request_id);
+  return new SIEStreamError(chunk.error.message, {
+    code: chunk.error.code,
+    param: validatedStreamErrorParam(chunk.error),
+    requestId,
+    retryAfter: validatedStreamRetryAfter(chunk.error),
+  });
 }
 
 /**
@@ -619,7 +958,7 @@ function extractGenerateChunkError(chunk: GenerateChunk): SIEStreamError | null 
  * await client.createPool("eval-bench", { l4: 2 });
  *
  * // Use pool for requests
- * await client.encode("bge-m3", { text: "Hello" }, { gpu: "eval-bench/l4" });
+ * await client.encode("BAAI/bge-m3", { text: "Hello" }, { gpu: "eval-bench/l4" });
  *
  * // Check pool status
  * const pool = await client.getPool("eval-bench");
@@ -639,6 +978,7 @@ export class SIEClient {
   private readonly provisionTimeout: number;
   private readonly controlPlaneUrl?: string;
   private readonly org?: string;
+  private readonly remote?: "forbid";
 
   /** Batch class — `POST/GET /v1/jobs` on the keyed gateway. */
   readonly jobs: JobsNamespace;
@@ -668,15 +1008,46 @@ export class SIEClient {
   /**
    * Create a new SIE client.
    *
-   * @param baseUrl - Base URL of the SIE server (e.g., "http://localhost:8080")
+   * @param baseUrl - Base URL of the SIE server (e.g., "http://localhost:8080").
+   *   Defaults to the `SIE_BASE_URL` environment variable when omitted.
    * @param options - Client options
    */
-  constructor(baseUrl: string, options: SIEClientOptions = {}) {
+  constructor(baseUrl?: string, options: SIEClientOptions = {}) {
+    const url = baseUrl ?? readEnv(SIE_BASE_URL_ENV);
+    if (url === undefined) {
+      throw new TypeError(`baseUrl is required: pass it explicitly or set ${SIE_BASE_URL_ENV}.`);
+    }
+    // Validate eagerly: a scheme-less baseUrl ("localhost:8080") would
+    // otherwise only surface at request time as a fetch `TypeError`.
+    let parsed: URL | undefined;
+    try {
+      parsed = new URL(url);
+    } catch {
+      parsed = undefined;
+    }
+    // `new URL()` normalizes `http:/v1`, `http:///v1`, `https:///v1` to a
+    // bogus host `"v1"` (WHATWG slash-coalescing), so those pass a `hostname`
+    // check while silently targeting the wrong host. Require a real
+    // `scheme://<authority>`: `https?://` immediately followed by a non-slash
+    // authority character.
+    const hasRealAuthority = /^https?:\/\/[^/]/i.test(url);
+    if (
+      !parsed ||
+      (parsed.protocol !== "http:" && parsed.protocol !== "https:") ||
+      !parsed.hostname ||
+      !hasRealAuthority
+    ) {
+      throw new TypeError(
+        `Invalid baseUrl "${url}": must be an absolute http(s) URL with a host, e.g. "http://localhost:8080".`,
+      );
+    }
     // Remove trailing slash
-    this.baseUrl = baseUrl.replace(/\/$/, "");
-    this.timeout = options.timeout ?? DEFAULT_TIMEOUT;
+    this.baseUrl = url.replace(/\/$/, "");
+    // `timeoutMs` is the unit-encoded name; `timeout` is a deprecated alias
+    // for the same MILLISECONDS value. `timeoutMs` wins if both are set.
+    this.timeout = options.timeoutMs ?? options.timeout ?? DEFAULT_TIMEOUT;
     this.gpu = options.gpu;
-    this.apiKey = options.apiKey;
+    this.apiKey = options.apiKey ?? envApiKeyFor(this.baseUrl, options.controlPlaneUrl);
     // BREAKING CHANGE (0.7): default flipped from `false` to `true` to match
     // the Python SDK (`wait_for_capacity=True`). Callers that relied on
     // fail-fast 503 PROVISIONING / connect-error behaviour must now pass
@@ -685,6 +1056,12 @@ export class SIEClient {
     this.provisionTimeout = options.provisionTimeout ?? DEFAULT_PROVISION_TIMEOUT;
     this.controlPlaneUrl = options.controlPlaneUrl?.replace(/\/$/, "");
     this.org = options.org;
+    if (options.remote !== undefined && options.remote !== "forbid") {
+      throw new TypeError(
+        `remote must be "forbid" or omitted, got ${JSON.stringify(options.remote)}`,
+      );
+    }
+    this.remote = options.remote;
 
     // First-class batch + connector surface.
     this.jobs = {
@@ -736,7 +1113,7 @@ export class SIEClient {
   /**
    * Encode a single item.
    *
-   * @param model - Model name (e.g., "bge-m3")
+   * @param model - Model name (e.g., "BAAI/bge-m3")
    * @param item - Item to encode
    * @param options - Encode options
    * @returns Encode result with embeddings
@@ -746,7 +1123,7 @@ export class SIEClient {
   /**
    * Encode multiple items.
    *
-   * @param model - Model name (e.g., "bge-m3")
+   * @param model - Model name (e.g., "BAAI/bge-m3")
    * @param items - Items to encode
    * @param options - Encode options
    * @returns Array of encode results in same order as input
@@ -812,6 +1189,18 @@ export class SIEClient {
 
     const results = parseEncodeResults(data.items);
     attachRequestMetadata(results, response.headers, data);
+    // Guard the 1:1 input-to-output contract before any positional access
+    // (`results[0]` below, or index-based reassembly in callers). The queue
+    // path returns mixed-success batches as 200 with only the successful
+    // items, so a desynced count would otherwise misalign every
+    // zip-inputs-to-outputs consumer.
+    validateBatchResultCount(
+      results,
+      itemsArray,
+      model,
+      "encode",
+      response.headers.get("x-sie-request-id") ?? undefined,
+    );
 
     if (isSingleItem) {
       const first = results[0];
@@ -883,37 +1272,22 @@ export class SIEClient {
     const response = await this.requestJson("/v1/models", "GET");
 
     // Wire format response: {"models": [...]}
-    interface WireModelInfo {
-      name: string;
-      loaded: boolean;
-      inputs: string[];
-      outputs: string[];
-      dims?: { dense?: number; sparse?: number; multivector?: number };
-      max_sequence_length?: number;
-    }
-
     interface WireModelsResponse {
       models: WireModelInfo[];
     }
 
     const data = (await response.json()) as WireModelsResponse;
 
-    return data.models.map((m) => ({
-      name: m.name,
-      loaded: m.loaded,
-      inputs: m.inputs,
-      outputs: m.outputs,
-      dims: m.dims,
-      maxSequenceLength: m.max_sequence_length,
-    }));
+    return data.models.map(toModelInfo);
   }
 
   /**
    * Get details for a specific model.
    *
    * Returns model metadata including dimensions, supported inputs/outputs,
-   * loaded status, and max sequence length. This is a lightweight call that
-   * reads from model config — it does not load the model or trigger inference.
+   * lifecycle state, profiles, and capabilities. This is a lightweight call
+   * that reads from model config — it does not load the model or trigger
+   * inference.
    *
    * @param name - Model name (e.g., "BAAI/bge-m3")
    * @returns Model information
@@ -921,25 +1295,9 @@ export class SIEClient {
   async getModel(name: string): Promise<ModelInfo> {
     const response = await this.requestJson(`/v1/models/${encodeURIComponent(name)}`, "GET");
 
-    interface WireModelInfo {
-      name: string;
-      loaded: boolean;
-      inputs: string[];
-      outputs: string[];
-      dims?: { dense?: number; sparse?: number; multivector?: number };
-      max_sequence_length?: number;
-    }
-
     const data = (await response.json()) as WireModelInfo;
 
-    return {
-      name: data.name,
-      loaded: data.loaded,
-      inputs: data.inputs,
-      outputs: data.outputs,
-      dims: data.dims,
-      maxSequenceLength: data.max_sequence_length,
-    };
+    return toModelInfo(data);
   }
 
   /**
@@ -1031,7 +1389,7 @@ export class SIEClient {
   /**
    * Score items against a query using a reranker model.
    *
-   * @param model - Model name (e.g., "bge-reranker-v2")
+   * @param model - Model name (e.g., "BAAI/bge-reranker-v2-m3")
    * @param query - Query item
    * @param items - Items to score against the query
    * @param options - Score options
@@ -1040,7 +1398,7 @@ export class SIEClient {
    * @example
    * ```typescript
    * const result = await client.score(
-   *   "bge-reranker-v2",
+   *   "BAAI/bge-reranker-v2-m3",
    *   { text: "What is machine learning?" },
    *   [
    *     { id: "doc-1", text: "Machine learning is..." },
@@ -1055,15 +1413,20 @@ export class SIEClient {
   /**
    * Generate text from a prompt (walking-skeleton SDK surface).
    *
-   * The SDK does not currently expose streaming chunks. The worker streams
-   * to the gateway, the gateway aggregates, and the SDK returns the
-   * assembled result plus SIE-native timing metadata (TTFT, TPOT,
-   * attempt id).
+   * Returns the aggregated outcome: the worker streams to the gateway,
+   * the gateway aggregates, and the SDK returns the assembled result
+   * plus SIE-native timing metadata (TTFT, TPOT, attempt id). To
+   * consume chunks as they arrive, use {@link streamGenerate} instead.
+   * Text-only prompts are raw continuation input, passed unchanged without
+   * the model's chat template or its enable_thinking/guardian_config settings.
+   * Use {@link chatCompletions} with messages for chat, instruction-based
+   * structured output, and guard checks. Image-bearing native requests render
+   * the prompt and images as one user turn through the model's template.
    *
    * @example
    * ```typescript
    * const result = await client.generate(
-   *   "Qwen__Qwen3-4B-Instruct-2507",
+   *   "Qwen/Qwen3-4B-Instruct-2507",
    *   "Write a haiku about the sea.",
    *   { maxNewTokens: 64, temperature: 0.7 },
    * );
@@ -1090,17 +1453,22 @@ export class SIEClient {
     if (pool) headers["X-SIE-Pool"] = pool;
     if (gpu) headers["X-SIE-MACHINE-PROFILE"] = gpu;
     if (this.apiKey) headers.Authorization = `Bearer ${this.apiKey}`;
+    if (this.remote) headers[REMOTE_HEADER] = this.remote;
 
     const safeModel = model.replaceAll("/", "__");
     const url = `${this.baseUrl}/v1/generate/${encodeURIComponent(safeModel)}`;
     const waitForCapacity = options.waitForCapacity ?? this.defaultWaitForCapacity;
 
-    const response = await withProvisioningRetry(() => this.performJsonPost(url, body, headers), {
-      model,
-      gpu,
-      waitForCapacity,
-      provisionTimeoutMs: this.provisionTimeout,
-    });
+    const timeoutMs = options.timeoutMs ?? this.timeout;
+    const response = await withProvisioningRetry(
+      () => this.performJsonPost(url, body, headers, timeoutMs),
+      {
+        model,
+        gpu,
+        waitForCapacity,
+        provisionTimeoutMs: this.provisionTimeout,
+      },
+    );
 
     const data = await parseTerminalJsonObject(response, "generate");
     const result = parseGenerateResult(data);
@@ -1121,28 +1489,46 @@ export class SIEClient {
    *     silently re-issuing a billable generation)
    *
    * Each call uses a fresh `AbortController` so concurrent retries don't
-   * share state, and the per-attempt timeout is bounded by `this.timeout`
-   * (NOT the cumulative provisioning budget).
+   * share state, and the per-attempt timeout is `timeoutMs` (NOT the
+   * cumulative provisioning budget).
    */
   private async performJsonPost(
     url: string,
     body: unknown,
     headers: Record<string, string>,
+    timeoutMs: number,
   ): Promise<Response> {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), this.timeout);
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const response = await fetch(url, {
+      let response = await fetch(url, {
         method: "POST",
         headers,
         body: JSON.stringify(body),
         signal: controller.signal,
-        redirect: "error",
+        redirect: "manual",
       });
+      for (let hop = 0; hop < MODAL_CONTINUATION_MAX_HOPS; hop += 1) {
+        requireVisibleManualRedirect(response);
+        const continuationUrl = modalContinuationUrl(this.baseUrl, response);
+        if (!continuationUrl) return response;
+        response = await fetch(continuationUrl, {
+          method: "GET",
+          headers,
+          signal: controller.signal,
+          redirect: "manual",
+        });
+      }
+      requireVisibleManualRedirect(response);
+      if (modalContinuationUrl(this.baseUrl, response)) {
+        throw new ProvisioningError(
+          `Provisioning result remained in flight after ${MODAL_CONTINUATION_MAX_HOPS} continuation hops`,
+        );
+      }
       return response;
     } catch (err) {
       if (err instanceof Error && err.name === "AbortError") {
-        throw new SIEConnectionError(`Request timeout after ${this.timeout}ms`, "timeout");
+        throw new SIEConnectionError(`Request timeout after ${timeoutMs}ms`, "timeout");
       }
       if (err instanceof TypeError) {
         // `generate()` / `chatCompletions()` are non-idempotent and carry
@@ -1155,7 +1541,7 @@ export class SIEClient {
         // retry loop propagate it. The SAFE pre-execution capacity
         // signals (503 PROVISIONING / MODEL_LOADING) are HTTP statuses, not
         // exceptions, so the retry loop still handles them.
-        throw new SIEConnectionError(`Connection failed: ${err.message}`, "connect");
+        throw connectionErrorFromFetchTypeError(err);
       }
       throw err;
     } finally {
@@ -1219,12 +1605,16 @@ export class SIEClient {
     // The loop also surfaces `ProvisioningError` when the caller opted out
     // (`waitForCapacity: false`) or the provision budget is exhausted,
     // matching `generate()`.
-    const response = await withProvisioningRetry(() => this.performJsonPost(url, body, headers), {
-      model: req.model,
-      gpu: undefined,
-      waitForCapacity,
-      provisionTimeoutMs,
-    });
+    const timeoutMs = options.timeoutMs ?? this.timeout;
+    const response = await withProvisioningRetry(
+      () => this.performJsonPost(url, body, headers, timeoutMs),
+      {
+        model: req.model,
+        gpu: undefined,
+        waitForCapacity,
+        provisionTimeoutMs,
+      },
+    );
 
     this.checkServerVersion(response);
 
@@ -1361,7 +1751,7 @@ export class SIEClient {
       signal,
       (chunk) => extractGenerateChunkError(chunk),
       { pool, gpu },
-      { waitForCapacity },
+      { waitForCapacity, timeoutMs: options.timeoutMs },
     );
   }
 
@@ -1379,7 +1769,8 @@ export class SIEClient {
    * Retry policy mirrors {@link generate}: only explicit SAFE
    * pre-execution capacity signals — `503 PROVISIONING`,
    * `503 MODEL_LOADING` and `503 RESOURCE_EXHAUSTED` (the latter only
-   * under `waitForCapacity`) — are retried while the provision budget
+   * under `waitForCapacity`) — and the pre-dispatch admission rejections
+   * handled by `admissionRetryDelay` are retried while the provision budget
    * remains; a `504` is post-publish and therefore terminal.
    * Once the body opens we never retry (the call is non-idempotent; a
    * mid-stream failure must not re-issue generation).
@@ -1393,12 +1784,13 @@ export class SIEClient {
     signal: AbortSignal | undefined,
     extractError: (chunk: T) => SIEStreamError | null,
     routing?: { pool?: string; gpu?: string },
-    provisioning?: { waitForCapacity?: boolean },
+    provisioning?: { waitForCapacity?: boolean; timeoutMs?: number },
   ): AsyncGenerator<T, void, undefined> {
     const headers = this.buildChatHeaders("text/event-stream");
     if (routing?.pool) headers["X-SIE-Pool"] = routing.pool;
     if (routing?.gpu) headers["X-SIE-MACHINE-PROFILE"] = routing.gpu;
     const waitForCapacity = provisioning?.waitForCapacity ?? this.defaultWaitForCapacity;
+    const preStreamTimeoutMs = provisioning?.timeoutMs ?? this.timeout;
     const gpu = routing?.gpu;
 
     // Compose the caller's signal with our internal timeout-controller so
@@ -1431,7 +1823,7 @@ export class SIEClient {
         // three-tier taxonomy). Setting `this.timeout` for the whole stream
         // would cap long generations at 30s. A fresh per-attempt timeout
         // covers each pre-stream fetch.
-        const preStreamTimeoutId = setTimeout(() => controller.abort(), this.timeout);
+        const preStreamTimeoutId = setTimeout(() => controller.abort(), preStreamTimeoutMs);
         let attemptResponse: Response;
         try {
           attemptResponse = await fetch(url, {
@@ -1446,10 +1838,13 @@ export class SIEClient {
             throw new SIEConnectionError("Stream aborted before response", "other");
           }
           if (error instanceof Error && error.name === "AbortError") {
-            throw new SIEConnectionError(`Stream open timeout after ${this.timeout}ms`, "timeout");
+            throw new SIEConnectionError(
+              `Stream open timeout after ${preStreamTimeoutMs}ms`,
+              "timeout",
+            );
           }
           if (error instanceof TypeError) {
-            throw new SIEConnectionError(`Connection failed: ${error.message}`, "connect");
+            throw connectionErrorFromFetchTypeError(error);
           }
           throw error;
         } finally {
@@ -1470,6 +1865,7 @@ export class SIEClient {
                 "No capacity available. Server is provisioning.",
                 gpu,
                 getRetryAfter(attemptResponse),
+                await getErrorParam(attemptResponse.clone()),
               );
             }
             const elapsed = Date.now() - startTime;
@@ -1478,6 +1874,7 @@ export class SIEClient {
                 `Provisioning timeout after ${elapsed}ms`,
                 gpu,
                 getRetryAfter(attemptResponse),
+                await getErrorParam(attemptResponse.clone()),
               );
             }
             const retryAfter = getRetryAfter(attemptResponse);
@@ -1498,7 +1895,11 @@ export class SIEClient {
           if (errorCode === MODEL_LOADING_ERROR_CODE) {
             const elapsed = Date.now() - startTime;
             if (elapsed >= this.provisionTimeout) {
-              throw new ModelLoadingError(`Model loading timeout for '${model}'`, model);
+              throw new ModelLoadingError(
+                `Model loading timeout for '${model}'`,
+                model,
+                await getErrorParam(attemptResponse.clone()),
+              );
             }
             const delay = getRetryAfter(attemptResponse) ?? MODEL_LOADING_DEFAULT_DELAY;
             if (
@@ -1518,7 +1919,11 @@ export class SIEClient {
             if (!waitForCapacity) {
               throw new ResourceExhaustedError(
                 `Server resource exhausted after ${oomRetries} retry attempt(s) for model '${model}'`,
-                { model, retries: oomRetries },
+                {
+                  model,
+                  retries: oomRetries,
+                  param: await getErrorParam(attemptResponse.clone()),
+                },
               );
             }
             const delay = nextOomRetryDelay({
@@ -1528,6 +1933,7 @@ export class SIEClient {
               elapsedMs: Date.now() - startTime,
               provisionTimeoutMs: this.provisionTimeout,
               model,
+              param: await getErrorParam(attemptResponse.clone()),
             });
             oomRetries += 1;
             if (await abortableSleep(delay, controller.signal)) {
@@ -1535,6 +1941,17 @@ export class SIEClient {
             }
             continue;
           }
+        }
+
+        const admissionDelay = await admissionRetryDelay(attemptResponse, {
+          startTime,
+          provisionTimeoutMs: this.provisionTimeout,
+        });
+        if (admissionDelay !== undefined) {
+          if (await abortableSleep(admissionDelay, controller.signal)) {
+            throw new SIEConnectionError("Stream aborted while provisioning", "other");
+          }
+          continue;
         }
 
         // 504 is terminal on the streaming path: post-publish, a worker may
@@ -1547,6 +1964,8 @@ export class SIEClient {
               "non-idempotent (retrying could double-bill).",
             await getErrorCode(attemptResponse.clone()),
             HTTP_GATEWAY_TIMEOUT,
+            readRequestId(attemptResponse),
+            await getErrorParam(attemptResponse.clone()),
           );
         }
 
@@ -1601,6 +2020,7 @@ export class SIEClient {
       [SDK_VERSION_HEADER]: SDK_VERSION,
     };
     if (this.apiKey) headers.Authorization = `Bearer ${this.apiKey}`;
+    if (this.remote) headers[REMOTE_HEADER] = this.remote;
     return headers;
   }
 
@@ -1642,7 +2062,7 @@ export class SIEClient {
   /**
    * Extract entities from a single item.
    *
-   * @param model - Model name (e.g., "gliner-multi-v2.1")
+   * @param model - Model name (e.g., "urchade/gliner_multi-v2.1")
    * @param item - Item to extract from
    * @param options - Extract options with labels
    * @returns Extract result with entities
@@ -1652,7 +2072,7 @@ export class SIEClient {
   /**
    * Extract entities from multiple items.
    *
-   * @param model - Model name (e.g., "gliner-multi-v2.1")
+   * @param model - Model name (e.g., "urchade/gliner_multi-v2.1")
    * @param items - Items to extract from
    * @param options - Extract options with labels
    * @returns Array of extract results in same order as input
@@ -1669,7 +2089,7 @@ export class SIEClient {
    * @example
    * ```typescript
    * const result = await client.extract(
-   *   "gliner-multi-v2.1",
+   *   "urchade/gliner_multi-v2.1",
    *   { text: "Apple was founded by Steve Jobs." },
    *   { labels: ["person", "organization"] },
    * );
@@ -1729,6 +2149,16 @@ export class SIEClient {
 
     const results = parseExtractResults(data.items);
     attachRequestMetadata(results, response.headers, data);
+    // Same positional contract as encode: `results[0]` below and index-based
+    // reassembly in batch callers both assume one result per input, and the
+    // queue path drops failed items from a 200 body.
+    validateBatchResultCount(
+      results,
+      itemsArray,
+      model,
+      "extract",
+      response.headers.get("x-sie-request-id") ?? undefined,
+    );
 
     if (isSingleItem) {
       const first = results[0];
@@ -1782,11 +2212,11 @@ export class SIEClient {
    * await client.createPool("eval-bench", { l4: 2 }, undefined, undefined, {
    *   bundle: "default",
    *   minimumWorkerCount: 1,
-   *   pinnedModels: ["bge-m3"],
+   *   pinnedModels: ["BAAI/bge-m3"],
    * });
    *
    * // Use the pool for requests
-   * await client.encode("bge-m3", { text: "Hello" }, { gpu: "eval-bench/l4" });
+   * await client.encode("BAAI/bge-m3", { text: "Hello" }, { gpu: "eval-bench/l4" });
    *
    * // Clean up when done
    * await client.deletePool("eval-bench");
@@ -2168,7 +2598,7 @@ export class SIEClient {
    * console.log(`Ready with ${capacity.workerCount} L4 workers`);
    *
    * // Wait and pre-load a model
-   * const capacityWithModel = await client.waitForCapacity("l4", { model: "bge-m3" });
+   * const capacityWithModel = await client.waitForCapacity("l4", { model: "BAAI/bge-m3" });
    * ```
    */
   async waitForCapacity(
@@ -2245,16 +2675,27 @@ export class SIEClient {
     // Retry counter for server-side OOM (RESOURCE_EXHAUSTED). Bounded so a
     // stuck-at-OOM server cannot cause unbounded blocking.
     let oomRetries = 0;
+    // First connect-retry is surfaced via `console.warn` (the SDK's existing
+    // logging seam, cf. the version-skew warning) so a user does not silently
+    // wait out the whole provision budget against an unreachable server.
+    let warnedConnectRetry = false;
 
     while (true) {
       let response: Response;
       try {
-        response = await this.request(path, body, pool, gpu);
+        response = await this.request(path, body, pool, gpu, startTime);
       } catch (err) {
         // Only retry connect-time failures; see docstring for rationale.
         if (waitForCapacity && err instanceof SIEConnectionError && err.kind === "connect") {
           const elapsed = Date.now() - startTime;
           if (elapsed < this.provisionTimeout) {
+            if (!warnedConnectRetry) {
+              warnedConnectRetry = true;
+              console.warn(
+                `[SIE SDK] Connection to ${urlOriginForLogging(this.baseUrl)} failed (${err.message}); ` +
+                  `retrying for up to ${this.provisionTimeout}ms`,
+              );
+            }
             const remaining = this.provisionTimeout - elapsed;
             const delay = Math.min(DEFAULT_RETRY_DELAY, remaining);
             await sleep(delay);
@@ -2264,7 +2705,7 @@ export class SIEClient {
         throw err;
       }
 
-      // Short-circuit terminal load failures (sie-test#85). The server
+      // Short-circuit terminal load failures. The server
       // emits 502 MODEL_LOAD_FAILED for permanent classes (gated repos,
       // missing dependencies, unrecognised architectures); we must
       // surface the error immediately rather than burn the
@@ -2287,6 +2728,7 @@ export class SIEClient {
               `No capacity available for GPU '${gpu}'. Server is provisioning.`,
               gpu,
               retryAfter,
+              await getErrorParam(response.clone()),
             );
           }
 
@@ -2296,6 +2738,7 @@ export class SIEClient {
               `Provisioning timeout after ${elapsed}ms waiting for GPU '${gpu}'`,
               gpu,
               retryAfter,
+              await getErrorParam(response.clone()),
             );
           }
 
@@ -2314,6 +2757,7 @@ export class SIEClient {
               `LoRA loading timeout after ${loraRetries} retries`,
               undefined, // We don't have lora name at this level
               model,
+              await getErrorParam(response.clone()),
             );
           }
 
@@ -2331,6 +2775,7 @@ export class SIEClient {
             throw new ModelLoadingError(
               `Model loading timeout after ${(elapsed / 1000).toFixed(1)}s for '${model}'`,
               model,
+              await getErrorParam(response.clone()),
             );
           }
 
@@ -2355,11 +2800,27 @@ export class SIEClient {
             elapsedMs: Date.now() - startTime,
             provisionTimeoutMs: this.provisionTimeout,
             model,
+            param: await getErrorParam(response.clone()),
           });
           oomRetries += 1;
           await sleep(delay);
           continue;
         }
+      }
+
+      // Retryable pre-execution admission backpressure (pass-2 audit B1/B2/B7):
+      // a 429 RATE_LIMIT, or a retryable 503 (BILLING_CAPACITY_UNAVAILABLE /
+      // QUEUE_FULL) the ladder above did not match. No work was published, so
+      // retry within the provision-timeout budget honoring Retry-After; a
+      // give-up throws a typed RateLimitError (429) or the server's terminal
+      // 503. 402/403 credit/account errors are terminal and NOT handled here.
+      const admissionDelay = await admissionRetryDelay(response, {
+        startTime,
+        provisionTimeoutMs: this.provisionTimeout,
+      });
+      if (admissionDelay !== undefined) {
+        await sleep(admissionDelay);
+        continue;
       }
 
       // Handle 504 (gateway timeout): queued work was published, but the
@@ -2395,6 +2856,7 @@ export class SIEClient {
     body?: unknown,
     pool?: string,
     gpu?: string,
+    startTime = Date.now(),
   ): Promise<Response> {
     const url = `${this.baseUrl}${path}`;
 
@@ -2420,30 +2882,81 @@ export class SIEClient {
       headers.Authorization = `Bearer ${this.apiKey}`;
     }
 
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), this.timeout);
+    if (this.remote) {
+      headers[REMOTE_HEADER] = this.remote;
+    }
 
-    try {
-      const response = await fetch(url, {
+    const fetchWithinBudget = async (
+      requestUrl: string,
+      init: Omit<RequestInit, "signal">,
+      followingContinuation: boolean,
+    ): Promise<Response> => {
+      const remaining = this.provisionTimeout - (Date.now() - startTime);
+      if (followingContinuation && remaining <= 0) {
+        throw new ProvisioningError(
+          `Provisioning timeout after ${this.provisionTimeout}ms awaiting request result`,
+          gpu,
+        );
+      }
+      const requestTimeout = followingContinuation
+        ? Math.min(this.timeout, remaining)
+        : this.timeout;
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), requestTimeout);
+      try {
+        return await fetch(requestUrl, { ...init, signal: controller.signal });
+      } catch (error) {
+        if (error instanceof Error && error.name === "AbortError") {
+          throw new SIEConnectionError(`Request timeout after ${requestTimeout}ms`, "timeout");
+        }
+        if (error instanceof TypeError) {
+          if (followingContinuation) {
+            throw new SIEConnectionError(
+              `Failed to retrieve the in-flight request result: ${error.message}`,
+              "other",
+            );
+          }
+          throw connectionErrorFromFetchTypeError(error);
+        }
+        throw error;
+      } finally {
+        clearTimeout(timeoutId);
+      }
+    };
+
+    let response = await fetchWithinBudget(
+      url,
+      {
         method: "POST",
         headers,
         body: body !== undefined ? packMessage(body) : undefined,
-        signal: controller.signal,
-        redirect: "error",
-      });
+        redirect: "manual",
+      },
+      false,
+    );
 
-      return response;
-    } catch (error) {
-      if (error instanceof Error && error.name === "AbortError") {
-        throw new SIEConnectionError(`Request timeout after ${this.timeout}ms`, "timeout");
-      }
-      if (error instanceof TypeError) {
-        throw new SIEConnectionError(`Connection failed: ${error.message}`, "connect");
-      }
-      throw error;
-    } finally {
-      clearTimeout(timeoutId);
+    for (let hop = 0; hop < MODAL_CONTINUATION_MAX_HOPS; hop += 1) {
+      requireVisibleManualRedirect(response);
+      const continuationUrl = modalContinuationUrl(this.baseUrl, response);
+      if (!continuationUrl) return response;
+      response = await fetchWithinBudget(
+        continuationUrl,
+        {
+          method: "GET",
+          headers,
+          redirect: "manual",
+        },
+        true,
+      );
     }
+    requireVisibleManualRedirect(response);
+    if (modalContinuationUrl(this.baseUrl, response)) {
+      throw new ProvisioningError(
+        `Provisioning result remained in flight after ${MODAL_CONTINUATION_MAX_HOPS} continuation hops`,
+        gpu,
+      );
+    }
+    return response;
   }
 
   /**
@@ -2483,7 +2996,7 @@ export class SIEClient {
         throw new SIEConnectionError(`Request timeout after ${this.timeout}ms`, "timeout");
       }
       if (error instanceof TypeError) {
-        throw new SIEConnectionError(`Connection failed: ${error.message}`, "connect");
+        throw connectionErrorFromFetchTypeError(error);
       }
       throw error;
     } finally {
@@ -2543,7 +3056,7 @@ export class SIEClient {
         throw new SIEConnectionError(`Request timeout after ${timeoutMs}ms`, "timeout");
       }
       if (error instanceof TypeError) {
-        throw new SIEConnectionError(`Connection failed: ${error.message}`, "connect");
+        throw connectionErrorFromFetchTypeError(error);
       }
       throw error;
     } finally {
@@ -2624,13 +3137,35 @@ export class SIEClient {
     let refreshes = 0;
     for (;;) {
       const job = await this.jobGet(jobId);
+      const state = job.state;
+      if (!state || !TERMINAL_JOB_STATES.has(state)) {
+        throw new RequestError(
+          `job ${jobId} is ${JSON.stringify(state)}, not terminal; results are decodable only after the job reaches a terminal state (succeeded/failed/suspended/cancelled)`,
+          JOB_NOT_TERMINAL_ERROR_CODE,
+          409,
+        );
+      }
       const chunks = jobChunks(job);
       const items: JobResultItem[] = [];
       try {
         for (const chunk of chunks) {
-          if (chunk.state !== "succeeded" || !chunk.ref) continue;
+          // A `failed` chunk still carries a ref with its SUCCESSFUL siblings
+          // (which are billed) plus the per-item failures, so its ref is read
+          // too — only chunks with no ref at all are skipped. Each item's
+          // `success`/`error` distinguishes the two.
+          if (!chunk.ref) continue;
           const raw = await this.readRef(chunk.ref);
-          items.push(...decodeChunkBytes(raw));
+          try {
+            items.push(...decodeChunkBytes(raw));
+          } catch (error) {
+            // Garbage bytes are a DECODE fault, not proof of failed
+            // publication/billing — confine it and flag it distinctly rather
+            // than folding it into the neutral incompleteness warning below.
+            if (!(error instanceof MalformedChunkError)) throw error;
+            console.warn(
+              `[SIE SDK] job ${jobId} chunk (seq=${chunk.seq}) ref could not be decoded (malformed bytes); its items are omitted from the results`,
+            );
+          }
         }
       } catch (error) {
         const refreshable =
@@ -2644,13 +3179,24 @@ export class SIEClient {
         throw error;
       }
       const withDims = items.find((it) => it.dims != null);
+      const retrieved = items.length;
+      const totalItems = job.total_items;
+      if (totalItems != null && retrieved < totalItems) {
+        // Neutral: state only what is known (fewer items decoded than the job's
+        // item count). Do NOT assert a cause — the shortfall may be an
+        // unpublished chunk OR an undecodable ref, and this call cannot prove
+        // billing from the status doc.
+        console.warn(
+          `[SIE SDK] job ${jobId} results are incomplete: retrieved ${retrieved} of ${totalItems} items`,
+        );
+      }
       return {
         job_id: job.id ?? jobId,
-        state: job.state,
-        total_items: job.total_items,
+        state,
+        total_items: totalItems,
         settled_credits: job.settled_credits,
         chunks,
-        retrieved: items.length,
+        retrieved,
         dims: withDims ? withDims.dims : null,
         items,
       };
@@ -2659,14 +3205,30 @@ export class SIEClient {
 
   private async jobWait(
     jobId: string,
-    options?: { timeoutMs?: number; pollMs?: number },
+    options?: { timeoutMs?: number; pollMs?: number; raiseOnFailure?: boolean },
   ): Promise<JobStatus> {
     const timeoutMs = options?.timeoutMs ?? DEFAULT_JOB_WAIT_TIMEOUT;
     const pollMs = options?.pollMs ?? DEFAULT_JOB_WAIT_POLL;
     const deadline = Date.now() + timeoutMs;
     for (;;) {
       const job = await this.jobGet(jobId);
-      if ((job.state && TERMINAL_JOB_STATES.has(job.state)) || job.phase === "planned") {
+      if (job.phase === "planned") return job;
+      const state = job.state;
+      if (state && TERMINAL_JOB_STATES.has(state)) {
+        if (options?.raiseOnFailure && state !== "succeeded") {
+          const outcome = job.outcome;
+          const errorCode = job.error_code;
+          const reason =
+            outcome || errorCode
+              ? ` (outcome=${JSON.stringify(outcome)}, error_code=${JSON.stringify(errorCode)})`
+              : "";
+          throw new JobFailedError(`job ${jobId} terminated ${JSON.stringify(state)}${reason}`, {
+            jobId: job.id ?? jobId,
+            state,
+            outcome,
+            errorCode,
+          });
+        }
         return job;
       }
       if (Date.now() >= deadline) {
@@ -2706,7 +3268,7 @@ export class SIEClient {
         throw new SIEConnectionError(`Request timeout after ${this.timeout}ms`, "timeout");
       }
       if (error instanceof TypeError) {
-        throw new SIEConnectionError(`Connection failed: ${error.message}`, "connect");
+        throw connectionErrorFromFetchTypeError(error);
       }
       throw error;
     } finally {
@@ -2815,7 +3377,7 @@ export class SIEClient {
         throw new SIEConnectionError(`Request timeout after ${timeoutMs}ms`, "timeout");
       }
       if (error instanceof TypeError) {
-        throw new SIEConnectionError(`Connection failed: ${error.message}`, "connect");
+        throw connectionErrorFromFetchTypeError(error);
       }
       throw error;
     } finally {
@@ -2851,7 +3413,7 @@ export class SIEClient {
         throw new SIEConnectionError(`Request timeout after ${this.timeout}ms`, "timeout");
       }
       if (error instanceof TypeError) {
-        throw new SIEConnectionError(`Connection failed: ${error.message}`, "connect");
+        throw connectionErrorFromFetchTypeError(error);
       }
       throw error;
     } finally {

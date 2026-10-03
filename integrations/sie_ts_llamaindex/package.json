@@ -1,6 +1,6 @@
 {
   "name": "@superlinked/sie-llamaindex",
-  "version": "0.7.1",
+  "version": "0.9.0",
   "description": "SIE embeddings integration for LlamaIndex.TS",
   "type": "module",
   "main": "./dist/index.cjs",
@@ -38,7 +38,7 @@
     "llamaindex": "^0.8.37",
     "tsup": "^8.5.1",
     "typescript": "^5.9.3",
-    "vitest": "^4.1.0"
+    "vitest": "^5.0.0"
   },
   "engines": {
     "node": ">=22.0.0"
@@ -54,7 +54,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/superlinked/sie-internal.git",
+    "url": "https://github.com/superlinked/sie.git",
     "directory": "integrations/sie_ts_llamaindex"
   },
   "publishConfig": {

@@ -365,6 +365,92 @@ class TestRegistryPinnedModels:
         registry.add_config(_make_config(name="Org/Model", hf_id="org/model-hf"))
         assert registry._pinned_disk_repo_ids() == {"org/model-hf"}
 
+    def test_pinned_disk_repo_ids_protects_all_expanded_derived_repos_with_dedup(self) -> None:
+        """Inherited duplicates collapse while a distinct effective artifact is also protected."""
+        registry = ModelRegistry(pinned_models=["Org/Model:alternate"])
+        config = ModelConfig.model_validate(
+            {
+                "sie_id": "Org/Model",
+                "hf_id": "org/source-hf",
+                "hf_revision": "a" * 40,
+                "tasks": {"encode": {"dense": {"dim": 3}}},
+                "profiles": {
+                    "default": {
+                        "adapter_path": "sie_server.adapters.sentence_transformer:Adapter",
+                        "max_batch_tokens": 128,
+                        "adapter_options": {
+                            "loadtime": {
+                                "serving_artifact": {
+                                    "format": "ctranslate2",
+                                    "repo_id": "derived/shared",
+                                    "revision": "b" * 40,
+                                    "manifest_path": "sie-serving-artifact.json",
+                                    "manifest_sha256": "c" * 64,
+                                    "compute_type": "bfloat16",
+                                }
+                            }
+                        },
+                    },
+                    "inherited": {"extends": "default"},
+                    "alternate": {
+                        "extends": "default",
+                        "adapter_options": {
+                            "loadtime": {
+                                "serving_artifact": {
+                                    "format": "ctranslate2",
+                                    "repo_id": "derived/alternate",
+                                    "revision": "d" * 40,
+                                    "manifest_path": "sie-serving-artifact.json",
+                                    "manifest_sha256": "e" * 64,
+                                    "compute_type": "int8_bfloat16",
+                                }
+                            }
+                        },
+                    },
+                },
+            }
+        )
+
+        registry.add_config(config)
+
+        assert registry._pinned_disk_repo_ids() == {"derived/shared", "derived/alternate"}
+
+    def test_pinned_disk_repo_ids_protects_source_and_derived_for_mixed_profiles(self) -> None:
+        registry = ModelRegistry(pinned_models=["Org/Mixed"])
+        config = ModelConfig.model_validate(
+            {
+                "sie_id": "Org/Mixed",
+                "hf_id": "org/source-hf",
+                "hf_revision": "a" * 40,
+                "tasks": {"encode": {"dense": {"dim": 3}}},
+                "profiles": {
+                    "default": {
+                        "adapter_path": "sie_server.adapters.sentence_transformer:Adapter",
+                        "max_batch_tokens": 128,
+                    },
+                    "derived": {
+                        "extends": "default",
+                        "adapter_options": {
+                            "loadtime": {
+                                "serving_artifact": {
+                                    "format": "ctranslate2",
+                                    "repo_id": "derived/mixed",
+                                    "revision": "b" * 40,
+                                    "manifest_path": "sie-serving-artifact.json",
+                                    "manifest_sha256": "c" * 64,
+                                    "compute_type": "bfloat16",
+                                }
+                            }
+                        },
+                    },
+                },
+            }
+        )
+
+        registry.add_config(config)
+
+        assert registry._pinned_disk_repo_ids() == {"org/source-hf", "derived/mixed"}
+
     def test_disk_cache_manager_wired_with_pinned_provider(self) -> None:
         """The registry feeds its pinned set into the disk cache manager's eviction guard."""
         registry = ModelRegistry(pinned_models=["org/pinned"])

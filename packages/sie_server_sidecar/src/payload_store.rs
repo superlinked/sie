@@ -9,7 +9,7 @@
 //!     (absolute paths are only accepted when they are inside `base_dir`;
 //!     relative paths are resolved against it). When no `base_dir` is
 //!     configured the reader is disabled for safety.
-//!   - cloud: `s3://…` / `gs://…` / `abfs://…` / `abfss://…` URL
+//!   - cloud: `s3://…` / `gs://…` / `abfs://…` / `abfss://…` / `oss://…` URL
 //!     (handled when the `cloud-storage` feature is enabled)
 //!
 //! Security: on Linux, the configured directory is pinned as a file
@@ -41,7 +41,7 @@ use futures_util::StreamExt;
 #[cfg(feature = "cloud-storage")]
 use object_store::ObjectStoreExt;
 
-const OBJECT_STORE_SCHEMES: &[&str] = &["s3://", "gs://", "abfs://", "abfss://"];
+const OBJECT_STORE_SCHEMES: &[&str] = &["s3://", "gs://", "abfs://", "abfss://", "oss://"];
 #[cfg(any(target_os = "linux", feature = "cloud-storage"))]
 const MAX_PAYLOAD_BYTES: u64 = crate::prep::media::MAX_OFFLOADED_PAYLOAD_BYTES as u64;
 
@@ -50,6 +50,11 @@ fn object_store_scheme(url: &str) -> Option<&'static str> {
         .iter()
         .copied()
         .find(|scheme| url.starts_with(scheme))
+}
+
+#[cfg(feature = "cloud-storage")]
+pub(crate) fn is_known_object_store_ref(value: &str) -> bool {
+    object_store_scheme(value).is_some()
 }
 
 #[derive(Debug, Error)]
@@ -537,7 +542,7 @@ impl PayloadStore for ObjectPayloadStore {
 /// URL handling:
 /// * `None` or an empty string → local store with no base_dir (disabled,
 ///   rejects all reads). Pods without offload configured stay safe.
-/// * `s3://…` / `gs://…` / `abfs://…` / `abfss://…` with the
+/// * `s3://…` / `gs://…` / `abfs://…` / `abfss://…` / `oss://…` with the
 ///   `cloud-storage` feature → object storage reader.
 /// * Those object-store URLs without the feature → we can't read from
 ///   object storage, and we MUST NOT silently treat the URL string as a
@@ -550,13 +555,18 @@ impl PayloadStore for ObjectPayloadStore {
 pub async fn create_payload_store(
     url: Option<&str>,
 ) -> Result<std::sync::Arc<dyn PayloadStore>, PayloadError> {
-    let Some(url) = url.filter(|u| !u.is_empty()) else {
+    let Some(url) = url.map(str::trim).filter(|url| !url.is_empty()) else {
         return Ok(std::sync::Arc::new(LocalPayloadStore::new(None::<PathBuf>)));
     };
 
     if let Some(scheme) = object_store_scheme(url) {
         #[cfg(feature = "cloud-storage")]
         {
+            if url.starts_with("oss://") {
+                return Ok(std::sync::Arc::new(
+                    crate::oss_payload_store::OssPayloadStore::from_url(url)?,
+                ));
+            }
             if let Some(rest) = url.strip_prefix("s3://") {
                 return Ok(std::sync::Arc::new(ObjectPayloadStore::new_s3(rest)?));
             }
@@ -1343,6 +1353,24 @@ mod tests {
                 matches!(e, PayloadError::Unsupported(_)),
                 "expected Unsupported for abfs://, got {e:?}"
             ),
+        }
+    }
+
+    #[cfg(not(feature = "cloud-storage"))]
+    #[tokio::test]
+    async fn factory_oss_without_feature_errors_loudly() {
+        match create_payload_store(Some("oss://bucket/payloads")).await {
+            Ok(_) => panic!("expected Unsupported for oss:// without cloud-storage feature"),
+            Err(error) => assert!(matches!(error, PayloadError::Unsupported(_))),
+        }
+    }
+
+    #[cfg(not(feature = "cloud-storage"))]
+    #[tokio::test]
+    async fn factory_trims_before_scheme_classification() {
+        match create_payload_store(Some("  oss://bucket/payloads  ")).await {
+            Ok(_) => panic!("expected trimmed oss:// to require cloud-storage feature"),
+            Err(error) => assert!(matches!(error, PayloadError::Unsupported(_))),
         }
     }
 }

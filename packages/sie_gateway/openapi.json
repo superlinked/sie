@@ -41,6 +41,35 @@
         ],
         "type": "object"
       },
+      "AudioInput": {
+        "properties": {
+          "data": {
+            "contentEncoding": "base64",
+            "description": "Media bytes. Base64-encoded on the JSON path; native binary on the msgpack path.",
+            "type": "string"
+          },
+          "format": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sample_rate": {
+            "description": "Sample rate in Hz. Must be positive.",
+            "exclusiveMinimum": 0,
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "type": "object"
+      },
       "BundleConfigDocument": {
         "properties": {
           "adapters": {
@@ -197,7 +226,7 @@
         "description": "One chat message in an OpenAI chat-completions request.\n\nPer the strict allow-list parser, ``content`` is either a\nplain string OR a list of content parts (``{type:\"text\"|\"input_text\",\ntext:\"...\"}``). ``image_url`` / ``input_image`` parts carrying a base64\n``data:`` URI are accepted for generation models declaring ``inputs.image`` (non-vision\nmodels reject 400 ``unsupported_field``; remote URLs reject 400\n``invalid_request``). Assistant messages that carry ``tool_calls`` may set\n``content: null``.\n\n``tool_calls`` is accepted only on ``role:\"assistant\"`` messages; each\nentry has the validated shape ``{id, type:\"function\", function:{name, arguments}}``\nwhere ``arguments`` is a JSON-encoded string (OpenAI convention).\n``tool_call_id`` is required on ``role:\"tool\"`` messages and rejected\non every other role.",
         "properties": {
           "content": {
-            "description": "Either a string or an array of content parts (`{type:\"text\"|\"input_text\", text:\"...\"}`). Image parts (`image_url` / `input_image`) carrying a base64 `data:` URI are accepted for generation models that declare `inputs.image`; non-vision models reject with 400 unsupported_field and remote (non-`data:`) URLs reject with 400 invalid_request. May be `null` on a `role:\"assistant\"` message that carries `tool_calls`.",
+            "description": "Either a string or an array of content parts (`{type:\"text\"|\"input_text\", text:\"...\"}`). Image parts (`image_url` / `input_image`) carrying a base64 `data:` URI are accepted for generation models that declare `inputs.image`; non-vision models reject with 400 unsupported_field and remote (non-`data:`) URLs reject with 400 invalid_request. One `video_url` part per request (`{url: \"data:video/<subtype>;base64,...\"}`, MP4/MOV, WebM/Matroska or AVI) is accepted for generation models that declare `inputs.video`. May be `null` on a `role:\"assistant\"` message that carries `tool_calls`.",
             "oneOf": [
               {
                 "type": "string"
@@ -229,9 +258,23 @@
                         "text",
                         "input_text",
                         "image_url",
-                        "input_image"
+                        "input_image",
+                        "video_url"
                       ],
                       "type": "string"
+                    },
+                    "video_url": {
+                      "additionalProperties": false,
+                      "description": "Video payload for `video_url` parts: `{ \"url\": \"data:video/<subtype>;base64,...\" }` with no other keys. The container is identified from its bytes (MP4/MOV, WebM/Matroska, AVI). Remote URLs reject with 400 invalid_request.",
+                      "properties": {
+                        "url": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "url"
+                      ],
+                      "type": "object"
                     }
                   },
                   "required": [
@@ -698,10 +741,30 @@
             "minimum": 0,
             "type": "integer"
           },
+          "images": {
+            "description": "Number of input images observed by the worker after successful execution.",
+            "format": "int32",
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "prompt_tokens": {
             "format": "int32",
             "minimum": 0,
             "type": "integer"
+          },
+          "prompt_tokens_details": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PromptTokensDetails",
+                "description": "Omitted when the serving engine does not report prefix-cache hits."
+              }
+            ]
           },
           "total_tokens": {
             "format": "int32",
@@ -974,13 +1037,14 @@
               "minimum": 0,
               "type": "integer"
             },
+            "description": "Required workers per machine profile. Requirements summing to more\nthan the gateway limit (`SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT`,\ndefault 4) are rejected.",
             "propertyNames": {
               "type": "string"
             },
             "type": "object"
           },
           "minimum_worker_count": {
-            "description": "Per-pool warm floor (minimum machines kept warm via KEDA). Default 0\nkeeps scale-from-zero. See `PoolSpec::minimum_worker_count`.",
+            "description": "Per-pool warm floor (minimum machines kept warm via KEDA). Default 0\nkeeps scale-from-zero. It applies to each of the pool's machine\nprofiles; a floor whose total across profiles exceeds the gateway limit\n(`SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT`, default 4) is rejected.\nSee `PoolSpec::minimum_worker_count`.",
             "format": "int32",
             "minimum": 0,
             "type": "integer"
@@ -1010,6 +1074,7 @@
             ]
           },
           "ttl_seconds": {
+            "description": "Lease TTL in seconds; omit for the gateway default. Values above the\ngateway limit (`SIE_GATEWAY_POOL_MAX_TTL_S`, default 3600) are rejected.",
             "format": "int64",
             "minimum": 0,
             "type": [
@@ -1050,12 +1115,9 @@
       "DocumentInput": {
         "properties": {
           "data": {
-            "items": {
-              "format": "int32",
-              "minimum": 0,
-              "type": "integer"
-            },
-            "type": "array"
+            "contentEncoding": "base64",
+            "description": "Media bytes. Base64-encoded on the JSON path; native binary on the msgpack path.",
+            "type": "string"
           },
           "format": {
             "type": [
@@ -1144,6 +1206,16 @@
               },
               {
                 "$ref": "#/components/schemas/TimingInfo"
+              }
+            ]
+          },
+          "usage": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Usage"
               }
             ]
           }
@@ -1281,6 +1353,7 @@
             "items": {
               "type": "string"
             },
+            "maxItems": 1000,
             "type": [
               "array",
               "null"
@@ -1327,6 +1400,16 @@
           },
           "model": {
             "type": "string"
+          },
+          "usage": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Usage"
+              }
+            ]
           }
         },
         "required": [
@@ -1459,6 +1542,38 @@
       },
       "GenerateChunk": {
         "description": "One JSON payload from a SIE-native generation SSE ``data:`` event.\nThe stream is terminated separately by the literal ``data: [DONE]``.",
+        "oneOf": [
+          {
+            "properties": {
+              "done": {
+                "const": true
+              },
+              "error": {
+                "type": "null"
+              }
+            },
+            "required": [
+              "execution_identity_sha256",
+              "execution_binding_sha256"
+            ]
+          },
+          {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "execution_identity_sha256"
+                  ]
+                },
+                {
+                  "required": [
+                    "execution_binding_sha256"
+                  ]
+                }
+              ]
+            }
+          }
+        ],
         "properties": {
           "done": {
             "type": "boolean"
@@ -1472,6 +1587,16 @@
                 "$ref": "#/components/schemas/GenerateChunkError"
               }
             ]
+          },
+          "execution_binding_sha256": {
+            "description": "Worker-origin execution binding, only on a successful terminal event\ntogether with execution_identity_sha256. Both are lowercase SHA-256 digests.",
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "execution_identity_sha256": {
+            "description": "Worker-origin execution identity, only on a successful terminal event.\nOptional complete pair with execution_binding_sha256; older or\nself-hosted deployments may omit both. Not a catalog weights revision\nor the executed bundle/config hash.",
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
           },
           "finish_reason": {
             "type": [
@@ -1532,6 +1657,22 @@
           },
           "message": {
             "type": "string"
+          },
+          "param": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "retry_after_s": {
+            "description": "Authoritative retry hint in seconds for RESOURCE_EXHAUSTED only; null\nfor other terminal errors.",
+            "format": "int32",
+            "maximum": 60,
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
           }
         },
         "required": [
@@ -1744,10 +1885,30 @@
             "minimum": 0,
             "type": "integer"
           },
+          "images": {
+            "description": "Number of input images observed by the worker after successful execution.",
+            "format": "int32",
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "prompt_tokens": {
             "format": "int32",
             "minimum": 0,
             "type": "integer"
+          },
+          "prompt_tokens_details": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PromptTokensDetails",
+                "description": "Omitted when the serving engine does not report prefix-cache hits."
+              }
+            ]
           },
           "total_tokens": {
             "format": "int32",
@@ -1869,12 +2030,9 @@
       "ImageInput": {
         "properties": {
           "data": {
-            "items": {
-              "format": "int32",
-              "minimum": 0,
-              "type": "integer"
-            },
-            "type": "array"
+            "contentEncoding": "base64",
+            "description": "Media bytes. Base64-encoded on the JSON path; native binary on the msgpack path.",
+            "type": "string"
           },
           "format": {
             "type": [
@@ -1938,6 +2096,16 @@
       },
       "ItemInput": {
         "properties": {
+          "audio": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/AudioInput"
+              }
+            ]
+          },
           "document": {
             "oneOf": [
               {
@@ -1968,6 +2136,16 @@
             "type": [
               "string",
               "null"
+            ]
+          },
+          "video": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/VideoInput"
+              }
             ]
           }
         },
@@ -2010,6 +2188,13 @@
           "total_eligible_workers": {
             "minimum": 0,
             "type": "integer"
+          },
+          "unsupported_workers": {
+            "description": "Workers that report the expected hash but cannot serve this model, for\nexample during a rollout that adds its adapter to the bundle.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           }
         },
         "required": [
@@ -2072,6 +2257,13 @@
           "sql": {
             "description": "Whether the model targets the SQL path — backs the ``model=\"sql\"``\nalias. Informational only; never request-gated. Precision-sensitive:\nSQL quality can regress sharply under FP8, so this model-level flag is a\nsupport signal, not a per-profile quality guarantee.",
             "type": "boolean"
+          },
+          "streaming": {
+            "description": "Whether the model supports incremental public generation output.\nDefaults to true for generation models when omitted from older configs.",
+            "type": [
+              "boolean",
+              "null"
+            ]
           },
           "tools": {
             "description": "Whether the model supports tool / function calling.",
@@ -2162,6 +2354,13 @@
       "ModelInfoWire": {
         "description": "Wire shape aligned with ``sie_server`` ``ModelInfo`` for ``GET /v1/models``.",
         "properties": {
+          "aliases": {
+            "description": "Short task-tier names that resolve to this model, for example\n``[\"rerank-fast\"]``. Send one anywhere a model id is accepted and it\nresolves to this entry, billed at this model's rate.\n\nAlways present, and empty when the model has none. Only names declared\nby the released catalog or by operator configuration appear here.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "capabilities": {
             "oneOf": [
               {
@@ -2229,6 +2428,17 @@
               "null"
             ]
           },
+          "routing": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ModelRoutingWire",
+                "description": "How the bare model name is served: the routing policy and the kind of\nupstream a remote profile calls. Emitted on every entry."
+              }
+            ]
+          },
           "state": {
             "type": "string"
           }
@@ -2240,7 +2450,8 @@
           "dims",
           "loaded",
           "state",
-          "profiles"
+          "profiles",
+          "aliases"
         ],
         "type": "object"
       },
@@ -2268,6 +2479,26 @@
         "required": [
           "detail"
         ],
+        "type": "object"
+      },
+      "ModelRoutingWire": {
+        "description": "Routing summary on a ``GET /v1/models`` entry.",
+        "properties": {
+          "policy": {
+            "description": "``remote_only``, ``fallback`` or ``threshold``. ``null`` means local\ncapacity only.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "upstream_kind": {
+            "description": "``sie`` or ``openai``: the kind of upstream a remote profile calls.\n``null`` without one.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
         "type": "object"
       },
       "ModelsResponse": {
@@ -2401,7 +2632,7 @@
         "description": "OpenAI-compatible ``POST /v1/embeddings`` request (subset supported on gateway).",
         "properties": {
           "dimensions": {
-            "description": "Accepted but ignored; the gateway returns the model's native dimension.",
+            "description": "Requested embedding width. SIE always returns the model's native dense\nwidth, so this is accepted only when it equals that width; any other\nvalue is rejected with 400 `unsupported_field` rather than ignored.",
             "format": "int32",
             "minimum": 0,
             "type": [
@@ -2439,14 +2670,27 @@
         ],
         "type": "object"
       },
+      "OpenAIEmbeddingTokenSource": {
+        "enum": [
+          "worker",
+          "character_estimate"
+        ],
+        "type": "string"
+      },
       "OpenAIEmbeddingUsage": {
         "properties": {
           "prompt_tokens": {
+            "description": "Exact post-tokenization input tokens when `sie_token_source` is\n`worker`; a character-based approximation when it is\n`character_estimate`.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
           },
+          "sie_token_source": {
+            "$ref": "#/components/schemas/OpenAIEmbeddingTokenSource",
+            "description": "SIE extension. `worker` when the counts above are the model's own\npost-tokenization measurement, `character_estimate` when the serving\npath reported no counts and the numbers are approximate."
+          },
           "total_tokens": {
+            "description": "Equal to `prompt_tokens`; embeddings produce no output tokens.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
@@ -2454,7 +2698,8 @@
         },
         "required": [
           "prompt_tokens",
-          "total_tokens"
+          "total_tokens",
+          "sie_token_source"
         ],
         "type": "object"
       },
@@ -2991,6 +3236,21 @@
             "type": "boolean"
           }
         },
+        "type": "object"
+      },
+      "PromptTokensDetails": {
+        "description": "Breakdown of the prompt tokens in one generation request.",
+        "properties": {
+          "cached_tokens": {
+            "description": "Prompt tokens served from the engine's prefix cache instead of being\nprefilled. Never exceeds `prompt_tokens`.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "cached_tokens"
+        ],
         "type": "object"
       },
       "Relation": {
@@ -3655,6 +3915,47 @@
         ],
         "type": "object"
       },
+      "Usage": {
+        "description": "Authoritative worker-emitted usage. Post-tokenization counts, never a\ncharacter estimate. A reported `0` is a measurement (a request that read no\ntext); an absent block means the serving path could not count. Structurally\nidentical to `ScoreUsage`, which shipped this shape first.",
+        "properties": {
+          "images": {
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "input_tokens": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "input_tokens"
+        ],
+        "type": "object"
+      },
+      "VideoInput": {
+        "properties": {
+          "data": {
+            "contentEncoding": "base64",
+            "description": "Media bytes. Base64-encoded on the JSON path; native binary on the msgpack path.",
+            "type": "string"
+          },
+          "format": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "type": "object"
+      },
       "WorkerInfo": {
         "properties": {
           "bundle": {
@@ -3706,6 +4007,17 @@
             "format": "int32",
             "type": "integer"
           },
+          "unsupported_models": {
+            "description": "Models covered by `bundle_config_hash` that this worker cannot serve,\nfor example during a rollout that adds adapters to its bundle. The\ngateway does not route these models to it. Omitted when empty.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "unsupported_models_overflow": {
+            "description": "The worker reported more unsupported models than the gateway accepts\n(1024), so no model is routed to its lane (pool, machine profile,\nbundle) while it overflows. Omitted when false.",
+            "type": "boolean"
+          },
           "url": {
             "type": "string"
           }
@@ -3745,7 +4057,7 @@
       "url": "https://www.apache.org/licenses/LICENSE-2.0.html"
     },
     "title": "SIE Gateway",
-    "version": "0.7.1"
+    "version": "0.9.0"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -3889,7 +4201,7 @@
     },
     "/readyz": {
       "get": {
-        "description": "Process readiness only. Always returns 200 once the gateway is serving requests; never returns 503. Worker readiness is reported by GET /health and by inference responses with retryable provisioning signals from a workerless gateway. This contract supports KEDA scale-from-zero.",
+        "description": "Gateway readiness. When a config service URL is configured, returns 503 until this replica has applied its first complete configuration snapshot, and 200 from then on, including while the config service is later unreachable. Without a config service URL it returns 200 once the gateway is serving requests. Readiness never depends on worker health: worker readiness is reported by GET /health and by inference responses with retryable provisioning signals from a workerless gateway. This contract supports KEDA scale-from-zero.",
         "operationId": "readyz",
         "responses": {
           "200": {
@@ -3900,7 +4212,17 @@
                 }
               }
             },
-            "description": "Gateway process is ready"
+            "description": "Gateway is ready"
+          },
+          "503": {
+            "content": {
+              "text/plain; charset=utf-8": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The first configuration snapshot has not been applied yet"
           }
         },
         "security": [],
@@ -4008,16 +4330,24 @@
                   "type": "string"
                 }
               },
+              "X-SIE-Execution-Binding-SHA256": {
+                "description": "Worker-origin runtime-independent SHA-256 binding of the release and deployment route, when available on buffered responses. SSE carries optional execution evidence in the successful terminal event instead of headers.",
+                "schema": {
+                  "pattern": "^[0-9a-f]{64}$",
+                  "type": "string"
+                }
+              },
               "X-SIE-Execution-Identity-SHA256": {
-                "description": "Worker-origin SHA-256 identity of the immutable release and realized serving resources, when available",
+                "description": "Worker-origin SHA-256 identity of the immutable release and realized serving resources, when available on buffered responses. SSE carries optional execution evidence in the successful terminal event instead of headers.",
                 "schema": {
                   "pattern": "^[0-9a-f]{64}$",
                   "type": "string"
                 }
               },
               "X-SIE-Model-Revision": {
-                "description": "Immutable deployed bundle/config execution revision that handled the request, when available",
+                "description": "Executed bundle/config SHA-256, distinct from the catalog weights revision (for example, a 40-hex Hugging Face commit). Buffered responses only: present when the routing snapshot has a model revision and all successful worker results report its expected config hash. Omitted when evidence is unavailable or mismatched, and always omitted on SSE because headers precede terminal execution evidence.",
                 "schema": {
+                  "pattern": "^[0-9a-f]{64}$",
                   "type": "string"
                 }
               },
@@ -4297,16 +4627,24 @@
                   "type": "string"
                 }
               },
+              "X-SIE-Execution-Binding-SHA256": {
+                "description": "Worker-origin runtime-independent SHA-256 binding of the release and deployment route, when available on buffered responses. SSE carries optional execution evidence in the successful terminal event instead of headers.",
+                "schema": {
+                  "pattern": "^[0-9a-f]{64}$",
+                  "type": "string"
+                }
+              },
               "X-SIE-Execution-Identity-SHA256": {
-                "description": "Worker-origin SHA-256 identity of the immutable release and realized serving resources, when available",
+                "description": "Worker-origin SHA-256 identity of the immutable release and realized serving resources, when available on buffered responses. SSE carries optional execution evidence in the successful terminal event instead of headers.",
                 "schema": {
                   "pattern": "^[0-9a-f]{64}$",
                   "type": "string"
                 }
               },
               "X-SIE-Model-Revision": {
-                "description": "Immutable deployed bundle/config execution revision that handled the request, when available",
+                "description": "Executed bundle/config SHA-256, distinct from the catalog weights revision (for example, a 40-hex Hugging Face commit). Buffered responses only: present when the routing snapshot has a model revision and all successful worker results report its expected config hash. Omitted when evidence is unavailable or mismatched, and always omitted on SSE because headers precede terminal execution evidence.",
                 "schema": {
+                  "pattern": "^[0-9a-f]{64}$",
                   "type": "string"
                 }
               },
@@ -4495,16 +4833,24 @@
                   "type": "string"
                 }
               },
+              "X-SIE-Execution-Binding-SHA256": {
+                "description": "Worker-origin runtime-independent SHA-256 binding of the release and deployment route, when available on buffered responses. SSE carries optional execution evidence in the successful terminal event instead of headers.",
+                "schema": {
+                  "pattern": "^[0-9a-f]{64}$",
+                  "type": "string"
+                }
+              },
               "X-SIE-Execution-Identity-SHA256": {
-                "description": "Worker-origin SHA-256 identity of the immutable release and realized serving resources, when available",
+                "description": "Worker-origin SHA-256 identity of the immutable release and realized serving resources, when available on buffered responses. SSE carries optional execution evidence in the successful terminal event instead of headers.",
                 "schema": {
                   "pattern": "^[0-9a-f]{64}$",
                   "type": "string"
                 }
               },
               "X-SIE-Model-Revision": {
-                "description": "Immutable deployed bundle/config execution revision that handled the request, when available",
+                "description": "Executed bundle/config SHA-256, distinct from the catalog weights revision (for example, a 40-hex Hugging Face commit). Buffered responses only: present when the routing snapshot has a model revision and all successful worker results report its expected config hash. Omitted when evidence is unavailable or mismatched, and always omitted on SSE because headers precede terminal execution evidence.",
                 "schema": {
+                  "pattern": "^[0-9a-f]{64}$",
                   "type": "string"
                 }
               },
@@ -5079,16 +5425,24 @@
                   "type": "string"
                 }
               },
+              "X-SIE-Execution-Binding-SHA256": {
+                "description": "Worker-origin runtime-independent SHA-256 binding of the release and deployment route, when available on buffered responses. SSE carries optional execution evidence in the successful terminal event instead of headers.",
+                "schema": {
+                  "pattern": "^[0-9a-f]{64}$",
+                  "type": "string"
+                }
+              },
               "X-SIE-Execution-Identity-SHA256": {
-                "description": "Worker-origin SHA-256 identity of the immutable release and realized serving resources, when available",
+                "description": "Worker-origin SHA-256 identity of the immutable release and realized serving resources, when available on buffered responses. SSE carries optional execution evidence in the successful terminal event instead of headers.",
                 "schema": {
                   "pattern": "^[0-9a-f]{64}$",
                   "type": "string"
                 }
               },
               "X-SIE-Model-Revision": {
-                "description": "Immutable deployed bundle/config execution revision that handled the request, when available",
+                "description": "Executed bundle/config SHA-256, distinct from the catalog weights revision (for example, a 40-hex Hugging Face commit). Buffered responses only: present when the routing snapshot has a model revision and all successful worker results report its expected config hash. Omitted when evidence is unavailable or mismatched, and always omitted on SSE because headers precede terminal execution evidence.",
                 "schema": {
+                  "pattern": "^[0-9a-f]{64}$",
                   "type": "string"
                 }
               },
@@ -5417,16 +5771,24 @@
                   "type": "string"
                 }
               },
+              "X-SIE-Execution-Binding-SHA256": {
+                "description": "Worker-origin runtime-independent SHA-256 binding of the release and deployment route, when available on buffered responses. SSE carries optional execution evidence in the successful terminal event instead of headers.",
+                "schema": {
+                  "pattern": "^[0-9a-f]{64}$",
+                  "type": "string"
+                }
+              },
               "X-SIE-Execution-Identity-SHA256": {
-                "description": "Worker-origin SHA-256 identity of the immutable release and realized serving resources, when available",
+                "description": "Worker-origin SHA-256 identity of the immutable release and realized serving resources, when available on buffered responses. SSE carries optional execution evidence in the successful terminal event instead of headers.",
                 "schema": {
                   "pattern": "^[0-9a-f]{64}$",
                   "type": "string"
                 }
               },
               "X-SIE-Model-Revision": {
-                "description": "Immutable deployed bundle/config execution revision that handled the request, when available",
+                "description": "Executed bundle/config SHA-256, distinct from the catalog weights revision (for example, a 40-hex Hugging Face commit). Buffered responses only: present when the routing snapshot has a model revision and all successful worker results report its expected config hash. Omitted when evidence is unavailable or mismatched, and always omitted on SSE because headers precede terminal execution evidence.",
                 "schema": {
+                  "pattern": "^[0-9a-f]{64}$",
                   "type": "string"
                 }
               },
@@ -5756,16 +6118,24 @@
                   "type": "string"
                 }
               },
+              "X-SIE-Execution-Binding-SHA256": {
+                "description": "Worker-origin runtime-independent SHA-256 binding of the release and deployment route, when available on buffered responses. SSE carries optional execution evidence in the successful terminal event instead of headers.",
+                "schema": {
+                  "pattern": "^[0-9a-f]{64}$",
+                  "type": "string"
+                }
+              },
               "X-SIE-Execution-Identity-SHA256": {
-                "description": "Worker-origin SHA-256 identity of the immutable release and realized serving resources, when available",
+                "description": "Worker-origin SHA-256 identity of the immutable release and realized serving resources, when available on buffered responses. SSE carries optional execution evidence in the successful terminal event instead of headers.",
                 "schema": {
                   "pattern": "^[0-9a-f]{64}$",
                   "type": "string"
                 }
               },
               "X-SIE-Model-Revision": {
-                "description": "Immutable deployed bundle/config execution revision that handled the request, when available",
+                "description": "Executed bundle/config SHA-256, distinct from the catalog weights revision (for example, a 40-hex Hugging Face commit). Buffered responses only: present when the routing snapshot has a model revision and all successful worker results report its expected config hash. Omitted when evidence is unavailable or mismatched, and always omitted on SSE because headers precede terminal execution evidence.",
                 "schema": {
+                  "pattern": "^[0-9a-f]{64}$",
                   "type": "string"
                 }
               },
@@ -6074,16 +6444,24 @@
                   "type": "string"
                 }
               },
+              "X-SIE-Execution-Binding-SHA256": {
+                "description": "Worker-origin runtime-independent SHA-256 binding of the release and deployment route, when available on buffered responses. SSE carries optional execution evidence in the successful terminal event instead of headers.",
+                "schema": {
+                  "pattern": "^[0-9a-f]{64}$",
+                  "type": "string"
+                }
+              },
               "X-SIE-Execution-Identity-SHA256": {
-                "description": "Worker-origin SHA-256 identity of the immutable release and realized serving resources, when available",
+                "description": "Worker-origin SHA-256 identity of the immutable release and realized serving resources, when available on buffered responses. SSE carries optional execution evidence in the successful terminal event instead of headers.",
                 "schema": {
                   "pattern": "^[0-9a-f]{64}$",
                   "type": "string"
                 }
               },
               "X-SIE-Model-Revision": {
-                "description": "Immutable deployed bundle/config execution revision that handled the request, when available",
+                "description": "Executed bundle/config SHA-256, distinct from the catalog weights revision (for example, a 40-hex Hugging Face commit). Buffered responses only: present when the routing snapshot has a model revision and all successful worker results report its expected config hash. Omitted when evidence is unavailable or mismatched, and always omitted on SSE because headers precede terminal execution evidence.",
                 "schema": {
+                  "pattern": "^[0-9a-f]{64}$",
                   "type": "string"
                 }
               },
@@ -6479,7 +6857,7 @@
                 }
               }
             },
-            "description": "Invalid pool request"
+            "description": "Invalid pool request, including a TTL or warm floor above the gateway limit"
           },
           "401": {
             "content": {
@@ -6499,7 +6877,7 @@
                 }
               }
             },
-            "description": "Valid bearer token but admin token required for this mutation (or admin token not configured)"
+            "description": "Admin token required for this mutation (or admin token not configured), the pool is named `default`, or the gateway's limit on API-created pools is reached"
           },
           "500": {
             "content": {
@@ -6987,6 +7365,19 @@
                           "minimum": 0,
                           "type": "integer"
                         },
+                        "input_tokens_details": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "cached_tokens": {
+                              "minimum": 0,
+                              "type": "integer"
+                            }
+                          },
+                          "required": [
+                            "cached_tokens"
+                          ],
+                          "type": "object"
+                        },
                         "output_tokens": {
                           "minimum": 0,
                           "type": "integer"
@@ -7055,16 +7446,24 @@
                   "type": "string"
                 }
               },
+              "X-SIE-Execution-Binding-SHA256": {
+                "description": "Worker-origin runtime-independent SHA-256 binding of the release and deployment route, when available on buffered responses. SSE carries optional execution evidence in the successful terminal event instead of headers.",
+                "schema": {
+                  "pattern": "^[0-9a-f]{64}$",
+                  "type": "string"
+                }
+              },
               "X-SIE-Execution-Identity-SHA256": {
-                "description": "Worker-origin SHA-256 identity of the immutable release and realized serving resources, when available",
+                "description": "Worker-origin SHA-256 identity of the immutable release and realized serving resources, when available on buffered responses. SSE carries optional execution evidence in the successful terminal event instead of headers.",
                 "schema": {
                   "pattern": "^[0-9a-f]{64}$",
                   "type": "string"
                 }
               },
               "X-SIE-Model-Revision": {
-                "description": "Immutable deployed bundle/config execution revision that handled the request, when available",
+                "description": "Executed bundle/config SHA-256, distinct from the catalog weights revision (for example, a 40-hex Hugging Face commit). Buffered responses only: present when the routing snapshot has a model revision and all successful worker results report its expected config hash. Omitted when evidence is unavailable or mismatched, and always omitted on SSE because headers precede terminal execution evidence.",
                 "schema": {
+                  "pattern": "^[0-9a-f]{64}$",
                   "type": "string"
                 }
               },
@@ -7338,16 +7737,24 @@
                   "type": "string"
                 }
               },
+              "X-SIE-Execution-Binding-SHA256": {
+                "description": "Worker-origin runtime-independent SHA-256 binding of the release and deployment route, when available on buffered responses. SSE carries optional execution evidence in the successful terminal event instead of headers.",
+                "schema": {
+                  "pattern": "^[0-9a-f]{64}$",
+                  "type": "string"
+                }
+              },
               "X-SIE-Execution-Identity-SHA256": {
-                "description": "Worker-origin SHA-256 identity of the immutable release and realized serving resources, when available",
+                "description": "Worker-origin SHA-256 identity of the immutable release and realized serving resources, when available on buffered responses. SSE carries optional execution evidence in the successful terminal event instead of headers.",
                 "schema": {
                   "pattern": "^[0-9a-f]{64}$",
                   "type": "string"
                 }
               },
               "X-SIE-Model-Revision": {
-                "description": "Immutable deployed bundle/config execution revision that handled the request, when available",
+                "description": "Executed bundle/config SHA-256, distinct from the catalog weights revision (for example, a 40-hex Hugging Face commit). Buffered responses only: present when the routing snapshot has a model revision and all successful worker results report its expected config hash. Omitted when evidence is unavailable or mismatched, and always omitted on SSE because headers precede terminal execution evidence.",
                 "schema": {
+                  "pattern": "^[0-9a-f]{64}$",
                   "type": "string"
                 }
               },

@@ -2,7 +2,7 @@
 
 Implements the caching hierarchy for model weights:
 1. Local cache (HF_HOME/hub by default)
-2. Cluster cache (S3/GCS/Azure object storage)
+2. Cluster cache (S3/GCS/Azure/Alibaba OSS object storage)
 3. HuggingFace Hub fallback (if enabled)
 
 The caching is transparent to adapters - they always see files in local cache.
@@ -51,7 +51,7 @@ class CacheConfig:
     """Local cache directory (usually HF_HOME/hub)."""
 
     cluster_cache: str | None = None
-    """Cluster cache URL (s3://, gs://, abfs://, or abfss://), or None if not configured."""
+    """Cluster cache URL (s3://, gs://, abfs(s)://, or oss://), or None if not configured."""
 
     hf_fallback: bool = True
     """Whether to fallback to HuggingFace Hub for downloads."""
@@ -62,7 +62,7 @@ def get_cache_config() -> CacheConfig:
 
     Reads:
         SIE_LOCAL_CACHE: Local cache directory (default: HF_HOME/hub)
-        SIE_CLUSTER_CACHE: Cluster cache URL (s3://, gs://, abfs://, or abfss://)
+        SIE_CLUSTER_CACHE: Cluster cache URL (s3://, gs://, abfs(s)://, or oss://)
         SIE_HF_FALLBACK: Whether to enable HF Hub fallback (default: true)
 
     Returns:
@@ -79,7 +79,7 @@ def get_cache_config() -> CacheConfig:
         else:
             local_cache = Path.home() / ".cache" / "huggingface" / "hub"
 
-    # Cluster cache: S3/GCS/Azure object-store URL
+    # Cluster cache: S3/GCS/Azure/Alibaba OSS object-store URL
     cluster_cache = os.environ.get("SIE_CLUSTER_CACHE")
 
     # HF fallback: default true
@@ -377,7 +377,7 @@ def populate_cluster_cache(
 ) -> bool:
     """Upload model from local cache to cluster cache.
 
-    Used by sie-admin to pre-populate cluster cache. Inverse of
+    Used by cluster-management clients to pre-populate cluster cache. Inverse of
     :func:`_download_from_cluster_cache`: the model's HF-style cache
     directory (``models--{org}--{name}``) is mirrored recursively to the
     same folder name under ``config.cluster_cache``, so workers hydrating

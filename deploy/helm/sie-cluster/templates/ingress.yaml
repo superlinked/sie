@@ -1,4 +1,5 @@
 {{- if .Values.ingress.enabled }}
+{{- include "sie-cluster.validateIngressExposure" . }}
 {{- $hosts := include "sie-cluster.ingress.hosts" . | fromJsonArray }}
 {{- $tls := include "sie-cluster.ingressTlsConfig" . | fromYaml }}
 apiVersion: networking.k8s.io/v1
@@ -11,11 +12,15 @@ metadata:
   {{- $annotations := dict }}
   {{- /* nginx default annotations */ -}}
   {{- /* - proxy-body-size: images can be large (base64 encoded) */ -}}
-  {{- /* - proxy-read/send-timeout: model loading can take 5+ minutes for large models */ -}}
+  {{- /* - proxy-read/send-timeout: a cold model load emits no bytes for minutes, and
+           the read timeout governs that no-first-byte window. Derived from
+           workers.common.modelReadyTimeoutSec so the edge cannot 504 a request that is
+           still inside the cluster's own load budget. */ -}}
+  {{- $proxyTimeoutS := include "sie-cluster.ingress.proxyTimeoutSeconds" . }}
   {{- $nginxDefaults := dict
         "nginx.ingress.kubernetes.io/proxy-body-size" "100m"
-        "nginx.ingress.kubernetes.io/proxy-read-timeout" "600"
-        "nginx.ingress.kubernetes.io/proxy-send-timeout" "600"
+        "nginx.ingress.kubernetes.io/proxy-read-timeout" $proxyTimeoutS
+        "nginx.ingress.kubernetes.io/proxy-send-timeout" $proxyTimeoutS
   }}
   {{- $annotations = merge $annotations $nginxDefaults }}
   {{- if .Values.ingress.annotations }}

@@ -6,8 +6,7 @@ description: Redact personal data from a document through the connected Superlin
 # Redact PII with Superlinked MCP
 
 Use the connected Superlinked MCP server to detect and replace PII on the SIE
-cluster. This mirrors the `redact-pii` flow from the `sie_tools` plugin in
-PR #1336, but uses the MCP `redact_pii` tool.
+cluster through the MCP `redact_pii` tool.
 
 ## Hard Rules
 

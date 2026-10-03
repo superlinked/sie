@@ -1,7 +1,7 @@
-"""FastMCP server exposing the Req 12 document tools.
+"""FastMCP server exposing document tools.
 
-Tracer bullet (#1306): a single ``docs_to_markdown`` tool. The cluster client is
-created once per process in the lifespan and reused across requests.
+The cluster client is created once per process in the lifespan and reused across
+requests.
 """
 
 import base64
@@ -214,9 +214,7 @@ def build_server(config: MCPConfig) -> FastMCP:
 
         Provide exactly one of ``content``, ``content_base64``, or ``document_base64``.
         For source documents, pass raw file bytes as ``document_base64``; the edge first
-        converts them through ``docs_to_markdown`` and then summarizes the markdown. This
-        mirrors the PR #1336 summarize-document skill without routing through the
-        gateway-backed ``sie_tools`` CLI.
+        converts them through ``docs_to_markdown`` and then summarizes the markdown.
 
         Args:
             content: Plain text/markdown content. Prefer ``content_base64`` for large files
@@ -265,7 +263,7 @@ def build_server(config: MCPConfig) -> FastMCP:
 
         Provide labels such as ``["person", "organization", "date", "amount"]`` and
         exactly one of ``content``, ``content_base64``, or ``document_base64``. Document
-        inputs are converted to markdown first, matching the PR #1336 flow.
+        inputs are converted to markdown first.
         """
         lifespan_ctx = ctx.request_context.lifespan_context
         client = lifespan_ctx["client"]

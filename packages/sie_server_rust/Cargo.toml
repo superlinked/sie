@@ -1,0 +1,93 @@
+[package]
+name = "sie-server-rust"
+version = "0.4.2"
+edition = "2021"
+description = "Rust inference-engine integrations for SIE server workers."
+publish = false
+
+[workspace]
+exclude = [
+    "vendor/candle-cublaslt",
+    "vendor/candle-gated-activation",
+    "vendor/candle-layer-norm",
+    "vendor/candle-rotary",
+    "vendor/candle-splade-pool",
+]
+
+[lib]
+name = "sie_server_rust"
+path = "src/lib.rs"
+
+[[bin]]
+name = "sie-server-rust"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+blake3 = "1"
+candle = { package = "candle-core", version = "0.10.2" }
+candle-cublaslt = { path = "vendor/candle-cublaslt", optional = true }
+candle-flash-attn = { version = "0.10.2", optional = true }
+candle-gated-activation = { path = "vendor/candle-gated-activation", optional = true }
+candle-index-select-cu = { version = "0.0.1", default-features = false, features = ["cuda-12"], optional = true }
+candle-layer-norm = { path = "vendor/candle-layer-norm", optional = true }
+candle-nn = "0.10.2"
+candle-rotary = { path = "vendor/candle-rotary", optional = true }
+candle-splade-pool = { path = "vendor/candle-splade-pool", optional = true }
+candle-transformers = "0.10.2"
+clap = { version = "4", features = ["derive", "env"] }
+hf-hub = { version = "0.5.0", features = ["tokio"] }
+half = "2"
+opentelemetry = "0.32"
+# Keep the blocking HTTP client deliberately. OTel 0.32 BatchSpanProcessor and
+# PeriodicReader export from dedicated std threads via futures_executor::block_on,
+# where an async reqwest client has no Tokio reactor and panics. This blocks only
+# those exporter threads, never the worker runtime or inference path.
+opentelemetry-otlp = { version = "0.32", default-features = false, features = [
+    "grpc-tonic",
+    "http-proto",
+    "metrics",
+    "reqwest-blocking-client",
+    "reqwest-rustls",
+    "tls-ring",
+    "trace",
+] }
+opentelemetry_sdk = { version = "0.32", features = ["rt-tokio"] }
+# Shared OTLP transport/proxy/resource/propagation plumbing (#2339).
+sie-telemetry = { path = "../sie_telemetry" }
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+serde = { version = "1", features = ["derive"] }
+serde_bytes = "0.11"
+serde_json = { version = "1", features = ["float_roundtrip"] }
+serde_yaml = "0.9"
+sha2 = "0.10"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tokenizers = { version = "0.22.0", default-features = false, features = ["onig"] }
+tracing = "0.1"
+tracing-opentelemetry = "0.33"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+rmp-serde = "1"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+opentelemetry_sdk = { version = "0.32", features = ["testing"] }
+tempfile = "3"
+
+[features]
+default = []
+accelerate = ["candle/accelerate", "candle-nn/accelerate", "candle-transformers/accelerate"]
+cuda = [
+    "candle/cuda",
+    "dep:candle-cublaslt",
+    "dep:candle-flash-attn",
+    "dep:candle-gated-activation",
+    "dep:candle-index-select-cu",
+    "dep:candle-layer-norm",
+    "dep:candle-rotary",
+    "dep:candle-splade-pool",
+    "candle-nn/cuda",
+    "candle-transformers/cuda",
+]
+metal = ["candle/metal", "candle-nn/metal"]

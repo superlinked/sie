@@ -1,0 +1,21 @@
+[project]
+name = "superlinked-sie-image-classify-example"
+version = "0.1.0"
+description = "Tag product photos with your own types, colours and materials on SIE Cloud"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "numpy>=2.0",
+  "sie-sdk>=0.6.23,<0.8.0",
+]
+
+[tool.uv]
+package = false
+
+[dependency-groups]
+dev = [
+  "ruff>=0.14",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"

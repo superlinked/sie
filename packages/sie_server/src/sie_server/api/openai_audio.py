@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any, cast
 
-from fastapi import APIRouter, Header, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from sie_sdk.queue_types import denormalize_model_id
 from starlette.datastructures import UploadFile
@@ -26,6 +26,7 @@ from sie_server.api.helpers import (
     oom_retry_after_from_registry,
 )
 from sie_server.api.options import resolve_runtime_options
+from sie_server.api.routing import error_code, fallback_refusal, remote_routing, route_request
 from sie_server.api.validation import validate_machine_profile_header
 from sie_server.core.inference_output import ExtractOutput
 from sie_server.core.worker import QueueFullError
@@ -37,7 +38,7 @@ from sie_server.types.responses import ErrorCode
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/v1", tags=["openai-compat"])
+router = APIRouter(prefix="/v1", tags=["openai-compat"], dependencies=[Depends(remote_routing)])
 
 _MAX_AUDIO_FILE_BYTES = 24 * 1024 * 1024
 _MAX_MULTIPART_BYTES = _MAX_AUDIO_FILE_BYTES + 1024 * 1024
@@ -434,12 +435,10 @@ async def create_transcription(
 
     registry_key = denormalize_model_id(form.model)
     registry = http_request.app.state.registry
-    device = registry.device
     try:
         with tracer.start_as_current_span("openai_audio_transcription") as span:
             span.set_attribute("model", registry_key)
-            checker = ModelStateChecker(registry, registry_key, span)
-            checker.check_exists()
+            ModelStateChecker(registry, registry_key, span).check_exists()
             config = registry.get_config(registry_key)
             if config.tasks.extract is None or not config.inputs.audio:
                 raise HTTPException(
@@ -450,9 +449,6 @@ async def create_transcription(
                         "param": "model",
                     },
                 )
-            checker.check_not_unloading()
-            checker.check_not_loading()
-            await checker.ensure_loaded(device)
 
             raw_options: dict[str, Any] = {"timestamp_granularities": form.timestamp_granularities}
             if form.language is not None:
@@ -461,6 +457,7 @@ async def create_transcription(
                 raw_options["temperature"] = form.temperature
             options = resolve_runtime_options(config, raw_options, span)
             item = Item(audio=AudioInput(data=form.audio, format=form.audio_format))
+            route = await route_request(http_request, registry_key, span, queued_items=1)
             error_handler = InferenceErrorHandler(
                 registry_key,
                 "extract",
@@ -470,7 +467,7 @@ async def create_transcription(
             try:
                 worker_result = await _extract_via_worker(
                     registry,
-                    registry_key,
+                    route.key,
                     [item],
                     instruction=form.prompt,
                     options=options,
@@ -495,6 +492,7 @@ async def create_transcription(
                     detail={"code": ErrorCode.INFERENCE_ERROR.value, "message": "malformed extract response"},
                 )
             headers = ResponseBuilder.build_headers(worker_result.timing)
+            headers.update(route.headers())
             response = _transcription_response(output[0]["data"], form, headers)
             if worker_telemetry_enabled():
                 worker_telemetry().item_completed(
@@ -510,7 +508,7 @@ async def create_transcription(
                 )
             return response
     except HTTPException as error:
-        return _http_error_response(error)
+        return _http_error_response(fallback_refusal(http_request, error.status_code, error_code(error)) or error)
     except ValueError:
         logger.exception("Failed to format transcription response for %s", registry_key)
         return _openai_error(

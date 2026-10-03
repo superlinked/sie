@@ -4,19 +4,35 @@ import asyncio
 import logging
 import os
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 
-import msgpack
 import msgspec
 import yaml
+from sie_sdk._msgpack import packb as pack_msgpack
 
-from sie_server.api.ws import compute_bundle_config_hash_cached
+from sie_server.adapters.errors import InputTooLongError, UpstreamUnavailableError
+from sie_server.api.ws import (
+    BundleConfigView,
+    BundleMetadataUnavailableError,
+    compute_bundle_config_hash_cached,
+    compute_bundle_config_view,
+)
 from sie_server.config.model import ModelConfig
+from sie_server.config.routing import validate_model_routing
+from sie_server.config.upstreams import validate_profile_upstreams
 from sie_server.core.encode_pipeline import EncodePipeline, resolve_encode_output_types
-from sie_server.core.extract_cost import build_extract_prepared_items
+from sie_server.core.extract_cost import (
+    MAX_EXTRACT_LABELS,
+    adapter_extract_item_costs,
+    build_extract_prepared_items,
+    output_schema_shape_error,
+)
+from sie_server.core.loader import expand_profile_variants
 from sie_server.core.oom import is_oom_error
+from sie_server.core.pool_isolation import validate_no_legacy_scalar_lora_id
 from sie_server.core.prepared import AudioPayload, AudioPreparedItem
 from sie_server.core.registry import ModelRegistry
 from sie_server.core.runtime_options import merge_runtime_options, merge_runtime_options_with_profile
@@ -24,6 +40,7 @@ from sie_server.core.score_cost import build_score_prepared_items_timed
 from sie_server.core.timing import RequestTiming
 from sie_server.core.worker.handlers.extract import ExtractHandler
 from sie_server.core.worker.model_worker import PreformedExtractRequest, PreformedScoreRequest
+from sie_server.core.worker.types import WorkerDrainedError
 from sie_server.ipc_types import (
     ApplyModelConfigRequest,
     ApplyModelConfigResponse,
@@ -39,6 +56,7 @@ from sie_server.ipc_types import (
     ProcessScoreBatchRequest,
     RawOutput,
     ReadinessState,
+    ReplaceModelConfigEntry,
     ReplaceModelConfigsRequest,
     ReplaceModelConfigsResponse,
     ScoreBatchItem,
@@ -85,6 +103,7 @@ _INFERENCE_ERROR_CODE: Final[str] = "inference_error"
 # which under a systemic failure is also the correct answer, because every one
 # of them was going to fail anyway.
 _MAX_ENCODE_ISOLATION_PASSES: Final[int] = 24
+_UPSTREAM_NAK_MAX_DELAY_S: Final[float] = 60.0
 _CANONICAL_AUDIO_SAMPLE_RATE: Final[int] = 16_000
 _MAX_AUDIO_CHANNELS: Final[int] = 2
 _MIN_AUDIO_SAMPLE_RATE: Final[int] = 8_000
@@ -347,8 +366,17 @@ def _maybe_multivector_raw_output(
     formatted: dict[str, Any],
     config: Any,
     output_types: list[str],
+    *,
+    f16_bytes: bool = False,
 ) -> RawOutput | None:
     """Multivector-only fast path for the Rust output shaper.
+
+    With ``f16_bytes`` (the sidecar declares it takes float16 byte buffers) a
+    float16 matrix travels as its little-endian bytes in ``values_f16``: 2 bytes
+    a value, where a list of Python floats packs as 9-byte msgpack doubles.
+    Wide multivector models need it to stay under the IPC response cap: one
+    8,192-token document of a 2,048-dim model is 16.8M values, 144 MiB as
+    doubles against 32 MiB as float16.
 
     Mirrors the invariants of the ``multivector`` branch of
     ``_wrap_encode_output``:
@@ -393,6 +421,17 @@ def _maybe_multivector_raw_output(
         token_dims = int(mv_dim)
     else:
         token_dims = int(arr.shape[1])
+
+    if f16_bytes and arr.dtype == np.float16:
+        return RawOutput(
+            multivector=MultivectorOutput(
+                values=[],
+                num_tokens=num_tokens,
+                token_dims=token_dims,
+                dtype="float16",
+                values_f16=np.ascontiguousarray(arr, dtype="<f2").tobytes(),
+            ),
+        )
 
     # Values must be contiguous in C order so ``.tobytes()`` (and the
     # Rust ``values.to_le_bytes()`` equivalent) agree. ``tolist()``
@@ -500,6 +539,39 @@ def _wrap_encode_output(output: dict, config: Any) -> dict:
     return wrapped
 
 
+def _rejected_config_mapping(model_config: str, model_id: str) -> dict[str, Any] | None:
+    """Return a rejected model config as a mapping for hashing, if it names ``model_id``."""
+    try:
+        raw = yaml.safe_load(model_config) if model_config.strip() else None
+    except yaml.YAMLError:
+        return None
+    if not isinstance(raw, dict) or raw.get("sie_id", model_id) != model_id:
+        return None
+    return raw
+
+
+def _rejected_entry_mapping(entry: ReplaceModelConfigEntry, model_id: str) -> dict[str, Any] | None:
+    """Return a rejected export entry as a mapping for hashing, if it names ``model_id``."""
+    return _rejected_config_mapping(entry.model_config, model_id)
+
+
+def _parse_exported_model_config(entry: ReplaceModelConfigEntry) -> ModelConfig:
+    if not entry.model_config.strip():
+        msg = "model_config is required"
+        raise ValueError(msg)
+
+    raw = yaml.safe_load(entry.model_config)
+    if not isinstance(raw, dict):
+        msg = "model_config must decode to a YAML mapping"
+        raise ValueError(msg)
+
+    model_config = ModelConfig(**raw)
+    if entry.model_id and model_config.sie_id != entry.model_id:
+        msg = f"model_id mismatch: export={entry.model_id!r} config={model_config.sie_id!r}"
+        raise ValueError(msg)
+    return model_config
+
+
 # ---------------------------------------------------------------------------
 # QueueExecutor
 # ---------------------------------------------------------------------------
@@ -544,6 +616,13 @@ class QueueExecutor:
         # :meth:`invalidate_model_descriptor` when a model is unloaded
         # or hot-reloaded.
         self._descriptor_cache: dict[str, ModelDescriptor] = {}
+        # Per bundle: the control-plane adapter list the latest config arrived
+        # with, and the raw entries of the latest export this worker's schema
+        # rejected. Both feed ``bundle_config_view``.
+        self._control_plane_adapters: dict[str, frozenset[str]] = {}
+        self._rejected_configs: dict[str, dict[str, dict[str, Any]]] = {}
+        self._view_state_version = 0
+        self._view_cache: dict[str, tuple[tuple[int, int], BundleConfigView]] = {}
 
     @property
     def registry(self) -> ModelRegistry:
@@ -563,68 +642,156 @@ class QueueExecutor:
         """
         self._descriptor_cache.pop(model_id, None)
 
+    def bundle_config_view(self, bundle_id: str) -> BundleConfigView:
+        """Return the advertised hash and unsupported model ids for ``bundle_id``."""
+        key = (int(getattr(self._registry, "_config_version", 0)), self._view_state_version)
+        cached = self._view_cache.get(bundle_id)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        try:
+            view = compute_bundle_config_view(
+                self._registry,
+                bundle_id,
+                control_plane_adapters=self._control_plane_adapters.get(bundle_id),
+                rejected_configs=self._rejected_configs.get(bundle_id),
+            )
+        except BundleMetadataUnavailableError:
+            logger.exception(
+                "Unable to load bundle metadata for %s; returning empty bundle_config_hash to avoid widened hash scope",
+                bundle_id,
+            )
+            return BundleConfigView("", [])
+        self._view_cache[bundle_id] = (key, view)
+        return view
+
+    def _record_control_plane_adapters(self, bundle_id: str, adapters: list[str] | None) -> None:
+        if adapters is None:
+            return
+        scope = frozenset(adapter for adapter in adapters if adapter)
+        if self._control_plane_adapters.get(bundle_id) != scope:
+            self._control_plane_adapters[bundle_id] = scope
+            self._view_state_version += 1
+
     async def apply_model_config(self, req: ApplyModelConfigRequest) -> ApplyModelConfigResponse:
-        """Validate and add a bundle-scoped config delta to the local registry."""
+        """Validate and add a bundle-scoped config delta to the local registry.
+
+        A delta whose config this worker rejects is handled like a rejected
+        export entry in :meth:`replace_model_configs`: the model keeps its
+        current registry entries, if any, and the received config is hashed and
+        reported in ``unsupported_models``. A config that cannot be attributed
+        to the notification's model still fails the apply.
+        """
         if not req.bundle_id:
             msg = "bundle_id is required"
             raise ValueError(msg)
         if not req.model_config.strip():
             msg = "model_config is required"
             raise ValueError(msg)
+        self._record_control_plane_adapters(req.bundle_id, req.bundle_adapters)
 
-        raw = yaml.safe_load(req.model_config)
-        if not isinstance(raw, dict):
-            msg = "model_config must decode to a YAML mapping"
-            raise ValueError(msg)
-
-        model_config = ModelConfig(**raw)
-        if req.model_id and model_config.sie_id != req.model_id:
-            msg = f"model_id mismatch: notification={req.model_id!r} config={model_config.sie_id!r}"
-            raise ValueError(msg)
-
-        updated_model_ids = await self._registry.add_config_async(model_config)
-        for model_id in updated_model_ids:
-            self.invalidate_model_descriptor(model_id)
-        bundle_hash = compute_bundle_config_hash_cached(self._registry, req.bundle_id)
-        return ApplyModelConfigResponse(
-            applied=True,
-            bundle_config_hash=bundle_hash,
-            config_version=int(getattr(self._registry, "_config_version", 0)),
-        )
-
-    def compute_bundle_config_hash(self, bundle_id: str) -> str:
-        """Return the local registry hash for ``bundle_id``."""
-        if not bundle_id:
-            return ""
-        return compute_bundle_config_hash_cached(self._registry, bundle_id)
-
-    async def replace_model_configs(self, req: ReplaceModelConfigsRequest) -> ReplaceModelConfigsResponse:
-        """Replace the bundle-scoped registry view from a full export snapshot."""
-        if not req.bundle_id:
-            msg = "bundle_id is required"
-            raise ValueError(msg)
-
-        configs: list[ModelConfig] = []
-        for entry in req.models:
-            if not entry.model_config.strip():
-                msg = "model_config is required"
-                raise ValueError(msg)
-
-            raw = yaml.safe_load(entry.model_config)
+        try:
+            raw = yaml.safe_load(req.model_config)
             if not isinstance(raw, dict):
                 msg = "model_config must decode to a YAML mapping"
                 raise ValueError(msg)
 
             model_config = ModelConfig(**raw)
-            if entry.model_id and model_config.sie_id != entry.model_id:
-                msg = f"model_id mismatch: export={entry.model_id!r} config={model_config.sie_id!r}"
+            if req.model_id and model_config.sie_id != req.model_id:
+                msg = f"model_id mismatch: notification={req.model_id!r} config={model_config.sie_id!r}"
                 raise ValueError(msg)
-            configs.append(model_config)
 
-        invalidated = await self._registry.replace_configs_async(configs)
+            updated_model_ids = await self._registry.add_config_async(model_config)
+        except (TypeError, ValueError, yaml.YAMLError) as exc:
+            rejected = _rejected_config_mapping(req.model_config, req.model_id) if req.model_id else None
+            if rejected is None:
+                raise
+            logger.warning(
+                "Rejected model config delta %r for bundle %s; keeping its current config, if any: %s",
+                req.model_id,
+                req.bundle_id,
+                exc,
+            )
+            self._rejected_configs.setdefault(req.bundle_id, {})[req.model_id] = rejected
+            self._view_state_version += 1
+        else:
+            for model_id in updated_model_ids:
+                self.invalidate_model_descriptor(model_id)
+            if self._rejected_configs.get(req.bundle_id, {}).pop(model_config.sie_id, None) is not None:
+                self._view_state_version += 1
+        view = self.bundle_config_view(req.bundle_id)
+        return ApplyModelConfigResponse(
+            applied=True,
+            bundle_config_hash=view.bundle_config_hash,
+            config_version=int(getattr(self._registry, "_config_version", 0)),
+            unsupported_models=view.unsupported_models,
+        )
+
+    def compute_bundle_config_hash(self, bundle_id: str) -> str:
+        """Return the registry hash for ``bundle_id``, scoped by this image's bundle file.
+
+        ``Ping`` reports this hash without ``unsupported_models``, and a sidecar
+        with no committed state advertises it. A hash that travels without that
+        list must imply that this image serves every model it covers, so it is
+        never scoped by the control-plane adapter list.
+        """
+        if not bundle_id:
+            return ""
+        return compute_bundle_config_hash_cached(self._registry, bundle_id)
+
+    async def replace_model_configs(self, req: ReplaceModelConfigsRequest) -> ReplaceModelConfigsResponse:
+        """Replace the bundle-scoped registry view from a full export snapshot.
+
+        An entry with an invalid schema or per-model options is logged, and
+        that model keeps its current registry entries, if any. An invalid entry
+        without an identifiable model, duplicate valid model IDs, and cross-model
+        pool conflicts reject the whole snapshot before any registry mutation.
+        The returned hash covers the received entries, scoped by the
+        control-plane adapter list when the request carries one; a rejected
+        model whose retained config differs in hashed fields is reported in
+        ``unsupported_models``. The sidecar advertises the hash only when it
+        equals the control-plane hash.
+        """
+        if not req.bundle_id:
+            msg = "bundle_id is required"
+            raise ValueError(msg)
+        self._record_control_plane_adapters(req.bundle_id, req.bundle_adapters)
+
+        configs: list[ModelConfig] = []
+        rejected: set[str] = set()
+        rejected_configs: dict[str, dict[str, Any]] = {}
+        for entry in req.models:
+            model_id = entry.model_id
+            try:
+                model_config = _parse_exported_model_config(entry)
+                model_id = model_config.sie_id
+                for expanded in expand_profile_variants([model_config]).values():
+                    validate_no_legacy_scalar_lora_id(name=expanded.sie_id, config=expanded)
+                    validate_profile_upstreams(expanded)
+                    validate_model_routing(expanded)
+                configs.append(model_config)
+            except (TypeError, ValueError, yaml.YAMLError) as exc:
+                if not model_id:
+                    msg = "cannot identify rejected model config; authoritative snapshot was not applied"
+                    raise ValueError(msg) from exc
+                logger.warning(
+                    "Rejected exported model config %r for bundle %s; keeping its current config, if any: %s",
+                    model_id,
+                    req.bundle_id,
+                    exc,
+                )
+                rejected.add(model_id)
+                if (raw := _rejected_entry_mapping(entry, model_id)) is not None:
+                    rejected_configs[model_id] = raw
+
+        invalidated = await self._registry.replace_configs_async(configs, retained_models=rejected)
         for model_id in invalidated:
             self.invalidate_model_descriptor(model_id)
-        bundle_hash = compute_bundle_config_hash_cached(self._registry, req.bundle_id)
+        accepted_ids = {config.sie_id for config in configs}
+        self._rejected_configs[req.bundle_id] = {
+            model_id: raw for model_id, raw in rejected_configs.items() if model_id not in accepted_ids
+        }
+        self._view_state_version += 1
+        view = self.bundle_config_view(req.bundle_id)
         applied_configs = self._registry.get_configs_snapshot(req.bundle_id)
         applied_models = sorted(applied_configs)
         applied_profiles = sorted(
@@ -635,10 +802,11 @@ class QueueExecutor:
         )
         return ReplaceModelConfigsResponse(
             applied=True,
-            bundle_config_hash=bundle_hash,
+            bundle_config_hash=view.bundle_config_hash,
             config_version=int(getattr(self._registry, "_config_version", 0)),
             applied_models=applied_models,
             applied_profiles=applied_profiles,
+            unsupported_models=view.unsupported_models,
         )
 
     async def set_pinned_models(self, req: SetPinnedModelsRequest) -> SetPinnedModelsResponse:
@@ -655,7 +823,8 @@ class QueueExecutor:
         - ``ready``: continue processing
         - ``loading_started``: progress-ACK and recheck (this call triggered a new load)
         - ``loading_in_progress``: progress-ACK and recheck with a longer delay
-        - ``retry_later``: NAK with base delay (unknown error path)
+        - ``retry_later``: NAK with base delay (unknown model, or a transient
+          load failure whose cooldown is still running)
         - ``failed``: TERMINAL — dead-letter as ``MODEL_LOAD_FAILED`` (do NOT
           recheck). Emitted when the registry holds a PERMANENT
           ``LoadFailure`` (``cooldown=permanent``).
@@ -670,9 +839,10 @@ class QueueExecutor:
         *permanent* classes only, using the SAME ``get_failure().is_permanent``
         classification as the direct-HTTP ``check_not_failed`` gate and the
         Modal lane's ``worker_runtime._terminal_load_failure``. Transient
-        in-cooldown classes (OOM / NETWORK / TIMEOUT) are intentionally NOT
-        terminal — they stay ``loading_in_progress`` so the caller retries
-        after the short cooldown.
+        failures are not terminal: while their cooldown runs they report
+        ``retry_later``, so the sidecar NAKs the item with a delay and it is
+        redelivered, possibly to a worker that has the model loaded, instead
+        of being held on this worker for the whole cooldown.
         """
         if not self._registry.has_model(model_id):
             return "retry_later"
@@ -686,6 +856,9 @@ class QueueExecutor:
 
         if self._registry.is_loading(model_id):
             return "loading_in_progress"
+
+        if failure is not None and failure.in_cooldown(time.monotonic()):
+            return "retry_later"
 
         try:
             started = await self._registry.start_load_async(model_id, self._registry.device)
@@ -707,6 +880,8 @@ class QueueExecutor:
         failure = self._registry.get_failure(model_id)
         if failure is not None and failure.is_permanent:
             return "failed"
+        if failure is not None and failure.in_cooldown(time.monotonic()):
+            return "retry_later"
         return "loading_in_progress"
 
     # -- Handshake-driven model descriptor --------------------------------
@@ -857,7 +1032,7 @@ class QueueExecutor:
 
     @staticmethod
     def _options_key(options: dict[str, Any] | None) -> bytes:
-        return msgpack.packb(options, use_bin_type=True) if options else b""
+        return pack_msgpack(options, use_bin_type=True) if options else b""
 
     @staticmethod
     def _batch_profile(items: list[Any]) -> str:
@@ -926,7 +1101,7 @@ class QueueExecutor:
             # rejects it just like the HTTP ingress. Only an absent value
             # receives the public dense default.
             output_types = tuple(bi.output_types) if bi.output_types is not None else ("dense",)
-            options_key = msgpack.packb(bi.options, use_bin_type=True) if bi.options else b""
+            options_key = pack_msgpack(bi.options, use_bin_type=True) if bi.options else b""
             key = (
                 output_types,
                 bi.instruction,
@@ -965,6 +1140,7 @@ class QueueExecutor:
                 request_options=group[0].options or {},
                 outcomes=outcomes,
                 isolation=isolation,
+                f16_bytes=req.accepts_batched_f16_multivectors,
             )
 
         return BatchOutcome(outcomes=[outcomes[bi.work_item_id] for bi in items])
@@ -982,6 +1158,7 @@ class QueueExecutor:
         outcomes: dict[str, ItemOutcome],
         isolation: _IsolationBudget,
         depth: int = 0,
+        f16_bytes: bool = False,
     ) -> None:
         """Run one encode sub-group and record its per-item outcomes.
 
@@ -989,7 +1166,8 @@ class QueueExecutor:
         ``InvalidInputError`` can be isolated by re-running narrower groups —
         see :meth:`_isolate_encode_invalid_input`. ``isolation`` is the batch's
         shared re-run budget and ``depth`` the current bisection depth, both
-        carried only for that path.
+        carried only for that path. ``f16_bytes``: the sidecar takes float16
+        multivectors as byte buffers (see :func:`_maybe_multivector_raw_output`).
         """
         # Validate each item against the typed Item contract at the seam
         # (parity with the HTTP path). A per-item decode failure is isolated
@@ -999,7 +1177,7 @@ class QueueExecutor:
         server_items: list[Item] = []
         for bi in group:
             try:
-                server_items.append(decode_item(bi.item))
+                server_items.append(decode_item(bi.item, f"items[{bi.item_index}]"))
             except (msgspec.ValidationError, InvalidMediaError) as decode_exc:
                 outcomes[bi.work_item_id] = _inference_exception_outcome(bi, decode_exc)
                 continue
@@ -1130,6 +1308,7 @@ class QueueExecutor:
                             formatted_outputs[idx],
                             config,
                             response_output_types,
+                            f16_bytes=f16_bytes,
                         )
                     if raw_output is None:
                         output = _wrap_encode_output(formatted_outputs[idx], config)
@@ -1146,7 +1325,7 @@ class QueueExecutor:
                         item_id = server_items[idx].id
                         if item_id is not None:
                             output = {"id": item_id, **output}
-                        result_msgpack = msgpack.packb(output, use_bin_type=True)
+                        result_msgpack = pack_msgpack(output, use_bin_type=True)
                     outcomes[bi.work_item_id] = ItemOutcome(
                         work_item_id=bi.work_item_id,
                         request_id=bi.request_id,
@@ -1181,6 +1360,7 @@ class QueueExecutor:
                 error=e,
                 isolation=isolation,
                 depth=depth,
+                f16_bytes=f16_bytes,
             )
         except Exception as e:  # noqa: BLE001
             logger.warning("Encode sub-batch failed for model %s: %s", model_id, e)
@@ -1201,6 +1381,7 @@ class QueueExecutor:
         error: InvalidInputError,
         isolation: _IsolationBudget,
         depth: int,
+        f16_bytes: bool = False,
     ) -> None:
         """Fail only the request that supplied the malformed input.
 
@@ -1287,6 +1468,7 @@ class QueueExecutor:
                 outcomes=outcomes,
                 isolation=isolation,
                 depth=depth + 1,
+                f16_bytes=f16_bytes,
             )
 
     # -- Score -------------------------------------------------------------
@@ -1325,8 +1507,8 @@ class QueueExecutor:
         for bi in req.items:
             try:
                 options = merge_runtime_options(config, bi.options)
-                query_item = decode_item(bi.query_item)
-                score_items = [decode_item(it) for it in bi.score_items]
+                query_item = decode_item(bi.query_item, "query")
+                score_items = [decode_item(it, f"items[{index}]") for index, it in enumerate(bi.score_items)]
 
                 prepared_items, timing = build_score_prepared_items_timed(query_item, score_items)
 
@@ -1421,8 +1603,22 @@ class QueueExecutor:
 
         for bi in req.items:
             try:
+                # Reject before the worker walks the schema to build its
+                # batching key (same bounds as the HTTP ExtractParams check).
+                if bi.output_schema is not None and (schema_error := output_schema_shape_error(bi.output_schema)):
+                    raise InvalidInputError(schema_error)
+                if bi.labels is not None and len(bi.labels) > MAX_EXTRACT_LABELS:
+                    raise InvalidInputError(f"Field 'labels' must contain at most {MAX_EXTRACT_LABELS} labels")
                 options = merge_runtime_options(config, bi.options)
-                server_item = decode_item(bi.item)
+                # Same precedence as the HTTP extract path: the request's own
+                # instruction, else one from the options (profile defaults
+                # included).
+                instruction = bi.instruction if bi.instruction is not None else options.get("instruction")
+                if instruction is not None and not isinstance(instruction, str):
+                    raise InvalidInputError("instruction must be a string")
+                # Also rejects an item over the text size bound (as the HTTP
+                # ExtractRequest does) before any cost estimate or adapter sees it.
+                server_item = decode_item(bi.item, f"items[{bi.item_index}]")
                 timing = RequestTiming()
                 timing.start_tokenization()
                 if bi.prepared_audio is not None:
@@ -1463,14 +1659,23 @@ class QueueExecutor:
                             model_id,
                             [server_item],
                             config,
-                            instruction=bi.instruction,
+                            instruction=instruction,
                             task=task,
                         )
                         prepared_items = prepared_batch.items
                     else:
                         # Batching proxy only; authoritative text/page billing
                         # comes from the adapter's ExtractOutput unit counts.
-                        prepared_items = build_extract_prepared_items([server_item])
+                        # The sidecar sizes queue batches (cost 1 per extract item); this cost does not.
+                        item_costs = adapter_extract_item_costs(
+                            extract_adapter,
+                            [server_item],
+                            labels=bi.labels,
+                            output_schema=bi.output_schema,
+                            instruction=instruction,
+                            options=options,
+                        )
+                        prepared_items = build_extract_prepared_items([server_item], item_costs=item_costs)
                 timing.end_tokenization()
 
                 lora = self._extract_lora(options)
@@ -1480,7 +1685,7 @@ class QueueExecutor:
                         items=[server_item],
                         labels=bi.labels,
                         output_schema=bi.output_schema,
-                        instruction=bi.instruction,
+                        instruction=instruction,
                         options=options,
                         request_id=bi.request_id,
                         timing=timing,
@@ -1761,6 +1966,25 @@ def _units_from_token_counts(counts: Any, expected_len: int) -> UnitCounts | Non
     return UnitCounts(input_tokens=sum(int(c) for c in counts))
 
 
+def _content_token_total(content: Any, input_tokens: Any, expected_len: int) -> int | None:
+    """Sum per-pair caller-content token counts for one score work item.
+
+    Every pair must carry a well-formed count no larger than its own input
+    count; anything else leaves the dimension unset rather than attributing a
+    partial or inconsistent sum.
+    """
+    if not isinstance(content, list) or not isinstance(input_tokens, list):
+        return None
+    if len(content) != expected_len or len(input_tokens) != expected_len:
+        return None
+    for count, total in zip(content, input_tokens, strict=True):
+        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+            return None
+        if not isinstance(total, int) or isinstance(total, bool) or count > total:
+            return None
+    return sum(content)
+
+
 def _backfill_score_units(
     adapter: Any,
     bi: ScoreBatchItem,
@@ -1874,6 +2098,13 @@ def _score_success_outcome(
         instruction=bi.instruction,
     )
     units = _with_images(units, sum(image_counts) if image_counts is not None else None)
+    content_tokens = _content_token_total(
+        getattr(score_output, "content_token_counts", None),
+        getattr(score_output, "input_token_counts", None),
+        score_output.batch_size,
+    )
+    if content_tokens is not None and units is not None and units.input_tokens is not None:
+        units = msgspec.structs.replace(units, content_input_tokens=content_tokens)
 
     # Score output is always Rust-frameable: the Python and Rust
     # sort/rank paths produce byte-identical results (see the
@@ -1943,7 +2174,7 @@ def _extract_success_outcome(
         # error instead of publishing an object the client reads as success.
         return _error_outcome(bi, _INFERENCE_ERROR_CODE, "adapter returned no extraction results")
     item_id = server_item.id if server_item.id is not None else f"item-{bi.item_index}"
-    result_msgpack = msgpack.packb({**extraction_results[0], "id": item_id}, use_bin_type=True)
+    result_msgpack = pack_msgpack({**extraction_results[0], "id": item_id}, use_bin_type=True)
 
     return ItemOutcome(
         work_item_id=bi.work_item_id,
@@ -1985,12 +2216,42 @@ def _oom_nak_outcome(bi: EncodeBatchItem | ScoreBatchItem | ExtractBatchItem) ->
     )
 
 
+def _upstream_nak_outcome(bi: EncodeBatchItem | ScoreBatchItem | ExtractBatchItem, retry_after_s: int) -> ItemOutcome:
+    # Never shorter than the base delay: a work item has a fixed number of
+    # deliveries, and a one-second hint would spend them long before the
+    # gateway stops waiting for the result.
+    delay_s = min(_UPSTREAM_NAK_MAX_DELAY_S, max(_default_nak_delay_s(), float(retry_after_s)))
+    return ItemOutcome(
+        work_item_id=bi.work_item_id,
+        request_id=bi.request_id,
+        item_index=bi.item_index,
+        disposition="nak_retry",
+        nak_delay_ms=int(delay_s * 1000),
+    )
+
+
 def _inference_exception_outcome(
     bi: EncodeBatchItem | ScoreBatchItem | ExtractBatchItem,
     exc: BaseException,
 ) -> ItemOutcome:
     if is_oom_error(exc):
         return _oom_nak_outcome(bi)
+    if isinstance(exc, WorkerDrainedError):
+        # The model was evicted before this item ran. Same answer as the
+        # "model evicted mid-batch" checks above: NAK so the work is
+        # redelivered, rather than publishing a terminal ``inference_error``
+        # for work that never started. The sidecar's preformed path does not
+        # park items in a batcher today, so this arm is a contract guard
+        # against a future caller that submits through the queueing path.
+        return _nak_outcome(bi)
+    if isinstance(exc, UpstreamUnavailableError):
+        # A remote profile's upstream did not serve the item, and asking again
+        # later may succeed: redeliver instead of publishing a terminal error.
+        return _upstream_nak_outcome(bi, exc.retry_after_s)
+    if isinstance(exc, InputTooLongError):
+        # The input exceeds the model's window: INPUT_TOO_LONG (HTTP 400), as
+        # the HTTP path reports it, not a server-side inference failure.
+        return _error_outcome(bi, ErrorCode.INPUT_TOO_LONG.value, str(exc))
     if isinstance(exc, (InvalidInputError, msgspec.ValidationError)):
         # A typed-decode failure (decode_item) or a media contract violation;
         # both surface as INVALID_INPUT (HTTP 400), matching the HTTP path.

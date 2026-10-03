@@ -9,6 +9,7 @@
  */
 
 import { describe, expect, it } from "vitest";
+import { DEFAULT_PROVISION_TIMEOUT } from "../src/internal/constants.js";
 import {
   getErrorCode,
   handleError,
@@ -18,6 +19,16 @@ import {
   parseGpuParam,
 } from "../src/internal/parsing.js";
 import { computeBackoffWithJitter, getRetryAfter } from "../src/internal/retry.js";
+import { packMessage } from "../src/msgpack.js";
+
+describe("Default provision timeout", () => {
+  it("matches the Python SDK's DEFAULT_PROVISION_TIMEOUT_S (900s)", () => {
+    // Parity with packages/sie_sdk/src/sie_sdk/client/_shared.py —
+    // cold loads / scale-from-zero can take 5-15 minutes; a shorter TS
+    // budget made requests fail in TS that succeed in Python.
+    expect(DEFAULT_PROVISION_TIMEOUT).toBe(900_000);
+  });
+});
 
 describe("Retry logic - exponential backoff with jitter", () => {
   it("should return delay within expected range for first attempt", () => {
@@ -132,12 +143,12 @@ describe("Retry-After header parsing", () => {
     expect(delay).toBeLessThan(12000);
   });
 
-  it("should return undefined for past date", () => {
+  it("should treat a past date as retry-immediately (0ms)", () => {
     const pastDate = new Date(Date.now() - 10000);
     const httpDate = pastDate.toUTCString();
 
     const delay = getRetryAfter(httpDate);
-    expect(delay).toBeUndefined();
+    expect(delay).toBe(0);
   });
 
   it("should return undefined for invalid format", () => {
@@ -248,6 +259,51 @@ describe("handleError (gateway / FastAPI bodies)", () => {
       message: "Model 'x' not found",
       code: "MODEL_NOT_FOUND",
       statusCode: 404,
+    });
+  });
+
+  it("uses a non-sensitive fallback for a non-string nested error message", async () => {
+    const res = new Response(
+      JSON.stringify({
+        detail: {
+          code: "INTERNAL_ERROR",
+          message: { private: "message-secret" },
+          param: "param-secret",
+        },
+      }),
+      { status: 500, headers: { "Content-Type": "application/json" } },
+    );
+
+    try {
+      await handleError(res);
+      throw new Error("expected handleError to throw");
+    } catch (error) {
+      expect(error).toMatchObject({
+        name: "ServerError",
+        message: "Request failed",
+        code: "INTERNAL_ERROR",
+        param: "param-secret",
+      });
+      expect((error as Error).message).not.toContain("message-secret");
+      expect((error as Error).message).not.toContain("param-secret");
+    }
+  });
+
+  it("carries the x-sie-request-id header onto typed errors (#3136)", async () => {
+    const res = new Response(
+      JSON.stringify({
+        detail: { code: "empty_model_output", message: "model produced no visible output text" },
+      }),
+      {
+        status: 500,
+        headers: { "Content-Type": "application/json", "x-sie-request-id": "req-http-1" },
+      },
+    );
+    await expect(handleError(res)).rejects.toMatchObject({
+      name: "ServerError",
+      code: "empty_model_output",
+      statusCode: 500,
+      requestId: "req-http-1",
     });
   });
 
@@ -363,6 +419,7 @@ describe("handleError (gateway / FastAPI bodies)", () => {
       message: 'field "model" is required',
       code: "invalid_request",
       statusCode: 400,
+      param: "model",
     });
   });
 
@@ -383,6 +440,36 @@ describe("handleError (gateway / FastAPI bodies)", () => {
       message: "queue unavailable",
       code: "transport_failure",
       statusCode: 503,
+      param: null,
+    });
+  });
+
+  it("preserves nullable/string param from msgpack and rejects other types", async () => {
+    const msgpack = new Response(
+      packMessage({
+        error: {
+          message: "bad sampling field",
+          code: "unsupported_field",
+          param: "top_k",
+        },
+      }),
+      { status: 400, headers: { "Content-Type": "application/msgpack" } },
+    );
+    await expect(handleError(msgpack)).rejects.toMatchObject({
+      name: "RequestError",
+      code: "unsupported_field",
+      param: "top_k",
+    });
+
+    const malformed = new Response(
+      JSON.stringify({
+        error: { message: "bad field", code: "unsupported_field", param: { field: "top_k" } },
+      }),
+      { status: 400, headers: { "Content-Type": "application/json" } },
+    );
+    await expect(handleError(malformed)).rejects.toMatchObject({
+      name: "RequestError",
+      param: undefined,
     });
   });
 
@@ -589,4 +676,50 @@ describe("parseGenerateResult usage coercion (BUG 13c)", () => {
       totalTokens: 6,
     });
   });
+});
+
+describe("generation cached prompt tokens", () => {
+  it("surfaces prompt_tokens_details.cached_tokens", () => {
+    const result = parseGenerateResult({
+      model: "m",
+      text: "ok",
+      usage: {
+        prompt_tokens: 90,
+        completion_tokens: 3,
+        total_tokens: 93,
+        prompt_tokens_details: { cached_tokens: 64 },
+      },
+    });
+    expect(result.usage.cachedPromptTokens).toBe(64);
+  });
+
+  it.each([
+    undefined,
+    {},
+    { cached_tokens: -1 },
+    { cached_tokens: 1.5 },
+    { cached_tokens: "64" },
+    [64],
+  ])("omits an absent or malformed count (%j)", (details) => {
+    const result = parseGenerateResult({
+      model: "m",
+      text: "ok",
+      usage: { prompt_tokens: 90, prompt_tokens_details: details },
+    });
+    expect(result.usage).not.toHaveProperty("cachedPromptTokens");
+  });
+});
+
+describe("authoritative generation image usage", () => {
+  it.each([1, 2])("preserves %i observed images", (images) => {
+    const result = parseGenerateResult({ model: "m", text: "ok", usage: { images } });
+    expect(result.usage.images).toBe(images);
+  });
+  it.each([undefined, null, 0, -1, 1.5, "1", true, Number.MAX_SAFE_INTEGER + 1])(
+    "omits missing or malformed image usage %s",
+    (images) => {
+      const result = parseGenerateResult({ model: "m", text: "ok", usage: { images } });
+      expect(result.usage).not.toHaveProperty("images");
+    },
+  );
 });

@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "scheme": "oss",
+  "bucket": "sie-wire-fixture",
+  "prefix": "payloads",
+  "plain_key": "request_00000000_0.bin",
+  "object_key": "payloads/request_00000000_0.bin",
+  "full_reference": "oss://sie-wire-fixture/payloads/request_00000000_0.bin"
+}

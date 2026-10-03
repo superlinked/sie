@@ -10,13 +10,24 @@ pooling / normalize) for every queued request.
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import AsyncIterator
+from typing import Any
+
 import pytest
+from sie_server.adapters._generation_base import GenerationChunk
+from sie_server.adapters.fake.adapter import FakeAdapter
 from sie_server.config.model import ModelConfig
+from sie_server.core import runtime_options
 from sie_server.core.encode_pipeline import resolve_encode_output_types
 from sie_server.core.runtime_options import (
+    GenerationTimeoutError,
+    GenerationTimeouts,
     apply_generation_runtime_options,
+    bound_generation,
     merge_runtime_options,
     merge_runtime_options_with_profile,
+    resolve_generation_timeouts,
 )
 from sie_server.types.inputs import InvalidInputError
 
@@ -164,6 +175,21 @@ def test_malformed_profile_selector_raises_invalid_input(profile: object) -> Non
         merge_runtime_options(config, {"profile": profile})
 
 
+@pytest.mark.parametrize("policy", [[], ["truncate_text"], {}, {"a": 1}, 0, True, "drop", ""])
+def test_invalid_overflow_policy_raises_invalid_input_on_both_ingress_paths(policy: object) -> None:
+    """The queue worker merges options here too, so an invalid policy is a 400, not an inference error."""
+    config = _embedder_config()
+
+    with pytest.raises(InvalidInputError, match="Invalid overflow_policy"):
+        merge_runtime_options(config, {"overflow_policy": policy})
+
+
+@pytest.mark.parametrize("policy", ["default", "truncate_text", "error", None])
+def test_valid_overflow_policies_pass_through(policy: str | None) -> None:
+    merged = merge_runtime_options(_embedder_config(), {"overflow_policy": policy})
+    assert merged["overflow_policy"] == policy
+
+
 def _generation_config() -> ModelConfig:
     return ModelConfig.model_validate(
         {
@@ -225,6 +251,93 @@ def test_generation_frequency_penalty_and_seed_defaults_apply() -> None:
 
     assert resolved["frequency_penalty"] == 0.5
     assert resolved["seed"] == -(1 << 63)
+
+
+_CHAT_RECIPE = {"temperature": 0.7, "top_p": 0.8, "top_k": 20, "presence_penalty": 1.5}
+_JSON_GRAMMAR = {"json_schema": {"type": "object", "properties": {"injured": {"type": "integer"}}}}
+
+
+def _chat_recipe_config() -> ModelConfig:
+    config = _generation_config()
+    config.profiles["default"].adapter_options.runtime["default_sampling"] = dict(_CHAT_RECIPE)
+    return config
+
+
+@pytest.mark.parametrize("grammar", [_JSON_GRAMMAR, {"regex": "(yes|no)"}])
+def test_generation_grammar_request_defaults_to_greedy_without_penalties(grammar: dict[str, Any]) -> None:
+    resolved = apply_generation_runtime_options(
+        _chat_recipe_config(),
+        None,
+        {"prompt": "hi", "max_new_tokens": 64, "grammar": grammar},
+    )
+
+    assert resolved["temperature"] == 0.0
+    assert resolved["presence_penalty"] == 0.0
+    assert resolved["frequency_penalty"] == 0.0
+    # Inert at temperature 0; kept as the profile sets them.
+    assert resolved["top_p"] == 0.8
+    assert resolved["top_k"] == 20
+    assert resolved["grammar"] == grammar
+
+
+def test_generation_grammar_request_keeps_explicit_sampler_fields() -> None:
+    resolved = apply_generation_runtime_options(
+        _chat_recipe_config(),
+        None,
+        {
+            "prompt": "hi",
+            "max_new_tokens": 64,
+            "grammar": _JSON_GRAMMAR,
+            "temperature": 0.9,
+            "presence_penalty": 0.4,
+        },
+    )
+
+    assert resolved["temperature"] == 0.9
+    assert resolved["presence_penalty"] == 0.4
+    assert resolved["frequency_penalty"] == 0.0
+
+
+def test_generation_grammar_request_keeps_request_default_sampling() -> None:
+    resolved = apply_generation_runtime_options(
+        _chat_recipe_config(),
+        {"default_sampling": {"temperature": 0.3, "presence_penalty": 1.0}},
+        {"prompt": "hi", "max_new_tokens": 64, "grammar": _JSON_GRAMMAR},
+    )
+
+    assert resolved["temperature"] == 0.3
+    assert resolved["presence_penalty"] == 1.0
+    assert resolved["top_p"] == 0.8
+
+
+def test_generation_grammar_request_without_profile_sampling_is_greedy() -> None:
+    config = _generation_config()
+    del config.profiles["default"].adapter_options.runtime["default_sampling"]
+
+    resolved = apply_generation_runtime_options(
+        config,
+        None,
+        {"prompt": "hi", "max_new_tokens": 64, "grammar": _JSON_GRAMMAR},
+    )
+
+    assert resolved["temperature"] == 0.0
+    assert resolved["presence_penalty"] == 0.0
+    assert "top_p" not in resolved
+
+
+@pytest.mark.parametrize("grammar", [None, "absent"])
+def test_generation_unconstrained_request_keeps_profile_recipe(grammar: object) -> None:
+    params: dict[str, Any] = {"prompt": "hi", "max_new_tokens": 64}
+    if grammar != "absent":
+        params["grammar"] = grammar
+
+    resolved = apply_generation_runtime_options(_chat_recipe_config(), None, params)
+
+    assert resolved["temperature"] == 0.7
+    assert resolved["top_p"] == 0.8
+    assert resolved["top_k"] == 20
+    assert resolved["presence_penalty"] == 1.5
+    assert resolved.get("frequency_penalty") is None
 
 
 def test_generation_profile_default_min_new_tokens_caps_to_explicit_max() -> None:
@@ -316,3 +429,167 @@ def test_generation_invalid_sampling_option_fails_closed(sampling: dict[str, obj
 def test_generation_non_finite_timeout_fails_closed(value: float) -> None:
     with pytest.raises(ValueError, match="positive number"):
         apply_generation_runtime_options(_generation_config(), {"overall_timeout_s": value}, {"prompt": "hi"})
+
+
+@pytest.mark.parametrize("key", ["first_chunk_timeout_s", "inter_chunk_timeout_s", "overall_timeout_s"])
+@pytest.mark.parametrize("value", [1e300, 2.0**64, 1 << 64])
+def test_generation_request_timeout_beyond_duration_range_fails_closed(key: str, value: float) -> None:
+    with pytest.raises(ValueError, match=r"less than 2\^64 seconds"):
+        apply_generation_runtime_options(_generation_config(), {key: value}, {"prompt": "hi"})
+
+
+def test_generation_request_timeout_below_duration_range_is_accepted() -> None:
+    largest_below = float.fromhex("0x1.fffffffffffffp+63")
+    apply_generation_runtime_options(_generation_config(), {"overall_timeout_s": largest_below}, {"prompt": "hi"})
+
+
+def test_generation_timeouts_resolve_from_profile_and_request() -> None:
+    config = _generation_config()
+
+    assert resolve_generation_timeouts(config, None) == GenerationTimeouts(first_chunk_s=None, overall_s=60.0)
+    assert resolve_generation_timeouts(
+        config,
+        {"first_chunk_timeout_s": 5, "overall_timeout_s": 12.5},
+    ) == GenerationTimeouts(first_chunk_s=5.0, overall_s=12.5)
+
+    undeclared = _generation_config()
+    del undeclared.profiles["default"].adapter_options.runtime["overall_timeout_s"]
+    assert resolve_generation_timeouts(undeclared, None) == GenerationTimeouts()
+
+
+class _Engine:
+    def __init__(self, delays: list[float]) -> None:
+        self.delays = delays
+        self.closed = False
+
+    async def chunks(self) -> AsyncIterator[int]:
+        try:
+            for index, delay in enumerate(self.delays):
+                await asyncio.sleep(delay)
+                yield index
+        finally:
+            self.closed = True
+
+
+async def _drain(chunks: AsyncIterator[int]) -> list[int]:
+    return [chunk async for chunk in chunks]
+
+
+async def test_bound_generation_passes_chunks_through_within_timeouts() -> None:
+    engine = _Engine([0.0, 0.0, 0.0])
+
+    chunks = await _drain(bound_generation(engine.chunks(), GenerationTimeouts(first_chunk_s=1.0, overall_s=1.0)))
+
+    assert chunks == [0, 1, 2]
+    assert engine.closed
+
+
+async def test_bound_generation_without_timeouts_is_unbounded() -> None:
+    engine = _Engine([0.05, 0.05])
+
+    assert await _drain(bound_generation(engine.chunks(), GenerationTimeouts())) == [0, 1]
+
+
+async def test_bound_generation_first_chunk_timeout_aborts_the_engine() -> None:
+    engine = _Engine([5.0])
+
+    with pytest.raises(GenerationTimeoutError) as raised:
+        await _drain(bound_generation(engine.chunks(), GenerationTimeouts(first_chunk_s=0.05, overall_s=5.0)))
+
+    assert raised.value.code == "first_chunk_timeout"
+    assert engine.closed
+
+
+async def test_bound_generation_overall_timeout_applies_after_the_first_chunk() -> None:
+    engine = _Engine([0.0, 0.0, 5.0])
+
+    with pytest.raises(GenerationTimeoutError) as raised:
+        await _drain(bound_generation(engine.chunks(), GenerationTimeouts(first_chunk_s=0.05, overall_s=0.2)))
+
+    assert raised.value.code == "overall_timeout"
+    assert engine.closed
+
+
+class _EngineWithHangingAbort:
+    def __init__(self) -> None:
+        self.close_started = False
+
+    def __aiter__(self) -> _EngineWithHangingAbort:
+        return self
+
+    async def __anext__(self) -> int:
+        await asyncio.sleep(10)
+        return 0
+
+    async def aclose(self) -> None:
+        self.close_started = True
+        await asyncio.sleep(10)
+
+
+async def test_bound_generation_does_not_wait_on_a_hung_engine_abort(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(runtime_options, "_GENERATION_CLOSE_TIMEOUT_S", 0.05)
+    engine = _EngineWithHangingAbort()
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+
+    with pytest.raises(GenerationTimeoutError) as raised:
+        await _drain(bound_generation(engine, GenerationTimeouts(first_chunk_s=0.05)))
+
+    assert raised.value.code == "first_chunk_timeout"
+    assert engine.close_started
+    assert loop.time() - started < 2.0
+
+
+class _AdapterWithHangingAbort(FakeAdapter):
+    """A generation engine whose abort on cancellation takes a while."""
+
+    def __init__(self, abort_s: float) -> None:
+        super().__init__()
+        self.abort_s = abort_s
+        self.abort_started = False
+        self.abort_finished = False
+
+    async def generate(self, prompt: str, **kwargs: Any) -> AsyncIterator[GenerationChunk]:
+        _ = (prompt, kwargs)
+        try:
+            await asyncio.sleep(30)
+            yield GenerationChunk(text_delta="late")
+        except asyncio.CancelledError:
+            self.abort_started = True
+            await asyncio.sleep(self.abort_s)
+            self.abort_finished = True
+            raise
+
+
+async def test_bound_generation_answers_before_a_slow_engine_abort_finishes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(runtime_options, "_GENERATION_CLOSE_TIMEOUT_S", 0.1)
+    adapter = _AdapterWithHangingAbort(abort_s=0.5)
+    adapter.load("cpu")
+    chunks = adapter.generate_with_preflight({"prompt": "hi", "max_new_tokens": 4}, None)
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+
+    with pytest.raises(GenerationTimeoutError) as raised:
+        await _drain(bound_generation(chunks, GenerationTimeouts(first_chunk_s=0.05)))
+
+    elapsed = loop.time() - started
+    assert raised.value.code == "first_chunk_timeout"
+    assert elapsed < 0.4, elapsed
+    assert adapter.abort_started
+    assert not adapter.abort_finished
+
+    await asyncio.sleep(0.6)
+    assert adapter.abort_finished, "the engine abort must be allowed to finish in the background"
+
+
+async def test_bound_generation_keeps_engine_timeout_errors() -> None:
+    async def failing() -> AsyncIterator[int]:
+        raise TimeoutError("engine read timed out")
+        yield 0
+
+    with pytest.raises(TimeoutError) as raised:
+        await _drain(bound_generation(failing(), GenerationTimeouts(overall_s=5.0)))
+
+    assert not isinstance(raised.value, GenerationTimeoutError)

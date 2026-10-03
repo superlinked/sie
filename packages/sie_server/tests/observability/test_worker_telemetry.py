@@ -557,6 +557,7 @@ def test_metric_inventory_is_exact() -> None:
         "sie.worker.scheduler.adaptive.p50",
         "sie.worker.scheduler.starvation.resets",
         "sie.worker.generation.ttft",
+        "sie.worker.generation.worker_wait",
         "sie.worker.generation.tpot",
         "sie.worker.generation.tokens",
         "sie.worker.generation.inflight",
@@ -567,7 +568,41 @@ def test_metric_inventory_is_exact() -> None:
         "sie.worker.generation.grammar.compile.duration",
         "sie.worker.generation.grammar.cache.lookups",
         "sie.worker.generation.grammar.requests",
+        "sie.worker.upstream.refusals",
+        "sie.worker.upstream.breaker.open",
     }
+
+
+def test_upstream_refusals_and_breaker_state_carry_a_bounded_upstream_name(
+    active_telemetry: tuple[wt.WorkerTelemetry, InMemoryMetricReader, MeterProvider],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    telemetry, reader, _provider = active_telemetry
+    monkeypatch.setattr(wt, "_admitted_upstreams", set())
+    for index in range(wt._MAX_UPSTREAMS + 2):
+        telemetry.upstream_refused(upstream=f"upstream-{index}", refusal="rate_cap")
+    telemetry.upstream_refused(upstream="upstream-0", refusal="not-a-limit")
+    telemetry.upstream_refused(upstream="upstream-1", refusal="breaker_open")
+    telemetry.upstream_breaker_changed(upstream="upstream-1", open=True)
+    telemetry.upstream_breaker_changed(upstream="upstream-0", open=False)
+
+    by_name = _metric_map(reader.get_metrics_data())
+    refusals = _points(by_name[wt.UPSTREAM_REFUSALS_METRIC_NAME])
+    assert all(set(point.attributes) == {"upstream", "reason", "lane"} for point in refusals)
+    counts = {(point.attributes["upstream"], point.attributes["reason"]): point.value for point in refusals}
+    assert counts[("upstream-0", "rate_cap")] == 1
+    assert counts[("upstream-0", "other")] == 1
+    assert counts[("upstream-1", "breaker_open")] == 1
+    assert counts[("other", "rate_cap")] == 2
+    assert len({upstream for upstream, _ in counts}) == wt._MAX_UPSTREAMS + 1
+    breaker = {point.attributes["upstream"]: point for point in _points(by_name[wt.UPSTREAM_BREAKER_OPEN_METRIC_NAME])}
+    assert {name: point.value for name, point in breaker.items()} == {"upstream-1": 1, "upstream-0": 0}
+    assert dict(breaker["upstream-1"].attributes) == {"upstream": "upstream-1", "lane": "realtime|l4|default"}
+
+
+def test_a_remote_adapter_is_its_own_backend() -> None:
+    assert wt._adapter_backend("sie_server.adapters.remote.sie:SieUpstreamAdapter") == "remote"
+    assert wt._adapter_backend("sie_server.adapters.fake.adapter:FakeAdapter") == "python"
 
 
 def test_metrics_transport_is_signal_specific_then_generic(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -633,3 +668,46 @@ def test_invalid_metrics_transport_disables_export_fail_open(
     assert "continuing without export" in caplog.text
     assert "error_type=ValueError" in caplog.text
     assert "http/json" not in caplog.text
+
+
+def test_service_version_uses_explicit_deployment_revision(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OTEL_SERVICE_VERSION", "  " + "a" * 40 + "  ")
+    assert wt.worker_resource_attributes()["service.version"] == "a" * 40
+    monkeypatch.setenv("OTEL_SERVICE_VERSION", "  ")
+    assert "service.version" not in wt.worker_resource_attributes()
+
+
+@pytest.mark.parametrize("closed_first", ["overflow-a", "overflow-b"])
+def test_overflow_breaker_gauge_stays_open_until_every_breaker_closes(
+    active_telemetry: tuple[wt.WorkerTelemetry, InMemoryMetricReader, MeterProvider],
+    monkeypatch: pytest.MonkeyPatch,
+    closed_first: str,
+) -> None:
+    telemetry, reader, _provider = active_telemetry
+    monkeypatch.setattr(wt, "_admitted_upstreams", {f"upstream-{i}" for i in range(wt._MAX_UPSTREAMS)})
+    for name in ("overflow-a", "overflow-b"):
+        telemetry.upstream_breaker_changed(upstream=name, open=True)
+    telemetry.upstream_breaker_changed(upstream=closed_first, open=False)
+
+    def overflow_value() -> int:
+        points = _points(_metric_map(reader.get_metrics_data())[wt.UPSTREAM_BREAKER_OPEN_METRIC_NAME])
+        assert len(points) == 1
+        assert points[0].attributes["upstream"] == "other"
+        return points[0].value
+
+    assert overflow_value() == 1
+    telemetry.upstream_breaker_changed(upstream="never-opened", open=False)
+    assert overflow_value() == 1
+    last = "overflow-b" if closed_first == "overflow-a" else "overflow-a"
+    telemetry.upstream_breaker_changed(upstream=last, open=False)
+    assert overflow_value() == 0
+
+
+def test_upstream_refusal_counter_counts_calls_in_a_batch(
+    active_telemetry: tuple[wt.WorkerTelemetry, InMemoryMetricReader, MeterProvider],
+) -> None:
+    telemetry, reader, _provider = active_telemetry
+    telemetry.upstream_refused(upstream="batch-upstream", refusal="rate_cap", requests=7)
+    telemetry.upstream_refused(upstream="batch-upstream", refusal="rate_cap")
+    points = _points(_metric_map(reader.get_metrics_data())[wt.UPSTREAM_REFUSALS_METRIC_NAME])
+    assert sum(point.value for point in points) == 8

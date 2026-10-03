@@ -1,0 +1,13 @@
+{
+  "usage_container": "usage",
+  "terminal_unit_fields": [
+    "audio_ms",
+    "content_input_tokens",
+    "images",
+    "input_tokens",
+    "output_tokens",
+    "pages",
+    "pairs"
+  ],
+  "settled_charge_fields": ["credits_charged", "rate_book_version"]
+}

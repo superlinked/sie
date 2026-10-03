@@ -1,0 +1,7 @@
+evidence/
+evidence.old/
+runs/
+report.json
+.venv/
+__pycache__/
+.ruff_cache/

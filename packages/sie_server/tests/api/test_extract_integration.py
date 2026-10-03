@@ -5,7 +5,7 @@ These tests verify end-to-end behavior including:
 - Large extract requests are sub-batched correctly
 - Backpressure returns 503 when queue is full
 
-Mark: integration (run with `mise run test -m integration`)
+Mark: integration (run with `mise run test -- -i packages/sie_server/tests/api/test_extract_integration.py`)
 """
 
 from __future__ import annotations

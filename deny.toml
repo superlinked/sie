@@ -1,14 +1,11 @@
-# cargo-deny policy for the workspace (sie-gateway, sie-gateway-cloud,
-# sie-server-sidecar, sie-audio-prep) — merged from the former per-crate
-# packages/sie_gateway/deny.toml + packages/sie_audio_prep/deny.toml (#2339).
-# packages/sie_server_rust is not a workspace member (see Cargo.toml) and,
-# as before this merge, is not deny-audited.
+# cargo-deny policy shared by the public Rust workspace and standalone worker.
+# Each dependency graph is audited against its own committed lockfile.
 #
-# Run with: `mise run gateway-deny`
+# Workspace: `mise run gateway-deny`; standalone worker: the CI Rust audit lane.
 # Docs:     https://embarkstudios.github.io/cargo-deny/
 
 [graph]
-all-features = true        # audit cloud-storage feature deps too
+all-features = true        # audit optional feature dependencies too
 no-default-features = false
 
 [advisories]
@@ -26,8 +23,7 @@ ignore = [
     # depending on quick-xml >=0.41.
     { id = "RUSTSEC-2026-0194", reason = "quick-xml <0.41 quadratic duplicate-attribute parse DoS (upstream #969); transitive via object_store 0.14.0 (pins ^0.40.1); awaiting upstream bump" },
     { id = "RUSTSEC-2026-0195", reason = "quick-xml <0.41 namespace-declaration allocation DoS (upstream #970); transitive via object_store 0.14.0 (pins ^0.40.1); awaiting upstream bump" },
-    # Surfaced when the sidecar joined deny coverage (#2339): `paste` is
-    # archived-unmaintained (no vulnerability), transitive via
+    # `paste` is archived and unmaintained (no vulnerability), transitive via
     # tokenizers 0.23 -> macro_rules_attribute. Drop when tokenizers ships a
     # release off macro_rules_attribute/paste.
     { id = "RUSTSEC-2024-0436", reason = "paste unmaintained (archived, no vuln); transitive via tokenizers 0.23 macro_rules_attribute; awaiting upstream bump" },
@@ -57,6 +53,9 @@ confidence-threshold = 0.9
 # licenses. Scoped as per-crate exceptions rather than a global allow so the
 # gateway/sidecar keep their historical no-MPL posture for any future dep.
 exceptions = [
+    # option-ext is consumed unmodified only by the standalone worker through
+    # hf-hub -> dirs -> dirs-sys. Keep its MPL allowance exact-version scoped.
+    { name = "option-ext", version = "=0.2.0", allow = ["MPL-2.0"] },
     { name = "symphonia", allow = ["MPL-2.0"] },
     { name = "symphonia-adapter-libopus", allow = ["MPL-2.0"] },
     { name = "symphonia-bundle-flac", allow = ["MPL-2.0"] },

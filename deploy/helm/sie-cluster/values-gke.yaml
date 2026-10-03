@@ -61,9 +61,10 @@ dashboards:
 healthGates:
   enabled: true
 
-# Ingress via nginx-ingress (install externally or via ingress-nginx chart)
+# Ingress via nginx-ingress. Off by default: install an ingress controller,
+# then enable it with hosts, TLS, and gateway auth (see the chart README).
 ingress:
-  enabled: true
+  enabled: false
   className: nginx
   # TLS defaults to BYO (user-supplied kubernetes.io/tls Secret).
   # Three other modes are supported:
@@ -149,12 +150,11 @@ workers:
           maxReplicas: 10
 
 # ServiceAccount — Helm manages creation; Workload Identity annotation injected at deploy time.
-# NAMING CONTRACT: name must match Terraform's Workload Identity binding
-#   in deploy/terraform/gcp/infra/iam.tf (currently "sie:sie-server").
+# NAMING CONTRACT: name must match the namespace/service-account binding in
+#   your Workload Identity configuration (the default is "sie:sie-server").
 # To inject the GCP SA at deploy time:
 #   --set serviceAccount.annotations."iam\.gke\.io/gcp-service-account"=<EMAIL>
-# Or use terraform output:
-#   --set serviceAccount.annotations."iam\.gke\.io/gcp-service-account"="$(terraform -chdir=deploy/terraform/gcp/infra output -raw sie_workload_service_account)"
+# Or pass the corresponding output from your infrastructure configuration.
 serviceAccount:
   create: true
   name: "sie-server"

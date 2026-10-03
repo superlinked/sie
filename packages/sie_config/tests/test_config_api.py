@@ -1,16 +1,21 @@
 import asyncio
+import copy
+import logging
 import tempfile
 import threading
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
 import yaml
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sie_config import config_api
 from sie_config.config_api import router as config_router
 from sie_config.config_store import ConfigStore
 from sie_config.model_registry import ModelRegistry
+from sie_config.nats_publisher import NatsPublisher
 
 
 def _create_test_app(
@@ -408,12 +413,12 @@ class TestConfigAPIModels:
             "  default:\n"
             "    adapter_path: sie_server.adapters.bert_flash:Bert\n"
             "    max_batch_tokens: 8192\n"
-            "    max_sequence_length: 256\n"
+            "    compute_precision: float16\n"
         )
         resp1 = client.post("/v1/configs/models", content=yaml_body)
         assert resp1.status_code == 201
 
-        conflict_body = yaml_body.replace("max_sequence_length: 256", "max_sequence_length: 128")
+        conflict_body = yaml_body.replace("compute_precision: float16", "compute_precision: bfloat16")
         resp2 = client.post("/v1/configs/models", content=conflict_body)
         assert resp2.status_code == 409
         data = resp2.json()
@@ -612,19 +617,35 @@ class TestConfigAPIEdgeCases:
         # armed by EITHER env signal (SIE_ENV managed / SIE_DEPLOYMENT_ENV Helm).
         monkeypatch.delenv("SIE_ADMIN_TOKEN", raising=False)
         monkeypatch.delenv("SIE_AUTH_TOKEN", raising=False)
+        monkeypatch.delenv("SIE_CONFIG_READ_TOKEN", raising=False)
         monkeypatch.delenv("SIE_ENV", raising=False)
         monkeypatch.delenv("SIE_DEPLOYMENT_ENV", raising=False)
         monkeypatch.setenv(env_var, "production")
         app = _create_test_app(self._bundles, self._models)
         client = TestClient(app)
         yaml_body = "sie_id: test/model\nprofiles:\n  default:\n    adapter_path: sie_server.adapters.bert_flash:B\n    max_batch_tokens: 1\n"
-        assert client.get("/v1/configs/models").status_code == 403
-        assert client.post("/v1/configs/models", content=yaml_body).status_code == 403
+        read = client.get("/v1/configs/models")
+        assert read.status_code == 403
+        assert "requires SIE_CONFIG_READ_TOKEN (or SIE_ADMIN_TOKEN) in production" in read.text
+        write = client.post("/v1/configs/models", content=yaml_body)
+        assert write.status_code == 403
+        assert "requires SIE_ADMIN_TOKEN in production" in write.text
+
+    def test_non_ascii_token_is_rejected_not_an_error(self, monkeypatch) -> None:
+        monkeypatch.setenv("SIE_ADMIN_TOKEN", "admin-secret")
+        monkeypatch.setenv("SIE_AUTH_TOKEN", "read-only")
+        app = _create_test_app(self._bundles, self._models)
+        client = TestClient(app)
+        headers = {"Authorization": "Bearer caf\u00e9".encode()}
+        yaml_body = "sie_id: test/model\nprofiles:\n  default:\n    adapter_path: sie_server.adapters.bert_flash:B\n    max_batch_tokens: 1\n"
+        assert client.get("/v1/configs/models", headers=headers).status_code == 403
+        assert client.post("/v1/configs/models", content=yaml_body, headers=headers).status_code == 403
 
     def test_dev_without_any_token_stays_open(self, monkeypatch) -> None:
         # Self-host / dev (no prod env signal) keeps the open-localhost posture.
         monkeypatch.delenv("SIE_ADMIN_TOKEN", raising=False)
         monkeypatch.delenv("SIE_AUTH_TOKEN", raising=False)
+        monkeypatch.delenv("SIE_CONFIG_READ_TOKEN", raising=False)
         monkeypatch.delenv("SIE_ENV", raising=False)
         monkeypatch.delenv("SIE_DEPLOYMENT_ENV", raising=False)
         app = _create_test_app(self._bundles, self._models)
@@ -752,6 +773,7 @@ class TestConfigAPIExport:
             "default"
         )
         assert data["bundle_pool_config_hashes"]["default"]["default"] == data["bundle_config_hashes"]["default"]
+        assert data["bundle_adapters"] == {"default": ["sie_server.adapters.bert_flash"]}
         assert len(data["models"]) == 1
         assert data["models"][0]["model_id"] == "test/model"
         assert data["models"][0]["affected_bundles"] == ["default"]
@@ -1093,10 +1115,13 @@ class TestConfigAPIExportNoConfigStore:
         assert set(parsed.get("profiles", {}).keys()) == {"default", "fast"}, (
             f"NATS delta must carry merged profiles; got {list(parsed.get('profiles', {}).keys())}"
         )
+        assert last_call.kwargs["affected_bundles"] == ["default"]
+        assert last_call.kwargs["bundle_adapters"] == self.app.state.model_registry.get_bundle_adapters(["default"])
+        assert last_call.kwargs["bundle_adapters"]["default"]
 
 
 class TestConfigAPIExportAuth:
-    """Export is admin-gated. These tests protect the internal-only contract."""
+    """Export bearer parsing, and the admin token on the export route."""
 
     def setup_method(self) -> None:
         self._tmpdir = tempfile.TemporaryDirectory()
@@ -1120,6 +1145,22 @@ class TestConfigAPIExportAuth:
         assert resp.status_code == 401
         assert "Missing Authorization header" in resp.text
 
+    def test_lowercase_bearer_prefix_is_accepted(self, monkeypatch) -> None:
+        monkeypatch.setenv("SIE_ADMIN_TOKEN", "the-real-admin")
+        resp = self.client.get(
+            "/v1/configs/export",
+            headers={"Authorization": "bearer the-real-admin"},
+        )
+        assert resp.status_code == 200
+
+    def test_bearer_prefix_is_trimmed_and_case_insensitive(self, monkeypatch) -> None:
+        monkeypatch.setenv("SIE_ADMIN_TOKEN", "the-real-admin")
+        resp = self.client.get(
+            "/v1/configs/export",
+            headers={"Authorization": "  BEARER  the-real-admin  "},
+        )
+        assert resp.status_code == 200
+
     def test_export_forbidden_with_wrong_admin_token(self, monkeypatch) -> None:
         monkeypatch.setenv("SIE_ADMIN_TOKEN", "the-real-admin")
         resp = self.client.get(
@@ -1127,18 +1168,6 @@ class TestConfigAPIExportAuth:
             headers={"Authorization": "Bearer WRONG-TOKEN"},
         )
         assert resp.status_code == 403
-
-    def test_export_forbidden_with_inference_only_token(self, monkeypatch) -> None:
-        # SIE_AUTH_TOKEN alone is not an admin credential, even for reads that
-        # go through the write-auth gate (export is admin-only).
-        monkeypatch.delenv("SIE_ADMIN_TOKEN", raising=False)
-        monkeypatch.setenv("SIE_AUTH_TOKEN", "inference-token")
-        resp = self.client.get(
-            "/v1/configs/export",
-            headers={"Authorization": "Bearer inference-token"},
-        )
-        assert resp.status_code == 403
-        assert "SIE_ADMIN_TOKEN" in resp.text
 
     def test_export_allowed_with_correct_admin_token(self, monkeypatch) -> None:
         monkeypatch.setenv("SIE_ADMIN_TOKEN", "the-real-admin")
@@ -1150,6 +1179,226 @@ class TestConfigAPIExportAuth:
         data = resp.json()
         assert data["snapshot_version"] == 1
         assert any(m["model_id"] == "test/model" for m in data["models"])
+
+
+_WRITE_BODY = (
+    "sie_id: test/model\n"
+    "profiles:\n"
+    "  extra:\n"
+    "    adapter_path: sie_server.adapters.bert_flash:BertFlashAdapter\n"
+    "    max_batch_tokens: 1\n"
+)
+_READ_ROUTES = [
+    ("GET", "/v1/configs/models", None),
+    ("GET", "/v1/configs/models/test/model", None),
+    ("GET", "/v1/configs/bundles", None),
+    ("GET", "/v1/configs/bundles/default", None),
+    ("POST", "/v1/configs/resolve", '{"model": "test/model"}'),
+    ("GET", "/v1/configs/epoch", None),
+]
+_EXPORT_ROUTE = ("GET", "/v1/configs/export", None)
+_WRITE_ROUTES = [
+    ("POST", "/v1/configs/models", _WRITE_BODY),
+    ("PUT", "/v1/configs/models/test/model", _WRITE_BODY),
+    ("DELETE", "/v1/configs/models/test/model", None),
+]
+_CREDENTIALS = {
+    "admin": "Bearer admin-secret",
+    "config-read": "Bearer config-read-secret",
+    "inference": "Bearer inference-secret",
+    "wrong": "Bearer not-a-configured-token",
+    "non-ascii": "Bearer café".encode(),
+}
+
+
+class TestConfigAPIRouteAuth:
+    """Every route against every credential, with all three tokens configured."""
+
+    def setup_method(self) -> None:
+        self._tmpdir = tempfile.TemporaryDirectory()
+        root = Path(self._tmpdir.name)
+        bundles = root / "bundles"
+        models = root / "models"
+        bundles.mkdir()
+        models.mkdir()
+        _write_bundle(bundles, "default", ["sie_server.adapters.bert_flash"])
+        _write_model(models, "test/model", "sie_server.adapters.bert_flash:BertFlashAdapter")
+        self.client = TestClient(_create_test_app(bundles, models, str(root / "store")))
+
+    def teardown_method(self) -> None:
+        self._tmpdir.cleanup()
+
+    @pytest.fixture(autouse=True)
+    def _tokens(self, monkeypatch) -> None:
+        monkeypatch.setenv("SIE_ADMIN_TOKEN", "admin-secret")
+        monkeypatch.setenv("SIE_CONFIG_READ_TOKEN", "config-read-secret")
+        monkeypatch.setenv("SIE_AUTH_TOKEN", "inference-secret")
+        monkeypatch.setenv("SIE_DEPLOYMENT_ENV", "production")
+
+    def _call(self, method: str, path: str, body: str | None, credential: str | None) -> int:
+        headers = {} if credential is None else {"Authorization": _CREDENTIALS[credential]}
+        return self.client.request(method, path, content=body, headers=headers).status_code
+
+    @pytest.mark.parametrize(("method", "path", "body"), [*_READ_ROUTES, _EXPORT_ROUTE, *_WRITE_ROUTES])
+    def test_missing_credential_is_401(self, method: str, path: str, body: str | None) -> None:
+        assert self._call(method, path, body, None) == 401
+
+    @pytest.mark.parametrize("credential", ["wrong", "non-ascii"])
+    @pytest.mark.parametrize(("method", "path", "body"), [*_READ_ROUTES, _EXPORT_ROUTE, *_WRITE_ROUTES])
+    def test_unknown_credential_is_403(self, method: str, path: str, body: str | None, credential: str) -> None:
+        assert self._call(method, path, body, credential) == 403
+
+    @pytest.mark.parametrize("credential", ["admin", "config-read", "inference"])
+    @pytest.mark.parametrize(("method", "path", "body"), _READ_ROUTES)
+    def test_every_configured_credential_reads(self, method: str, path: str, body: str | None, credential: str) -> None:
+        assert self._call(method, path, body, credential) == 200
+
+    @pytest.mark.parametrize(("credential", "status"), [("admin", 200), ("config-read", 200), ("inference", 403)])
+    def test_export_accepts_the_config_read_and_admin_tokens_only(self, credential: str, status: int) -> None:
+        assert self._call(*_EXPORT_ROUTE, credential) == status
+
+    @pytest.mark.parametrize("credential", ["config-read", "inference"])
+    @pytest.mark.parametrize(("method", "path", "body"), _WRITE_ROUTES)
+    def test_read_credentials_never_write(self, method: str, path: str, body: str | None, credential: str) -> None:
+        assert self._call(method, path, body, credential) == 403
+
+    @pytest.mark.parametrize(("method", "path", "body"), _WRITE_ROUTES)
+    def test_admin_credential_writes(self, method: str, path: str, body: str | None) -> None:
+        assert self._call(method, path, body, "admin") not in (401, 403)
+
+
+class TestConfigAPIReadTokenWithoutAdmin:
+    """A read token without an admin token keeps writes closed in any environment."""
+
+    def setup_method(self) -> None:
+        self._tmpdir = tempfile.TemporaryDirectory()
+        root = Path(self._tmpdir.name)
+        bundles = root / "bundles"
+        models = root / "models"
+        bundles.mkdir()
+        models.mkdir()
+        _write_bundle(bundles, "default", ["sie_server.adapters.bert_flash"])
+        _write_model(models, "test/model", "sie_server.adapters.bert_flash:BertFlashAdapter")
+        self.client = TestClient(_create_test_app(bundles, models, str(root / "store")))
+
+    def teardown_method(self) -> None:
+        self._tmpdir.cleanup()
+
+    @pytest.mark.parametrize("deployment_env", [None, "development", "production"])
+    @pytest.mark.parametrize("read_var", ["SIE_CONFIG_READ_TOKEN", "SIE_AUTH_TOKEN"])
+    def test_writes_refused_and_reads_need_the_token(
+        self, monkeypatch, read_var: str, deployment_env: str | None
+    ) -> None:
+        for var in ("SIE_ADMIN_TOKEN", "SIE_CONFIG_READ_TOKEN", "SIE_AUTH_TOKEN", "SIE_ENV", "SIE_DEPLOYMENT_ENV"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv(read_var, "read-secret")
+        if deployment_env is not None:
+            monkeypatch.setenv("SIE_DEPLOYMENT_ENV", deployment_env)
+        read = {"Authorization": "Bearer read-secret"}
+
+        assert self.client.get("/v1/configs/export").status_code == 401
+        export_status = 200 if read_var == "SIE_CONFIG_READ_TOKEN" else 403
+        assert self.client.get("/v1/configs/export", headers=read).status_code == export_status
+        assert self.client.get("/v1/configs/epoch", headers=read).status_code == 200
+        for headers in ({}, read):
+            resp = self.client.post("/v1/configs/models", content=_WRITE_BODY, headers=headers)
+            assert resp.status_code == 403
+            assert "require SIE_ADMIN_TOKEN" in resp.text
+            assert self.client.delete("/v1/configs/models/test/model", headers=headers).status_code == 403
+
+
+class TestReadTokenSeparationWarning:
+    @pytest.mark.parametrize(
+        ("read_token", "admin_token", "warned"),
+        [("same-secret", "same-secret", True), ("read-secret", "admin-secret", False), (None, "admin-secret", False)],
+    )
+    def test_warns_only_when_the_read_token_is_the_admin_token(
+        self, monkeypatch, caplog, read_token: str | None, admin_token: str, warned: bool
+    ) -> None:
+        monkeypatch.delenv("SIE_CONFIG_READ_TOKEN", raising=False)
+        if read_token is not None:
+            monkeypatch.setenv("SIE_CONFIG_READ_TOKEN", read_token)
+        monkeypatch.setenv("SIE_ADMIN_TOKEN", admin_token)
+        with caplog.at_level(logging.WARNING, logger="sie_config.config_api"):
+            config_api.warn_if_read_token_is_admin_token()
+        assert ("SIE_CONFIG_READ_TOKEN equals SIE_ADMIN_TOKEN" in caplog.text) is warned
+        assert "secret" not in caplog.text
+
+
+class TestConfigAPIExportSingleFlight:
+    """Concurrent exports build one at a time, so a write waits behind at most one build."""
+
+    def test_a_write_waits_behind_at_most_one_export_build(self, monkeypatch) -> None:
+        for var in ("SIE_ADMIN_TOKEN", "SIE_CONFIG_READ_TOKEN", "SIE_AUTH_TOKEN", "SIE_ENV", "SIE_DEPLOYMENT_ENV"):
+            monkeypatch.delenv(var, raising=False)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bundles, models = root / "bundles", root / "models"
+            bundles.mkdir()
+            models.mkdir()
+            _write_bundle(bundles, "default", ["sie_server.adapters.bert_flash"])
+            _write_model(models, "test/model", "sie_server.adapters.bert_flash:BertFlashAdapter")
+            app = _create_test_app(bundles, models, str(root / "store"))
+            store = app.state.config_store
+
+            order: list[str] = []
+            first_build_started = threading.Event()
+            release_builds = threading.Event()
+            read_epoch, increment_epoch = store.read_epoch, store.increment_epoch
+            in_write = threading.local()
+
+            def gated_read_epoch() -> int:
+                if getattr(in_write, "active", False):
+                    return read_epoch()
+                order.append("export")
+                first_build_started.set()
+                assert release_builds.wait(timeout=10)
+                return read_epoch()
+
+            def recorded_increment_epoch() -> int:
+                order.append("write")
+                in_write.active = True
+                try:
+                    return increment_epoch()
+                finally:
+                    in_write.active = False
+
+            monkeypatch.setattr(store, "read_epoch", gated_read_epoch)
+            monkeypatch.setattr(store, "increment_epoch", recorded_increment_epoch)
+            exports = 8
+            lock_requests = 0
+            lock_request_events: dict[int, asyncio.Event] = {}
+            get_write_lock = config_api._get_write_lock
+
+            def counted_get_write_lock(app_state):
+                nonlocal lock_requests
+                lock_requests += 1
+                if lock_requests in lock_request_events:
+                    lock_request_events[lock_requests].set()
+                return get_write_lock(app_state)
+
+            monkeypatch.setattr(config_api, "_get_write_lock", counted_get_write_lock)
+
+            async def scenario() -> list[int]:
+                exports_queued, write_queued = asyncio.Event(), asyncio.Event()
+                lock_request_events.update({exports: exports_queued, exports + 1: write_queued})
+                transport = httpx.ASGITransport(app=app)
+                async with httpx.AsyncClient(transport=transport, base_url="http://sie-config") as client:
+                    export_tasks = [asyncio.create_task(client.get("/v1/configs/export")) for _ in range(exports)]
+                    assert await asyncio.to_thread(first_build_started.wait, 10)
+                    await exports_queued.wait()
+                    write_task = asyncio.create_task(client.post("/v1/configs/models", content=_WRITE_BODY))
+                    await write_queued.wait()
+                    release_builds.set()
+                    responses = await asyncio.gather(write_task, *export_tasks)
+                    return [response.status_code for response in responses]
+
+            statuses = asyncio.run(asyncio.wait_for(scenario(), timeout=20))
+
+        assert statuses[0] == 201
+        assert statuses[1:] == [200] * exports
+        assert order.index("write") == 1, order
+        assert order.count("export") == exports
 
 
 class TestConfigAPIEpoch:
@@ -1270,8 +1519,6 @@ class TestConfigAPIEpoch:
         assert "epoch" in resp.json()
 
     def test_epoch_accepts_admin_token(self, monkeypatch) -> None:
-        # Read auth accepts the admin token too — the gateway passes its
-        # admin token here rather than maintaining two credentials.
         monkeypatch.setenv("SIE_ADMIN_TOKEN", "real-admin")
         resp = self.client.get(
             "/v1/configs/epoch",
@@ -1930,8 +2177,8 @@ class TestIdempotencyEvictionSafety:
 class TestMergePreservesTopLevelFields:
     """Appending a profile via `POST /v1/configs/models` must merge on
     top of the stored document, not replace it. A minimal append body
-    cannot erase previously-written top-level fields (`description`,
-    `default_bundle`, ...); conflicting values raise 409 because the
+    cannot erase previously-written top-level fields (`hf_id`,
+    `max_sequence_length`, ...); conflicting values raise 409 because the
     config API is append-only for model metadata.
     """
 
@@ -1956,8 +2203,8 @@ class TestMergePreservesTopLevelFields:
             "/v1/configs/models",
             content=(
                 "sie_id: acme/bert\n"
-                "description: keep-me-around\n"
-                "default_bundle: premium\n"
+                "hf_id: acme/bert-base\n"
+                "max_sequence_length: 512\n"
                 "profiles:\n"
                 "  default:\n"
                 "    adapter_path: sie_server.adapters.bert_flash:BertFlashAdapter\n"
@@ -1966,8 +2213,8 @@ class TestMergePreservesTopLevelFields:
         )
         assert resp1.status_code == 201
 
-        # Append a second profile with a minimal body (no description /
-        # default_bundle in the incoming payload).
+        # Append a second profile with a minimal body (no hf_id /
+        # max_sequence_length in the incoming payload).
         resp2 = self.client.post(
             "/v1/configs/models",
             content=(
@@ -1982,8 +2229,8 @@ class TestMergePreservesTopLevelFields:
 
         stored_path = self._store / "models" / "acme__bert.yaml"
         stored = yaml.safe_load(stored_path.read_text())
-        assert stored["description"] == "keep-me-around"
-        assert stored["default_bundle"] == "premium"
+        assert stored["hf_id"] == "acme/bert-base"
+        assert stored["max_sequence_length"] == 512
         assert set(stored["profiles"].keys()) == {"default", "fast"}
 
     def test_conflicting_top_level_field_returns_409(self) -> None:
@@ -1991,7 +2238,7 @@ class TestMergePreservesTopLevelFields:
             "/v1/configs/models",
             content=(
                 "sie_id: acme/bert\n"
-                "description: initial\n"
+                "hf_id: acme/bert-initial\n"
                 "profiles:\n"
                 "  default:\n"
                 "    adapter_path: sie_server.adapters.bert_flash:BertFlashAdapter\n"
@@ -2000,13 +2247,13 @@ class TestMergePreservesTopLevelFields:
         )
         assert resp1.status_code == 201
 
-        # Reusing the same sie_id but mutating `description` must fail 409
+        # Reusing the same sie_id but mutating `hf_id` must fail 409
         # — config API is append-only for top-level metadata.
         resp2 = self.client.post(
             "/v1/configs/models",
             content=(
                 "sie_id: acme/bert\n"
-                "description: mutated!\n"
+                "hf_id: acme/bert-mutated\n"
                 "profiles:\n"
                 "  fast:\n"
                 "    adapter_path: sie_server.adapters.bert_flash:BertFlashAdapter\n"
@@ -2016,7 +2263,7 @@ class TestMergePreservesTopLevelFields:
         assert resp2.status_code == 409
         body = resp2.json()
         assert body["detail"]["error"] == "content_conflict"
-        assert "description" in body["detail"]["conflicting_fields"]
+        assert "hf_id" in body["detail"]["conflicting_fields"]
 
     def test_append_can_introduce_new_top_level_field(self) -> None:
         resp1 = self.client.post(
@@ -2035,7 +2282,7 @@ class TestMergePreservesTopLevelFields:
             "/v1/configs/models",
             content=(
                 "sie_id: acme/bert\n"
-                "description: added-later\n"
+                "hf_id: acme/bert-base\n"
                 "profiles:\n"
                 "  fast:\n"
                 "    adapter_path: sie_server.adapters.bert_flash:BertFlashAdapter\n"
@@ -2045,7 +2292,7 @@ class TestMergePreservesTopLevelFields:
         assert resp2.status_code == 201
 
         stored = yaml.safe_load((self._store / "models" / "acme__bert.yaml").read_text())
-        assert stored["description"] == "added-later"
+        assert stored["hf_id"] == "acme/bert-base"
 
 
 class TestRejectUnroutableModels:
@@ -2374,3 +2621,205 @@ class TestConfigAPIReplace:
         # The first model still exists; the second was never (mis)written under the key.
         assert self.client.get("/v1/configs/models/idemx/first").status_code == 200
         assert self.client.get("/v1/configs/models/idemx/second").status_code == 404
+
+
+def _routing_write_config() -> dict:
+    return {
+        "sie_id": "acme/routing",
+        "hf_id": "acme/routing",
+        "tasks": {"extract": {}},
+        "profiles": {
+            "default": {
+                "adapter_path": "sie_server.adapters.bert_flash:BertFlashAdapter",
+                "max_batch_tokens": 4096,
+                "kv_budget_tokens": 4096,
+            },
+            "remote": {
+                "adapter_path": "sie_server.adapters.remote.sie:SieUpstreamAdapter",
+                "max_batch_tokens": 4096,
+                "kv_budget_tokens": 4096,
+                "adapter_options": {"loadtime": {"upstream": "team-sie", "upstream_model": "org/name"}},
+            },
+        },
+        "routing": {"policy": "fallback", "fallback_profile": "remote"},
+    }
+
+
+class TestConfigAPIRoutingValidation:
+    @pytest.fixture
+    def app_client(self, tmp_path: Path) -> tuple[FastAPI, TestClient]:
+        bundles, models = tmp_path / "bundles", tmp_path / "models"
+        bundles.mkdir()
+        models.mkdir()
+        _write_bundle(bundles, "default", ["sie_server.adapters.bert_flash", "sie_server.adapters.remote.sie"])
+        app = _create_test_app(bundles, models, str(tmp_path / "store"))
+        publisher = MagicMock(spec=NatsPublisher)
+        publisher.connected = True
+        publisher.router_id = "test-publisher"
+        publisher.publish_config_notification = AsyncMock()
+        app.state.nats_publisher = publisher
+        return app, TestClient(app)
+
+    @pytest.mark.parametrize("method", ["POST", "PUT"])
+    @pytest.mark.parametrize(
+        "routing",
+        [
+            {},
+            {"policy": "remote_only"},
+            {"policy": "remote_only", "fallback_profile": "remote"},
+            {"policy": "fallback"},
+            {"policy": "fallback", "fallback_profile": "missing"},
+            {"policy": "fallback", "fallback_profile": "default"},
+            {"policy": "fallback", "fallback_profile": "remote", "triggers": []},
+            {"policy": "fallback", "fallback_profile": "remote", "triggers": ["unhealthy", "unhealthy"]},
+            {"policy": "fallback", "fallback_profile": "remote", "wake_above": 1},
+            {
+                "policy": "threshold",
+                "fallback_profile": "remote",
+                "wake_above": 2,
+                "sleep_below": 1,
+                "window_s": 1,
+                "cooldown_s": 1,
+            },
+        ],
+    )
+    def test_invalid_routing_has_no_write_effects(
+        self, app_client: tuple[FastAPI, TestClient], monkeypatch: pytest.MonkeyPatch, method: str, routing: dict
+    ) -> None:
+        app, client = app_client
+        config = _routing_write_config()
+        config["routing"] = routing
+        writer = MagicMock(wraps=app.state.config_store.write_model)
+        monkeypatch.setattr(app.state.config_store, "write_model", writer)
+        path = "/v1/configs/models" if method == "POST" else "/v1/configs/models/acme/routing"
+
+        response = client.request(method, path, content=yaml.safe_dump(config))
+
+        assert response.status_code == 422
+        assert response.json()["detail"]["error"] == "validation_error"
+        writer.assert_not_called()
+        assert app.state.model_registry.get_full_config("acme/routing") is None
+        assert app.state.config_store.read_epoch() == 0
+        app.state.nats_publisher.publish_config_notification.assert_not_called()
+
+    @pytest.mark.parametrize("method", ["POST", "PUT"])
+    def test_generation_fallback_is_refused_without_write_effects(
+        self, app_client: tuple[FastAPI, TestClient], method: str
+    ) -> None:
+        app, client = app_client
+        config = _routing_write_config()
+        config["tasks"] = {"generate": {"context_length": 8192, "max_output_tokens": 64}}
+        path = "/v1/configs/models" if method == "POST" else "/v1/configs/models/acme/routing"
+        response = client.request(method, path, content=yaml.safe_dump(config))
+        assert response.status_code == 422
+        assert "generate" in str(response.json())
+        assert app.state.config_store.read_model("acme/routing") is None
+        assert app.state.config_store.read_epoch() == 0
+        app.state.nats_publisher.publish_config_notification.assert_not_called()
+
+    def test_valid_partial_append_preserves_routing_tasks_and_default(
+        self, app_client: tuple[FastAPI, TestClient]
+    ) -> None:
+        app, client = app_client
+        original = _routing_write_config()
+        assert client.post("/v1/configs/models", content=yaml.safe_dump(original)).status_code == 201
+        append = {"sie_id": original["sie_id"], "profiles": {"variant": {"extends": "remote"}}}
+
+        response = client.post("/v1/configs/models", content=yaml.safe_dump(append))
+
+        assert response.status_code == 201
+        stored = yaml.safe_load(app.state.config_store.read_model(original["sie_id"]))
+        assert stored["routing"] == original["routing"]
+        assert stored["tasks"] == original["tasks"]
+        assert stored["profiles"]["default"] == original["profiles"]["default"]
+        assert set(stored["profiles"]) == {"default", "remote", "variant"}
+        assert app.state.model_registry.get_full_config(original["sie_id"]) == stored
+
+    @pytest.mark.parametrize("inherited_task", [False, True])
+    def test_append_rejects_hybrid_encoding_from_effective_tasks(
+        self, app_client: tuple[FastAPI, TestClient], inherited_task: bool
+    ) -> None:
+        app, client = app_client
+        original = _routing_write_config()
+        if inherited_task:
+            original.pop("routing")
+            original["tasks"] = {"encode": {"dense": {"dim": 384}}}
+        else:
+            original.pop("tasks")
+        assert client.post("/v1/configs/models", content=yaml.safe_dump(original)).status_code == 201
+        before = app.state.config_store.read_model(original["sie_id"])
+        app.state.nats_publisher.publish_config_notification.reset_mock()
+        append = {"sie_id": original["sie_id"], "profiles": {"variant": {"extends": "remote"}}}
+        if inherited_task:
+            append["routing"] = {"policy": "fallback", "fallback_profile": "remote"}
+        else:
+            append["tasks"] = {"encode": {"dense": {"dim": 384}}}
+
+        response = client.post("/v1/configs/models", content=yaml.safe_dump(append))
+
+        assert response.status_code == 422
+        assert app.state.config_store.read_model(original["sie_id"]) == before
+        assert app.state.model_registry.get_full_config(original["sie_id"]) == original
+        assert app.state.config_store.read_epoch() == 1
+        app.state.nats_publisher.publish_config_notification.assert_not_called()
+
+    def test_metadata_conflict_still_precedes_new_invalid_routing(self, app_client: tuple[FastAPI, TestClient]) -> None:
+        app, client = app_client
+        original = _routing_write_config()
+        original.pop("routing")
+        assert client.post("/v1/configs/models", content=yaml.safe_dump(original)).status_code == 201
+        append = {
+            "sie_id": original["sie_id"],
+            "hf_id": "acme/different",
+            "profiles": {"variant": {"extends": "remote"}},
+            "routing": {"policy": "remote_only"},
+        }
+
+        response = client.post("/v1/configs/models", content=yaml.safe_dump(append))
+
+        assert response.status_code == 409
+        assert response.json()["detail"]["conflicting_fields"] == ["hf_id"]
+        assert app.state.model_registry.get_full_config(original["sie_id"]) == original
+        assert app.state.config_store.read_epoch() == 1
+        with pytest.raises(ValueError, match="remote_backed"):
+            app.state.model_registry.add_model_config(append)
+        assert app.state.model_registry.get_full_config(original["sie_id"]) == original
+
+    def test_disk_merged_omitted_task_is_checked_before_persistence(
+        self, app_client: tuple[FastAPI, TestClient], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        app, client = app_client
+        original = _routing_write_config()
+        original.pop("tasks")
+        assert client.post("/v1/configs/models", content=yaml.safe_dump(original)).status_code == 201
+        disk = {**copy.deepcopy(original), "tasks": {"encode": {"dense": {"dim": 384}}}}
+        disk_yaml = yaml.safe_dump(disk)
+        app.state.config_store.write_model(original["sie_id"], disk_yaml)
+        writer = MagicMock(wraps=app.state.config_store.write_model)
+        monkeypatch.setattr(app.state.config_store, "write_model", writer)
+        app.state.nats_publisher.publish_config_notification.reset_mock()
+        append = {"sie_id": original["sie_id"], "profiles": {"variant": {"extends": "remote"}}}
+
+        response = client.post("/v1/configs/models", content=yaml.safe_dump(append))
+
+        assert response.status_code == 422
+        writer.assert_not_called()
+        assert app.state.config_store.read_model(original["sie_id"]) == disk_yaml
+        assert app.state.model_registry.get_full_config(original["sie_id"]) == original
+        assert app.state.config_store.read_epoch() == 1
+        app.state.nats_publisher.publish_config_notification.assert_not_called()
+
+    def test_replacement_does_not_rescue_fallback_from_stored_profiles(
+        self, app_client: tuple[FastAPI, TestClient]
+    ) -> None:
+        app, client = app_client
+        original = _routing_write_config()
+        assert client.post("/v1/configs/models", content=yaml.safe_dump(original)).status_code == 201
+        replacement = copy.deepcopy(original)
+        replacement["profiles"].pop("remote")
+
+        response = client.put("/v1/configs/models/acme/routing", content=yaml.safe_dump(replacement))
+
+        assert response.status_code == 422
+        assert app.state.model_registry.get_full_config(original["sie_id"]) == original
+        assert app.state.config_store.read_epoch() == 1

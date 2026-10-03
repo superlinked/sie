@@ -1,5 +1,6 @@
 sie_id: ibm-granite/granite-embedding-english-r2
 hf_id: ibm-granite/granite-embedding-english-r2
+hf_revision: 47ea694b257b703fee9253d75c2b1f2985180498
 inputs:
   text: true
   image: false

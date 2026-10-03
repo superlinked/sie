@@ -23,8 +23,7 @@ hf_id: defog/sqlcoder-7b-2
 #     still LOSES to general Qwen3-4B-Instruct at 0.70 on Spider exec-acc, so the
 #     model="sql" alias STAYS on Qwen3-4B-Instruct. (The card recommends
 #     num_beams=4; SGLang serves greedy, so 0.467 is a lower bound, but beam
-#     search is a serving change and would still likely trail.) See
-#     benchmarks/generation/Qwen__Qwen3-4B-Instruct-2507/sql/measured_baseline.json.
+#     search is a serving change and would still likely trail.)
 inputs:
   text: true
   image: false

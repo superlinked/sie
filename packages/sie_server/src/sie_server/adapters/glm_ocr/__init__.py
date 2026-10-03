@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import gc
-import io
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -11,7 +10,7 @@ import torch
 from sie_server.adapters._vision_patch_embed import rebind_vision_patch_embed
 from sie_server.adapters.base import ModelAdapter, ModelCapabilities, ModelDims
 from sie_server.core.inference_output import EncodeOutput, ExtractOutput
-from sie_server.types.inputs import media_bytes
+from sie_server.types.inputs import decode_image
 from sie_server.types.responses import Entity
 
 if TYPE_CHECKING:
@@ -260,12 +259,13 @@ class GlmOcrAdapter(ModelAdapter):
             )
 
         all_entities = []
-        for item in items:
+        for i, item in enumerate(items):
             entities = self._extract_single(
                 item,
                 instruction=instruction,
                 max_new_tokens=max_new_tokens,
                 num_beams=num_beams,
+                item_index=i,
             )
             all_entities.append(entities)
 
@@ -306,6 +306,7 @@ class GlmOcrAdapter(ModelAdapter):
                     instruction=None,
                     max_new_tokens=max_new_tokens,
                     num_beams=num_beams,
+                    item_index=i,
                 )
                 all_entities.append(entities)
                 continue
@@ -339,6 +340,7 @@ class GlmOcrAdapter(ModelAdapter):
         instruction: str | None,
         max_new_tokens: int,
         num_beams: int,
+        item_index: int | None = None,
     ) -> list[Entity]:
         """Extract from a single item.
 
@@ -351,16 +353,13 @@ class GlmOcrAdapter(ModelAdapter):
         Returns:
             List of entities extracted from the item.
         """
-        from PIL import Image as PILImage
-
         images = item.images
         if not images or len(images) == 0:
             raise ValueError(_ERR_NO_IMAGES)
 
-        img_bytes = media_bytes(images[0], kind="image")
-        pil_img = PILImage.open(io.BytesIO(img_bytes))
-        if pil_img.mode != "RGB":
-            pil_img = pil_img.convert("RGB")
+        # decode_image raises InvalidMediaError (-> 400 INVALID_INPUT) on
+        # non-bytes or undecodable payloads.
+        pil_img = decode_image(images[0], item_index=item_index, image_index=0)
 
         text = instruction or self._user_text
         messages = [

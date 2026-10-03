@@ -1,0 +1,36 @@
+{
+  "description": "RunBatch with op=\"future_op\" — an op a forward-compat sidecar might emit before this adapter image knows about it. Python adapter_call_loop must reject the WHOLE batch with error_code=\"run_batch_unknown_op\", NOT crash, and NOT silently drop. The payload is a real encode payload to confirm it extracts identifiers from whichever variant is set even when the op tag is unrecognised.",
+  "input": {
+    "model_id": "test/parity-future",
+    "batch_id": 200,
+    "lora_key": "",
+    "total_cost": 1,
+    "items": [
+      {
+        "op": "future_op",
+        "encode": {
+          "work_item_id": "w-fut",
+          "request_id": "r-fut",
+          "item_index": 0,
+          "total_items": 1,
+          "timestamp": 0.0,
+          "item": {"text": "hello from the future"},
+          "options": null
+        }
+      }
+    ]
+  },
+  "expected_canonical_outcomes": [
+    {
+      "work_item_id": "w-fut",
+      "request_id": "r-fut",
+      "item_index": 0,
+      "disposition": "publish_error_and_ack",
+      "error_code": "run_batch_unknown_op"
+    }
+  ],
+  "notes": {
+    "elided_fields": ["error", "nak_delay_ms", "result_msgpack", "raw_output", "inference_ms", "tokenization_ms", "postprocessing_ms"],
+    "rationale": "Forward-compat: a Rust scheduler that learns op=embed_image before this adapter image is rebuilt should surface a clean run_batch_unknown_op rather than crash or silently drop. The per-payload (work_item_id, request_id) extraction proves the rejection still threads the customer-facing identifiers through to the sidecar publisher."
+  }
+}

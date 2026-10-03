@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import hashlib
+import json
 import logging
 import os
 import struct
@@ -214,8 +215,10 @@ class IpcServer:
         self._drain_deadline_s: float | None = None
         self._streaming_processor: Any | None = None
         self._streaming_processor_lock = asyncio.Lock()
-        self._generation_prewarm_lock = asyncio.Lock()
-        self._generation_prewarmed = False
+        self._generation_prewarm_metadata_lock = asyncio.Lock()
+        self._generation_prewarm_locks: dict[str, asyncio.Lock] = {}
+        self._generation_prewarm_completed: dict[str, tuple[int, str]] = {}
+        self._generation_prewarm_authority_cache: dict[str, tuple[int, str]] = {}
 
     # -- Public surface ----------------------------------------------------
 
@@ -725,7 +728,7 @@ class IpcServer:
     ) -> SignalGenerateCancelResponse:
         if not req.request_id:
             return SignalGenerateCancelResponse(matched=False)
-        processor = await self._get_streaming_processor(prewarm=False)
+        processor = await self._get_streaming_processor()
         return SignalGenerateCancelResponse(matched=bool(processor.signal_cancel(req.request_id)))
 
     async def _handle_process_generate(
@@ -741,20 +744,20 @@ class IpcServer:
         try:
             # Keep the JetStream lease alive while the first generation
             # request lazily constructs the streaming processor and prewarms
-            # grammars. The processor's own heartbeat starts later, once
-            # request processing reaches the decode path.
+            # the requested model's grammars. The processor's own heartbeat
+            # starts later, once request processing reaches the decode path.
             await msg.in_progress()
-            processor = await self._get_streaming_processor()
+            processor = await self._get_streaming_processor(prewarm_model_id=req.model_id)
             await processor.process(msg, req.model_id)
             await sink.send(GenerateEvent(kind="done"))
         finally:
             _GENERATE_SINK.reset(token)
 
-    async def _get_streaming_processor(self, *, prewarm: bool = True) -> Any:
+    async def _get_streaming_processor(self, *, prewarm_model_id: str | None = None) -> Any:
         if self._streaming_processor is not None:
             processor = self._streaming_processor
-            if prewarm:
-                await self._prewarm_generation_grammars(processor)
+            if prewarm_model_id is not None:
+                await self._prewarm_generation_grammars(processor, prewarm_model_id)
             return processor
         async with self._streaming_processor_lock:
             if self._streaming_processor is None:
@@ -767,8 +770,8 @@ class IpcServer:
                     admission_resolver=self._resolve_generation_admission,
                 )
             processor = self._streaming_processor
-        if prewarm:
-            await self._prewarm_generation_grammars(processor)
+        if prewarm_model_id is not None:
+            await self._prewarm_generation_grammars(processor, prewarm_model_id)
         return processor
 
     def _resolve_generation_admission(self, model_id: str) -> tuple[int | None, bool | None]:
@@ -792,23 +795,63 @@ class IpcServer:
             profile_admission = None
         return budget, resolve_admission_enabled(profile_admission=profile_admission)
 
-    async def _prewarm_generation_grammars(self, processor: Any) -> None:
-        async with self._generation_prewarm_lock:
-            if self._generation_prewarmed:
+    async def _prewarm_generation_grammars(self, processor: Any, model_id: str) -> None:
+        authority = self._generation_prewarm_authority(model_id)
+        if authority is None:
+            return
+        async with self._generation_prewarm_metadata_lock:
+            if self._generation_prewarm_completed.get(model_id) == authority:
                 return
-            self._generation_prewarmed = True
+            model_lock = self._generation_prewarm_locks.setdefault(model_id, asyncio.Lock())
+
+        async with model_lock:
+            authority = self._generation_prewarm_authority(model_id)
+            if authority is None:
+                return
+            async with self._generation_prewarm_metadata_lock:
+                if self._generation_prewarm_completed.get(model_id) == authority:
+                    return
             try:
-                configs = self._executor.registry.get_configs_snapshot()
+                await processor.prewarm_grammars_for_model(model_id)
             except Exception:  # noqa: BLE001
-                logger.debug("Could not snapshot configs for generation grammar prewarm", exc_info=True)
+                logger.warning("Generation grammar prewarm failed for %s", model_id, exc_info=True)
                 return
-            for model_id, config in configs.items():
-                try:
-                    if config.tasks.generate is None:
-                        continue
-                    await processor.prewarm_grammars_for_model(model_id)
-                except Exception:  # noqa: BLE001
-                    logger.warning("Generation grammar prewarm failed for %s", model_id, exc_info=True)
+            async with self._generation_prewarm_metadata_lock:
+                if self._generation_prewarm_authority(model_id) == authority:
+                    self._generation_prewarm_completed[model_id] = authority
+
+    def _generation_prewarm_authority(self, model_id: str) -> tuple[int, str] | None:
+        try:
+            registry = self._executor.registry
+            version_before = registry._config_version
+            if isinstance(version_before, bool) or not isinstance(version_before, int) or version_before < 0:
+                return None
+            cached = self._generation_prewarm_authority_cache.get(model_id)
+            if cached is not None and cached[0] == version_before:
+                if registry._config_version == version_before:
+                    return cached
+                return None
+            config = registry.get_config(model_id)
+            if config.tasks.generate is None:
+                return None
+            payload = json.dumps(
+                config.model_dump(mode="json"),
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ).encode()
+            if registry._config_version != version_before:
+                return None
+            authority = version_before, hashlib.sha256(payload).hexdigest()
+            if registry._config_version != version_before:
+                return None
+            self._generation_prewarm_authority_cache[model_id] = authority
+        except KeyError:
+            return None
+        except Exception:  # noqa: BLE001
+            logger.debug("Could not inspect requested model for generation grammar prewarm", exc_info=True)
+            return None
+        return authority
 
     # -- Error helper ------------------------------------------------------
 

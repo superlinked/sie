@@ -1,0 +1,54 @@
+name: Release Helm
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+      tag_name:
+        required: true
+        type: string
+      sha:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+        with:
+          version: 2026.5.5
+          install_args: --jobs=1
+      - name: Validate, render, and retain the exact chart
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_TAG: ${{ inputs.tag_name }}
+          RELEASE_SHA: ${{ inputs.sha }}
+        run: |
+          set -euo pipefail
+          test "$RELEASE_TAG" = "v$RELEASE_VERSION"
+          test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+          test "$(mise exec -- uv run --frozen --project . python -c 'import sys,yaml; print(yaml.safe_load(open(sys.argv[1]))["version"])' deploy/helm/sie-cluster/Chart.yaml)" = "$RELEASE_VERSION"
+          test "$(mise exec -- uv run --frozen --project . python -c 'import sys,yaml; print(yaml.safe_load(open(sys.argv[1]))["appVersion"])' deploy/helm/sie-cluster/Chart.yaml)" = "$RELEASE_TAG"
+          mise run helm -- dependencies
+          mise run helm -- lint --set payloadStore.enabled=false
+          mise run helm -- template --set payloadStore.enabled=false >/dev/null
+          mkdir -p artifact
+          mise run helm -- package --destination artifact
+          python3 -m tools.ci.release_artifact stamp --directory artifact --kind helm --version '${{ inputs.version }}' --tag-name '${{ inputs.tag_name }}' --source-revision '${{ inputs.sha }}' --run-id '${{ github.run_id }}'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: helm-sie-cluster-${{ inputs.version }}
+          path: artifact/
+          if-no-files-found: error
+          retention-days: 30

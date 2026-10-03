@@ -98,7 +98,7 @@ markers = [
     "eks: tests that require a real EKS cluster",
     "generation: tests that exercise generation endpoint contracts or a real generation worker",
     "observability: tests that require optional local observability components",
-    "idle_rerank: opt-in Tilt e2e for idle-eviction behavior",
+    "idle_rerank: opt-in end-to-end idle-eviction behavior",
     "model: model regression tests that download real weights",
     "fake_stack: deterministic weightless Fake Engine regression tests",
 ]

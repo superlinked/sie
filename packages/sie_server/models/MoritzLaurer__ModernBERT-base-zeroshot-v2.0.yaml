@@ -1,5 +1,6 @@
 sie_id: MoritzLaurer/ModernBERT-base-zeroshot-v2.0
 hf_id: MoritzLaurer/ModernBERT-base-zeroshot-v2.0
+hf_revision: d421c4545a438fd006fb43f8b981c5d908faa1e1
 inputs:
   text: true
   image: false

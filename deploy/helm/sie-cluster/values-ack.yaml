@@ -1,0 +1,198 @@
+# Alibaba Cloud ACK specific values
+fullnameOverride: sie
+
+# ACK RRSA admission injects short-lived OIDC credentials into every SIE pod
+# template that uses the shared sie-server ServiceAccount.
+podLabels:
+  pod-identity.alibabacloud.com/injection: "on"
+
+# Sub-charts required for queue-depth autoscaling and observability.
+keda:
+  install: true
+
+kube-prometheus-stack:
+  install: true
+  # ACK manages its own control plane.
+  kubeApiServer:
+    enabled: false
+  kubeControllerManager:
+    enabled: false
+  kubeScheduler:
+    enabled: false
+  kubeProxy:
+    enabled: false
+  kubeEtcd:
+    enabled: false
+  prometheus:
+    prometheusSpec:
+      storageSpec:
+        volumeClaimTemplate:
+          spec:
+            storageClassName: alicloud-disk-topology-alltype
+  grafana:
+    persistence:
+      storageClassName: alicloud-disk-topology-alltype
+      # ACK disk CSI rejects smaller dynamically provisioned disks.
+      size: 20Gi
+
+observability:
+  logs:
+    install: true
+
+loki:
+  singleBinary:
+    persistence:
+      storageClass: alicloud-disk-topology-alltype
+
+# ACK may mark none of its built-in disk CSI classes as default. The selected
+# topology-aware class delays allocation until scheduling and falls back from
+# ESSD to SSD/ultra in the chosen zone. It does not itself prove encryption;
+# use a governed encrypted WFFC class and override all four ACK storage paths
+# together when encrypted PVCs are required.
+
+kubernetes-event-exporter:
+  install: false
+
+# Autoscaling via KEDA (queries Prometheus for scaling decisions).
+# prometheusAddress is auto-derived when kube-prometheus-stack.install=true.
+autoscaling:
+  enabled: true
+  cooldownPeriod: 600
+  scaleDownStabilization: 300
+
+serviceMonitor:
+  enabled: true
+  labels:
+    app.kubernetes.io/part-of: sie
+
+machineProfiles:
+  # Alibaba Cloud ecs.gn7i-c8g1.2xlarge (NVIDIA A10, 24 GiB).
+  a10:
+    gpuType: nvidia-a10
+    machineType: ecs.gn7i-c8g1.2xlarge
+    spot: false
+
+ingress:
+  # Install and wait for an ACK-compatible ingress controller before enabling.
+  enabled: false
+  className: nginx
+
+gateway:
+  replicas: 2
+  image:
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "512Mi"
+    limits:
+      cpu: "2"
+      memory: "2Gi"
+  extraEnv:
+    - name: SIE_OSS_REGION
+      value: "eu-central-1"
+    - name: SIE_OSS_USE_INTERNAL_ENDPOINT
+      value: "true"
+    - name: ALIBABA_CLOUD_ECS_METADATA_DISABLED
+      value: "true"
+
+config:
+  enabled: true
+  podSecurityContext:
+    fsGroup: 1000
+    fsGroupChangePolicy: OnRootMismatch
+    runAsGroup: 1000
+    runAsNonRoot: true
+    runAsUser: 1000
+  # Mutable epoch state remains on an ACK disk. OSS cannot provide the
+  # compare-and-swap contract required by sie-config.
+  configStore:
+    enabled: true
+    storageClassName: alicloud-disk-topology-alltype
+    # ACK disk CSI rejects smaller dynamically provisioned disks.
+    size: 20Gi
+  image:
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "256Mi"
+    limits:
+      cpu: "1"
+      memory: "1Gi"
+
+workers:
+  common:
+    # Node-backed emptyDir cache. The Terraform GPU disk default is 500 GiB,
+    # leaving nominal headroom for images, logs, OS, and kubelet thresholds.
+    cacheStorageSize: 300Gi
+    extraEnv:
+      - name: SIE_OSS_REGION
+        value: "eu-central-1"
+      - name: SIE_OSS_USE_INTERNAL_ENDPOINT
+        value: "true"
+      - name: ALIBABA_CLOUD_ECS_METADATA_DISABLED
+        value: "true"
+    workerSidecar:
+      extraEnv:
+        - name: SIE_OSS_REGION
+          value: "eu-central-1"
+        - name: SIE_OSS_USE_INTERNAL_ENDPOINT
+          value: "true"
+        - name: ALIBABA_CLOUD_ECS_METADATA_DISABLED
+          value: "true"
+  pools:
+    a10:
+      enabled: true
+      machineProfile: a10
+      gpuType: a10
+      # Match the generic GPU labels and the Terraform pool's exact GPU type.
+      nodeSelector:
+        ack.node.gpu.schedule: default
+        sie.superlinked.com/gpu-type: a10
+        sie.superlinked.com/node-type: gpu
+      gpu:
+        count: 1
+        product: NVIDIA-A10
+      resources:
+        requests:
+          cpu: "4"
+          memory: "16Gi"
+        limits:
+          cpu: "8"
+          memory: "24Gi"
+      # Matches the taint applied by the Alibaba Terraform module.
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Equal
+          value: present
+          effect: NoSchedule
+      bundles:
+        default:
+          minReplicas: 0
+          maxReplicas: 10
+
+# Pass Terraform's `payload_store_url` output at install time. Native OSS V4
+# uses RRSA and is required for queue work items larger than 1 MiB.
+payloadStore:
+  enabled: true
+
+# Pass Terraform's `rrsa_workload_role_name` output through the exact
+# `pod-identity.alibabacloud.com/role-name` annotation at install time. The
+# chart never renders an AccessKey or projected token value.
+serviceAccount:
+  create: true
+  name: "sie-server"
+  annotations: {}
+
+dcgm-exporter:
+  # If enabled, keep the exporter on the same ACK GPU pools as workers.
+  nodeSelector:
+    ack.node.gpu.schedule: default
+    sie.superlinked.com/gpu-type: a10
+    sie.superlinked.com/node-type: gpu
+  tolerations:
+    - key: nvidia.com/gpu
+      operator: Equal
+      value: present
+      effect: NoSchedule

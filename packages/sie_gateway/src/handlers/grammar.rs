@@ -12,6 +12,8 @@
 //! * JSON Schema reject-list (``$dynamicRef``, ``if/then/else``,
 //!   ``unevaluatedProperties``, ``dependentSchemas``)
 //! * Mutual exclusivity of ``json_schema`` and ``regex``
+//! * ``strict: true`` only on ``json_schema`` and ``regex`` grammars, whose
+//!   finished output the worker verifies
 //!
 //! All failures return a 400 :class:`Response` carrying the OpenAI
 //! error envelope with ``code`` (``grammar_invalid`` |
@@ -291,6 +293,13 @@ pub fn parse_grammar(v: &Value) -> GrammarParseResult {
                 format!("ebnf length {} exceeds limit ({MAX_EBNF_LEN})", ebnf.len()),
                 "grammar.ebnf",
                 oai_code::INVALID_REQUEST,
+            ));
+        }
+        if strict == Some(true) {
+            return GrammarParseResult::Err(bad_request(
+                "'grammar.strict' is not supported for EBNF grammars".to_string(),
+                "grammar.strict",
+                oai_code::UNSUPPORTED_FIELD,
             ));
         }
         GrammarParseResult::Ok(GrammarSpec::Ebnf {
@@ -1175,6 +1184,20 @@ mod tests {
                 assert_eq!(strict, Some(true));
             }
             other => panic!("expected JsonSchema, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_parse_grammar_rejects_strict_ebnf() {
+        let v = json!({"ebnf": "root ::= \"yes\" | \"no\"", "strict": true});
+        let body = err_or_panic(parse_grammar(&v)).await;
+        assert_eq!(body["error"]["param"], "grammar.strict");
+        assert_eq!(body["error"]["code"], "unsupported_field");
+
+        let v = json!({"ebnf": "root ::= \"yes\" | \"no\"", "strict": false});
+        match ok_or_panic(parse_grammar(&v)) {
+            GrammarSpec::Ebnf { strict, .. } => assert_eq!(strict, Some(false)),
+            other => panic!("expected Ebnf, got {other:?}"),
         }
     }
 

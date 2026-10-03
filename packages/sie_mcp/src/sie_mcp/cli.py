@@ -12,7 +12,7 @@ import uvicorn
 from sie_mcp.plugin_pack import build_plugin_pack
 from sie_mcp.skill_zip import build_skill_zip, skill_name
 
-app = typer.Typer(name="sie-mcp", help="SIE MCP edge service (Req 12).", no_args_is_help=True)
+app = typer.Typer(name="sie-mcp", help="SIE MCP edge service.", no_args_is_help=True)
 
 _PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 _DEFAULT_SKILL_MD = _PACKAGE_ROOT / "plugin" / "SKILL.md"
@@ -65,7 +65,7 @@ def skill_zip(
         typer.Option("--out", "-o", help="Output .zip path (default: dist/<name>-skill.zip)."),
     ] = None,
 ) -> None:
-    """Package the surface-agnostic Superlinked Agent Skill as a claude.ai-uploadable ZIP (#1312)."""
+    """Package the surface-agnostic Superlinked Agent Skill as a claude.ai-uploadable ZIP."""
     if not skill.is_file():
         raise typer.BadParameter(f"SKILL.md not found at {skill}")
     text = skill.read_text(encoding="utf-8")
@@ -83,7 +83,7 @@ def plugin_pack(
         typer.Option(
             "--mcp-url",
             envvar="SIE_MCP_URL",
-            help="Hosted MCP endpoint to install, e.g. https://mcp.sie-test.example/mcp.",
+            help="Hosted or self-hosted MCP endpoint to install, e.g. https://mcp.example.com/mcp.",
         ),
     ],
     connector_secret: Annotated[
@@ -91,13 +91,16 @@ def plugin_pack(
         typer.Option(
             "--connector-secret",
             envvar="SIE_MCP_CONNECTOR_SECRET",
-            help="Optional connector secret to print in INSTALL.md; prefer the env var to avoid shell history.",
+            help=(
+                "Deprecated compatibility input; ignored and never used, written, or printed. "
+                "Provide the secret during connector installation."
+            ),
         ),
     ] = None,
     cluster_label: Annotated[
         str,
         typer.Option("--cluster-label", help="Human-readable cluster label for the generated install guide."),
-    ] = "sie-test",
+    ] = "sie-cluster",
     skill: Annotated[
         Path,
         typer.Option("--skill", "-s", help="Path to the surface-agnostic Superlinked SKILL.md to package."),
@@ -118,7 +121,7 @@ def plugin_pack(
         typer.Option("--out-dir", "-o", help="Output directory for the plugin pack."),
     ] = _PACKAGE_ROOT / "dist" / "superlinked-docs-plugin",
 ) -> None:
-    """Build a quick install pack for a hosted/test-cluster Superlinked MCP edge."""
+    """Build a quick install pack for a hosted or self-hosted Superlinked MCP edge."""
     if not skill.is_file():
         raise typer.BadParameter(f"SKILL.md not found at {skill}")
     cowork_text = None

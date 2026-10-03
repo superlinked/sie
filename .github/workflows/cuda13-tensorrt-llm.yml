@@ -1,0 +1,37 @@
+name: CUDA 13 TensorRT-LLM image compatibility
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/cuda13-tensorrt-llm.yml
+      - .github/workflows/cuda13-bundle-image.yml
+      - tools/ci/cuda13_image_smoke.py
+      - Cargo.toml
+      - Cargo.lock
+      - packages/sie_audio_prep/**
+      - packages/sie_gateway/**
+      - packages/sie_server_sidecar/**
+      - packages/sie_telemetry/**
+      - packages/sie_sdk/pyproject.toml
+      - packages/sie_sdk/src/**
+      - packages/sie_server/Dockerfile.cuda13
+      - packages/sie_server/src/**
+      - packages/sie_server/bundles/**
+      - packages/sie_server/models/**
+      - packages/sie_server/bundles/tensorrt-llm.yaml
+      - packages/sie_server/src/sie_server/adapters/tensorrt_llm/**
+      - packages/sie_server/pyproject.toml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cuda13-tensorrt-llm-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compatibility:
+    uses: ./.github/workflows/cuda13-bundle-image.yml
+    with:
+      bundle: tensorrt-llm
+      image-tag: sie-cuda13-tensorrt-llm:pr

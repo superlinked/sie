@@ -31,8 +31,7 @@ tasks:
       # NOTE: scoped to what the production backend (``outlines``, set
       # per-profile under ``adapter_options.loadtime``) actually supports
       # on SGLang. SGLang's outlines_backend explicitly skips ebnf with
-      # ``Skip unsupported key_type='ebnf'`` — confirmed on A100 smoke
-      # 2026-05-26 (see ``benchmarks/generation/qwen35-outlines-smoke/``).
+      # ``Skip unsupported key_type='ebnf'`` — confirmed by a compatibility smoke.
       # If an operator switches a Qwen3.5 profile to ``grammar_backend:
       # xgrammar`` they should re-add ``"ebnf"`` here — xgrammar smoke on
       # the same hardware passed all three modes (regex/json_schema/ebnf).
@@ -109,9 +108,8 @@ max_sequence_length: 8192
 #     effective_max_running_requests_per_dp = 48
 #
 # ``kv_budget_tokens`` is sized at ``token_capacity / 4``, matching the
-# pattern set by Qwen3-4B-Instruct-2507. Re-calibrate via the smoke
-# tool ``tools/smoke_qwen35_4b.py`` if SGLang version or
-# ``mem_fraction_static`` changes.
+# pattern set by Qwen3-4B-Instruct-2507. Re-calibrate with an SGLang capacity
+# probe if its version or ``mem_fraction_static`` changes.
 profiles:
   # The bare model is the measured production A100-40GB shape. The
   # ``a100-40gb`` alias below preserves the resolved profile identity used by
@@ -266,8 +264,8 @@ profiles:
     max_batch_tokens: 65536
     compute_precision: bfloat16
     adapter_path: sie_server.adapters.sglang.generation:SGLangGenerationAdapter
-    # Analytical estimate — re-calibrate via ``tools/smoke_qwen35_4b.py``
-    # once H100 access is set up. Scales ~2× off the A100-40GB number
+    # Analytical estimate — re-calibrate with an SGLang capacity probe once
+    # H100 access is set up. Scales ~2× off the A100-40GB number
     # (80 GB / 40 GB), so ~420k tokens at context=32768.
     kv_budget_tokens: 421888
     adapter_options:

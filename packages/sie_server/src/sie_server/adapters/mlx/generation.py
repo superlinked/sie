@@ -11,7 +11,7 @@ Metal-memory isolation.
 
 Selection is automatic: :meth:`SGLangGenerationAdapter.create_for_device`
 swaps to this adapter on any non-CUDA device, so unsuffixed generation models
-"just work" on a Mac (served via ``mise run serve -b sglang``).
+"just work" on a Mac (served via ``mise run serve -- -b sglang``).
 
 Streaming async-iterator contract (same as the SGLang adapter). The adapter
 opens an HTTP streaming connection to the child's OpenAI-compatible
@@ -34,7 +34,7 @@ import os
 import subprocess
 import tempfile
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
 from typing import Any, cast
 
@@ -44,11 +44,13 @@ from sie_server.adapters._generation_base import (
     FinishReason,
     GenerationAdapter,
     GenerationChunk,
+    GenerationUnsupportedFieldError,
 )
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_NOT_LOADED
 from sie_server.adapters.mlx import _server
-from sie_server.types.inputs import ImageInput
+from sie_server.core.load_errors import EngineExitedError, EngineStartupError, ModelConfigurationError
+from sie_server.types.inputs import ImageInput, VideoInput
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +86,14 @@ _FINISH_REASONS: frozenset[str] = frozenset({"stop", "length"})
 _MLX_SAMPLING_KEYS: frozenset[str] = frozenset(
     {"temperature", "top_p", "top_k", "min_p", "repetition_penalty", "max_tokens", "seed", "stop"}
 )
+
+
+def _reject_grammar(grammar: object) -> None:
+    if grammar is not None:
+        raise GenerationUnsupportedFieldError(
+            "grammar",
+            "structured-output grammars are not supported by the MLX generation backend",
+        )
 
 
 def normalize_mlx_seed(seed: int) -> int:
@@ -149,6 +159,7 @@ class MLXGenerationAdapter(GenerationAdapter):
 
         self._process: subprocess.Popen[bytes] | None = None
         self._server_url: str | None = None
+        self._port: int | None = None
         self._device: str | None = None
         self._output_file: tempfile._TemporaryFileWrapper | None = None
         # Single-flight lock: mlx_lm.server is single-tenant and the cancellation
@@ -186,7 +197,7 @@ class MLXGenerationAdapter(GenerationAdapter):
         # module but lack adapter_options.loadtime.mlx_repo — without this, mlx_lm would
         # download the full-precision HF weights (e.g. a 27B model) and OOM on Metal.
         if not self._mlx_repo:
-            raise RuntimeError(
+            raise ModelConfigurationError(
                 f"Generation model '{self._model_name_or_path}' has no mlx_repo set; the Mac MLX "
                 "backend requires an MLX-quantized repo. Add adapter_options.loadtime.mlx_repo "
                 "to the model YAML (e.g. 'mlx-community/<model>-4bit'), or serve a curated Mac model "
@@ -200,7 +211,7 @@ class MLXGenerationAdapter(GenerationAdapter):
             raise RuntimeError(
                 "mlx-lm is not installed in this environment; the Apple-Silicon generation "
                 "backend requires it. Serve generation with the 'sglang' bundle "
-                "(`mise run serve -b sglang`), which installs mlx-lm on macOS."
+                "(`mise run serve -- -b sglang`), which installs mlx-lm on macOS."
             )
         # Defensive: a prior load that left a live subprocess would be orphaned (it
         # survives in its own session, holding its port + Metal memory). Tear it down
@@ -209,44 +220,60 @@ class MLXGenerationAdapter(GenerationAdapter):
             self.unload()
         self._device = device
         port = _server.find_free_port()
+        self._port = port
         self._server_url = f"http://127.0.0.1:{port}"
 
-        cmd = _server.build_launch_command(mlx_repo=mlx_repo, port=port)
-        logger.info(
-            "Starting MLX generation server for %s (repo=%s) on device=%s at port %d",
-            self._model_name_or_path,
-            self._mlx_repo,
-            device,
-            port,
-        )
-        logger.info("Loading model %s via MLX (first run downloads weights — this can take minutes)…", self._mlx_repo)
+        # Everything past the port reservation runs under abort-on-failure: the
+        # port (and, once opened, the log fd) belong to this adapter from here
+        # on, and a raise anywhere below — a full /tmp in open_output_log, a
+        # failed exec, a cancelled load — must hand them back rather than leak
+        # one slot of the 100-port span per attempt.
+        try:
+            cmd = _server.build_launch_command(mlx_repo=mlx_repo, port=port)
+            logger.info(
+                "Starting MLX generation server for %s (repo=%s) on device=%s at port %d",
+                self._model_name_or_path,
+                self._mlx_repo,
+                device,
+                port,
+            )
+            logger.info(
+                "Loading model %s via MLX (first run downloads weights — this can take minutes)…", self._mlx_repo
+            )
 
-        self._output_file = _server.open_output_log()
-        self._process = _server.launch_mlx_server(cmd, output_file=self._output_file)
+            self._output_file = _server.open_output_log()
+            self._process = _server.launch_mlx_server(cmd, output_file=self._output_file)
 
-        # One budget covers BOTH health-readiness and the model-load warmup below, so a
-        # slow health bind can't let warmup tack on a second full timeout.
-        budget = _server.resolve_startup_timeout(self._startup_timeout_s)
-        started = time.monotonic()
-        if not _server.wait_for_server(
-            self._server_url,
-            self._process,
-            output_file=self._output_file,
-            timeout_s=budget,
-        ):
+            # One budget covers BOTH health-readiness and the model-load warmup below, so a
+            # slow health bind can't let warmup tack on a second full timeout.
+            budget = _server.resolve_startup_timeout(self._startup_timeout_s)
+            started = time.monotonic()
+            if not _server.wait_for_server(
+                self._server_url,
+                self._process,
+                output_file=self._output_file,
+                timeout_s=budget,
+            ):
+                # A child that died is a crash, not a timeout: keep the
+                # messages distinct so the loader's timeout reclassification
+                # never stamps a crash's elapsed time as the configured budget.
+                crash_exit_code = self._process.poll()
+                if crash_exit_code is not None:
+                    raise EngineStartupError(f"{_server.ERR_SERVER_CRASH} (exit code {crash_exit_code})")
+                raise RuntimeError(_server.ERR_SERVER_STARTUP)
+
+            # mlx_lm.server answers /health as soon as httpd is up, possibly before the model
+            # finishes loading. Warm it up with a 1-token request so the cold model load
+            # completes inside load() (deterministic readiness) and the user's first real request
+            # is fast. Use the REMAINING budget so wait+warmup stay within one timeout. A failed
+            # warmup means the child bound the port but cannot serve the model, so treat it as a
+            # load failure rather than reporting "ready" and handing the error to the first request.
+            warmup_budget = max(30.0, budget - (time.monotonic() - started))
+            if not _server.warmup_model(self._server_url, mlx_repo, timeout_s=warmup_budget):
+                raise RuntimeError(_server.ERR_WARMUP_FAILED)
+        except BaseException:
             self._abort_failed_load()
-            raise RuntimeError(_server.ERR_SERVER_STARTUP)
-
-        # mlx_lm.server answers /health as soon as httpd is up, possibly before the model
-        # finishes loading. Warm it up with a 1-token request so the cold model load
-        # completes inside load() (deterministic readiness) and the user's first real request
-        # is fast. Use the REMAINING budget so wait+warmup stay within one timeout. A failed
-        # warmup means the child bound the port but cannot serve the model, so treat it as a
-        # load failure rather than reporting "ready" and handing the error to the first request.
-        warmup_budget = max(30.0, budget - (time.monotonic() - started))
-        if not _server.warmup_model(self._server_url, mlx_repo, timeout_s=warmup_budget):
-            self._abort_failed_load()
-            raise RuntimeError(_server.ERR_WARMUP_FAILED)
+            raise
 
         logger.info("MLX generation server ready: %s at %s", self._model_name_or_path, self._server_url)
 
@@ -254,11 +281,14 @@ class MLXGenerationAdapter(GenerationAdapter):
         """Tear down a partially-started child + reset state after a failed load.
 
         The registry does not call unload() on a failed load, so this mirrors unload():
-        terminate the child, drop the temp log, and clear _server_url/_device so the adapter
-        does not look "loaded" (_check_loaded() gates only on _server_url).
+        terminate the child, release its reserved port, drop the temp log, and clear
+        _server_url/_device so the adapter does not look "loaded" (_check_loaded()
+        gates only on _server_url).
         """
         _server.terminate_process(self._process)
         self._process = None
+        _server.release_port(self._port)
+        self._port = None
         self._server_url = None
         self._device = None
         self._cleanup_output_log()
@@ -268,6 +298,10 @@ class MLXGenerationAdapter(GenerationAdapter):
             logger.info("Shutting down MLX generation server for %s", self._model_name_or_path)
             _server.terminate_process(self._process)
             self._process = None
+        # Release only after the child is down so a concurrent load can't be
+        # handed a port the dying child still holds bound.
+        _server.release_port(self._port)
+        self._port = None
         self._server_url = None
         self._device = None
         self._cleanup_output_log()
@@ -296,6 +330,22 @@ class MLXGenerationAdapter(GenerationAdapter):
     def _check_loaded(self) -> None:
         if self._server_url is None:
             raise RuntimeError(ERR_NOT_LOADED)
+        exit_code = self.engine_exit_code()
+        if exit_code is not None:
+            msg = (
+                f"MLX engine for {self._served_model_name!r} is not running "
+                f"(process exited with code {exit_code}). The model must be reloaded."
+            )
+            raise EngineExitedError(msg)
+
+    def engine_exit_code(self) -> int | None:
+        """Report an exited child to the registry's recovery loop."""
+        return None if self._process is None else self._process.poll()
+
+    def preflight_generate(self, parameters: Mapping[str, Any], *, stream: bool) -> None:
+        """Reject controls that ``mlx_lm.server`` cannot honour before dispatch."""
+        _ = stream
+        _reject_grammar(parameters.get("grammar"))
 
     def _build_sampling_body(
         self,
@@ -359,14 +409,18 @@ class MLXGenerationAdapter(GenerationAdapter):
         logprobs: bool = False,
         top_logprobs: int | None = None,
         images: list[ImageInput] | None = None,
-        **kwargs: Any,  # tolerate SGLang-only kwargs (grammar, n, best_of, stream, …)
+        videos: list[VideoInput] | None = None,
+        **kwargs: Any,  # tolerate SGLang-only kwargs (n, best_of, stream, …); grammar is rejected
     ) -> AsyncIterator[GenerationChunk]:
         self._check_loaded()
+        _reject_grammar(kwargs.get("grammar"))
         # Vision is deferred on the Mac MLX path (mlx-vlm would need its own
         # transformers>=5.5 process — see the implementation plan §9). Fail loud
         # rather than silently dropping the images and returning a wrong answer.
         if images:
             raise ValueError("vision input is not supported on the Mac MLX generation path yet (see plan §9)")
+        if videos:
+            raise GenerationUnsupportedFieldError("videos")
         # Unused on the MLX path today (kept to satisfy the streaming contract):
         # mlx_lm.server's /v1/completions does not expose these knobs uniformly.
         if min_new_tokens is not None:

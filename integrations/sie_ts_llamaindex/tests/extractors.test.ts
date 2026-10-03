@@ -8,6 +8,12 @@ import { createSIEExtractorTool } from "../src/index.js";
 // Default empty extract result
 const emptyExtractResult = { entities: [], relations: [], classifications: [], objects: [] };
 
+function asConstructor<T extends object>(instance: T): () => T {
+  return function constructorMock() {
+    return instance;
+  };
+}
+
 // Mock the SIEClient
 vi.mock("@superlinked/sie-sdk", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@superlinked/sie-sdk")>();
@@ -18,9 +24,7 @@ vi.mock("@superlinked/sie-sdk", async (importOriginal) => {
 
   return {
     ...actual,
-    SIEClient: vi.fn().mockImplementation(function () {
-      return mockClient;
-    }),
+    SIEClient: vi.fn().mockImplementation(asConstructor(mockClient)),
   };
 });
 
@@ -57,12 +61,12 @@ describe("createSIEExtractorTool", () => {
       classifications: [],
       objects: [],
     });
-    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(function () {
-      return {
-      extract: mockExtract,
-      close: vi.fn(),
-    };
-    });
+    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+      asConstructor({
+        extract: mockExtract,
+        close: vi.fn(),
+      }),
+    );
 
     const tool = createSIEExtractorTool({ modelName: "test-ner" });
     const result = await tool.call({ text: "John Smith works at Acme Corp" });
@@ -90,12 +94,12 @@ describe("createSIEExtractorTool", () => {
   it("passes custom labels to extract", async () => {
     const { SIEClient } = await import("@superlinked/sie-sdk");
     const mockExtract = vi.fn().mockResolvedValue(emptyExtractResult);
-    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(function () {
-      return {
-      extract: mockExtract,
-      close: vi.fn(),
-    };
-    });
+    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+      asConstructor({
+        extract: mockExtract,
+        close: vi.fn(),
+      }),
+    );
 
     const tool = createSIEExtractorTool({
       labels: ["product", "date"],
@@ -110,12 +114,12 @@ describe("createSIEExtractorTool", () => {
   it("returns empty result for no extractions", async () => {
     const { SIEClient } = await import("@superlinked/sie-sdk");
     const mockExtract = vi.fn().mockResolvedValue(emptyExtractResult);
-    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(function () {
-      return {
-      extract: mockExtract,
-      close: vi.fn(),
-    };
-    });
+    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+      asConstructor({
+        extract: mockExtract,
+        close: vi.fn(),
+      }),
+    );
 
     const tool = createSIEExtractorTool();
     const result = await tool.call({ text: "no entities here" });
@@ -123,6 +127,32 @@ describe("createSIEExtractorTool", () => {
     const parsed = JSON.parse(result as string);
     expect(parsed.entities).toEqual([]);
     expect(parsed.relations).toEqual([]);
+  });
+
+  it("throws when SIE reports a per-item extraction failure", async () => {
+    const { RequestError, SIEClient } = await import("@superlinked/sie-sdk");
+    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+      asConstructor({
+        extract: vi.fn().mockResolvedValue({
+          entities: [],
+          relations: [],
+          classifications: [],
+          objects: [],
+          error: {
+            code: "INPUT_TOO_LONG",
+            message: "Input exceeds the model's maximum token capacity",
+          },
+          request: { id: "req-1" },
+        }),
+        close: vi.fn(),
+      }),
+    );
+
+    const tool = createSIEExtractorTool();
+    const error = await tool.call({ text: "test" }).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(RequestError);
+    expect(error).toMatchObject({ code: "INPUT_TOO_LONG", requestId: "req-1" });
   });
 
   it("includes label types in default description", () => {

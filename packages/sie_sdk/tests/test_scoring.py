@@ -1,6 +1,7 @@
 """Tests for SDK scoring module (maxsim / maxsim_batch utilities)."""
 
 import numpy as np
+import pytest
 from sie_sdk.scoring import maxsim, maxsim_batch
 
 # Create a random generator for tests
@@ -150,3 +151,85 @@ class TestMaxSimBatch:
         actual = maxsim_batch(queries, docs)
 
         np.testing.assert_allclose(actual, expected, rtol=0, atol=0)
+
+
+class TestMaxsimInputValidation:
+    """Common misuse must name the fault, not leak NumPy's gufunc signature.
+
+    Callers hold vectors they read back out of a vector database, so shape and
+    width faults are the expected failure mode. Before this, all three cases
+    below surfaced as raw NumPy errors quoting
+    ``gufunc signature (n?,k),(k,m?)->(n?,m?)`` — which never mentions query,
+    document, or which side was wrong.
+    """
+
+    def test_dim_mismatch_names_both_widths(self) -> None:
+        query = np.zeros((3, 128), dtype=np.float32)
+        doc = np.zeros((4, 64), dtype=np.float32)
+
+        with pytest.raises(ValueError, match=r"dim mismatch: query has dim 128 but documents\[0\] has dim 64"):
+            maxsim(query, [doc])
+
+    def test_empty_document_is_rejected_with_its_shape(self) -> None:
+        query = np.zeros((3, 128), dtype=np.float32)
+        empty = np.zeros((0, 128), dtype=np.float32)
+
+        with pytest.raises(ValueError, match=r"documents\[0\] has 0 tokens"):
+            maxsim(query, [empty])
+
+    def test_empty_query_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match=r"query has 0 tokens"):
+            maxsim(np.zeros((0, 128), dtype=np.float32), [np.zeros((2, 128), dtype=np.float32)])
+
+    def test_single_vector_passed_unwrapped_explains_the_fix(self) -> None:
+        """A 1-D array is the classic slip; the message must say how to fix it."""
+        query = np.zeros((3, 128), dtype=np.float32)
+
+        with pytest.raises(ValueError, match=r"must be a 2-D array"):
+            maxsim(query, np.zeros(128, dtype=np.float32))
+
+    def test_1d_query_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match=r"query must be a 2-D array"):
+            maxsim(np.zeros(128, dtype=np.float32), [np.zeros((2, 128), dtype=np.float32)])
+
+    def test_the_offending_document_is_identified_by_index(self) -> None:
+        query = np.zeros((2, 8), dtype=np.float32)
+        docs = [np.zeros((3, 8), dtype=np.float32), np.zeros((3, 4), dtype=np.float32)]
+
+        with pytest.raises(ValueError, match=r"documents\[1\] has dim 4"):
+            maxsim(query, docs)
+
+    def test_empty_document_list_still_returns_no_scores(self) -> None:
+        """Zero documents is a legitimate empty result, not an error."""
+        assert maxsim(np.zeros((2, 8), dtype=np.float32), []) == []
+
+    def test_valid_input_is_unaffected(self) -> None:
+        query = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
+        doc1 = np.array([[1.0, 0.0], [0.5, 0.5]], dtype=np.float32)
+        doc2 = np.array([[0.0, 1.0]], dtype=np.float32)
+
+        scores = maxsim(query, [doc1, doc2])
+        assert len(scores) == 2
+        assert scores[0] > scores[1]
+
+    def test_batch_dim_mismatch_is_named(self) -> None:
+        with pytest.raises(ValueError, match=r"dim mismatch"):
+            maxsim_batch(
+                [np.zeros((2, 8), dtype=np.float32)],
+                [np.zeros((3, 5), dtype=np.float32)],
+            )
+
+    def test_batch_empty_document_is_named(self) -> None:
+        with pytest.raises(ValueError, match=r"documents\[0\] has 0 tokens"):
+            maxsim_batch(
+                [np.zeros((2, 8), dtype=np.float32)],
+                [np.zeros((0, 8), dtype=np.float32)],
+            )
+
+    def test_batch_valid_input_is_unaffected(self) -> None:
+        queries = [np.array([[1.0, 0.0]], dtype=np.float32), np.array([[0.0, 1.0]], dtype=np.float32)]
+        docs = [np.array([[1.0, 0.0]], dtype=np.float32), np.array([[0.0, 1.0]], dtype=np.float32)]
+
+        scores = maxsim_batch(queries, docs)
+        assert scores.shape == (2, 2)
+        assert scores[0, 0] > scores[0, 1]

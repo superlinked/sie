@@ -990,3 +990,68 @@ class TestProfileLoraPins:
             "b": {"adapter_options": {"runtime": {"lora_id": "acme/l"}}},
         }
         model_registry._validate_profile_lora_pins(profiles)
+
+
+class TestProfilePlacement:
+    """Dict-level mirror of sie_server's tensor-parallel placement rules.
+
+    A worker refuses a whole config snapshot containing a profile that breaks
+    them, so accepting such a write would take down every model in the bundle.
+    """
+
+    @staticmethod
+    def _profiles(**loadtime: object) -> dict:
+        return {"p": {"adapter_options": {"loadtime": dict(loadtime)}}}
+
+    @pytest.mark.parametrize("width", [1, 2, 8])
+    def test_a_usable_width_passes(self, width: int) -> None:
+        model_registry._validate_profile_placement(self._profiles(tensor_parallel_size=width))
+
+    @pytest.mark.parametrize("width", [0, 9, True, "2", None, 2.5])
+    def test_an_unusable_width_is_refused(self, width: object) -> None:
+        with pytest.raises(ValueError, match="tensor_parallel_size"):
+            model_registry._validate_profile_placement(self._profiles(tensor_parallel_size=width))
+
+    @pytest.mark.parametrize(
+        "args",
+        [["--tp", "2"], ["--tensor-parallel-size=4"], ["--tensor-parallel", "4"], ["--base-gpu-id", "1"]],
+    )
+    def test_a_placement_flag_is_refused_however_it_is_spelled(self, args: list[str]) -> None:
+        with pytest.raises(ValueError, match="placement flag"):
+            model_registry._validate_profile_placement(self._profiles(extra_launch_args=args))
+
+    @pytest.mark.parametrize(
+        "args",
+        [
+            ["--nccl-port", "30411"],
+            ["--nccl-port=30411"],
+            ["--nccl-po", "30411"],
+            ["--host", "127.0.0.1"],
+            ["--port=8000"],
+        ],
+    )
+    def test_a_listener_flag_is_refused_however_it_is_spelled(self, args: list[str]) -> None:
+        with pytest.raises(ValueError, match="listener flag"):
+            model_registry._validate_profile_placement(self._profiles(extra_launch_args=args))
+
+    def test_the_sanctioned_rendezvous_option_still_passes(self) -> None:
+        model_registry._validate_profile_placement(self._profiles(tensor_parallel_size=2, nccl_port=30411))
+
+    def test_a_device_visibility_variable_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="CUDA_VISIBLE_DEVICES"):
+            model_registry._validate_profile_placement(self._profiles(extra_env={"CUDA_VISIBLE_DEVICES": "0"}))
+
+    def test_ordinary_passthroughs_still_pass(self) -> None:
+        model_registry._validate_profile_placement(
+            self._profiles(extra_launch_args=["--dtype", "bfloat16"], extra_env={"SGLANG_ENABLE_SPEC_V2": "1"})
+        )
+
+    def test_the_mirror_matches_the_server_rules(self) -> None:
+        server = pytest.importorskip("sie_server.config.model")
+        groups = pytest.importorskip("sie_server.config.device_groups")
+
+        assert model_registry._PLACEMENT_LAUNCH_FLAGS == server._PLACEMENT_LAUNCH_FLAGS
+        assert model_registry._LISTENER_LAUNCH_FLAGS == server._LISTENER_LAUNCH_FLAGS
+        assert model_registry._REFUSED_LAUNCH_FLAGS == server._REFUSED_LAUNCH_FLAGS
+        assert model_registry._PLACEMENT_ENV_VARS == server._PLACEMENT_ENV_VARS
+        assert model_registry._MAX_TENSOR_PARALLEL_SIZE == groups.MAX_TENSOR_PARALLEL_SIZE

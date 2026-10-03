@@ -524,7 +524,7 @@ fn wait_timeout<I: HasCost, T>(inner: &Inner<I, T>) -> Option<Duration> {
 
     let effective_ms = batch_remaining_ms.min(coalesce_remaining_ms);
     // ms → Duration, clamping tiny negatives to zero.
-    Some(Duration::from_secs_f64(effective_ms.max(0.0) / 1000.0))
+    Some(Duration::try_from_secs_f64(effective_ms.max(0.0) / 1000.0).unwrap_or(Duration::MAX))
 }
 
 fn extract_batch<I: HasCost, T>(
@@ -1028,6 +1028,29 @@ mod tests {
         let t = wait_timeout(&inner).expect("pending → Some");
         // roughly 15 ms remaining (20 - 5), ±5 ms slop for clock jitter.
         assert!(t <= Duration::from_millis(20));
+    }
+
+    #[test]
+    fn wait_timeout_saturates_for_windows_beyond_duration_range() {
+        let cfg = BatchConfig {
+            max_batch_wait_ms: 1e300,
+            coalesce_ms: 1e300,
+            coalesce_ratio: 1.0,
+            ..BatchConfig::default()
+        };
+        let now = Instant::now();
+        let inner: Inner<StubItem, u32> = Inner {
+            pending: vec![PendingRequest {
+                item: StubItem::new(1),
+                metadata: 1,
+                arrival_time: now,
+            }],
+            total_cost: 1,
+            first_request_time: Some(now),
+            last_submit_time: Some(now),
+            config: cfg,
+        };
+        assert_eq!(wait_timeout(&inner), Some(Duration::MAX));
     }
 
     #[test]

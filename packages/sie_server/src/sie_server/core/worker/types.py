@@ -6,6 +6,7 @@ Contains request metadata, configuration, and statistics types.
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -18,6 +19,16 @@ if TYPE_CHECKING:
 
 # Type alias for worker output union
 WorkerOutput = EncodeOutput | ScoreOutput | ExtractOutput
+
+# Detailed instrumentation (``SIE_INSTRUMENTATION=1`` / ``WorkerConfig.instrumentation``)
+# records five samples per batch. It is a debugging aid, but a flag left on in a
+# long-lived deployment would otherwise grow those series without bound for the
+# life of the process — and ``WorkerStats.summary`` runs min/max/mean/median over
+# the whole history, so it would also get progressively slower. Each series is a
+# bounded ring buffer instead: the newest N samples are kept, older ones drop off.
+# N is deliberately generous (a busy worker at ~50 batches/s covers the last few
+# minutes) because the summary is a shape check, not an exact audit trail.
+INSTRUMENTATION_HISTORY_LIMIT = 10_000
 
 
 @dataclass
@@ -82,7 +93,50 @@ class RequestMetadata:
 
 
 class QueueFullError(Exception):
-    """Raised when the worker queue is full and cannot accept more requests."""
+    """Raised when the worker queue is full and cannot accept more requests.
+
+    Carries the structured counts from the capacity check so the HTTP
+    layer can distinguish a request that can *never* fit (``requested >
+    limit`` — a client error) from genuine transient pressure (queue
+    occupied by other work — retryable). All fields are optional so
+    legacy raise sites that only pass a message keep working; without
+    them the HTTP layer conservatively treats the error as transient.
+
+    Attributes:
+        pending: Items already queued when the check ran.
+        requested: Items this request tried to add.
+        limit: The worker's ``max_queue_size``.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        pending: int | None = None,
+        requested: int | None = None,
+        limit: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.pending = pending
+        self.requested = requested
+        self.limit = limit
+
+
+class WorkerDrainedError(RuntimeError):
+    """Raised on a request that was still queued when its worker stopped.
+
+    ``ModelWorker.stop()`` cancels the batch-processing loop, so anything
+    still sitting in a ``BatchFormer`` will never run. Without an explicit
+    failure those awaiters hang until some outer timeout fires — the model
+    is gone, but the promise is never broken (the eviction-drain contract's
+    second stage).
+
+    The condition is transient and the work was never started, so this is a
+    *retryable* error: the HTTP surface maps it onto the existing 503
+    ``MODEL_LOADING`` shape (with ``Retry-After``) and the queue surface
+    maps it onto a ``nak_retry`` redelivery — the same answers both paths
+    already give for "this model is not available right now".
+    """
 
 
 @dataclass
@@ -145,6 +199,16 @@ class WorkerConfig:
     # instead of being shredded into several half-full ones.
     coalesce_ms: float = 15.0
     coalesce_ratio: float = 0.5
+    # Idle-dispatch accumulation window (#2874). An idle worker used to
+    # dispatch IMMEDIATELY with whatever was pending, so a burst arriving at
+    # an idle worker degenerated into a train of small serialized forwards
+    # (many batch-of-1 dispatches instead of one fused batch). With this
+    # window, the first batch after idleness coalesces arrivals until the
+    # queue has been quiet for ``idle_coalesce_ms`` (or the batch fills, or
+    # ``max_batch_wait_ms`` elapses since the first request). A lone request
+    # therefore waits at most this window — single-digit ms — before
+    # dispatch, and ``0`` restores the legacy immediate dispatch.
+    idle_coalesce_ms: float = 3.0
     max_queue_size: int = 1000  # Maximum pending items in queue (0 = unlimited)
     instrumentation: bool = False
     adaptive_batching: AdaptiveBatchingParams = field(default_factory=AdaptiveBatchingParams)
@@ -166,20 +230,21 @@ class WorkerStats:
     # callers can read counters without conditional checks.
     oom_recoveries: OomRecoveryStats = field(default_factory=OomRecoveryStats)
 
-    # Detailed instrumentation (for performance analysis)
-    batch_sizes: list[int] | None = None  # Items per batch
-    batch_tokens: list[int] | None = None  # Tokens per batch
-    batch_wait_ms: list[float] | None = None  # Time waiting for batch to form
-    inference_ms: list[float] | None = None  # GPU inference time per batch
-    requests_per_batch: list[int] | None = None  # Unique requests combined per batch
+    # Detailed instrumentation (for performance analysis). Bounded ring buffers,
+    # each capped at INSTRUMENTATION_HISTORY_LIMIT samples — see that constant.
+    batch_sizes: deque[int] | None = None  # Items per batch
+    batch_tokens: deque[int] | None = None  # Tokens per batch
+    batch_wait_ms: deque[float] | None = None  # Time waiting for batch to form
+    inference_ms: deque[float] | None = None  # GPU inference time per batch
+    requests_per_batch: deque[int] | None = None  # Unique requests combined per batch
 
-    def enable_instrumentation(self) -> None:
-        """Enable detailed instrumentation tracking."""
-        self.batch_sizes = []
-        self.batch_tokens = []
-        self.batch_wait_ms = []
-        self.inference_ms = []
-        self.requests_per_batch = []
+    def enable_instrumentation(self, history_limit: int = INSTRUMENTATION_HISTORY_LIMIT) -> None:
+        """Enable detailed instrumentation tracking over a bounded sample window."""
+        self.batch_sizes = deque(maxlen=history_limit)
+        self.batch_tokens = deque(maxlen=history_limit)
+        self.batch_wait_ms = deque(maxlen=history_limit)
+        self.inference_ms = deque(maxlen=history_limit)
+        self.requests_per_batch = deque(maxlen=history_limit)
 
     @property
     def instrumentation_enabled(self) -> bool:

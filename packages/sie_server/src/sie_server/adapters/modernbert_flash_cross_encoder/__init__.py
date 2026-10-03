@@ -3,9 +3,18 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any, ClassVar
 
+import numpy as np
 import torch
 
 from sie_server.adapters._flash_base import FlashBaseAdapter
+from sie_server.adapters._modernbert_flash_graphs import (
+    EncodeFn,
+    PackedForward,
+    VarlenGraphRunner,
+    graph_runner,
+    parse_graph_mode,
+)
+from sie_server.adapters._packed_rope import packed_rope_available, rotate_packed_qkv_
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_NOT_LOADED, ERR_REQUIRES_TEXT, ComputePrecision
 from sie_server.adapters._utils import extract_text
@@ -35,7 +44,7 @@ class ModernBertFlashCrossEncoderAdapter(FlashBaseAdapter):
     spec = AdapterSpec(
         inputs=("text",),
         outputs=("score",),
-        unload_fields=("_model", "_tokenizer", "_dtype", "_num_heads", "_head_dim", "_hidden_size"),
+        unload_fields=("_model", "_tokenizer", "_dtype", "_num_heads", "_head_dim", "_hidden_size", "_graphs"),
     )
 
     def __init__(
@@ -46,6 +55,7 @@ class ModernBertFlashCrossEncoderAdapter(FlashBaseAdapter):
         max_seq_length: int = 8192,
         compute_precision: ComputePrecision = "bfloat16",
         revision: str | None = None,
+        cuda_graphs: str | bool = "off",
         **kwargs: Any,
     ) -> None:
         """Initialize the adapter.
@@ -57,9 +67,17 @@ class ModernBertFlashCrossEncoderAdapter(FlashBaseAdapter):
             compute_precision: Compute precision (bfloat16 recommended for ModernBERT).
             revision: Optional HuggingFace revision/branch/commit SHA to pin when
                 loading model artifacts. Forwarded to ``from_pretrained(..., revision=...)``.
+            cuda_graphs: "off" (the default) or "bucketed": whether forwards
+                replay the encoder as CUDA graphs (see
+                ``sie_server.adapters._modernbert_flash_graphs``). An operator
+                setting, fixed at load.
             **kwargs: Additional arguments (ignored).
+
+        Raises:
+            ValueError: If ``cuda_graphs`` is not "off" or "bucketed".
         """
         _ = kwargs
+        self._cuda_graphs = parse_graph_mode(cuda_graphs, adapter="ModernBertFlashCrossEncoder")
         self._model_name_or_path = str(model_name_or_path)
         self._trust_remote_code = trust_remote_code
         self._max_seq_length = max_seq_length
@@ -78,6 +96,8 @@ class ModernBertFlashCrossEncoderAdapter(FlashBaseAdapter):
         self._hidden_size: int = 0
         self._use_sigmoid: bool = True
         self._use_mean_pooling: bool = False
+        # Replays the encoder as CUDA graphs, when the operator enabled them.
+        self._graphs: VarlenGraphRunner | None = None
 
     def load(self, device: str) -> None:
         """Load model weights onto the specified device."""
@@ -144,6 +164,100 @@ class ModernBertFlashCrossEncoderAdapter(FlashBaseAdapter):
             self._model,
             self._max_seq_length,
         )
+        self._graphs = self._graph_runner()
+
+    def _graph_runner(self) -> VarlenGraphRunner | None:
+        """The CUDA graph runner for the loaded model; None when graphs are off or do not apply."""
+        if self._cuda_graphs == "off" or self._device is None or self._tokenizer is None:
+            return None
+        reason = self._graph_unsupported_reason()
+        if reason is not None:
+            logger.warning(
+                "ModernBERT cuda_graphs=%s does not apply to %s, which runs eagerly: %s",
+                self._cuda_graphs,
+                self._model_name_or_path,
+                reason,
+            )
+            return None
+        window = self._max_seq_length
+        return graph_runner(
+            lambda: self._graph_encoder(window),
+            mode=self._cuda_graphs,
+            device=self._device,
+            hidden_size=self._hidden_size,
+            dtype=self._dtype or self._resolve_dtype(),
+            window=window,
+            pad_token_id=self._tokenizer.pad_token_id,
+            name=self._model_name_or_path,
+        )
+
+    def _graph_unsupported_reason(self) -> str | None:
+        """Why this model's forward cannot be recorded; None when it can."""
+        if not packed_rope_available(self._device or "cpu"):
+            return "the graph's rotary kernel needs Triton on CUDA"
+        for layer in self._model.model.layers:
+            rotary = getattr(layer.attn, "rotary_emb", None)
+            if not callable(getattr(rotary, "_update_cos_sin_cache", None)):
+                return "its attention layers have no flash-attn rotary embedding"
+        return None
+
+    def _graph_encoder(self, window: int) -> tuple[EncodeFn, list[torch.Tensor]]:
+        """The encoder a graph records: ``_forward_flash`` up to the final norm.
+
+        The eager forward rotates queries and keys with each layer's
+        flash-attn rotary embedding, whose kernel finds positions from
+        ``cu_seqlens``. A graph's ``cu_seqlens`` has fixed slots, so the graph
+        rotates by token position instead (``rotate_packed_qkv_``), with the
+        same arithmetic and the same cosine and sine tables: each rotary
+        module's own cache, grown to the model window once here.
+
+        Returns:
+            The encoder and the tables it reads.
+        """
+        backbone = self._model.model
+        embeddings = backbone.embeddings
+        layers = list(backbone.layers)
+        final_norm = backbone.final_norm
+        tables: dict[Any, tuple[torch.Tensor, torch.Tensor]] = {}
+        layer_tables: list[tuple[torch.Tensor, torch.Tensor]] = []
+        for layer in layers:
+            rotary = layer.attn.rotary_emb
+            base = getattr(rotary, "base", None)
+            key = float(base) if isinstance(base, (int, float)) else id(rotary)
+            if key not in tables:
+                rotary._update_cos_sin_cache(window, device=self._device, dtype=self._dtype)
+                # Held here: the module replaces its cache when it grows, and a graph keeps reading these.
+                tables[key] = (rotary._cos_cached, rotary._sin_cached)
+            layer_tables.append(tables[key])
+        num_heads, head_dim, hidden_size = self._num_heads, self._head_dim, self._hidden_size
+        softmax_scale = 1.0 / (head_dim**0.5)
+
+        def encode(
+            input_ids: torch.Tensor, positions: torch.Tensor, cu_seqlens: torch.Tensor, max_seqlen: int, total: int
+        ) -> torch.Tensor:
+            from flash_attn.flash_attn_interface import flash_attn_varlen_qkvpacked_func
+
+            hidden = embeddings.tok_embeddings(input_ids)
+            if hasattr(embeddings, "norm"):
+                hidden = embeddings.norm(hidden)
+            if hasattr(embeddings, "drop"):
+                hidden = embeddings.drop(hidden)
+            for layer, (cos, sin) in zip(layers, layer_tables, strict=True):
+                qkv = layer.attn.Wqkv(layer.attn_norm(hidden)).view(total, 3, num_heads, head_dim)
+                rotate_packed_qkv_(qkv, positions, cos, sin)
+                attn_out = flash_attn_varlen_qkvpacked_func(
+                    qkv,
+                    cu_seqlens,
+                    max_seqlen=max_seqlen,
+                    softmax_scale=softmax_scale,
+                    causal=False,
+                    window_size=layer.attn.local_attention,
+                )
+                hidden = hidden + layer.attn.Wo(attn_out.reshape(total, hidden_size))
+                hidden = hidden + layer.mlp(layer.mlp_norm(hidden))
+            return final_norm(hidden)
+
+        return encode, [table for pair in tables.values() for table in pair]
 
     def _resolve_dtype(self) -> torch.dtype:
         """Resolve compute dtype."""
@@ -198,38 +312,7 @@ class ModernBertFlashCrossEncoderAdapter(FlashBaseAdapter):
             )
             for q, d in pairs
         ]
-
-        # Build packed representation
-        seq_lengths = [enc["input_ids"].shape[1] for enc in encodings]
-        total_tokens = sum(seq_lengths)
-        max_seqlen = max(seq_lengths)
-
-        # Pack tensors
-        input_ids = torch.cat([enc["input_ids"].squeeze(0) for enc in encodings]).to(self._device)
-
-        # Build cu_seqlens
-        cu_seqlens = torch.zeros(len(pairs) + 1, dtype=torch.int32, device=self._device)
-        for i, length in enumerate(seq_lengths):
-            cu_seqlens[i + 1] = cu_seqlens[i] + length
-
-        with torch.inference_mode():
-            # Run forward pass with flash attention
-            logits = self._forward_flash(
-                input_ids,
-                cu_seqlens,
-                max_seqlen,
-                total_tokens,
-                len(pairs),
-                seq_lengths,
-            )
-
-            # Apply activation function
-            scores_tensor = logits.squeeze(-1).float()
-            if self._use_sigmoid:
-                scores_tensor = torch.sigmoid(scores_tensor)
-            scores = scores_tensor.cpu().tolist()
-
-        return scores
+        return self._scores(encodings).tolist()
 
     def score_pairs(
         self,
@@ -284,9 +367,24 @@ class ModernBertFlashCrossEncoderAdapter(FlashBaseAdapter):
             )
             for q, d in pairs
         ]
+        return ScoreOutput(scores=self._scores(encodings))
+
+    def _scores(self, encodings: list[Any]) -> np.ndarray:
+        """float32 relevance scores for tokenized (query, doc) pairs: a replayed CUDA graph, or eagerly."""
+        seq_lengths = [enc["input_ids"].shape[1] for enc in encodings]
+        if self._graphs is not None:
+            flat_ids = torch.cat([enc["input_ids"].squeeze(0) for enc in encodings]).numpy()
+
+            def head(packed: PackedForward) -> np.ndarray:
+                logits = self._head_logits(packed.hidden, packed.cu_seqlens, len(seq_lengths))
+                return self._activate(logits)
+
+            with torch.inference_mode():
+                scores = self._graphs.run(flat_ids, seq_lengths, head)
+            if scores is not None:
+                return scores
 
         # Build packed representation
-        seq_lengths = [enc["input_ids"].shape[1] for enc in encodings]
         total_tokens = sum(seq_lengths)
         max_seqlen = max(seq_lengths)
 
@@ -294,7 +392,7 @@ class ModernBertFlashCrossEncoderAdapter(FlashBaseAdapter):
         input_ids = torch.cat([enc["input_ids"].squeeze(0) for enc in encodings]).to(self._device)
 
         # Build cu_seqlens
-        cu_seqlens = torch.zeros(len(pairs) + 1, dtype=torch.int32, device=self._device)
+        cu_seqlens = torch.zeros(len(encodings) + 1, dtype=torch.int32, device=self._device)
         for i, length in enumerate(seq_lengths):
             cu_seqlens[i + 1] = cu_seqlens[i] + length
 
@@ -304,20 +402,17 @@ class ModernBertFlashCrossEncoderAdapter(FlashBaseAdapter):
                 cu_seqlens,
                 max_seqlen,
                 total_tokens,
-                len(pairs),
+                len(encodings),
                 seq_lengths,
             )
+            return self._activate(logits)
 
-            scores_tensor = logits.squeeze(-1).float()
-            if self._use_sigmoid:
-                scores_tensor = torch.sigmoid(scores_tensor)
-
-            # Convert to float32 numpy array and wrap in ScoreOutput
-            import numpy as np
-
-            scores_array = scores_tensor.cpu().numpy().astype(np.float32)
-
-        return ScoreOutput(scores=scores_array)
+    def _activate(self, logits: torch.Tensor) -> np.ndarray:
+        """Scores from logits: sigmoid for single-label models, as float32 on the host."""
+        scores_tensor = logits.squeeze(-1).float()
+        if self._use_sigmoid:
+            scores_tensor = torch.sigmoid(scores_tensor)
+        return scores_tensor.cpu().numpy().astype(np.float32)
 
     def _forward_flash(
         self,
@@ -348,9 +443,6 @@ class ModernBertFlashCrossEncoderAdapter(FlashBaseAdapter):
         embeddings = backbone.embeddings
         layers = backbone.layers
         final_norm = backbone.final_norm
-        head = self._model.head
-        drop = self._model.drop
-        classifier = self._model.classifier
 
         # Compute embeddings (ModernBERT: tok_embeddings -> norm -> drop)
         hidden = embeddings.tok_embeddings(input_ids)
@@ -400,6 +492,13 @@ class ModernBertFlashCrossEncoderAdapter(FlashBaseAdapter):
 
         # Apply final layer norm
         hidden = final_norm(hidden)
+        return self._head_logits(hidden, cu_seqlens, batch_size)
+
+    def _head_logits(self, hidden: torch.Tensor, cu_seqlens: torch.Tensor, batch_size: int) -> torch.Tensor:
+        """Classification logits ``[batch_size, 1]`` from final-normed packed hidden states."""
+        head = self._model.head
+        drop = self._model.drop
+        classifier = self._model.classifier
 
         # Pool hidden states based on config
         if self._use_mean_pooling:

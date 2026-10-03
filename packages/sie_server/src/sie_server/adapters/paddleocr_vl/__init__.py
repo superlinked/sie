@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import io
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -13,7 +12,7 @@ from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_NOT_LOADED, ComputePrecision
 from sie_server.adapters._vision_patch_embed import rebind_vision_patch_embed
 from sie_server.core.inference_output import EncodeOutput, ExtractOutput
-from sie_server.types.inputs import media_bytes
+from sie_server.types.inputs import decode_image
 from sie_server.types.responses import Entity
 
 if TYPE_CHECKING:
@@ -25,7 +24,7 @@ _ERR_NO_IMAGES = "PaddleOCRVLAdapter requires image input for extraction"
 _ERR_ENCODE_NOT_SUPPORTED = "PaddleOCRVLAdapter does not support encode(). Use extract() instead."
 _ERR_FP16_UNSUPPORTED = "PaddleOCR-VL does not support float16 on CUDA (config pins bfloat16); use bfloat16 or float32."
 
-# Canonical task -> prompt mapping from the PaddleOCR-VL model card.
+# Canonical task -> prompt mapping from the PaddleOCR-VL-1.5 model card.
 # Keep in sync with preprocessor/vision.py::_PADDLEOCR_VL_TASK_PROMPTS.
 _TASK_PROMPTS: dict[str, str] = {
     "ocr": "OCR:",
@@ -44,8 +43,8 @@ _COMPAT_PATCHED_ATTR = "_sie_paddleocr_vl_compat_patched"
 def _apply_transformers_compat_shim() -> None:
     """Bridge a parameter rename so PaddleOCR-VL's modeling code loads.
 
-    PaddleOCR-VL's custom modeling code (byte-identical across the pinned 1.5
-    and 1.6 revisions) calls
+    PaddleOCR-VL-1.5's custom modeling code (pinned at revision
+    6819afc8509ac9afa50e91b34627a7cf8f7900bb) calls
     ``transformers.masking_utils.create_causal_mask(inputs_embeds=...)``,
     but the signature in transformers 4.57.x uses ``input_embeds`` (singular).
     Without this shim, ``model.generate()`` raises:
@@ -76,9 +75,9 @@ def _apply_transformers_compat_shim() -> None:
 
 
 class PaddleOCRVLAdapter(BaseAdapter):
-    """Adapter for the PaddlePaddle/PaddleOCR-VL OCR VLMs (1.5, 1.6).
+    """Adapter for PaddlePaddle/PaddleOCR-VL-1.5 OCR VLM.
 
-    PaddleOCR-VL is a 0.9B-param autoregressive VLM combining a NaViT-style
+    PaddleOCR-VL-1.5 is a 0.9B-param autoregressive VLM combining a NaViT-style
     SigLIP vision encoder with an ERNIE-4.5-0.3B decoder. Supports 109
     languages and six task modes: ocr, table, formula, chart, spotting, seal.
 
@@ -280,13 +279,14 @@ class PaddleOCRVLAdapter(BaseAdapter):
             )
 
         all_entities = []
-        for item in items:
+        for i, item in enumerate(items):
             entities = self._extract_single(
                 item,
                 task=task,
                 instruction=instruction,
                 max_new_tokens=max_new_tokens,
                 num_beams=num_beams,
+                item_index=i,
             )
             all_entities.append(entities)
         return ExtractOutput(entities=all_entities)
@@ -314,6 +314,7 @@ class PaddleOCRVLAdapter(BaseAdapter):
                         instruction=instruction,
                         max_new_tokens=max_new_tokens,
                         num_beams=num_beams,
+                        item_index=i,
                     )
                 )
                 continue
@@ -349,17 +350,15 @@ class PaddleOCRVLAdapter(BaseAdapter):
         instruction: str | None,
         max_new_tokens: int,
         num_beams: int,
+        item_index: int | None = None,
     ) -> list[Entity]:
-        from PIL import Image as PILImage
-
         images = item.images
         if not images:
             raise ValueError(_ERR_NO_IMAGES)
 
-        img_bytes = media_bytes(images[0], kind="image")
-        pil_img = PILImage.open(io.BytesIO(img_bytes))
-        if pil_img.mode != "RGB":
-            pil_img = pil_img.convert("RGB")
+        # decode_image raises InvalidMediaError (-> 400 INVALID_INPUT) on
+        # non-bytes or undecodable payloads.
+        pil_img = decode_image(images[0], item_index=item_index, image_index=0)
 
         messages = self._build_messages(task=task, instruction=instruction)
         text = self._processor.apply_chat_template(

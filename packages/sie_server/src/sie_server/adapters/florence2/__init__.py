@@ -17,7 +17,6 @@ See: https://huggingface.co/microsoft/Florence-2-base
 
 from __future__ import annotations
 
-import io
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -30,7 +29,7 @@ from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_NOT_LOADED, ComputePrecision
 from sie_server.core.inference_output import EncodeOutput, ExtractOutput
 from sie_server.core.preprocessor.vision import resolve_florence2_prompt
-from sie_server.types.inputs import media_bytes
+from sie_server.types.inputs import decode_image
 from sie_server.types.responses import DetectedObject, Entity
 
 if TYPE_CHECKING:
@@ -357,13 +356,14 @@ class Florence2Adapter(BaseAdapter):
         # Fallback to inline preprocessing
         all_entities = []
         all_objects = []
-        for item in items:
+        for i, item in enumerate(items):
             entities, objects = self._extract_single(
                 item,
                 prompt=prompt,
                 task=effective_task,
                 max_new_tokens=max_new_tokens,
                 num_beams=num_beams,
+                item_index=i,
             )
             all_entities.append(entities)
             all_objects.append(objects)
@@ -418,6 +418,7 @@ class Florence2Adapter(BaseAdapter):
                     task=task,
                     max_new_tokens=max_new_tokens,
                     num_beams=num_beams,
+                    item_index=i,
                 )
                 all_entities.append(entities)
                 all_objects.append(objects)
@@ -493,6 +494,7 @@ class Florence2Adapter(BaseAdapter):
         task: str,
         max_new_tokens: int,
         num_beams: int,
+        item_index: int | None = None,
     ) -> tuple[list[Entity], list[DetectedObject]]:
         """Extract from a single item.
 
@@ -506,18 +508,14 @@ class Florence2Adapter(BaseAdapter):
         Returns:
             Tuple of (entities, detected_objects) extracted from the item.
         """
-        from PIL import Image as PILImage
-
         # Validate input
         images = item.images
         if not images or len(images) == 0:
             raise ValueError(_ERR_NO_IMAGES)
 
-        # Load image
-        img_bytes = media_bytes(images[0], kind="image")
-        pil_img = PILImage.open(io.BytesIO(img_bytes))
-        if pil_img.mode != "RGB":
-            pil_img = pil_img.convert("RGB")
+        # Load image; decode_image raises InvalidMediaError (-> 400
+        # INVALID_INPUT) on non-bytes or undecodable payloads.
+        pil_img = decode_image(images[0], item_index=item_index, image_index=0)
 
         image_size = (pil_img.width, pil_img.height)
 

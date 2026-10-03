@@ -1,4 +1,5 @@
 {{- include "sie-cluster.validateNats" . -}}
+{{- include "sie-cluster.nats.validateAuth" . -}}
 {{- include "sie-cluster.validateTls" . -}}
 {{- include "sie-cluster.validateKedaWatchNamespace" . -}}
 {{- include "sie-cluster.validateBundledTelemetryBackends" . -}}
@@ -7,7 +8,32 @@
 SIE Cluster {{ .Chart.Version }} deployed to namespace {{ include "sie-cluster.namespace" . }}.
 
 Gateway: http://{{ include "sie-cluster.gateway.serviceName" . }}.{{ include "sie-cluster.namespace" . }}.svc:{{ .Values.gateway.service.port }}
+{{- if include "sie-cluster.nats.authEnabled" . }}
+{{- if and .Values.nats.install (dig "auth" "allowAnonymous" false .Values.nats) }}
+NATS:    ANONYMOUS ACCESS IS ON
 
+*****************************************************************************************************
+WARNING: nats.auth.allowAnonymous=true. The NATS server accepts anonymous connections with
+unrestricted permissions: any pod that can reach NATS can read queued work and publish model
+configuration to the gateway and the workers. This setting is only for the first step of the
+upgrade. Once every pod has restarted, run helm upgrade again with
+--set nats.auth.allowAnonymous=false. --reuse-values and --reset-then-reuse-values keep it on.
+*****************************************************************************************************
+{{- else }}
+NATS:    authenticated; sie-config, the gateway, and the worker sidecars each connect as their own user.
+{{- end }}
+{{- else if .Values.nats.enabled }}
+
+WARNING: NATS authentication is off (nats.auth.enabled=false). Any pod that can reach NATS can read
+queued work and publish model configuration to the gateway and the workers.
+{{- end }}
+
+{{- if and .Values.config.enabled (include "sie-cluster.config.generatesAdminToken" .) }}
+sie-config admin token: kubectl get secret -n {{ include "sie-cluster.namespace" . }} {{ include "sie-cluster.config.generatedAdminTokenSecretName" . }} -o jsonpath='{.data.{{ include "sie-cluster.config.adminTokenSecretKey" . | replace "." "\\." }}}' | base64 -d
+{{- end }}
+{{- if and .Values.config.enabled (include "sie-cluster.config.generatesReadToken" .) }}
+sie-config read token (reads only): kubectl get secret -n {{ include "sie-cluster.namespace" . }} {{ include "sie-cluster.config.generatedReadTokenSecretName" . }} -o jsonpath='{.data.{{ include "sie-cluster.config.readTokenSecretKey" . | replace "." "\\." }}}' | base64 -d
+{{- end }}
 {{- if $kubePrometheusStack.install }}
 Prometheus: enabled - kubectl port-forward -n {{ include "sie-cluster.kubePrometheusStack.namespace" . }} svc/{{ include "sie-cluster.kubePrometheusStack.prometheusServiceName" . }} 9090:{{ include "sie-cluster.kubePrometheusStack.prometheusServicePort" . }}
 {{- end }}
@@ -17,6 +43,24 @@ Grafana password: kubectl get secret -n {{ include "sie-cluster.kubePrometheusSt
 {{- end }}
 {{- if .Values.keda.install }}
 KEDA:       enabled
+{{- end }}
+{{- if eq (include "sie-cluster.worker.remoteLaneEnabled" .) "true" }}
+
+Remote backends: the remote lane is the only worker that holds upstream credentials.
+{{- if dig "remote" "networkPolicy" "enabled" true .Values.workers }}
+Its NetworkPolicy admits only the gateway and limits egress by address and port, not by host name.
+It works only with a CNI that enforces NetworkPolicy. See the chart README section "Network policy
+for remote lanes".
+{{- else }}
+WARNING: workers.remote.networkPolicy.enabled=false. workers.networkPolicy still limits who can
+reach the remote lane, but its egress is not restricted.
+{{- end }}
+{{- end }}
+{{- if and .Release.IsUpgrade (not .Values.ingress.enabled) (lookup "networking.k8s.io/v1" "Ingress" (include "sie-cluster.namespace" .) (include "sie-cluster.fullname" .)) }}
+
+WARNING: this upgrade removes the gateway Ingress {{ include "sie-cluster.fullname" . }} because
+ingress.enabled is false (the cloud overlays no longer enable it). To keep external access, set
+ingress.enabled=true with gateway auth and TLS; see the chart README section "Ingress".
 {{- end }}
 {{- if and $tls.enabled (eq (default "byo" $tls.mode) "cert-manager") }}
 
@@ -37,4 +81,10 @@ Export the root CA (e.g. to trust on a client machine):
 The root CA is also replicated to selected namespaces as ConfigMap {{ .Values.certManagerBundle.trustBundle.name | quote }}
 (key: {{ .Values.certManagerBundle.trustBundle.target.configMapKey | quote }}) via trust-manager.
 {{- end }}
+{{- end }}
+{{- if and .Values.payloadStore.enabled (not (include "sie-cluster.payloadStoreUrl" .)) }}
+
+WARNING: no payload store URL resolved, so work items larger than 1MB will fail.
+Set payloadStore.url (or workers.common.clusterCache.url), or set
+payloadStore.enabled=false to run without large-payload support.
 {{- end }}

@@ -18,7 +18,7 @@ use futures_util::TryStreamExt;
 use thiserror::Error;
 use tracing::{debug, info, warn};
 
-use crate::config::WorkerConfig;
+use crate::config::{NatsCredentials, WorkerConfig};
 use crate::subject::subjects_overlap;
 
 /// Default consumer parameters. Must match the gateway's stream creator
@@ -43,6 +43,20 @@ fn max_deliver() -> i64 {
         .unwrap_or(DEFAULT_MAX_DELIVER)
 }
 
+/// Longest redelivery envelope, so that it can always be added to an `Instant`.
+const MAX_REDELIVERY_ENVELOPE: Duration = Duration::from_secs(30 * 365 * 24 * 60 * 60);
+
+/// How long JetStream keeps redelivering an unacknowledged work message
+/// before it dead-letters it: `max_deliver` rounds of the ACK wait.
+pub(crate) fn redelivery_envelope() -> Duration {
+    redelivery_envelope_for(max_deliver())
+}
+
+fn redelivery_envelope_for(max_deliver: i64) -> Duration {
+    Duration::from_secs(ACK_WAIT_SECS.saturating_mul(max_deliver as u64))
+        .min(MAX_REDELIVERY_ENVELOPE)
+}
+
 /// The larger of the durable work lifetime and configured retry envelope is the
 /// active-worker expiry horizon; the bounded state may evict the oldest entry
 /// sooner. Core NATS cancellation remains best-effort: a worker that starts or
@@ -63,6 +77,43 @@ fn stream_max_age_secs() -> u64 {
         .and_then(|s| s.parse::<u64>().ok())
         .filter(|&n| n > 0)
         .unwrap_or(DEFAULT_STREAM_MAX_AGE_SECS)
+}
+
+/// Env-overridable JetStream storage backing for the work-queue streams,
+/// wired by Helm as `SIE_STREAM_STORAGE` (`memory` — the default and the
+/// only historical behaviour — or `file`).
+///
+/// `Memory` keeps queued and delivered-but-unacknowledged work only in the
+/// broker's RAM: a restart of the NATS pod (an OOM kill, a NATS rollout, or a
+/// node drain that evicts that pod specifically) erases it, along with the
+/// `DEAD_LETTERS` record that would have named it. `file` persists it across a
+/// broker restart at the cost of disk and publish latency.
+///
+/// MUST match the gateway's `SIE_STREAM_STORAGE` — whoever creates the
+/// stream first wins, and JetStream does not permit changing an existing
+/// stream's storage type in place. An unrecognized value falls back to the
+/// default rather than failing the worker.
+fn stream_storage() -> StorageType {
+    match std::env::var("SIE_STREAM_STORAGE")
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "file" | "disk" => StorageType::File,
+        _ => StorageType::Memory,
+    }
+}
+
+/// Env-overridable JetStream replica count (`SIE_STREAM_REPLICAS`, default
+/// 1). Above 1 requires a clustered NATS deployment. Unlike the storage
+/// type, this IS reconcilable on an existing stream.
+fn stream_num_replicas() -> usize {
+    std::env::var("SIE_STREAM_REPLICAS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(1)
 }
 
 /// Env-overridable `max_ack_pending`. Python hardcodes 1000 for now but
@@ -121,9 +172,34 @@ pub enum NatsSetupError {
     },
 }
 
+/// Inbox prefix of the sidecar's JetStream API replies and pull deliveries.
+/// It differs from the gateway's `_INBOX`, where workers publish results, so a
+/// NATS user can be allowed to publish results without reading gateway inboxes.
+pub const WORKER_INBOX_PREFIX: &str = "_INBOX_WORKER";
+
 /// Connect to NATS and return a JetStream context.
-pub async fn connect(nats_url: &str) -> Result<(async_nats::Client, JsContext), NatsSetupError> {
-    let client = async_nats::connect(nats_url)
+pub async fn connect(
+    nats_url: &str,
+    credentials: Option<&NatsCredentials>,
+) -> Result<(async_nats::Client, JsContext), NatsSetupError> {
+    let mut options = async_nats::ConnectOptions::new()
+        .custom_inbox_prefix(WORKER_INBOX_PREFIX)
+        .event_callback(|event| async move {
+            match event {
+                async_nats::Event::ServerError(error) => {
+                    warn!(error = %error, "NATS server error");
+                }
+                async_nats::Event::ClientError(error) => {
+                    warn!(error = %error, "NATS client error");
+                }
+                other => info!(event = %other, "NATS event"),
+            }
+        });
+    if let Some(credentials) = credentials {
+        options = options.user_and_password(credentials.user.clone(), credentials.password.clone());
+    }
+    let client = options
+        .connect(nats_url)
         .await
         .map_err(|source| NatsSetupError::Connect { source })?;
     let js = async_nats::jetstream::new(client.clone());
@@ -208,6 +284,116 @@ async fn reconcile_stream_max_age(
         "reconciled NATS stream max_age"
     );
     Ok(())
+}
+
+/// Repair pre-existing streams created without `DiscardPolicy::New` (the
+/// gateway's `ensure_stream` historically left the async-nats default,
+/// `Old`), which silently discards the oldest queued work at the
+/// `max_messages` cap instead of rejecting the new publish.
+async fn reconcile_stream_discard(
+    js: &JsContext,
+    stream: &mut JsStream,
+    stream_name: &str,
+) -> Result<(), NatsSetupError> {
+    let observed_discard = stream.cached_info().config.discard;
+    if observed_discard == DiscardPolicy::New {
+        return Ok(());
+    }
+
+    let mut updated = stream.cached_info().config.clone();
+    updated.discard = DiscardPolicy::New;
+    js.update_stream(updated)
+        .await
+        .map_err(|e| NatsSetupError::EnsureStream {
+            name: stream_name.to_string(),
+            source: e.into(),
+        })?;
+    *stream = js
+        .get_stream(stream_name)
+        .await
+        .map_err(|e| NatsSetupError::EnsureStream {
+            name: stream_name.to_string(),
+            source: e.into(),
+        })?;
+    info!(
+        stream = %stream_name,
+        observed_discard = ?observed_discard,
+        "reconciled NATS stream discard policy to New (reject publishes at cap)"
+    );
+    Ok(())
+}
+
+/// Bring an existing stream's replica count to the configured
+/// `SIE_STREAM_REPLICAS`. JetStream supports changing `num_replicas` on a
+/// live stream (this is how an R1 stream is scaled to R3), so unlike the
+/// storage type this is genuinely reconcilable.
+///
+/// NATS does not validate the count against the real topology — a single-node
+/// server accepts R3 and reports it (verified against nats-server 2.12.6) —
+/// so guarding `streamReplicas` against the deployed NATS cluster size is the
+/// Helm chart's job, not the broker's.
+async fn reconcile_stream_replicas(
+    js: &JsContext,
+    stream: &mut JsStream,
+    stream_name: &str,
+    desired_replicas: usize,
+) -> Result<(), NatsSetupError> {
+    let observed_replicas = stream.cached_info().config.num_replicas;
+    if observed_replicas == desired_replicas {
+        return Ok(());
+    }
+
+    let mut updated = stream.cached_info().config.clone();
+    updated.num_replicas = desired_replicas;
+    js.update_stream(updated)
+        .await
+        .map_err(|e| NatsSetupError::EnsureStream {
+            name: stream_name.to_string(),
+            source: e.into(),
+        })?;
+    *stream = js
+        .get_stream(stream_name)
+        .await
+        .map_err(|e| NatsSetupError::EnsureStream {
+            name: stream_name.to_string(),
+            source: e.into(),
+        })?;
+    info!(
+        stream = %stream_name,
+        observed_replicas,
+        desired_replicas,
+        "reconciled NATS stream num_replicas"
+    );
+    Ok(())
+}
+
+/// Report — but do NOT try to repair — a storage-type divergence.
+///
+/// NATS rejects an `update_stream` that changes `storage` (err_code 10052,
+/// "stream configuration update can not change storage type"), because the
+/// stream's message store is already materialized in RAM or on disk.
+/// "Repairing" it would mean deleting and recreating the stream, destroying
+/// exactly the queued work that durability is meant to protect. So an
+/// operator flipping `SIE_STREAM_STORAGE` on a cluster with live streams
+/// gets a loud warning and keeps their work; the streams take the new
+/// storage once the pool is drained and they are recreated.
+fn warn_on_stream_storage_mismatch(
+    stream: &JsStream,
+    stream_name: &str,
+    desired_storage: StorageType,
+) {
+    let observed_storage = stream.cached_info().config.storage;
+    if observed_storage == desired_storage {
+        return;
+    }
+    warn!(
+        stream = %stream_name,
+        observed_storage = ?observed_storage,
+        desired_storage = ?desired_storage,
+        "NATS stream storage type differs from SIE_STREAM_STORAGE and CANNOT be changed in \
+         place; the stream keeps its existing storage until an operator drains the pool and \
+         recreates it"
+    );
 }
 
 /// Predicate used by [`cleanup_overlapping_consumers`]. Returns true
@@ -420,14 +606,16 @@ pub async fn ensure_worker_stream_and_consumer(
     let consumer_name = config.worker_consumer_name();
     let desired_max_age = Duration::from_secs(generation_stream_max_age_secs());
 
+    let desired_storage = stream_storage();
+    let desired_replicas = stream_num_replicas();
     let stream_cfg = StreamConfig {
         name: stream_name.clone(),
         subjects: vec![subject.clone()],
         retention: RetentionPolicy::WorkQueue,
-        storage: StorageType::Memory,
+        storage: desired_storage,
         max_age: desired_max_age,
         max_messages: STREAM_MAX_MSGS,
-        num_replicas: 1,
+        num_replicas: desired_replicas,
         discard: DiscardPolicy::New,
         ..Default::default()
     };
@@ -444,6 +632,9 @@ pub async fn ensure_worker_stream_and_consumer(
             })?;
     reconcile_stream_subjects(js, &mut stream, &stream_name, &subject).await?;
     reconcile_stream_max_age(js, &mut stream, &stream_name, desired_max_age).await?;
+    reconcile_stream_discard(js, &mut stream, &stream_name).await?;
+    reconcile_stream_replicas(js, &mut stream, &stream_name, desired_replicas).await?;
+    warn_on_stream_storage_mismatch(&stream, &stream_name, desired_storage);
 
     cleanup_overlapping_consumers(&stream, &consumer_name, &subject).await;
 
@@ -508,14 +699,16 @@ async fn ensure_stream_and_consumer_inner(
     let subject = config.subject_filter();
     let consumer_name = config.consumer_name();
 
+    let desired_storage = stream_storage();
+    let desired_replicas = stream_num_replicas();
     let stream_cfg = StreamConfig {
         name: stream_name.clone(),
         subjects: vec![stream_subject.clone()],
         retention: RetentionPolicy::WorkQueue,
-        storage: StorageType::Memory,
+        storage: desired_storage,
         max_age: Duration::from_secs(stream_max_age_secs()),
         max_messages: STREAM_MAX_MSGS,
-        num_replicas: 1,
+        num_replicas: desired_replicas,
         discard: DiscardPolicy::New,
         ..Default::default()
     };
@@ -534,6 +727,9 @@ async fn ensure_stream_and_consumer_inner(
             })?;
     reconcile_stream_subjects(js, &mut stream, &stream_name, &stream_subject).await?;
     reconcile_stream_max_age(js, &mut stream, &stream_name, desired_max_age).await?;
+    reconcile_stream_discard(js, &mut stream, &stream_name).await?;
+    reconcile_stream_replicas(js, &mut stream, &stream_name, desired_replicas).await?;
+    warn_on_stream_storage_mismatch(&stream, &stream_name, desired_storage);
 
     // Self-heal stale durables whose filters overlap this concrete
     // `(pool, machine_profile, bundle)` lane. Without this, NATS rejects
@@ -707,6 +903,18 @@ mod tests {
     }
 
     #[test]
+    fn redelivery_envelope_can_always_be_added_to_an_instant() {
+        assert_eq!(
+            redelivery_envelope_for(DEFAULT_MAX_DELIVER),
+            Duration::from_secs(600)
+        );
+        let envelope = redelivery_envelope_for(i64::MAX);
+        let now = tokio::time::Instant::now();
+        assert!(now + envelope > now);
+        assert_eq!(envelope, MAX_REDELIVERY_ENVELOPE);
+    }
+
+    #[test]
     fn env_free_accessors_match_defaults() {
         // Env-free calls must return the hardcoded defaults. We do not
         // touch the environment (would be racy with other tests) — this
@@ -722,12 +930,24 @@ mod tests {
         if std::env::var("SIE_MAX_ACK_PENDING").is_err() {
             assert_eq!(max_ack_pending(), DEFAULT_MAX_ACK_PENDING);
         }
+        // The shipped default stays memory-backed / single-replica: this
+        // knob makes durability configurable, it does not flip the
+        // production posture. Must also match the gateway's default
+        // (`SIE_STREAM_STORAGE` in packages/sie_gateway/src/config.rs) —
+        // whoever creates the stream first wins.
+        if std::env::var("SIE_STREAM_STORAGE").is_err() {
+            assert_eq!(stream_storage(), StorageType::Memory);
+        }
+        if std::env::var("SIE_STREAM_REPLICAS").is_err() {
+            assert_eq!(stream_num_replicas(), 1);
+        }
     }
 
     #[test]
     fn config_produces_expected_names() {
         let cfg = WorkerConfig {
             nats_url: Some(String::new()),
+            nats_credentials: None,
             local_socket_path: None,
             pool: "default".into(),
             bundle: "b".into(),

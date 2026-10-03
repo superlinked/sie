@@ -100,11 +100,16 @@ class ScoreHandler(OperationHandler[ScoreOutput]):
         sliced_image_counts = (
             [image_counts[index]] if image_counts is not None and 0 <= index < len(image_counts) else None
         )
+        content_counts = output.content_token_counts
+        sliced_content_counts = (
+            [content_counts[index]] if content_counts is not None and 0 <= index < len(content_counts) else None
+        )
         return ScoreOutput(
             scores=output.scores[index : index + 1],
             batch_size=1,
             input_token_counts=sliced_counts,
             input_image_counts=sliced_image_counts,
+            content_token_counts=sliced_content_counts,
         )
 
     def assemble_output(
@@ -132,7 +137,15 @@ class ScoreHandler(OperationHandler[ScoreOutput]):
         # its reserve estimate rather than under-counting).
         assembled_counts: list[int] = []
         assembled_image_counts: list[int] = []
+        assembled_content_counts: list[int] | None = []
         for i in range(batch_size):
+            partial_content_counts = partials[i].content_token_counts
+            if assembled_content_counts is not None:
+                if isinstance(partial_content_counts, list) and len(partial_content_counts) == 1:
+                    assembled_content_counts.append(partial_content_counts[0])
+                else:
+                    assembled_content_counts = None
+
             partial_counts = partials[i].input_token_counts
             if not (isinstance(partial_counts, list) and len(partial_counts) == 1):
                 assembled_counts = []
@@ -149,4 +162,5 @@ class ScoreHandler(OperationHandler[ScoreOutput]):
             batch_size=batch_size,
             input_token_counts=assembled_counts if len(assembled_counts) == batch_size else None,
             input_image_counts=assembled_image_counts if len(assembled_image_counts) == batch_size else None,
+            content_token_counts=assembled_content_counts,
         )

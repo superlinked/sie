@@ -28,6 +28,22 @@ class TimingInfo(TypedDict, total=False):
     postprocessing_ms: float | None
 
 
+class Usage(TypedDict):
+    """Authoritative post-tokenization usage, never a character estimate.
+
+    ``input_tokens`` is the sum of the worker's per-item token counts. A
+    reported ``0`` is a MEASUREMENT — a video-only encode consumes exactly zero
+    text tokens — and is distinct from an absent ``usage`` block, which means
+    the counts were unavailable on this path.
+
+    Score shipped this shape first (:class:`ScoreUsage`); encode and extract
+    report the same field names so the surfaces agree.
+    """
+
+    input_tokens: Required[int]
+    images: NotRequired[int]
+
+
 class EncodeResponse(TypedDict, total=False):
     """Response body for POST /v1/encode/{model}.
 
@@ -35,11 +51,13 @@ class EncodeResponse(TypedDict, total=False):
         model: Model name used for encoding.
         items: Encoded results, one per input item.
         timing: Server-side timing breakdown.
+        usage: Authoritative usage; omitted when the counts are unavailable.
     """
 
     model: str
     items: list[EncodeResult]
     timing: TimingInfo | None
+    usage: Usage
 
 
 class ScoreEntry(TypedDict):
@@ -56,9 +74,24 @@ class ScoreEntry(TypedDict):
     rank: int
 
 
+# Kept as its own name for existing importers and for the published
+# ``ScoreUsageModel`` schema; structurally identical to :class:`Usage`.
+class ScoreInputTokensDetails(TypedDict):
+    """Breakdown of score ``input_tokens``.
+
+    ``content_tokens`` is the caller's own text inside every scored pair: the
+    query, the document after truncation, and a request instruction when one
+    was supplied, each tokenized alone. The rest of ``input_tokens`` is the
+    prompt template the reranker wraps around each pair.
+    """
+
+    content_tokens: Required[int]
+
+
 class ScoreUsage(TypedDict):
     input_tokens: Required[int]
     images: NotRequired[int]
+    input_tokens_details: NotRequired[ScoreInputTokensDetails]
 
 
 class ScoreResponse(TypedDict, total=False):
@@ -177,10 +210,12 @@ class ExtractResponse(TypedDict, total=False):
     Attributes:
         model: Model name used for extraction.
         items: Extraction results, one per input item.
+        usage: Authoritative usage; omitted when the counts are unavailable.
     """
 
     model: str
     items: list[ExtractResult]
+    usage: Usage
 
 
 class ErrorCode(StrEnum):

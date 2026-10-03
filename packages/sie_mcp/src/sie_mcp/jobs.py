@@ -1,4 +1,4 @@
-"""``docs_to_markdown`` — the Req 12 docs→markdown job (#1306, thickened in #1307).
+"""The ``docs_to_markdown`` document-conversion job.
 
 Stateless orchestration over the SIE ``extract`` primitive: a document's bytes go
 to the cluster and come back as markdown. Docling is the front door for all

@@ -1,0 +1,75 @@
+sie_id: "zai-org/GLM-5.3-Flash"
+hf_id: "zai-org/GLM-5.3-Flash"
+hf_revision: eb9eb208eb0d988989d07a6a12d0fdeb5f52574a
+# Glm5NextForConditionalGeneration: 321B parameters in a 305.8 GiB blockwise
+# FP8 checkpoint (e4m3, 128x128 weight blocks, dynamic activations), which
+# SGLang detects from the checkpoint itself. No transformers release carries
+# glm5_next; the sglang-cu130 engine registers the architecture and its
+# processor. The weights need eight 80 GB accelerators.
+inputs:
+  text: true
+  # The architecture reads images, but the pinned engine resolves transformers
+  # 5.12.1, which has no glm5_next processor. SGLang then falls back to a bare
+  # tokenizer and never turns an image into visual tokens, so an answer about
+  # an image is a guess from the text (sgl-project/sglang#39831). Text only
+  # until the engine moves to transformers 5.16.1 or later
+  # (sgl-project/sglang#39012) and images are measured again.
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: null
+  extract: null
+  generate:
+    # The checkpoint's native window is 1,048,576 tokens. This route admits
+    # what was measured on eight 80 GB accelerators.
+    context_length: 16384
+    max_output_tokens: 4096
+    # The chat template always opens a thinking block and never reads
+    # enable_thinking. Declaring it true marks that reasoning private: the
+    # queued worker drops everything before </think>, and the direct route
+    # has the engine's glm45 parser split it off.
+    chat_template_kwargs:
+      enable_thinking: true
+    # Grammar and tool calling are not claimed yet. On the queued route the
+    # engine applies a grammar from the first generated token, which is inside
+    # the open thinking block, and the worker does not parse this template's
+    # <arg_key>/<arg_value> tool calls.
+    capabilities:
+      grammar: []
+      streaming: true
+      tools: false
+max_sequence_length: 16384
+profiles:
+  default:
+    max_batch_tokens: 16384
+    kv_budget_tokens: 16384
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.sglang.cuda13:SGLangCuda13Adapter
+    adapter_options:
+      loadtime:
+        tensor_parallel_size: 8
+        # The first request after a cold start compiled kernels for 91 s before
+        # its first byte, measured on eight H100s.
+        request_read_timeout_s: 300
+        # Cold starts on eight H100s took from 684 s to about 36 minutes.
+        # Reading the 306 GiB checkpoint took from a few minutes to 25 minutes,
+        # and decode CUDA-graph capture about 7.5 more.
+        startup_timeout_s: 2400
+        max_seq_length: 16384
+        mem_fraction_static: 0.85
+        served_model_name: zai-org/GLM-5.3-Flash
+        trust_remote_code: false
+        grammar_backend: xgrammar
+        reasoning_parser: glm45
+        speculative:
+          enabled: false
+      runtime:
+        first_chunk_timeout_s: 300
+        inter_chunk_timeout_s: 60
+        overall_timeout_s: 600
+        # generation_config.json at the pinned revision.
+        default_sampling:
+          temperature: 1.0
+          top_p: 0.95

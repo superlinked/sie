@@ -137,7 +137,7 @@ result = rag("What is machine learning?")
 Start the SIE server before using this integration:
 
 ```bash
-mise run serve -d cpu -p 8080
+mise run serve -- -d cpu -p 8080
 ```
 
 ## Testing

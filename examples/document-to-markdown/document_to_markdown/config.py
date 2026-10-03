@@ -9,8 +9,36 @@ import yaml
 from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parent.parent
-DATA_DIR = ROOT / "data"
-PDF_DIR = DATA_DIR / "pdfs"
+# Written by `python3 fetch.py`, which owns this directory and replaces it
+# wholesale. Nothing else writes into it, so the digests the fetch checked stay
+# true of what is on disk.
+EVIDENCE_DIR = ROOT / "data"
+# The file `python3 fetch.py` drops in the directory it wrote, naming the
+# dataset and revision. One definition, because "is this a fetched bundle" is
+# asked in two places and two different answers to it is the bug this guards.
+#
+# fetch.py spells the name again rather than importing it. That is deliberate:
+# it has to run on a bare `python3` with nothing installed, which is the whole
+# point of it, and importing this package would need `uv sync` first. The same
+# name in the nine other examples' fetch.py is why it is a fixed string rather
+# than something this example gets to choose.
+EVIDENCE_MARKER = ".sie-evidence"
+
+
+def is_fetched_bundle(run_dir: Path) -> bool:
+    """True when `python3 fetch.py` wrote this directory.
+
+    A fetched bundle's files are pinned by digests the fetch checked, and it
+    carries its own source provenance. A bundle `convert-documents` wrote has
+    neither.
+    """
+    return (run_dir / EVIDENCE_MARKER).is_file()
+
+
+# Written by `uv run fetch-documents`, and kept outside the fetched tree so a
+# re-fetch does not delete the PDFs and a PDF download does not overwrite the
+# recorded provenance.
+PDF_DIR = ROOT / "pdfs"
 RUNS_DIR = ROOT / "runs"
 
 

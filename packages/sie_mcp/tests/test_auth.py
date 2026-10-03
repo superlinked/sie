@@ -1,4 +1,5 @@
 from typing import Any
+from urllib.parse import urlsplit
 
 import pytest
 from sie_mcp.auth import ConnectorSecretAuthMiddleware, authenticate, base_url, bearer_token
@@ -119,19 +120,137 @@ def test_base_url_prefers_pinned_public_url() -> None:
     assert base_url(cfg, scheme="http", headers=headers) == "https://mcp.example.com"
 
 
-def test_base_url_derives_from_forwarded_headers() -> None:
-    cfg = _cfg(public_base_url=None)
-    headers = Headers({"host": "internal:8088", "x-forwarded-proto": "https", "x-forwarded-host": "mcp.example.com"})
-    assert base_url(cfg, scheme="http", headers=headers) == "https://mcp.example.com"
+def test_base_url_derives_from_request_scheme_and_allowed_host() -> None:
+    cfg = _cfg(public_base_url=None, allowed_hosts=["mcp.example.com"])
+    headers = Headers({"host": "mcp.example.com"})
+    assert base_url(cfg, scheme="https", headers=headers) == "https://mcp.example.com"
+
+
+def test_base_url_ignores_forwarded_headers() -> None:
+    cfg = _cfg(public_base_url=None, allowed_hosts=["mcp.example.com"])
+    headers = Headers(
+        {"host": "mcp.example.com", "x-forwarded-proto": "http", "x-forwarded-host": "evil.attacker.example"}
+    )
+    assert base_url(cfg, scheme="https", headers=headers) == "https://mcp.example.com"
+
+
+@pytest.mark.parametrize("host", ["evil.attacker.example", "mcp.example.com.evil.example", "", "notlocalhost:8088"])
+def test_base_url_refuses_untrusted_host(host: str) -> None:
+    cfg = _cfg(public_base_url=None, allowed_hosts=["mcp.example.com", "edge.example.com:*"])
+    assert base_url(cfg, scheme="https", headers=Headers({"host": host})) is None
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        # Extra authority after the port.
+        "edge.example.com:8443@evil.attacker.example",
+        "edge.example.com:8443/evil",
+        # Not ports.
+        "edge.example.com:99999",
+        "edge.example.com:0",
+        "edge.example.com:abc",
+        "edge.example.com:",
+    ],
+)
+def test_base_url_refuses_wildcard_host_without_a_valid_port(host: str) -> None:
+    cfg = _cfg(public_base_url=None, allowed_hosts=["edge.example.com:*"])
+    assert base_url(cfg, scheme="https", headers=Headers({"host": host})) is None
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        # Loopback is trusted without configuration, so a Host that merely starts
+        # with a loopback name must not inherit that trust.
+        "localhost:8088@evil.attacker.example",
+        "127.0.0.1:8088@evil.attacker.example",
+        "[::1]@evil.attacker.example",
+        "[::1]:8088@evil.attacker.example",
+        "[::1].evil.attacker.example",
+        "localhost:8088/evil",
+        "localhost:99999",
+    ],
+)
+def test_base_url_refuses_loopback_lookalike_hosts(host: str) -> None:
+    cfg = _cfg(public_base_url=None, allowed_hosts=[])
+    assert base_url(cfg, scheme="https", headers=Headers({"host": host})) is None
+
+
+@pytest.mark.parametrize("literal", ["::::", "1:2:3", "12345::1", "::ffff:192.0.2.999"])
+@pytest.mark.parametrize("allowed_port", ["443", "*"])
+def test_base_url_refuses_malformed_ipv6_even_when_allowed(literal: str, allowed_port: str) -> None:
+    cfg = _cfg(public_base_url=None, allowed_hosts=[f"[{literal}]:{allowed_port}"])
+    assert base_url(cfg, scheme="https", headers=Headers({"host": f"[{literal}]:443"})) is None
+
+
+@pytest.mark.parametrize("literal", ["2001:db8::1", "::ffff:192.0.2.1"])
+@pytest.mark.parametrize("allowed_port", ["443", "*"])
+def test_base_url_trusts_valid_allowed_ipv6(literal: str, allowed_port: str) -> None:
+    cfg = _cfg(public_base_url=None, allowed_hosts=[f"[{literal}]:{allowed_port}"])
+    host = f"[{literal}]:443"
+    assert base_url(cfg, scheme="https", headers=Headers({"host": host})) == f"https://{host}"
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "edge.example.com:8443",
+        "edge.example.com:8443@evil.attacker.example",
+        "edge.example.com:8443/evil",
+        "evil.attacker.example",
+    ],
+)
+def test_advertised_origin_never_resolves_to_an_unconfigured_host(host: str) -> None:
+    """Whatever is advertised must parse back to a host the operator configured."""
+    cfg = _cfg(public_base_url=None, allowed_hosts=["edge.example.com:*"])
+    origin = base_url(cfg, scheme="https", headers=Headers({"host": host}))
+    if origin is None:
+        return
+    metadata = f"{origin}/.well-known/oauth-protected-resource"
+    assert urlsplit(metadata).hostname == "edge.example.com"
+    assert urlsplit(metadata).path == "/.well-known/oauth-protected-resource"
+
+
+@pytest.mark.parametrize(
+    ("host", "expected"),
+    [
+        ("localhost:8088", "http://localhost:8088"),
+        ("127.0.0.1:8088", "http://127.0.0.1:8088"),
+        ("[::1]:8088", "http://[::1]:8088"),
+        ("LOCALHOST:8088", "http://LOCALHOST:8088"),
+        ("edge.example.com:8443", "http://edge.example.com:8443"),
+        ("Edge.Example.com:8443", "http://Edge.Example.com:8443"),
+        ("mcp.example.com", "http://mcp.example.com"),
+    ],
+)
+def test_base_url_trusts_loopback_and_wildcard_port_hosts(host: str, expected: str) -> None:
+    cfg = _cfg(public_base_url=None, allowed_hosts=["EDGE.example.com:*", "MCP.Example.com"])
+    assert base_url(cfg, scheme="http", headers=Headers({"host": host})) == expected
 
 
 async def test_unauthorized_returns_www_authenticate_challenge() -> None:
-    cfg = _cfg(connector_secrets={"s3cret": "user-1"})
+    cfg = _cfg(connector_secrets={"s3cret": "user-1"}, allowed_hosts=["mcp.example.com"])
     reached, start = await _run_middleware(cfg, path="/mcp", headers=[(b"host", b"mcp.example.com")])
     assert reached["app"] is False
     assert start["status"] == 401
     challenge = Headers(raw=start["headers"])["www-authenticate"]
     assert 'resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource"' in challenge
+
+
+async def test_unauthorized_challenge_ignores_forwarded_host() -> None:
+    cfg = _cfg(connector_secrets={"s3cret": "user-1"}, allowed_hosts=["mcp.example.com"])
+    headers = [(b"host", b"mcp.example.com"), (b"x-forwarded-host", b"evil.attacker.example")]
+    _reached, start = await _run_middleware(cfg, path="/mcp", headers=headers)
+    challenge = Headers(raw=start["headers"])["www-authenticate"]
+    assert 'resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource"' in challenge
+
+
+async def test_unauthorized_omits_challenge_for_untrusted_host() -> None:
+    cfg = _cfg(connector_secrets={"s3cret": "user-1"})
+    _reached, start = await _run_middleware(cfg, path="/mcp", headers=[(b"host", b"evil.attacker.example")])
+    assert start["status"] == 401
+    assert "www-authenticate" not in Headers(raw=start["headers"])
 
 
 async def test_unauthorized_omits_challenge_when_oauth_disabled() -> None:

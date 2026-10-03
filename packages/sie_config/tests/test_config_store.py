@@ -1,6 +1,8 @@
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
+import pytest
 from sie_config.config_store import ConfigStore
 
 
@@ -112,3 +114,23 @@ class TestConfigStore:
         self.store.write_model("org/model", "sie_id: org/model\n")
         store2 = ConfigStore(self.store.base_dir)
         assert store2.read_model("org/model") == "sie_id: org/model\n"
+
+    def test_oss_is_rejected_for_mutable_epoch_storage(self) -> None:
+        with pytest.raises(ValueError, match="cannot satisfy the required epoch compare-and-swap contract"):
+            ConfigStore("oss://config-bucket/sie-config")
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "s3://config-bucket/sie-config",
+            "gs://config-bucket/sie-config",
+            "abfs://config@account.dfs.core.windows.net/sie-config",
+            "abfss://config@account.dfs.core.windows.net/sie-config",
+        ],
+    )
+    def test_existing_mutable_cloud_backends_still_construct(self, url: str) -> None:
+        with patch("sie_config.config_store.get_storage_backend") as get_backend:
+            store = ConfigStore(url)
+
+        assert store.base_dir == url
+        get_backend.assert_called_once_with(url)

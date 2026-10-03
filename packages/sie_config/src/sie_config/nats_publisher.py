@@ -41,6 +41,44 @@ class PartialPublishError(RuntimeError):
         )
 
 
+def _replace_userinfo(url: str, replacement: str | None) -> str:
+    """Return ``url`` with each server's ``user[:password]@`` userinfo replaced.
+
+    The userinfo becomes ``replacement@``, or is removed when ``replacement`` is ``None``.
+    """
+    servers = []
+    for server in url.split(","):
+        scheme, sep, rest = server.partition("://")
+        if not sep:
+            scheme, rest = "", server
+        authority_end = min((i for i in (rest.find("/"), rest.find("?"), rest.find("#")) if i >= 0), default=len(rest))
+        at = rest.rfind("@", 0, authority_end)
+        if at >= 0:
+            rest = rest[at + 1 :] if replacement is None else replacement + rest[at:]
+        servers.append(f"{scheme}{sep}{rest}")
+    return ",".join(servers)
+
+
+def _redact_userinfo(url: str) -> str:
+    """Return ``url`` with any ``user[:password]@`` userinfo replaced, for logs."""
+    return _replace_userinfo(url, "<redacted>")
+
+
+def _credentials_from_env() -> tuple[str, str] | None:
+    """NATS user and password from ``SIE_NATS_USER`` / ``SIE_NATS_PASSWORD``.
+
+    Returns ``None`` when neither is set and raises ``ValueError`` when only one is.
+    """
+    user = os.environ.get("SIE_NATS_USER", "")
+    password = os.environ.get("SIE_NATS_PASSWORD", "")
+    if not user and not password:
+        return None
+    if not user or not password:
+        msg = "SIE_NATS_USER and SIE_NATS_PASSWORD must be set together"
+        raise ValueError(msg)
+    return user, password
+
+
 def _get_router_id() -> str:
     """Get unique publisher identifier from hostname or env.
 
@@ -65,11 +103,16 @@ class NatsPublisher:
     Gracefully degrades when NATS is unavailable -- config mutations are blocked.
 
     Args:
-        nats_url: NATS connection URL. Default: nats://localhost:4222
+        nats_url: NATS connection URL. Default: nats://localhost:4222.
+            Credentials come from ``SIE_NATS_USER`` / ``SIE_NATS_PASSWORD``;
+            userinfo in the URL is removed before connecting.
     """
 
     def __init__(self, nats_url: str | None = None) -> None:
         self._nats_url = nats_url or os.environ.get("SIE_NATS_URL", "nats://localhost:4222")
+        self._connect_url = _replace_userinfo(self._nats_url, None)
+        self._log_url = _redact_userinfo(self._nats_url)
+        self._credentials = _credentials_from_env()
         self._nc: nats.NATS | None = None
         self._router_id = _get_router_id()
         self._connected = False
@@ -86,6 +129,19 @@ class NatsPublisher:
         if self._boot_connect_task is not None and not self._boot_connect_task.done():
             return
         self._boot_connect_task = asyncio.create_task(self.connect())
+
+    async def _connect_client(self) -> nats.NATS:
+        user, password = self._credentials or (None, None)
+        return await nats.connect(
+            self._connect_url,
+            reconnected_cb=self._handle_reconnect,
+            disconnected_cb=self._handle_disconnect,
+            error_cb=self._handle_error,
+            max_reconnect_attempts=-1,
+            reconnect_time_wait=2,
+            user=user,
+            password=password,
+        )
 
     @property
     def connected(self) -> bool:
@@ -122,19 +178,12 @@ class NatsPublisher:
             )
         try:
             self._nc = await asyncio.wait_for(
-                nats.connect(
-                    self._nats_url,
-                    reconnected_cb=self._handle_reconnect,
-                    disconnected_cb=self._handle_disconnect,
-                    error_cb=self._handle_error,
-                    max_reconnect_attempts=-1,
-                    reconnect_time_wait=2,
-                ),
+                self._connect_client(),
                 timeout=budget,
             )
             self._connected = True
             sie_metrics.set_nats_connected(True)
-            logger.info("Connected to NATS at %s (router_id=%s)", self._nats_url, self._router_id)
+            logger.info("Connected to NATS at %s (router_id=%s)", self._log_url, self._router_id)
             return
         except TimeoutError:
             self._nc = None
@@ -142,7 +191,7 @@ class NatsPublisher:
             sie_metrics.set_nats_connected(False)
             logger.warning(
                 "NATS at %s not ready within %.0fs - retries continue in background",
-                self._nats_url,
+                self._log_url,
                 budget,
             )
         except Exception:  # noqa: BLE001 -- graceful degradation when NATS unavailable
@@ -151,7 +200,7 @@ class NatsPublisher:
             sie_metrics.set_nats_connected(False)
             logger.warning(
                 "Failed to connect to NATS at %s -- config mutations will be blocked until reconnect",
-                self._nats_url,
+                self._log_url,
                 exc_info=True,
             )
 
@@ -175,19 +224,12 @@ class NatsPublisher:
                         logger.debug("Failed to drain stale NATS client", exc_info=True)
                     self._nc = None
 
-                self._nc = await nats.connect(
-                    self._nats_url,
-                    reconnected_cb=self._handle_reconnect,
-                    disconnected_cb=self._handle_disconnect,
-                    error_cb=self._handle_error,
-                    max_reconnect_attempts=-1,
-                    reconnect_time_wait=2,
-                )
+                self._nc = await self._connect_client()
                 self._connected = True
                 sie_metrics.set_nats_connected(True)
                 logger.info(
                     "Connected to NATS at %s (router_id=%s) after startup deferral",
-                    self._nats_url,
+                    self._log_url,
                     self._router_id,
                 )
                 return
@@ -240,6 +282,7 @@ class NatsPublisher:
         model_config_yaml: str,
         model_pool: str = "default",
         bundle_pool_config_hashes: dict[str, dict[str, str]] | None = None,
+        bundle_adapters: dict[str, list[str]] | None = None,
     ) -> None:
         """Publish config change notifications to NATS.
 
@@ -254,7 +297,8 @@ class NatsPublisher:
         set of fields that ``sie_gateway`` and worker sidecars expect
         (``router_id``, ``bundle_id``, ``epoch``, ``bundle_config_hash``,
         ``model_id``, ``profiles_added``, ``model_config``,
-        ``affected_bundles``, ``pool``, ``bundle_pool_config_hashes``).
+        ``affected_bundles``, ``pool``, ``bundle_pool_config_hashes``,
+        ``bundle_adapters``).
         See ``packages/sie_gateway/src/nats/manager.rs::ConfigNotification``.
 
         Args:
@@ -266,6 +310,7 @@ class NatsPublisher:
             model_config_yaml: Full model config YAML content.
             model_pool: Canonical pool assignment for the changed model.
             bundle_pool_config_hashes: Nested bundle_id -> pool -> hash map.
+            bundle_adapters: bundle_id -> adapter modules the hashes were scoped by.
 
         Raises:
             RuntimeError: If NATS is not connected.
@@ -294,6 +339,7 @@ class NatsPublisher:
         nc = cast("nats.NATS", self._nc)
         normalized_pool = model_pool.strip().lower() or "default"
         pool_hashes = bundle_pool_config_hashes or {}
+        adapters_by_bundle = bundle_adapters or {}
 
         # Publish each bundle delta individually, collecting failures
         # rather than short-circuiting on the first exception. If we
@@ -315,6 +361,7 @@ class NatsPublisher:
                 "affected_bundles": affected_bundles,
                 "pool": normalized_pool,
                 "bundle_pool_config_hashes": pool_hashes,
+                "bundle_adapters": adapters_by_bundle,
             }
             encoded = orjson.dumps(payload)
 
@@ -365,7 +412,7 @@ class NatsPublisher:
         """Handle NATS reconnection."""
         self._connected = True
         sie_metrics.set_nats_connected(True)
-        logger.info("Reconnected to NATS at %s", self._nats_url)
+        logger.info("Reconnected to NATS at %s", self._log_url)
 
     async def _handle_disconnect(self) -> None:
         """Handle NATS disconnection."""

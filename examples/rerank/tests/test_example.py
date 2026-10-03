@@ -1,118 +1,95 @@
+"""Integrity tests for the public recording; fetch.py must run first."""
+
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
-import sys
+import os
+import shutil
+import tempfile
 import unittest
 from pathlib import Path
-from typing import Any
-from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
-RUN_SPEC = importlib.util.spec_from_file_location("rerank_run", ROOT / "run.py")
-assert RUN_SPEC is not None
-assert RUN_SPEC.loader is not None
-run = importlib.util.module_from_spec(RUN_SPEC)
-sys.modules[RUN_SPEC.name] = run
-RUN_SPEC.loader.exec_module(run)
+DATA = Path(os.environ.get("RERANK_EVIDENCE_DIR", str(ROOT / "data")))
+spec = importlib.util.spec_from_file_location("rerank_score", ROOT / "score.py")
+assert spec and spec.loader
+scorer = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(scorer)
+fetch_spec = importlib.util.spec_from_file_location("rerank_fetch", ROOT / "fetch.py")
+assert fetch_spec and fetch_spec.loader
+fetcher = importlib.util.module_from_spec(fetch_spec)
+fetch_spec.loader.exec_module(fetcher)
 
 
-def strings(value: Any):
-    if isinstance(value, str):
-        yield value
-    elif isinstance(value, dict):
-        for item in value.values():
-            yield from strings(item)
-    elif isinstance(value, list):
-        for item in value:
-            yield from strings(item)
+class RecordedEvidenceTests(unittest.TestCase):
+    def test_published_figures_and_completeness(self):
+        result = scorer.score(DATA)
+        self.assertEqual(result["models"]["sie-qwen3-reranker-4b"]["bothRulesAllRepetitions"], 455)
+        self.assertEqual(result["models"]["gpt-6-luna"]["proposal"], 491)
+        self.assertEqual(result["models"]["claude-haiku-4-5"]["partialRankings"], 668)
 
+    def tamper(self, name, change, expected):
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary) / "data"
+            shutil.copytree(DATA, target)
+            path = target / name
+            change(path)
+            manifest = scorer.load(target / "manifest.json")
+            manifest["files_sha256"][name] = hashlib.sha256(path.read_bytes()).hexdigest()
+            (target / "manifest.json").write_text(json.dumps(manifest))
+            with self.assertRaisesRegex(ValueError, expected):
+                scorer.score(target)
 
-class RerankExampleTests(unittest.TestCase):
-    def test_inputs_are_exact_primary_source_excerpts(self) -> None:
-        cases, sources = run.load_and_verify_inputs()
-        self.assertEqual(len(cases["cases"]), 4)
-        self.assertEqual(len(sources["sources"]), 4)
+    def test_missing_call_keeps_fixed_denominator(self):
+        self.tamper(
+            "calls/sie-qwen3-reranker-4b.jsonl",
+            lambda p: p.write_text("\n".join(p.read_text().splitlines()[1:]) + "\n"),
+            "Missing, duplicate",
+        )
 
-    def test_recorded_audit_envelopes_match_the_runner(self) -> None:
-        cases, _ = run.load_and_verify_inputs()
-        for case_id, case in cases["cases"].items():
-            name = run.ARTIFACT_NAMES[case_id]
-            recorded = run.read_json(ROOT / "verified-run" / "requests" / f"{name}.json")
-            self.assertEqual(recorded, run.build_audit_envelope(case_id, case))
+    def test_duplicate_call_is_not_an_extra_success(self):
+        self.tamper(
+            "calls/sie-qwen3-reranker-4b.jsonl",
+            lambda p: p.write_text(p.read_text() + p.read_text().splitlines()[0] + "\n"),
+            "Missing, duplicate",
+        )
 
-    def test_recorded_responses_pass_fail_closed_checks(self) -> None:
-        cases, _ = run.load_and_verify_inputs()
-        evaluation = run.read_json(ROOT / "verified-run" / "evaluation.json")
-        checks = {check["case_id"]: check for check in evaluation["checks"]}
-        for case_id, case in cases["cases"].items():
-            name = run.ARTIFACT_NAMES[case_id]
-            response = run.read_json(ROOT / "verified-run" / "raw" / f"{name}.json")
-            observed = run.validate_response(case_id, case, response)
-            self.assertTrue(observed["passed"])
-            self.assertEqual(
-                checks[case_id]["expected_top_candidate_id"],
-                observed["expected_top_candidate_id"],
-            )
-            self.assertEqual(
-                checks[case_id]["observed_top_candidate_id"],
-                observed["observed_top_candidate_id"],
-            )
-            self.assertEqual(
-                checks[case_id]["candidate_count"],
-                observed["candidate_count"],
-            )
+    def test_declared_winner_must_match_recorded_order(self):
+        def change(path):
+            rows = scorer.rows(path)
+            rows[0]["top1"] = rows[0]["ranked_ids"][1]
+            path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
 
-    def test_boolean_score_fails_closed(self) -> None:
-        cases, _ = run.load_and_verify_inputs()
-        case_id = "scotus_two_contracts"
-        case = cases["cases"][case_id]
-        response = run.read_json(ROOT / "verified-run" / "raw" / "supreme-court-arbitration.json")
-        response["scores"][0]["score"] = True
+        self.tamper("calls/sie-qwen3-reranker-4b.jsonl", change, "Winner differs")
 
-        with self.assertRaisesRegex(ValueError, "Invalid score"):
-            run.validate_response(case_id, case, response)
+    def test_repair_cannot_replace_an_original_success(self):
+        def change(path):
+            rows = scorer.rows(path)
+            rows[-1]["case"] = rows[0]["case"]
+            rows[-1]["arm"] = rows[0]["arm"]
+            path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
 
-    def test_manifest_rejects_rewritten_excerpt_and_declared_hash(self) -> None:
-        cases = run.read_json(run.CASES_PATH)
-        sources = run.read_json(run.SOURCES_PATH)
-        candidate = cases["cases"]["scotus_two_contracts"]["candidates"][0]
-        candidate["text"] += " tampered"
-        candidate["sha256"] = run.sha256_bytes(candidate["text"].encode("utf-8"))
+        self.tamper("history/transport-repair.jsonl", change, "Retries must only")
 
-        with (
-            mock.patch.object(run, "read_json", side_effect=[cases, sources]),
-            self.assertRaisesRegex(ValueError, "Canonical excerpt changed"),
-        ):
-            run.load_and_verify_inputs()
+    def test_fetch_refuses_unowned_destination_and_existing_backup(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary) / "data"
+            target.mkdir()
+            self.assertIn("no .sie-evidence", fetcher.refuse_reason(target))
+            (target / ".sie-evidence").write_bytes(fetcher.marker_bytes())
+            self.assertIsNone(fetcher.refuse_reason(target))
+            fetcher.backup_path(target).mkdir()
+            self.assertIn("already exists", fetcher.refuse_reason(target))
 
-    def test_manifest_pins_every_artifact(self) -> None:
-        manifest = run.read_json(ROOT / "verified-run" / "manifest.json")
-        self.assertEqual(manifest["inputs"]["cases_sha256"], run.sha256_file(run.CASES_PATH))
-        self.assertEqual(manifest["inputs"]["sources_sha256"], run.sha256_file(run.SOURCES_PATH))
-        self.assertEqual(set(manifest["artifacts"]), set(run.ARTIFACT_NAMES))
-        for artifact in manifest["artifacts"].values():
-            self.assertEqual(
-                artifact["request_sha256"],
-                run.sha256_file(ROOT / artifact["request"]),
-            )
-            self.assertEqual(
-                artifact["raw_response_sha256"],
-                run.sha256_file(ROOT / artifact["raw_response"]),
-            )
-        evaluation = manifest["evaluation"]
-        self.assertEqual(evaluation["sha256"], run.sha256_file(ROOT / evaluation["file"]))
-
-    def test_metadata_has_no_temporary_filesystem_paths(self) -> None:
-        forbidden = ("/Users/", "/root/", "/tmp/", "reference-batch", "/v4/")
-        for directory in (ROOT / "data", ROOT / "verified-run"):
-            for path in directory.rglob("*.json"):
-                value = json.loads(path.read_text(encoding="utf-8"))
-                for text in strings(value):
-                    self.assertFalse(
-                        any(marker in text for marker in forbidden),
-                        f"{path}: {text}",
-                    )
+    def test_unverified_bytes_are_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary) / "data"
+            shutil.copytree(DATA, target)
+            (target / "analysis.json").write_text("{}")
+            with self.assertRaisesRegex(ValueError, "Digest differs"):
+                scorer.score(target)
 
 
 if __name__ == "__main__":

@@ -6,12 +6,13 @@ of CrewAI workflows using SIE tools.
 Run with: pytest -m integration integrations/sie_crewai/tests/
 
 Prerequisites:
-    mise run serve -d cpu -p 8080
+    mise run serve -- -d cpu -p 8080
 """
 
 from __future__ import annotations
 
 import os
+import re
 
 import pytest
 
@@ -23,6 +24,20 @@ pytestmark = pytest.mark.integration
 def sie_url() -> str:
     """Get SIE server URL from environment or default."""
     return os.environ.get("SIE_SERVER_URL", "http://localhost:8080")
+
+
+def _ranked(result: str) -> list[tuple[float, str]]:
+    """Parse ``SIERerankerTool`` output into ``(score, document)`` pairs, most relevant first."""
+    lines = result.splitlines()
+    assert lines[0] == "Ranked documents (most relevant first):"
+    ranked = []
+    for position, line in enumerate(lines[1:], 1):
+        match = re.fullmatch(rf"{position}\. \[Score: (-?\d+\.\d+)\] (.*)", line)
+        assert match, line
+        ranked.append((float(match[1]), match[2]))
+    scores = [score for score, _ in ranked]
+    assert scores == sorted(scores, reverse=True)
+    return ranked
 
 
 class TestResearchAgentWorkflow:
@@ -60,9 +75,9 @@ class TestResearchAgentWorkflow:
             top_k=3,
         )
 
-        assert "Ranked documents" in result
-        assert "Score:" in result
-        # Top results should be about ML/neural networks, not weather/stocks
+        ranked = [document for _, document in _ranked(result)]
+        assert len(ranked) == 3
+        assert not {research_sources[1], research_sources[4]} & set(ranked)
 
 
 class TestLeadQualificationWorkflow:
@@ -153,7 +168,7 @@ class TestContentCreationWorkflow:
             top_k=3,
         )
 
-        assert "Ranked documents" in ranked
+        assert {document for _, document in _ranked(ranked)} == {articles[0], articles[2], articles[3]}
 
         # Step 2: Extract key entities from top result
         extractor = SIEExtractorTool(
@@ -199,7 +214,7 @@ class TestMultiAgentCollaboration:
             top_k=2,
         )
 
-        assert "Ranked documents" in analyst_result
+        assert _ranked(analyst_result)[0][1] == market_reports[2]
 
         # Writer agent: extract specific facts for report
         writer_extractor = SIEExtractorTool(

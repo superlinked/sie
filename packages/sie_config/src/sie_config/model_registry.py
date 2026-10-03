@@ -6,8 +6,10 @@ import json
 import logging
 import re
 import threading
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, cast
 
 import orjson
 import yaml
@@ -120,6 +122,114 @@ def _resolved_profile_hash_config(
     return resolved
 
 
+REMOTE_ADAPTER_MODULE_PREFIX = "sie_server.adapters.remote."
+
+
+def validate_routing_config(config: dict[str, Any]) -> None:
+    """Reject routing a worker cannot serve, without requiring a full append body."""
+    routing = config.get("routing")
+    if routing is None:
+        return
+    if not isinstance(routing, dict):
+        raise ValueError("routing must set a recognized policy")
+    policy = routing.get("policy")
+    if not isinstance(policy, str) or policy not in {"remote_only", "fallback", "threshold"}:
+        raise ValueError("routing must set a recognized policy")
+    if policy == "threshold":
+        raise ValueError("routing policy 'threshold' is not available yet")
+
+    threshold_fields = ("wake_above", "sleep_below", "window_s", "cooldown_s")
+    if policy == "remote_only":
+        if any(routing.get(key) is not None for key in ("fallback_profile", "triggers", *threshold_fields)):
+            raise ValueError("routing policy 'remote_only' takes no other policy field")
+        if not config.get("remote_backed"):
+            raise ValueError("routing policy 'remote_only' requires 'remote_backed: true'")
+        if any(config.get(key) is not None for key in ("hf_id", "weights_path", "hf_revision")) or config.get(
+            "package_backed"
+        ):
+            raise ValueError("a 'remote_backed' model must not declare local weights")
+    else:
+        if config.get("remote_backed"):
+            raise ValueError("a 'remote_backed' model cannot use routing policy 'fallback'")
+        if any(routing.get(key) is not None for key in threshold_fields):
+            raise ValueError("routing policy 'fallback' takes no threshold field")
+        triggers = routing.get("triggers")
+        if triggers is not None:
+            allowed = {"provisioning", "model_loading", "saturated", "unhealthy"}
+            if not isinstance(triggers, list | tuple) or not triggers:
+                raise ValueError("routing.triggers must name at least one trigger; omit it for the default")
+            if any(not isinstance(trigger, str) or trigger not in allowed for trigger in triggers):
+                raise ValueError("routing.triggers contains an unsupported trigger")
+            if len(set(triggers)) != len(triggers):
+                raise ValueError("routing.triggers must not repeat a trigger")
+        tasks = config.get("tasks") or {}
+        if not isinstance(tasks, dict):
+            raise ValueError("routing tasks must be a mapping")
+        if any(tasks.get(task) is not None for task in ("encode", "score")):
+            raise ValueError(
+                "routing policy 'fallback' cannot serve encode or score until remote equivalence is proven"
+            )
+        if tasks.get("generate") is not None:
+            raise ValueError("routing policy 'fallback' cannot serve generate until remote adapters produce tokens")
+
+    profiles = config.get("profiles") or {}
+    if not isinstance(profiles, dict):
+        raise ValueError("routing profiles must be mappings")
+    adapters: dict[str, object] = {}
+    for name, profile in profiles.items():
+        if not isinstance(profile, dict):
+            raise ValueError("routing profiles must be mappings")
+        parent_name = profile.get("extends")
+        if parent_name is not None:
+            parent = profiles.get(parent_name)
+            if not isinstance(parent, dict):
+                raise ValueError("routing profiles must extend a defined parent")
+            if parent.get("extends") is not None:
+                raise ValueError("routing profiles must not use chained or cyclic inheritance")
+        resolved = _resolved_profile_hash_config(profiles, name)
+        if resolved is None:
+            raise ValueError("routing profile inheritance cannot be resolved")
+        adapters[name] = resolved["adapter_path"]
+
+    remote = {
+        name
+        for name, adapter in adapters.items()
+        if isinstance(adapter, str) and adapter.startswith(REMOTE_ADAPTER_MODULE_PREFIX)
+    }
+    if policy == "remote_only":
+        if not profiles or remote != set(profiles):
+            raise ValueError("every profile of a 'remote_backed' model must use a remote adapter")
+    else:
+        if "default" not in profiles or "default" in remote:
+            raise ValueError("routing policy 'fallback' needs a local 'default' profile")
+        fallback = routing.get("fallback_profile")
+        if not isinstance(fallback, str) or fallback == "default" or fallback not in remote:
+            raise ValueError("routing.fallback_profile must name a non-default remote profile")
+
+
+def undeclared_upstreams(profiles: dict, profile_names: Iterable[str], declared: frozenset[str]) -> dict[str, object]:
+    """Map each named remote profile whose upstream is not in ``declared`` to the upstream it names.
+
+    A profile is remote when its adapter, after ``extends``, is a remote adapter. Its
+    upstream is ``adapter_options.loadtime.upstream`` after ``extends``, resolved as
+    the worker resolves it.
+    """
+    undeclared: dict[str, object] = {}
+    for name in profile_names:
+        resolved = _resolved_profile_hash_config(profiles, name)
+        if resolved is None:
+            continue
+        adapter_path = resolved["adapter_path"]
+        if not (isinstance(adapter_path, str) and adapter_path.startswith(REMOTE_ADAPTER_MODULE_PREFIX)):
+            continue
+        options = resolved["adapter_options"]
+        loadtime = cast("dict[str, Any]", options).get("loadtime") if isinstance(options, dict) else None
+        upstream = loadtime.get("upstream") if isinstance(loadtime, dict) else None
+        if not isinstance(upstream, str) or upstream not in declared:
+            undeclared[name] = upstream
+    return undeclared
+
+
 _PROFILE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
@@ -145,6 +255,87 @@ def _validate_profile_name(profile_name: str) -> None:
 # schema, and the two packages deliberately do not import each other's schema
 # modules — the server's rule is the authority; this copy is the early refusal.
 _IMMUTABLE_REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
+
+
+# Mirror of sie_server's placement and listener rules (config/model.py). A
+# worker refuses a snapshot containing a profile that breaks them, so the config
+# service refuses the write that would put one there.
+_MAX_TENSOR_PARALLEL_SIZE = 8
+_PLACEMENT_LAUNCH_FLAGS = frozenset(
+    {
+        "--tp",
+        "--tp-size",
+        "--tensor-parallel-size",
+        "--dp",
+        "--dp-size",
+        "--data-parallel-size",
+        "--ep-size",
+        "--expert-parallel-size",
+        "--pp-size",
+        "--pipeline-parallel-size",
+        "--nnodes",
+        "--node-rank",
+        "--dist-init-addr",
+        "--base-gpu-id",
+        "--gpu-id-step",
+    }
+)
+_LISTENER_LAUNCH_FLAGS = frozenset({"--host", "--nccl-port", "--port"})
+_REFUSED_LAUNCH_FLAGS = _PLACEMENT_LAUNCH_FLAGS | _LISTENER_LAUNCH_FLAGS
+_PLACEMENT_ENV_VARS = frozenset({"CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES"})
+
+
+def _validate_profile_placement(profiles: dict) -> None:
+    """Mirror sie_server's tensor-parallel width and placement rules on raw dicts."""
+    for profile_name, profile in profiles.items():
+        if not isinstance(profile, dict):
+            continue
+        options = profile.get("adapter_options")
+        loadtime = options.get("loadtime") if isinstance(options, dict) else None
+        if not isinstance(loadtime, dict):
+            continue
+        if "tensor_parallel_size" in loadtime:
+            width = loadtime["tensor_parallel_size"]
+            if isinstance(width, bool) or not isinstance(width, int) or not 1 <= width <= _MAX_TENSOR_PARALLEL_SIZE:
+                msg = (
+                    f"Profile '{profile_name}': tensor_parallel_size must be an integer between 1 and "
+                    f"{_MAX_TENSOR_PARALLEL_SIZE}, got {width!r}"
+                )
+                raise ValueError(msg)
+        raw_args = loadtime.get("extra_launch_args") or []
+        if isinstance(raw_args, list):
+            for entry in raw_args:
+                flag = str(entry).split("=", 1)[0].strip()
+                if not flag.startswith("--") or len(flag) <= len("--"):
+                    continue
+                refused = next((f for f in sorted(_REFUSED_LAUNCH_FLAGS) if f.startswith(flag)), None)
+                if refused is None:
+                    continue
+                if refused in _LISTENER_LAUNCH_FLAGS:
+                    remedy = (
+                        "Declare loadtime.nccl_port instead."
+                        if refused == "--nccl-port"
+                        else "The worker passes the host and port of the engine's HTTP listener and talks to it."
+                    )
+                    msg = (
+                        f"Profile '{profile_name}': extra_launch_args carries {flag!r}, which sets the "
+                        f"listener flag {refused!r}. {remedy}"
+                    )
+                else:
+                    msg = (
+                        f"Profile '{profile_name}': extra_launch_args carries {flag!r}, which sets the "
+                        f"placement flag {refused!r}. Declare loadtime.tensor_parallel_size instead."
+                    )
+                raise ValueError(msg)
+        raw_env = loadtime.get("extra_env") or {}
+        if isinstance(raw_env, dict):
+            for key in raw_env:
+                if str(key).strip().upper() in _PLACEMENT_ENV_VARS:
+                    msg = (
+                        f"Profile '{profile_name}': extra_env sets {key!r}, which the worker overwrites "
+                        "with its device mask. Declare loadtime.tensor_parallel_size instead."
+                    )
+                    raise ValueError(msg)
 
 
 def _validate_profile_lora_pins(profiles: dict) -> None:
@@ -458,7 +649,7 @@ class ModelRegistry:
         self._model_profiles: dict[str, set[str]] = {}  # model -> profile names
         self._model_profile_configs: dict[str, dict[str, dict]] = {}  # model -> {profile_name: config_dict}
         # Full merged model config (including top-level metadata like
-        # `description`, `default_bundle`). Populated on reload() from the
+        # `hf_id`, `max_sequence_length`). Populated on reload() from the
         # on-disk YAML and on add_model_config() via append-only merge.
         # This is the authoritative source for `/v1/configs/export` in
         # no-config-store deployments, where we otherwise have no way to
@@ -953,6 +1144,16 @@ class ModelRegistry:
         with self._lock:
             return self._bundles.get(bundle)
 
+    def get_bundle_adapters(self, bundle_ids: list[str] | None = None) -> dict[str, list[str]]:
+        """Return the adapter-module list of each requested known bundle.
+
+        These are the lists ``compute_bundle_config_hash`` scopes by, so a worker
+        that hashes the configs it received with them reproduces this hash.
+        """
+        with self._lock:
+            names = list(self._bundles) if bundle_ids is None else bundle_ids
+            return {name: list(self._bundles[name].adapters) for name in names if name in self._bundles}
+
     def get_models_for_bundle(self, bundle: str) -> list[str]:
         """Get all models that can be served by a bundle.
 
@@ -1036,6 +1237,7 @@ class ModelRegistry:
             raise ValueError(msg)
 
         _validate_profile_lora_pins(profiles)
+        _validate_profile_placement(profiles)
 
         for profile_name, profile in profiles.items():
             _validate_profile_name(str(profile_name))
@@ -1095,6 +1297,17 @@ class ModelRegistry:
                 raise ProfileConflictError(sie_id, conflicting_profiles)
         else:
             created_profiles = list(profiles.keys())  # type: ignore
+
+        stored_config = self._model_full_configs.get(sie_id, {})
+        effective_config = {**config, **stored_config}
+        effective_profiles = dict(effective_config.get("profiles") or {})
+        effective_profiles.update({name: profiles[name] for name in created_profiles})
+        effective_config["profiles"] = effective_profiles
+        metadata_conflict = any(
+            key != "profiles" and key in stored_config and stored_config[key] != value for key, value in config.items()
+        )
+        if not metadata_conflict:
+            validate_routing_config(effective_config)
 
         # Compute the post-apply adapter set so bundle mappings reflect
         # the hypothetical new state. This is a pure computation on a
@@ -1204,6 +1417,8 @@ class ModelRegistry:
             new_full_config["profiles"] = merged_profiles_full
             if "sie_id" not in new_full_config:
                 new_full_config["sie_id"] = sie_id
+
+            validate_routing_config(new_full_config)
 
             new_adapter_modules_set = _adapter_modules_for_profiles(merged_profiles_full)
             route_adapter_modules = _base_route_adapter_modules(merged_profiles_full)
@@ -1335,6 +1550,7 @@ class ModelRegistry:
             raise ValueError(msg)
 
         _validate_profile_lora_pins(profiles)
+        _validate_profile_placement(profiles)
 
         for profile_name, profile in profiles.items():
             _validate_profile_name(str(profile_name))
@@ -1364,6 +1580,8 @@ class ModelRegistry:
         if unroutable:
             msg = f"Adapter(s) not in any known bundle: {', '.join(sorted(unroutable))}"
             raise ValueError(msg)
+
+        validate_routing_config(config)
 
     def validate_model_config_replacement(self, config: dict) -> None:
         """Validate a wholesale replacement without mutating registry state."""

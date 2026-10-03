@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from sie_sdk._msgpack import packb as pack_msgpack
+
 from sie_server.core.inference_output import ExtractOutput
 from sie_server.core.worker.handlers.base import OperationHandler, make_hashable
 
@@ -16,6 +18,22 @@ if TYPE_CHECKING:
     from sie_server.core.worker.types import RequestMetadata
     from sie_server.types.inputs import Item
     from sie_server.types.responses import Classification, DetectedObject, Relation
+
+
+def _ordered_key(value: dict[str, Any]) -> Any:
+    """Batching key that keeps object key order.
+
+    Requests in one group all run with the first request's options and
+    schema, and key order can be part of their meaning (named label groups,
+    schema properties). Requests that differ only in order must therefore
+    land in different groups. The msgpack encoding is the key the queue
+    executor already uses for the same purpose.
+    """
+    try:
+        return pack_msgpack(value, use_bin_type=True)
+    except (TypeError, ValueError):
+        # Wire requests always encode; keep the old key for anything else.
+        return make_hashable(value)
 
 
 class ExtractHandler(OperationHandler[ExtractOutput]):
@@ -40,8 +58,8 @@ class ExtractHandler(OperationHandler[ExtractOutput]):
         """
         # Label order is part of the model input for label-conditioned extractors.
         labels_key = tuple(metadata.labels) if metadata.labels else None
-        schema_key = make_hashable(metadata.output_schema) if metadata.output_schema is not None else None
-        options_key = make_hashable(metadata.options) if metadata.options else None
+        schema_key = _ordered_key(metadata.output_schema) if metadata.output_schema is not None else None
+        options_key = _ordered_key(metadata.options) if metadata.options else None
         return (
             labels_key,
             schema_key,
@@ -69,9 +87,12 @@ class ExtractHandler(OperationHandler[ExtractOutput]):
         Returns:
             ExtractOutput with entities.
         """
-        labels_tuple, _schema_key, instruction, options_tuple = config_key
+        labels_tuple, _schema_key, instruction, _options_key = config_key
         labels = list(labels_tuple) if labels_tuple else None
-        options = dict(options_tuple) if options_tuple else None
+        # Read original options from metadata like encode and score do: the
+        # config key turns nested lists and objects into tuples, which would
+        # hand adapters a lossy copy of structured options.
+        options = metadata_list[0].options or None
         output_schema = metadata_list[0].output_schema
 
         return adapter.extract(

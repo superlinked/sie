@@ -6,7 +6,7 @@ Run with: pytest -m integration integrations/sie_qdrant/tests/
 
 Prerequisites:
     # SIE server
-    mise run serve -d cpu -p 8080
+    mise run serve -- -d cpu -p 8080
 
     # Qdrant (Docker)
     docker run -d -p 6333:6333 -p 6334:6334 qdrant/qdrant:v1.13.2

@@ -1,0 +1,156 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from unittest.mock import Mock
+
+import pytest
+
+from tools.ci import cpu_stack_smoke, live_sdk, rust_tests
+
+ROOT = Path(__file__).resolve().parents[3]
+
+
+def test_rust_fails_without_nats(monkeypatch):
+    monkeypatch.setattr(rust_tests.shutil, "which", lambda _: None)
+    with pytest.raises(RuntimeError, match="nats-server is required"):
+        rust_tests.main()
+
+
+def test_rust_fails_when_broker_exits():
+    process = Mock()
+    process.poll.return_value = 1
+    with pytest.raises(RuntimeError, match="NATS exited"):
+        rust_tests.wait_for_jetstream("http://127.0.0.1:1/jsz", process)
+
+
+def test_rust_runs_real_nats_opt_in_and_cloud_feature_without_benchmarks(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SIE_RUN_TELEMETRY_BENCHMARK", "1")
+    monkeypatch.setattr(rust_tests.shutil, "which", lambda _: "/test/bin")
+    monkeypatch.setattr(rust_tests, "wait_for_jetstream", Mock())
+    process = Mock()
+    monkeypatch.setattr(rust_tests.subprocess, "Popen", Mock(return_value=process))
+    run = Mock()
+    monkeypatch.setattr(rust_tests.subprocess, "run", run)
+    rust_tests.main()
+    commands = [call.args[0] for call in run.call_args_list]
+    assert commands == [
+        ["cargo", "test", "--locked", "--workspace"],
+        ["cargo", "test", "--locked", "-p", "sie-server-sidecar", "--features", "cloud-storage"],
+        ["cargo", "test", "--locked", "--manifest-path", "packages/sie_server_rust/Cargo.toml"],
+    ]
+    for call in run.call_args_list:
+        assert call.kwargs["env"]["NATS_URL"].startswith("nats://127.0.0.1:")
+        assert call.kwargs["env"]["SIE_RUN_NATS_PUBLISHER_TEST"] == "1"
+        assert not any("BENCHMARK" in key for key in call.kwargs["env"])
+    process.terminate.assert_called_once()
+
+
+def test_live_sdk_fails_when_server_exits():
+    process = Mock()
+    process.poll.return_value = 1
+    with pytest.raises(RuntimeError, match="SIE server exited"):
+        live_sdk.wait_for_api("http://127.0.0.1:1", process)
+
+
+@pytest.mark.parametrize("endpoint", ["tcp://remote.example:2375", "ssh://remote.example"])
+def test_cpu_smoke_rejects_remote_docker(monkeypatch, endpoint):
+    monkeypatch.delenv("DOCKER_CONTEXT", raising=False)
+    monkeypatch.delenv("DOCKER_HOST", raising=False)
+    monkeypatch.setattr(
+        cpu_stack_smoke, "docker", lambda *args: json.dumps([{"Endpoints": {"docker": {"Host": endpoint}}}])
+    )
+    with pytest.raises(RuntimeError, match="local Unix"):
+        cpu_stack_smoke.require_local_docker()
+
+
+def test_docker_host_override_cannot_hide_remote_endpoint(monkeypatch):
+    monkeypatch.delenv("DOCKER_CONTEXT", raising=False)
+    monkeypatch.setenv("DOCKER_HOST", "tcp://remote.example:2375")
+    monkeypatch.setattr(
+        cpu_stack_smoke,
+        "docker",
+        lambda *args: json.dumps([{"Endpoints": {"docker": {"Host": "unix:///var/run/docker.sock"}}}]),
+    )
+    with pytest.raises(RuntimeError, match="local Unix"):
+        cpu_stack_smoke.require_local_docker()
+
+
+def test_cpu_builds_all_six_images_without_publish(monkeypatch):
+    run = Mock()
+    monkeypatch.setattr(cpu_stack_smoke.subprocess, "run", run)
+    cpu_stack_smoke.build_images("local/test", "a" * 40)
+    assert len(run.call_args_list) == 6
+    commands = [call.args[0] for call in run.call_args_list]
+    assert all(command[:4] == ["mise", "run", "docker", "--"] for command in commands)
+    assert all("--push" not in command for command in commands)
+    assert [command[command.index("--service") + 1] for command in commands[1:]] == list(cpu_stack_smoke.SERVICES)
+
+
+def test_cpu_stack_task_wraps_one_harness_and_docker_flag_delegates():
+    wrapper = (ROOT / "tools/mise_tasks/cpu-stack.bash").read_text()
+    test_task = (ROOT / "tools/mise_tasks/test.bash").read_text()
+    assert "mise run sync" in wrapper
+    assert "python -m tools.ci.cpu_stack_smoke" in wrapper
+    assert "exec mise run cpu-stack" in test_task
+    assert 'ARGS+=("-m" "docker"' not in test_task
+    assert "test_docker_integration.py" not in test_task
+
+
+def test_read_scoped_catalog_requires_reads_and_a_refused_write(monkeypatch):
+    statuses = {
+        ("/v1/configs/models", None): 401,
+        ("/v1/configs/epoch", "read"): 200,
+        ("/v1/configs/export", "read"): 200,
+        ("/v1/configs/models", "read"): 403,
+    }
+    monkeypatch.setattr(
+        cpu_stack_smoke, "config_status", lambda _url, path, token=None, body=None: statuses[(path, token)]
+    )
+    monkeypatch.setattr(cpu_stack_smoke, "config_models", lambda _url, _token: {"model"})
+    assert cpu_stack_smoke.require_read_scoped_catalog("http://config", "read") == {"model"}
+
+    statuses[("/v1/configs/models", "read")] = 201
+    with pytest.raises(RuntimeError, match="read-token write"):
+        cpu_stack_smoke.require_read_scoped_catalog("http://config", "read")
+
+
+@pytest.mark.parametrize(
+    ("logs", "latest"),
+    [
+        ("", None),
+        ("worker-config: startup export reconcile complete", "export reconcile complete"),
+        (
+            "worker-config: startup export reconcile failed; will retry\nworker-config: export reconcile complete",
+            "export reconcile complete",
+        ),
+        ("worker-config: startup export reconcile partial; will retry", "export reconcile partial"),
+        (
+            "worker-config: startup export reconcile complete\nworker-config: epoch poll failed",
+            "epoch poll failed",
+        ),
+    ],
+)
+def test_latest_reconcile_result_reads_the_last_outcome(logs, latest):
+    assert cpu_stack_smoke.latest_reconcile_result(logs) == latest
+
+
+def test_sidecar_export_reconcile_waits_for_a_complete_result(monkeypatch):
+    logs = iter(
+        [
+            "worker-config: startup export reconcile failed; will retry",
+            "worker-config: startup export reconcile failed; will retry\nworker-config: export reconcile complete",
+        ]
+    )
+    monkeypatch.setattr(cpu_stack_smoke, "docker", lambda *args, check=True: next(logs))
+    monkeypatch.setattr(cpu_stack_smoke.time, "sleep", lambda _seconds: None)
+    cpu_stack_smoke.require_sidecar_export_reconcile("sidecar", timeout=5)
+
+
+def test_sidecar_export_reconcile_rejects_a_result_that_never_completes(monkeypatch):
+    log = "worker-config: startup export reconcile partial; will retry"
+    monkeypatch.setattr(cpu_stack_smoke, "docker", lambda *args, check=True: log)
+    monkeypatch.setattr(cpu_stack_smoke.time, "sleep", lambda _seconds: None)
+    with pytest.raises(RuntimeError, match="latest: export reconcile partial"):
+        cpu_stack_smoke.require_sidecar_export_reconcile("sidecar", timeout=0.05)

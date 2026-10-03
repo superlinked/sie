@@ -509,6 +509,53 @@ class TestSiglipAdapter:
         assert output.dense is not None
         np.testing.assert_array_equal(output.dense, np.array([[1.0] * 3, [2.0] * 3]))
 
+    def test_mixed_batch_uses_prepared_images_and_text_tower(self) -> None:
+        """Text items ride the prepared list as empty payloads (#3136): the
+        image tower keeps its positionally aligned prepared tensors and the
+        text item still encodes via the text tower.
+        """
+        adapter = SiglipAdapter("google/siglip2-base-patch16-224", normalize=False)
+        model = MagicMock()
+        model.get_image_features.side_effect = lambda pixel_values: pixel_values[:, :, 0, 0]
+        model.get_text_features.side_effect = lambda **kw: torch.full((1, 3), 9.0)
+        processor = MagicMock()
+        processor.return_value = {"input_ids": torch.tensor([[1, 2]])}
+        adapter._model = model
+        adapter._processor = processor
+        adapter._device = "cpu"
+        adapter._dense_dim = 3
+
+        prepared = [
+            PreparedItem(
+                payload=ImagePayload(pixel_values=None, original_size=(0, 0)),
+                cost=1,
+                original_index=0,
+            ),
+            PreparedItem(
+                payload=ImagePayload(pixel_values=torch.full((3, 1, 1), 1.0), original_size=(1, 1)),
+                cost=1,
+                original_index=1,
+            ),
+            PreparedItem(
+                payload=ImagePayload(pixel_values=torch.full((3, 1, 1), 2.0), original_size=(1, 1)),
+                cost=1,
+                original_index=2,
+            ),
+        ]
+        items = [
+            Item(id="query", text="a red square"),
+            _img_item("first", [(1, 1, 1)]),
+            _img_item("second", [(2, 2, 2)]),
+        ]
+
+        output = adapter.encode(items, ["dense"], prepared_items=prepared)
+
+        assert output.dense is not None
+        np.testing.assert_array_equal(output.dense[0], np.array([9.0] * 3))
+        np.testing.assert_array_equal(output.dense[1], np.array([1.0] * 3))
+        np.testing.assert_array_equal(output.dense[2], np.array([2.0] * 3))
+        assert output.extra["text_tower_skipped"] == [False, True, True]
+
     @pytest.mark.parametrize("invalid", [0, -1])
     def test_rejects_non_positive_max_length(self, invalid: int) -> None:
         with pytest.raises(ValueError, match="max_seq_length must be positive"):
@@ -637,3 +684,30 @@ class TestSiglipAdapter:
             output.dense,
             np.array([[1.0] * 3, [2.0] * 3, [3.0] * 3, [4.0] * 3]),
         )
+
+
+def test_preprocess_one_rejects_undecodable_bytes_with_typed_error() -> None:
+    """Non-image bytes are a typed InvalidMediaError (-> 400), not a PIL OSError 500."""
+    from sie_server.types.inputs import InvalidMediaError
+
+    adapter = SiglipAdapter("google/siglip-base-patch16-224")
+
+    with pytest.raises(InvalidMediaError, match="image data is not a decodable image"):
+        adapter._preprocess_one({"data": b"valid base64, but not an image"})
+
+
+def test_undecodable_bytes_name_the_original_item_index() -> None:
+    """The decode jobs carry request-local indices through the stacked batch.
+
+    ``image_indices`` maps the image-item subset back to original positions
+    (here 0 and 2); the decode failure must name index 2, not subset slot 1.
+    """
+    from sie_server.types.inputs import InvalidMediaError
+
+    adapter = SiglipAdapter("google/siglip-base-patch16-224")
+    adapter._processor = _FakeVisionProcessor()
+    good = _img_item("good", [(1, 2, 3)])
+    bad = Item(images=[{"data": b"valid base64, but not an image"}])
+
+    with pytest.raises(InvalidMediaError, match=r"at `\$\.items\[2\]\.images\[0\]\.data`"):
+        adapter._preprocess_image_batch([0, 2], [good, bad], {})

@@ -24,6 +24,7 @@
 import {
   type ExtractOptions,
   type ExtractResult,
+  RequestError,
   SIEClient,
   type SIEClientOptions,
 } from "@superlinked/sie-sdk";
@@ -116,7 +117,19 @@ class _SIEExtractor {
       extractOptions.threshold = this.threshold;
     }
 
-    const result: ExtractResult = await this.client.extract(this.modelName, { text }, extractOptions);
+    const result: ExtractResult = await this.client.extract(
+      this.modelName,
+      { text },
+      extractOptions,
+    );
+    if (result.error) {
+      throw new RequestError(
+        `Extraction failed: ${result.error.message}`,
+        result.error.code,
+        undefined,
+        result.request?.id,
+      );
+    }
 
     return JSON.stringify({
       entities: result.entities.map((e) => ({

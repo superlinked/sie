@@ -1,6 +1,6 @@
 [package]
 name = "sie-gateway"
-version = "0.7.1"
+version = "0.9.0"
 edition = "2021"
 publish = false
 
@@ -25,7 +25,13 @@ rustls = { version = "0.23", default-features = false, features = ["ring"] }
 tokio-tungstenite = "0.29"
 futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `preserve_order` keeps JSON object keys in the order the caller sent them.
+# Request bodies are parsed into `serde_json::Value` and re-serialised for the
+# worker, and a `json_schema` grammar's property order decides the order a
+# constrained decoder generates fields in (reason-before-answer schemas depend
+# on it). Hashes and generated files that must be canonical sort explicitly via
+# `canonical_json`.
+serde_json = { version = "1", features = ["preserve_order"] }
 serde_yaml = "0.9"
 clap = { version = "4", features = ["derive", "env"] }
 tracing = "0.1"
@@ -35,6 +41,7 @@ dashmap = "6"
 tower = "0.5"
 tower-http = { version = "0.7", features = ["cors"] }
 bytes = "1"
+http = "1"
 
 # Phase 4: Model registry + hot reload
 arc-swap = "1"
@@ -73,6 +80,10 @@ percent-encoding = "2"
 # Cloud payload store backends (opt-in)
 object_store = { version = "0.14", optional = true, features = ["aws", "gcp", "azure"] }
 url = { version = "2", optional = true }
+reqsign-aliyun-oss = { version = "=3.1.5", optional = true }
+reqsign-core = { version = "=3.3.1", optional = true }
+reqsign-file-read-tokio = { version = "=3.0.6", optional = true }
+reqsign-http-send-reqwest = { version = "=4.0.6", optional = true }
 utoipa = "5.4.0"
 
 # W3C Trace Context propagation. The gateway extracts the
@@ -116,7 +127,14 @@ tracing-opentelemetry = "0.33"
 
 [features]
 default = []
-cloud-storage = ["dep:object_store", "dep:url"]
+cloud-storage = [
+    "dep:object_store",
+    "dep:reqsign-aliyun-oss",
+    "dep:reqsign-core",
+    "dep:reqsign-file-read-tokio",
+    "dep:reqsign-http-send-reqwest",
+    "dep:url",
+]
 # Test-target-only seam used by the managed composition's release telemetry
 # benchmark. It installs a synchronous in-memory reader, so the timed path
 # exercises the real facade without exporter network or background work.
@@ -130,7 +148,6 @@ raw-routing-logs = []
 
 [dev-dependencies]
 tempfile = "3"
-http = "1"
 tower = { version = "0.5", features = ["util"] }
 wiremock = "0.6"
 # `testing` unlocks the in-memory metric exporter used to assert the gateway's

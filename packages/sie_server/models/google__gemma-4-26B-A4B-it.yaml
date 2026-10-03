@@ -2,8 +2,8 @@ sie_id: google/gemma-4-26B-A4B-it
 hf_id: google/gemma-4-26B-A4B-it
 # ── Engine (see issue #1415) ──
 #
-# Served by the dedicated ``gemma`` bundle (packages/sie_server/bundles/
-# gemma.yaml): sglang 0.5.13 + torch 2.11 (cu130) on a CUDA 13 base. 0.5.13 is
+# Served by the shared ``sglang-cu130`` bundle (packages/sie_server/bundles/
+# sglang-cu130.yaml): sglang 0.5.13 + torch 2.11 (cu130) on a CUDA 13 base. 0.5.13 is
 # the validated engine; 0.5.11 (first release with Gemma 4) has a JIT-kernel
 # compile bug. Smoke-validated on a Modal H100-80GB 2026-06-19: the ``default``
 # profile shape (BF16, mem_fraction 0.90, --disable-cuda-graph) loads the MoE

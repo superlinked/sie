@@ -12,9 +12,10 @@ from sie_server.adapters.owlv2.adapter import Owlv2Adapter
 from sie_server.types.inputs import Item
 
 
-def test_load_uses_slow_processor_protocol() -> None:
+def test_load_uses_fast_processor_and_caps_image_side() -> None:
     adapter = Owlv2Adapter("google/owlv2-base-patch16-ensemble", revision="deadbeef")
     mock_processor = MagicMock()
+    mock_processor.image_processor.size = {"height": 960, "width": 960}
     mock_model = MagicMock()
     mock_model.parameters.return_value = iter([MagicMock(dtype="float32")])
 
@@ -26,7 +27,9 @@ def test_load_uses_slow_processor_protocol() -> None:
 
     kwargs = load_processor.call_args.kwargs
     assert kwargs["revision"] == "deadbeef"
-    assert kwargs["use_fast"] is False
+    assert kwargs["use_fast"] is True
+    # Photos far larger than the model input are shrunk before the processor.
+    assert adapter._preprocessor._max_side == 1920
     model_kwargs = load_model.call_args.kwargs
     assert model_kwargs["dtype"] is torch.float32
     assert "torch_dtype" not in model_kwargs
@@ -204,3 +207,26 @@ def test_fused_requests_map_prepared_results_positionally() -> None:
         detect_batch.call_args.kwargs["pixel_values"],
         torch.stack([prepared[0].payload.pixel_values, prepared[1].payload.pixel_values]),
     )
+
+
+def test_extract_image_rejects_undecodable_bytes_with_typed_error() -> None:
+    """Non-image bytes are a typed InvalidMediaError (-> 400), not a PIL OSError 500."""
+    from sie_server.types.inputs import InvalidMediaError
+
+    adapter = Owlv2Adapter("google/owlv2-base-patch16-ensemble")
+
+    with pytest.raises(InvalidMediaError, match="image data is not a decodable image"):
+        adapter._extract_image(Item(images=[{"data": b"valid base64, not an image", "format": "jpeg"}]))
+
+
+def test_extract_fallback_names_the_offending_item_index() -> None:
+    """The inline-decode fallback loop passes each item's request-local index."""
+    from sie_server.types.inputs import InvalidMediaError
+
+    adapter = Owlv2Adapter("google/owlv2-base-patch16-ensemble")
+    adapter._model = MagicMock()
+    adapter._processor = MagicMock()
+    items = [Item(), Item(), Item(images=[{"data": b"valid base64, not an image", "format": "png"}])]
+
+    with pytest.raises(InvalidMediaError, match=r"at `\$\.items\[2\]\.images\[0\]\.data`"):
+        adapter.extract(items, labels=["object"])

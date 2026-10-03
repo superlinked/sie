@@ -1,0 +1,4 @@
+# Helm dependency builds use tmpcharts-* staging directories. Exclude an
+# interrupted build's residue from release records and the Kubernetes Secret
+# size budget.
+tmpcharts-*

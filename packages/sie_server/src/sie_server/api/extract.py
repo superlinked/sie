@@ -1,7 +1,7 @@
 import logging
 from typing import TYPE_CHECKING, Annotated, Any, cast
 
-from fastapi import APIRouter, Header, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 
 from sie_server.adapters.errors import InputTooLongError
@@ -11,11 +11,13 @@ from sie_server.api.helpers import (
     RequestParser,
     ResponseBuilder,
     oom_retry_after_from_registry,
+    validated_total,
 )
 from sie_server.api.options import resolve_runtime_options
+from sie_server.api.routing import remote_routing, route_request
 from sie_server.api.serialization import MsgPackResponse
 from sie_server.api.validation import validate_machine_profile_header
-from sie_server.core.extract_cost import build_extract_prepared_items
+from sie_server.core.extract_cost import adapter_extract_item_costs, build_extract_prepared_items
 from sie_server.core.inference_output import ExtractOutput
 from sie_server.core.timing import RequestTiming
 from sie_server.core.worker import QueueFullError, WorkerResult
@@ -34,6 +36,7 @@ from sie_server.types.responses import (
     ExtractResponse,
     ExtractResult,
     Relation,
+    Usage,
 )
 
 if TYPE_CHECKING:
@@ -41,7 +44,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/v1", tags=["extract"])
+router = APIRouter(prefix="/v1", tags=["extract"], dependencies=[Depends(remote_routing)])
 
 
 async def _extract_via_worker(
@@ -141,7 +144,20 @@ async def _extract_via_worker(
     else:
         # Text/document model: cost is text characters or document byte size.
         # GLiNER/GLiClass tokenize internally; document adapters (Docling) parse internally.
-        prepared_items = build_extract_prepared_items(items)
+        # Adapters that run several model rows per item report their own cost.
+        try:
+            adapter = registry.get(model)
+        except (AttributeError, KeyError):
+            adapter = None
+        item_costs = adapter_extract_item_costs(
+            adapter,
+            items,
+            labels=labels,
+            output_schema=output_schema,
+            instruction=instruction,
+            options=options,
+        )
+        prepared_items = build_extract_prepared_items(items, item_costs=item_costs)
 
     timing.end_tokenization()
 
@@ -264,12 +280,13 @@ def _build_response(
         },
         400: {"description": "Invalid request"},
         404: {"description": "Model not found"},
+        413: {"description": "Request body exceeds the configured size limit"},
         502: {
             "description": (
                 "Terminal model-load failure (MODEL_LOAD_FAILED). "
                 "Carried in the ``detail`` envelope: ``{code, message, "
                 "error_class, permanent, attempts}``. No ``Retry-After`` "
-                "header — clients MUST NOT auto-retry. See sie-test#85."
+                "header — clients MUST NOT auto-retry."
             ),
         },
         503: {"description": "Model not loaded or service unavailable"},
@@ -328,11 +345,9 @@ async def extract(
         span.set_attribute("batch_size", len(request.items))
 
         registry = http_request.app.state.registry
-        device = registry.device
 
         # Validate model state using helper
-        model_checker = ModelStateChecker(registry, model, span)
-        model_checker.check_exists()
+        ModelStateChecker(registry, model, span).check_exists()
 
         # Check model config supports extraction (extract-specific validation)
         config = registry.get_config(model)
@@ -346,11 +361,6 @@ async def extract(
                     f"Use an extraction model like GLiNER, GLiClass, or Florence-2.",
                 },
             )
-
-        # Continue model state validation
-        model_checker.check_not_unloading()
-        model_checker.check_not_loading()
-        await model_checker.ensure_loaded(device)
 
         # Get params and resolve runtime options (outside inference try/except
         # so ValueError from invalid profiles returns 400, not 500)
@@ -367,8 +377,21 @@ async def extract(
         # Request-level instruction takes precedence; fall back to profile instruction
         if instruction is None:
             instruction = options.get("instruction")
+        if instruction is not None and not isinstance(instruction, str):
+            span.set_attribute("error", "invalid_instruction")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"code": ErrorCode.INVALID_INPUT.value, "message": "instruction must be a string"},
+            )
 
         items = request.items
+        route = await route_request(
+            http_request,
+            model,
+            span,
+            profile=params.options.get("profile") if params is not None and params.options else None,
+            queued_items=len(items),
+        )
 
         # Extract using worker with batching
         error_handler = InferenceErrorHandler(
@@ -382,7 +405,7 @@ async def extract(
         try:
             worker_result = await _extract_via_worker(
                 registry,
-                model,
+                route.key,
                 items,
                 labels=labels,
                 output_schema=output_schema,
@@ -403,6 +426,13 @@ async def extract(
 
         # Build response
         response = _build_response(model, items, extraction_results)
+
+        # Same worker counts the telemetry block below meters from, reported to
+        # the caller so `usage` and the bill can be reconciled. Absent counts
+        # leave `usage` off rather than substituting an estimate.
+        extract_tokens = validated_total(extract_output.input_token_counts, len(items))
+        if extract_tokens is not None:
+            response["usage"] = Usage(input_tokens=extract_tokens)
 
         if worker_telemetry_enabled():
             units: dict[str, int] = {}
@@ -435,4 +465,5 @@ async def extract(
 
         # Build response headers and return
         headers = ResponseBuilder.build_headers(timing)
+        headers.update(route.headers())
         return ResponseBuilder.build_response(response, accept, headers)

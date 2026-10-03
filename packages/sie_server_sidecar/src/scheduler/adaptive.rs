@@ -344,8 +344,8 @@ impl AdaptiveBatchController {
     /// low module-level defaults. If Rust falls back to those bare
     /// values, the PI loop flushes tiny batches too eagerly under
     /// saturation. Restoring the model-derived floors here is the
-    /// equivalent of the Python production constructor and is what every
-    /// deployed `ModelWorker` in `sie-internal` already runs.
+    /// equivalent of the Python production constructor used by deployed
+    /// `ModelWorker` instances.
     ///
     /// Env vars (`SIE_ADAPTIVE_BATCH_*`) are then applied on top of
     /// the production-derived defaults — operators can still pin
@@ -548,8 +548,7 @@ impl AdaptiveBatchController {
     /// [`Instant::now`] by advancing an internal virtual f64-seconds
     /// clock by `dt_s` before running the controller. Intended
     /// **exclusively** for shadow-trace replay — see
-    /// `examples/replay_controller_trace.rs` and
-    /// `scripts/perf/replay-scheduler-trace.py`.
+    /// `examples/replay_controller_trace.rs`.
     ///
     /// The virtual clock advances on **every** call (including calls
     /// that early-return under `update_interval`), matching the Python

@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use arc_swap::ArcSwap;
 use sha2::{Digest, Sha256};
@@ -9,7 +10,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::types::bundle::{engine_adapter_prefixes, BundleInfo, DEFAULT_ENGINE, KNOWN_ENGINES};
 use crate::types::model::{
-    CanonicalProfile, ModelConfig, ModelEntry, ModelInfoExtras, ProfileConfig,
+    CanonicalProfile, ModelConfig, ModelEntry, ModelInfoExtras, ProfileConfig, ServedBy,
 };
 
 #[derive(Debug)]
@@ -155,6 +156,12 @@ struct RegistrySnapshot {
     bundle_pool_config_hashes: HashMap<(String, String), String>,
 }
 
+#[derive(Default)]
+pub(crate) struct AuthoritativeHashes {
+    pub bundle: HashMap<String, String>,
+    pub pool: HashMap<String, HashMap<String, String>>,
+}
+
 /// Opaque handle to one immutable [`ModelRegistry`] snapshot generation.
 ///
 /// Derived-state publishers can compute every value from this handle, perform
@@ -162,6 +169,30 @@ struct RegistrySnapshot {
 /// [`ModelRegistry::with_current_generation`]. Holding the `Arc` also prevents
 /// pointer reuse, so the identity check is ABA-safe.
 #[allow(dead_code)] // consumed by the managed gateway wrapper, not the standalone binary
+/// Floor on how much of the served surface an authoritative snapshot may
+/// remove in one apply, as a fraction of what is currently served. `0`
+/// disables the guard, which is the escape hatch for a deliberate bulk
+/// removal.
+const MIN_RETAINED_RATIO_ENV: &str = "SIE_CONFIG_MIN_RETAINED_RATIO";
+const DEFAULT_MIN_RETAINED_RATIO: f64 = 0.5;
+
+/// Resolved once: the gateway's environment does not change after boot, and
+/// this is read on the config-apply path.
+fn min_retained_ratio() -> f64 {
+    static RATIO: OnceLock<f64> = OnceLock::new();
+    *RATIO.get_or_init(|| {
+        std::env::var(MIN_RETAINED_RATIO_ENV)
+            .ok()
+            .and_then(|raw| raw.trim().parse::<f64>().ok())
+            .filter(|ratio| (0.0..=1.0).contains(ratio))
+            .unwrap_or(DEFAULT_MIN_RETAINED_RATIO)
+    })
+}
+
+/// Expanded model entries plus their lower-cased name index, as one
+/// authoritative export produces them.
+type AuthoritativeModels = (HashMap<String, ModelEntry>, HashMap<String, String>);
+
 pub struct ModelRegistryGeneration {
     snapshot: Arc<RegistrySnapshot>,
 }
@@ -186,6 +217,12 @@ pub struct ModelRegistry {
     /// Ordinary readers remain lock-free and see one consistent snapshot per
     /// access.
     write_lock: Mutex<()>,
+    /// Whether the served surface was installed by the control plane. A
+    /// filesystem seed is a bootstrap convenience the first authoritative
+    /// export may replace wholesale; only a surface the authority itself
+    /// installed is protected by the retention guard, so a config service
+    /// that later restarts empty cannot take it down.
+    authoritative_surface: AtomicBool,
 }
 
 impl ModelRegistry {
@@ -199,6 +236,7 @@ impl ModelRegistry {
             models_dir: models_dir.as_ref().to_path_buf(),
             snapshot: ArcSwap::from_pointee(RegistrySnapshot::default()),
             write_lock: Mutex::new(()),
+            authoritative_surface: AtomicBool::new(false),
         };
         if auto_load {
             registry.reload();
@@ -368,6 +406,7 @@ impl ModelRegistry {
             bundle_pool_config_hashes,
         };
         self.snapshot.store(Arc::new(snap));
+        self.authoritative_surface.store(false, Ordering::Release);
     }
 
     fn load_bundle_file(path: &Path) -> Result<BundleInfo, Box<dyn std::error::Error>> {
@@ -1193,17 +1232,18 @@ impl ModelRegistry {
     /// Resolve the dispatch model id for a grammar-constrained request.
     ///
     /// When a model declares ``tasks.generate.grammar_profile`` (surfaced as
-    /// ``ModelInfoExtras::grammar_profile``), grammar requests must run on the
-    /// ``{base}:{grammar_profile}`` profile variant rather than a speculative
-    /// one — NEXTN/MTP speculative decoding bypasses SGLang's Outlines grammar
+    /// ``ModelInfoExtras::grammar_profile``), incompatible profiles route to
+    /// ``{base}:{grammar_profile}`` rather than a speculative profile —
+    /// NEXTN/MTP speculative decoding bypasses SGLang's Outlines grammar
     /// FSM. An explicit variant may declare a profile-scoped grammar fallback
     /// that preserves its context/hardware/thinking launch shape while
-    /// disabling speculation. A variant that directly inherits the model-wide
-    /// grammar profile and is already safe remains selected.
+    /// disabling speculation. A compatible default profile, or a safe variant
+    /// that directly inherits the model-wide grammar profile, remains selected.
     ///
     /// The routing target is resolved off the request's *base* model, so the
-    /// rewrite fires regardless of which id the caller named:
-    /// - base id (``Qwen/Qwen3.5-4B``)            → ``…:no-spec``
+    /// rewrite applies to incompatible defaults and explicit variants:
+    /// - incompatible base id (``org/grammar-model``) → ``…:no-spec``
+    /// - compatible base id                      → ``Keep``
     /// - sibling variant (``…:a100-40gb``, NEXTN) → ``…:no-spec``
     /// - scoped variant (``…:h200-256k``)         → ``…:h200-256k-no-spec``
     /// - target variant (``…:no-spec``)           → ``Keep`` (already safe)
@@ -1221,6 +1261,13 @@ impl ModelRegistry {
         let Some((base, profile)) = Self::base_grammar_profile(&snap, model) else {
             return GrammarRoute::Keep;
         };
+        if Self::canonical_model_name(&snap, model).as_deref() == Some(base.as_str())
+            && snap.models.get(&base).is_some_and(|entry| {
+                Self::profile_is_grammar_compatible(entry, "default", &profile)
+            })
+        {
+            return GrammarRoute::Keep;
+        }
         let target = format!("{base}:{profile}");
         // The request already names the grammar-safe variant (compare canonical
         // ids so a differently-cased ``…:NO-SPEC`` is still recognised).
@@ -1343,13 +1390,28 @@ impl ModelRegistry {
             Self::profile_loadtime_value(profile, "speculative")
                 .and_then(|value| value.get("enabled")),
             Some(serde_json::Value::Bool(false))
-        )
+        ) && Self::profile_has_no_raw_speculative_overrides(profile)
     }
 
     fn profile_does_not_enable_speculation(profile: &CanonicalProfile) -> bool {
-        match Self::profile_loadtime_value(profile, "speculative") {
+        let typed_safe = match Self::profile_loadtime_value(profile, "speculative") {
             None => true,
             Some(value) => matches!(value.get("enabled"), Some(serde_json::Value::Bool(false))),
+        };
+        typed_safe && Self::profile_has_no_raw_speculative_overrides(profile)
+    }
+
+    fn profile_has_no_raw_speculative_overrides(profile: &CanonicalProfile) -> bool {
+        match Self::profile_loadtime_value(profile, "extra_launch_args") {
+            None | Some(serde_json::Value::Null) => true,
+            Some(serde_json::Value::Array(args)) => args.iter().all(|arg| {
+                arg.as_str().is_some_and(|arg| {
+                    let flag = arg.split_once('=').map_or(arg, |(flag, _)| flag);
+                    !flag.starts_with("--speculative-")
+                        && !matches!(flag, "--enable-multi-layer-eagle" | "--config")
+                })
+            }),
+            _ => false,
         }
     }
 
@@ -1425,6 +1487,12 @@ impl ModelRegistry {
     /// (every subsequent `add_model_config` will then reject every adapter as
     /// unknown — that's the correct behavior when `sie-config` is unreachable
     /// and we have no seed).
+    /// `dead_code`-allowed because the `sie-gateway` BINARY compiles this
+    /// module tree independently of the library (see the note in `lib.rs`):
+    /// the bootstrap now installs bundles and models together through
+    /// [`Self::replace_authoritative_surface`], and this standalone path is
+    /// kept for the library's downstream consumers.
+    #[allow(dead_code)]
     pub fn install_bundles(&self, bundles: Vec<BundleInfo>) {
         let _write = self
             .write_lock
@@ -1466,6 +1534,35 @@ impl ModelRegistry {
             // would shuffle between replicas and between process restarts.
             matching.sort_by(|(pa, na), (pb, nb)| pa.cmp(pb).then_with(|| na.cmp(nb)));
             model_entry.bundles = matching.into_iter().map(|(_, name)| name).collect();
+        }
+
+        // A bundle set that strands the served models is the same outage as
+        // an empty model export: every affected adapter becomes unroutable.
+        // Judged on routability after the rebuild rather than on bundle
+        // counts, so an equal-sized set of incompatible bundles is caught.
+        // `install_bundles` has no error channel, so a refusal is a warn and
+        // the existing bundles stand.
+        let served = old_snap
+            .models
+            .values()
+            .filter(|entry| !entry.bundles.is_empty())
+            .count();
+        let retained = old_snap
+            .models
+            .iter()
+            .filter(|(id, entry)| {
+                !entry.bundles.is_empty()
+                    && snap
+                        .models
+                        .get(id.as_str())
+                        .is_some_and(|rebuilt| !rebuilt.bundles.is_empty())
+            })
+            .count();
+        if self.authoritative_surface.load(Ordering::Acquire) {
+            if let Some(refusal) = Self::shrink_refusal(served, retained, min_retained_ratio()) {
+                warn!(reason = %refusal, "refused authoritative bundle install");
+                return;
+            }
         }
 
         let bundle_config_hashes = Self::rebuild_bundle_config_hashes(&new_bundles, &snap.models);
@@ -1525,6 +1622,14 @@ impl ModelRegistry {
         Self::immutable_model_revision(snap.models.get(&canonical)?)
     }
 
+    /// The side that serves `model`'s route, or `None` when the registry does
+    /// not hold it.
+    pub fn served_by(&self, model: &str) -> Option<ServedBy> {
+        let snap = self.snapshot.load();
+        let canonical = Self::canonical_model_name(&snap, model)?;
+        snap.models.get(&canonical).map(ModelEntry::served_by)
+    }
+
     pub fn get_model_pool_name(&self, model: &str) -> Option<String> {
         let snap = self.snapshot.load();
         let canonical = Self::canonical_model_name(&snap, model)?;
@@ -1572,23 +1677,39 @@ impl ModelRegistry {
     /// Return the routing hash and immutable model revision from one registry
     /// snapshot. Keeping these values in one read is required for response
     /// provenance: a config delta must not pair hash A with revision B.
+    ///
+    /// The supplied pool is the physical/admission fallback for an unknown
+    /// (for example sealed) model. A catalog model always scopes its hash to
+    /// the pool declared by that model, independently of the physical queue
+    /// selected for dispatch. This keeps dedicated physical lanes from
+    /// accidentally turning config-hash enforcement into an empty wildcard.
+    /// The scope bit reports whether the hash is governed by a known catalog
+    /// model. Proxy paths use it to reject a missing known hash instead of
+    /// treating it as the legacy unknown/sealed wildcard.
     pub fn bundle_execution_evidence(
         &self,
         bundle_id: &str,
         pool_name: &str,
         model: &str,
-    ) -> (String, Option<String>) {
+    ) -> (String, Option<String>, bool) {
         let snap = self.snapshot.load();
+        let canonical = Self::canonical_model_name(&snap, model);
+        let uses_catalog_scope = canonical.is_some();
+        let pool_name = canonical
+            .as_ref()
+            .and_then(|canonical| snap.models.get(canonical))
+            .map(Self::entry_pool_name)
+            .unwrap_or(pool_name);
         let pool_name = Self::normalize_pool_name(pool_name);
         let bundle_config_hash = snap
             .bundle_pool_config_hashes
             .get(&(bundle_id.to_string(), pool_name))
             .cloned()
             .unwrap_or_default();
-        let revision = Self::canonical_model_name(&snap, model)
+        let revision = canonical
             .and_then(|canonical| snap.models.get(&canonical))
             .and_then(Self::immutable_model_revision);
-        (bundle_config_hash, revision)
+        (bundle_config_hash, revision, uses_catalog_scope)
     }
 
     /// Resolve one connector encode identity from a single registry snapshot.
@@ -1961,7 +2082,12 @@ impl ModelRegistry {
             return String::new();
         }
 
-        let serialized = serde_json::to_string(&items).unwrap_or_default();
+        // Sort every object's keys before hashing. The outer maps here are
+        // `BTreeMap`s, but `adapter_options` and nested values keep their
+        // source order under serde_json's `preserve_order`; the config
+        // service hashes with `sort_keys=True`, and the shared conformance
+        // vectors pin that canonical form.
+        let serialized = crate::canonical_json::to_sorted_string(&serde_json::Value::Array(items));
         let mut hasher = Sha256::new();
         hasher.update(serialized.as_bytes());
         let digest = hasher.finalize();
@@ -2006,18 +2132,186 @@ impl ModelRegistry {
     /// profile variants that disappeared from `sie-config` instead of overlaying
     /// exported rows onto the existing snapshot. Use this only for
     /// `/v1/configs/export`, never for live NATS deltas.
+    /// Refuse an authoritative snapshot that retains fewer than
+    /// `min_retained_ratio` of the identities currently served.
+    ///
+    /// The control plane is authoritative for WHICH models exist, not for
+    /// whether it is itself healthy. A well-formed empty or near-empty export
+    /// — a config service restarted against an empty database, a filtered
+    /// query, a half-finished migration — is indistinguishable on the wire
+    /// from a deliberate removal, and applying it takes the whole model
+    /// surface out on every replica at once, within one poll interval.
+    /// Refusing keeps the last good surface and leaves the caller's retry loop
+    /// to apply the real snapshot once the control plane serves one.
+    ///
+    /// `retained` counts identities served both before and after the
+    /// replacement, so an equal-sized snapshot naming entirely different
+    /// models (the wrong environment's export) is caught, not just a smaller
+    /// one. `served == 0` never refuses: the first bootstrap has nothing to
+    /// protect.
+    fn shrink_refusal(served: usize, retained: usize, min_retained_ratio: f64) -> Option<String> {
+        if served == 0 || min_retained_ratio <= 0.0 {
+            return None;
+        }
+        let floor = ((served as f64) * min_retained_ratio).ceil() as usize;
+        if retained >= floor {
+            return None;
+        }
+        Some(format!(
+            "authoritative snapshot would retain only {retained} of the {served} identities \
+             served now, below the floor of {floor} ({MIN_RETAINED_RATIO_ENV}={min_retained_ratio}); \
+             keeping the current surface. Set {MIN_RETAINED_RATIO_ENV}=0 to apply a deliberate \
+             bulk removal."
+        ))
+    }
+
+    /// `dead_code`-allowed for the same reason as [`Self::install_bundles`]:
+    /// the binary no longer calls it, the downstream composition crate does.
+    #[allow(dead_code)]
     pub fn replace_model_configs_authoritative(
         &self,
         configs: Vec<ModelConfig>,
+    ) -> Result<usize, String> {
+        self.apply_authoritative(None, configs, None, AuthoritativeHashes::default())
+    }
+
+    /// Install a matched bundle set and model export as ONE snapshot.
+    ///
+    /// The bootstrap fetches both from the control plane; validating the
+    /// models against the bundles they were exported with, and judging
+    /// retention on the combined result, means a bundle change that only
+    /// makes sense together with its model change can never be half-applied
+    /// or refused on the strength of the half already installed.
+    #[allow(dead_code)]
+    pub fn replace_authoritative_surface(
+        &self,
+        bundles: Vec<BundleInfo>,
+        configs: Vec<ModelConfig>,
+    ) -> Result<usize, String> {
+        self.apply_authoritative(Some(bundles), configs, None, AuthoritativeHashes::default())
+    }
+
+    pub(crate) fn replace_authoritative_surface_if_current(
+        &self,
+        generation: &ModelRegistryGeneration,
+        bundles: Vec<BundleInfo>,
+        configs: Vec<ModelConfig>,
+        hashes: AuthoritativeHashes,
+    ) -> Result<usize, String> {
+        self.apply_authoritative(Some(bundles), configs, Some(generation), hashes)
+    }
+
+    fn apply_authoritative(
+        &self,
+        bundles: Option<Vec<BundleInfo>>,
+        configs: Vec<ModelConfig>,
+        generation: Option<&ModelRegistryGeneration>,
+        hashes: AuthoritativeHashes,
     ) -> Result<usize, String> {
         let _write = self
             .write_lock
             .lock()
             .expect("ModelRegistry write_lock poisoned");
         let old_snap = self.snapshot.load();
+        if generation.is_some_and(|expected| !Arc::ptr_eq(&old_snap, &expected.snapshot)) {
+            return Err(
+                "registry changed while fetching authoritative export; retry required".into(),
+            );
+        }
+        let new_bundles: HashMap<String, BundleInfo> = match bundles {
+            Some(bundles) => bundles.into_iter().map(|b| (b.name.clone(), b)).collect(),
+            None => old_snap.bundles.clone(),
+        };
+        let applied = configs.len();
+        let (new_models, new_model_names_lower) =
+            Self::build_authoritative_models(configs, &new_bundles)?;
+
+        let mut bundle_config_hashes =
+            Self::rebuild_bundle_config_hashes(&new_bundles, &new_models);
+        let mut bundle_pool_config_hashes =
+            Self::rebuild_bundle_pool_config_hashes(&new_bundles, &new_models);
+        for (bundle, hash) in hashes.bundle {
+            if !new_bundles.contains_key(&bundle) {
+                continue;
+            }
+            if hash.is_empty() {
+                bundle_config_hashes.remove(&bundle);
+            } else {
+                bundle_config_hashes.insert(bundle, hash);
+            }
+        }
+        for (bundle, pools) in hashes.pool {
+            if !new_bundles.contains_key(&bundle) {
+                continue;
+            }
+            for (pool, hash) in pools {
+                let pool = pool.trim().to_lowercase();
+                let pool = if pool.is_empty() {
+                    DEFAULT_MODEL_POOL.to_string()
+                } else {
+                    pool
+                };
+                let key = (bundle.clone(), pool);
+                if hash.is_empty() {
+                    bundle_pool_config_hashes.remove(&key);
+                } else {
+                    bundle_pool_config_hashes.insert(key, hash);
+                }
+            }
+        }
+
+        if self.authoritative_surface.load(Ordering::Acquire) {
+            let served = old_snap
+                .models
+                .values()
+                .filter(|entry| !entry.bundles.is_empty())
+                .count();
+            let retained = old_snap
+                .models
+                .iter()
+                .filter(|(id, entry)| {
+                    !entry.bundles.is_empty()
+                        && new_models
+                            .get(id.as_str())
+                            .is_some_and(|candidate| !candidate.bundles.is_empty())
+                })
+                .count();
+            if let Some(refusal) = Self::shrink_refusal(served, retained, min_retained_ratio()) {
+                return Err(refusal);
+            }
+        }
+
+        info!(
+            old_models = old_snap.models.len(),
+            models = new_models.len(),
+            bundles = new_bundles.len(),
+            "replaced model configs from authoritative export"
+        );
+
+        self.snapshot.store(Arc::new(RegistrySnapshot {
+            bundles: new_bundles,
+            models: new_models,
+            model_names_lower: new_model_names_lower,
+            bundle_config_hashes,
+            bundle_pool_config_hashes,
+        }));
+        self.authoritative_surface.store(true, Ordering::Release);
+
+        Ok(applied)
+    }
+
+    /// Validate and expand an exported model set against the bundle set it
+    /// will be served with.
+    fn build_authoritative_models(
+        configs: Vec<ModelConfig>,
+        bundles: &HashMap<String, BundleInfo>,
+    ) -> Result<AuthoritativeModels, String> {
         let mut new_models: HashMap<String, ModelEntry> = HashMap::new();
         let mut new_model_names_lower: HashMap<String, String> = HashMap::new();
-        let applied = configs.len();
+        let all_bundle_adapters: HashSet<String> = bundles
+            .values()
+            .flat_map(|b| b.adapters.iter().cloned())
+            .collect();
 
         for config in configs {
             let sie_id = &config.name;
@@ -2047,11 +2341,6 @@ impl ModelRegistry {
                 }
             }
 
-            let all_bundle_adapters: HashSet<String> = old_snap
-                .bundles
-                .values()
-                .flat_map(|b| b.adapters.iter().cloned())
-                .collect();
             let unroutable: Vec<&String> = adapter_modules
                 .iter()
                 .filter(|a| !all_bundle_adapters.contains(a.as_str()))
@@ -2068,33 +2357,12 @@ impl ModelRegistry {
             }
 
             for mut entry in Self::expand_model_config_into_profile_variants(&config)? {
-                Self::assign_bundles(&mut entry, &old_snap.bundles);
+                Self::assign_bundles(&mut entry, bundles);
                 new_model_names_lower.insert(entry.name.to_lowercase(), entry.name.clone());
                 new_models.insert(entry.name.clone(), entry);
             }
         }
-
-        let bundle_config_hashes =
-            Self::rebuild_bundle_config_hashes(&old_snap.bundles, &new_models);
-        let bundle_pool_config_hashes =
-            Self::rebuild_bundle_pool_config_hashes(&old_snap.bundles, &new_models);
-
-        info!(
-            old_models = old_snap.models.len(),
-            models = new_models.len(),
-            bundles = old_snap.bundles.len(),
-            "replaced model configs from authoritative export"
-        );
-
-        self.snapshot.store(Arc::new(RegistrySnapshot {
-            bundles: old_snap.bundles.clone(),
-            models: new_models,
-            model_names_lower: new_model_names_lower,
-            bundle_config_hashes,
-            bundle_pool_config_hashes,
-        }));
-
-        Ok(applied)
+        Ok((new_models, new_model_names_lower))
     }
 
     fn add_model_config_inner(
@@ -2385,6 +2653,7 @@ impl ModelRegistry {
             // config — refresh here so a delta-update can rescind or
             // tighten the advertised set without a full reload.
             existing.grammar_capabilities = refreshed.grammar_capabilities;
+            existing.streaming_supported = refreshed.streaming_supported;
             existing.tools_supported = refreshed.tools_supported;
             // ``grammar_profile`` is likewise derived from
             // ``tasks.generate`` — refresh it too so a delta that changes
@@ -2784,6 +3053,258 @@ mod tests {
         assert_eq!(
             registry.grammar_route_variant("org/scoped-only:safe"),
             GrammarRoute::Keep
+        );
+    }
+
+    #[test]
+    fn test_grammar_route_variant_default_profile() {
+        let config: ModelConfig = serde_yaml::from_str(
+            r#"
+name: org/grammar-model
+tasks:
+  generate:
+    grammar_profile: safe
+profiles:
+  default:
+    adapter_path: sie_server.adapters.sglang.generation:SGLangGenerationAdapter
+    adapter_options:
+      loadtime: {grammar_backend: outlines, speculative: {enabled: false}}
+  safe:
+    adapter_path: sie_server.adapters.sglang.generation:SGLangGenerationAdapter
+    adapter_options:
+      loadtime: {grammar_backend: outlines, speculative: {enabled: false}}
+  speculative:
+    adapter_path: sie_server.adapters.sglang.generation:SGLangGenerationAdapter
+    adapter_options:
+      loadtime: {grammar_backend: outlines, speculative: {enabled: true}}
+"#,
+        )
+        .unwrap();
+        let default = config.profiles["default"].clone();
+        let mut cases = vec![("compatible", default.clone(), true)];
+        for (name, field, value, compatible) in [
+            (
+                "fp8",
+                "extra_launch_args",
+                serde_json::json!(["--quantization", "fp8"]),
+                true,
+            ),
+            (
+                "speculation-enabled",
+                "speculative",
+                serde_json::json!({"enabled": true}),
+                false,
+            ),
+            (
+                "speculation-absent",
+                "speculative",
+                serde_json::Value::Null,
+                false,
+            ),
+            (
+                "speculation-malformed",
+                "speculative",
+                serde_json::json!({"enabled": "false"}),
+                false,
+            ),
+            (
+                "backend-mismatch",
+                "grammar_backend",
+                serde_json::json!("xgrammar"),
+                false,
+            ),
+            (
+                "raw-grammar-override",
+                "extra_launch_args",
+                serde_json::json!(["--grammar-backend", "xgrammar"]),
+                false,
+            ),
+            (
+                "raw-speculative-override",
+                "extra_launch_args",
+                serde_json::json!(["--speculative-algo", "NEXTN"]),
+                false,
+            ),
+        ] {
+            let mut profile = default.clone();
+            let loadtime = profile.adapter_options.as_mut().unwrap()["loadtime"]
+                .as_object_mut()
+                .unwrap();
+            if value.is_null() {
+                loadtime.remove(field);
+            } else {
+                loadtime.insert(field.to_string(), value);
+            }
+            cases.push((name, profile, compatible));
+        }
+        let mut different_adapter = default;
+        different_adapter.adapter_path =
+            Some("sie_server.adapters.sentence_transformer:Adapter".to_string());
+        cases.push(("adapter-mismatch", different_adapter, false));
+
+        let (_dir, bundles_dir, models_dir) = create_test_dirs();
+        fs::write(
+            bundles_dir.join("default.yaml"),
+            "name: default\npriority: 10\nadapters:\n  - sie_server.adapters.sglang.generation\n  - sie_server.adapters.sentence_transformer\n",
+        )
+        .unwrap();
+        for (name, profile, compatible) in cases {
+            let registry = ModelRegistry::new(&bundles_dir, &models_dir, true);
+            let mut config = config.clone();
+            config.profiles.insert("default".to_string(), profile);
+            registry.add_model_config(config).unwrap();
+            let fallback = GrammarRoute::Rewrite("org/grammar-model:safe".to_string());
+            let expected = if compatible {
+                GrammarRoute::Keep
+            } else {
+                fallback.clone()
+            };
+            for model in ["org/grammar-model", "ORG/GRAMMAR-MODEL"] {
+                assert_eq!(
+                    registry.grammar_route_variant(model),
+                    expected,
+                    "{name}: {model}"
+                );
+            }
+            assert_eq!(
+                registry.grammar_route_variant("org/grammar-model:speculative"),
+                fallback,
+                "{name}: speculative sibling",
+            );
+            assert_eq!(
+                registry.grammar_route_variant("org/grammar-model:safe"),
+                GrammarRoute::Keep,
+                "{name}: safe target",
+            );
+        }
+    }
+
+    #[test]
+    fn test_grammar_profiles_reject_matching_raw_speculative_overrides() {
+        let config: ModelConfig = serde_yaml::from_str(
+            r#"
+name: org/grammar-model
+profiles:
+  default:
+    adapter_path: sie_server.adapters.sglang.generation:SGLangGenerationAdapter
+    adapter_options:
+      loadtime: {grammar_backend: outlines, speculative: {enabled: false}}
+  safe:
+    extends: default
+"#,
+        )
+        .unwrap();
+        for args in [
+            serde_json::json!(["--speculative-algorithm", "NEXTN"]),
+            serde_json::json!(["--speculative-algorithm=NEXTN"]),
+            serde_json::json!(["--speculative-algo", "NEXTN"]),
+            serde_json::json!(["--speculative-algo=NEXTN"]),
+            serde_json::json!(["--speculative-draft-model-path", "org/draft"]),
+            serde_json::json!(["--speculative-num-steps", "5"]),
+            serde_json::json!(["--enable-multi-layer-eagle"]),
+            serde_json::json!(["--config", "server.yaml"]),
+            serde_json::json!(["--config=server.yaml"]),
+        ] {
+            let mut config = config.clone();
+            config
+                .profiles
+                .get_mut("default")
+                .unwrap()
+                .adapter_options
+                .as_mut()
+                .unwrap()["loadtime"]["extra_launch_args"] = args.clone();
+            let entry = ModelRegistry::model_entry_from_config(&config).unwrap();
+            assert!(
+                !ModelRegistry::profile_is_grammar_compatible(&entry, "default", "safe"),
+                "matching launch overrides must not establish grammar compatibility: {args}"
+            );
+            config.tasks =
+                Some(serde_yaml::from_str("generate:\n  grammar_profile: safe\n").unwrap());
+            let error = ModelRegistry::model_entry_from_config(&config).unwrap_err();
+            assert!(
+                error.contains("must not enable speculation"),
+                "{args}: {error}"
+            );
+            config.tasks = None;
+            let mut fast = config.profiles["default"].clone();
+            fast.grammar_profile = Some("safe".to_string());
+            config.profiles.insert("fast".to_string(), fast);
+            let error = ModelRegistry::model_entry_from_config(&config).unwrap_err();
+            assert!(
+                error.contains("explicitly disabling speculation"),
+                "{args}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_grammar_target_rejects_raw_speculation_without_typed_settings() {
+        let config: ModelConfig = serde_yaml::from_str(
+            r#"
+name: org/grammar-model
+tasks:
+  generate:
+    grammar_profile: safe
+profiles:
+  default:
+    adapter_path: sie_server.adapters.sglang.generation:SGLangGenerationAdapter
+  safe:
+    extends: default
+    adapter_options:
+      loadtime:
+        extra_launch_args: [--speculative-algorithm, NEXTN]
+"#,
+        )
+        .unwrap();
+        let error = ModelRegistry::model_entry_from_config(&config).unwrap_err();
+        assert!(error.contains("must not enable speculation"));
+    }
+
+    #[test]
+    fn test_grammar_route_variant_matching_benign_launch_args() {
+        let config: ModelConfig = serde_yaml::from_str(
+            r#"
+name: org/grammar-model
+tasks:
+  generate:
+    grammar_profile: safe
+profiles:
+  default:
+    adapter_path: sie_server.adapters.sglang.generation:SGLangGenerationAdapter
+    adapter_options:
+      loadtime:
+        grammar_backend: outlines
+        speculative: {enabled: false}
+        extra_launch_args: [--log-level, warning, --quantization, fp8]
+  safe:
+    extends: default
+  fast:
+    extends: default
+    adapter_options:
+      loadtime:
+        speculative: {enabled: true}
+"#,
+        )
+        .unwrap();
+        let (_dir, bundles_dir, models_dir) = create_test_dirs();
+        fs::write(
+            bundles_dir.join("default.yaml"),
+            "name: default\npriority: 10\nadapters:\n  - sie_server.adapters.sglang.generation\n",
+        )
+        .unwrap();
+        let registry = ModelRegistry::new(&bundles_dir, &models_dir, true);
+        registry.add_model_config(config).unwrap();
+        assert_eq!(
+            registry.grammar_route_variant("org/grammar-model"),
+            GrammarRoute::Keep
+        );
+        assert_eq!(
+            registry.grammar_route_variant("org/grammar-model:safe"),
+            GrammarRoute::Keep
+        );
+        assert_eq!(
+            registry.grammar_route_variant("org/grammar-model:fast"),
+            GrammarRoute::Rewrite("org/grammar-model:safe".to_string())
         );
     }
 
@@ -4216,6 +4737,100 @@ encode:
     }
 
     #[test]
+    fn test_tasks_delta_refreshes_streaming_capability_for_base_and_variants() {
+        let (_dir, bundles_dir, models_dir) = create_test_dirs();
+        fs::write(
+            bundles_dir.join("default.yaml"),
+            "name: default\npriority: 10\nadapters:\n  - module\n",
+        )
+        .unwrap();
+        let registry = ModelRegistry::new(&bundles_dir, &models_dir, true);
+        let profile = || crate::types::model::ProfileConfig {
+            kv_budget_tokens: None,
+            max_output_tokens: None,
+            grammar_profile: None,
+            chat_template_kwargs: None,
+            adapter_path: Some("module:Adapter".to_string()),
+            max_batch_tokens: Some(4096),
+            compute_precision: None,
+            adapter_options: None,
+            extends: None,
+        };
+        registry
+            .add_model_config(ModelConfig {
+                name: "test/generator".to_string(),
+                hf_revision: None,
+                adapter_module: None,
+                default_bundle: None,
+                pool: None,
+                profiles: HashMap::from([
+                    ("default".to_string(), profile()),
+                    ("buffered".to_string(), profile()),
+                ]),
+                inputs: None,
+                max_sequence_length: None,
+                tasks: Some(
+                    serde_yaml::from_str("generate:\n  capabilities:\n    streaming: false\n")
+                        .unwrap(),
+                ),
+            })
+            .unwrap();
+
+        for name in ["test/generator", "test/generator:buffered"] {
+            assert_eq!(
+                registry
+                    .get_model_info(name)
+                    .unwrap()
+                    .info_extras
+                    .streaming_supported,
+                Some(false),
+                "seeded capability for {name}",
+            );
+        }
+
+        let apply_tasks_delta = |streaming: bool| {
+            registry
+                .add_model_config(ModelConfig {
+                    name: "test/generator".to_string(),
+                    hf_revision: None,
+                    adapter_module: None,
+                    default_bundle: None,
+                    pool: None,
+                    profiles: HashMap::from([
+                        ("default".to_string(), profile()),
+                        ("buffered".to_string(), profile()),
+                    ]),
+                    inputs: None,
+                    max_sequence_length: None,
+                    tasks: Some(
+                        serde_yaml::from_str(&format!(
+                            "generate:\n  capabilities:\n    streaming: {streaming}\n"
+                        ))
+                        .unwrap(),
+                    ),
+                })
+                .unwrap();
+        };
+
+        for expected in [true, false] {
+            apply_tasks_delta(expected);
+            for name in ["test/generator", "test/generator:buffered"] {
+                let entry = registry.get_model_info(name).unwrap();
+                assert_eq!(
+                    entry.info_extras.streaming_supported,
+                    Some(expected),
+                    "delta for {name}"
+                );
+                assert_eq!(
+                    entry.to_model_info_value(false)["capabilities"]["streaming"],
+                    serde_json::json!(expected),
+                    "discovery projection for {name}",
+                );
+            }
+        }
+    }
+
+    #[test]
     fn test_add_model_config_preserves_info_extras_for_profile_only_update() {
         let (_dir, bundles_dir, models_dir) = create_test_dirs();
 
@@ -4403,6 +5018,359 @@ adapters:
     /// conflict override behavior. Production export replay now uses
     /// `replace_model_configs_authoritative`, but this still guards the shared
     /// merge code for divergent stored profiles.
+    fn named_cfg_for_test(name: &str) -> ModelConfig {
+        ModelConfig {
+            name: name.to_string(),
+            ..cfg_for_test_model(
+                "sie_server.adapters.sentence_transformer:SentenceTransformerAdapter",
+                4096,
+            )
+        }
+    }
+
+    #[test]
+    fn authoritative_generation_can_only_be_installed_once() {
+        let temp = TempDir::new().unwrap();
+        let registry = ModelRegistry::new(temp.path(), temp.path(), false);
+        let generation = registry.capture_generation();
+        let bundles = vec![BundleInfo {
+            name: "default".into(),
+            priority: 10,
+            adapters: vec!["sie_server.adapters.sentence_transformer".into()],
+            engine: DEFAULT_ENGINE.into(),
+        }];
+        registry
+            .replace_authoritative_surface_if_current(
+                &generation,
+                bundles.clone(),
+                vec![named_cfg_for_test("test/model")],
+                AuthoritativeHashes {
+                    bundle: HashMap::from([("default".into(), "authority-hash".into())]),
+                    pool: HashMap::from([(
+                        "default".into(),
+                        HashMap::from([(" CUSTOM ".into(), "pool-hash".into())]),
+                    )]),
+                },
+            )
+            .unwrap();
+        let installed = registry.capture_generation();
+        assert_eq!(
+            installed.snapshot.bundle_config_hashes["default"],
+            "authority-hash"
+        );
+        assert_eq!(
+            installed.snapshot.bundle_pool_config_hashes[&("default".into(), "custom".into())],
+            "pool-hash"
+        );
+        assert!(registry
+            .replace_authoritative_surface_if_current(
+                &generation,
+                bundles,
+                vec![named_cfg_for_test("test/other")],
+                AuthoritativeHashes::default(),
+            )
+            .is_err());
+        assert!(registry
+            .with_current_generation(&installed, || ())
+            .is_some());
+        assert!(registry.get_model_info("test/model").is_some());
+        assert!(registry.get_model_info("test/other").is_none());
+    }
+
+    #[test]
+    fn test_shrink_refusal_bounds() {
+        let half = 0.5;
+        // Nothing to protect on the first bootstrap.
+        assert!(ModelRegistry::shrink_refusal(0, 0, half).is_none());
+        // Full retention and exactly-at-floor retention are allowed.
+        assert!(ModelRegistry::shrink_refusal(10, 10, half).is_none());
+        assert!(ModelRegistry::shrink_refusal(10, 5, half).is_none());
+        // One identity below the floor is not.
+        assert!(ModelRegistry::shrink_refusal(10, 4, half).is_some());
+        // The whole point: nothing retained (an empty export, or an export
+        // naming entirely different models).
+        assert!(ModelRegistry::shrink_refusal(40, 0, half).is_some());
+        // Ratio 0 is the documented escape hatch for a deliberate bulk removal.
+        assert!(ModelRegistry::shrink_refusal(40, 0, 0.0).is_none());
+        // A single served model can be dropped only through the hatch:
+        // ceil(1 * 0.5) == 1.
+        assert!(ModelRegistry::shrink_refusal(1, 0, half).is_some());
+    }
+
+    #[test]
+    fn test_empty_authoritative_export_keeps_the_current_model_surface() {
+        let (_dir, bundles_dir, models_dir) = create_test_dirs();
+        fs::write(
+            bundles_dir.join("default.yaml"),
+            r#"
+name: default
+priority: 10
+adapters:
+  - sie_server.adapters.sentence_transformer
+"#,
+        )
+        .unwrap();
+        let registry = ModelRegistry::new(&bundles_dir, &models_dir, true);
+
+        let seed: Vec<ModelConfig> = (0..4)
+            .map(|i| named_cfg_for_test(&format!("test/model-{i}")))
+            .collect();
+        registry
+            .replace_model_configs_authoritative(seed)
+            .expect("seed apply");
+        let served = registry.list_models();
+        assert!(served.len() >= 4, "seed must serve something: {served:?}");
+
+        // sie-config answers 200 with an empty model set — a restarted config
+        // service, not a deliberate removal.
+        let refusal = registry
+            .replace_model_configs_authoritative(Vec::new())
+            .expect_err("an empty authoritative export must be refused");
+        assert!(
+            refusal.contains("keeping the current surface"),
+            "refusal must say what it did: {refusal}"
+        );
+        assert_eq!(
+            registry.list_models().len(),
+            served.len(),
+            "the served surface must survive a refused snapshot"
+        );
+    }
+
+    #[test]
+    fn test_matched_bundle_and_model_change_applies_as_one_snapshot() {
+        let (_dir, bundles_dir, models_dir) = create_test_dirs();
+        fs::write(
+            bundles_dir.join("default.yaml"),
+            r#"
+name: default
+priority: 10
+adapters:
+  - sie_server.adapters.sentence_transformer
+"#,
+        )
+        .unwrap();
+        let registry = ModelRegistry::new(&bundles_dir, &models_dir, true);
+        registry
+            .replace_authoritative_surface(
+                registry
+                    .list_bundles()
+                    .into_iter()
+                    .map(|name| BundleInfo {
+                        name,
+                        priority: 10,
+                        adapters: vec!["sie_server.adapters.sentence_transformer".to_string()],
+                        engine: DEFAULT_ENGINE.to_string(),
+                    })
+                    .collect(),
+                vec![named_cfg_for_test("test/model-0")],
+            )
+            .expect("seed the authoritative surface");
+
+        // The authority moves the served model onto a new adapter and ships
+        // the bundle that routes it in the same export. Installing the bundle
+        // alone would strand the model; applied together it stays routable.
+        let moved = ModelConfig {
+            profiles: {
+                let mut m = HashMap::new();
+                m.insert(
+                    "default".to_string(),
+                    crate::types::model::ProfileConfig {
+                        adapter_path: Some(
+                            "sie_server.adapters.pytorch_embedding:PyTorchEmbeddingAdapter"
+                                .to_string(),
+                        ),
+                        max_batch_tokens: Some(4096),
+                        kv_budget_tokens: None,
+                        max_output_tokens: None,
+                        grammar_profile: None,
+                        chat_template_kwargs: None,
+                        compute_precision: None,
+                        adapter_options: None,
+                        extends: None,
+                    },
+                );
+                m
+            },
+            ..named_cfg_for_test("test/model-0")
+        };
+        let new_bundles = vec![BundleInfo {
+            name: "torch".to_string(),
+            priority: 10,
+            adapters: vec!["sie_server.adapters.pytorch_embedding".to_string()],
+            engine: DEFAULT_ENGINE.to_string(),
+        }];
+        registry
+            .replace_authoritative_surface(new_bundles, vec![moved])
+            .expect("a matched bundle+model change is one ordinary apply");
+        assert_eq!(registry.list_bundles(), vec!["torch".to_string()]);
+        assert!(registry.list_models().iter().any(|n| n == "test/model-0"));
+
+        // And the guard still holds on the joint result: a matched export that
+        // strands the served models is refused as a whole.
+        let stranding = vec![BundleInfo {
+            name: "other".to_string(),
+            priority: 10,
+            adapters: vec!["sie_server.adapters.nothing_served_uses".to_string()],
+            engine: DEFAULT_ENGINE.to_string(),
+        }];
+        registry
+            .replace_authoritative_surface(stranding, vec![named_cfg_for_test("other/model")])
+            .expect_err("a matched export retaining none of the served models must be refused");
+        assert_eq!(registry.list_bundles(), vec!["torch".to_string()]);
+    }
+
+    #[test]
+    fn test_first_authoritative_export_replaces_a_local_seed_freely() {
+        let (_dir, bundles_dir, models_dir) = create_test_dirs();
+        fs::write(
+            bundles_dir.join("default.yaml"),
+            r#"
+name: default
+priority: 10
+adapters:
+  - sie_server.adapters.sentence_transformer
+"#,
+        )
+        .unwrap();
+        let registry = ModelRegistry::new(&bundles_dir, &models_dir, true);
+        registry
+            .add_model_config(named_cfg_for_test("stale/model"))
+            .expect("seed a gateway-local model");
+
+        // The seed is a convenience, not the authority: the first export may
+        // drop every seeded model, exactly as bootstrap relies on.
+        registry
+            .replace_model_configs_authoritative(vec![named_cfg_for_test("kept/model")])
+            .expect("the first authoritative export replaces a local seed");
+        let names = registry.list_models();
+        assert!(names.iter().any(|n| n == "kept/model"));
+        assert!(!names.iter().any(|n| n == "stale/model"));
+
+        // From here the surface is the authority's own, and the guard applies.
+        registry
+            .replace_model_configs_authoritative(Vec::new())
+            .expect_err("a later empty export must be refused");
+        assert!(registry.list_models().iter().any(|n| n == "kept/model"));
+    }
+
+    #[test]
+    fn test_equal_sized_export_naming_different_models_is_refused() {
+        let (_dir, bundles_dir, models_dir) = create_test_dirs();
+        fs::write(
+            bundles_dir.join("default.yaml"),
+            r#"
+name: default
+priority: 10
+adapters:
+  - sie_server.adapters.sentence_transformer
+"#,
+        )
+        .unwrap();
+        let registry = ModelRegistry::new(&bundles_dir, &models_dir, true);
+        let seed: Vec<ModelConfig> = (0..4)
+            .map(|i| named_cfg_for_test(&format!("test/model-{i}")))
+            .collect();
+        registry
+            .replace_model_configs_authoritative(seed)
+            .expect("seed apply");
+        let served = registry.list_models();
+
+        // Same cardinality, disjoint identities: another environment's export.
+        let strangers: Vec<ModelConfig> = (0..4)
+            .map(|i| named_cfg_for_test(&format!("other/model-{i}")))
+            .collect();
+        registry
+            .replace_model_configs_authoritative(strangers)
+            .expect_err("an export retaining none of the served models must be refused");
+        assert_eq!(registry.list_models(), served);
+    }
+
+    #[test]
+    fn test_export_retaining_the_floor_is_applied() {
+        let (_dir, bundles_dir, models_dir) = create_test_dirs();
+        fs::write(
+            bundles_dir.join("default.yaml"),
+            r#"
+name: default
+priority: 10
+adapters:
+  - sie_server.adapters.sentence_transformer
+"#,
+        )
+        .unwrap();
+        let registry = ModelRegistry::new(&bundles_dir, &models_dir, true);
+        let seed: Vec<ModelConfig> = (0..4)
+            .map(|i| named_cfg_for_test(&format!("test/model-{i}")))
+            .collect();
+        registry
+            .replace_model_configs_authoritative(seed)
+            .expect("seed apply");
+
+        // Two of four retained meets ceil(4 * 0.5); two are genuinely replaced.
+        let rotated: Vec<ModelConfig> = [
+            "test/model-0",
+            "test/model-1",
+            "test/model-9",
+            "test/model-8",
+        ]
+        .into_iter()
+        .map(named_cfg_for_test)
+        .collect();
+        registry
+            .replace_model_configs_authoritative(rotated)
+            .expect("retaining the floor is an ordinary apply");
+        let names = registry.list_models();
+        assert!(names.iter().any(|n| n == "test/model-9"));
+        assert!(!names.iter().any(|n| n == "test/model-3"));
+    }
+
+    #[test]
+    fn test_bundle_install_that_strands_the_served_models_is_refused() {
+        let (_dir, bundles_dir, models_dir) = create_test_dirs();
+        fs::write(
+            bundles_dir.join("default.yaml"),
+            r#"
+name: default
+priority: 10
+adapters:
+  - sie_server.adapters.sentence_transformer
+"#,
+        )
+        .unwrap();
+        let registry = ModelRegistry::new(&bundles_dir, &models_dir, true);
+        registry
+            .replace_model_configs_authoritative(vec![named_cfg_for_test("test/model-0")])
+            .expect("seed apply");
+        let before = registry.list_bundles();
+        assert!(!before.is_empty(), "fixture must seed a bundle");
+
+        // Same bundle count, but nothing that routes the served adapter.
+        let incompatible = registry
+            .list_bundles()
+            .into_iter()
+            .map(|_| BundleInfo {
+                name: "unrelated".to_string(),
+                priority: 10,
+                adapters: vec!["sie_server.adapters.nothing_served_uses".to_string()],
+                engine: DEFAULT_ENGINE.to_string(),
+            })
+            .collect();
+        registry.install_bundles(incompatible);
+        assert_eq!(
+            registry.list_bundles(),
+            before,
+            "a bundle set that strands every served model must be refused"
+        );
+
+        registry.install_bundles(Vec::new());
+        assert_eq!(
+            registry.list_bundles(),
+            before,
+            "an empty bundle install must be refused"
+        );
+    }
+
     #[test]
     fn test_add_model_config_authoritative_overrides_conflicting_profile() {
         let (_dir, bundles_dir, models_dir) = create_test_dirs();
@@ -4821,6 +5789,127 @@ profiles:
     }
 
     #[test]
+    fn test_compute_bundle_config_hash_changes_with_serving_artifact_manifest() {
+        let (_dir, bundles_dir, models_dir) = create_test_dirs();
+        let vector: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../conformance/bundle_config_hash/serving_artifact_expanded_profile_vector.json"
+        ))
+        .expect("valid shared serving-artifact hash vector");
+        let bundle_id = vector["bundle_id"].as_str().expect("bundle id");
+        fs::write(
+            bundles_dir.join(format!("{bundle_id}.yaml")),
+            serde_json::to_vec(&vector["bundle"]).expect("serialize bundle vector"),
+        )
+        .unwrap();
+        let model_path = models_dir.join("derived.yaml");
+        let write_model = |manifest_sha256: &str| {
+            let mut model = vector["model"].clone();
+            *model
+                .pointer_mut(
+                    "/profiles/default/adapter_options/loadtime/serving_artifact/manifest_sha256",
+                )
+                .expect("manifest pointer") =
+                serde_json::Value::String(manifest_sha256.to_string());
+            fs::write(
+                &model_path,
+                serde_json::to_vec(&model).expect("serialize model vector"),
+            )
+            .unwrap();
+        };
+        write_model(
+            vector["manifest_sha256"]["initial"]
+                .as_str()
+                .expect("initial manifest digest"),
+        );
+        let registry = ModelRegistry::new(&bundles_dir, &models_dir, true);
+        let first = registry.compute_bundle_config_hash(bundle_id);
+
+        write_model(
+            vector["manifest_sha256"]["changed"]
+                .as_str()
+                .expect("changed manifest digest"),
+        );
+        registry.reload();
+        let second = registry.compute_bundle_config_hash(bundle_id);
+
+        assert_eq!(
+            first,
+            vector["expected_hash"]["initial"]
+                .as_str()
+                .expect("initial expected hash")
+        );
+        assert_eq!(
+            second,
+            vector["expected_hash"]["changed"]
+                .as_str()
+                .expect("changed expected hash")
+        );
+        assert_ne!(first, second);
+    }
+
+    /// serde_json keeps insertion order in this crate (`preserve_order`),
+    /// so the bundle config hash must sort keys itself. Writing the shared
+    /// conformance vector with every object's keys reversed must still
+    /// produce the cross-language expected hash.
+    #[test]
+    fn test_compute_bundle_config_hash_ignores_source_key_order() {
+        fn reverse_keys(value: &serde_json::Value) -> serde_json::Value {
+            match value {
+                serde_json::Value::Object(map) => {
+                    let mut out = serde_json::Map::new();
+                    for (key, child) in map.iter().rev() {
+                        out.insert(key.clone(), reverse_keys(child));
+                    }
+                    serde_json::Value::Object(out)
+                }
+                serde_json::Value::Array(items) => {
+                    serde_json::Value::Array(items.iter().map(reverse_keys).collect())
+                }
+                other => other.clone(),
+            }
+        }
+
+        let vector: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../conformance/bundle_config_hash/serving_artifact_expanded_profile_vector.json"
+        ))
+        .expect("valid shared serving-artifact hash vector");
+        let bundle_id = vector["bundle_id"].as_str().expect("bundle id");
+        let mut model = vector["model"].clone();
+        *model
+            .pointer_mut(
+                "/profiles/default/adapter_options/loadtime/serving_artifact/manifest_sha256",
+            )
+            .expect("manifest pointer") = vector["manifest_sha256"]["initial"].clone();
+        let expected = vector["expected_hash"]["initial"]
+            .as_str()
+            .expect("initial expected hash");
+
+        let mut hashes = Vec::new();
+        for model in [model.clone(), reverse_keys(&model)] {
+            let (_dir, bundles_dir, models_dir) = create_test_dirs();
+            fs::write(
+                bundles_dir.join(format!("{bundle_id}.yaml")),
+                serde_json::to_vec(&reverse_keys(&vector["bundle"])).expect("serialize bundle"),
+            )
+            .unwrap();
+            let encoded = serde_json::to_vec(&model).expect("serialize model vector");
+            fs::write(models_dir.join("derived.yaml"), &encoded).unwrap();
+            let registry = ModelRegistry::new(&bundles_dir, &models_dir, true);
+            hashes.push((
+                String::from_utf8(encoded).unwrap(),
+                registry.compute_bundle_config_hash(bundle_id),
+            ));
+        }
+
+        assert_ne!(
+            hashes[0].0, hashes[1].0,
+            "the reordered model file must differ byte-for-byte"
+        );
+        assert_eq!(hashes[0].1, expected);
+        assert_eq!(hashes[1].1, expected);
+    }
+
+    #[test]
     fn test_resolve_execution_evidence_is_one_snapshot_and_profile_exact() {
         let (_dir, bundles_dir, models_dir) = create_test_dirs();
         fs::write(
@@ -4988,7 +6077,7 @@ profiles:
         )
         .unwrap();
         let registry = ModelRegistry::new(&bundles_dir, &models_dir, true);
-        let (first, first_revision) =
+        let (first, first_revision, _) =
             registry.bundle_execution_evidence("default", "default", "org/revisioned");
         assert_eq!(
             first_revision.as_deref(),
@@ -5020,7 +6109,7 @@ profiles:
             registry.get_model_revision("org/revisioned").as_deref(),
             Some("89abcdef0123456789abcdef0123456789abcdef")
         );
-        let (second, second_revision) =
+        let (second, second_revision, _) =
             registry.bundle_execution_evidence("default", "default", "org/revisioned");
         assert_ne!(first, second);
         assert_eq!(
@@ -5112,6 +6201,25 @@ profiles:
             registry.compute_bundle_config_hash_for_pool("default", "customer-a"),
             tenant_hash
         );
+
+        let (tenant_execution_hash, _, uses_catalog_scope) = registry.bundle_execution_evidence(
+            "default",
+            "dedicated-physical-queue",
+            "tenant/model",
+        );
+        assert_eq!(tenant_execution_hash, tenant_hash);
+        assert!(!tenant_execution_hash.is_empty());
+        assert!(uses_catalog_scope);
+
+        let (default_execution_hash, _, uses_catalog_scope) =
+            registry.bundle_execution_evidence("default", "qwen4b-benchmark", "default/model");
+        assert_eq!(default_execution_hash, default_hash);
+        assert!(uses_catalog_scope);
+
+        let (unknown_execution_hash, _, uses_catalog_scope) =
+            registry.bundle_execution_evidence("default", "qwen4b-benchmark", "org/sealed-unknown");
+        assert!(unknown_execution_hash.is_empty());
+        assert!(!uses_catalog_scope);
     }
 
     #[test]
@@ -5506,5 +6614,87 @@ profiles:
                  engine_adapter_prefixes() in types/bundle.rs"
             );
         }
+    }
+
+    fn repository_bundles_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../sie_server/bundles")
+    }
+
+    fn remote_profile() -> crate::types::model::ProfileConfig {
+        crate::types::model::ProfileConfig {
+            adapter_options: Some(serde_json::json!({
+                "loadtime": {"upstream": "team-sie", "upstream_model": "org/name"}
+            })),
+            ..profile(
+                Some("sie_server.adapters.remote.sie:SieUpstreamAdapter"),
+                Some(8192),
+                None,
+            )
+        }
+    }
+
+    fn model_with_profiles(
+        name: &str,
+        profiles: Vec<(&str, crate::types::model::ProfileConfig)>,
+    ) -> ModelConfig {
+        ModelConfig {
+            name: name.to_string(),
+            hf_revision: None,
+            adapter_module: None,
+            default_bundle: None,
+            pool: None,
+            profiles: profiles
+                .into_iter()
+                .map(|(profile_name, profile)| (profile_name.to_string(), profile))
+                .collect(),
+            inputs: None,
+            max_sequence_length: None,
+            tasks: None,
+        }
+    }
+
+    #[test]
+    fn test_remote_profiles_resolve_to_the_remote_bundle_of_the_repository() {
+        let (_dir, _bundles_dir, models_dir) = create_test_dirs();
+        let registry = ModelRegistry::new(repository_bundles_dir(), &models_dir, true);
+        registry
+            .add_model_config(model_with_profiles(
+                "acme/remote",
+                vec![("default", remote_profile())],
+            ))
+            .unwrap();
+        registry
+            .add_model_config(model_with_profiles(
+                "acme/hybrid",
+                vec![
+                    (
+                        "default",
+                        profile(
+                            Some("sie_server.adapters.bert_flash:BertFlashAdapter"),
+                            Some(4096),
+                            None,
+                        ),
+                    ),
+                    ("remote", remote_profile()),
+                ],
+            ))
+            .unwrap();
+
+        assert_eq!(
+            registry.get_model_bundles("acme/remote"),
+            vec!["remote".to_string(), "default".to_string()]
+        );
+        assert_eq!(
+            registry.resolve_bundle("acme/remote", None).unwrap(),
+            "remote"
+        );
+        assert_eq!(
+            registry.resolve_bundle("acme/hybrid", None).unwrap(),
+            "default"
+        );
+        assert_eq!(
+            registry.resolve_bundle("acme/hybrid:remote", None).unwrap(),
+            "remote"
+        );
     }
 }

@@ -1,6 +1,6 @@
 """Tests for the terminal ``failed`` state machine in ModelRegistry.
 
-Covers the regression tracked in sie-test#85: a load failure (gated repo,
+Covers a terminal load-failure regression: a load failure (gated repo,
 missing dependency, etc.) used to silently return the model to
 ``available``, producing an infinite retry loop. The registry now records
 a :class:`LoadFailure` and short-circuits ``start_load_async`` while the
@@ -20,8 +20,10 @@ from sie_sdk.exceptions import GatedModelError
 from sie_server.adapters.sglang import _server as sglang_server
 from sie_server.config.model import EmbeddingDim, EncodeTask, ModelConfig, ProfileConfig, Tasks
 from sie_server.core.load_errors import (
+    MAX_TRANSIENT_ATTEMPTS,
     LoadErrorClass,
     classify_load_error,
+    cooldown_for,
 )
 from sie_server.core.registry import ModelRegistry
 
@@ -102,10 +104,11 @@ class TestClassifyLoadError:
         assert result.error_class is LoadErrorClass.NETWORK
         assert result.cooldown_s is not None
 
-    def test_unknown_runtime_error_is_unknown_permanent(self) -> None:
+    def test_unknown_runtime_error_is_unknown_with_a_bounded_cooldown(self) -> None:
         result = classify_load_error(RuntimeError("some unrelated failure"))
         assert result.error_class is LoadErrorClass.UNKNOWN
-        assert result.is_permanent
+        assert not result.is_permanent
+        assert result.cooldown_s is not None
 
 
 # ---------------------------------------------------------------------------
@@ -229,3 +232,26 @@ class TestRegistryFailedState:
         # Re-add a (possibly fixed) config.
         registry_with_model.add_config(_make_config(name="test-model"))
         assert not registry_with_model.is_failed("test-model")
+
+    async def test_repeated_transient_failures_back_off_then_become_permanent(
+        self, registry_with_model: ModelRegistry
+    ) -> None:
+        cooldowns = []
+        for _ in range(MAX_TRANSIENT_ATTEMPTS):
+            registry_with_model._record_load_failure("test-model", ConnectionError("dns failure"))
+            failure = registry_with_model.get_failure("test-model")
+            assert failure is not None
+            cooldowns.append(failure.cooldown_s)
+
+        assert cooldowns == [cooldown_for(LoadErrorClass.NETWORK, n) for n in range(1, MAX_TRANSIENT_ATTEMPTS + 1)]
+        assert cooldowns[0] < cooldowns[1] < cooldowns[2]
+        assert not registry_with_model.get_failure("test-model").is_permanent
+
+        registry_with_model._record_load_failure("test-model", ConnectionError("dns failure"))
+
+        failure = registry_with_model.get_failure("test-model")
+        assert failure is not None
+        assert failure.error_class is LoadErrorClass.NETWORK
+        assert failure.attempts == MAX_TRANSIENT_ATTEMPTS + 1
+        assert failure.is_permanent
+        assert await registry_with_model.start_load_async("test-model", "cpu") is False

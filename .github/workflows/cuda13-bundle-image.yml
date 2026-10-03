@@ -1,0 +1,37 @@
+name: CUDA 13 bundle image
+
+on:
+  workflow_call:
+    inputs:
+      bundle:
+        required: true
+        type: string
+      image-tag:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  compatibility:
+    name: CUDA 13 image compatibility / ${{ inputs.bundle }}
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+      - uses: useblacksmith/setup-docker-builder@9309da73a81f66976a6d750572e221508b1e2682 # v1
+      - uses: useblacksmith/build-push-action@9b0579bbec7a6cad2f171596c57e7ac1e7658850 # v1
+        with:
+          context: .
+          file: packages/sie_server/Dockerfile.cuda13
+          platforms: linux/amd64
+          build-args: |
+            BUNDLE=${{ inputs.bundle }}
+            SIE_SRC_REV=${{ github.sha }}
+          tags: ${{ inputs.image-tag }}
+          load: true
+          push: false
+      - run: python3 tools/ci/cuda13_image_smoke.py "${{ inputs.bundle }}" "${{ inputs.image-tag }}"

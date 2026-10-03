@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 from sie_sdk import SIEAsyncClient, SIEClient
+from sie_sdk.client._shared import modal_continuation_path
 from sie_sdk.client.async_ import _AioResponse
 
 BASE_URL = "https://gateway.example.test"
@@ -158,7 +159,13 @@ def test_async_rejects_edge_header_that_would_override_connector_idempotency() -
     ],
 )
 def test_sync_rejects_origin_credentials_without_secure_absolute_origin(base_url: str) -> None:
-    with patch("sie_sdk.client.sync.httpx.Client"), pytest.raises(ValueError, match="absolute https"):
+    # A scheme-less base_url is rejected even earlier by the generic
+    # construction-time scheme validation; either ValueError upholds the
+    # "no edge headers without a secure absolute origin" property.
+    with (
+        patch("sie_sdk.client.sync.httpx.Client"),
+        pytest.raises(ValueError, match=r"absolute https|http:// or https://"),
+    ):
         SIEClient(base_url, base_url_headers=EDGE_HEADERS)
 
 
@@ -328,5 +335,47 @@ async def test_async_adversarial_redirect_ref_is_not_followed_or_credentialed() 
     ],
 )
 def test_async_rejects_origin_credentials_without_secure_absolute_origin(base_url: str) -> None:
-    with pytest.raises(ValueError, match="absolute https"):
+    # A scheme-less base_url is rejected even earlier by the generic
+    # construction-time scheme validation; either ValueError upholds the
+    # "no edge headers without a secure absolute origin" property.
+    with pytest.raises(ValueError, match=r"absolute https|http:// or https://"):
         SIEAsyncClient(base_url, base_url_headers=EDGE_HEADERS)
+
+
+@pytest.mark.parametrize(
+    "location",
+    [
+        "https://attacker.example/result?__modal_attempt_token=opaque",
+        "https://gateway.example.test.attacker.example/result?__modal_attempt_token=opaque",
+        "http://gateway.example.test/result?__modal_attempt_token=opaque",
+        "https://user@gateway.example.test/result?__modal_attempt_token=opaque",
+        "/result",
+        "/result?__modal_attempt_token=",
+        "/result?__modal_attempt_token=one&__modal_attempt_token=two",
+        "/result?__modal_attempt_token=opaque#fragment",
+        "/result?__modal_attempt_token=opaque\r\nX-Evil:true",
+    ],
+)
+def test_modal_continuation_rejects_adversarial_locations(location: str) -> None:
+    response = MagicMock(status_code=303, headers={"Location": location}, content=b"")
+
+    assert modal_continuation_path("https://gateway.example.test", response) is None
+
+
+@pytest.mark.parametrize(
+    ("location", "expected"),
+    [
+        (
+            "/v1/generate/m?existing=1&__modal_attempt_token=opaque",
+            "/v1/generate/m?existing=1&__modal_attempt_token=opaque",
+        ),
+        (
+            "https://gateway.example.test/v1/generate/m?__modal_attempt_token=opaque",
+            "/v1/generate/m?__modal_attempt_token=opaque",
+        ),
+    ],
+)
+def test_modal_continuation_accepts_only_exact_origin_attempt_urls(location: str, expected: str) -> None:
+    response = MagicMock(status_code=303, headers={"location": location}, content=b"")
+
+    assert modal_continuation_path("https://gateway.example.test", response) == expected

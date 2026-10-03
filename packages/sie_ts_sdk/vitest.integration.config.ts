@@ -5,7 +5,7 @@
  * The server is started automatically via globalSetup.
  *
  * Usage:
- *   mise run ts test-integration
+ *   mise run ts -- test-integration
  *   # or directly:
  *   pnpm test:integration
  */

@@ -3,6 +3,8 @@ import tomllib
 from importlib.metadata import version as pkg_version
 from pathlib import Path
 
+import pytest
+from jsonschema import Draft202012Validator
 from sie_server.cli import app
 from typer.testing import CliRunner
 
@@ -92,6 +94,14 @@ def test_openapi_documents_generate_contract() -> None:
     assert chunk_schema["properties"]["usage"]["anyOf"][0] == {"$ref": "#/components/schemas/GenerateUsageModel"}
     assert chunk_schema["properties"]["error"]["anyOf"][0] == {"$ref": "#/components/schemas/GenerateChunkErrorModel"}
     assert chunk_schema["properties"]["logprobs"]["anyOf"][0]["type"] == "array"
+    chunk_error_schema = spec["components"]["schemas"]["GenerateChunkErrorModel"]
+    assert chunk_error_schema["properties"]["param"]["anyOf"][0] == {"type": "string"}
+    assert "param" not in chunk_error_schema["required"]
+    retry_after = chunk_error_schema["properties"]["retry_after_s"]
+    assert retry_after["anyOf"][0]["type"] == "integer"
+    assert retry_after["anyOf"][0]["minimum"] == 1
+    assert retry_after["anyOf"][0]["maximum"] == 60
+    assert "retry_after_s" not in chunk_error_schema["required"]
 
     responses = operation["responses"]
     assert "INPUT_TOO_LONG" in responses["413"]["description"]
@@ -116,6 +126,15 @@ def test_openapi_documents_generate_contract() -> None:
         "attempts",
     }
     assert model_load_failed_detail["properties"]["code"]["const"] == "MODEL_LOAD_FAILED"
+
+
+def test_openapi_documents_streaming_model_capability() -> None:
+    result = runner.invoke(app, ["openapi"])
+    assert result.exit_code == 0, result.output
+    spec = json.loads(result.output)
+    streaming = spec["components"]["schemas"]["ModelCapabilities"]["properties"]["streaming"]
+    assert streaming["type"] == "boolean"
+    assert streaming["default"] is True
 
 
 def test_openapi_documents_direct_completions_contract() -> None:
@@ -170,6 +189,45 @@ def test_openapi_audio_timestamp_contract() -> None:
     assert granularities["items"]["enum"] == ["word", "segment"]
 
 
+def test_openapi_documents_media_bytes_as_base64_strings() -> None:
+    """Every media `data` field advertises the one JSON encoding the API accepts.
+
+    On the JSON path msgspec base64-decodes `data` (matching the msgpack
+    path's native binary), so the schema has to say `contentEncoding: base64`.
+    Pydantic's default rendering of `bytes` is `format: binary`, which in
+    OpenAPI means raw octets -- a generated client that believed it would send
+    bytes that never decode.
+    """
+    result = runner.invoke(app, ["openapi"])
+    assert result.exit_code == 0, result.output
+    schemas = json.loads(result.output)["components"]["schemas"]
+    for name in ["ImageInputModel", "AudioInputModel", "VideoInputModel", "DocumentInputModel"]:
+        data = schemas[name]["properties"]["data"]
+        assert data["type"] == "string", f"{name}.data must be a string: {data}"
+        assert data["contentEncoding"] == "base64", f"{name}.data must declare base64 encoding: {data}"
+        assert "format" not in data, f"{name}.data must not claim `format` (binary means raw octets): {data}"
+
+
+def test_openapi_documents_positive_audio_sample_rate() -> None:
+    """`sample_rate` must advertise the positive bound the preprocessor enforces."""
+    result = runner.invoke(app, ["openapi"])
+    assert result.exit_code == 0, result.output
+    schemas = json.loads(result.output)["components"]["schemas"]
+    sample_rate = schemas["AudioInputModel"]["properties"]["sample_rate"]
+    integer_branch = next(branch for branch in sample_rate["anyOf"] if branch.get("type") == "integer")
+    assert integer_branch["exclusiveMinimum"] == 0, f"sample_rate must be positive: {sample_rate}"
+
+
+def test_openapi_item_accepts_all_media_inputs() -> None:
+    """The item schema exposes every media input the worker `Item` accepts."""
+    result = runner.invoke(app, ["openapi"])
+    assert result.exit_code == 0, result.output
+    schemas = json.loads(result.output)["components"]["schemas"]
+    properties = schemas["ItemModel"]["properties"]
+    for field in ["images", "audio", "video", "document"]:
+        assert field in properties, f"ItemModel must document `{field}`"
+
+
 def test_openapi_output_file(tmp_path: Path) -> None:
     """CLI writes spec to a file when --output is given."""
     out = tmp_path / "spec.json"
@@ -192,3 +250,36 @@ def test_openapi_version_from_package() -> None:
     assert pkg_version("sie-server") == project_version
     assert spec["info"]["version"] == project_version
     assert committed_spec["info"]["version"] == project_version
+
+
+@pytest.mark.parametrize("package", ["sie_server", "sie_gateway"])
+@pytest.mark.parametrize(
+    ("evidence", "valid"),
+    [
+        ({}, True),
+        ({"execution_identity_sha256": "a" * 64, "execution_binding_sha256": "b" * 64}, True),
+        ({"execution_identity_sha256": "a" * 64}, False),
+        ({"execution_binding_sha256": "b" * 64}, False),
+        ({"execution_identity_sha256": "A" * 64, "execution_binding_sha256": "b" * 64}, False),
+        ({"execution_identity_sha256": "a" * 63, "execution_binding_sha256": "b" * 64}, False),
+        ({"execution_identity_sha256": None, "execution_binding_sha256": None}, False),
+        ({"execution_identity_sha256": "a" * 64, "execution_binding_sha256": "b" * 64, "done": False}, False),
+        (
+            {
+                "execution_identity_sha256": "a" * 64,
+                "execution_binding_sha256": "b" * 64,
+                "error": {"code": "INTERNAL", "message": "Generation failed"},
+            },
+            False,
+        ),
+        ({"execution_identity_sha256": "a" * 64, "execution_binding_sha256": "b" * 64, "error": None}, True),
+        ({"done": False}, True),
+        ({"error": {"code": "INTERNAL", "message": "Generation failed"}}, True),
+    ],
+)
+def test_native_stream_schema_requires_complete_execution_evidence(package: str, evidence: dict, valid: bool) -> None:
+    spec_path = Path(__file__).resolve().parents[3] / "packages" / package / "openapi.json"
+    spec = json.loads(spec_path.read_text())
+    validator = Draft202012Validator({"$ref": "#/components/schemas/GenerateChunk", "components": spec["components"]})
+    terminal = {"request_id": "request-1", "seq": 1, "text_delta": "", "done": True, **evidence}
+    assert validator.is_valid(terminal) is valid

@@ -1,5 +1,5 @@
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import msgpack
 import msgpack_numpy as m
@@ -8,6 +8,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sie_server.api.encode import router as encode_router
+from sie_server.api.serialization import MsgPackResponse
 from sie_server.config.model import (
     AdapterOptions,
     EmbeddingDim,
@@ -23,6 +24,16 @@ m.patch()
 
 # Header for JSON responses (msgpack is default)
 JSON_HEADERS = {"Accept": "application/json"}
+
+
+def test_msgpack_response_rejects_object_arrays_without_pickling() -> None:
+    unsafe = np.array([object()], dtype=object)
+
+    with patch("msgpack_numpy.pickle.dumps") as pickle_dumps:
+        with pytest.raises(ValueError, match="allowed numeric dtype"):
+            MsgPackResponse({"values": unsafe})
+
+    pickle_dumps.assert_not_called()
 
 
 def _mock_encode_impl(items: list[Any], output_types: list[str], **kwargs: Any) -> Any:

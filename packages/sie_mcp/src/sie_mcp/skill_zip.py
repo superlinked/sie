@@ -1,4 +1,4 @@
-"""Package the claude.ai Agent Skill as an uploadable ZIP (Req 12 #1312).
+"""Package the claude.ai Agent Skill as an uploadable ZIP.
 
 claude.ai's two-piece install takes the remote MCP connector plus a **skill ZIP**.
 The platform requires the archive to contain a single top-level folder named after

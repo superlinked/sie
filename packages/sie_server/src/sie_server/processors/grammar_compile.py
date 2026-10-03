@@ -53,7 +53,12 @@ import json
 import logging
 from typing import Any
 
-from sie_server.types.grammar import GrammarSpec, GrammarValidationError
+from sie_server.types.grammar import (
+    OUTLINES_JSON_SCHEMA_TYPE_DIAGNOSTIC,
+    OUTLINES_JSON_SCHEMA_TYPE_MESSAGE,
+    GrammarSpec,
+    GrammarValidationError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -178,9 +183,7 @@ def compile_outlines(tokenizer: Any, grammar: GrammarSpec) -> Any:
 
     Blocking — callers must wrap in :func:`asyncio.to_thread` (see
     :class:`StreamingProcessor`). Raises
-    :class:`GrammarValidationError` with ``code="grammar_compile_failed"``
-    on any Outlines exception, wrapping the original error message for
-    the gateway-side chunk envelope.
+    :class:`GrammarValidationError` with a client-safe diagnostic.
 
     The returned value is a sentinel object that :class:`GrammarLRU`
     stores. Currently ``True`` for the SGLang path; a future
@@ -225,11 +228,16 @@ def compile_outlines(tokenizer: Any, grammar: GrammarSpec) -> Any:
     except GrammarValidationError:
         raise
     except Exception as exc:
-        # Wrap the Outlines-internal error message so the chunk envelope
-        # surfaces something actionable. Don't include the full schema
-        # in the message — schemas are sometimes private.
+        if (
+            grammar.kind == "json_schema"
+            and isinstance(exc, ValueError)
+            and exc.args == (OUTLINES_JSON_SCHEMA_TYPE_DIAGNOSTIC,)
+        ):
+            raise GrammarValidationError(
+                OUTLINES_JSON_SCHEMA_TYPE_MESSAGE, code="invalid_request", param="grammar"
+            ) from exc
         raise GrammarValidationError(
-            f"outlines compile failed: {exc}",
+            "outlines compile failed",
             code="grammar_compile_failed",
             param="grammar",
         ) from exc

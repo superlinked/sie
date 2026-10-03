@@ -1,0 +1,6 @@
+evidence/
+sets/
+runs/
+.venv/
+__pycache__/
+.ruff_cache/

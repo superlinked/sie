@@ -30,7 +30,7 @@ kubernetes-event-exporter:
 # prometheusAddress is auto-derived when kube-prometheus-stack.install=true
 autoscaling:
   enabled: true
-  # Match GCP (600s/300s) - must survive gaps between matrix eval task transitions
+  # Match GCP (600s/300s) - must survive gaps between long evaluation/workload transitions
   cooldownPeriod: 600
   scaleDownStabilization: 300
 
@@ -48,9 +48,10 @@ machineProfiles:
     machineType: g6.xlarge
     spot: false
 
-# Ingress via nginx-ingress (matches GCP)
+# Ingress via nginx-ingress. Off by default: install an ingress controller,
+# then enable it with hosts, TLS, and gateway auth (see the chart README).
 ingress:
-  enabled: true
+  enabled: false
   className: nginx
   # TLS defaults to BYO (user-supplied kubernetes.io/tls Secret).
   # Three other modes are supported:
@@ -158,8 +159,8 @@ workers:
           maxReplicas: 4
 
 # ServiceAccount — Helm manages creation; IRSA annotation must be injected at deploy time.
-# NAMING CONTRACT: name must match module.sie_irsa_role namespace_service_accounts
-#   in deploy/terraform/aws/irsa.tf (currently "sie:sie-server").
+# NAMING CONTRACT: name must match the namespace/service-account binding in
+#   your workload-identity configuration (the default is "sie:sie-server").
 # To inject the IRSA role ARN at deploy time:
 #   --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"=<ARN>
 # Note: The hf-token secret is NOT created by the Helm chart. It must be created

@@ -1,5 +1,6 @@
 sie_id: rasyosef/splade-mini
 hf_id: rasyosef/splade-mini
+hf_revision: 98cb9db1eb2af3399c0bee30a6edca3fe9c0c057
 inputs:
   text: true
   image: false

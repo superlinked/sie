@@ -6,7 +6,7 @@ Async variants for all client methods.
 
 Example:
     >>> async with SIEAsyncClient("http://localhost:8080") as client:
-    ...     result = await client.encode("bge-m3", {"text": "Hello world"})
+    ...     result = await client.encode("BAAI/bge-m3", {"text": "Hello world"})
     ...     print(result["dense"].shape)
     (1024,)
 
@@ -16,20 +16,21 @@ Example:
     ...     gpu="l4",
     ...     options={"normalize": True},
     ... ) as client:
-    ...     result = await client.encode("bge-m3", {"text": "Hello"})  # uses l4
+    ...     result = await client.encode("BAAI/bge-m3", {"text": "Hello"})  # uses l4
 
     >>> # With resource pool for isolated capacity
     >>> async with SIEAsyncClient(
     ...     "http://gateway:8080",
     ...     pool={"name": "eval-bench", "gpus": {"l4": 2}},
     ... ) as client:
-    ...     result = await client.encode("bge-m3", {"text": "Hello"}, gpu="eval-bench/l4")
+    ...     result = await client.encode("BAAI/bge-m3", {"text": "Hello"}, gpu="eval-bench/l4")
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import json
 import logging
 import time
@@ -40,15 +41,15 @@ from typing import IO, Any, Literal, Self, cast, overload
 from urllib.parse import quote, urlencode
 
 import aiohttp
-import msgpack
-import msgpack_numpy as m
 
+from sie_sdk._msgpack import packb as pack_msgpack
 from sie_sdk.audio import convert_item_audio
 from sie_sdk.documents import convert_item_document
 from sie_sdk.files import resolve_upload
 from sie_sdk.images import ImageLike, convert_images_for_json, convert_item_images
 from sie_sdk.jobs import (
     TERMINAL_JOB_STATES,
+    MalformedChunkError,
     build_job_body,
     decode_chunk_bytes,
     job_chunks,
@@ -85,6 +86,7 @@ from sie_sdk.types import (
     OutputType,
     PoolInfo,
     PoolSpec,
+    Recommendation,
     RequestMetadata,
     ResponseInputMessage,
     ResponseResult,
@@ -100,36 +102,45 @@ from ._shared import (
     HTTP_CLIENT_ERROR,
     HTTP_GATEWAY_TIMEOUT,
     HTTP_SERVICE_UNAVAILABLE,
+    JOB_NOT_TERMINAL_ERROR_CODE,
     JOB_RESULT_NOT_FOUND_ERROR_CODE,
     JOB_RESULT_REF_MAX_REFRESHES,
     JSON_CONTENT_TYPE,
     LORA_LOADING_DEFAULT_DELAY_S,
     LORA_LOADING_ERROR_CODE,
     LORA_LOADING_MAX_RETRIES,
+    MODAL_CONTINUATION_MAX_HOPS,
     MODEL_LOADING_DEFAULT_DELAY_S,
     MODEL_LOADING_ERROR_CODE,
     MSGPACK_CONTENT_TYPE,
     PROVISIONING_ERROR_CODE,
+    RECOMMEND_PATH,
+    REMOTE_HEADER,
+    REQUEST_ID_HEADER,
     RESOURCE_EXHAUSTED_ERROR_CODE,
     RESOURCE_EXHAUSTED_MAX_RETRIES,
     SDK_VERSION_HEADER,
     SERVER_VERSION_HEADER,
     _coerce_token_count,
+    admission_retry_delay,
     attach_request_metadata,
     base_url_accepts_origin_credentials,
     build_chat_body,
     build_estimate_envelope,
     build_responses_body,
+    cached_prompt_tokens_from_usage,
     check_version_skew,
     compute_oom_backoff,
     compute_retry_delay,
     convert_score_images_for_wire,
     copy_base_url_headers,
     get_error_code,
+    get_error_param,
     get_retry_after,
     get_sdk_version,
     handle_error,
     is_transient_connect_error,
+    modal_continuation_path,
     next_stream_retry_delay,
     parse_encode_results,
     parse_extract_results,
@@ -137,22 +148,30 @@ from ._shared import (
     parse_request_metadata,
     parse_score_result,
     parse_terminal_json_object,
+    parse_terminal_msgpack_object,
     provisioning_retry_delay,
     raise_if_estimate_unroutable,
     raise_if_input_too_long,
     raise_if_model_load_failed,
+    read_timeout_message,
     request_matches_base_url_origin,
+    resolve_api_key,
+    resolve_base_url,
+    resolve_timeouts,
     retry_after_or_default,
     settled_charge_from_usage,
     sse_chunk_error,
     sse_headers,
-    validate_encode_result_count,
+    valid_stream_request_id,
+    validate_base_url,
+    validate_batch_result_count,
     validate_generate_grammar,
     validate_generate_request_body,
     websocket_matches_base_url_origin,
 )
 from ._sse import aiter_sse_payloads
 from .errors import (
+    JobFailedError,
     LoraLoadingError,
     ModelLoadingError,
     PoolError,
@@ -192,26 +211,40 @@ def _fail_pool_creation(future: asyncio.Future[None], exc: BaseException) -> Non
         future.exception()
 
 
-# Mid-flight transport errors retried under `wait_for_capacity=True`:
-# the request was in flight and the peer severed the connection before a
-# complete response arrived (proxy idle timeout, rolling restart,
-# ECONNRESET). `ClientConnectorError` is retried separately at each call
-# site to preserve its distinct "Failed to connect" message.
-# Call-site `except` order: `_RETRYABLE_TRANSPORT_ERRORS` →
-# `ClientConnectorError` → `(ClientError, OSError)` (first-match
-# routing requires most-specific first).
+# Failures before the request reached the server; retried under
+# `wait_for_capacity=True` on every path. aiohttp raises
+# `ConnectionTimeoutError` (3.10+) for connect-phase timeouts; older releases
+# report them as the ambiguous `ServerTimeoutError`, which stays terminal.
+_CONNECT_PHASE_ERRORS: tuple[type[BaseException], ...] = (
+    aiohttp.ClientConnectorError,
+    *(error for error in (getattr(aiohttp, "ConnectionTimeoutError", None),) if isinstance(error, type)),
+)
+
+# Mid-flight transport errors retried under `wait_for_capacity=True` on the
+# idempotent encode/score/extract paths: the peer severed the connection
+# before a complete response arrived (proxy idle timeout, rolling restart,
+# ECONNRESET).
 _RETRYABLE_TRANSPORT_ERRORS: tuple[type[BaseException], ...] = (
-    TimeoutError,
     aiohttp.ServerDisconnectedError,
-    aiohttp.ServerTimeoutError,
     aiohttp.ClientPayloadError,
+)
+
+# Timeouts after the request may have reached the server: never retried.
+# Call-site `except` order: `_CONNECT_PHASE_ERRORS` →
+# `_RETRYABLE_TRANSPORT_ERRORS` → `_SENT_REQUEST_TIMEOUT_ERRORS` →
+# `(ClientError, OSError)` (first-match routing requires most-specific first).
+_SENT_REQUEST_TIMEOUT_ERRORS: tuple[type[BaseException], ...] = (
+    TimeoutError,
+    aiohttp.ServerTimeoutError,
 )
 
 _LEASE_RENEWAL_MAX_RETRIES = 5
 
-# NOTE: msgpack_numpy.patch() is called lazily in SIEAsyncClient.__init__
-# (see sync.py for details).
-_NUMPY_PATCHED = False
+# Per-task retry counts keyed by client id. Each update stores a new dict, so
+# a task spawned from this context never shares counts with its parent.
+_LAST_RETRY_COUNTS: contextvars.ContextVar[dict[int, int] | None] = contextvars.ContextVar(
+    "sie_sdk_async_last_retry_counts", default=None
+)
 
 
 def _parse_generate_result_async(
@@ -247,6 +280,12 @@ def _parse_generate_result_async(
             "completion_tokens": _coerce_token_count(usage.get("completion_tokens")),
             "total_tokens": _coerce_token_count(usage.get("total_tokens")),
         }
+        images = usage.get("images")
+        if isinstance(images, int) and not isinstance(images, bool) and 0 < images <= 2**32 - 1:
+            parsed_usage["images"] = images
+        cached = cached_prompt_tokens_from_usage(usage)
+        if cached is not None:
+            parsed_usage["prompt_tokens_details"] = {"cached_tokens": cached}
         settled = settled_charge_from_usage(usage)
         if settled is not None:
             parsed_usage["credits_charged"], parsed_usage["rate_book_version"] = settled
@@ -292,7 +331,9 @@ async def _handle_oom_retry(
             msg,
             model=model,
             retries=oom_retries,
+            param=get_error_param(response),
             request=parse_request_metadata(response.headers),
+            retry_after=get_retry_after(response),
         )
     retry_after = get_retry_after(response)
     raw_delay = compute_oom_backoff(retry_after, oom_retries)
@@ -312,7 +353,9 @@ async def _handle_oom_retry(
             msg,
             model=model,
             retries=oom_retries,
+            param=get_error_param(response),
             request=parse_request_metadata(response.headers),
+            retry_after=get_retry_after(response),
         )
     delay = raw_delay
     # First retry surfaces at WARNING so a user with default log level
@@ -382,8 +425,16 @@ class SIEAsyncClient:
 
     Args:
         base_url: Base URL of the SIE server (e.g., "http://localhost:8080").
-        timeout_s: Request timeout in seconds (default: 30.0).
+            Defaults to the ``SIE_BASE_URL`` environment variable when omitted.
+        timeout_s: One per-attempt limit in seconds for both connecting and
+            waiting for response data. Sets ``connect_timeout_s`` and
+            ``read_timeout_s`` together; either of those overrides it.
         api_key: Optional API key for authentication (sent as Bearer token).
+            When omitted, the ``SIE_API_KEY`` environment variable is used only if
+            ``base_url`` has the same origin as ``SIE_BASE_URL`` (including when
+            ``base_url`` itself comes from ``SIE_BASE_URL``); with a
+            ``control_plane_url`` on another origin the key must be passed
+            explicitly. Pass ``""`` to send no credential.
         gpu: GPU type for requests (e.g., "l4", "a100-80gb"). Can be overridden per-call.
         options: Options dict for requests. Merged with per-call options (per-call wins).
         pool: Resource pool spec for isolated capacity. Created lazily on first request.
@@ -392,10 +443,23 @@ class SIEAsyncClient:
             origin. Values are copied at construction and never forwarded to a
             control-plane URL, external payload-store reference, or redirect
             target. Same-origin capability refs receive only these edge headers.
+        connect_timeout_s: Seconds allowed to establish a connection (default:
+            10). A connection that cannot be established is retried under
+            ``wait_for_capacity``.
+        read_timeout_s: Seconds to wait for response data once a request is
+            sent (default: 150, longer than the gateway's default 120 s
+            request deadline). A read timeout is never retried, because the
+            server may still be processing the request.
+        remote: ``"forbid"`` sends ``X-SIE-Remote: forbid`` with every request, so
+            no request is served through a remote upstream. A model served
+            locally answers from local capacity, including ``503 MODEL_LOADING``
+            while it loads, and a model served only remotely answers ``400``.
+            ``None`` (default) leaves the choice to the model's routing policy.
+            The setting applies to every call made with this client.
 
     Example:
         >>> async with SIEAsyncClient("http://localhost:8080") as client:
-        ...     result = await client.encode("bge-m3", {"text": "Hello world"})
+        ...     result = await client.encode("BAAI/bge-m3", {"text": "Hello world"})
         ...     print(result["dense"].shape)
         (1024,)
 
@@ -405,23 +469,23 @@ class SIEAsyncClient:
         ...     gpu="l4",
         ...     options={"normalize": True},
         ... ) as client:
-        ...     result = await client.encode("bge-m3", {"text": "Hello"})  # uses l4
+        ...     result = await client.encode("BAAI/bge-m3", {"text": "Hello"})  # uses l4
 
         >>> # With resource pool for isolated capacity
         >>> async with SIEAsyncClient(
         ...     "http://gateway:8080",
         ...     pool={"name": "eval-bench", "gpus": {"l4": 2}},
         ... ) as client:
-        ...     result = await client.encode("bge-m3", {"text": "Hello"}, gpu="eval-bench/l4")
+        ...     result = await client.encode("BAAI/bge-m3", {"text": "Hello"}, gpu="eval-bench/l4")
     """
 
     _version_warning_logged = False
 
     def __init__(
         self,
-        base_url: str,
+        base_url: str | None = None,
         *,
-        timeout_s: float = 30.0,
+        timeout_s: float | None = None,
         api_key: str | None = None,
         gpu: str | None = None,
         options: dict[str, Any] | None = None,
@@ -431,22 +495,20 @@ class SIEAsyncClient:
         control_plane_url: str | None = None,
         org: str | None = None,
         base_url_headers: Mapping[str, str] | None = None,
+        connect_timeout_s: float | None = None,
+        read_timeout_s: float | None = None,
+        remote: Literal["forbid"] | None = None,
     ) -> None:
-        # Ensure msgpack-numpy hooks are installed (once per process).
-        # Done lazily here instead of at module level to avoid monkey-patching
-        # msgpack in processes that import sie_sdk but never use the client.
-        global _NUMPY_PATCHED
-        if not _NUMPY_PATCHED:
-            m.patch()
-            _NUMPY_PATCHED = True
-
+        base_url = resolve_base_url(base_url)
+        api_key = resolve_api_key(api_key, base_url, control_plane_url)
         # Normalize base_url (remove trailing slash)
+        validate_base_url(base_url)
         self._base_url = base_url.rstrip("/")
         self._base_url_headers = copy_base_url_headers(base_url_headers)
         if self._base_url_headers and not base_url_accepts_origin_credentials(self._base_url):
             msg = "base_url_headers require an absolute https base_url without embedded credentials"
             raise ValueError(msg)
-        self._timeout = timeout_s
+        self._connect_timeout, self._timeout = resolve_timeouts(timeout_s, connect_timeout_s, read_timeout_s)
         self._default_gpu = gpu
         self._default_options = options
         self._api_key = api_key
@@ -478,6 +540,11 @@ class SIEAsyncClient:
         }
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
+        if remote is not None:
+            if remote != "forbid":
+                msg = "remote must be 'forbid' or None"
+                raise ValueError(msg)
+            headers[REMOTE_HEADER] = remote
 
         self._headers = headers.copy()
 
@@ -508,7 +575,7 @@ class SIEAsyncClient:
             self._session = aiohttp.ClientSession(
                 base_url=self._base_url,
                 connector=connector,
-                timeout=aiohttp.ClientTimeout(total=self._timeout),
+                timeout=aiohttp.ClientTimeout(total=self._timeout, sock_connect=self._connect_timeout),
                 headers=self._headers,
             )
         return self._session
@@ -527,6 +594,41 @@ class SIEAsyncClient:
     def base_url(self) -> str:
         """Return the base URL of the SIE server."""
         return self._base_url
+
+    @property
+    def last_retry_count(self) -> int:
+        """Return SDK retries performed by the latest call awaited in this task.
+
+        Tracked per asyncio context, the async counterpart of the sync
+        client's per-thread value: a call run as a separate task (for example
+        through ``asyncio.gather``) records its count in that task only.
+        """
+        counts = _LAST_RETRY_COUNTS.get()
+        return counts.get(id(self), 0) if counts else 0
+
+    def _set_retry_count(self, value: int) -> None:
+        counts = dict(_LAST_RETRY_COUNTS.get() or {})
+        counts[id(self)] = value
+        _LAST_RETRY_COUNTS.set(counts)
+
+    def _reset_retry_count(self) -> None:
+        self._set_retry_count(0)
+
+    def _record_retry(self) -> None:
+        self._set_retry_count(self.last_retry_count + 1)
+
+    def _attempt_timeout(self, remaining: float, read_timeout_s: float | None = None) -> aiohttp.ClientTimeout:
+        """Timeouts for one attempt, capped by the remaining provision budget.
+
+        An explicit per-call ``read_timeout_s`` is honoured as given.
+        """
+        read = read_timeout_s if read_timeout_s is not None else min(self._timeout, remaining)
+        return aiohttp.ClientTimeout(
+            total=max(remaining, read),
+            connect=read,
+            sock_connect=min(self._connect_timeout, remaining),
+            sock_read=read,
+        )
 
     # ------------------------------------------------------------------
     # Low-level HTTP helpers (thin wrappers around aiohttp)
@@ -550,6 +652,7 @@ class SIEAsyncClient:
         headers: dict[str, str] | None = None,
         timeout_s: float | None = None,
         include_base_url_headers: bool = True,
+        client_timeout: aiohttp.ClientTimeout | None = None,
     ) -> _AioResponse:
         kw: dict[str, Any] = {}
         if data is not None:
@@ -559,7 +662,9 @@ class SIEAsyncClient:
         request_headers = self._headers_for_request(url, headers, include_base_url_headers=include_base_url_headers)
         if request_headers:
             kw["headers"] = request_headers
-        if timeout_s is not None:
+        if client_timeout is not None:
+            kw["timeout"] = client_timeout
+        elif timeout_s is not None:
             kw["timeout"] = aiohttp.ClientTimeout(total=timeout_s)
         kw["allow_redirects"] = False
         async with self._throttle(), self._ensure_session().post(url, **kw) as resp:
@@ -622,6 +727,43 @@ class SIEAsyncClient:
         if warning:
             logger.warning(warning)
             SIEAsyncClient._version_warning_logged = True
+
+    async def _follow_modal_continuations(
+        self,
+        response: _AioResponse,
+        *,
+        start_time: float,
+        budget_s: float,
+        accept: str = JSON_CONTENT_TYPE,
+    ) -> _AioResponse:
+        """Consume bounded same-origin Modal 303 result URLs without replaying POST."""
+        for _ in range(MODAL_CONTINUATION_MAX_HOPS):
+            path = modal_continuation_path(self._base_url, response)
+            if path is None:
+                return response
+            remaining = budget_s - (time.monotonic() - start_time)
+            if remaining <= 0:
+                msg = f"Provision timeout ({budget_s:.1f}s) exceeded while awaiting request result"
+                raise ProvisioningError(msg)
+            try:
+                async with (
+                    self._throttle(),
+                    self._ensure_session().get(
+                        path,
+                        headers=self._headers_for_request(path, {"Accept": accept}),
+                        timeout=self._attempt_timeout(remaining),
+                        allow_redirects=False,
+                    ) as raw,
+                ):
+                    content = await raw.read()
+                    response = _AioResponse(raw.status, content, raw.headers)
+            except (aiohttp.ClientError, OSError) as exc:
+                msg = f"Failed to retrieve the in-flight generation result: {type(exc).__name__}"
+                raise SIEConnectionError(msg) from exc
+        if modal_continuation_path(self._base_url, response) is not None:
+            msg = f"Provisioning result remained in flight after {MODAL_CONTINUATION_MAX_HOPS} continuation hops"
+            raise ProvisioningError(msg)
+        return response
 
     def _resolve_gpu(self, gpu: str | None) -> str | None:
         """Resolve GPU, using default if not specified."""
@@ -1212,6 +1354,7 @@ class SIEAsyncClient:
         max_oom_retries: int = RESOURCE_EXHAUSTED_MAX_RETRIES,
     ) -> EncodeResult | list[EncodeResult]:
         """Async version of encode(). See SIEClient.encode() for details."""
+        self._reset_retry_count()
         # Track if single item was passed
         single_item = not isinstance(items, list)
         items_list = [items] if single_item else items
@@ -1251,7 +1394,7 @@ class SIEAsyncClient:
             request_body["params"] = params
 
         # Serialize with msgpack
-        body = msgpack.packb(request_body, use_bin_type=True)
+        body = pack_msgpack(request_body, use_bin_type=True)
 
         # Build headers with optional GPU and pool routing
         headers: dict[str, str] = {}
@@ -1268,6 +1411,7 @@ class SIEAsyncClient:
         lora_retries = 0
         # Retry counter for server-side OOM (RESOURCE_EXHAUSTED).
         oom_retries = 0
+        connect_retries = 0
 
         # Retry loop for retryable provisioning/capacity responses.
         while True:
@@ -1278,14 +1422,14 @@ class SIEAsyncClient:
             if remaining <= 0:
                 msg = f"Provision timeout ({timeout:.1f}s) exceeded before request could be sent"
                 raise ProvisioningError(msg, gpu=resolved_gpu)
-            request_timeout = min(self._timeout, remaining)
+            request_timeout = self._attempt_timeout(remaining)
 
             try:
                 response = await self._post(
                     f"/v1/encode/{model}",
                     data=body,
                     headers=headers,
-                    timeout_s=request_timeout,
+                    client_timeout=request_timeout,
                 )
             except _RETRYABLE_TRANSPORT_ERRORS as e:
                 if wait_for_capacity:
@@ -1296,34 +1440,45 @@ class SIEAsyncClient:
                         error=e,
                     )
                     if delay_s is not None:
+                        self._record_retry()
                         await asyncio.sleep(delay_s)
                         continue
-                if isinstance(e, TimeoutError):
-                    msg = f"Request timed out: {e}"
-                else:
-                    msg = (
-                        f"Connection lost mid-request ({type(e).__name__}); "
-                        f"the peer closed the connection before sending a complete response: {e}"
-                    )
+                msg = (
+                    f"Connection lost mid-request ({type(e).__name__}); "
+                    f"the peer closed the connection before sending a complete response: {e}"
+                )
                 raise SIEConnectionError(msg) from e
-            except aiohttp.ClientConnectorError as e:
+            except _CONNECT_PHASE_ERRORS as e:
                 if wait_for_capacity and is_transient_connect_error(e):
                     delay_s = compute_retry_delay(
                         start_time=start_time,
                         timeout=timeout,
                         error_label="Connect error",
                         error=e,
+                        attempt=connect_retries,
+                        target=self._base_url,
                     )
                     if delay_s is not None:
+                        connect_retries += 1
+                        self._record_retry()
                         await asyncio.sleep(delay_s)
                         continue
                 msg = f"Failed to connect to {self._base_url}: {e}"
                 raise SIEConnectionError(msg) from e
+            except _SENT_REQUEST_TIMEOUT_ERRORS as e:
+                raise SIEConnectionError(read_timeout_message(e)) from e
             except (aiohttp.ClientError, OSError) as e:
                 msg = f"Failed to connect to {self._base_url}: {e}"
                 raise SIEConnectionError(msg) from e
 
-            # Short-circuit terminal load failures (sie-test#85).
+            response = await self._follow_modal_continuations(
+                response,
+                start_time=start_time,
+                budget_s=timeout,
+                accept=MSGPACK_CONTENT_TYPE,
+            )
+
+            # Short-circuit terminal load failures.
             raise_if_model_load_failed(response, model=model)
 
             # Handle 503 with LORA_LOADING or MODEL_LOADING - auto-retry
@@ -1342,6 +1497,7 @@ class SIEAsyncClient:
                         actual_delay,
                         timeout,
                     )
+                    self._record_retry()
                     await asyncio.sleep(actual_delay)
                     continue
 
@@ -1363,6 +1519,7 @@ class SIEAsyncClient:
                         lora_retries,
                         LORA_LOADING_MAX_RETRIES,
                     )
+                    self._record_retry()
                     await asyncio.sleep(delay)
                     continue
 
@@ -1384,6 +1541,7 @@ class SIEAsyncClient:
                         elapsed,
                         timeout,
                     )
+                    self._record_retry()
                     await asyncio.sleep(actual_delay)
                     continue
 
@@ -1396,7 +1554,27 @@ class SIEAsyncClient:
                         timeout=timeout,
                         model=model,
                     )
+                    self._record_retry()
                     continue
+
+            # Retryable pre-execution admission backpressure (pass-2 audit
+            # B1/B2/B7): a 429 RATE_LIMIT, or a retryable 503
+            # (BILLING_CAPACITY_UNAVAILABLE / QUEUE_FULL) the ladder above did
+            # not match. No work was published, so retry within the
+            # provision-timeout budget honoring Retry-After; a give-up raises a
+            # typed RateLimitError (429) or the server's terminal 503.
+            # 402/403 credit/account errors are terminal and NOT handled here.
+            admission_delay = admission_retry_delay(response, start_time=start_time, timeout=timeout)
+            if admission_delay is not None:
+                logger.info(
+                    "Admission backpressure (HTTP %d), retrying in %.1fs (timeout: %.1fs)",
+                    response.status_code,
+                    admission_delay,
+                    timeout,
+                )
+                self._record_retry()
+                await asyncio.sleep(admission_delay)
+                continue
 
             # Handle 504 (gateway timeout): queued work was published, but the
             # gateway did not receive a worker result before its deadline.
@@ -1415,6 +1593,7 @@ class SIEAsyncClient:
                         elapsed,
                         timeout,
                     )
+                    self._record_retry()
                     await asyncio.sleep(actual_delay)
                     continue
 
@@ -1428,27 +1607,30 @@ class SIEAsyncClient:
         self._check_server_version(response)
 
         # Deserialize response
-        response_data = msgpack.unpackb(response.content, raw=False)
+        response_data = parse_terminal_msgpack_object(response, owner="encode")
 
         # Get timing info if present
         timing = response_data.get("timing")
 
         # Parse results and inject timing into each
         results = parse_encode_results(response_data["items"])
-        # Guard the 1:1 input↔output contract before any positional access
-        # (``results[0]`` below, or batch reassembly in callers). A desynced
-        # count otherwise surfaces as a context-free ``IndexError`` (#1526).
-        validate_encode_result_count(
-            results,
-            len(items_list),
-            model,
-            request=parse_request_metadata(response.headers),
-        )
         if timing:
             for result in results:
                 result["timing"] = timing
 
         attach_request_metadata(results, response.headers, response_data)
+        # Guard the 1:1 input↔output contract before any positional access
+        # (``results[0]`` below, or batch reassembly in callers). The gateway's
+        # queue path returns mixed-success batches as 200 with only the
+        # successful items, so a desynced count otherwise misaligns every
+        # zip-inputs-to-outputs consumer (#1526, finding U1).
+        validate_batch_result_count(
+            results,
+            items_list,  # ty: ignore[invalid-argument-type]
+            model,
+            operation="encode",
+            request=parse_request_metadata(response.headers),
+        )
 
         # Return single result if single item was passed
         return results[0] if single_item else results
@@ -1473,6 +1655,38 @@ class SIEAsyncClient:
         data = response.json()
         return data["models"]
 
+    async def recommend(
+        self,
+        task: str,
+        *,
+        # Same rationale as `estimate`: this is the per-call HTTP budget, not a
+        # caller-supplied cancellation budget.
+        timeout: float | None = None,  # noqa: ASYNC109
+    ) -> Recommendation:
+        """Async version of recommend(). See SIEClient.recommend() for details."""
+        self._reset_retry_count()
+        try:
+            response = await self._post(
+                RECOMMEND_PATH,
+                json_data={"task": task},
+                headers={
+                    "Accept": JSON_CONTENT_TYPE,
+                    "Content-Type": JSON_CONTENT_TYPE,
+                },
+                timeout_s=timeout if timeout is not None else self._timeout,
+            )
+        except TimeoutError as e:
+            msg = f"Request timed out: {e}"
+            raise SIEConnectionError(msg) from e
+        except (aiohttp.ClientError, OSError) as e:
+            msg = f"Failed to connect to {self._base_url}: {e}"
+            raise SIEConnectionError(msg) from e
+
+        if response.status_code >= HTTP_CLIENT_ERROR:
+            handle_error(response)
+
+        return cast("Recommendation", response.json())
+
     async def estimate(
         self,
         endpoint: str,
@@ -1484,6 +1698,7 @@ class SIEAsyncClient:
         timeout: float | None = None,  # noqa: ASYNC109
     ) -> CostEstimate:
         """Async version of estimate(). See SIEClient.estimate() for details."""
+        self._reset_retry_count()
         body = build_estimate_envelope(endpoint, request)
         try:
             response = await self._post(
@@ -1738,6 +1953,7 @@ class SIEAsyncClient:
         Async version of :meth:`SIEClient.score`. See that method for full
         parameter documentation.
         """
+        self._reset_retry_count()
         # Resolve defaults and pool
         pool_name, resolved_gpu = await self._resolve_pool_and_gpu(gpu)
         resolved_options = self._resolve_options(options)
@@ -1754,7 +1970,7 @@ class SIEAsyncClient:
             request_body["options"] = resolved_options
 
         # Serialize with msgpack
-        body = msgpack.packb(request_body, use_bin_type=True)
+        body = pack_msgpack(request_body, use_bin_type=True)
 
         # Build headers with optional GPU and pool routing
         headers: dict[str, str] = {}
@@ -1770,6 +1986,7 @@ class SIEAsyncClient:
         # Model loading uses time-based timeout only (no retry counter)
         # OOM retry counter (RESOURCE_EXHAUSTED) — bounded with exponential backoff.
         oom_retries = 0
+        connect_retries = 0
 
         # Retry loop for retryable provisioning/capacity responses.
         while True:
@@ -1780,14 +1997,14 @@ class SIEAsyncClient:
             if remaining <= 0:
                 msg = f"Provision timeout ({timeout:.1f}s) exceeded before request could be sent"
                 raise ProvisioningError(msg, gpu=resolved_gpu)
-            request_timeout = min(self._timeout, remaining)
+            request_timeout = self._attempt_timeout(remaining)
 
             try:
                 response = await self._post(
                     f"/v1/score/{model}",
                     data=body,
                     headers=headers,
-                    timeout_s=request_timeout,
+                    client_timeout=request_timeout,
                 )
             except _RETRYABLE_TRANSPORT_ERRORS as e:
                 if wait_for_capacity:
@@ -1798,34 +2015,45 @@ class SIEAsyncClient:
                         error=e,
                     )
                     if delay_s is not None:
+                        self._record_retry()
                         await asyncio.sleep(delay_s)
                         continue
-                if isinstance(e, TimeoutError):
-                    msg = f"Request timed out: {e}"
-                else:
-                    msg = (
-                        f"Connection lost mid-request ({type(e).__name__}); "
-                        f"the peer closed the connection before sending a complete response: {e}"
-                    )
+                msg = (
+                    f"Connection lost mid-request ({type(e).__name__}); "
+                    f"the peer closed the connection before sending a complete response: {e}"
+                )
                 raise SIEConnectionError(msg) from e
-            except aiohttp.ClientConnectorError as e:
+            except _CONNECT_PHASE_ERRORS as e:
                 if wait_for_capacity and is_transient_connect_error(e):
                     delay_s = compute_retry_delay(
                         start_time=start_time,
                         timeout=timeout,
                         error_label="Connect error",
                         error=e,
+                        attempt=connect_retries,
+                        target=self._base_url,
                     )
                     if delay_s is not None:
+                        connect_retries += 1
+                        self._record_retry()
                         await asyncio.sleep(delay_s)
                         continue
                 msg = f"Failed to connect to {self._base_url}: {e}"
                 raise SIEConnectionError(msg) from e
+            except _SENT_REQUEST_TIMEOUT_ERRORS as e:
+                raise SIEConnectionError(read_timeout_message(e)) from e
             except (aiohttp.ClientError, OSError) as e:
                 msg = f"Failed to connect to {self._base_url}: {e}"
                 raise SIEConnectionError(msg) from e
 
-            # Short-circuit terminal load failures (sie-test#85).
+            response = await self._follow_modal_continuations(
+                response,
+                start_time=start_time,
+                budget_s=timeout,
+                accept=MSGPACK_CONTENT_TYPE,
+            )
+
+            # Short-circuit terminal load failures.
             raise_if_model_load_failed(response, model=model)
 
             # Handle 503 with MODEL_LOADING - auto-retry
@@ -1844,6 +2072,7 @@ class SIEAsyncClient:
                         actual_delay,
                         timeout,
                     )
+                    self._record_retry()
                     await asyncio.sleep(actual_delay)
                     continue
 
@@ -1863,6 +2092,7 @@ class SIEAsyncClient:
                         elapsed,
                         timeout,
                     )
+                    self._record_retry()
                     await asyncio.sleep(actual_delay)
                     continue
 
@@ -1875,7 +2105,27 @@ class SIEAsyncClient:
                         timeout=timeout,
                         model=model,
                     )
+                    self._record_retry()
                     continue
+
+            # Retryable pre-execution admission backpressure (pass-2 audit
+            # B1/B2/B7): a 429 RATE_LIMIT, or a retryable 503
+            # (BILLING_CAPACITY_UNAVAILABLE / QUEUE_FULL) the ladder above did
+            # not match. No work was published, so retry within the
+            # provision-timeout budget honoring Retry-After; a give-up raises a
+            # typed RateLimitError (429) or the server's terminal 503.
+            # 402/403 credit/account errors are terminal and NOT handled here.
+            admission_delay = admission_retry_delay(response, start_time=start_time, timeout=timeout)
+            if admission_delay is not None:
+                logger.info(
+                    "Admission backpressure (HTTP %d), retrying in %.1fs (timeout: %.1fs)",
+                    response.status_code,
+                    admission_delay,
+                    timeout,
+                )
+                self._record_retry()
+                await asyncio.sleep(admission_delay)
+                continue
 
             # Handle 504 (gateway timeout). See encode() above for rationale.
             if response.status_code == HTTP_GATEWAY_TIMEOUT and wait_for_capacity:
@@ -1891,6 +2141,7 @@ class SIEAsyncClient:
                         elapsed,
                         timeout,
                     )
+                    self._record_retry()
                     await asyncio.sleep(actual_delay)
                     continue
 
@@ -1901,7 +2152,7 @@ class SIEAsyncClient:
 
         self._check_server_version(response)
 
-        response_data = msgpack.unpackb(response.content, raw=False)
+        response_data = parse_terminal_msgpack_object(response, owner="score")
 
         result = parse_score_result(response_data)
         attach_request_metadata([result], response.headers, response_data)
@@ -1931,6 +2182,7 @@ class SIEAsyncClient:
         wait_for_capacity: bool = True,
         provision_timeout_s: float | None = None,
         max_oom_retries: int = RESOURCE_EXHAUSTED_MAX_RETRIES,
+        read_timeout_s: float | None = None,
     ) -> GenerateResult:
         """Async sibling of :meth:`SIEClient.generate`.
 
@@ -1938,6 +2190,7 @@ class SIEAsyncClient:
         awaits the aggregated outcome; use :meth:`stream_generate` for
         SIE-native chunk streaming.
         """
+        self._reset_retry_count()
         resolved_grammar = validate_generate_grammar(grammar) if grammar is not None else None
         pool_name, resolved_gpu = await self._resolve_pool_and_gpu(gpu)
 
@@ -1979,6 +2232,7 @@ class SIEAsyncClient:
         timeout = provision_timeout_s if provision_timeout_s is not None else DEFAULT_PROVISION_TIMEOUT_S
         start_time = time.monotonic()
         oom_retries = 0
+        connect_retries = 0
 
         while True:
             elapsed = time.monotonic() - start_time
@@ -1986,7 +2240,7 @@ class SIEAsyncClient:
             if remaining <= 0:
                 msg = f"Provision timeout ({timeout:.1f}s) exceeded before request could be sent"
                 raise ProvisioningError(msg, gpu=resolved_gpu)
-            request_timeout_s = min(self._timeout, remaining)
+            request_timeout = self._attempt_timeout(remaining, read_timeout_s)
 
             try:
                 async with (
@@ -1995,47 +2249,41 @@ class SIEAsyncClient:
                         f"/v1/generate/{safe_model}",
                         data=body,
                         headers=self._headers_for_request(f"/v1/generate/{safe_model}", headers),
-                        timeout=aiohttp.ClientTimeout(total=request_timeout_s),
+                        timeout=request_timeout,
                         allow_redirects=False,
                     ) as raw,
                 ):
                     content = await raw.read()
                     response = _AioResponse(raw.status, content, raw.headers)
-            except _RETRYABLE_TRANSPORT_ERRORS as e:
-                # Generation is NOT idempotent and carries no dedup key.
-                # These errors fire after the request body was sent (read
-                # timeout, peer reset, payload error), so the worker may
-                # already be — or have finished — generating. Retrying would
-                # issue a *second* billable generation with a different
-                # completion, so surface the error instead of re-running.
-                # (The idempotent encode/score/extract paths still retry.)
-                msg = f"Request failed: {e}"
-                raise SIEConnectionError(msg) from e
-            except aiohttp.ClientConnectorError as e:
-                # Connect errors fail before the request is sent, so no
-                # generation could have started — safe to retry.
+            except _CONNECT_PHASE_ERRORS as e:
+                # Connect-phase failures happen before the request is sent,
+                # so no generation could have started — safe to retry.
                 if wait_for_capacity and is_transient_connect_error(e):
                     delay_s = compute_retry_delay(
                         start_time=start_time,
                         timeout=timeout,
                         error_label="Connect error",
                         error=e,
+                        attempt=connect_retries,
+                        target=self._base_url,
                     )
                     if delay_s is not None:
+                        connect_retries += 1
+                        self._record_retry()
                         await asyncio.sleep(delay_s)
                         continue
                 msg = f"Failed to connect to {self._base_url}: {e}"
                 raise SIEConnectionError(msg) from e
             except (aiohttp.ClientError, OSError) as e:
-                # Catch-all transport failure. For the non-idempotent
-                # generate path we do NOT retry: unlike a pure connect
-                # failure (ClientConnectorError above), a generic
-                # ClientError/OSError (e.g. ECONNRESET) can fire after the
-                # request was sent, so the worker may already have generated.
-                # Retrying would double-bill an inference. Surface instead.
+                # Every other transport failure, including read timeouts and
+                # peer resets, can fire after the request body was sent, so the
+                # worker may already be — or have finished — generating.
+                # Generation is NOT idempotent and carries no dedup key, so
+                # surface the error instead of re-running it.
                 msg = f"Request failed: {e}"
                 raise SIEConnectionError(msg) from e
 
+            response = await self._follow_modal_continuations(response, start_time=start_time, budget_s=timeout)
             raise_if_model_load_failed(response, model=model)
 
             if response.status_code == 503:
@@ -2048,17 +2296,33 @@ class SIEAsyncClient:
                         start_time=start_time,
                         timeout=timeout,
                     )
+                    self._record_retry()
                     await asyncio.sleep(delay)
                     continue
 
-                if error_code == MODEL_LOADING_ERROR_CODE and wait_for_capacity:
+                if error_code == MODEL_LOADING_ERROR_CODE:
+                    # Retried regardless of ``wait_for_capacity``, matching
+                    # encode/score/extract/chat/responses/streaming: the worker
+                    # has already accepted the request and is loading the model,
+                    # so this is a pre-execution signal, not a capacity wait.
                     elapsed = time.monotonic() - start_time
                     if elapsed >= timeout:
                         msg = f"Model loading timeout after {elapsed:.1f}s for '{model}'"
                         raise ModelLoadingError(msg, model=model)
                     retry_after = get_retry_after(response)
                     delay = retry_after_or_default(retry_after, MODEL_LOADING_DEFAULT_DELAY_S)
-                    await asyncio.sleep(min(delay, timeout - elapsed))
+                    remaining = timeout - elapsed
+                    if delay >= remaining:
+                        # Sleeping through the rest of the budget would make
+                        # the NEXT loop iteration raise a generic
+                        # ProvisioningError; surface the typed root cause now.
+                        msg = (
+                            f"Model loading retry delay ({delay:.1f}s) would exceed the "
+                            f"provision timeout ({timeout:.1f}s, {elapsed:.1f}s elapsed) for '{model}'"
+                        )
+                        raise ModelLoadingError(msg, model=model)
+                    self._record_retry()
+                    await asyncio.sleep(delay)
                     continue
                 if error_code == RESOURCE_EXHAUSTED_ERROR_CODE:
                     oom_retries = await _handle_oom_retry(
@@ -2069,7 +2333,27 @@ class SIEAsyncClient:
                         timeout=timeout,
                         model=model,
                     )
+                    self._record_retry()
                     continue
+
+            # Retryable pre-execution admission backpressure (pass-2 audit
+            # B1/B2/B7): a 429 RATE_LIMIT, or a retryable 503
+            # (BILLING_CAPACITY_UNAVAILABLE / QUEUE_FULL) the ladder above did
+            # not match. No work was published, so retry within the
+            # provision-timeout budget honoring Retry-After; a give-up raises a
+            # typed RateLimitError (429) or the server's terminal 503.
+            # 402/403 credit/account errors are terminal and NOT handled here.
+            admission_delay = admission_retry_delay(response, start_time=start_time, timeout=timeout)
+            if admission_delay is not None:
+                logger.info(
+                    "Admission backpressure (HTTP %d), retrying in %.1fs (timeout: %.1fs)",
+                    response.status_code,
+                    admission_delay,
+                    timeout,
+                )
+                self._record_retry()
+                await asyncio.sleep(admission_delay)
+                continue
 
             # Do NOT retry 504 here. Unlike the idempotent encode/score/extract
             # paths (which keep the 504 retry block), generation is NOT
@@ -2080,8 +2364,9 @@ class SIEAsyncClient:
             # surface it as a terminal ServerError instead (same reasoning as
             # the mid-flight transport-error block above). The pre-execution
             # 503 MODEL_LOADING / PROVISIONING retries above remain because
-            # those fire *before* any generation can have started and the
-            # caller has opted into capacity waiting.
+            # those fire *before* any generation can have started
+            # (MODEL_LOADING unconditionally; PROVISIONING when the caller
+            # has opted into capacity waiting).
             if response.status_code == HTTP_GATEWAY_TIMEOUT:
                 msg = (
                     "Gateway timed out (504) after the generate request was published to the "
@@ -2092,6 +2377,7 @@ class SIEAsyncClient:
                     msg,
                     code=get_error_code(response),
                     status_code=response.status_code,
+                    param=get_error_param(response),
                     request=parse_request_metadata(response.headers),
                 )
 
@@ -2119,15 +2405,18 @@ class SIEAsyncClient:
         wait_for_capacity: bool = True,
         provision_timeout_s: float | None = None,
         max_oom_retries: int = RESOURCE_EXHAUSTED_MAX_RETRIES,
+        read_timeout_s: float | None = None,
     ) -> ResponseResult:
         """Async counterpart of :meth:`SIEClient.responses`.
 
         The gateway's Responses MVP is stateless, text-only, and
         non-streaming. Retry behavior matches the sync method: only explicit
-        pre-execution capacity signals and connect-before-send failures are
-        retried; mid-flight failures and post-publish 504 responses are
-        terminal because generation is non-idempotent.
+        pre-execution capacity signals, pre-dispatch admission rejections and
+        connect-before-send failures are retried; mid-flight failures, read
+        timeouts and post-publish 504 responses are terminal because
+        generation is non-idempotent.
         """
+        self._reset_retry_count()
         pool_name, resolved_gpu = await self._resolve_pool_and_gpu(gpu)
         body = json.dumps(
             build_responses_body(
@@ -2148,6 +2437,7 @@ class SIEAsyncClient:
         timeout = provision_timeout_s if provision_timeout_s is not None else DEFAULT_PROVISION_TIMEOUT_S
         start_time = time.monotonic()
         oom_retries = 0
+        connect_retries = 0
         while True:
             remaining = timeout - (time.monotonic() - start_time)
             if remaining <= 0:
@@ -2160,21 +2450,25 @@ class SIEAsyncClient:
                         "/v1/responses",
                         data=body,
                         headers=self._headers_for_request("/v1/responses", headers),
-                        timeout=aiohttp.ClientTimeout(total=min(self._timeout, remaining)),
+                        timeout=self._attempt_timeout(remaining, read_timeout_s),
                         allow_redirects=False,
                     ) as raw,
                 ):
                     content = await raw.read()
                     response = _AioResponse(raw.status, content, raw.headers)
-            except aiohttp.ClientConnectorError as e:
+            except _CONNECT_PHASE_ERRORS as e:
                 if wait_for_capacity and is_transient_connect_error(e):
                     delay_s = compute_retry_delay(
                         start_time=start_time,
                         timeout=timeout,
                         error_label="Connect error",
                         error=e,
+                        attempt=connect_retries,
+                        target=self._base_url,
                     )
                     if delay_s is not None:
+                        connect_retries += 1
+                        self._record_retry()
                         await asyncio.sleep(delay_s)
                         continue
                 msg = f"Failed to connect to {self._base_url}: {e}"
@@ -2183,6 +2477,7 @@ class SIEAsyncClient:
                 msg = f"Request failed: {e}"
                 raise SIEConnectionError(msg) from e
 
+            response = await self._follow_modal_continuations(response, start_time=start_time, budget_s=timeout)
             if response.status_code == 200:
                 break
             delay, oom_retries = next_stream_retry_delay(
@@ -2195,6 +2490,7 @@ class SIEAsyncClient:
                 oom_retries=oom_retries,
                 max_oom_retries=max_oom_retries,
             )
+            self._record_retry()
             await asyncio.sleep(delay)
 
         self._check_server_version(response)
@@ -2234,19 +2530,23 @@ class SIEAsyncClient:
         wait_for_capacity: bool = True,
         provision_timeout_s: float | None = None,
         max_oom_retries: int = RESOURCE_EXHAUSTED_MAX_RETRIES,
+        read_timeout_s: float | None = None,
     ) -> ChatCompletion:
         """Non-streaming OpenAI-compatible chat completion (``/v1/chat/completions``).
 
         Async counterpart of :meth:`SIEClient.chat_completions`. For token
         streaming use :meth:`stream_chat_completions`. Generation is
-        non-idempotent, so only pre-execution 503 PROVISIONING / MODEL_LOADING responses are retried;
-        a 504 surfaces as :class:`ServerError`.
+        non-idempotent, so only pre-execution capacity signals and
+        pre-dispatch admission rejections are retried; a 504 surfaces as
+        :class:`ServerError`. ``read_timeout_s`` sets how long to wait for the
+        complete response once the request is sent.
 
         Typed kwargs cover the full gateway-supported field set (see
         :func:`build_chat_body` for the canonical list); ``extra_body`` is
         still merged last for forward-compat fields the typed surface does
         not name yet.
         """
+        self._reset_retry_count()
         pool_name, resolved_gpu = await self._resolve_pool_and_gpu(gpu)
         body = json.dumps(
             build_chat_body(
@@ -2287,6 +2587,7 @@ class SIEAsyncClient:
         timeout = provision_timeout_s if provision_timeout_s is not None else DEFAULT_PROVISION_TIMEOUT_S
         start_time = time.monotonic()
         oom_retries = 0
+        connect_retries = 0
         while True:
             remaining = timeout - (time.monotonic() - start_time)
             if remaining <= 0:
@@ -2299,18 +2600,25 @@ class SIEAsyncClient:
                         "/v1/chat/completions",
                         data=body,
                         headers=self._headers_for_request("/v1/chat/completions", headers),
-                        timeout=aiohttp.ClientTimeout(total=min(self._timeout, remaining)),
+                        timeout=self._attempt_timeout(remaining, read_timeout_s),
                         allow_redirects=False,
                     ) as raw,
                 ):
                     content = await raw.read()
                     response = _AioResponse(raw.status, content, raw.headers)
-            except aiohttp.ClientConnectorError as e:
+            except _CONNECT_PHASE_ERRORS as e:
                 if wait_for_capacity and is_transient_connect_error(e):
                     delay_s = compute_retry_delay(
-                        start_time=start_time, timeout=timeout, error_label="Connect error", error=e
+                        start_time=start_time,
+                        timeout=timeout,
+                        error_label="Connect error",
+                        error=e,
+                        attempt=connect_retries,
+                        target=self._base_url,
                     )
                     if delay_s is not None:
+                        connect_retries += 1
+                        self._record_retry()
                         await asyncio.sleep(delay_s)
                         continue
                 msg = f"Failed to connect to {self._base_url}: {e}"
@@ -2321,6 +2629,7 @@ class SIEAsyncClient:
                 msg = f"Request failed: {e}"
                 raise SIEConnectionError(msg) from e
 
+            response = await self._follow_modal_continuations(response, start_time=start_time, budget_s=timeout)
             if response.status_code == 200:
                 break
             delay, oom_retries = next_stream_retry_delay(
@@ -2333,6 +2642,7 @@ class SIEAsyncClient:
                 oom_retries=oom_retries,
                 max_oom_retries=max_oom_retries,
             )
+            self._record_retry()
             await asyncio.sleep(delay)
 
         self._check_server_version(response)
@@ -2531,9 +2841,11 @@ class SIEAsyncClient:
         failure is terminal (non-idempotent). The ``async with`` keeps the
         connection open while the caller consumes the generator.
         """
+        self._reset_retry_count()
         timeout = provision_timeout_s if provision_timeout_s is not None else DEFAULT_PROVISION_TIMEOUT_S
         start_time = time.monotonic()
         oom_retries = 0
+        connect_retries = 0
         while True:
             remaining = timeout - (time.monotonic() - start_time)
             if remaining <= 0:
@@ -2547,7 +2859,23 @@ class SIEAsyncClient:
                         url,
                         data=body,
                         headers=self._headers_for_request(url, headers),
-                        timeout=aiohttp.ClientTimeout(total=min(self._timeout, remaining)),
+                        # No ``total`` timeout: it would cover the entire SSE
+                        # body and kill any stream running longer than
+                        # ``timeout_s`` mid-generation (the TS SDK documents
+                        # the same trap and uses a pre-stream-only timeout).
+                        # Connection establishment stays bounded by the
+                        # pre-stream retry budget; reads are bounded
+                        # *per-read* so a dead connection still fails within
+                        # ~``timeout_s`` while a healthy long stream — whose
+                        # chunks keep arriving — survives. Mirrors the sync
+                        # twin, where the httpx float timeout is per-phase
+                        # (per socket read), not total.
+                        timeout=aiohttp.ClientTimeout(
+                            total=None,
+                            connect=min(self._timeout, remaining),
+                            sock_connect=min(self._connect_timeout, remaining),
+                            sock_read=self._timeout,
+                        ),
                         allow_redirects=False,
                     ) as raw,
                 ):
@@ -2576,12 +2904,34 @@ class SIEAsyncClient:
                             if isinstance(chunk, dict):
                                 err = sse_chunk_error(chunk)
                                 if err is not None:
-                                    code, message = err
+                                    code, message, param, retry_after_s = err
+                                    # Terminal error chunks — on both the
+                                    # SIE-native generate shape and the OpenAI
+                                    # chat shape — carry the gateway request
+                                    # id in-band (streamed responses have no
+                                    # terminal headers); forward it so typed
+                                    # errors like ``empty_model_output`` stay
+                                    # correlatable (#3136).
+                                    request_id = valid_stream_request_id(chunk.get("request_id"))
+                                    error_headers: dict[str, str] = {}
+                                    if request_id:
+                                        error_headers[REQUEST_ID_HEADER] = request_id
+                                    if retry_after_s is not None:
+                                        error_headers["Retry-After"] = str(retry_after_s)
                                     if not yielded_chunk:
                                         capacity_response = _AioResponse(
                                             HTTP_SERVICE_UNAVAILABLE,
-                                            json.dumps({"error": {"code": code, "message": message}}).encode(),
-                                            {},
+                                            json.dumps(
+                                                {
+                                                    "error": {
+                                                        "code": code,
+                                                        "message": message,
+                                                        "param": param,
+                                                        "retry_after_s": retry_after_s,
+                                                    }
+                                                }
+                                            ).encode(),
+                                            error_headers,
                                         )
                                         retry_delay, oom_retries = next_stream_retry_delay(
                                             capacity_response,
@@ -2594,17 +2944,30 @@ class SIEAsyncClient:
                                             max_oom_retries=max_oom_retries,
                                         )
                                         break
-                                    raise ServerError(message, code=code)
+                                    raise ServerError(
+                                        message,
+                                        code=code,
+                                        param=param,
+                                        request=parse_request_metadata(error_headers),
+                                        retry_after=float(retry_after_s) if retry_after_s is not None else None,
+                                    )
                             yield chunk
                             yielded_chunk = True
                         else:
                             return
-            except aiohttp.ClientConnectorError as e:
+            except _CONNECT_PHASE_ERRORS as e:
                 if wait_for_capacity and is_transient_connect_error(e):
                     delay_s = compute_retry_delay(
-                        start_time=start_time, timeout=timeout, error_label="Connect error", error=e
+                        start_time=start_time,
+                        timeout=timeout,
+                        error_label="Connect error",
+                        error=e,
+                        attempt=connect_retries,
+                        target=self._base_url,
                     )
                     if delay_s is not None:
+                        connect_retries += 1
+                        self._record_retry()
                         await asyncio.sleep(delay_s)
                         continue
                 msg = f"Failed to connect to {self._base_url}: {e}"
@@ -2615,6 +2978,7 @@ class SIEAsyncClient:
                 raise SIEConnectionError(msg) from e
             # Reached only on the non-200 pre-stream retry path.
             if retry_delay is not None:
+                self._record_retry()
                 await asyncio.sleep(retry_delay)
 
     # Use overload for proper type hints when single item vs list
@@ -2665,6 +3029,7 @@ class SIEAsyncClient:
         max_oom_retries: int = RESOURCE_EXHAUSTED_MAX_RETRIES,
     ) -> ExtractResult | list[ExtractResult]:
         """Async version of extract(). See SIEClient.extract() for details."""
+        self._reset_retry_count()
         # Track if single item was passed
         single_item = not isinstance(items, list)
         items_list = [items] if single_item else items
@@ -2702,7 +3067,7 @@ class SIEAsyncClient:
             request_body["params"] = params
 
         # Serialize with msgpack
-        body = msgpack.packb(request_body, use_bin_type=True)
+        body = pack_msgpack(request_body, use_bin_type=True)
 
         # Build headers with optional GPU and pool routing
         headers: dict[str, str] = {}
@@ -2718,6 +3083,7 @@ class SIEAsyncClient:
         # Model loading uses time-based timeout only (no retry counter)
         # OOM retry counter (RESOURCE_EXHAUSTED) — bounded with exponential backoff.
         oom_retries = 0
+        connect_retries = 0
 
         # Retry loop for retryable provisioning/capacity responses.
         while True:
@@ -2728,14 +3094,14 @@ class SIEAsyncClient:
             if remaining <= 0:
                 msg = f"Provision timeout ({timeout:.1f}s) exceeded before request could be sent"
                 raise ProvisioningError(msg, gpu=resolved_gpu)
-            request_timeout = min(self._timeout, remaining)
+            request_timeout = self._attempt_timeout(remaining)
 
             try:
                 response = await self._post(
                     f"/v1/extract/{model}",
                     data=body,
                     headers=headers,
-                    timeout_s=request_timeout,
+                    client_timeout=request_timeout,
                 )
             except _RETRYABLE_TRANSPORT_ERRORS as e:
                 if wait_for_capacity:
@@ -2746,34 +3112,45 @@ class SIEAsyncClient:
                         error=e,
                     )
                     if delay_s is not None:
+                        self._record_retry()
                         await asyncio.sleep(delay_s)
                         continue
-                if isinstance(e, TimeoutError):
-                    msg = f"Request timed out: {e}"
-                else:
-                    msg = (
-                        f"Connection lost mid-request ({type(e).__name__}); "
-                        f"the peer closed the connection before sending a complete response: {e}"
-                    )
+                msg = (
+                    f"Connection lost mid-request ({type(e).__name__}); "
+                    f"the peer closed the connection before sending a complete response: {e}"
+                )
                 raise SIEConnectionError(msg) from e
-            except aiohttp.ClientConnectorError as e:
+            except _CONNECT_PHASE_ERRORS as e:
                 if wait_for_capacity and is_transient_connect_error(e):
                     delay_s = compute_retry_delay(
                         start_time=start_time,
                         timeout=timeout,
                         error_label="Connect error",
                         error=e,
+                        attempt=connect_retries,
+                        target=self._base_url,
                     )
                     if delay_s is not None:
+                        connect_retries += 1
+                        self._record_retry()
                         await asyncio.sleep(delay_s)
                         continue
                 msg = f"Failed to connect to {self._base_url}: {e}"
                 raise SIEConnectionError(msg) from e
+            except _SENT_REQUEST_TIMEOUT_ERRORS as e:
+                raise SIEConnectionError(read_timeout_message(e)) from e
             except (aiohttp.ClientError, OSError) as e:
                 msg = f"Failed to connect to {self._base_url}: {e}"
                 raise SIEConnectionError(msg) from e
 
-            # Short-circuit terminal load failures (sie-test#85).
+            response = await self._follow_modal_continuations(
+                response,
+                start_time=start_time,
+                budget_s=timeout,
+                accept=MSGPACK_CONTENT_TYPE,
+            )
+
+            # Short-circuit terminal load failures.
             raise_if_model_load_failed(response, model=model)
 
             # Short-circuit token-budget overruns (#849).
@@ -2795,6 +3172,7 @@ class SIEAsyncClient:
                         actual_delay,
                         timeout,
                     )
+                    self._record_retry()
                     await asyncio.sleep(actual_delay)
                     continue
 
@@ -2814,6 +3192,7 @@ class SIEAsyncClient:
                         elapsed,
                         timeout,
                     )
+                    self._record_retry()
                     await asyncio.sleep(actual_delay)
                     continue
 
@@ -2826,7 +3205,27 @@ class SIEAsyncClient:
                         timeout=timeout,
                         model=model,
                     )
+                    self._record_retry()
                     continue
+
+            # Retryable pre-execution admission backpressure (pass-2 audit
+            # B1/B2/B7): a 429 RATE_LIMIT, or a retryable 503
+            # (BILLING_CAPACITY_UNAVAILABLE / QUEUE_FULL) the ladder above did
+            # not match. No work was published, so retry within the
+            # provision-timeout budget honoring Retry-After; a give-up raises a
+            # typed RateLimitError (429) or the server's terminal 503.
+            # 402/403 credit/account errors are terminal and NOT handled here.
+            admission_delay = admission_retry_delay(response, start_time=start_time, timeout=timeout)
+            if admission_delay is not None:
+                logger.info(
+                    "Admission backpressure (HTTP %d), retrying in %.1fs (timeout: %.1fs)",
+                    response.status_code,
+                    admission_delay,
+                    timeout,
+                )
+                self._record_retry()
+                await asyncio.sleep(admission_delay)
+                continue
 
             # Handle 504 (gateway timeout). See encode() above for rationale.
             if response.status_code == HTTP_GATEWAY_TIMEOUT and wait_for_capacity:
@@ -2842,6 +3241,7 @@ class SIEAsyncClient:
                         elapsed,
                         timeout,
                     )
+                    self._record_retry()
                     await asyncio.sleep(actual_delay)
                     continue
 
@@ -2852,11 +3252,20 @@ class SIEAsyncClient:
 
         self._check_server_version(response)
 
-        response_data = msgpack.unpackb(response.content, raw=False)
+        response_data = parse_terminal_msgpack_object(response, owner="extract")
 
         results = parse_extract_results(response_data["items"])
-
         attach_request_metadata(results, response.headers, response_data)
+        # Same positional contract as encode: ``results[0]`` below and
+        # index-based reassembly in batch callers both assume one result per
+        # input, and the queue path drops failed items from a 200 body.
+        validate_batch_result_count(
+            results,
+            items_list,  # ty: ignore[invalid-argument-type]
+            model,
+            operation="extract",
+            request=parse_request_metadata(response.headers),
+        )
 
         return results[0] if single_item else results
 
@@ -3019,18 +3428,44 @@ class _AsyncJobs(_AsyncNamespace):
         )
 
     async def results(self, job_id: str) -> JobResults:
-        """Async ``jobs.results`` — read + decode the finished job's chunk refs."""
+        """Async ``jobs.results`` — read + decode a terminal job's chunk refs.
+
+        Reads every chunk that published a ref (a ``failed`` chunk still carries
+        one with its SUCCESSFUL, already-billed siblings plus the per-item
+        failures); only chunks with no ref are skipped. Raises ``RequestError``
+        with code ``job_not_terminal`` on a non-terminal job, warns neutrally
+        when fewer items are retrieved than ``total_items``, and warns distinctly
+        when a chunk ref could not be decoded. See the sync
+        :meth:`SIEClient.jobs.results` for the full contract.
+        """
         refreshes = 0
         while True:
             job = await self.get(job_id)
+            state = job.get("state")
+            if state not in TERMINAL_JOB_STATES:
+                msg = (
+                    f"job {job_id} is {state!r}, not terminal; results are decodable only after the "
+                    "job reaches a terminal state (succeeded/failed/suspended/cancelled)"
+                )
+                raise RequestError(msg, code=JOB_NOT_TERMINAL_ERROR_CODE, status_code=409)
             chunks = job_chunks(job)
             items = []
             try:
                 for chunk in chunks:
                     ref = chunk.get("ref")
-                    if chunk.get("state") != "succeeded" or not ref:
+                    if not ref:
                         continue
-                    items.extend(decode_chunk_bytes(await self._read_ref(ref)))
+                    raw = await self._read_ref(ref)
+                    try:
+                        items.extend(decode_chunk_bytes(raw))
+                    except MalformedChunkError:
+                        # Garbage bytes are a DECODE fault, not proof of failed
+                        # publication/billing — confine it and flag it distinctly.
+                        warnings.warn(
+                            f"job {job_id} chunk (seq={chunk.get('seq')}) ref could not be decoded "
+                            "(malformed bytes); its items are omitted from the results",
+                            stacklevel=2,
+                        )
             except RequestError as exc:
                 refreshable = exc.status_code == 404 and exc.code == JOB_RESULT_NOT_FOUND_ERROR_CODE
                 if refreshable and refreshes < JOB_RESULT_REF_MAX_REFRESHES:
@@ -3038,26 +3473,62 @@ class _AsyncJobs(_AsyncNamespace):
                     continue
                 raise
             dims = next((it["dims"] for it in items if it.get("dims")), None)
+            retrieved = len(items)
+            total_items = job.get("total_items")
+            if total_items is not None and retrieved < total_items:
+                # Neutral: state only what is known; do not assert a cause.
+                warnings.warn(
+                    f"job {job_id} results are incomplete: retrieved {retrieved} of {total_items} items",
+                    stacklevel=2,
+                )
             return {
                 "job_id": job.get("id", job_id),
-                "state": job.get("state"),
-                "total_items": job.get("total_items"),
+                "state": state,
+                "total_items": total_items,
                 "settled_credits": job.get("settled_credits"),
                 "chunks": chunks,
-                "retrieved": len(items),
+                "retrieved": retrieved,
                 "dims": dims,
                 "items": items,
             }
 
-    async def wait(self, job_id: str, *, timeout_s: float = 600.0, poll_s: float = 2.0) -> JobStatus:
-        """Poll until terminal, or return a connector plan at its stable planned phase."""
+    async def wait(
+        self,
+        job_id: str,
+        *,
+        timeout_s: float = 600.0,
+        poll_s: float = 2.0,
+        raise_on_failure: bool = False,
+    ) -> JobStatus:
+        """Poll until terminal, or return a connector plan at its stable planned phase.
+
+        With ``raise_on_failure=True`` a non-successful terminal
+        (``failed``/``suspended``/``cancelled``) raises :class:`JobFailedError`
+        carrying the status doc's ``outcome``/``error_code``. The default is
+        unchanged and back-compatible (see the sync :meth:`SIEClient.jobs.wait`).
+        """
         deadline = time.monotonic() + timeout_s
         while True:
             job = await self.get(job_id)
-            if job.get("state") in TERMINAL_JOB_STATES or job.get("phase") == "planned":
+            if job.get("phase") == "planned":
+                return job
+            state = job.get("state")
+            if state in TERMINAL_JOB_STATES:
+                if raise_on_failure and state != "succeeded":
+                    outcome = job.get("outcome")
+                    error_code = job.get("error_code")
+                    reason = f" (outcome={outcome!r}, error_code={error_code!r})" if outcome or error_code else ""
+                    msg = f"job {job_id} terminated {state!r}{reason}"
+                    raise JobFailedError(
+                        msg,
+                        job_id=job.get("id", job_id),
+                        state=state,
+                        outcome=outcome,
+                        error_code=error_code,
+                    )
                 return job
             if time.monotonic() >= deadline:
-                msg = f"job {job_id} still {job.get('state')!r} after {timeout_s:.0f}s"
+                msg = f"job {job_id} still {state!r} after {timeout_s:.0f}s"
                 raise RequestError(msg, code="job_wait_timeout", status_code=504)
             await asyncio.sleep(poll_s)
 

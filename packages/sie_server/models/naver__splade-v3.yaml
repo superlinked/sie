@@ -1,5 +1,6 @@
 sie_id: naver/splade-v3
 hf_id: naver/splade-v3
+hf_revision: fdfeceb91d7b9de7985b38addd3ba9f53a59a355
 inputs:
   text: true
   image: false

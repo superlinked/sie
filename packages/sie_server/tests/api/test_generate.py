@@ -10,18 +10,29 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from typing import Literal
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
-from sie_server.adapters._generation_base import GenerationAdapter, GenerationChunk
+from sie_server.adapters._generation_base import (
+    GenerationAdapter,
+    GenerationCapacityError,
+    GenerationChunk,
+    GenerationDrainingError,
+    GenerationError,
+    GenerationInputTooLongError,
+    GenerationInvalidRequestError,
+    GenerationUnsupportedFieldError,
+)
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters.base import ModelCapabilities, ModelDims
+from sie_server.adapters.mlx.generation import MLXGenerationAdapter
 from sie_server.api import generate as generate_api
 from sie_server.api.generate import router as generate_router
+from sie_server.config.engine import EngineConfig
 from sie_server.config.model import (
     AdapterOptions,
     GenerateCapabilities,
@@ -31,12 +42,58 @@ from sie_server.config.model import (
     ProfileConfig,
     Tasks,
 )
+from sie_server.core.loader import expand_profile_variants
 from sie_server.core.registry import ModelRegistry
-from sie_server.types.grammar import GrammarSpec
+from sie_server.types.grammar import OUTLINES_JSON_SCHEMA_TYPE_MESSAGE, GrammarSpec
 from sie_server.types.inputs import ImageInput
 
 _GEMMA_OPEN = "<" + "|channel" + ">" + "thought\n"
 _GEMMA_CLOSE = "<" + "channel|" + ">"
+
+
+class _UntrustedUnsupportedFieldError(GenerationUnsupportedFieldError):
+    code = "SENSITIVE_UNSUPPORTED_CODE"
+
+
+class _UntrustedCapacityError(GenerationCapacityError):
+    code = "SENSITIVE_CAPACITY_CODE"
+
+
+class _FutureUnsupportedFieldError(GenerationUnsupportedFieldError):
+    pass
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_param"),
+    [
+        (GenerationUnsupportedFieldError("n", "n refusal"), "n"),
+        (GenerationUnsupportedFieldError("best_of", "best_of refusal"), "best_of"),
+        (
+            GenerationUnsupportedFieldError(
+                "lora_path",
+                "'lora_adapter' is not supported by this generation backend",
+            ),
+            "lora_adapter",
+        ),
+    ],
+)
+def test_generation_http_exception_preserves_public_refusal_param(
+    error: GenerationUnsupportedFieldError,
+    expected_param: str,
+) -> None:
+    exception = generate_api._generation_http_exception(error)
+
+    assert exception.status_code == 400
+    assert exception.detail["param"] == expected_param
+    assert exception.detail["param"] != "lora_path"
+    assert "lora_path" not in str(exception.detail)
+
+
+def test_generation_http_exception_redacts_future_refusal_subclass_param() -> None:
+    exception = generate_api._generation_http_exception(_FutureUnsupportedFieldError("n", "future refusal"))
+
+    assert exception.status_code == 400
+    assert exception.detail == {"code": "unsupported_field", "message": "future refusal"}
 
 
 class _FakeGenAdapter(GenerationAdapter):
@@ -63,6 +120,13 @@ class _FakeGenAdapter(GenerationAdapter):
     # exercise the route's error/cancelled → non-200 mapping (BUG: a
     # terminal error/cancelled chunk must NOT become an HTTP 200).
     finish_reason: str = "stop"
+    # Typed terminal error fields; tests set these to exercise the
+    # route's verbatim-code fail-closed mapping (#3104/#3136).
+    error_code: str | None = None
+    error_message: str | None = None
+    cached_tokens: int | None = None
+    # Generated text; ``None`` echoes the prompt.
+    output_text: str | None = None
 
     async def generate(
         self,
@@ -105,13 +169,19 @@ class _FakeGenAdapter(GenerationAdapter):
             self.last_call["images"] = images
         # Yield one delta + a terminal chunk so the local-dev route can
         # drain the iterator into the walking-skeleton-shaped aggregate response.
-        yield GenerationChunk(text_delta=f"echo:{prompt}", is_first=True)
+        yield GenerationChunk(
+            text_delta=self.output_text if self.output_text is not None else f"echo:{prompt}",
+            is_first=True,
+        )
         yield GenerationChunk(
             text_delta="",
             done=True,
             finish_reason=self.finish_reason,  # type: ignore[arg-type]
             prompt_tokens=len(prompt.split()),
             completion_tokens=2,
+            cached_tokens=self.cached_tokens,
+            error_code=self.error_code,
+            error_message=self.error_message,
         )
 
 
@@ -200,10 +270,37 @@ class _ThinkingGenAdapter(_FakeGenAdapter):
         )
 
 
+class _PreflightAdapter(_FakeGenAdapter):
+    def __init__(self, error: Exception | None = None, *, raise_during_generate: bool = False) -> None:
+        super().__init__()
+        self.error = error
+        self.raise_during_generate = raise_during_generate
+        self.preflight_parameters: dict[str, object] | None = None
+        self.preflight_stream: bool | None = None
+        self.dispatched_parameters: dict[str, object] | None = None
+        self.events: list[str] = []
+
+    def preflight_generate(self, parameters: Mapping[str, object], *, stream: bool) -> None:
+        self.events.append("preflight")
+        self.preflight_parameters = dict(parameters)
+        self.preflight_stream = stream
+        if self.error is not None and not self.raise_during_generate:
+            raise self.error
+
+    async def generate(self, prompt: str, **kwargs: object) -> AsyncIterator[GenerationChunk]:
+        self.events.append("generate")
+        self.dispatched_parameters = {"prompt": prompt, **kwargs}
+        if self.error is not None and self.raise_during_generate:
+            raise self.error
+        async for chunk in super().generate(prompt, **kwargs):  # type: ignore[arg-type]
+            yield chunk
+
+
 def _make_config(
     *,
     model_id: str = "Qwen/Qwen3-4B-Instruct",
     grammar: list[Literal["json_schema", "regex", "ebnf"]] | None = None,
+    streaming: bool = True,
 ) -> ModelConfig:
     return ModelConfig(
         sie_id=model_id,
@@ -212,7 +309,7 @@ def _make_config(
             generate=GenerateTask(
                 context_length=32768,
                 max_output_tokens=4096,
-                capabilities=GenerateCapabilities(grammar=grammar or []),
+                capabilities=GenerateCapabilities(grammar=grammar or [], streaming=streaming),
             ),
         ),
         profiles={
@@ -306,17 +403,27 @@ class TestGenerateEndpoint:
             ]
             streamed_text = "".join(event.get("text_delta", "") for event in events)
             assert streamed_text == "Visible answer"
+            assert events[0]["text_delta"] == ""
+            assert events[0]["done"] is False
             assert "private reasoning" not in streamed_text
         else:
             assert response.json()["text"] == "Visible answer"
 
     @pytest.mark.parametrize("stream", [False, True])
+    @pytest.mark.parametrize(
+        "template_kwargs", [{"enable_thinking": False}, {"guardian_config": {"risk_name": "harm"}}]
+    )
     def test_text_only_generate_preserves_legacy_adapter_call_signature(
         self,
         client: TestClient,
         registry: MagicMock,
         stream: bool,
+        template_kwargs: dict[str, object],
     ) -> None:
+        config = _make_config()
+        assert config.tasks.generate is not None
+        config.tasks.generate.chat_template_kwargs = template_kwargs
+        registry.get_config.return_value = config
         legacy_adapter = _LegacyTextGenAdapter()
         registry.get.return_value = legacy_adapter
 
@@ -380,6 +487,11 @@ class TestGenerateEndpoint:
         assert fake_adapter.last_call is not None
         assert fake_adapter.last_call["prompt"] == "<image>Read the image"
         assert fake_adapter.last_call["images"] == [{"data": b"hello", "format": "png"}]
+        if stream:
+            chunks = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: {")]
+            assert chunks[-1]["usage"]["images"] == 1
+        else:
+            assert response.json()["usage"]["images"] == 1
 
     @pytest.mark.parametrize("enable_thinking", [False, True])
     def test_native_image_prompt_uses_pinned_trusted_model_tokenizer(
@@ -814,6 +926,18 @@ class TestGenerateEndpoint:
         assert body["detail"]["param"] == "prompt"
         assert body["detail"]["code"] == "INPUT_TOO_LONG"
 
+    def test_prompt_is_not_bound_by_the_item_text_cap(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Generation prompts are not encode/score/extract items: long-context
+        # models keep their own prompt bound, not the per-item text cap.
+        monkeypatch.setattr("sie_server.types.inputs.MAX_ITEM_TEXT_BYTES", 16)
+        response = client.post(
+            "/v1/generate/Qwen__Qwen3-4B-Instruct",
+            json={"prompt": "x" * 64, "max_new_tokens": 8},
+        )
+        assert response.status_code == 200, response.text
+
     # ── Penalty forwarding and unsupported direct-worker grammar ──────
 
     @pytest.mark.parametrize("field", ["frequency_penalty", "presence_penalty"])
@@ -893,6 +1017,7 @@ class TestGenerateEndpoint:
         stream: bool,
     ) -> None:
         registry.get_config.return_value = _make_config(grammar=[expected.kind])
+        fake_adapter.output_text = '{"title": "Quarterly report"}'
 
         response = client.post(
             "/v1/generate/Qwen__Qwen3-4B-Instruct",
@@ -1202,6 +1327,33 @@ class TestGenerateEndpoint:
         assert response.status_code == 400, response.text
         assert registry.start_load_async.called is False
 
+    def test_usage_reports_cached_prompt_tokens(self, client: TestClient, fake_adapter: _FakeGenAdapter) -> None:
+        fake_adapter.cached_tokens = 2
+        body = {"prompt": "one two three", "max_new_tokens": 8}
+
+        blocking = client.post("/v1/generate/Qwen__Qwen3-4B-Instruct", json=body)
+        assert blocking.status_code == 200, blocking.text
+        assert blocking.json()["usage"] == {
+            "prompt_tokens": 3,
+            "completion_tokens": 2,
+            "total_tokens": 5,
+            "prompt_tokens_details": {"cached_tokens": 2},
+        }
+
+        streamed = client.post("/v1/generate/Qwen__Qwen3-4B-Instruct", json={**body, "stream": True})
+        assert streamed.status_code == 200, streamed.text
+        events = [
+            json.loads(line.removeprefix("data: ")) for line in streamed.text.splitlines() if line.startswith("data: {")
+        ]
+        assert events[-1]["usage"]["prompt_tokens_details"] == {"cached_tokens": 2}
+
+    def test_usage_omits_prompt_tokens_details_when_engine_is_silent(
+        self, client: TestClient, fake_adapter: _FakeGenAdapter
+    ) -> None:
+        response = client.post("/v1/generate/Qwen__Qwen3-4B-Instruct", json={"prompt": "Hi", "max_new_tokens": 8})
+        assert response.status_code == 200, response.text
+        assert "prompt_tokens_details" not in response.json()["usage"]
+
     def test_streaming_logprobs_are_forwarded(self, client: TestClient, fake_adapter: _FakeGenAdapter) -> None:
         response = client.post(
             "/v1/generate/Qwen__Qwen3-4B-Instruct",
@@ -1234,6 +1386,98 @@ class TestGenerateEndpoint:
         assert response.status_code == 500, response.text
         assert response.json()["detail"]["code"] == "inference_error"
 
+    def test_terminal_empty_model_output_returns_500_with_verbatim_code(
+        self, client: TestClient, fake_adapter: _FakeGenAdapter
+    ) -> None:
+        """#3104/#3136: an ``empty_model_output`` terminal keeps a
+        ``stop``/``length`` finish_reason, so the buffered route must key on
+        the typed ``error_code`` — not answer HTTP 200 with empty text — and
+        surface the code/message verbatim, exactly like the streaming shape.
+        """
+        fake_adapter.finish_reason = "length"
+        fake_adapter.error_code = "empty_model_output"
+        fake_adapter.error_message = "model produced no visible output text"
+        response = client.post(
+            "/v1/generate/Qwen__Qwen3-4B-Instruct",
+            json={"prompt": "Hi", "max_new_tokens": 8},
+        )
+        assert response.status_code == 500, response.text
+        detail = response.json()["detail"]
+        assert detail["code"] == "empty_model_output"
+        assert detail["message"] == "model produced no visible output text"
+        assert "retry-after" not in {k.lower() for k in response.headers}
+
+    def test_terminal_error_with_typed_code_is_not_flattened_to_inference_error(
+        self, client: TestClient, fake_adapter: _FakeGenAdapter
+    ) -> None:
+        """A parser-style ``finish_reason="error"`` terminal that carries its
+        own typed code must surface that code verbatim, not the hardcoded
+        ``inference_error`` fallback (#3136).
+        """
+        fake_adapter.finish_reason = "error"
+        fake_adapter.error_code = "tool_call_parse_error"
+        fake_adapter.error_message = "model emitted a malformed tool call"
+        response = client.post(
+            "/v1/generate/Qwen__Qwen3-4B-Instruct",
+            json={"prompt": "Hi", "max_new_tokens": 8},
+        )
+        assert response.status_code == 500, response.text
+        detail = response.json()["detail"]
+        assert detail["code"] == "tool_call_parse_error"
+        assert detail["message"] == "model emitted a malformed tool call"
+
+    @pytest.mark.parametrize(
+        ("code", "message", "expected_code", "expected_message"),
+        [
+            (
+                "inference_error",
+                "SENSITIVE_NATIVE_BUFFERED_RUNTIME",
+                "inference_error",
+                "internal error during generation",
+            ),
+            (
+                "grammar_compile_failed",
+                "SENSITIVE_NATIVE_BUFFERED_GRAMMAR",
+                "grammar_compile_failed",
+                "internal error compiling grammar",
+            ),
+            (
+                "MODEL_OUTPUT_PARSE_ERROR",
+                "invalid model JSON",
+                "MODEL_OUTPUT_PARSE_ERROR",
+                "invalid model JSON",
+            ),
+            (
+                "SENSITIVE_NATIVE_BUFFERED_ERROR_CODE",
+                "SENSITIVE_NATIVE_BUFFERED_ERROR_CODE",
+                "inference_error",
+                "generation terminated with an upstream error",
+            ),
+        ],
+    )
+    def test_terminal_error_message_is_classified_at_buffered_boundary(
+        self,
+        client: TestClient,
+        fake_adapter: _FakeGenAdapter,
+        code: str,
+        message: str,
+        expected_code: str,
+        expected_message: str,
+    ) -> None:
+        fake_adapter.finish_reason = "error"
+        fake_adapter.error_code = code
+        fake_adapter.error_message = message
+
+        response = client.post(
+            "/v1/generate/Qwen__Qwen3-4B-Instruct",
+            json={"prompt": "Hi", "max_new_tokens": 8},
+        )
+
+        assert response.status_code == 500, response.text
+        assert response.json()["detail"] == {"code": expected_code, "message": expected_message}
+        if message.startswith("SENSITIVE_"):
+            assert message not in response.text
+
     def test_terminal_cancelled_finish_reason_returns_503(
         self, client: TestClient, fake_adapter: _FakeGenAdapter
     ) -> None:
@@ -1257,3 +1501,518 @@ class TestGenerateEndpoint:
             json={"prompt": "Hi", "max_new_tokens": 8},
         )
         assert response.status_code == 200, response.text
+
+    @pytest.mark.parametrize("stream", [False, True])
+    def test_preflight_receives_exact_dispatched_parameters(
+        self,
+        client: TestClient,
+        registry: MagicMock,
+        stream: bool,
+    ) -> None:
+        adapter = _PreflightAdapter()
+        registry.get.return_value = adapter
+
+        response = client.post(
+            "/v1/generate/Qwen__Qwen3-4B-Instruct",
+            json={"prompt": "Hi", "max_new_tokens": 8, "stream": stream},
+        )
+
+        assert response.status_code == 200, response.text
+        assert adapter.events[:2] == ["preflight", "generate"]
+        assert adapter.preflight_stream is stream
+        assert adapter.preflight_parameters == adapter.dispatched_parameters
+        if stream:
+            assert adapter.preflight_parameters is not None
+            assert adapter.preflight_parameters["logprobs"] is False
+            assert adapter.preflight_parameters["top_logprobs"] is None
+        else:
+            assert adapter.preflight_parameters is not None
+            assert "logprobs" not in adapter.preflight_parameters
+            assert "top_logprobs" not in adapter.preflight_parameters
+
+    def test_streaming_capability_rejects_before_adapter_lookup(
+        self,
+        client: TestClient,
+        registry: MagicMock,
+    ) -> None:
+        registry.get_config.return_value = _make_config(streaming=False)
+
+        response = client.post(
+            "/v1/generate/Qwen__Qwen3-4B-Instruct",
+            json={"prompt": "Hi", "max_new_tokens": 8, "stream": True},
+        )
+
+        assert response.status_code == 400
+        assert response.json()["detail"] == {
+            "code": "unsupported_field",
+            "message": "Model 'Qwen__Qwen3-4B-Instruct' does not support streaming generation",
+            "param": "stream",
+        }
+        registry.get.assert_not_called()
+
+    def test_preflight_unsupported_field_is_exact_400(
+        self,
+        client: TestClient,
+        registry: MagicMock,
+    ) -> None:
+        adapter = _PreflightAdapter(GenerationUnsupportedFieldError("top_k"))
+        registry.get.return_value = adapter
+
+        response = client.post(
+            "/v1/generate/Qwen__Qwen3-4B-Instruct",
+            json={"prompt": "Hi", "max_new_tokens": 8},
+        )
+
+        assert response.status_code == 400
+        assert response.json()["detail"]["code"] == "unsupported_field"
+        assert response.json()["detail"]["param"] == "top_k"
+        assert adapter.events == ["preflight"]
+
+    def test_backend_type_refusal_is_actual_buffered_400(self, client: TestClient, registry: MagicMock) -> None:
+        adapter = _PreflightAdapter(
+            GenerationInvalidRequestError("grammar", OUTLINES_JSON_SCHEMA_TYPE_MESSAGE), raise_during_generate=True
+        )
+        registry.get.return_value = adapter
+        response = client.post(
+            "/v1/generate/Qwen__Qwen3-4B-Instruct", json={"prompt": "Optional value", "max_new_tokens": 8}
+        )
+        assert response.status_code == 400
+        assert response.json()["detail"] == {
+            "code": "invalid_request",
+            "message": OUTLINES_JSON_SCHEMA_TYPE_MESSAGE,
+            "param": "grammar",
+        }
+        assert adapter.events == ["preflight", "generate"]
+
+    def test_preflight_input_too_long_is_exact_400(
+        self,
+        client: TestClient,
+        registry: MagicMock,
+    ) -> None:
+        adapter = _PreflightAdapter(
+            GenerationInputTooLongError(
+                "prompt token count (129) exceeds max_input_len (128)",
+            )
+        )
+        registry.get.return_value = adapter
+
+        response = client.post(
+            "/v1/generate/Qwen__Qwen3-4B-Instruct",
+            json={"prompt": "Hi", "max_new_tokens": 8},
+        )
+
+        assert response.status_code == 400
+        assert response.json()["detail"] == {
+            "code": "INPUT_TOO_LONG",
+            "message": "prompt token count (129) exceeds max_input_len (128)",
+            "param": "prompt",
+        }
+        assert adapter.events == ["preflight"]
+
+    @pytest.mark.parametrize(
+        ("error", "status_code"),
+        [
+            (_UntrustedUnsupportedFieldError("top_k", "private unsupported detail"), 400),
+            (_UntrustedCapacityError("private capacity detail"), 503),
+        ],
+    )
+    def test_typed_generation_errors_sanitize_untrusted_codes(
+        self,
+        client: TestClient,
+        registry: MagicMock,
+        error: GenerationError,
+        status_code: int,
+    ) -> None:
+        adapter = _PreflightAdapter(error)
+        registry.get.return_value = adapter
+
+        response = client.post(
+            "/v1/generate/Qwen__Qwen3-4B-Instruct",
+            json={"prompt": "Hi", "max_new_tokens": 8},
+        )
+
+        assert response.status_code == status_code
+        assert response.json()["detail"]["code"] == "inference_error"
+        assert "SENSITIVE_" not in response.text
+
+    @pytest.mark.parametrize(
+        ("raise_during_generate", "message", "events"),
+        [
+            (False, "internal error during generation preflight", ["preflight"]),
+            (True, "internal error during generation", ["preflight", "generate"]),
+        ],
+    )
+    def test_unexpected_generation_errors_do_not_leak_exception_text(
+        self,
+        client: TestClient,
+        registry: MagicMock,
+        raise_during_generate: bool,
+        message: str,
+        events: list[str],
+    ) -> None:
+        adapter = _PreflightAdapter(
+            RuntimeError("sensitive internal generation detail"),
+            raise_during_generate=raise_during_generate,
+        )
+        registry.get.return_value = adapter
+
+        response = client.post(
+            "/v1/generate/Qwen__Qwen3-4B-Instruct",
+            json={"prompt": "Hi", "max_new_tokens": 8},
+        )
+
+        assert response.status_code == 500
+        assert response.json()["detail"] == {"code": "inference_error", "message": message}
+        assert "sensitive internal generation detail" not in response.text
+        assert adapter.events == events
+
+    @pytest.mark.parametrize("raise_during_generate", [False, True])
+    def test_generic_typed_generation_error_does_not_leak_exception_text(
+        self,
+        client: TestClient,
+        registry: MagicMock,
+        raise_during_generate: bool,
+    ) -> None:
+        sentinel = "SENSITIVE_TYPED_NATIVE_BUFFERED"
+        adapter = _PreflightAdapter(
+            GenerationError(sentinel),
+            raise_during_generate=raise_during_generate,
+        )
+        registry.get.return_value = adapter
+
+        response = client.post(
+            "/v1/generate/Qwen__Qwen3-4B-Instruct",
+            json={"prompt": "Hi", "max_new_tokens": 8},
+        )
+
+        assert response.status_code == 500
+        assert response.json()["detail"] == {
+            "code": "inference_error",
+            "message": "internal error during generation",
+        }
+        assert sentinel not in response.text
+
+    @pytest.mark.parametrize(
+        ("error", "code", "retry_after"),
+        [
+            (GenerationCapacityError("scheduler full"), "RESOURCE_EXHAUSTED", "5"),
+            (GenerationDrainingError("scheduler draining"), "MODEL_LOADING", "5"),
+        ],
+    )
+    def test_typed_capacity_after_preflight_remains_retryable(
+        self,
+        client: TestClient,
+        registry: MagicMock,
+        error: GenerationError,
+        code: str,
+        retry_after: str,
+    ) -> None:
+        adapter = _PreflightAdapter(error, raise_during_generate=True)
+        registry.get.return_value = adapter
+
+        response = client.post(
+            "/v1/generate/Qwen__Qwen3-4B-Instruct",
+            json={"prompt": "Hi", "max_new_tokens": 8},
+        )
+
+        assert response.status_code == 503
+        assert response.json()["detail"]["code"] == code
+        assert response.headers["retry-after"] == retry_after
+        assert adapter.events == ["preflight", "generate"]
+
+    def test_generation_capacity_uses_configured_resource_exhausted_retry_hint(
+        self,
+        client: TestClient,
+        registry: MagicMock,
+    ) -> None:
+        registry.engine_config = EngineConfig.model_validate({"oom_recovery": {"retry_after_s": 12}})
+        adapter = _PreflightAdapter(GenerationCapacityError("scheduler full"))
+        registry.get.return_value = adapter
+
+        response = client.post(
+            "/v1/generate/Qwen__Qwen3-4B-Instruct",
+            json={"prompt": "Hi", "max_new_tokens": 8},
+        )
+
+        assert response.status_code == 503
+        assert response.json()["detail"]["code"] == "RESOURCE_EXHAUSTED"
+        assert response.headers["retry-after"] == "12"
+
+
+_STRICT_SCHEMA = {
+    "type": "object",
+    "properties": {"title": {"type": "string"}},
+    "required": ["title"],
+    "additionalProperties": False,
+}
+
+
+def _grammar_routed_configs() -> dict[str, ModelConfig]:
+    config = _make_config(model_id="Qwen/Qwen3.5-4B", grammar=["json_schema"])
+    assert config.tasks.generate is not None
+    config.tasks.generate.grammar_profile = "no-spec"
+    config.profiles["default"].adapter_options.loadtime["speculative"] = {"algorithm": "NEXTN", "num_steps": 3}
+    config.profiles["no-spec"] = ProfileConfig(
+        extends="default",
+        adapter_options=AdapterOptions(
+            loadtime={"reasoning_parser": "qwen3", "speculative": {"enabled": False}},
+        ),
+    )
+    return expand_profile_variants([config])
+
+
+def _serve_configs(registry: MagicMock, configs: Mapping[str, ModelConfig]) -> None:
+    registry.has_model.side_effect = configs.__contains__
+    registry.get_config.side_effect = configs.__getitem__
+
+
+def _sse_events(text: str) -> list[dict[str, object]]:
+    return [json.loads(line.removeprefix("data: ")) for line in text.splitlines() if line.startswith("data: {")]
+
+
+class TestStrictStructuredOutput:
+    """``strict`` grammars are verified on the terminal path of the direct route."""
+
+    def test_blocking_strict_schema_violation_is_a_typed_error(
+        self,
+        client: TestClient,
+        registry: MagicMock,
+        fake_adapter: _FakeGenAdapter,
+    ) -> None:
+        registry.get_config.return_value = _make_config(grammar=["json_schema"])
+        fake_adapter.output_text = "[]"
+
+        response = client.post(
+            "/v1/generate/Qwen__Qwen3-4B-Instruct",
+            json={
+                "prompt": "Summarise",
+                "grammar": {"json_schema": _STRICT_SCHEMA, "strict": True},
+                "max_new_tokens": 8,
+            },
+        )
+
+        assert response.status_code == 500
+        assert response.json()["detail"] == {
+            "code": "MODEL_OUTPUT_PARSE_ERROR",
+            "message": "generated output does not match the requested JSON schema at $ ('type' keyword)",
+        }
+
+    def test_streaming_strict_schema_violation_errors_on_the_terminal_event(
+        self,
+        client: TestClient,
+        registry: MagicMock,
+        fake_adapter: _FakeGenAdapter,
+    ) -> None:
+        registry.get_config.return_value = _make_config(grammar=["json_schema"])
+        fake_adapter.output_text = '{"title": 7}'
+
+        response = client.post(
+            "/v1/generate/Qwen__Qwen3-4B-Instruct",
+            json={
+                "prompt": "Summarise",
+                "grammar": {"json_schema": _STRICT_SCHEMA, "strict": True},
+                "max_new_tokens": 8,
+                "stream": True,
+            },
+        )
+
+        assert response.status_code == 200
+        events = _sse_events(response.text)
+        assert events[0]["text_delta"] == '{"title": 7}'
+        terminal = events[-1]
+        assert terminal["done"] is True
+        assert terminal["finish_reason"] == "error"
+        assert terminal["error"] == {
+            "code": "MODEL_OUTPUT_PARSE_ERROR",
+            "message": "generated output does not match the requested JSON schema at $.title ('type' keyword)",
+        }
+        assert response.text.endswith("data: [DONE]\n\n")
+
+    @pytest.mark.parametrize("stream", [False, True])
+    def test_strict_regex_requires_a_full_match(
+        self,
+        client: TestClient,
+        registry: MagicMock,
+        fake_adapter: _FakeGenAdapter,
+        stream: bool,
+    ) -> None:
+        registry.get_config.return_value = _make_config(grammar=["regex"])
+        fake_adapter.output_text = "ABC-1234 trailing"
+
+        response = client.post(
+            "/v1/generate/Qwen__Qwen3-4B-Instruct",
+            json={
+                "prompt": "Code?",
+                "grammar": {"regex": r"[A-Z]{3}-\d{4}", "strict": True},
+                "max_new_tokens": 8,
+                "stream": stream,
+            },
+        )
+
+        expected = {
+            "code": "MODEL_OUTPUT_PARSE_ERROR",
+            "message": "generated output does not match the requested regex",
+        }
+        if stream:
+            assert _sse_events(response.text)[-1]["error"] == expected
+        else:
+            assert response.status_code == 500
+            assert response.json()["detail"] == expected
+
+    @pytest.mark.parametrize("strict", [None, False])
+    @pytest.mark.parametrize("stream", [False, True])
+    def test_non_strict_grammar_output_is_returned_unchanged(
+        self,
+        client: TestClient,
+        registry: MagicMock,
+        fake_adapter: _FakeGenAdapter,
+        strict: bool | None,
+        stream: bool,
+    ) -> None:
+        registry.get_config.return_value = _make_config(grammar=["json_schema"])
+        fake_adapter.output_text = "[]"
+        grammar: dict[str, object] = {"json_schema": _STRICT_SCHEMA}
+        if strict is not None:
+            grammar["strict"] = strict
+
+        response = client.post(
+            "/v1/generate/Qwen__Qwen3-4B-Instruct",
+            json={"prompt": "Summarise", "grammar": grammar, "max_new_tokens": 8, "stream": stream},
+        )
+
+        assert response.status_code == 200
+        if stream:
+            terminal = _sse_events(response.text)[-1]
+            assert terminal["finish_reason"] == "stop"
+            assert "error" not in terminal
+        else:
+            assert response.json()["text"] == "[]"
+            assert response.json()["finish_reason"] == "stop"
+
+    def test_strict_output_that_conforms_is_returned(
+        self,
+        client: TestClient,
+        registry: MagicMock,
+        fake_adapter: _FakeGenAdapter,
+    ) -> None:
+        registry.get_config.return_value = _make_config(grammar=["json_schema"])
+        fake_adapter.output_text = '{"title": "Quarterly report"}'
+
+        response = client.post(
+            "/v1/generate/Qwen__Qwen3-4B-Instruct",
+            json={
+                "prompt": "Summarise",
+                "grammar": {"json_schema": _STRICT_SCHEMA, "strict": True},
+                "max_new_tokens": 8,
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json()["text"] == '{"title": "Quarterly report"}'
+
+    def test_strict_ebnf_is_rejected_before_dispatch(
+        self,
+        client: TestClient,
+        registry: MagicMock,
+        fake_adapter: _FakeGenAdapter,
+    ) -> None:
+        registry.get_config.return_value = _make_config(grammar=["ebnf"])
+
+        response = client.post(
+            "/v1/generate/Qwen__Qwen3-4B-Instruct",
+            json={"prompt": "Yes?", "grammar": {"ebnf": 'root ::= "yes"', "strict": True}, "max_new_tokens": 8},
+        )
+
+        assert response.status_code == 400
+        assert response.json()["detail"]["code"] == "unsupported_field"
+        assert response.json()["detail"]["param"] == "grammar.strict"
+        assert fake_adapter.last_call is None
+
+
+class TestGrammarProfileAdmission:
+    """Grammar requests on the direct route run on the declared grammar profile."""
+
+    @pytest.mark.parametrize("stream", [False, True])
+    def test_grammar_request_runs_on_the_grammar_profile(
+        self,
+        client: TestClient,
+        registry: MagicMock,
+        fake_adapter: _FakeGenAdapter,
+        stream: bool,
+    ) -> None:
+        _serve_configs(registry, _grammar_routed_configs())
+
+        response = client.post(
+            "/v1/generate/Qwen__Qwen3.5-4B",
+            json={
+                "prompt": "Hi",
+                "grammar": {"json_schema": {"type": "object"}},
+                "max_new_tokens": 8,
+                "stream": stream,
+            },
+        )
+
+        assert response.status_code == 200, response.text
+        registry.get.assert_called_with("Qwen/Qwen3.5-4B:no-spec")
+        registry.touch_lru.assert_called_with("Qwen/Qwen3.5-4B:no-spec")
+        assert fake_adapter.last_call is not None
+        assert fake_adapter.last_call["grammar"] == GrammarSpec(kind="json_schema", value={"type": "object"})
+        if not stream:
+            assert response.json()["model"] == "Qwen/Qwen3.5-4B"
+
+    def test_unconstrained_request_keeps_the_requested_profile(
+        self,
+        client: TestClient,
+        registry: MagicMock,
+    ) -> None:
+        _serve_configs(registry, _grammar_routed_configs())
+
+        response = client.post("/v1/generate/Qwen__Qwen3.5-4B", json={"prompt": "Hi", "max_new_tokens": 8})
+
+        assert response.status_code == 200, response.text
+        registry.get.assert_called_with("Qwen/Qwen3.5-4B")
+        assert response.json()["model"] == "Qwen/Qwen3.5-4B"
+
+    def test_missing_grammar_profile_rejects_instead_of_running_speculatively(
+        self,
+        client: TestClient,
+        registry: MagicMock,
+        fake_adapter: _FakeGenAdapter,
+    ) -> None:
+        configs = _grammar_routed_configs()
+        del configs["Qwen/Qwen3.5-4B:no-spec"]
+        _serve_configs(registry, configs)
+
+        response = client.post(
+            "/v1/generate/Qwen__Qwen3.5-4B",
+            json={"prompt": "Hi", "grammar": {"json_schema": {"type": "object"}}, "max_new_tokens": 8},
+        )
+
+        assert response.status_code == 400
+        detail = response.json()["detail"]
+        assert detail["code"] == "unsupported_field"
+        assert detail["param"] == "grammar"
+        assert "'no-spec'" in detail["message"]
+        registry.get.assert_not_called()
+        assert fake_adapter.last_call is None
+
+    def test_mlx_backend_rejects_grammar_in_preflight(
+        self,
+        client: TestClient,
+        registry: MagicMock,
+    ) -> None:
+        registry.get_config.return_value = _make_config(model_id="Qwen/Qwen3.5-4B", grammar=["json_schema"])
+        adapter = MLXGenerationAdapter(model_name_or_path="Qwen/Qwen3.5-4B", mlx_repo="mlx-community/Qwen3.5-4B-4bit")
+        registry.get.return_value = adapter
+
+        response = client.post(
+            "/v1/generate/Qwen__Qwen3.5-4B",
+            json={"prompt": "Hi", "grammar": {"json_schema": {"type": "object"}}, "max_new_tokens": 8},
+        )
+
+        assert response.status_code == 400
+        assert response.json()["detail"] == {
+            "code": "unsupported_field",
+            "message": "structured-output grammars are not supported by the MLX generation backend",
+            "param": "grammar",
+        }

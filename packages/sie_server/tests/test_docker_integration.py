@@ -6,8 +6,6 @@ These tests build and run the actual SIE Docker image to verify:
 - Model downloads work (cache directory permissions)
 - Basic inference works
 
-Regression test for: https://github.com/superlinked/sie-internal/issues/10
-
 Run with: pytest -m "docker"
 """
 

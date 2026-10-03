@@ -25,7 +25,12 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Literal, cast
 
-from sie_server.adapters._generation_base import FinishReason, GenerationChunk, ToolCallDelta
+from sie_server.adapters._generation_base import (
+    FinishReason,
+    GenerationChunk,
+    ToolCallDelta,
+    aclose_with_error_precedence,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +47,7 @@ _PARALLEL_TOOL_CALLS_VIOLATED = "parallel_tool_calls_violated"
 # ``<tool_call>…</tool_call>``:
 #   - ``qwen_xml``    — Qwen3(-Coder): ``<function=NAME><parameter=K>V</parameter>…</function>``
 #   - ``hermes_json`` — Hermes: ``{"name": "...", "arguments": {...}}``
+#   - ``glm_xml``     — GLM: ``NAME<arg_key>K</arg_key><arg_value>V</arg_value>…``
 #   - ``auto``        — runtime heuristic (XML if the block starts with
 #                       ``<function=``, else JSON). Kept as a fallback for
 #                       callers that cannot resolve the model's configured
@@ -49,7 +55,7 @@ _PARALLEL_TOOL_CALLS_VIOLATED = "parallel_tool_calls_violated"
 #                       model config (``tasks.generate`` → adapter
 #                       ``tool_call_parser``) so production traffic uses an
 #                       explicit format rather than guessing per block.
-ToolCallFormat = Literal["auto", "qwen_xml", "hermes_json"]
+ToolCallFormat = Literal["auto", "qwen_xml", "hermes_json", "glm_xml"]
 
 # A model that emits ``<tool_call>`` and never closes it would let
 # ``tool_buffer`` grow without bound (same for free-form prose with no
@@ -82,17 +88,22 @@ async def parse_tool_call_stream(
     always ``aclose()``d (on cancel, early parse-error ``return``, and normal
     completion alike).
     """
+    terminal_outcome_selected = False
     try:
         async for out in _parse_tool_call_stream_impl(
             chunks,
             tool_call_format=tool_call_format,
             parallel_tool_calls=parallel_tool_calls,
         ):
+            if out.done:
+                terminal_outcome_selected = True
             yield out
     finally:
-        aclose = getattr(chunks, "aclose", None)
-        if aclose is not None:
-            await aclose()
+        await aclose_with_error_precedence(
+            chunks,
+            outcome_selected=terminal_outcome_selected,
+            context="tool-call parser upstream iterator",
+        )
 
 
 @dataclass
@@ -341,6 +352,9 @@ async def _parse_tool_call_stream_impl(
         return s
 
     async for chunk in chunks:
+        if not chunk.text_delta and not chunk.done and chunk.finish_reason is None and not chunk.logprobs:
+            yield chunk
+            continue
         idx = chunk.choice_index
         state = _state(idx)
         incoming = chunk.text_delta
@@ -430,8 +444,11 @@ async def _parse_tool_call_stream_impl(
                     finish_reason="tool_calls" if any_tool_call else chunk.finish_reason,
                     prompt_tokens=chunk.prompt_tokens,
                     completion_tokens=chunk.completion_tokens,
+                    cached_tokens=chunk.cached_tokens,
                     candidates=tuple(updated_candidates),
                     logprobs=chunk.logprobs,
+                    error_code=chunk.error_code,
+                    error_message=chunk.error_message,
                 )
             # Global terminal. Close any choices that did not see a
             # per-choice finish event (single-candidate path: this is
@@ -476,6 +493,9 @@ async def _parse_tool_call_stream_impl(
                 finish_reason=global_finish,  # type: ignore[arg-type]
                 prompt_tokens=chunk.prompt_tokens,
                 completion_tokens=chunk.completion_tokens,
+                cached_tokens=chunk.cached_tokens,
+                error_code=chunk.error_code,
+                error_message=chunk.error_message,
                 # Preserve ``candidates`` (with any per-candidate
                 # ``tool_calls`` injected above for the non-streaming
                 # ``n>1`` + tools path) through the wrap.
@@ -578,6 +598,8 @@ def _tool_call_deltas(raw: str, index: int, tool_call_format: ToolCallFormat = "
         name, arguments = _parse_xml_tool_call(raw)
     elif tool_call_format == "hermes_json":
         name, arguments = _parse_hermes_tool_call(raw)
+    elif tool_call_format == "glm_xml":
+        name, arguments = _parse_glm_tool_call(raw)
     elif raw.startswith("<function="):
         name, arguments = _parse_xml_tool_call(raw)
     else:
@@ -671,6 +693,67 @@ def _parse_xml_tool_call(raw: str) -> tuple[str, dict[str, object]]:
             arguments[key] = val
         pos = close_idx + len(_XML_PARAM_CLOSE)
         count += 1
+    return name, arguments
+
+
+_GLM_KEY_OPEN = "<arg_key>"
+_GLM_KEY_CLOSE = "</arg_key>"
+_GLM_VALUE_OPEN = "<arg_value>"
+_GLM_VALUE_CLOSE = "</arg_value>"
+
+
+def _skip_whitespace(raw: str, pos: int) -> int:
+    while pos < len(raw) and raw[pos].isspace():
+        pos += 1
+    return pos
+
+
+def _parse_glm_tool_call(raw: str) -> tuple[str, dict[str, object]]:
+    """Parse the GLM tool-call form.
+
+    Example::
+
+        get_weather<arg_key>city</arg_key><arg_value>Tokyo</arg_value>
+
+    Returns ``(name, arguments)``; the name is the text before the first
+    ``<arg_key>``. Only whitespace may separate the name and the argument
+    pairs, and a name or key carrying a tag is rejected, so an unpaired or
+    misplaced tag is a parse error rather than part of the call. The chat
+    template writes string values raw and every other value as JSON, so values
+    are coerced as in the Qwen XML form. The scan is linear, and a call with
+    more than ``_MAX_XML_PARAMS`` pairs is rejected rather than truncated.
+    """
+    first_key = raw.find(_GLM_KEY_OPEN)
+    name = (raw if first_key == -1 else raw[:first_key]).strip()
+    if not name or any(char.isspace() or char in "<>" for char in name):
+        raise ValueError("malformed GLM tool-call: invalid function name")
+    arguments: dict[str, object] = {}
+    pos = len(raw) if first_key == -1 else first_key
+    count = 0
+    while (pos := _skip_whitespace(raw, pos)) < len(raw) and count < _MAX_XML_PARAMS:
+        if not raw.startswith(_GLM_KEY_OPEN, pos):
+            raise ValueError("malformed GLM tool-call: expected <arg_key>")
+        key_close = raw.find(_GLM_KEY_CLOSE, pos)
+        if key_close == -1:
+            raise ValueError("malformed GLM tool-call: unterminated argument")
+        value_open = _skip_whitespace(raw, key_close + len(_GLM_KEY_CLOSE))
+        if not raw.startswith(_GLM_VALUE_OPEN, value_open):
+            raise ValueError("malformed GLM tool-call: expected <arg_value>")
+        value_close = raw.find(_GLM_VALUE_CLOSE, value_open)
+        if value_close == -1:
+            raise ValueError("malformed GLM tool-call: unterminated argument")
+        key = raw[pos + len(_GLM_KEY_OPEN) : key_close].strip()
+        if "<" in key or ">" in key:
+            raise ValueError("malformed GLM tool-call: invalid argument key")
+        value = raw[value_open + len(_GLM_VALUE_OPEN) : value_close].strip()
+        try:
+            arguments[key] = json.loads(value)
+        except (json.JSONDecodeError, ValueError):
+            arguments[key] = value
+        pos = value_close + len(_GLM_VALUE_CLOSE)
+        count += 1
+    if _skip_whitespace(raw, pos) < len(raw):
+        raise ValueError(f"malformed GLM tool-call: more than {_MAX_XML_PARAMS} arguments")
     return name, arguments
 
 

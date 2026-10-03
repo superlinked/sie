@@ -12,11 +12,13 @@
 import { describe, expect, it } from "vitest";
 import type {
   AudioInput,
+  ChatCompletionChunk,
   DocumentInput,
   EncodeResult,
   Entity,
   ExtractItem,
   ExtractResult,
+  GenerateChunk,
   Item,
   ModelCapabilities,
   ModelInfo,
@@ -122,6 +124,36 @@ describe("Item creation - common user patterns", () => {
     const item: Item = { document: { data: new Uint8Array([0x00, 0x01]) } };
 
     expect(item.document?.format).toBeUndefined();
+  });
+});
+
+describe("Generation SSE error types", () => {
+  it("represents the additive retry hint on chat and native chunks", () => {
+    const error = {
+      code: "RESOURCE_EXHAUSTED",
+      message: "capacity unavailable",
+      retry_after_s: 12,
+    };
+    const generate: GenerateChunk = {
+      request_id: "req-generate",
+      seq: 0,
+      text_delta: "",
+      done: true,
+      error,
+    };
+    const chat: ChatCompletionChunk = {
+      id: "chatcmpl-1",
+      object: "chat.completion.chunk",
+      created: 0,
+      model: "m",
+      system_fingerprint: null,
+      choices: [],
+      request_id: "req-chat",
+      error,
+    };
+
+    expect(generate.error?.retry_after_s).toBe(12);
+    expect(chat.error?.retry_after_s).toBe(12);
   });
 });
 
@@ -421,6 +453,7 @@ describe("ModelInfo - model discovery", () => {
   it("surfaces generation capabilities for code/sql/guard discovery", () => {
     // User scenario: "Show generation models that support text-to-SQL"
     const capabilities: ModelCapabilities = {
+      streaming: false,
       grammar: ["json_schema", "regex"],
       tools: true,
       lora_adapters: ["sql-lora"],
@@ -439,10 +472,14 @@ describe("ModelInfo - model discovery", () => {
     };
 
     expect(model.capabilities?.code).toBe(true);
+    expect(model.capabilities?.streaming).toBe(false);
     expect(model.capabilities?.sql).toBe(true);
     expect(model.capabilities?.guard).toBe(false);
     expect(model.capabilities?.grammar).toEqual(["json_schema", "regex"]);
     expect(model.capabilities?.profile_lora_adapters?.default).toEqual(["sql-lora"]);
+
+    const gatewayNullableCapabilities: ModelCapabilities = { streaming: null };
+    expect(gatewayNullableCapabilities.streaming).toBeNull();
   });
 });
 

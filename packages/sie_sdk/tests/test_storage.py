@@ -1,8 +1,11 @@
 """Tests for storage backend functionality."""
 
+import json
+import logging
 import sys
 import types
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -10,7 +13,9 @@ from sie_sdk.storage import (
     AzureBlobBackend,
     GCSBackend,
     LocalBackend,
+    OSSBackend,
     S3Backend,
+    _AlibabaCredentialsProvider,
     get_storage_backend,
     is_cloud_path,
     join_path,
@@ -526,6 +531,280 @@ class TestAzureBlobBackend:
         )
 
 
+class TestOSSBackend:
+    """Alibaba OSS uses strict URLs, V4 signing, and provider credentials."""
+
+    @staticmethod
+    def _backend_with_bucket(bucket: MagicMock) -> OSSBackend:
+        backend = OSSBackend()
+        backend._buckets["sie-cache"] = bucket
+        return backend
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "oss://",
+            "oss://ABCD/models",
+            "oss://ab/models",
+            "oss://user:password@sie-cache/models",
+            "oss://sie-cache/models?token=sensitive",
+            "oss://sie-cache/models#fragment",
+            "oss://sie-cache//models",
+            "oss://sie-cache/models/../payloads",
+            "oss://sie-cache/models/%2e%2e/payloads",
+            "oss://sie-cache/models\\payloads",
+            "oss://sie-cache/models with spaces",
+            f"oss://sie-cache/{'a' * 1024}",
+        ],
+    )
+    def test_parse_rejects_ambiguous_or_credential_bearing_urls(self, url: str) -> None:
+        with pytest.raises(ValueError, match="OSS"):
+            OSSBackend._parse_oss_url(url)
+
+    def test_parse_accepts_bucket_root_and_safe_prefix(self) -> None:
+        assert OSSBackend._parse_oss_url("oss://sie-cache") == ("sie-cache", "")
+        assert OSSBackend._parse_oss_url("oss://sie-cache/models/snapshots/") == (
+            "sie-cache",
+            "models/snapshots/",
+        )
+
+    def test_shared_payload_wire_fixture_matches_python_path_contract(self) -> None:
+        fixture_path = Path(__file__).parents[2] / "wire-fixtures" / "oss_payload_store.json"
+        fixture = json.loads(fixture_path.read_text())
+
+        bucket, object_key = OSSBackend._parse_oss_url(fixture["full_reference"])
+        assert fixture["version"] == 1
+        assert fixture["scheme"] == "oss"
+        assert bucket == fixture["bucket"]
+        assert object_key == fixture["object_key"]
+        assert object_key == f"{fixture['prefix']}/{fixture['plain_key']}"
+        assert join_path(f"oss://{bucket}", fixture["prefix"], fixture["plain_key"]) == fixture["full_reference"]
+
+    def test_paginated_listing_filters_markers_and_nested_files(self) -> None:
+        bucket = MagicMock()
+        page_marker = "page-2"
+        bucket.list_objects_v2.side_effect = [
+            SimpleNamespace(
+                prefix_list=["models/first/"],
+                object_list=[],
+                is_truncated=True,
+                next_continuation_token=page_marker,
+            ),
+            SimpleNamespace(
+                prefix_list=["models/second/"],
+                object_list=[],
+                is_truncated=False,
+                next_continuation_token="",
+            ),
+            SimpleNamespace(
+                prefix_list=[],
+                object_list=[
+                    SimpleNamespace(key="models/"),
+                    SimpleNamespace(key="models/config.yaml"),
+                    SimpleNamespace(key="models/readme.md"),
+                    SimpleNamespace(key="models/nested/ignored.yaml"),
+                ],
+                is_truncated=False,
+                next_continuation_token="",
+            ),
+        ]
+        backend = self._backend_with_bucket(bucket)
+
+        assert list(backend.list_dirs("oss://sie-cache/models")) == ["first", "second"]
+        assert list(backend.list_files("oss://sie-cache/models", "*.yaml")) == ["config.yaml"]
+        assert bucket.list_objects_v2.call_args_list[0].kwargs["continuation_token"] == ""
+        assert bucket.list_objects_v2.call_args_list[1].kwargs["continuation_token"] == page_marker
+
+    def test_has_children_ignores_folder_marker(self) -> None:
+        bucket = MagicMock()
+        bucket.list_objects_v2.side_effect = [
+            SimpleNamespace(object_list=[SimpleNamespace(key="models/snapshots/")]),
+            SimpleNamespace(
+                object_list=[
+                    SimpleNamespace(key="models/snapshots/"),
+                    SimpleNamespace(key="models/snapshots/abc/config.json"),
+                ]
+            ),
+        ]
+        backend = self._backend_with_bucket(bucket)
+
+        assert backend.has_children("oss://sie-cache/models/snapshots") is False
+        assert backend.has_children("oss://sie-cache/models/snapshots") is True
+        assert bucket.list_objects_v2.call_args.kwargs == {
+            "prefix": "models/snapshots/",
+            "delimiter": "",
+            "continuation_token": "",
+            "max_keys": 2,
+        }
+
+    def test_download_exists_and_read_text_use_exact_key(self, tmp_path: Path) -> None:
+        bucket = MagicMock()
+        bucket.object_exists.return_value = True
+        result = MagicMock()
+        result.read.return_value = b"model: clip\n"
+        bucket.get_object.return_value = result
+        backend = self._backend_with_bucket(bucket)
+        destination = tmp_path / "nested" / "config.yaml"
+
+        backend.download_file("oss://sie-cache/models/config.yaml", destination)
+        assert backend.exists("oss://sie-cache/models/config.yaml") is True
+        assert backend.read_text("oss://sie-cache/models/config.yaml") == "model: clip\n"
+
+        bucket.get_object_to_file.assert_called_once_with("models/config.yaml", str(destination))
+        bucket.object_exists.assert_called_once_with("models/config.yaml")
+        bucket.get_object.assert_called_once_with("models/config.yaml")
+        result.close.assert_called_once_with()
+
+    def test_provider_failure_is_sanitized(self) -> None:
+        class SecretError(Exception):
+            status = 403
+            code = "AccessDenied"
+
+            def __str__(self) -> str:
+                return "token=projected-secret request-id=raw-id"
+
+        bucket = MagicMock()
+        bucket.get_object.side_effect = SecretError()
+        backend = self._backend_with_bucket(bucket)
+
+        with pytest.raises(RuntimeError) as exc_info:
+            backend.read_text("oss://sie-cache/models/config.yaml")
+
+        message = str(exc_info.value)
+        assert message == "Alibaba OSS read failed (status=403, code=AccessDenied)"
+        assert "projected-secret" not in message
+        assert "raw-id" not in message
+
+    def test_bucket_construction_uses_v4_and_derived_internal_endpoint(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        calls: dict[str, object] = {}
+        oss2_module = types.ModuleType("oss2")
+
+        def provider_auth_v4(provider: object) -> object:
+            calls["provider"] = provider
+            return "v4-auth"
+
+        def bucket_factory(auth: object, endpoint: str, bucket_name: str, **kwargs: object) -> object:
+            calls["bucket"] = (auth, endpoint, bucket_name, kwargs)
+            return object()
+
+        oss2_module.ProviderAuthV4 = provider_auth_v4
+        oss2_module.Bucket = bucket_factory
+        monkeypatch.setitem(sys.modules, "oss2", oss2_module)
+        monkeypatch.setenv("SIE_OSS_REGION", "eu-central-1")
+        monkeypatch.setenv("SIE_OSS_USE_INTERNAL_ENDPOINT", "true")
+
+        backend = OSSBackend()
+        backend._credential_client = MagicMock()
+        backend._get_bucket("sie-cache")
+
+        assert calls["bucket"] == (
+            "v4-auth",
+            "https://oss-eu-central-1-internal.aliyuncs.com",
+            "sie-cache",
+            {"app_name": "sie-sdk", "region": "eu-central-1"},
+        )
+        assert calls["provider"] is backend._credentials_provider
+        assert not hasattr(oss2_module, "Auth")
+        assert logging.getLogger("oss2.http").getEffectiveLevel() >= logging.WARNING
+
+    def test_endpoint_config_rejects_invalid_region_and_boolean(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SIE_OSS_REGION", "https://attacker.invalid")
+        with pytest.raises(ValueError, match="SIE_OSS_REGION"):
+            OSSBackend._resolve_runtime_endpoint()
+
+        monkeypatch.setenv("SIE_OSS_REGION", "eu-central-1")
+        monkeypatch.setenv("SIE_OSS_USE_INTERNAL_ENDPOINT", "sometimes")
+        with pytest.raises(ValueError, match="SIE_OSS_USE_INTERNAL_ENDPOINT"):
+            OSSBackend._resolve_runtime_endpoint()
+
+    def test_partial_rrsa_configuration_fails_closed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ALIBABA_CLOUD_ROLE_ARN", "sensitive-role-value")
+        monkeypatch.delenv("ALIBABA_CLOUD_OIDC_PROVIDER_ARN", raising=False)
+        monkeypatch.delenv("ALIBABA_CLOUD_OIDC_TOKEN_FILE", raising=False)
+
+        with pytest.raises(RuntimeError) as exc_info:
+            OSSBackend._build_credential_client()
+
+        message = str(exc_info.value)
+        assert "incomplete" in message
+        assert "sensitive-role-value" not in message
+
+    def test_complete_rrsa_configuration_selects_explicit_oidc_client(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        package = types.ModuleType("alibabacloud_credentials")
+        client_module = types.ModuleType("alibabacloud_credentials.client")
+        models_module = types.ModuleType("alibabacloud_credentials.models")
+
+        class FakeConfig:
+            def __init__(self, **kwargs: object) -> None:
+                self.kwargs = kwargs
+
+        class FakeClient:
+            def __init__(self, config: FakeConfig | None = None) -> None:
+                self.config = config
+
+        client_module.Client = FakeClient
+        models_module.Config = FakeConfig
+        monkeypatch.setitem(sys.modules, "alibabacloud_credentials", package)
+        monkeypatch.setitem(sys.modules, "alibabacloud_credentials.client", client_module)
+        monkeypatch.setitem(sys.modules, "alibabacloud_credentials.models", models_module)
+        monkeypatch.setenv("ALIBABA_CLOUD_ROLE_ARN", "acs:ram::example:role/workload")
+        monkeypatch.setenv("ALIBABA_CLOUD_OIDC_PROVIDER_ARN", "acs:ram::example:oidc-provider/ack")
+        monkeypatch.setenv("ALIBABA_CLOUD_OIDC_TOKEN_FILE", "/var/run/secrets/ack/token")
+        monkeypatch.setenv("ALIBABA_CLOUD_ROLE_SESSION_NAME", "sie-worker")
+
+        client = OSSBackend._build_credential_client()
+
+        assert client.config is not None
+        assert client.config.kwargs == {
+            "type": "oidc_role_arn",
+            "role_arn": "acs:ram::example:role/workload",
+            "oidc_provider_arn": "acs:ram::example:oidc-provider/ack",
+            "oidc_token_file_path": "/var/run/secrets/ack/token",
+            "role_session_name": "sie-worker",
+        }
+
+    def test_credentials_adapter_refreshes_and_sanitizes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        credentials_module = types.ModuleType("oss2.credentials")
+
+        class FakeCredentials:
+            def __init__(self, access_key_id: str, access_key_secret: str, security_token: str) -> None:
+                self.values = (access_key_id, access_key_secret, security_token)
+
+        credentials_module.Credentials = FakeCredentials
+        monkeypatch.setitem(sys.modules, "oss2.credentials", credentials_module)
+        client = MagicMock()
+        first_values = ("id-1", "secret-1", "token-1")
+        second_values = ("id-2", "secret-2", "token-2")
+        client.get_credential.side_effect = [
+            SimpleNamespace(
+                access_key_id=first_values[0],
+                access_key_secret=first_values[1],
+                security_token=first_values[2],
+            ),
+            SimpleNamespace(
+                access_key_id=second_values[0],
+                access_key_secret=second_values[1],
+                security_token=second_values[2],
+            ),
+        ]
+        provider = _AlibabaCredentialsProvider(client)
+
+        assert provider.get_credentials().values == first_values
+        assert provider.get_credentials().values == second_values
+        assert client.get_credential.call_count == 2
+
+        client.get_credential.side_effect = RuntimeError("OIDC token=projected-secret")
+        with pytest.raises(RuntimeError, match="could not be resolved") as exc_info:
+            provider.get_credentials()
+        assert "projected-secret" not in str(exc_info.value)
+
+
 class TestHelperFunctions:
     """Tests for module-level helper functions."""
 
@@ -535,6 +814,7 @@ class TestHelperFunctions:
         assert is_cloud_path("gs://bucket/key")
         assert is_cloud_path("abfs://container@account.dfs.core.windows.net/key")
         assert is_cloud_path("abfss://container@account.dfs.core.windows.net/key")
+        assert is_cloud_path("oss://bucket/key")
         assert not is_cloud_path("/local/path")
         assert not is_cloud_path("./relative/path")
 
@@ -558,6 +838,10 @@ class TestHelperFunctions:
         result = join_path("abfs://container@account.dfs.core.windows.net/models/", "dir", "file.txt")
         assert result == "abfs://container@account.dfs.core.windows.net/models/dir/file.txt"
 
+    def test_join_path_oss(self) -> None:
+        result = join_path("oss://bucket/models/", "dir", "file.txt")
+        assert result == "oss://bucket/models/dir/file.txt"
+
     def test_get_storage_backend(self) -> None:
         """Backend selection works correctly."""
         assert isinstance(get_storage_backend("/local/path"), LocalBackend)
@@ -565,6 +849,7 @@ class TestHelperFunctions:
         # so we just check we get the right type
         assert isinstance(get_storage_backend("s3://bucket"), S3Backend)
         assert isinstance(get_storage_backend("gs://bucket"), GCSBackend)
+        assert isinstance(get_storage_backend("oss://bucket"), OSSBackend)
         assert isinstance(get_storage_backend("abfs://container@account.dfs.core.windows.net/models"), AzureBlobBackend)
         assert isinstance(
             get_storage_backend("abfss://container@account.dfs.core.windows.net/models"), AzureBlobBackend

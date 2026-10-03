@@ -8,7 +8,7 @@ from typing import Any
 from azure.core.exceptions import HttpResponseError
 from botocore.exceptions import ClientError
 from google.api_core.exceptions import Forbidden
-from sie_sdk.storage import AzureBlobBackend, GCSBackend, LocalBackend, S3Backend
+from sie_sdk.storage import AzureBlobBackend, GCSBackend, LocalBackend, OSSBackend, S3Backend
 
 
 class FakeS3Client:
@@ -252,6 +252,62 @@ class TestAzureServerSideCopy:
         ((source_url, _),) = dst_container.blob_clients["models/a.bin"].copy_calls
         assert source_url == src_blob.url
         assert source_url.count("?") == 1
+
+
+class TestOSSServerSideCopy:
+    def test_cross_provider_is_unsupported(self) -> None:
+        backend = OSSBackend()
+
+        assert backend.try_server_side_copy("oss://source/models/a.bin", "s3://dest/models/a.bin") is False
+        assert backend._buckets == {}
+
+    def test_same_region_copy_uses_destination_bucket(self) -> None:
+        backend = OSSBackend()
+        destination = FakeOSSBucket()
+        backend._buckets["dest-bucket"] = destination
+
+        assert (
+            backend.try_server_side_copy(
+                "oss://source-bucket/models/a.bin",
+                "oss://dest-bucket/other/a.bin",
+            )
+            is True
+        )
+        assert destination.copies == [("source-bucket", "models/a.bin", "other/a.bin")]
+
+    def test_provider_error_falls_back_without_exposing_secrets(self, caplog: Any) -> None:
+        class SecretProviderError(Exception):
+            status = 403
+            code = "AccessDenied"
+
+            def __str__(self) -> str:
+                return "Authorization=secret-token request-id=private"
+
+        backend = OSSBackend()
+        destination = FakeOSSBucket()
+        destination.error = SecretProviderError()
+        backend._buckets["dest-bucket"] = destination
+
+        assert (
+            backend.try_server_side_copy(
+                "oss://source-bucket/models/a.bin",
+                "oss://dest-bucket/other/a.bin",
+            )
+            is False
+        )
+        assert "secret-token" not in caplog.text
+        assert "request-id" not in caplog.text
+
+
+class FakeOSSBucket:
+    def __init__(self) -> None:
+        self.copies: list[tuple[str, str, str]] = []
+        self.error: Exception | None = None
+
+    def copy_object(self, source_bucket: str, source_key: str, destination_key: str) -> None:
+        if self.error is not None:
+            raise self.error
+        self.copies.append((source_bucket, source_key, destination_key))
 
 
 class TestBaseBackendDefault:

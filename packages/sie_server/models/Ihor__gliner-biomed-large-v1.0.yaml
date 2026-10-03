@@ -1,5 +1,8 @@
 sie_id: Ihor/gliner-biomed-large-v1.0
 hf_id: Ihor/gliner-biomed-large-v1.0
+hf_revision: f79771210ab2111a2081ef31620fdb7342f602e9
+hf_tokenizer_dependencies:
+  Ihor/gliner-biomed-large-v1.0: f79771210ab2111a2081ef31620fdb7342f602e9
 inputs:
   text: true
   image: false
@@ -16,4 +19,9 @@ profiles:
     adapter_path: sie_server.adapters.gliner:GLiNERAdapter
     adapter_options:
       loadtime: {}
-      runtime: {}
+      runtime:
+        # Chosen on dev data, caller-named types: macro F1 over the CrossNER AI, literature, music,
+        # politics and science dev splits and 500 train sentences each of MIT Movie and MIT Restaurant
+        # rises from 0.635 at the library's 0.5 to 0.658 at 0.8 (grid 0.2 to 0.8). CoNLL-2003 test F1
+        # rises too, from 0.644 to 0.679.
+        threshold: 0.8

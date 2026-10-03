@@ -1,0 +1,23 @@
+sie_id: knowledgator/gliformer-large-v1
+hf_id: knowledgator/gliformer-large-v1
+hf_revision: d0a4e53d09cebe6bc963dd9be319d4279084bb2d
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode:
+    dense:
+      dim: 1024
+  score: null
+  extract: {}
+max_sequence_length: 2048
+profiles:
+  default:
+    max_batch_tokens: 16384
+    compute_precision: float16
+    adapter_path: sie_server.adapters.gliformer.adapter:GLiFormerAdapter
+    adapter_options:
+      loadtime: {}
+      runtime: {}

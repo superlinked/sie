@@ -29,7 +29,7 @@ profiles:
       loadtime:
         mem_fraction_static: 0.85
         served_model_name: lightonai/LightOnOCR-2-1B
-        max_concurrent_requests: 16
+        max_concurrent_requests: 64
         meter_pages: true
         system_prompt: You are an OCR engine. Return the markdown representation of the document.
         extra_env:

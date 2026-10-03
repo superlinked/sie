@@ -495,6 +495,75 @@ class TestImmediateDispatch:
         assert batch.items[2].cost == 5
 
 
+class TestCoalesceCap:
+    """Tests for the idle-dispatch coalesce cap in get_batch() (#2874)."""
+
+    @pytest.mark.asyncio
+    async def test_cap_bounds_lone_item_wait(self) -> None:
+        """A lone item waits only the cap, not the full coalesce/batch window."""
+        config = BatchConfig(max_batch_wait_ms=1000, max_batch_requests=64, coalesce_ms=800, coalesce_ratio=1.0)
+        batcher: BatchFormer[TextPreparedItem, str] = BatchFormer(config)
+
+        await batcher.submit(make_text_item([1, 2, 3]), "req-1")
+
+        start = time.monotonic()
+        batch = await asyncio.wait_for(batcher.get_batch(coalesce_cap_ms=10), timeout=2.0)
+        elapsed_ms = (time.monotonic() - start) * 1000
+
+        assert batch.size == 1
+        # Coalesce fires at ~10ms of quiet, far below the 800ms coalesce
+        # window and the 1000ms batch timeout.
+        assert elapsed_ms < 400
+
+    @pytest.mark.asyncio
+    async def test_cap_still_accumulates_a_burst(self) -> None:
+        """Arrivals inside the cap keep extending accumulation (burst fuses)."""
+        config = BatchConfig(max_batch_wait_ms=1000, max_batch_requests=64, coalesce_ms=800, coalesce_ratio=1.0)
+        batcher: BatchFormer[TextPreparedItem, str] = BatchFormer(config)
+
+        batch_task = asyncio.create_task(batcher.get_batch(coalesce_cap_ms=60))
+        for i in range(5):
+            await batcher.submit(make_text_item([1, 2, 3], 0), f"req-{i}")
+            await asyncio.sleep(0.005)  # gaps well inside the 60ms cap
+
+        batch = await asyncio.wait_for(batch_task, timeout=2.0)
+
+        assert batch.size == 5
+
+    @pytest.mark.asyncio
+    async def test_batch_timeout_still_bounds_capped_wait(self) -> None:
+        """A cap larger than the batch window cannot extend the total wait."""
+        config = BatchConfig(max_batch_wait_ms=30, max_batch_requests=64, coalesce_ms=1_000, coalesce_ratio=1.0)
+        batcher: BatchFormer[TextPreparedItem, str] = BatchFormer(config)
+
+        await batcher.submit(make_text_item([1, 2, 3]), "req-1")
+
+        start = time.monotonic()
+        batch = await asyncio.wait_for(batcher.get_batch(coalesce_cap_ms=10_000), timeout=2.0)
+        elapsed_ms = (time.monotonic() - start) * 1000
+
+        assert batch.size == 1
+        # Neither the large cap nor the 1000ms coalesce window can extend the
+        # 30ms batch timeout — the batch window is the binding bound here.
+        assert elapsed_ms < 500
+
+    @pytest.mark.asyncio
+    async def test_no_cap_keeps_existing_behavior(self) -> None:
+        """Without a cap the coalesce window is unchanged."""
+        config = BatchConfig(max_batch_wait_ms=200, max_batch_requests=64, coalesce_ms=40, coalesce_ratio=1.0)
+        batcher: BatchFormer[TextPreparedItem, str] = BatchFormer(config)
+
+        await batcher.submit(make_text_item([1, 2, 3]), "req-1")
+
+        start = time.monotonic()
+        batch = await asyncio.wait_for(batcher.get_batch(), timeout=2.0)
+        elapsed_ms = (time.monotonic() - start) * 1000
+
+        assert batch.size == 1
+        # Coalesce fires at ~40ms of quiet — not immediately.
+        assert elapsed_ms >= 30
+
+
 class TestSubBatching:
     """Tests for sub-batching behavior (splitting large batches)."""
 

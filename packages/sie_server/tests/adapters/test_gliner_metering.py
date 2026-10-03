@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 from sie_server.adapters.gliner import GLiNERAdapter
-from sie_server.types.inputs import Item
+from sie_server.types.inputs import InvalidInputError, Item
 
 
 class FakeEncoding:
@@ -142,7 +142,7 @@ def test_extract_rejects_blank_document_before_inference() -> None:
 def test_extract_rejects_prompt_that_leaves_no_document_subword() -> None:
     adapter = adapter_with_processor(FakeProcessor(tokenizer_word_limit=4))
 
-    with pytest.raises(ValueError, match="leaves no document tokens"):
+    with pytest.raises(InvalidInputError, match="leaves no document tokens"):
         adapter.extract([Item(text="represented")], labels=["entity"])
 
     adapter._model.inference.assert_not_called()
@@ -179,7 +179,7 @@ def test_appending_words_beyond_processor_window_does_not_change_meter() -> None
         ("numind/NuNER_Zero", "c90187673f464518dca09f41689184ed6976242c"),
     ],
 )
-def test_pinned_classic_processors_meter_only_the_executed_word_window(
+def test_pinned_classic_processors_meter_every_window_they_read(
     model_id: str,
     revision: str,
 ) -> None:
@@ -191,15 +191,21 @@ def test_pinned_classic_processors_meter_only_the_executed_word_window(
     adapter.load("cuda:0")
     labels = ["party", "date", "term", "law", "money", "obligation", "notice"]
     prefix = " ".join(f"contractword{index}" for index in range(384))
-    suffix = " ".join(f"discarded{index}" for index in range(120))
+    suffix = " ".join(f"readtail{index}" for index in range(120))
     try:
         prefix_count = adapter._doc_input_token_counts([prefix], labels)
+        suffix_count = adapter._doc_input_token_counts([suffix], labels)
         extended_count = adapter._doc_input_token_counts([f"{prefix} {suffix}"], labels)
         output = adapter.extract([Item(text=f"{prefix} {suffix}")], labels=labels)
     finally:
         adapter.unload()
 
     assert prefix_count is not None
-    assert extended_count == prefix_count
-    assert output.input_token_counts == prefix_count
+    assert suffix_count is not None
+    assert extended_count is not None
     assert prefix_count[0] > 384
+    # The words past the model window are read too, and each token is counted
+    # once: the special tokens of the one document, not of each window.
+    specials = 2
+    assert extended_count == [prefix_count[0] + suffix_count[0] - specials]
+    assert output.input_token_counts == extended_count

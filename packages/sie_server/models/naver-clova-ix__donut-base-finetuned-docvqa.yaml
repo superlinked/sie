@@ -1,5 +1,6 @@
 sie_id: naver-clova-ix/donut-base-finetuned-docvqa
 hf_id: naver-clova-ix/donut-base-finetuned-docvqa
+hf_revision: b19d2e332684b0e2d35d9144ce34047767335cf8
 inputs:
   text: false
   image: true

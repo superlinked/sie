@@ -6,9 +6,7 @@ description: Summarize a long PDF, scan, office file, text file, or markdown fil
 # Summarize a Document with Superlinked MCP
 
 Use the connected Superlinked MCP server to summarize the source on the SIE
-cluster. This mirrors the `summarize-document` flow from the `sie_tools` plugin
-in PR #1336, but uses the MCP `summarize_document` tool instead of the
-gateway-backed `~/.sie/bin/sie` wrapper.
+cluster through the MCP `summarize_document` tool.
 
 ## Steps
 

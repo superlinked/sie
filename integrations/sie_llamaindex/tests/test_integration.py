@@ -4,7 +4,7 @@ These tests require a running SIE server and serve as runnable examples.
 Run with: pytest -m integration integrations/sie_llamaindex/tests/
 
 Prerequisites:
-    mise run serve -d cpu -p 8080
+    mise run serve -- -d cpu -p 8080
 """
 
 from __future__ import annotations
@@ -264,6 +264,7 @@ class TestRAGPipelineIntegration:
     def test_query_engine_with_reranking(self, sie_url: str) -> None:
         """Example: Using reranker in query engine pipeline."""
         from llama_index.core import Document, Settings, VectorStoreIndex
+        from llama_index.core.llms import MockLLM
         from sie_llamaindex import SIEEmbedding, SIENodePostprocessor
 
         # Configure embeddings
@@ -284,16 +285,17 @@ class TestRAGPipelineIntegration:
             top_n=2,
         )
 
-        # Get retriever with reranking
-        retriever = index.as_retriever(
+        # Query engine with a mock LLM, so retrieval and reranking are the real steps
+        query_engine = index.as_query_engine(
+            llm=MockLLM(),
             similarity_top_k=3,
             node_postprocessors=[reranker],
         )
-
-        # This would be used in a full query engine with LLM
-        # For now, just test retrieval works
-        nodes = retriever.retrieve("How does search work?")
-        assert len(nodes) == 2  # Limited by top_n
+        response = query_engine.query("How does search work?")
+        assert len(response.source_nodes) == 2  # Limited by top_n
+        scores = [node.score for node in response.source_nodes]
+        assert all(isinstance(score, float) for score in scores)
+        assert scores == sorted(scores, reverse=True)
 
 
 class TestExtractorIntegration:
@@ -313,7 +315,7 @@ class TestExtractorIntegration:
             timeout_s=180.0,
         )
 
-        result = extractor.extract("John Smith works at Google in New York.")
+        result = extractor.extract("John Smith works at Google in New York.")["entities"]
 
         assert isinstance(result, list)
         # Should find at least some entities

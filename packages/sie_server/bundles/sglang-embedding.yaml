@@ -20,9 +20,8 @@ deps:
   # a pre-release-only requirement. PyPI's ``flash-attn-4`` also publishes a
   # stable ``0.0.1`` placeholder, which disables uv's "allow pre-releases
   # when a package has nothing but pre-releases" rule, so a resolution that
-  # only names ``sglang`` is unsatisfiable (nightly quality-adapter 7B lanes
-  # died on this for weeks — #1684). Declaring the dep here with an explicit
-  # pre-release specifier re-enables pre-releases for exactly this package.
+  # only names ``sglang`` is unsatisfiable. Declaring the dep here with an
+  # explicit pre-release specifier re-enables pre-releases for exactly this package.
   # Runtime-inert for us: sglang's default attention backend is flashinfer;
   # fa4 only needs to be importable to satisfy the dependency.
   flash-attn-4: '==4.0.0b19'

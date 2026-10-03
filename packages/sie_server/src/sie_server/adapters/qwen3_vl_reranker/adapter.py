@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import inspect
-import io
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -14,7 +13,7 @@ from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ComputePrecision
 from sie_server.adapters._vision_patch_embed import rebind_vision_patch_embed
 from sie_server.core.inference_output import ScoreOutput
-from sie_server.types.inputs import InvalidInputError, InvalidMediaError, media_bytes
+from sie_server.types.inputs import InvalidInputError, InvalidMediaError, decode_image
 
 if TYPE_CHECKING:
     from PIL import Image
@@ -710,17 +709,9 @@ class Qwen3VLRerankerAdapter(BaseAdapter):
             raise InvalidInputError(_ERR_NO_INPUT)
 
     def _load_first_image(self, item: Any) -> Image.Image:
-        from PIL import Image
-
-        img_input = item.images[0]
-        try:
-            with Image.open(io.BytesIO(media_bytes(img_input, kind="image"))) as source:
-                source.load()
-                return source.convert("RGB") if source.mode != "RGB" else source.copy()
-        except InvalidMediaError:
-            raise
-        except (OSError, ValueError) as exc:
-            raise InvalidMediaError("image input must contain a valid decodable image") from exc
+        # decode_image raises InvalidMediaError (-> 400 INVALID_INPUT) on
+        # non-bytes or undecodable payloads, and converts to RGB.
+        return decode_image(item.images[0], image_index=0)
 
     def get_preprocessor(self) -> Any | None:
         # Qwen3-VL processor requires text alongside images (for chat template

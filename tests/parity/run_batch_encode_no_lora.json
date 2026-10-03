@@ -1,0 +1,64 @@
+{
+  "description": "RunBatch with op=encode, all valid items, lora_key=\"\" (the empty-string base alias). Pins the Python adapter_call_loop base-model fast path: NO injection into options['lora']. Empty lora_key must be byte-identical to a base-only deploy that never set lora_key in the first place.",
+  "input": {
+    "model_id": "test/parity-encode-base",
+    "batch_id": 7,
+    "lora_key": "",
+    "total_cost": 50,
+    "items": [
+      {
+        "op": "encode",
+        "encode": {
+          "work_item_id": "w0",
+          "request_id": "r",
+          "item_index": 0,
+          "total_items": 2,
+          "timestamp": 0.0,
+          "item": {"text": "alpha"},
+          "options": null
+        }
+      },
+      {
+        "op": "encode",
+        "encode": {
+          "work_item_id": "w1",
+          "request_id": "r",
+          "item_index": 1,
+          "total_items": 2,
+          "timestamp": 0.0,
+          "item": {"text": "beta"},
+          "options": null
+        }
+      }
+    ]
+  },
+  "expected_canonical_outcomes": [
+    {
+      "work_item_id": "w0",
+      "request_id": "r",
+      "item_index": 0,
+      "disposition": "publish_and_ack",
+      "error_code": null
+    },
+    {
+      "work_item_id": "w1",
+      "request_id": "r",
+      "item_index": 1,
+      "disposition": "publish_and_ack",
+      "error_code": null
+    }
+  ],
+  "expected_lora_in_options": null,
+  "notes": {
+    "elided_fields": [
+      "inference_ms",
+      "tokenization_ms",
+      "postprocessing_ms",
+      "result_msgpack",
+      "raw_output",
+      "error",
+      "nak_delay_ms"
+    ],
+    "rationale": "expected_lora_in_options=null means the per-item assertion in the echo executor checks the COMPLEMENT: items must arrive WITHOUT options['lora'] set. The base path is required to be allocation-free + indistinguishable from a non-LoRA deploy."
+  }
+}

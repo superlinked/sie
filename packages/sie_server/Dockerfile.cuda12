@@ -110,12 +110,12 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # intentionally not imported here.
 RUN .venv/bin/python -c "import sie_audio_prep, torch; print(torch.__version__)"
 
-# Register bundle-libs on sys.path via a .pth file executed by site.py at
-# interpreter startup. `sys.path.insert(0, ...)` puts bundle-libs at
-# position 0 so bundle-specific versions SHADOW shared venv versions
-# (required for the transformers5 bundle). Content is identical for every
-# bundle, so writing it here keeps the shared venv layer byte-identical.
-RUN echo "import sys; sys.path.insert(0, '/app/bundle-libs')" \
+# Register bundle-libs as a site directory so dependency-owned .pth files are
+# processed at interpreter startup. Then move every discovered bundle path
+# ahead of the shared venv so bundle-specific versions SHADOW it (required for
+# the transformers5 bundle). Content is identical for every bundle, so writing
+# it here keeps the shared venv layer byte-identical.
+RUN echo "import site, sys; _sie_bundle_start = len(sys.path); site.addsitedir('/app/bundle-libs'); sys.path[:] = sys.path[_sie_bundle_start:] + sys.path[:_sie_bundle_start]" \
     > /app/.venv/lib/python3.12/site-packages/_sie_bundle.pth
 
 # Conservative venv cleanup — only things known to be runtime-safe. Keep
@@ -165,7 +165,7 @@ RUN .venv/bin/python -m sie_server.cli resolve-deps \
 #
 # Per-bundle CUDA wheel index. SGLang's sgl-kernel/flashinfer wheels live on the
 # docs.sglang.ai cu129 index (not PyPI), so the SGLang-family bundles add it.
-# The gemma bundle (sglang 0.5.13 / torch 2.11 / cu130, CUDA 13) is built by the
+# The sglang-cu130 bundle (sglang 0.5.13 / torch 2.11 / cu130, CUDA 13) is built by the
 # separate ``cuda13`` platform — see Dockerfile.cuda13 — not here.
 RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=cache,target=/root/.cache/uv \
@@ -210,15 +210,29 @@ RUN set -eux; \
 # smaller CUDA base runtime; SGLang-family bundles need the devel toolkit
 # because flashinfer/tvm_ffi perform runtime JIT through nvcc on first decode.
 FROM nvidia/cuda:12.4.1-base-ubuntu22.04 AS runtime-default
+# The CTranslate2 bundle uses the CUDA runtime image, not the devel toolchain.
+FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04 AS runtime-ctranslate2
 FROM nvidia/cuda:12.4.1-base-ubuntu22.04 AS runtime-transformers5
 FROM nvidia/cuda:12.9.1-cudnn-devel-ubuntu22.04 AS runtime-sglang
 ENV CUDA_HOME=/usr/local/cuda \
     LD_LIBRARY_PATH="/usr/local/cuda/lib64:$LD_LIBRARY_PATH"
+# FFmpeg shared libraries: SGLang decodes video inputs with torchcodec, which
+# dlopens them at first use and has no bundled FFmpeg.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+    libavcodec58 \
+    libavdevice58 \
+    libavfilter7 \
+    libavformat58 \
+    libavutil56 \
+    libswresample3 \
+    libswscale5
 FROM runtime-sglang AS runtime-sglang-embedding
 FROM runtime-sglang AS runtime-sglang-vision-extract
-# NOTE: the gemma bundle (CUDA 13 / sglang 0.5.13 / torch 2.11 cu130) is built by
+# NOTE: the sglang-cu130 bundle (CUDA 13 / sglang 0.5.13 / torch 2.11 cu130) is built by
 # the separate ``cuda13`` platform — packages/sie_server/Dockerfile.cuda13 — so
-# this CUDA-12 image never produces a (mislabelled) CUDA-13 ``cuda12-gemma``
+# this CUDA-12 image never produces a (mislabelled) CUDA-13 ``cuda12-sglang-cu130``
 # image. See #1415.
 
 FROM runtime-${BUNDLE} AS runtime
@@ -294,7 +308,8 @@ COPY --link --from=base --chown=1000:1000 /app/bundles /app/bundles
 # A `.pth` file in the shared venv puts /app/bundle-libs at sys.path[0] at startup.
 COPY --link --from=builder --chown=1000:1000 /app/bundle-libs /app/bundle-libs
 
-RUN mkdir -p /app/evals /app/.cache/huggingface && chown -R sie:sie /app/evals /app/.cache
+RUN mkdir -p /app/evals /app/.cache/huggingface /app/.cache/sie-kernels \
+    && chown -R sie:sie /app/evals /app/.cache
 
 # Declare the BUNDLE arg only here, where it is first used (LABEL + ENV),
 # so every RUN/COPY layer above is bundle-agnostic in its cache key and the
@@ -309,6 +324,7 @@ ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     HF_HOME=/app/.cache/huggingface \
+    SIE_SGLANG_KERNEL_CACHE_ROOT=/app/.cache/sie-kernels \
     NVIDIA_VISIBLE_DEVICES=all \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility \
     SIE_BUNDLE="${BUNDLE}"

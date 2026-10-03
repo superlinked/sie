@@ -3,12 +3,18 @@
  */
 
 import {
+  AccountInactiveError,
+  AccountStateUnavailableError,
   EstimateUnroutableError,
+  IncompleteBatchError,
   InputTooLongError,
+  InsufficientCreditsError,
   ModelLoadFailedError,
   ProvisioningError,
+  RateLimitError,
   RequestError,
   ServerError,
+  SpendLimitError,
 } from "../errors.js";
 import { unpackMessage } from "../msgpack.js";
 import type {
@@ -27,10 +33,18 @@ import type {
   WorkerInfo,
 } from "../types.js";
 import {
+  ACCOUNT_PENDING_REVIEW_ERROR_CODE,
+  ACCOUNT_STATE_UNAVAILABLE_ERROR_CODE,
+  ACCOUNT_SUSPENDED_ERROR_CODE,
   HTTP_CLIENT_ERROR_MAX,
   HTTP_CLIENT_ERROR_MIN,
+  HTTP_FORBIDDEN,
+  HTTP_PAYMENT_REQUIRED,
   HTTP_SERVER_ERROR_MAX,
   HTTP_SERVER_ERROR_MIN,
+  HTTP_TOO_MANY_REQUESTS,
+  INSUFFICIENT_CREDITS_ERROR_CODE,
+  KEY_SPEND_LIMIT_EXCEEDED_ERROR_CODE,
   MSGPACK_CONTENT_TYPE,
   PROVISIONING_ERROR_CODE,
 } from "./constants.js";
@@ -38,10 +52,41 @@ import {
 import { getRetryAfter as getRetryAfterFromHeader } from "./retry.js";
 
 const SIE_ERROR_CODE_HEADER = "X-SIE-Error-Code";
+const REQUEST_ID_HEADER = "x-sie-request-id";
+const INVALID_ERROR_MESSAGE = "Request failed";
 
 function normalizeErrorCode(code: string | undefined): string | undefined {
   if (code === "provisioning") return PROVISIONING_ERROR_CODE;
   return code;
+}
+
+/**
+ * Read the gateway request id from a terminal response, applying the same
+ * validation as `parseRequestMetadata` (non-empty visible ASCII, no
+ * surrounding whitespace, bounded length). Returns `undefined` when absent
+ * or malformed so errors never carry an attacker-shaped id (#3136).
+ */
+export function readRequestId(response: Response): string | undefined {
+  return validateRequestId(response.headers.get(REQUEST_ID_HEADER));
+}
+
+/**
+ * Validate one candidate request id (non-empty visible ASCII, no surrounding
+ * whitespace, bounded length). Shared by the header path above and the
+ * in-band stream error path so streamed ids obey the same rule and errors
+ * never carry an attacker-shaped id (#3136).
+ */
+export function validateRequestId(value: unknown): string | undefined {
+  if (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= 256 &&
+    value === value.trim() &&
+    /^[\x20-\x7e]+$/.test(value)
+  ) {
+    return value;
+  }
+  return undefined;
 }
 
 /**
@@ -99,6 +144,19 @@ export async function getErrorDetail(
   return undefined;
 }
 
+/** Preserve the OpenAI-compatible nullable/string `error.param` contract. */
+function errorParamFromDetail(
+  detail: Record<string, unknown> | undefined,
+): string | null | undefined {
+  const param = detail?.param;
+  return typeof param === "string" || param === null ? param : undefined;
+}
+
+/** Extract a validated nullable/string error parameter from JSON or msgpack. */
+export async function getErrorParam(response: Response): Promise<string | null | undefined> {
+  return errorParamFromDetail(await getErrorDetail(response));
+}
+
 /**
  * Extract error code from response body (handles both JSON and msgpack)
  */
@@ -151,6 +209,7 @@ export async function throwIfModelLoadFailed(response: Response, model?: string)
     errorClass,
     permanent,
     attempts,
+    param: errorParamFromDetail(detail),
   });
 }
 
@@ -174,7 +233,7 @@ export async function throwIfInputTooLong(response: Response, model?: string): P
     typeof detail.message === "string"
       ? detail.message
       : "Input exceeds the model's maximum token capacity";
-  throw new InputTooLongError(message, { model });
+  throw new InputTooLongError(message, { model, param: errorParamFromDetail(detail) });
 }
 
 /** The one exact path of the cost-estimate dry run (#2435). */
@@ -234,7 +293,7 @@ export async function throwIfEstimateUnroutable(response: Response): Promise<voi
     detail && typeof detail.message === "string"
       ? detail.message
       : "the active rate book cannot price this request";
-  throw new EstimateUnroutableError(message, code);
+  throw new EstimateUnroutableError(message, code, errorParamFromDetail(detail));
 }
 
 /**
@@ -250,12 +309,14 @@ export async function handleError(response: Response, gpu?: string): Promise<nev
 
   let code: string | undefined;
   let message: string;
+  let param: string | null | undefined;
 
   if (detail) {
     const c = detail.code;
     code = typeof c === "string" ? c : undefined;
     const m = detail.message;
-    message = typeof m === "string" ? m : JSON.stringify(detail);
+    message = typeof m === "string" ? m : INVALID_ERROR_MESSAGE;
+    param = errorParamFromDetail(detail);
   } else {
     try {
       const data = (await response.json()) as Record<string, unknown>;
@@ -269,32 +330,67 @@ export async function handleError(response: Response, gpu?: string): Promise<nev
         code = typeof data.code === "string" ? data.code : undefined;
         message = response.statusText;
       }
+      param = errorParamFromDetail(data);
     } catch {
       code = undefined;
       message = response.statusText;
+      param = undefined;
     }
   }
   code = response.headers.get(SIE_ERROR_CODE_HEADER) ?? normalizeErrorCode(code);
+  const requestId = readRequestId(response);
 
   if (status === 503 && code === PROVISIONING_ERROR_CODE) {
     const retryAfter = getRetryAfter(response);
-    throw new ProvisioningError(message, gpu, retryAfter);
+    throw new ProvisioningError(message, gpu, retryAfter, param);
+  }
+
+  // Rate limit (pass-2 audit B1). Retried on the admission ladder in the
+  // buffered loops; a give-up there throws RateLimitError directly. This arm
+  // covers the terminal paths (streaming, listModels, estimate, …) so a 429 is
+  // always a typed RateLimitError rather than a generic RequestError.
+  if (status === HTTP_TOO_MANY_REQUESTS) {
+    throw new RateLimitError(message, {
+      retryAfter: getRetryAfter(response),
+      code,
+      requestId,
+      param,
+    });
+  }
+
+  // Terminal credit / account failures (pass-2 audit B3). 402/403 are NEVER
+  // retried — they have no arm on any retry ladder, so they surface here on the
+  // first response. Unrecognised 402/403 codes stay generic RequestError.
+  if (status === HTTP_PAYMENT_REQUIRED) {
+    if (code === INSUFFICIENT_CREDITS_ERROR_CODE)
+      throw new InsufficientCreditsError(message, { requestId, param });
+    if (code === KEY_SPEND_LIMIT_EXCEEDED_ERROR_CODE)
+      throw new SpendLimitError(message, { requestId, param });
+  }
+  if (
+    status === HTTP_FORBIDDEN &&
+    (code === ACCOUNT_SUSPENDED_ERROR_CODE || code === ACCOUNT_PENDING_REVIEW_ERROR_CODE)
+  ) {
+    throw new AccountInactiveError(message, code, requestId, param);
+  }
+  if (status === 503 && code === ACCOUNT_STATE_UNAVAILABLE_ERROR_CODE) {
+    throw new AccountStateUnavailableError(message, requestId, param);
   }
 
   if (status >= HTTP_CLIENT_ERROR_MIN && status <= HTTP_CLIENT_ERROR_MAX) {
     if (status === 400 && code === "INPUT_TOO_LONG") {
       // Fallback dispatch — ``model`` is only attached by the helper-style
       // short-circuit (``throwIfInputTooLong``) on the extract path.
-      throw new InputTooLongError(message);
+      throw new InputTooLongError(message, { param });
     }
-    throw new RequestError(message, code, status);
+    throw new RequestError(message, code, status, requestId, param);
   }
 
   if (status >= HTTP_SERVER_ERROR_MIN && status <= HTTP_SERVER_ERROR_MAX) {
-    throw new ServerError(message, code, status);
+    throw new ServerError(message, code, status, requestId, param);
   }
 
-  throw new ServerError(message, code, status);
+  throw new ServerError(message, code, status, requestId, param);
 }
 
 // Wire format types (what server sends)
@@ -334,6 +430,7 @@ interface WireScoreEntry {
 interface WireScoreUsage {
   input_tokens: number;
   images?: number;
+  input_tokens_details?: { content_tokens: number };
 }
 
 interface WireScoreResult {
@@ -435,6 +532,93 @@ export function parseEncodeResults(data: unknown[]): EncodeResult[] {
 }
 
 /**
+ * Best-effort ids of submitted items absent from a shortened response.
+ *
+ * Only computed when ids identify every position on both sides: every
+ * submitted item carries a string `id` and every returned item echoes one.
+ * Otherwise the set difference could mislabel a present-but-unnamed item as
+ * missing, so the diagnostic degrades to `undefined` (positional counts only).
+ *
+ * Runs only while building an error, so it degrades rather than throwing.
+ */
+function missingResultIds(
+  results: readonly unknown[],
+  submitted: readonly unknown[],
+): string[] | undefined {
+  const idOf = (value: unknown): string | undefined => {
+    if (typeof value !== "object" || value === null) {
+      return undefined;
+    }
+    const id = (value as { id?: unknown }).id;
+    return typeof id === "string" ? id : undefined;
+  };
+
+  const submittedIds = submitted.map(idOf);
+  if (submittedIds.some((id) => id === undefined)) {
+    return undefined;
+  }
+  const returnedIds = new Set<string>();
+  for (const result of results) {
+    const id = idOf(result);
+    if (id === undefined) {
+      return undefined;
+    }
+    returnedIds.add(id);
+  }
+  const missing = submittedIds.filter(
+    (id): id is string => id !== undefined && !returnedIds.has(id),
+  );
+  return missing.length > 0 ? missing : undefined;
+}
+
+/**
+ * Guard the positional batch contract: exactly one result per input item.
+ *
+ * Encode and extract are positional — both return `results[0]` for a
+ * single-item request, and batch callers reassemble results by index. The
+ * contract breaks on an HTTP 200 whose `items` list is *shorter* than the
+ * request: the gateway returns mixed-success batches as `200` carrying only
+ * the successful items (a per-item server-side failure — an input exceeding
+ * the model's `max_sequence_length`, say — is dropped from the body, not
+ * surfaced as an error envelope). Without this check the short list flows into
+ * positional access and silently misaligns every result after the drop.
+ *
+ * Mirrors the Python SDK's `validate_batch_result_count`, including its error
+ * codes, so both SDKs fail identically.
+ *
+ * @throws {IncompleteBatchError} If the counts differ.
+ */
+export function validateBatchResultCount(
+  results: readonly (EncodeResult | ExtractResult)[],
+  submitted: readonly unknown[],
+  model: string,
+  operation: "encode" | "extract",
+  requestId?: string,
+): void {
+  if (results.length === submitted.length) {
+    return;
+  }
+  const [label, noun, code] =
+    operation === "encode"
+      ? ["Encode", "embedding(s)", "ENCODE_RESULT_COUNT_MISMATCH"]
+      : ["Extract", "extraction result(s)", "EXTRACT_RESULT_COUNT_MISMATCH"];
+  const missingIds = missingResultIds(results, submitted);
+  let message = `${label} response desync for model ${JSON.stringify(model)}: server returned ${results.length} ${noun} for ${submitted.length} input item(s); expected exactly one per input. An input may have failed server-side (e.g. exceeding the model's max_sequence_length) and been dropped from the batch.`;
+  if (missingIds !== undefined) {
+    message += ` Missing item id(s): ${missingIds.join(", ")}.`;
+  }
+  throw new IncompleteBatchError(message, {
+    expected: submitted.length,
+    received: results.length,
+    code,
+    model,
+    missingIds,
+    requestId,
+    results,
+  });
+}
+
+/**
  * Parse wire format to ScoreEntry
  */
 function parseScoreEntry(data: WireScoreEntry): ScoreEntry {
@@ -460,6 +644,13 @@ export function parseScoreResult(data: unknown): ScoreResult {
       ? {
           inputTokens: wire.usage.input_tokens,
           images: wire.usage.images,
+          ...(wire.usage.input_tokens_details
+            ? {
+                inputTokensDetails: {
+                  contentTokens: wire.usage.input_tokens_details.content_tokens,
+                },
+              }
+            : {}),
         }
       : undefined,
   };
@@ -541,6 +732,8 @@ export function parseExtractResults(data: unknown[]): ExtractResult[] {
 }
 
 interface WireUsageBlock {
+  images?: unknown;
+  prompt_tokens_details?: unknown;
   prompt_tokens?: number;
   completion_tokens?: number;
   total_tokens?: number;
@@ -607,8 +800,24 @@ export function settledChargeFields(usage: unknown): {
   return { creditsCharged: credits, rateBookVersion: version };
 }
 
+/** `usage.prompt_tokens_details.cached_tokens`, or an empty object when absent or malformed. */
+export function cachedPromptTokensField(usage: unknown): { cachedPromptTokens?: number } {
+  if (typeof usage !== "object" || usage === null || Array.isArray(usage)) return {};
+  const details = (usage as Record<string, unknown>).prompt_tokens_details;
+  if (typeof details !== "object" || details === null || Array.isArray(details)) return {};
+  const cached = (details as Record<string, unknown>).cached_tokens;
+  if (typeof cached !== "number" || !Number.isSafeInteger(cached) || cached < 0) return {};
+  return { cachedPromptTokens: cached };
+}
+
 function coerceTokenCount(v: unknown): number {
   return typeof v === "number" && Number.isFinite(v) ? Math.trunc(v) : 0;
+}
+
+function isPositiveSafeInteger(value: unknown): value is number {
+  return (
+    typeof value === "number" && Number.isSafeInteger(value) && value > 0 && value <= 0xffffffff
+  );
 }
 
 export function parseGenerateResult(data: Record<string, unknown>): GenerateResult {
@@ -633,6 +842,8 @@ export function parseGenerateResult(data: Record<string, unknown>): GenerateResu
       promptTokens: coerceTokenCount(usage.prompt_tokens),
       completionTokens: coerceTokenCount(usage.completion_tokens),
       totalTokens: coerceTokenCount(usage.total_tokens),
+      ...(isPositiveSafeInteger(usage.images) ? { images: usage.images } : {}),
+      ...cachedPromptTokensField(usage),
       // #2434: the gateway merges the settled charge into this same block, so
       // rebuilding it field-by-field must carry the charge across. Absence
       // stays absence — a request that committed no debit gets neither key.

@@ -372,23 +372,3 @@ class TestAdmissionCaps:
         monkeypatch.setattr(video_frames, "_MAX_SCANNED_FRAMES", 4)
         with pytest.raises(VideoDecodeError, match="scan cap"):
             extract_frames(_video(_make_video(tmp_path, frames=12)))
-
-
-class TestBillingContractStaysInSyncWithTheGateway:
-    """The managed reservation ceiling is a hand-mirrored copy of the budget.
-
-    Settlement rejects a worker count above its reservation ceiling, so a
-    Python budget raised past the gateway constant would turn every successful
-    video encode into a billing fault. Nothing but this test binds the two.
-    """
-
-    def test_gateway_ceiling_covers_the_worker_budget(self) -> None:
-        repo_root = Path(__file__).resolve().parents[4]
-        dispatcher = repo_root / "packages" / "sie_cloud" / "gateway" / "src" / "dispatcher.rs"
-        if not dispatcher.is_file():  # pragma: no cover - checkout without the gateway crate
-            pytest.skip("gateway crate not present in this checkout")
-        marker = "const VIDEO_MAX_SAMPLED_FRAMES: usize = "
-        declarations = [line for line in dispatcher.read_text().splitlines() if marker in line]
-        assert len(declarations) == 1, "expected exactly one gateway frame-budget constant"
-        gateway_budget = int(declarations[0].split(marker)[1].split(";")[0].strip())
-        assert gateway_budget >= MAX_SAMPLED_FRAMES

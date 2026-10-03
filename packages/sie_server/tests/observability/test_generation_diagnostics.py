@@ -48,6 +48,7 @@ def test_typed_generation_events_emit_bounded_contract_points(
     reader, _ = active_generation
     telemetry = wt.worker_telemetry()
     telemetry.first_token_observed(model="catalog/gen", grammar="json_schema", duration_s=0.25)
+    telemetry.worker_wait_observed(model="catalog/gen", grammar="json_schema", duration_s=0.75)
     telemetry.stream_finished(
         model="catalog/gen",
         grammar="json_schema",
@@ -77,7 +78,11 @@ def test_typed_generation_events_emit_bounded_contract_points(
 
     by_name = _metric_map(reader.get_metrics_data())
     assert set(by_name) == wt.generation_metric_names()
-    for name in (wt.GENERATION_TTFT_METRIC_NAME, wt.GENERATION_TPOT_METRIC_NAME):
+    for name in (
+        wt.GENERATION_TTFT_METRIC_NAME,
+        wt.GENERATION_WORKER_WAIT_METRIC_NAME,
+        wt.GENERATION_TPOT_METRIC_NAME,
+    ):
         point = _points(by_name[name])[0]
         assert tuple(point.explicit_bounds) == wt.TTFT_TPOT_BUCKETS_S
         assert dict(point.attributes) == {

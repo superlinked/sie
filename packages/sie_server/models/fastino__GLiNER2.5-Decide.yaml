@@ -1,0 +1,28 @@
+# GLiNER2.5-Decide: English typed-decision classifier (DeBERTa-v3-large encoder,
+# span architecture), loaded through gliner2 2.x AutoExtractor. Served from the
+# transformers5 bundle, which pins gliner2 2.x.
+sie_id: fastino/GLiNER2.5-Decide
+hf_id: fastino/GLiNER2.5-Decide
+hf_revision: 7ee5da4c2415e32259bcdc0b1a7367c32ce8d6f6
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: null
+  extract: {}
+# Tokens per item: every question's prompt and labels, then the document. 512,
+# as for fastino/gliner2-large-v1, this model's base: its DeBERTa-v3-large encoder
+# was pretrained on 512 positions (max_position_embeddings), and neither the model
+# card nor the checkpoint config (max_len null) gives a longer length.
+max_sequence_length: 512
+profiles:
+  default:
+    max_batch_tokens: 16384
+    compute_precision: float16
+    adapter_path: sie_server.adapters.gliner2.decide:GLiNER2DecideAdapter
+    adapter_options:
+      loadtime: {}
+      runtime: {}

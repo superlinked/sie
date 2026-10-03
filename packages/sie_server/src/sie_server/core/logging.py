@@ -71,13 +71,62 @@ class TextFormatter(logging.Formatter):
         )
 
 
-def _resolve_log_level(*, verbose: bool, level_name: str | None) -> int:
-    """Pick root log level: ``--verbose`` wins, then explicit name, then ``SIE_LOG_LEVEL`` env."""
+# The single source of truth for both validation and resolution. Deliberately
+# narrower than ``logging.getLevelNamesMapping()``, which also carries NOTSET
+# and the deprecated WARN/FATAL aliases: validating against the wider set while
+# advertising this one would accept names the CLI help does not document, and
+# NOTSET on the root logger means "inherit", not a severity.
+_LEVELS: dict[str, int] = {
+    "DEBUG": logging.DEBUG,
+    "INFO": logging.INFO,
+    "WARNING": logging.WARNING,
+    "ERROR": logging.ERROR,
+    "CRITICAL": logging.CRITICAL,
+}
+
+# A rejected value is arbitrary caller/environment input, so it is truncated and
+# stripped of anything but plain identifier characters before being logged — a
+# level name never needs more, and an operator who accidentally pointed
+# SIE_LOG_LEVEL at a secret must not have it copied into the log sink.
+_REJECTED_MAX_LEN = 20
+
+
+def valid_log_levels() -> list[str]:
+    """Accepted level names, in ascending severity order."""
+    return list(_LEVELS)
+
+
+def is_valid_log_level(name: str) -> bool:
+    """Whether ``name`` is one of the advertised levels (case-insensitive)."""
+    return name.strip().upper() in _LEVELS
+
+
+def _safe_for_log(value: str) -> str:
+    """Render a rejected level name without echoing arbitrary input."""
+    cleaned = "".join(char if char.isalnum() or char in "-_" else "?" for char in value.strip())
+    if len(cleaned) > _REJECTED_MAX_LEN:
+        return cleaned[:_REJECTED_MAX_LEN] + "..."
+    return cleaned or "(empty)"
+
+
+def _resolve_log_level(*, verbose: bool, level_name: str | None) -> tuple[int, str | None]:
+    """Pick root log level: ``--verbose`` wins, then explicit name, then ``SIE_LOG_LEVEL`` env.
+
+    Returns:
+        ``(level, rejected_name)``. ``rejected_name`` is the caller's value when
+        it is not an advertised level, so :func:`configure_logging` can say so
+        once logging is actually running. Silently defaulting to INFO is the
+        worst outcome: an operator who set ``DEBUG`` and mistyped it sees a
+        normal-looking server with none of the output they asked for, and no
+        indication why.
+    """
     if verbose:
-        return logging.DEBUG
+        return logging.DEBUG, None
     raw = (level_name or os.environ.get("SIE_LOG_LEVEL") or "INFO").strip()
-    mapping = logging.getLevelNamesMapping()
-    return mapping.get(raw.upper(), logging.INFO)
+    resolved = _LEVELS.get(raw.upper())
+    if resolved is None:
+        return logging.INFO, raw
+    return resolved, None
 
 
 def configure_logging(
@@ -93,7 +142,7 @@ def configure_logging(
         json_format: Use JSON format. If None, reads from SIE_LOG_JSON env var.
         level_name: Log level name (e.g. ``DEBUG``, ``INFO``). When None, uses ``SIE_LOG_LEVEL``.
     """
-    log_level = _resolve_log_level(verbose=verbose, level_name=level_name)
+    log_level, rejected = _resolve_log_level(verbose=verbose, level_name=level_name)
 
     # Determine format (env var takes precedence if json_format not explicitly set)
     if json_format is None:
@@ -120,6 +169,16 @@ def configure_logging(
 
     # Set sie_server modules to appropriate level
     logging.getLogger("sie_server").setLevel(log_level)
+
+    # Emitted only now, with handlers installed, so the warning is actually
+    # visible. WARNING is above the INFO fallback, so it survives the very
+    # downgrade it is reporting.
+    if rejected is not None:
+        logging.getLogger(__name__).warning(
+            "Ignoring unknown log level %r; falling back to INFO. Valid levels: %s.",
+            _safe_for_log(rejected),
+            ", ".join(valid_log_levels()),
+        )
 
     # Reduce noise from third-party libraries
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)

@@ -4,7 +4,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
-from sie_sdk.storage import AzureBlobBackend, GCSBackend, LocalBackend, S3Backend, StorageBackend
+from sie_sdk.storage import AzureBlobBackend, GCSBackend, LocalBackend, OSSBackend, S3Backend, StorageBackend
 
 
 class TestLocalBackendWriteText:
@@ -88,6 +88,75 @@ class TestDeleteFile:
 
         container.get_blob_client.assert_called_once_with("models/test__model.yaml")
         container.get_blob_client.return_value.delete_blob.assert_called_once_with()
+
+    def test_oss_delete_targets_exact_object_and_is_idempotent(self) -> None:
+        class MissingObjectError(Exception):
+            status = 404
+            code = "NoSuchKey"
+
+        backend = OSSBackend()
+        bucket = MagicMock()
+        bucket.delete_object.side_effect = [None, MissingObjectError()]
+        backend._buckets["catalog"] = bucket
+
+        backend.delete_file("oss://catalog/models/test__model.yaml")
+        backend.delete_file("oss://catalog/models/test__model.yaml")
+
+        assert [call.args for call in bucket.delete_object.call_args_list] == [
+            ("models/test__model.yaml",),
+            ("models/test__model.yaml",),
+        ]
+
+
+class TestOSSBackendWrites:
+    def test_write_text_and_upload_file_target_exact_keys(self, tmp_path: Path) -> None:
+        backend = OSSBackend()
+        bucket = MagicMock()
+        backend._buckets["catalog"] = bucket
+        source = tmp_path / "model.bin"
+        source.write_bytes(b"model")
+
+        backend.write_text("oss://catalog/config/model.yaml", "sie_id: org/model\n")
+        backend.upload_file(source, "oss://catalog/models/model.bin")
+
+        bucket.put_object.assert_called_once_with("config/model.yaml", b"sie_id: org/model\n")
+        bucket.put_object_from_file.assert_called_once_with("models/model.bin", str(source))
+
+    def test_upload_directory_preserves_recursive_posix_layout(self, tmp_path: Path) -> None:
+        source = tmp_path / "source"
+        (source / "snapshots" / "abc").mkdir(parents=True)
+        (source / "refs").mkdir()
+        (source / "snapshots" / "abc" / "config.json").write_text("{}")
+        (source / "refs" / "main").write_text("abc")
+        backend = OSSBackend()
+        bucket = MagicMock()
+        backend._buckets["catalog"] = bucket
+
+        assert backend.upload_directory(source, "oss://catalog/models/org-model/") == 2
+
+        calls = {call.args for call in bucket.put_object_from_file.call_args_list}
+        assert calls == {
+            ("models/org-model/snapshots/abc/config.json", str(source / "snapshots" / "abc" / "config.json")),
+            ("models/org-model/refs/main", str(source / "refs" / "main")),
+        }
+
+    def test_write_failure_does_not_expose_provider_body(self) -> None:
+        class ProviderError(Exception):
+            status = 500
+            code = "InternalError"
+
+            def __str__(self) -> str:
+                return "Authorization=secret request-body=private"
+
+        backend = OSSBackend()
+        bucket = MagicMock()
+        bucket.put_object.side_effect = ProviderError()
+        backend._buckets["catalog"] = bucket
+
+        with pytest.raises(RuntimeError) as exc_info:
+            backend.write_text("oss://catalog/config/model.yaml", "private")
+
+        assert str(exc_info.value) == "Alibaba OSS write failed (status=500, code=InternalError)"
 
 
 class TestLocalBackendWriteTextIfMatch:

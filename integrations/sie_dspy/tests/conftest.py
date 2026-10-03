@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import NonCallableMagicMock, create_autospec
 
 import numpy as np
 import pytest
+from sie_sdk import SIEClient
 
 # Default test configuration
 EMBEDDING_DIM = 384
@@ -56,21 +57,31 @@ def _create_mock_encode_result(
     return results
 
 
+def _server_item_id(item: Any, index: int) -> str:
+    """Return the ``item_id`` the SIE server reports: the sent ``id``, else ``item-<index>``."""
+    item_id = item.get("id") if isinstance(item, dict) else None
+    return item_id if item_id is not None else f"item-{index}"
+
+
 def _create_mock_score_result(query: str, items: list[dict]) -> list[dict[str, Any]]:
-    """Create mock score results."""
+    """Create mock score results matching the ranked-envelope contract.
+
+    The SDK's ScoreResult is sorted by descending score, so sort here too and
+    assign ``rank`` from the sorted position. ``item_id`` is the id the SIE
+    server reports for that input.
+    """
     rng = np.random.default_rng(hash(query) % (2**32))
     scores = rng.uniform(0, 1, len(items))
 
-    results = []
-    for idx, score in enumerate(scores):
-        results.append(
-            {
-                "item_id": str(idx),
-                "score": float(score),
-                "rank": idx,
-            }
-        )
-    return results
+    sorted_indices = np.argsort(scores)[::-1]
+    return [
+        {
+            "item_id": items[idx]["id"],
+            "score": float(scores[idx]),
+            "rank": rank,
+        }
+        for rank, idx in enumerate(sorted_indices)
+    ]
 
 
 def _create_mock_extract_result(text: str, labels: list[str]) -> list[dict[str, Any]]:
@@ -106,9 +117,9 @@ def _get_text(item: Any) -> str:
 
 
 @pytest.fixture
-def mock_sie_client() -> MagicMock:
+def mock_sie_client() -> NonCallableMagicMock:
     """Create a mocked SIEClient for unit testing."""
-    client = MagicMock()
+    client = create_autospec(SIEClient, instance=True)
 
     def mock_encode(
         _model: str,
@@ -130,17 +141,22 @@ def mock_sie_client() -> MagicMock:
         item_dicts = [{"text": _get_text(i)} for i in items]
         return _create_mock_encode_result(item_dicts, is_query=is_query, output_types=output_types)
 
-    def mock_score(_model: str, query: Any, items: list[Any], **kwargs: Any) -> list[dict]:
+    def mock_score(_model: str, query: Any, items: list[Any], **kwargs: Any) -> dict[str, Any]:
+        # Mirror the real SDK: a ScoreResult envelope with ranked entries under
+        # "scores", not a bare list.
         query_text = _get_text(query)
-        item_dicts = [{"id": str(idx), "text": _get_text(i)} for idx, i in enumerate(items)]
-        return _create_mock_score_result(query_text, item_dicts)
+        item_dicts = [{"id": _server_item_id(i, idx), "text": _get_text(i)} for idx, i in enumerate(items)]
+        return {
+            "model": _model,
+            "scores": _create_mock_score_result(query_text, item_dicts),
+        }
 
     def mock_extract(_model: str, item: Any, labels: list[str], **_kwargs: Any) -> list[dict]:
         return _create_mock_extract_result(_get_text(item), labels)
 
-    client.encode = MagicMock(side_effect=mock_encode)
-    client.score = MagicMock(side_effect=mock_score)
-    client.extract = MagicMock(side_effect=mock_extract)
+    client.encode.side_effect = mock_encode
+    client.score.side_effect = mock_score
+    client.extract.side_effect = mock_extract
     client.base_url = "http://localhost:8080"
 
     return client

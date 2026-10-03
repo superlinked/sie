@@ -4,7 +4,7 @@ These tests require a running SIE server and serve as runnable examples.
 Run with: pytest -m integration integrations/sie_haystack/tests/
 
 Prerequisites:
-    mise run serve -d cpu -p 8080
+    mise run serve -- -d cpu -p 8080
 """
 
 from __future__ import annotations
@@ -161,10 +161,7 @@ class TestChromaIntegration:
 
         # 1. Set up Chroma (ephemeral for test)
         _ = chromadb.Client()  # Ensure ephemeral client
-        document_store = ChromaDocumentStore(
-            collection_name="test_sie_haystack",
-            embedding_function=None,  # We provide embeddings via SIE
-        )
+        document_store = ChromaDocumentStore(collection_name="test_sie_haystack")
 
         # 2. Create and embed documents
         doc_embedder = SIEDocumentEmbedder(base_url=sie_url, model="BAAI/bge-m3")

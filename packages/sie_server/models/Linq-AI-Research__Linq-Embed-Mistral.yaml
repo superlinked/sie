@@ -1,5 +1,6 @@
 sie_id: Linq-AI-Research/Linq-Embed-Mistral
 hf_id: Linq-AI-Research/Linq-Embed-Mistral
+hf_revision: 0c1a0b0589177079acc552433cad51d7c9132379
 inputs:
   text: true
   image: false

@@ -1,5 +1,6 @@
 sie_id: Alibaba-NLP/gte-multilingual-base
 hf_id: Alibaba-NLP/gte-multilingual-base
+hf_revision: 9bbca17d9273fd0d03d5725c7a4b0f6b45142062
 inputs:
   text: true
   image: false

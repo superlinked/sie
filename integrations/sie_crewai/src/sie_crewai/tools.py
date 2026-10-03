@@ -5,10 +5,45 @@ Provides tools for reranking and entity extraction using SIE.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from crewai.tools import BaseTool
 from pydantic import BaseModel, Field
+from sie_sdk import RequestError
+
+
+def _raise_for_item_error(result: Any) -> None:
+    """Raise when SIE reports that extraction failed for this item."""
+    error = result.get("error") if isinstance(result, Mapping) else None
+    if isinstance(error, Mapping):
+        msg = f"Extraction failed: {error.get('message')}"
+        raise RequestError(msg, code=error.get("code"), request=result.get("request"))
+
+
+def _scores_by_index(results: Mapping[str, Any], count: int) -> list[float]:
+    """Map ScoreResult entries back to input positions by item_id.
+
+    Each input is sent with ``id=str(position)``, which the server echoes as
+    the entry's ``item_id``. Only an exact echo of a sent id is used: an entry
+    whose ``item_id`` is missing, not a string, or not a sent id is skipped
+    (that document keeps its 0.0 default), so a malformed entry can neither
+    crash the rerank nor mis-assign a score to the wrong document.
+
+    Args:
+        results: ScoreResult envelope from ``SIEClient.score()``.
+        count: Number of input documents.
+
+    Returns:
+        Scores indexed by input position (0.0 for any unscored/invalid item).
+    """
+    positions = {str(index): index for index in range(count)}
+    scores = [0.0] * count
+    for entry in results.get("scores", []):
+        item_id = entry.get("item_id")
+        if isinstance(item_id, str) and item_id in positions:
+            scores[positions[item_id]] = float(entry.get("score", 0.0))
+    return scores
 
 
 class RerankerInput(BaseModel):
@@ -93,15 +128,21 @@ class SIERerankerTool(BaseTool):
         from sie_sdk.types import Item
 
         query_item = Item(text=query)
-        doc_items = [Item(text=doc) for doc in documents]
+        doc_items = [Item(text=doc, id=str(idx)) for idx, doc in enumerate(documents)]
 
         results = self.client.score(self.model, query_item, doc_items)
 
+        # ``results`` is a ScoreResult envelope; ranked entries are under
+        # ``results["scores"]`` (each a ScoreEntry whose ``item_id`` echoes the
+        # input position sent as the item ``id``, plus ``score``). Map scores
+        # back to input order by item_id rather than zipping positionally — the
+        # entries are sorted by relevance, not by input order.
+        # ``results["request"]`` (request id) and ``results["usage"]`` (token
+        # usage) are also available but intentionally not surfaced here.
+        score_by_index = _scores_by_index(results, len(documents))
+
         # Build scored documents
-        scored = []
-        for doc, result in zip(documents, results, strict=True):
-            score = result.get("score", 0.0) if isinstance(result, dict) else getattr(result, "score", 0.0)
-            scored.append((float(score), doc))
+        scored = [(score_by_index[idx], doc) for idx, doc in enumerate(documents)]
 
         # Sort by score descending
         scored.sort(key=lambda x: x[0], reverse=True)
@@ -207,6 +248,7 @@ class SIEExtractorTool(BaseTool):
             Item(text=text),
             labels=effective_labels,
         )
+        _raise_for_item_error(result)
 
         entities = self._parse_items(result, "entities")
         relations = self._parse_items(result, "relations")

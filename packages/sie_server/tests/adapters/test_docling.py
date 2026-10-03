@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -288,6 +288,28 @@ class TestDoclingExtract:
         # have produced ``document.png``.
         assert out.data[0]["document"] == {"name": "document.pdf"}
 
+    def test_document_with_non_bytes_data_yields_typed_invalid_input(self) -> None:
+        # A base64-str ``document.data`` (the queue path builds Item from an
+        # unvalidated dict, so a str can slip past the wire boundary) must
+        # surface a typed 400 describing the bytes-contract violation — NOT the
+        # contradictory image-branch "Document or image input is required",
+        # which denies the document the caller actually sent.
+        adapter, factory = _make_adapter()
+
+        # A str where the DocumentInput contract wants bytes; cast keeps the
+        # test type-correct while still exercising the queue-path violation.
+        malformed = cast("Any", {"data": "%PDF-1.4 base64-str-not-bytes", "format": "pdf"})
+        out = adapter.extract([Item(document=malformed)])
+
+        assert out.data == [{}]
+        assert out.errors is not None
+        assert out.errors[0] is not None
+        assert out.errors[0].code == "INVALID_INPUT"
+        assert "bytes" in out.errors[0].message
+        assert out.errors[0].message != "Document or image input is required"
+        # The item never reaches conversion, so no converter is built.
+        factory.assert_not_called()
+
     def test_neither_document_nor_image_yields_per_item_error(self) -> None:
         adapter, factory = _make_adapter()
 
@@ -569,6 +591,7 @@ class TestDoclingMakeConverter:
         # #2919: the recogniser language is pinned, never docling's ["chinese"]
         # default — word-joined English output was a defect on a billed profile.
         assert kwargs["ocr_options"].lang == ["en"]
+        assert kwargs["ocr_options"].det_model_path is None
         mock_fmt_opt.assert_called_once()
         mock_cls.assert_called_once()
         assert "format_options" in mock_cls.call_args.kwargs
@@ -591,6 +614,7 @@ class TestDoclingMakeConverter:
         # #2919: the OCR profile serves the English RapidOCR set from the pinned
         # artifact revision; both language sets ship, so this stays a data flip.
         assert kwargs["ocr_options"].lang == ["en"]
+        assert kwargs["ocr_options"].det_model_path is None
         mock_fmt_opt.assert_called_once()
         mock_cls.assert_called_once()
         assert "format_options" in mock_cls.call_args.kwargs
@@ -607,6 +631,9 @@ class TestDoclingMakeConverter:
             adapter._make_converter(ocr_enabled=False)
 
         assert mock_opts.call_args.kwargs["artifacts_path"] == tmp_path
+        assert mock_opts.call_args.kwargs["ocr_options"].det_model_path == str(
+            tmp_path / "RapidOcr/onnx/PP-OCRv4/det/ch_PP-OCRv4_det_mobile.onnx"
+        )
 
     def test_make_converter_passes_resolved_ordinary_artifact_root(self, tmp_path: Path) -> None:
         adapter = DoclingAdapter(model_name_or_path=tmp_path)
@@ -621,6 +648,9 @@ class TestDoclingMakeConverter:
             adapter._make_converter(ocr_enabled=True)
 
         assert mock_opts.call_args.kwargs["artifacts_path"] == tmp_path.resolve()
+        assert mock_opts.call_args.kwargs["ocr_options"].det_model_path == str(
+            tmp_path.resolve() / "RapidOcr/onnx/PP-OCRv4/det/ch_PP-OCRv4_det_mobile.onnx"
+        )
 
     def test_make_converter_no_ocr_uses_accelerator_options_when_device_set(self) -> None:
         adapter = DoclingAdapter()

@@ -2,8 +2,8 @@ services:
   sie:
     # transformers5 bundle so LightOnOCR-2-1B (the recognition default) loads.
     # Florence-2 family is incompatible with transformers>=5 (tokenizer API
-    # change), so the UI auto-disables those entries on this image
-    # (sie-internal#828 tracks unifying the bundles).
+    # change), so the UI auto-disables those entries on this image. Use the
+    # default bundle when testing Florence-2 models.
     image: ghcr.io/superlinked/sie-server:latest-cpu-transformers5
     # linux/amd64 is a no-op on x86_64 Linux hosts; on Apple Silicon it forces
     # Rosetta translation (slower but works for local testing).

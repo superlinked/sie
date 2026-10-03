@@ -301,6 +301,7 @@ class TestAsyncEncode:
                 "X-SIE-Units-Input-Tokens": "2",
                 "X-SIE-Credits-Debited": "5",
                 "X-SIE-Execution-Identity-SHA256": "b" * 64,
+                "X-SIE-Execution-Binding-SHA256": "c" * 64,
             },
         )
 
@@ -317,6 +318,7 @@ class TestAsyncEncode:
             "usage": {"input_tokens": 2},
             "credits_debited": 5,
             "execution_identity_sha256": "b" * 64,
+            "execution_binding_sha256": "c" * 64,
         }
         await client.close()
 

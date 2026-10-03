@@ -1,0 +1,539 @@
+sie_id: Qwen/Qwen3.8-27B-FP8
+hf_id: Qwen/Qwen3.8-27B-FP8
+hf_revision: 017b9c7af6b5689d5dd426a76e0bc077eb5ca20a
+# Official first-party blockwise FP8 checkpoint. The pinned config declares
+# Qwen3_5ForConditionalGeneration, 64 layers in the same 48 GDN + 16 full-
+# attention layout as Qwen3.6-27B, and a native 262,144-token window. Its
+# quantization_config is dynamic FP8 with 128x128 weight blocks, so SGLang
+# detects the checkpoint quantization directly; no online --quantization flag
+# belongs in these profiles.
+inputs:
+  text: true
+  image: true
+  audio: false
+  # Qwen documents native video understanding, but video is not yet wired
+  # through the SIE generation request surface.
+  video: false
+# A request with ONE image reads it at up to 3,211,264 pixels (3,136 visual
+# tokens, one per merged 32x32 patch), the resolution a dense form or statement
+# needs: at the family's 1,003,520 a full page came back with misread names and
+# digits. SIE_SGLANG_SINGLE_IMAGE_MAX_PIXELS raises the bound for single-image
+# requests only; a request with two or more images keeps --mm-process-config's
+# 1,003,520 per image, so multi-image requests fit the 8K window exactly as
+# before. The worker reserves the matching bound per request. Every profile
+# also compiles JSON-schema grammars without free whitespace, so greedy
+# decoding cannot pad a reply with indentation or run to the output cap in
+# spaces.
+# Every profile also bounds each JSON number to 19 integer and 19 fractional
+# digits (``json_number_max_digits``). XGrammar leaves digit runs unbounded, so
+# a greedy decode that starts repeating a digit (``8214263.0000...``) ran to
+# the output cap on 2 of 30 page-image extractions on the batch profile.
+tasks:
+  generate:
+    # Keep the bare route conservative. Native context is exposed only through
+    # exact-hardware profiles whose admission and launch shapes are smoke-tested.
+    context_length: 8192
+    max_output_tokens: 4096
+    grammar_profile: no-spec
+    capabilities:
+      grammar: ["json_schema", "regex"]
+      streaming: true
+      tools: true
+    # Qwen3.8 defaults to thinking. The bare model and every non-thinking
+    # profile are answer-only; reasoning is exposed only through the explicit
+    # thinking profiles below.
+    chat_template_kwargs:
+      enable_thinking: false
+    prewarm_grammars:
+      - name: yes_no
+        kind: regex
+        value: "(yes|no)"
+      - name: short_answer
+        kind: json_schema
+        value:
+          type: object
+          properties:
+            answer:
+              type: string
+          required: [answer]
+max_sequence_length: 8192
+profiles:
+  # Correctness-first bare route: official FP8 weights, BF16 KV, FP32 GDN
+  # state, no speculation, CUDA graphs disabled, and an 8K admission window.
+  default:
+    max_batch_tokens: 16384
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.sglang.cuda13:SGLangCuda13Adapter
+    kv_budget_tokens: 8192
+    adapter_options:
+      loadtime:
+        extra_env:
+          SIE_SGLANG_SINGLE_IMAGE_MAX_PIXELS: "3211264"
+        mem_fraction_static: 0.85
+        served_model_name: Qwen/Qwen3.8-27B-FP8
+        disable_cuda_graph: true
+        attention_backend: flashinfer
+        grammar_backend: xgrammar
+        json_number_max_digits: 19
+        tool_call_parser: qwen3_coder
+        speculative:
+          enabled: false
+        extra_launch_args:
+          - "--mm-process-config"
+          - '{"image":{"min_pixels":65536,"max_pixels":1003520}}'
+          - "--constrained-json-disable-any-whitespace"
+          - "--kv-cache-dtype"
+          - "bfloat16"
+          - "--mamba-ssm-dtype"
+          - "float32"
+      runtime:
+        first_chunk_timeout_s: 90
+        inter_chunk_timeout_s: 15
+        overall_timeout_s: 600
+        # Official Qwen3.8 non-thinking sampling recipe. Grammar-constrained
+        # requests default to temperature 0 and no presence penalty instead
+        # (see GRAMMAR_SAMPLING_DEFAULTS in core/runtime_options.py).
+        default_sampling:
+          temperature: 0.7
+          top_p: 0.8
+          top_k: 20
+          presence_penalty: 1.5
+        stop_tokens:
+          - "<|im_end|>"
+
+  no-spec:
+    extends: default
+
+  # H100-80GB: one native-window admission with in-checkpoint MTP. FA3 plus
+  # BF16 GDN state is the measured SM90 batch-one winner. Profile-scoped
+  # DeepGEMM fast warmup covers every decode M through 1024 and samples the
+  # prefill range through the explicit 32K boundary. The matching no-spec
+  # profile is the grammar-safe fallback. Every native-window pair uses the
+  # synchronous scheduler: pinned SGLang speculative V2 has a request-dependent
+  # overlap-path crash on hybrid Mamba, while these profiles admit only one
+  # running request and have no useful batch to overlap.
+  h100-256k:
+    max_output_tokens: 32768
+    max_batch_tokens: 262144
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.sglang.cuda13:SGLangCuda13Adapter
+    grammar_profile: h100-256k-no-spec
+    kv_budget_tokens: 262144
+    adapter_options:
+      loadtime:
+        max_seq_length: 262144
+        mem_fraction_static: 0.85
+        served_model_name: Qwen/Qwen3.8-27B-FP8
+        attention_backend: fa3
+        grammar_backend: xgrammar
+        json_number_max_digits: 19
+        tool_call_parser: qwen3_coder
+        extra_env:
+          SIE_SGLANG_SINGLE_IMAGE_MAX_PIXELS: "3211264"
+          SGLANG_JIT_DEEPGEMM_FAST_WARMUP: "1"
+        speculative:
+          enabled: true
+          algorithm: eagle
+          num_steps: 3
+          eagle_topk: 1
+          num_draft_tokens: 4
+        extra_launch_args:
+          - "--mm-process-config"
+          - '{"image":{"min_pixels":65536,"max_pixels":1003520}}'
+          - "--constrained-json-disable-any-whitespace"
+          - "--kv-cache-dtype"
+          - "bfloat16"
+          - "--mamba-ssm-dtype"
+          - "bfloat16"
+          - "--mamba-radix-cache-strategy"
+          - "extra_buffer"
+          - "--disable-overlap-schedule"
+          - "--page-size"
+          - "64"
+          - "--chunked-prefill-size"
+          - "32768"
+          - "--max-prefill-tokens"
+          - "32768"
+          - "--max-running-requests"
+          - "1"
+          - "--cuda-graph-max-bs-decode"
+          - "1"
+      runtime:
+        first_chunk_timeout_s: 900
+        inter_chunk_timeout_s: 30
+        overall_timeout_s: 1800
+        default_sampling:
+          temperature: 0.7
+          top_p: 0.8
+          top_k: 20
+          presence_penalty: 1.5
+        stop_tokens:
+          - "<|im_end|>"
+  h100-256k-no-spec:
+    extends: h100-256k
+    adapter_options:
+      loadtime:
+        max_seq_length: 262144
+        mem_fraction_static: 0.85
+        served_model_name: Qwen/Qwen3.8-27B-FP8
+        attention_backend: fa3
+        grammar_backend: xgrammar
+        json_number_max_digits: 19
+        tool_call_parser: qwen3_coder
+        extra_env:
+          SIE_SGLANG_SINGLE_IMAGE_MAX_PIXELS: "3211264"
+          SGLANG_JIT_DEEPGEMM_FAST_WARMUP: "1"
+        speculative:
+          enabled: false
+        extra_launch_args:
+          - "--mm-process-config"
+          - '{"image":{"min_pixels":65536,"max_pixels":1003520}}'
+          - "--constrained-json-disable-any-whitespace"
+          - "--kv-cache-dtype"
+          - "bfloat16"
+          - "--mamba-ssm-dtype"
+          - "bfloat16"
+          - "--mamba-radix-cache-strategy"
+          - "extra_buffer"
+          - "--disable-overlap-schedule"
+          - "--page-size"
+          - "64"
+          - "--chunked-prefill-size"
+          - "32768"
+          - "--max-prefill-tokens"
+          - "32768"
+          - "--max-running-requests"
+          - "1"
+          - "--cuda-graph-max-bs-decode"
+          - "1"
+
+  # H100-80GB batch lane: the h100-256k launch shape without speculation,
+  # admitting up to 16 running requests with CUDA graphs captured for every
+  # decode batch size through 16. Speculation stays off so xgrammar enforces
+  # every constrained token, which makes this the concurrent grammar-safe
+  # native-window lane. Measured on one H100 80GB with a ~670-token json_schema
+  # request: 72 tok/s decode at batch 1 against 11.6 on the bare route, and
+  # 148 requests/min at 8 in flight against 44. Standalone so its grammar twin
+  # inherits only this shape.
+  h100-256k-batch:
+    grammar_profile: h100-256k-batch-no-spec
+    max_output_tokens: 32768
+    max_batch_tokens: 262144
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.sglang.cuda13:SGLangCuda13Adapter
+    kv_budget_tokens: 262144
+    adapter_options:
+      loadtime:
+        max_seq_length: 262144
+        mem_fraction_static: 0.85
+        served_model_name: Qwen/Qwen3.8-27B-FP8
+        attention_backend: fa3
+        grammar_backend: xgrammar
+        json_number_max_digits: 19
+        tool_call_parser: qwen3_coder
+        extra_env:
+          SIE_SGLANG_SINGLE_IMAGE_MAX_PIXELS: "3211264"
+          SGLANG_JIT_DEEPGEMM_FAST_WARMUP: "1"
+        speculative:
+          enabled: false
+        extra_launch_args:
+          - "--mm-process-config"
+          - '{"image":{"min_pixels":65536,"max_pixels":1003520}}'
+          - "--constrained-json-disable-any-whitespace"
+          - "--kv-cache-dtype"
+          - "bfloat16"
+          - "--mamba-ssm-dtype"
+          - "bfloat16"
+          - "--mamba-radix-cache-strategy"
+          - "extra_buffer"
+          - "--disable-overlap-schedule"
+          - "--page-size"
+          - "64"
+          - "--chunked-prefill-size"
+          - "32768"
+          - "--max-prefill-tokens"
+          - "32768"
+          - "--max-running-requests"
+          - "16"
+          - "--cuda-graph-max-bs-decode"
+          - "16"
+      runtime:
+        first_chunk_timeout_s: 900
+        inter_chunk_timeout_s: 30
+        overall_timeout_s: 1800
+        default_sampling:
+          temperature: 0.7
+          top_p: 0.8
+          top_k: 20
+          presence_penalty: 1.5
+        stop_tokens:
+          - "<|im_end|>"
+  # Constrained-decoding identity for the batch lane; identical because the
+  # parent is already non-speculative and grammar-safe.
+  h100-256k-batch-no-spec:
+    extends: h100-256k-batch
+
+  # H100-80GB thinking: the h100-256k launch shape without speculation, plus
+  # the qwen3 reasoning parser and the strict-thinking lane so a premature EOS
+  # cannot leave the answer inside the private reasoning channel. The chat
+  # template's own default effort (xhigh) applies because the gateway does not
+  # forward request-level reasoning_effort. Sampling is the model card's
+  # thinking recipe. Standalone so its children inherit only this shape.
+  h100-256k-thinking:
+    grammar_profile: h100-256k-thinking-no-spec
+    max_output_tokens: 32768
+    max_batch_tokens: 262144
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.sglang.cuda13:SGLangStrictThinkingAdapter
+    kv_budget_tokens: 262144
+    chat_template_kwargs:
+      enable_thinking: true
+    adapter_options:
+      loadtime:
+        max_seq_length: 262144
+        mem_fraction_static: 0.85
+        served_model_name: Qwen/Qwen3.8-27B-FP8
+        attention_backend: fa3
+        grammar_backend: xgrammar
+        json_number_max_digits: 19
+        reasoning_parser: qwen3
+        tool_call_parser: qwen3_coder
+        extra_env:
+          SIE_SGLANG_SINGLE_IMAGE_MAX_PIXELS: "3211264"
+          SGLANG_JIT_DEEPGEMM_FAST_WARMUP: "1"
+        speculative:
+          enabled: false
+        extra_launch_args:
+          - "--mm-process-config"
+          - '{"image":{"min_pixels":65536,"max_pixels":1003520}}'
+          - "--constrained-json-disable-any-whitespace"
+          - "--kv-cache-dtype"
+          - "bfloat16"
+          - "--mamba-ssm-dtype"
+          - "bfloat16"
+          - "--mamba-radix-cache-strategy"
+          - "extra_buffer"
+          - "--disable-overlap-schedule"
+          - "--page-size"
+          - "64"
+          - "--chunked-prefill-size"
+          - "32768"
+          - "--max-prefill-tokens"
+          - "32768"
+          - "--max-running-requests"
+          - "1"
+          - "--cuda-graph-max-bs-decode"
+          - "1"
+      runtime:
+        first_chunk_timeout_s: 900
+        inter_chunk_timeout_s: 30
+        overall_timeout_s: 1800
+        default_sampling:
+          temperature: 1.0
+          top_p: 0.95
+          top_k: 20
+          presence_penalty: 0.0
+        stop_tokens:
+          - "<|im_end|>"
+  # Constrained-decoding identity for the thinking launch; identical because
+  # the parent is already non-speculative and grammar-safe.
+  h100-256k-thinking-no-spec:
+    extends: h100-256k-thinking
+  # Hardware-neutral alias. Thinking needs the native window, so it resolves
+  # to the H100 256K lane rather than the 8K bare route.
+  thinking:
+    extends: h100-256k-thinking
+
+  # H200-141GB: deliberately retain the measured H100 SM90 recipe and
+  # one-admission launch shape; the larger card provides more memory headroom
+  # without a second tuning surface.
+  h200-256k:
+    max_output_tokens: 32768
+    max_batch_tokens: 262144
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.sglang.cuda13:SGLangCuda13Adapter
+    grammar_profile: h200-256k-no-spec
+    kv_budget_tokens: 262144
+    adapter_options:
+      loadtime:
+        max_seq_length: 262144
+        mem_fraction_static: 0.85
+        served_model_name: Qwen/Qwen3.8-27B-FP8
+        attention_backend: fa3
+        grammar_backend: xgrammar
+        json_number_max_digits: 19
+        tool_call_parser: qwen3_coder
+        extra_env:
+          SIE_SGLANG_SINGLE_IMAGE_MAX_PIXELS: "3211264"
+          SGLANG_JIT_DEEPGEMM_FAST_WARMUP: "1"
+        speculative:
+          enabled: true
+          algorithm: eagle
+          num_steps: 3
+          eagle_topk: 1
+          num_draft_tokens: 4
+        extra_launch_args:
+          - "--mm-process-config"
+          - '{"image":{"min_pixels":65536,"max_pixels":1003520}}'
+          - "--constrained-json-disable-any-whitespace"
+          - "--kv-cache-dtype"
+          - "bfloat16"
+          - "--mamba-ssm-dtype"
+          - "bfloat16"
+          - "--mamba-radix-cache-strategy"
+          - "extra_buffer"
+          - "--disable-overlap-schedule"
+          - "--page-size"
+          - "64"
+          - "--chunked-prefill-size"
+          - "32768"
+          - "--max-prefill-tokens"
+          - "32768"
+          - "--max-running-requests"
+          - "1"
+          - "--cuda-graph-max-bs-decode"
+          - "1"
+      runtime:
+        first_chunk_timeout_s: 900
+        inter_chunk_timeout_s: 30
+        overall_timeout_s: 1800
+        default_sampling:
+          temperature: 0.7
+          top_p: 0.8
+          top_k: 20
+          presence_penalty: 1.5
+        stop_tokens:
+          - "<|im_end|>"
+  h200-256k-no-spec:
+    extends: h200-256k
+    adapter_options:
+      loadtime:
+        max_seq_length: 262144
+        mem_fraction_static: 0.85
+        served_model_name: Qwen/Qwen3.8-27B-FP8
+        attention_backend: fa3
+        grammar_backend: xgrammar
+        json_number_max_digits: 19
+        tool_call_parser: qwen3_coder
+        extra_env:
+          SIE_SGLANG_SINGLE_IMAGE_MAX_PIXELS: "3211264"
+          SGLANG_JIT_DEEPGEMM_FAST_WARMUP: "1"
+        speculative:
+          enabled: false
+        extra_launch_args:
+          - "--mm-process-config"
+          - '{"image":{"min_pixels":65536,"max_pixels":1003520}}'
+          - "--constrained-json-disable-any-whitespace"
+          - "--kv-cache-dtype"
+          - "bfloat16"
+          - "--mamba-ssm-dtype"
+          - "bfloat16"
+          - "--mamba-radix-cache-strategy"
+          - "extra_buffer"
+          - "--disable-overlap-schedule"
+          - "--page-size"
+          - "64"
+          - "--chunked-prefill-size"
+          - "32768"
+          - "--max-prefill-tokens"
+          - "32768"
+          - "--max-running-requests"
+          - "1"
+          - "--cuda-graph-max-bs-decode"
+          - "1"
+
+  # RTX PRO 6000 96GB (SM120): retain FlashInfer and 2K prefill chunks from the
+  # official Blackwell recipe while sharing the measured BF16 GDN state and
+  # profile-scoped DeepGEMM fast warmup. Both RTX profiles deliberately leave
+  # --max-prefill-tokens at SGLang's pinned default; only the chunk granularity
+  # is overridden here, and the Stage-5 full-window smoke guards that pairing.
+  rtx-pro-6000-256k:
+    max_output_tokens: 32768
+    max_batch_tokens: 262144
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.sglang.cuda13:SGLangCuda13Adapter
+    grammar_profile: rtx-pro-6000-256k-no-spec
+    kv_budget_tokens: 262144
+    adapter_options:
+      loadtime:
+        max_seq_length: 262144
+        mem_fraction_static: 0.85
+        served_model_name: Qwen/Qwen3.8-27B-FP8
+        attention_backend: flashinfer
+        grammar_backend: xgrammar
+        json_number_max_digits: 19
+        tool_call_parser: qwen3_coder
+        extra_env:
+          SIE_SGLANG_SINGLE_IMAGE_MAX_PIXELS: "3211264"
+          SGLANG_JIT_DEEPGEMM_FAST_WARMUP: "1"
+        speculative:
+          enabled: true
+          algorithm: eagle
+          num_steps: 3
+          eagle_topk: 1
+          num_draft_tokens: 4
+        extra_launch_args:
+          - "--mm-process-config"
+          - '{"image":{"min_pixels":65536,"max_pixels":1003520}}'
+          - "--constrained-json-disable-any-whitespace"
+          - "--kv-cache-dtype"
+          - "bfloat16"
+          - "--mamba-ssm-dtype"
+          - "bfloat16"
+          - "--mamba-radix-cache-strategy"
+          - "extra_buffer"
+          - "--disable-overlap-schedule"
+          - "--page-size"
+          - "64"
+          - "--chunked-prefill-size"
+          - "2048"
+          - "--max-running-requests"
+          - "1"
+          - "--cuda-graph-max-bs-decode"
+          - "1"
+      runtime:
+        first_chunk_timeout_s: 900
+        inter_chunk_timeout_s: 30
+        overall_timeout_s: 1800
+        default_sampling:
+          temperature: 0.7
+          top_p: 0.8
+          top_k: 20
+          presence_penalty: 1.5
+        stop_tokens:
+          - "<|im_end|>"
+  rtx-pro-6000-256k-no-spec:
+    extends: rtx-pro-6000-256k
+    adapter_options:
+      loadtime:
+        max_seq_length: 262144
+        mem_fraction_static: 0.85
+        served_model_name: Qwen/Qwen3.8-27B-FP8
+        attention_backend: flashinfer
+        grammar_backend: xgrammar
+        json_number_max_digits: 19
+        tool_call_parser: qwen3_coder
+        extra_env:
+          SIE_SGLANG_SINGLE_IMAGE_MAX_PIXELS: "3211264"
+          SGLANG_JIT_DEEPGEMM_FAST_WARMUP: "1"
+        speculative:
+          enabled: false
+        extra_launch_args:
+          - "--mm-process-config"
+          - '{"image":{"min_pixels":65536,"max_pixels":1003520}}'
+          - "--constrained-json-disable-any-whitespace"
+          - "--kv-cache-dtype"
+          - "bfloat16"
+          - "--mamba-ssm-dtype"
+          - "bfloat16"
+          - "--mamba-radix-cache-strategy"
+          - "extra_buffer"
+          - "--disable-overlap-schedule"
+          - "--page-size"
+          - "64"
+          - "--chunked-prefill-size"
+          - "2048"
+          - "--max-running-requests"
+          - "1"
+          - "--cuda-graph-max-bs-decode"
+          - "1"

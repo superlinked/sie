@@ -1,0 +1,23 @@
+sie_id: knowledgator/opir-edge-multilang-v1.0
+hf_id: knowledgator/opir-edge-multilang-v1.0
+hf_revision: 969a05f901f8de234b0204f5309cb7e6450e6371
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: null
+  extract: {}
+max_sequence_length: 1024  # trained with 1024-token inputs
+profiles:
+  default:
+    max_batch_tokens: 16384
+    compute_precision: null
+    adapter_path: sie_server.adapters.gliclass:GLiClassAdapter
+    adapter_options:
+      loadtime:
+        classification_type: single-label
+      runtime:
+        threshold: 0.0

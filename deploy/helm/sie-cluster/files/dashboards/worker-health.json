@@ -178,7 +178,7 @@
       "gridPos": { "h": 10, "w": 12, "x": 0, "y": 38 },
       "id": 70,
       "title": "Sidecar Config, NATS, Payload, IPC, and Drain Health",
-      "description": "Config convergence, NATS/payload outcomes, delivery attempts, IPC acquisition, payload size, and bounded shutdown-drain signals from the realtime sidecar.",
+      "description": "Config convergence, NATS/payload outcomes, work-item deadlines, delivery attempts, IPC acquisition, payload size, and bounded shutdown-drain signals from the realtime sidecar.",
       "type": "timeseries",
       "fieldConfig": { "defaults": { "unit": "short" } },
       "options": {
@@ -236,6 +236,11 @@
           "expr": "histogram_quantile(0.95, sum by (le, outcome, lane) (rate(sie_worker_shutdown_drain_duration_seconds_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker-sidecar\"}[5m])))",
           "legendFormat": "shutdown drain p95 {{outcome}} / {{lane}}",
           "refId": "J"
+        },
+        {
+          "expr": "sum by (operation, action, lane) (rate(sie_worker_work_item_deadline_exceeded_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker-sidecar\"}[5m]))",
+          "legendFormat": "deadline {{operation}} / {{action}} / {{lane}}",
+          "refId": "K"
         }
       ]
     },
@@ -436,6 +441,31 @@
           "expr": "sum by (lane) (sie_worker_ipc_response_chunk_reserved_bytes{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker-sidecar\"})",
           "legendFormat": "IPC reserved bytes {{lane}}",
           "refId": "G"
+        }
+      ]
+    },
+    {
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 68 },
+      "id": 75,
+      "title": "Remote Upstream Limits",
+      "description": "Upstream calls the worker refused without sending, by upstream and the limit reached (request rate cap, concurrency cap, open circuit breaker), and whether each upstream's circuit breaker is open.",
+      "type": "timeseries",
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "options": {
+        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "expr": "sum by (upstream, reason, lane) (rate(sie_worker_upstream_refusals_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\"}[5m]))",
+          "legendFormat": "refused/sec {{upstream}} / {{reason}} / {{lane}}",
+          "refId": "A"
+        },
+        {
+          "expr": "max by (upstream, lane) (sie_worker_upstream_breaker_open{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\"})",
+          "legendFormat": "breaker open {{upstream}} / {{lane}}",
+          "refId": "B"
         }
       ]
     }

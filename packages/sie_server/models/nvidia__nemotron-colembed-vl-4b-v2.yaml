@@ -1,5 +1,6 @@
 sie_id: nvidia/nemotron-colembed-vl-4b-v2
 hf_id: nvidia/nemotron-colembed-vl-4b-v2
+hf_revision: 0ed152d91f8ad4c5d48296b51c220f686641a398
 inputs:
   text: true
   image: true

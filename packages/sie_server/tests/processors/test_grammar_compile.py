@@ -12,7 +12,7 @@ from typing import Any, ClassVar
 
 import pytest
 from sie_server.processors import grammar_compile
-from sie_server.types.grammar import GrammarSpec, GrammarValidationError
+from sie_server.types.grammar import OUTLINES_JSON_SCHEMA_TYPE_MESSAGE, GrammarSpec, GrammarValidationError
 
 
 class _V5Tokenizer:
@@ -283,3 +283,66 @@ def test_already_adapted_tokenizer_passes_through(
     assert out is True
     _, tok_arg = regex_calls[0]
     assert tok_arg is adapted
+
+
+@pytest.mark.parametrize("type_value", [["string", "null"], {}, None, 1, True])
+def test_compile_known_nonstring_type_diagnostic_is_client_refusal(monkeypatch, type_value) -> None:
+    def reject(*_):
+        raise ValueError("'type' must be a string")
+
+    monkeypatch.setattr(grammar_compile, "_FACTORIES", (reject, reject))
+    with pytest.raises(GrammarValidationError) as error:
+        grammar_compile.compile_outlines(
+            _AdaptedTokenizer(), GrammarSpec(kind="json_schema", value={"type": type_value})
+        )
+    assert error.value.code == "invalid_request"
+    assert error.value.param == "grammar"
+    assert str(error.value) == OUTLINES_JSON_SCHEMA_TYPE_MESSAGE
+
+
+@pytest.mark.parametrize("kind", ["json_schema", "regex"])
+@pytest.mark.parametrize(
+    "failure",
+    [
+        ValueError("'type' must be a string secret"),
+        ValueError("secret 'type' must be a string"),
+        ValueError("secret" * 4096),
+        RuntimeError("'type' must be a string"),
+    ],
+)
+def test_compile_unknown_diagnostic_is_sanitized(monkeypatch, kind, failure) -> None:
+    def reject(*_):
+        raise failure
+
+    monkeypatch.setattr(grammar_compile, "_FACTORIES", (reject, reject))
+    grammar = GrammarSpec(kind=kind, value={} if kind == "json_schema" else ".*")
+    with pytest.raises(GrammarValidationError) as error:
+        grammar_compile.compile_outlines(_AdaptedTokenizer(), grammar)
+    assert error.value.code == "grammar_compile_failed"
+    assert str(error.value) == "outlines compile failed"
+
+
+def test_regex_diagnostic_does_not_gain_json_schema_refusal(monkeypatch) -> None:
+    def reject(*_):
+        raise ValueError("'type' must be a string")
+
+    monkeypatch.setattr(grammar_compile, "_FACTORIES", (reject, reject))
+    with pytest.raises(GrammarValidationError) as error:
+        grammar_compile.compile_outlines(_AdaptedTokenizer(), GrammarSpec(kind="regex", value=".*"))
+    assert error.value.code == "grammar_compile_failed"
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        {"type": "string"},
+        {"type": "null"},
+        {"anyOf": [{"type": "string"}, {"type": "null"}]},
+        {"type": ["string", "null"]},
+    ],
+)
+def test_compile_does_not_reject_or_rewrite_schema_shapes(monkeypatch, schema) -> None:
+    json_calls = []
+    _install_stubs(monkeypatch, json_calls=json_calls, regex_calls=[])
+    assert grammar_compile.compile_outlines(_StubTokenizer(), GrammarSpec(kind="json_schema", value=schema)) is True
+    assert json_calls[0][0] == grammar_compile.json.dumps(schema, sort_keys=True)

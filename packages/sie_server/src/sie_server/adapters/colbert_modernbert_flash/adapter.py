@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -12,12 +11,24 @@ from torch.nn import functional
 from sie_server.adapters._colbert_utils import punctuation_token_ids
 from sie_server.adapters._flash_base import FlashBaseAdapter
 from sie_server.adapters._flash_pack import build_position_ids
+from sie_server.adapters._modernbert_flash import (
+    modernbert_rope_cos_sin,
+    modernbert_rope_theta,
+    parse_fused_rope,
+    run_modernbert_flash_layers,
+)
+from sie_server.adapters._modernbert_flash_graphs import (
+    PackedForward,
+    VarlenGraphRunner,
+    graph_runner,
+    modernbert_encoder,
+    parse_graph_mode,
+)
 from sie_server.adapters._multivector import maxsim_scores_batched
 from sie_server.adapters._pylate_dense import apply_dense_chain, load_pylate_dense_chain
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_NOT_LOADED, ERR_REQUIRES_TEXT, ComputePrecision
 from sie_server.adapters._utils import (
-    apply_rotary_pos_emb,
     grouped_score_pairs,
     validate_output_types,
 )
@@ -31,39 +42,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _ERR_CPU_NOT_SUPPORTED = "ColBERTModernBERTFlashAdapter requires CUDA for Flash Attention."
-
-
-def _nested_rope_theta(config: Any, layer_kind: str) -> float | None:
-    """Return ``rope_theta`` for ``layer_kind`` from a transformers>=5 nested
-    ``rope_parameters`` mapping, or None when it is absent or malformed.
-
-    transformers 5.x re-serializes ModernBERT rope as
-    ``rope_parameters[{"full_attention", "sliding_attention"}]["rope_theta"]``
-    and drops the flat ``global_rope_theta``/``local_rope_theta`` keys. This
-    bundle's 4.x config class does not ingest the nested mapping —
-    ``PretrainedConfig`` retains it as an opaque attribute while the flat attrs
-    fill in from class defaults — so without this read a 5.x-serialized
-    checkpoint is silently served with sliding-window layers at the
-    class-default theta 10000 instead of its trained value (mLateOn trains
-    both layer kinds at 160000; the #2807 parity probe measured per-token
-    cosine vs pylate down to 0.588 from this alone).
-
-    Precedence: nested-when-present wins — a 5.x-serialized config is
-    authoritative about itself, and 4.x-written configs carry no
-    ``rope_parameters`` key, so their flat-attr path stays byte-identical. A
-    malformed nested declaration (non-mapping, missing layer kind, non-numeric
-    theta) falls back to the flat attrs rather than failing the load.
-    """
-    rope_parameters = getattr(config, "rope_parameters", None)
-    if not isinstance(rope_parameters, Mapping):
-        return None
-    entry = rope_parameters.get(layer_kind)
-    if not isinstance(entry, Mapping):
-        return None
-    theta = entry.get("rope_theta")
-    if isinstance(theta, bool) or not isinstance(theta, (int, float)):
-        return None
-    return float(theta)
 
 
 class ColBERTModernBERTFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
@@ -94,7 +72,7 @@ class ColBERTModernBERTFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
     spec = AdapterSpec(
         inputs=("text",),
         outputs=("multivector", "score"),
-        unload_fields=("_model", "_tokenizer", "_dense_chain"),
+        unload_fields=("_model", "_tokenizer", "_dense_chain", "_graphs"),
     )
 
     def __init__(
@@ -112,6 +90,8 @@ class ColBERTModernBERTFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
         doc_prefix: str = "",
         muvera_config: dict[str, Any] | None = None,
         revision: str | None = None,
+        cuda_graphs: str | bool = "off",
+        fused_rope: bool = False,
         **kwargs: Any,
     ) -> None:
         """Initialize the adapter.
@@ -133,9 +113,24 @@ class ColBERTModernBERTFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
             revision: Optional HuggingFace revision/branch/commit SHA to pin when
                 loading the tokenizer, model, and Dense-chain artifacts.
                 Forwarded to ``from_pretrained(..., revision=...)``.
+            cuda_graphs: "off" (the default) or "bucketed": whether forwards
+                replay the encoder as CUDA graphs (see
+                ``sie_server.adapters._modernbert_flash_graphs``). An operator
+                setting, fixed at load.
+            fused_rope: Whether queries and keys are rotated by one fused kernel
+                on CUDA (see ``run_modernbert_flash_layers``) instead of
+                PyTorch elementwise operations. An operator setting, fixed at
+                load; a model's profile enables it only where it is at least as
+                accurate against float32 (see the server README).
             **kwargs: Additional arguments (ignored).
+
+        Raises:
+            ValueError: If ``cuda_graphs`` is not "off" or "bucketed", or
+                ``fused_rope`` is not a boolean.
         """
         _ = kwargs
+        self._cuda_graphs = parse_graph_mode(cuda_graphs, adapter="ColBERTModernBERTFlashAdapter")
+        self._fused_rope = parse_fused_rope(fused_rope, adapter="ColBERTModernBERTFlashAdapter")
         self._model_name_or_path = str(model_name_or_path)
         self._revision = revision
         self._token_dim = token_dim
@@ -155,6 +150,8 @@ class ColBERTModernBERTFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
         self._device: str | None = None
         self._dense_chain: list[torch.Tensor] | None = None
         self._doc_skiplist_ids: set[int] = set()
+        # Replays the encoder as CUDA graphs, when the operator enabled them.
+        self._graphs: VarlenGraphRunner | None = None
 
     def load(self, device: str) -> None:
         """Load the model onto the specified device.
@@ -216,6 +213,28 @@ class ColBERTModernBERTFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
             self._model.config.hidden_size,
             self._token_dim,
             None if self._dense_chain is None else [tuple(w.shape) for w in self._dense_chain],
+        )
+        self._graphs = self._graph_runner(dtype)
+
+    def _graph_runner(self, dtype: torch.dtype) -> VarlenGraphRunner | None:
+        """The CUDA graph runner for the loaded model; None when graphs are off."""
+        if self._device is None or self._tokenizer is None:
+            return None
+        model = self._model
+        window = self._max_seq_length
+        positions = getattr(model.config, "max_position_embeddings", None)
+        if isinstance(positions, int) and positions > 0:
+            window = min(window, positions)
+        fused_rope = self._fused_rope
+        return graph_runner(
+            lambda: modernbert_encoder(model, window=window, dtype=dtype, fused_rope=fused_rope),
+            mode=self._cuda_graphs,
+            device=self._device,
+            hidden_size=model.config.hidden_size,
+            dtype=dtype,
+            window=window,
+            pad_token_id=self._tokenizer.pad_token_id,
+            name=self._model_name_or_path,
         )
 
     def _load_tokenizer(self) -> PreTrainedTokenizerFast:
@@ -316,23 +335,58 @@ class ColBERTModernBERTFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
             )
 
         encodings = self._tokenize_inputs(texts, max_length)
-
-        # Build packed representation
         seq_lengths = [enc["input_ids"].shape[1] for enc in encodings]
+
+        multivectors = self._encode_graphed(encodings, seq_lengths, is_query=is_query)
+        if multivectors is None:
+            multivectors = self._encode_eager(encodings, seq_lengths, is_query=is_query)
+
+        return EncodeOutput(
+            multivector=multivectors,
+            batch_size=len(items),
+            is_query=is_query,
+            multivector_token_dim=self._token_dim,
+            extra={"input_token_counts": [int(length) for length in seq_lengths]},
+        )
+
+    def _encode_graphed(
+        self, encodings: list[Any], seq_lengths: list[int], *, is_query: bool
+    ) -> list[np.ndarray] | None:
+        """Token vectors from a replayed CUDA graph; None when the forward runs eagerly.
+
+        A model with LoRA adapters loaded always runs eagerly: its forward
+        depends on which adapter is active.
+        """
+        if self._graphs is None or self._peft_model is not None:
+            return None
+        flat_ids = torch.cat([enc["input_ids"].squeeze(0) for enc in encodings]).numpy()
+
+        def head(packed: PackedForward) -> list[np.ndarray]:
+            return self._token_vectors(
+                packed.hidden, packed.cu_seqlens, seq_lengths, packed.input_ids.long(), is_query=is_query
+            )
+
+        with torch.inference_mode():
+            return self._graphs.run(flat_ids, seq_lengths, head)
+
+    def _encode_eager(self, encodings: list[Any], seq_lengths: list[int], *, is_query: bool) -> list[np.ndarray]:
+        """Token vectors from an eager forward over the packed rows."""
+        # Build packed representation
         total_tokens = sum(seq_lengths)
         max_seqlen = max(seq_lengths)
+        num_seqs = len(seq_lengths)
 
         # Pack input_ids
         input_ids_packed = torch.cat([enc["input_ids"].squeeze(0) for enc in encodings]).to(self._device)
 
         # Build cu_seqlens (cumulative sequence lengths)
-        cu_seqlens = torch.zeros(len(texts) + 1, dtype=torch.int32, device=self._device)
+        cu_seqlens = torch.zeros(num_seqs + 1, dtype=torch.int32, device=self._device)
         for i, length in enumerate(seq_lengths):
             cu_seqlens[i + 1] = cu_seqlens[i] + length
 
         with torch.inference_mode():
             # Build position IDs for RoPE
-            position_ids_packed = self._build_position_ids(cu_seqlens, len(texts))
+            position_ids_packed = self._build_position_ids(cu_seqlens, num_seqs)
 
             # Run embeddings
             hidden = self._run_embeddings(input_ids_packed)
@@ -358,29 +412,33 @@ class ColBERTModernBERTFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
             if hasattr(self._model, "final_norm"):
                 hidden = self._model.final_norm(hidden)
 
-            # Apply the trained pylate Dense chain (if the checkpoint ships one)
-            # then Matryoshka-truncate to token_dim; see #1680.
-            hidden = self._project(hidden)
+            return self._token_vectors(hidden, cu_seqlens, seq_lengths, input_ids_packed, is_query=is_query)
 
-            # L2 normalize
-            if self._normalize:
-                hidden = functional.normalize(hidden, p=2, dim=-1)
+    def _token_vectors(
+        self,
+        hidden: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        seq_lengths: list[int],
+        input_ids: torch.Tensor,
+        *,
+        is_query: bool,
+    ) -> list[np.ndarray]:
+        """Project, normalize and split final-normed packed hidden states into per-item token vectors."""
+        # Apply the trained pylate Dense chain (if the checkpoint ships one)
+        # then Matryoshka-truncate to token_dim; see #1680.
+        hidden = self._project(hidden)
 
-            # Split back into per-item results
-            multivectors = self._split_embeddings(
-                hidden,
-                cu_seqlens,
-                seq_lengths,
-                input_ids_packed,
-                is_query=is_query,
-            )
+        # L2 normalize
+        if self._normalize:
+            hidden = functional.normalize(hidden, p=2, dim=-1)
 
-        return EncodeOutput(
-            multivector=multivectors,
-            batch_size=len(items),
+        # Split back into per-item results
+        return self._split_embeddings(
+            hidden,
+            cu_seqlens,
+            seq_lengths,
+            input_ids,
             is_query=is_query,
-            multivector_token_dim=self._token_dim,
-            extra={"input_token_counts": [int(length) for length in seq_lengths]},
         )
 
     def _tokenize_inputs(self, texts: list[str], max_length: int) -> list[Any]:
@@ -541,8 +599,9 @@ class ColBERTModernBERTFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
         layers: ``global_rope_theta`` (default 160000) for global layers and
         ``local_rope_theta`` (default 10000) for local (sliding-window) layers.
         A transformers>=5 nested ``rope_parameters`` declaration takes
-        precedence over the flat attrs when present (see ``_nested_rope_theta``
-        for the rationale and fallback contract).
+        precedence over the flat attrs when present (see ``nested_rope_theta``
+        in ``sie_server.adapters._modernbert_flash`` for the rationale
+        and fallback contract).
 
         Args:
             position_ids: Packed position IDs [total_tokens].
@@ -551,25 +610,13 @@ class ColBERTModernBERTFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
         Returns:
             cos, sin tensors of shape [total_tokens, head_dim].
         """
-        head_dim = self._model.config.hidden_size // self._model.config.num_attention_heads
         cfg = self._model.config
-
-        if use_global:
-            base = _nested_rope_theta(cfg, "full_attention")
-            if base is None:
-                base = getattr(cfg, "global_rope_theta", getattr(cfg, "rope_theta", 160000.0))
-        else:
-            base = _nested_rope_theta(cfg, "sliding_attention")
-            if base is None:
-                base = getattr(cfg, "local_rope_theta", getattr(cfg, "rope_theta", 10000.0))
-
-        inv_freq = 1.0 / (base ** (torch.arange(0, head_dim, 2, device=self._device).float() / head_dim))
-
-        pos = position_ids.float()
-        freqs = torch.outer(pos, inv_freq)  # [total_tokens, head_dim/2]
-        emb = torch.cat([freqs, freqs], dim=-1)  # [total_tokens, head_dim]
-
-        return emb.cos().to(self._resolve_dtype()), emb.sin().to(self._resolve_dtype())
+        return modernbert_rope_cos_sin(
+            position_ids,
+            head_dim=cfg.hidden_size // cfg.num_attention_heads,
+            theta=modernbert_rope_theta(cfg, use_global=use_global),
+            dtype=self._resolve_dtype(),
+        )
 
     def _run_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         """Compute embeddings for packed input (no position embeddings - RoPE in attention)."""
@@ -601,71 +648,21 @@ class ColBERTModernBERTFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
         patterns.  Every ``global_attn_every_n_layers``-th layer (0-indexed)
         uses full (global) attention with ``global_rope_theta``; the remaining
         layers use sliding-window (local) attention of size
-        ``local_attention`` with ``local_rope_theta``.
+        ``local_attention`` with ``local_rope_theta``. See
+        ``sie_server.adapters._modernbert_flash.run_modernbert_flash_layers``.
         """
-        from flash_attn import flash_attn_varlen_func
-
-        cfg = self._model.config
-        num_heads = cfg.num_attention_heads
-        hidden_size = cfg.hidden_size
-        head_dim = hidden_size // num_heads
-        softmax_scale = 1.0 / (head_dim**0.5)
-
-        global_every_n = getattr(cfg, "global_attn_every_n_layers", 1)
-        local_window = getattr(cfg, "local_attention", -1)
-        # flash_attn_varlen_func expects window_size as (left, right) tuple
-        window = (local_window // 2, local_window // 2) if local_window > 0 else (-1, -1)
-
-        for layer_idx, layer in enumerate(self._model.layers):
-            is_global = (layer_idx % global_every_n == 0) if global_every_n > 1 else True
-            cos = global_cos if is_global else local_cos
-            sin = global_sin if is_global else local_sin
-
-            # Pre-attention norm (ModernBERT is pre-norm)
-            normed_hidden = layer.attn_norm(hidden)
-
-            # Fused QKV projection
-            qkv = layer.attn.Wqkv(normed_hidden)
-            qkv = qkv.view(total_tokens, 3, num_heads, head_dim)
-            query = qkv[:, 0]  # [total_tokens, num_heads, head_dim]
-            key = qkv[:, 1]
-            value = qkv[:, 2]
-
-            # Apply RoPE to Q and K (using layer-appropriate theta)
-            query, key = apply_rotary_pos_emb(query, key, cos, sin)
-
-            # Flash attention — global layers use full attention,
-            # local layers use sliding window
-            attn_kwargs: dict[str, Any] = {}
-            if not is_global and local_window > 0:
-                attn_kwargs["window_size"] = window
-
-            attn_out = flash_attn_varlen_func(
-                query,
-                key,
-                value,
-                cu_seqlens_q=cu_seqlens,
-                cu_seqlens_k=cu_seqlens,
-                max_seqlen_q=max_seqlen,
-                max_seqlen_k=max_seqlen,
-                causal=False,
-                softmax_scale=softmax_scale,
-                **attn_kwargs,
-            )
-            attn_out = attn_out.reshape(total_tokens, hidden_size)
-
-            # Output projection
-            attn_out = layer.attn.Wo(attn_out)
-
-            # Residual connection
-            hidden = hidden + attn_out
-
-            # MLP block with pre-norm
-            normed_hidden = layer.mlp_norm(hidden)
-            mlp_out = layer.mlp(normed_hidden)
-            hidden = hidden + mlp_out
-
-        return hidden
+        return run_modernbert_flash_layers(
+            self._model,
+            hidden,
+            cu_seqlens,
+            max_seqlen,
+            total_tokens,
+            global_cos,
+            global_sin,
+            local_cos,
+            local_sin,
+            fused_rope=self._fused_rope,
+        )
 
     def _split_embeddings(
         self,

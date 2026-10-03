@@ -101,8 +101,10 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # shared-deps resolver.
 RUN .venv/bin/python -c "import sie_audio_prep, torch; print(torch.__version__)"
 
-# Register bundle-libs on sys.path. Content is identical across bundles.
-RUN echo "import sys; sys.path.insert(0, '/app/bundle-libs')" \
+# Register bundle-libs as a site directory so dependency-owned .pth files are
+# processed, then move every discovered bundle path ahead of the shared venv so
+# bundle versions shadow it. Content is identical across bundles.
+RUN echo "import site, sys; _sie_bundle_start = len(sys.path); site.addsitedir('/app/bundle-libs'); sys.path[:] = sys.path[_sie_bundle_start:] + sys.path[:_sie_bundle_start]" \
     > /app/.venv/lib/python3.12/site-packages/_sie_bundle.pth
 
 # .venv cleanup + stdlib trim — runs here so /app/.venv reaches its final

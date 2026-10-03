@@ -18,6 +18,8 @@ use opentelemetry::{global, KeyValue};
 
 pub const QUEUE_DURATION_METRIC_NAME: &str = "sie.worker.queue.duration";
 pub const QUEUE_DEPTH_METRIC_NAME: &str = "sie.worker.queue.depth";
+pub const WORK_ITEM_AGE_METRIC_NAME: &str = "sie.worker.work_item.age";
+pub const WORK_ITEM_DEADLINE_EXCEEDED_METRIC_NAME: &str = "sie.worker.work_item.deadline_exceeded";
 pub const SCHEDULER_REQUEST_BATCH_DISPATCH_WAIT_METRIC_NAME: &str =
     "sie.worker.scheduler.request_batch.dispatch_wait";
 pub const SCHEDULER_REQUEST_BATCH_TOTAL_METRIC_NAME: &str =
@@ -84,7 +86,7 @@ const CONFIG_OPERATION_SERIES: usize = 6;
 const CONFIG_OUTCOME_SERIES: usize = 18;
 const NATS_OPERATION_SERIES: usize = 7;
 const BINARY_OUTCOME_SERIES: usize = 3;
-const NATS_REASON_SERIES: usize = 10;
+const NATS_REASON_SERIES: usize = 12;
 const DELIVERY_REDELIVERED_SERIES: usize = 2;
 const RESULT_TRANSPORT_MODE_SERIES: usize = 4;
 const RESULT_TRANSPORT_OUTCOME_SERIES: usize = 4;
@@ -95,9 +97,18 @@ const SCHEDULER_P50_KIND_SERIES: usize = 2;
 const GENERATION_LOADING_STATE_SERIES: usize = 4;
 const GENERATION_RESPONSE_OUTCOME_SERIES: usize = 4;
 const SHUTDOWN_DRAIN_OUTCOME_SERIES: usize = 3;
+const DEADLINE_ACTION_SERIES: usize = 3;
 
 pub(crate) const SIDECAR_QUEUE_CARDINALITY_LIMIT: usize =
     OPERATION_SERIES * SIDECAR_CATALOG_PAIR_SERIES;
+/// `sie.worker.work_item.age` carries only `operation` and the process-fixed
+/// `lane`. It deliberately omits the catalog `(model, profile)` pair that the
+/// scheduler-local queue families carry: the question it answers ("how stale is
+/// the work this worker is executing?") is a transport-queue property, and
+/// multiplying it by 257 catalog pairs would buy no extra answer.
+pub(crate) const SIDECAR_WORK_ITEM_AGE_CARDINALITY_LIMIT: usize = OPERATION_SERIES;
+pub(crate) const SIDECAR_WORK_ITEM_DEADLINE_CARDINALITY_LIMIT: usize =
+    OPERATION_SERIES * DEADLINE_ACTION_SERIES;
 pub(crate) const SIDECAR_BATCH_FILL_CARDINALITY_LIMIT: usize =
     SIDECAR_QUEUE_CARDINALITY_LIMIT * FLUSH_REASON_SERIES;
 pub(crate) const SIDECAR_IPC_CARDINALITY_LIMIT: usize = IPC_METHOD_SERIES * IPC_OUTCOME_SERIES;
@@ -131,6 +142,10 @@ pub(crate) fn sidecar_metric_cardinality_limit(name: &str) -> Option<usize> {
         | SCHEDULER_REQUEST_BATCH_TOTAL_METRIC_NAME
         | BATCH_SIZE_METRIC_NAME
         | BATCH_COST_METRIC_NAME => Some(SIDECAR_QUEUE_CARDINALITY_LIMIT),
+        WORK_ITEM_AGE_METRIC_NAME => Some(SIDECAR_WORK_ITEM_AGE_CARDINALITY_LIMIT),
+        WORK_ITEM_DEADLINE_EXCEEDED_METRIC_NAME => {
+            Some(SIDECAR_WORK_ITEM_DEADLINE_CARDINALITY_LIMIT)
+        }
         BATCH_FILL_RATIO_METRIC_NAME => Some(SIDECAR_BATCH_FILL_CARDINALITY_LIMIT),
         IPC_REQUESTS_METRIC_NAME | IPC_REQUEST_DURATION_METRIC_NAME => {
             Some(SIDECAR_IPC_CARDINALITY_LIMIT)
@@ -172,6 +187,23 @@ pub(crate) fn sidecar_metric_cardinality_limit(name: &str) -> Option<usize> {
 const QUEUE_DURATION_BUCKETS: &[f64] = &[
     0.000_1, 0.000_25, 0.000_5, 0.001, 0.002_5, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5,
     5.0, 10.0, 30.0,
+];
+/// Transport-queue age spans a much wider range than the scheduler-local
+/// families, so it gets its own boundaries rather than reusing
+/// [`QUEUE_DURATION_BUCKETS`] (which tops out at 30s and would pile every
+/// interesting observation into one overflow bucket).
+///
+/// The upper boundaries are the system's own time constants, so a reader can
+/// answer the B2 question directly off bucket counts instead of an interpolated
+/// quantile: 120s is the client-facing ceiling
+/// (`packages/sie_gateway/src/config.rs`), 300s is the generation-pool ack
+/// wait, 600s is the default redelivery envelope (30s × 20 deliveries), and
+/// 1800s is stream retention (`packages/sie_server_sidecar/src/nats_consumer.rs`).
+/// Everything at or above the 120s boundary began executing after its client
+/// could still have been waiting.
+const WORK_ITEM_AGE_BUCKETS: &[f64] = &[
+    0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0,
+    1800.0,
 ];
 const BATCH_SIZE_BUCKETS: &[f64] = &[1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0];
 const BATCH_COST_BUCKETS: &[f64] = &[
@@ -441,6 +473,25 @@ impl TelemetryContext {
         ]
     }
 
+    fn work_item_age_attributes(&self, operation: &'static str) -> [KeyValue; 2] {
+        [
+            KeyValue::new("operation", operation),
+            KeyValue::new("lane", self.lane.to_string()),
+        ]
+    }
+
+    fn work_item_deadline_attributes(
+        &self,
+        operation: &'static str,
+        action: &'static str,
+    ) -> [KeyValue; 3] {
+        [
+            KeyValue::new("operation", operation),
+            KeyValue::new("action", action),
+            KeyValue::new("lane", self.lane.to_string()),
+        ]
+    }
+
     fn batch_attributes(
         &self,
         operation: &'static str,
@@ -579,6 +630,8 @@ impl ResultTransportOutcome {
 pub struct EnabledSidecarTelemetry {
     queue_duration: Histogram<f64>,
     queue_depth: Gauge<u64>,
+    work_item_age: Histogram<f64>,
+    work_item_deadline_exceeded: opentelemetry::metrics::Counter<u64>,
     scheduler_request_batch_dispatch_wait: Histogram<f64>,
     scheduler_request_batch_total: Histogram<f64>,
     batch_size: Histogram<u64>,
@@ -697,6 +750,21 @@ impl SidecarTelemetry {
             .with_description("Worker-local scheduler wait before batch execution.")
             .with_unit("s")
             .with_boundaries(QUEUE_DURATION_BUCKETS.to_vec())
+            .build();
+        let work_item_age = meter
+            .f64_histogram(WORK_ITEM_AGE_METRIC_NAME)
+            .with_description(
+                "Age of a work item when the worker commits to executing it, from the gateway publish timestamp on its envelope.",
+            )
+            .with_unit("s")
+            .with_boundaries(WORK_ITEM_AGE_BUCKETS.to_vec())
+            .build();
+        let work_item_deadline_exceeded = meter
+            .u64_counter(WORK_ITEM_DEADLINE_EXCEEDED_METRIC_NAME)
+            .with_description(
+                "Work items found past their gateway deadline before backend execution, by whether they were dropped or executed.",
+            )
+            .with_unit("{item}")
             .build();
         let scheduler_request_batch_dispatch_wait = meter
             .f64_histogram(SCHEDULER_REQUEST_BATCH_DISPATCH_WAIT_METRIC_NAME)
@@ -905,6 +973,8 @@ impl SidecarTelemetry {
         EnabledSidecarTelemetry {
             queue_duration,
             queue_depth,
+            work_item_age,
+            work_item_deadline_exceeded,
             scheduler_request_batch_dispatch_wait,
             scheduler_request_batch_total,
             batch_size,
@@ -1078,6 +1148,56 @@ impl SidecarTelemetry {
         self.queue_depth.record(
             depth,
             &self.context.queue_attributes(operation, model, profile),
+        );
+    }
+
+    /// Record the age of one work item at the instant the worker commits to
+    /// executing it, measured from the gateway publish timestamp carried on its
+    /// envelope.
+    ///
+    /// This is the transport-queue observation the scheduler-local
+    /// `sie.worker.queue.duration` cannot make: it spans broker enqueue,
+    /// redelivery, pull, payload fetch, and scheduling, so it is the only
+    /// series that says how stale the work a worker takes on actually is.
+    /// Compare its upper buckets against the client-facing request ceiling to
+    /// read off how much work is started after its caller could still be
+    /// waiting.
+    ///
+    /// Callers must record this at an execution-commit point for EVERY
+    /// operation, generation included; the dispatcher's `record_work_item_ages`
+    /// documents where those points are and why a missing one biases the
+    /// distribution toward zero.
+    ///
+    /// Takes plain seconds rather than a [`Duration`] on purpose: the caller's
+    /// value is a wall-clock delta between two `SystemTime` reads, and
+    /// `Duration::from_secs_f64` PANICS on a negative, NaN, or overflowing
+    /// input. A skewed or corrupt envelope timestamp must cost this worker a
+    /// dropped observation, never an aborted request. Non-finite and negative
+    /// ages are therefore dropped here rather than poisoning the series.
+    pub fn work_item_age_observed(&self, operation: &str, age_seconds: f64) {
+        if self.inner.is_none() || !age_seconds.is_finite() || age_seconds < 0.0 {
+            return;
+        }
+        let operation = bounded_operation(operation);
+        self.work_item_age.record(
+            age_seconds,
+            &self.context.work_item_age_attributes(operation),
+        );
+    }
+
+    /// Record a work item found past its gateway deadline before backend
+    /// execution. `action` is `dropped` when enforcement ACK-dropped it and
+    /// `executed` when enforcement is off and it ran anyway.
+    pub fn work_item_deadline_exceeded(&self, operation: &str, action: &str) {
+        if self.inner.is_none() {
+            return;
+        }
+        self.work_item_deadline_exceeded.add(
+            1,
+            &self.context.work_item_deadline_attributes(
+                bounded_operation(operation),
+                bounded_deadline_action(action),
+            ),
         );
     }
 
@@ -2054,6 +2174,14 @@ fn bounded_operation(operation: &str) -> &'static str {
     }
 }
 
+fn bounded_deadline_action(action: &str) -> &'static str {
+    match action {
+        "dropped" => "dropped",
+        "executed" => "executed",
+        _ => OTHER,
+    }
+}
+
 fn bounded_flush_reason(reason: &str) -> &'static str {
     match reason {
         "cost_cap" => "cost_cap",
@@ -2177,11 +2305,13 @@ fn bounded_nats_reason(reason: &str) -> &'static str {
         "completed" => "completed",
         "retry" => "retry",
         "pool_not_assigned" => "pool_not_assigned",
+        "model_unsupported" => "model_unsupported",
         "first_delivery" => "first_delivery",
         "redelivery" => "redelivery",
         "metadata_unavailable" => "metadata_unavailable",
         "transport" => "transport",
         "stream_ended" => "stream_ended",
+        "deadline_exceeded" => "deadline_exceeded",
         _ => OTHER,
     }
 }
@@ -2509,6 +2639,8 @@ mod tests {
         let names = [
             QUEUE_DURATION_METRIC_NAME,
             QUEUE_DEPTH_METRIC_NAME,
+            WORK_ITEM_AGE_METRIC_NAME,
+            WORK_ITEM_DEADLINE_EXCEEDED_METRIC_NAME,
             SCHEDULER_REQUEST_BATCH_DISPATCH_WAIT_METRIC_NAME,
             SCHEDULER_REQUEST_BATCH_TOTAL_METRIC_NAME,
             BATCH_SIZE_METRIC_NAME,
@@ -2551,7 +2683,12 @@ mod tests {
             .all(|name| sidecar_metric_cardinality_limit(name).is_some()));
         assert!(sidecar_metric_cardinality_limit("not-a-contract-metric").is_none());
         assert_eq!(SIDECAR_QUEUE_CARDINALITY_LIMIT, 7 * 257);
+        // Operation alone; `lane` is fixed for the process lifetime.
+        assert_eq!(SIDECAR_WORK_ITEM_AGE_CARDINALITY_LIMIT, 7);
+        assert_eq!(SIDECAR_WORK_ITEM_DEADLINE_CARDINALITY_LIMIT, 7 * 3);
         assert_eq!(SIDECAR_BATCH_FILL_CARDINALITY_LIMIT, 7 * 257 * 8);
+        // Operation, outcome and reason; `deadline_exceeded` is the twelfth reason.
+        assert_eq!(SIDECAR_NATS_CARDINALITY_LIMIT, 7 * 3 * 12);
         assert_eq!(SIDECAR_IPC_RESPONSE_CHUNK_CARDINALITY_LIMIT, 3);
         assert_eq!(SIDECAR_RESULT_TRANSPORT_CARDINALITY_LIMIT, 4 * 4);
         assert_eq!(SIDECAR_GENERATION_LOADING_CARDINALITY_LIMIT, 257 * 4 * 4);
@@ -2602,6 +2739,37 @@ mod tests {
             "unknown-state",
         ];
         let loading_outcomes = ["success", "ack_error", "publish_error", "unknown-outcome"];
+        let nats_operations = [
+            "receive",
+            "ack",
+            "nak",
+            "progress",
+            "fetch",
+            "stream",
+            "unknown-operation",
+        ];
+        let nats_outcomes = ["success", "error", "unknown-outcome"];
+        let nats_reasons = [
+            "none",
+            "completed",
+            "retry",
+            "pool_not_assigned",
+            "model_unsupported",
+            "first_delivery",
+            "redelivery",
+            "metadata_unavailable",
+            "transport",
+            "stream_ended",
+            "deadline_exceeded",
+            "unknown-reason",
+        ];
+        for operation in nats_operations {
+            for outcome in nats_outcomes {
+                for reason in nats_reasons {
+                    telemetry.nats_operation(operation, outcome, reason, 1);
+                }
+            }
+        }
         for model in models.iter().map(String::as_str).chain(["unknown/model"]) {
             for operation in operations {
                 for flush_reason in flush_reasons {
@@ -2649,6 +2817,18 @@ mod tests {
             sum.data_points().count(),
             SIDECAR_GENERATION_LOADING_CARDINALITY_LIMIT
         );
+        assert!(sum.data_points().all(|point| point
+            .attributes()
+            .all(|attribute| attribute.key.as_str() != "otel.metric.overflow")));
+
+        let nats = exported
+            .iter()
+            .find(|metric| metric.name() == NATS_OPERATIONS_METRIC_NAME)
+            .expect("nats operations");
+        let AggregatedMetrics::U64(MetricData::Sum(sum)) = nats.data() else {
+            panic!("nats operations must be a u64 sum")
+        };
+        assert_eq!(sum.data_points().count(), SIDECAR_NATS_CARDINALITY_LIMIT);
         assert!(sum.data_points().all(|point| point
             .attributes()
             .all(|attribute| attribute.key.as_str() != "otel.metric.overflow")));
@@ -2716,6 +2896,8 @@ mod tests {
         telemetry.adaptive_snapshot("model-a", None, 5.0, 4096, Some(12.0), Some(20.0), 1);
         telemetry.generation_model_loading_response("model-a", None, "loading_started", "success");
         telemetry.shutdown_drain_completed("success", Duration::from_millis(1));
+        telemetry.work_item_age_observed("encode", 1.5);
+        telemetry.work_item_deadline_exceeded("encode", "dropped");
 
         provider.force_flush().expect("force_flush");
         let resource_metrics = exporter.get_finished_metrics().expect("finished metrics");
@@ -2731,6 +2913,65 @@ mod tests {
         assert_eq!(telemetry.queue_depth_for_tests("encode", "model-a"), 0);
     }
 
+    /// The work-item age series must carry exactly `operation` and `lane`, must
+    /// bound an unknown operation rather than minting a series for it, and must
+    /// drop a clock delta it cannot represent instead of poisoning the
+    /// histogram.
+    #[test]
+    fn work_item_age_is_bounded_by_operation_and_drops_unrepresentable_ages() {
+        let exporter = InMemoryMetricExporter::default();
+        let reader = PeriodicReader::builder(exporter.clone()).build();
+        let provider = SdkMeterProvider::builder().with_reader(reader).build();
+        let meter = provider.meter("work-item-age-test");
+        let telemetry = test_metrics(&meter, &["model-a"]);
+
+        telemetry.work_item_age_observed("encode", 0.25);
+        telemetry.work_item_age_observed("caller-defined-operation", 900.0);
+        // Neither of these may reach the SDK.
+        telemetry.work_item_age_observed("encode", -1.0);
+        telemetry.work_item_age_observed("encode", f64::NAN);
+        telemetry.work_item_age_observed("encode", f64::INFINITY);
+
+        provider.force_flush().expect("force_flush");
+        let resource_metrics = exporter.get_finished_metrics().expect("finished metrics");
+        let exported: Vec<_> = resource_metrics
+            .iter()
+            .flat_map(|resource| resource.scope_metrics())
+            .flat_map(|scope| scope.metrics())
+            .filter(|metric| metric.name() == WORK_ITEM_AGE_METRIC_NAME)
+            .collect();
+        assert_eq!(exported.len(), 1);
+        let metric = exported[0];
+        assert_eq!(metric.unit(), "s");
+        let AggregatedMetrics::F64(MetricData::Histogram(histogram)) = metric.data() else {
+            panic!("work item age must be an f64 histogram");
+        };
+        let mut observed: Vec<(String, u64)> = histogram
+            .data_points()
+            .map(|point| {
+                let attributes: HashMap<&str, String> = point
+                    .attributes()
+                    .map(|attribute| (attribute.key.as_str(), attribute.value.as_str().to_string()))
+                    .collect();
+                assert_eq!(
+                    attributes.keys().copied().collect::<HashSet<_>>(),
+                    HashSet::from(["operation", "lane"]),
+                    "work item age must carry exactly operation and lane"
+                );
+                assert_eq!(attributes["lane"], "default|l4|default");
+                (attributes["operation"].clone(), point.count())
+            })
+            .collect();
+        observed.sort();
+        // The unknown operation collapsed to `other` rather than minting its
+        // own series, and the three unrepresentable ages were dropped, so
+        // `encode` counts one observation and not four.
+        assert_eq!(
+            observed,
+            vec![("encode".to_string(), 1), ("other".to_string(), 1)]
+        );
+    }
+
     #[test]
     fn exports_exact_dotted_contract_with_bounded_attributes() {
         let exporter = InMemoryMetricExporter::default();
@@ -2742,6 +2983,7 @@ mod tests {
 
         metrics.queue_enqueued("encode", "model-a", Some("fast"));
         metrics.queue_released("encode", "model-a", Some("fast"), Duration::from_millis(5));
+        metrics.work_item_age_observed("encode", 42.5);
         metrics.scheduler_request_batch_completed(SchedulerRequestBatchObservation {
             operation: "encode",
             model: "model-a",
@@ -2815,6 +3057,7 @@ mod tests {
             "customer error text",
         );
         metrics.shutdown_drain_completed("deadline_exceeded", Duration::from_secs(12));
+        metrics.work_item_deadline_exceeded("encode", "dropped");
 
         provider.force_flush().expect("force_flush");
         let resource_metrics = exporter.get_finished_metrics().expect("finished metrics");
@@ -2832,6 +3075,8 @@ mod tests {
             HashSet::from([
                 QUEUE_DURATION_METRIC_NAME.to_string(),
                 QUEUE_DEPTH_METRIC_NAME.to_string(),
+                WORK_ITEM_AGE_METRIC_NAME.to_string(),
+                WORK_ITEM_DEADLINE_EXCEEDED_METRIC_NAME.to_string(),
                 SCHEDULER_REQUEST_BATCH_DISPATCH_WAIT_METRIC_NAME.to_string(),
                 SCHEDULER_REQUEST_BATCH_TOTAL_METRIC_NAME.to_string(),
                 BATCH_SIZE_METRIC_NAME.to_string(),

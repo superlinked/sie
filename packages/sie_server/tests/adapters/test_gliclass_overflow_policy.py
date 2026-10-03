@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from sie_server.adapters.errors import InputTooLongError
@@ -8,7 +9,9 @@ from sie_server.adapters.gliclass import GLiClassAdapter
 
 
 class _FakeTokenizer:
-    def __call__(self, text: str, add_special_tokens: bool = False) -> dict[str, list[str]]:
+    def __call__(self, text: str | list[str], add_special_tokens: bool = False) -> dict[str, Any]:
+        if isinstance(text, list):
+            return {"input_ids": [t.split() for t in text]}
         return {"input_ids": text.split()}
 
     def decode(self, ids: list[str], skip_special_tokens: bool = True) -> str:
@@ -19,10 +22,6 @@ class _FakePipe:
     def prepare_input(self, text: str, labels: list[str]) -> str:
         prefix = "<LABEL> " + " <SEP> ".join(labels)
         return f"{prefix} {text}".strip()
-
-
-class _FakePipeline:
-    pipe = _FakePipe()
 
 
 # With _FakeTokenizer + _FakePipe, N labels produce a 2N-token label_prompt.
@@ -36,7 +35,7 @@ def _make_adapter(*, max_seq_length: int = 10, special_count: int = 2) -> GLiCla
     adapter._max_seq_length = max_seq_length
     adapter._special_count = special_count
     adapter._tokenizer = _FakeTokenizer()  # ty:ignore[invalid-assignment]
-    adapter._pipeline = _FakePipeline()  # ty:ignore[invalid-assignment]
+    adapter._pipe = _FakePipe()
     return adapter
 
 
@@ -45,45 +44,53 @@ class TestApplyOverflowPolicy:
         adapter = _make_adapter()
         texts = ["a b c d e f g h i j"]  # 10 tokens, observed = 16 > 10
 
-        assert adapter._apply_overflow_policy(texts, _LABELS, "default") == texts
+        assert adapter._apply_overflow_policy(texts, _LABELS, "default") == (texts, [None])
 
     def test_default_is_the_default_arg(self) -> None:
         adapter = _make_adapter()
         texts = ["a b c d e f g h i j"]
 
-        assert adapter._apply_overflow_policy(texts, _LABELS) == texts
+        assert adapter._apply_overflow_policy(texts, _LABELS) == (texts, [None])
 
     def test_truncate_text_passes_fitting_text_through(self) -> None:
         adapter = _make_adapter()
         texts = ["a b c d"]  # 4 tokens, observed = 10
 
-        assert adapter._apply_overflow_policy(texts, _LABELS, "truncate_text") == ["a b c d"]
+        assert adapter._apply_overflow_policy(texts, _LABELS, "truncate_text") == (["a b c d"], [None])
 
     def test_truncate_text_slices_overflowing_text_to_budget(self) -> None:
         adapter = _make_adapter()
         texts = ["a b c d e f g"]  # 7 tokens, budget = 4
 
-        assert adapter._apply_overflow_policy(texts, _LABELS, "truncate_text") == ["a b c d"]
+        assert adapter._apply_overflow_policy(texts, _LABELS, "truncate_text") == (["a b c d"], [None])
 
     def test_truncate_text_mixed_batch(self) -> None:
         adapter = _make_adapter()
         texts = ["a b", "a b c d e f g"]
 
-        assert adapter._apply_overflow_policy(texts, _LABELS, "truncate_text") == ["a b", "a b c d"]
+        assert adapter._apply_overflow_policy(texts, _LABELS, "truncate_text") == (["a b", "a b c d"], [None, None])
 
-    def test_error_raises_on_overflowing_text(self) -> None:
+    def test_error_fails_only_the_overflowing_text(self) -> None:
         adapter = _make_adapter()
-        texts = ["a b c d e"]  # 5 tokens, observed = 11 > 10
+        texts = ["a b", "a b c d e"]  # the second is 5 tokens, observed = 11 > 10
 
-        with pytest.raises(InputTooLongError, match=r"items\[0\] observed_tokens=11"):
-            adapter._apply_overflow_policy(texts, _LABELS, "error")
+        out, failures = adapter._apply_overflow_policy(texts, _LABELS, "error")
 
-    def test_error_reports_first_overflowing_item_index(self) -> None:
+        assert out == texts
+        assert failures[0] is None
+        assert failures[1] is not None
+        assert "(11 tokens, at most 10)" in failures[1]
+        assert "overflow_policy is 'error'" in failures[1]
+
+    def test_error_messages_name_no_item_index(self) -> None:
+        # One adapter call can hold several callers' requests, so an index
+        # would point into another caller's items.
         adapter = _make_adapter()
-        texts = ["a b", "a b c d e f"]
 
-        with pytest.raises(InputTooLongError, match=r"items\[1\]"):
-            adapter._apply_overflow_policy(texts, _LABELS, "error")
+        _, failures = adapter._apply_overflow_policy(["a b", "a b c d e f"], _LABELS, "error")
+
+        assert failures[1] is not None
+        assert "items[" not in failures[1]
 
     def test_label_prompt_overflow_raises_under_truncate_text(self) -> None:
         adapter = _make_adapter(max_seq_length=5)  # overhead 6 > 5
@@ -101,28 +108,28 @@ class TestApplyOverflowPolicy:
         adapter = _make_adapter(max_seq_length=5)
         texts = ["a b c"]
 
-        assert adapter._apply_overflow_policy(texts, _LABELS, "default") == texts
+        assert adapter._apply_overflow_policy(texts, _LABELS, "default") == (texts, [None])
 
 
-class _RaisingPipeline:
-    """Fake gliclass pipeline whose __call__ raises a chosen exception.
+class _RaisingPipe:
+    """Fake gliclass pipe whose model input preparation raises a chosen exception.
 
-    Exercises the except-block crash-signature mapping in
-    ``GLiClassAdapter.extract`` end-to-end (not just ``_apply_overflow_policy``).
-    The default overflow policy returns texts without touching ``.pipe``, so the
-    pipeline only needs to be callable.
+    Exercises the crash-signature mapping in ``GLiClassAdapter.extract``
+    end-to-end (not just ``_apply_overflow_policy``). The default overflow
+    policy returns texts without tokenizing, so the pipe only needs to fail
+    when the rows are prepared.
     """
 
     def __init__(self, exc: BaseException) -> None:
         self._exc = exc
 
-    def __call__(self, *args: object, **kwargs: object) -> object:
+    def prepare_inputs(self, *args: object, **kwargs: object) -> object:
         raise self._exc
 
 
 def _make_raising_adapter(exc: BaseException) -> GLiClassAdapter:
     adapter = GLiClassAdapter("test-model")
-    adapter._pipeline = _RaisingPipeline(exc)  # ty:ignore[invalid-assignment]
+    adapter._pipe = _RaisingPipe(exc)
     return adapter
 
 

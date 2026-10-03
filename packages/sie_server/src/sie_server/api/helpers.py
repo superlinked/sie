@@ -1,4 +1,6 @@
 import logging
+import math
+import os
 import time
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
@@ -8,11 +10,13 @@ import msgspec
 from fastapi import HTTPException, Request, status
 from fastapi.responses import JSONResponse
 
-from sie_server.adapters.errors import InputTooLongError
+from sie_server.adapters.errors import InputTooLongError, UpstreamUnavailableError
 from sie_server.api.serialization import MsgPackResponse, _convert_for_json
+from sie_server.core.model_suggestions import suggestion_suffix
 from sie_server.core.oom import is_oom_error
 from sie_server.core.timing import RequestTiming
 from sie_server.core.worker import QueueFullError
+from sie_server.core.worker.types import WorkerDrainedError
 from sie_server.observability.tracing import get_current_trace_id
 from sie_server.observability.worker_telemetry import worker_telemetry, worker_telemetry_enabled
 from sie_server.types.responses import ErrorCode
@@ -28,6 +32,39 @@ if TYPE_CHECKING:
 # + recovery window. Operators can override per-cluster via
 # ``engine_config.oom_recovery.retry_after_s`` (env: SIE_OOM_RECOVERY__RETRY_AFTER_S).
 _OOM_DEFAULT_RETRY_AFTER_S = 5
+
+# Retry-After (seconds) for transient 503 QUEUE_FULL responses. The queue
+# drains at inference speed, so pressure typically clears within a second
+# or two — much faster than a model load, hence smaller than the
+# MODEL_LOADING/OOM values.
+_QUEUE_FULL_RETRY_AFTER_S = 1
+
+# Ceiling on a native encode/score/extract request body. Defaults to the
+# largest native ingress ceiling the OSS gateway enforces (34 MiB, its extract
+# body bound), so a server behind that gateway never refuses a body the
+# gateway already admitted, while a server exposed directly cannot be made
+# to buffer an unbounded body before admission runs.
+_DEFAULT_MAX_REQUEST_BODY_BYTES = 34 * 1024 * 1024
+
+
+def _request_body_limit_from_env() -> int:
+    raw = os.environ.get("SIE_MAX_REQUEST_BODY_BYTES")
+    if raw is None:
+        return _DEFAULT_MAX_REQUEST_BODY_BYTES
+    limit = int(raw)
+    if limit < 0:
+        msg = "SIE_MAX_REQUEST_BODY_BYTES must be non-negative"
+        raise ValueError(msg)
+    return limit
+
+
+MAX_REQUEST_BODY_BYTES = _request_body_limit_from_env()
+
+# Retry-After (seconds) for a request that was still queued when its model
+# was evicted (``WorkerDrainedError``). Matches the ``MODEL_LOADING``
+# Retry-After the state checks above already emit: the client's next attempt
+# will re-trigger the load, so the wait it should expect is a model load.
+WORKER_DRAINED_RETRY_AFTER_S = 5
 
 
 def oom_retry_after_from_registry(registry: "ModelRegistry | None") -> int:
@@ -67,6 +104,43 @@ JSON_CONTENT_TYPE = "application/json"
 # Version negotiation headers
 SERVER_VERSION_HEADER = "X-SIE-Server-Version"
 SDK_VERSION_HEADER = "X-SIE-SDK-Version"
+
+# Remote-serving disclosure
+SERVED_BY_HEADER = "X-SIE-Served-By"
+UPSTREAM_HEADER = "X-SIE-Upstream"
+
+
+def queue_full_exception(error: QueueFullError) -> HTTPException:
+    """503 ``QUEUE_FULL`` with ``Retry-After`` for a queue that other work fills right now."""
+    return HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail={"code": ErrorCode.QUEUE_FULL.value, "message": str(error)},
+        headers={"Retry-After": str(_QUEUE_FULL_RETRY_AFTER_S)},
+    )
+
+
+def upstream_unavailable_exception(error: UpstreamUnavailableError, model: str) -> HTTPException:
+    """503 for a request its upstream did not serve, with the upstream's clamped ``Retry-After``.
+
+    A model that is not ready upstream answers ``MODEL_LOADING``; a busy or
+    unreachable upstream answers ``QUEUE_FULL``. The SDKs retry both. The
+    message is fixed text: nothing the upstream sent reaches the caller.
+    """
+    if error.kind == "not_ready":
+        code = ErrorCode.MODEL_LOADING
+        message = f"Model '{model}' is loading on its upstream, please retry"
+    else:
+        code = ErrorCode.QUEUE_FULL
+        message = f"The upstream serving model '{model}' is {error.kind}, please retry"
+    return HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail={"code": code.value, "message": message},
+        headers={
+            "Retry-After": str(error.retry_after_s),
+            SERVED_BY_HEADER: "remote",
+            UPSTREAM_HEADER: error.upstream,
+        },
+    )
 
 
 def _get_server_version() -> str:
@@ -137,6 +211,38 @@ class ContentNegotiator:
         return MSGPACK_CONTENT_TYPE in content_type_lower or "application/x-msgpack" in content_type_lower
 
 
+def payload_too_large(message: str) -> HTTPException:
+    """413 with the server's standard error detail."""
+    return HTTPException(
+        status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+        detail={"code": ErrorCode.INPUT_TOO_LONG.value, "message": message},
+    )
+
+
+async def read_bounded_request_body(request: Request, limit: int) -> bytes:
+    """Read an ASGI request without aggregating more than ``limit`` bytes.
+
+    A declared ``Content-Length`` above the limit is refused before the first
+    byte is read; a chunked or misdeclared body is refused the moment the
+    aggregate would cross it.
+    """
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            declared_length = int(content_length)
+        except ValueError:
+            declared_length = -1
+        if declared_length > limit:
+            raise payload_too_large(f"request body exceeds the limit of {limit} bytes")
+
+    body = bytearray()
+    async for chunk in request.stream():
+        if len(chunk) > limit - len(body):
+            raise payload_too_large(f"request body exceeds the limit of {limit} bytes")
+        body.extend(chunk)
+    return bytes(body)
+
+
 class RequestParser:
     """Parses and validates HTTP request bodies via msgspec."""
 
@@ -159,7 +265,7 @@ class RequestParser:
         """
         check_sdk_version(http_request)
         content_type = http_request.headers.get("content-type")
-        body = await http_request.body()
+        body = await read_bounded_request_body(http_request, MAX_REQUEST_BODY_BYTES)
 
         try:
             if ContentNegotiator.is_msgpack_request(content_type):
@@ -181,6 +287,47 @@ class RequestParser:
                     "message": f"Failed to parse request body: {e}",
                 },
             ) from e
+
+
+def openai_error_response(exc: HTTPException) -> JSONResponse:
+    """Re-emit an ``HTTPException`` as a top-level OpenAI error envelope.
+
+    FastAPI serializes ``HTTPException.detail`` under a ``{"detail": ...}``
+    wrapper, which OpenAI clients cannot parse. The direct OpenAI-compat
+    surfaces catch the exception and return a top-level
+    ``{"error": {"message", "type", "param", "code"}}`` object instead — the
+    shape ``/v1/completions`` and ``/v1/audio/transcriptions`` already emit.
+
+    Status code, headers, error codes, and messages are preserved verbatim;
+    auxiliary detail fields (e.g. ``error_class``/``permanent``/``attempts``
+    on ``MODEL_LOAD_FAILED``) are carried inside the error
+    object so SDK short-circuits keep working.
+    """
+    detail = exc.detail
+    param: str | None = None
+    error_type: Any = None
+    extras: dict[str, Any] = {}
+    if isinstance(detail, dict):
+        nested = detail.get("error")
+        source: dict[str, Any] = nested if isinstance(nested, dict) else detail
+        message = str(source.get("message", "request failed"))
+        code = str(source.get("code", "invalid_request"))
+        raw_param = source.get("param")
+        param = raw_param if isinstance(raw_param, str) else None
+        error_type = source.get("type")
+        extras = {key: value for key, value in source.items() if key not in {"message", "type", "param", "code"}}
+    else:
+        message = str(detail)
+        code = "invalid_request"
+    if not isinstance(error_type, str):
+        error_type = (
+            "invalid_request_error" if exc.status_code < status.HTTP_500_INTERNAL_SERVER_ERROR else "server_error"
+        )
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"error": {"message": message, "type": error_type, "param": param, "code": code, **extras}},
+        headers=dict(exc.headers) if exc.headers is not None else None,
+    )
 
 
 class ModelStateChecker:
@@ -210,7 +357,9 @@ class ModelStateChecker:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail={
                     "code": ErrorCode.MODEL_NOT_FOUND.value,
-                    "message": f"Model '{self.model}' not found",
+                    "message": (
+                        f"Model '{self.model}' not found{suggestion_suffix(self.model, self.registry.model_names)}"
+                    ),
                 },
             )
 
@@ -257,7 +406,7 @@ class ModelStateChecker:
         bypass its 5-minute ``MODEL_LOADING`` retry budget and surface
         a :class:`ModelLoadFailedError` to the caller immediately.
 
-        This is the symptom-side fix for sie-test#85: previously a
+        This is the symptom-side fix for terminal model-load failures: previously a
         gated/dep-missing model would loop the SDK for 5 minutes; now
         the server tells the SDK "don't bother" the first time it asks.
 
@@ -308,7 +457,7 @@ class ModelStateChecker:
         # another doomed background load. Without this guard, every
         # request would retrigger ``start_load_async`` and the SDK
         # would burn its 5-minute MODEL_LOADING budget on a known-bad
-        # configuration (sie-test#85).
+        # configuration.
         self.check_not_failed()
 
         logger.info("Starting background load for model %s on device %s", self.model, device)
@@ -337,6 +486,48 @@ class ModelStateChecker:
             },
             headers={"Retry-After": "5"},
         )
+
+    async def ensure_lora_loaded(self, lora: str) -> None:
+        """Start loading a LoRA adapter if needed, raise 503 to retry.
+
+        Args:
+            lora: LoRA id selected by the resolved profile or request options.
+
+        Raises:
+            HTTPException: 503 ``LORA_LOADING`` with ``Retry-After`` while the
+                adapter loads, 500 if it failed to load, 400 if the model does
+                not support LoRA.
+        """
+        try:
+            is_ready, is_loading = await self.registry.ensure_lora_loaded_async(self.model, lora)
+            if is_loading:
+                self.span.set_attribute("error", "lora_loading")
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail={
+                        "code": ErrorCode.LORA_LOADING.value,
+                        "message": f"LoRA '{lora}' is loading for model '{self.model}', please retry",
+                    },
+                    headers={"Retry-After": "1"},
+                )
+            if not is_ready:
+                self.span.set_attribute("error", "lora_load_failed")
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail={
+                        "code": ErrorCode.INFERENCE_ERROR.value,
+                        "message": f"Failed to load LoRA '{lora}' for model '{self.model}'",
+                    },
+                )
+        except ValueError as e:
+            self.span.set_attribute("error", "lora_not_supported")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": ErrorCode.INVALID_INPUT.value,
+                    "message": str(e),
+                },
+            ) from e
 
     async def validate_ready(self, device: str) -> None:
         """Run all state checks to ensure model is ready for inference.
@@ -408,21 +599,42 @@ class InferenceErrorHandler:
     def handle_queue_full(self, error: QueueFullError) -> HTTPException:
         """Handle queue full backpressure error.
 
+        Two distinct situations arrive here (usability sweep — the old
+        mapping returned ``503 MODEL_NOT_LOADED`` for both, which was
+        wrong on every axis: the model *is* loaded, and a request larger
+        than the queue's total capacity can never succeed no matter how
+        often it is retried):
+
+        - The request's own item count exceeds the queue capacity limit
+          (``error.requested > error.limit``): a permanent client error →
+          ``400 INVALID_INPUT`` naming the per-request limit.
+        - Genuine transient pressure (queue occupied by other work) →
+          ``503 QUEUE_FULL`` with a ``Retry-After`` header so clients
+          back off briefly and retry.
+
         Args:
             error: QueueFullError from worker.
 
         Returns:
-            HTTPException with 503 status.
+            HTTPException with 400 (oversized request) or 503 (transient).
         """
+        if error.requested is not None and error.limit is not None and error.requested > error.limit:
+            self.span.set_attribute("error", "invalid_input")
+            self._record_completion("error")
+            return HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": ErrorCode.INVALID_INPUT.value,
+                    "message": (
+                        f"Request has {error.requested} items but the queue accepts at most "
+                        f"{error.limit} items per request for model '{self.model}'; "
+                        f"split the request into batches of {error.limit} or fewer"
+                    ),
+                },
+            )
         self.span.set_attribute("error", "queue_full")
         self._record_completion("retry")
-        return HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={
-                "code": ErrorCode.MODEL_NOT_LOADED.value,
-                "message": str(error),
-            },
-        )
+        return queue_full_exception(error)
 
     def handle_value_error(self, error: ValueError) -> HTTPException:
         """Handle invalid input errors.
@@ -458,16 +670,48 @@ class InferenceErrorHandler:
         """Handle generic inference errors.
 
         OOM errors are mapped to 503 ``RESOURCE_EXHAUSTED`` with a
-        ``Retry-After`` header so the SDK can auto-retry. Everything else
-        keeps the legacy 500 ``INFERENCE_ERROR`` mapping.
+        ``Retry-After`` header so the SDK can auto-retry. A request the
+        worker drained on eviction never ran at all, so it maps to the
+        existing retryable 503 ``MODEL_LOADING`` shape. A request a remote
+        profile's upstream did not serve maps to a retryable 503 through
+        :func:`upstream_unavailable_exception`. Everything else keeps the
+        legacy 500 ``INFERENCE_ERROR`` mapping.
 
         Args:
             error: Exception from inference.
             operation: Operation name for error message (Inference, Extraction, Scoring).
 
         Returns:
-            HTTPException with 503 (OOM) or 500 (other).
+            HTTPException with 503 (OOM, drained) or 500 (other).
         """
+        # A drained request was evicted out of the queue before inference
+        # started. Reuse ``MODEL_LOADING`` rather than minting a new code:
+        # the SDK and the gateway already treat it as retryable, and the
+        # client's retry will re-trigger exactly the load that code names.
+        if isinstance(error, WorkerDrainedError):
+            logger.info(
+                "%s request drained on eviction for model %s, returning 503 MODEL_LOADING: %s",
+                operation,
+                self.model,
+                error,
+            )
+            self.span.set_attribute("error", "model_loading")
+            self._record_completion("retry")
+            return HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={
+                    "code": ErrorCode.MODEL_LOADING.value,
+                    "message": f"Model '{self.model}' was evicted before this request ran, please retry",
+                },
+                headers={"Retry-After": str(WORKER_DRAINED_RETRY_AFTER_S)},
+            )
+
+        if isinstance(error, UpstreamUnavailableError):
+            logger.warning("%s for model %s was not served by its upstream: %s", operation, self.model, error)
+            self.span.set_attribute("error", f"upstream_{error.kind}")
+            self._record_completion("retry")
+            return upstream_unavailable_exception(error, self.model)
+
         # Recognise both the worker's ``ResourceExhaustedError`` (recovery
         # exhausted) and any OOM that escaped without recovery (recovery
         # disabled or a code path the executor doesn't wrap). Both deserve
@@ -497,9 +741,56 @@ class InferenceErrorHandler:
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={
                 "code": ErrorCode.INFERENCE_ERROR.value,
-                "message": f"{operation} error: {error}",
+                "message": f"internal error during {operation.lower()}",
             },
         )
+
+
+def ensure_finite_scores(scores: list[float], model: str) -> None:
+    """Fail closed when a model produces non-finite (NaN/inf) scores.
+
+    A cross-encoder that emits ``NaN``/``inf`` scores (observed on
+    ``cross-encoder/ms-marco-MiniLM-L-6-v2`` on CPU) corrupts the response on
+    BOTH content types: the JSON path crashes ``json.dumps`` ("Out of range
+    float values are not JSON compliant: nan") into a bare 500 with no error
+    envelope, while the msgpack path returns HTTP 200 with the ``NaN`` ranked
+    as if it were a real score — silent corruption for any msgpack client.
+
+    Detect the non-finite output before serialization and raise a typed,
+    enveloped ``500 INFERENCE_ERROR`` that names the model, so ``/v1/score``
+    and ``/v1/rerank`` fail closed identically on JSON and msgpack. The 500 /
+    ``INFERENCE_ERROR`` mapping matches the repo precedent for a model that
+    produces invalid output (the generation terminal-error path). Applied at
+    the shared ``list[float]`` seam both score paths pass through, so it covers
+    every float-output reranker uniformly. (pass-2 audit A2)
+
+    Raises:
+        HTTPException: 500 ``INFERENCE_ERROR`` if any score is not finite.
+    """
+    if all(math.isfinite(score) for score in scores):
+        return
+    raise HTTPException(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        detail={
+            "code": ErrorCode.INFERENCE_ERROR.value,
+            "message": f"Model '{model}' produced non-finite scores",
+        },
+    )
+
+
+def validated_total(counts: list[int] | None, item_count: int) -> int | None:
+    """Sum authoritative per-item counts, or ``None`` when they are unusable.
+
+    A partition that is misaligned with the batch or holds non-``int`` entries
+    is not a measurement, so it is dropped rather than mis-attributed — the same
+    rule ``encode_pipeline._validated_counts`` applies upstream. ``0`` is a
+    legitimate total and is returned as such; only ``None`` means "unknown".
+    """
+    if counts is None or len(counts) != item_count:
+        return None
+    if not all(isinstance(count, int) and not isinstance(count, bool) for count in counts):
+        return None
+    return sum(counts)
 
 
 class ResponseBuilder:

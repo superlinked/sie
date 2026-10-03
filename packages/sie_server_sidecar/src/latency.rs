@@ -169,7 +169,7 @@ impl FetchExpiryController {
         };
         let headroom_ms = self.target_p50_ms - observed;
         let adjustment_s = headroom_ms * self.gain / 1000.0;
-        let adjustment = Duration::from_secs_f64(adjustment_s.abs());
+        let adjustment = Duration::try_from_secs_f64(adjustment_s.abs()).unwrap_or(Duration::MAX);
         let new = if adjustment_s >= 0.0 {
             current.saturating_add(adjustment)
         } else {
@@ -277,6 +277,31 @@ mod tests {
             c.adjust(Duration::from_millis(15), &t),
             Duration::from_millis(5)
         );
+    }
+
+    #[test]
+    fn adjust_stays_within_bounds_for_extreme_targets() {
+        let mut t = LatencyTracker::new(200, 10);
+        for _ in 0..20 {
+            t.record(10.0);
+        }
+        let defaults = FetchExpiryController::from_env_or_default();
+        for (target_p50_ms, expected) in [
+            (f64::INFINITY, defaults.max),
+            (1e300, defaults.max),
+            (-1e300, defaults.min),
+            (f64::NAN, defaults.min),
+        ] {
+            let c = FetchExpiryController {
+                target_p50_ms,
+                ..defaults.clone()
+            };
+            assert_eq!(
+                c.adjust(Duration::from_millis(5), &t),
+                expected,
+                "{target_p50_ms}"
+            );
+        }
     }
 
     #[test]

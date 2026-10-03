@@ -13,12 +13,13 @@ import uuid
 from dataclasses import dataclass
 from typing import Annotated, Any, cast
 
-from fastapi import APIRouter, Header, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from sie_sdk.queue_types import denormalize_model_id
 
 from sie_server.adapters._generation_base import (
     GenerationAdapter,
+    GenerationError,
     reasoning_starts_in_prompt,
     resolve_reasoning_format,
     suppress_thinking_blocks,
@@ -30,18 +31,26 @@ from sie_server.api.openai_completions import (
     _MAX_F32,
     _MAX_PROMPT_BYTES,
     _collect_completion,
+    _completion_error_response,
     _CompletionError,
-    _error_response,
+    _from_generation_error,
     _from_http_exception,
+    _generation_timeout_error,
     _number,
     _read_json_body,
 )
+from sie_server.api.routing import remote_routing, route_request
 from sie_server.api.validation import validate_machine_profile_header, validate_signed_i64
-from sie_server.core.runtime_options import apply_generation_runtime_options
+from sie_server.core.runtime_options import (
+    GenerationTimeoutError,
+    apply_generation_runtime_options,
+    bound_generation,
+    resolve_generation_timeouts,
+)
 from sie_server.observability.tracing import tracer
 from sie_server.types.openapi import OpenAIResponsesResponseModel
 
-router = APIRouter(prefix="/v1", tags=["openai-compat"])
+router = APIRouter(prefix="/v1", tags=["openai-compat"], dependencies=[Depends(remote_routing)])
 logger = logging.getLogger(__name__)
 
 _MAX_U32 = (1 << 32) - 1
@@ -218,6 +227,7 @@ def _parse_params(body: dict[str, Any]) -> _ResponsesParams:
         413: {"description": "Request body or rendered input is too large"},
         500: {"description": "Generation failed"},
         503: {"description": "Model loading or temporarily unavailable"},
+        504: {"description": "Non-streaming generation exceeded its first_chunk_timeout_s or overall_timeout_s"},
     },
     openapi_extra={
         "requestBody": {
@@ -240,11 +250,7 @@ async def responses(
         registry_key = denormalize_model_id(params.model)
         with tracer.start_as_current_span("openai_responses") as span:
             span.set_attribute("model", params.model)
-            checker = ModelStateChecker(registry, registry_key, span)
-            checker.check_exists()
-            checker.check_not_failed()
-            checker.check_not_unloading()
-            checker.check_not_loading()
+            ModelStateChecker(registry, registry_key, span).check_exists()
 
             config = registry.get_config(registry_key)
             generate_task = getattr(config.tasks, "generate", None)
@@ -294,9 +300,9 @@ async def responses(
             except ValueError as exc:
                 raise _CompletionError(str(exc), code="invalid_request") from exc
 
-            await checker.ensure_loaded(registry.device)
-            adapter = registry.get(registry_key)
-            registry.touch_lru(registry_key)
+            route = await route_request(http_request, registry_key, span)
+            adapter = registry.get(route.key)
+            registry.touch_lru(route.key)
             if not isinstance(adapter, GenerationAdapter):
                 raise _CompletionError(
                     f"Model '{params.model}' adapter does not support generation",
@@ -305,18 +311,34 @@ async def responses(
                     code="inference_error",
                 )
 
-            chunks = adapter.generate(
-                prompt=prompt,
-                max_new_tokens=params.max_output_tokens,
-                temperature=float(runtime_params.get("temperature", 1.0)),
-                top_p=float(runtime_params.get("top_p", 1.0)),
-                stop=runtime_params.get("stop"),
-                frequency_penalty=runtime_params.get("frequency_penalty"),
-                presence_penalty=runtime_params.get("presence_penalty"),
-                top_k=runtime_params.get("top_k"),
-                min_new_tokens=runtime_params.get("min_tokens"),
-                seed=runtime_params.get("seed"),
-            )
+            generation_parameters: dict[str, Any] = {
+                "prompt": prompt,
+                "max_new_tokens": params.max_output_tokens,
+                "temperature": float(runtime_params.get("temperature", 1.0)),
+                "top_p": float(runtime_params.get("top_p", 1.0)),
+                "stop": runtime_params.get("stop"),
+                "frequency_penalty": runtime_params.get("frequency_penalty"),
+                "presence_penalty": runtime_params.get("presence_penalty"),
+                "top_k": runtime_params.get("top_k"),
+                "min_new_tokens": runtime_params.get("min_tokens"),
+                "seed": runtime_params.get("seed"),
+            }
+            try:
+                adapter.preflight_generate(generation_parameters, stream=False)
+            except GenerationError as exc:
+                raise _from_generation_error(exc, registry) from exc
+            except Exception as exc:
+                logger.warning("OpenAI Responses preflight failed for %s", params.model, exc_info=True)
+                raise _CompletionError(
+                    "internal error during generation",
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    code="inference_error",
+                ) from exc
+
+            try:
+                chunks = adapter.generate(**generation_parameters)
+            except GenerationError as exc:
+                raise _from_generation_error(exc, registry) from exc
             if thinking_blocks_must_be_hidden(config):
                 reasoning_format = resolve_reasoning_format(config, adapter)
                 chunks = suppress_thinking_blocks(
@@ -325,9 +347,15 @@ async def responses(
                     reasoning_format=reasoning_format,
                 )
             try:
-                text, terminal = await _collect_completion(chunks)
+                text, terminal = await _collect_completion(
+                    bound_generation(chunks, resolve_generation_timeouts(config, None))
+                )
             except _CompletionError:
                 raise
+            except GenerationTimeoutError as exc:
+                raise _generation_timeout_error(exc) from exc
+            except GenerationError as exc:
+                raise _from_generation_error(exc, registry) from exc
             except Exception as exc:
                 logger.warning("OpenAI Responses generation failed for %s", params.model, exc_info=True)
                 raise _CompletionError(
@@ -346,6 +374,13 @@ async def responses(
                 )
             prompt_tokens = terminal.prompt_tokens
             completion_tokens = terminal.completion_tokens
+            usage: dict[str, Any] = {
+                "input_tokens": prompt_tokens,
+                "output_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens,
+            }
+            if terminal.cached_tokens is not None:
+                usage["input_tokens_details"] = {"cached_tokens": min(terminal.cached_tokens, prompt_tokens)}
             return JSONResponse(
                 content={
                     "id": response_id,
@@ -362,14 +397,11 @@ async def responses(
                             "content": [{"type": "output_text", "text": text, "annotations": []}],
                         }
                     ],
-                    "usage": {
-                        "input_tokens": prompt_tokens,
-                        "output_tokens": completion_tokens,
-                        "total_tokens": prompt_tokens + completion_tokens,
-                    },
-                }
+                    "usage": usage,
+                },
+                headers=route.headers(),
             )
     except _CompletionError as exc:
-        return _error_response(exc)
+        return _completion_error_response(http_request, exc)
     except HTTPException as exc:
-        return _error_response(_from_http_exception(exc))
+        return _completion_error_response(http_request, _from_http_exception(exc))

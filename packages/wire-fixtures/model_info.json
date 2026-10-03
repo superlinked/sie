@@ -1,0 +1,44 @@
+{
+  "_comment": [
+    "Golden field set for one `/v1/models` (and `/v1/models/{model}`) entry.",
+    "`typed` is every key the gateway emits that an SDK ModelInfo type MUST",
+    "declare; `excluded` is every key it emits that an SDK MUST NOT declare,",
+    "each with the reason. A new wire field fails both SDK tests until it is",
+    "consciously placed in one bucket or the other \u2014 that is the point.",
+    "Emitters: packages/sie_gateway/src/types/model.rs::to_model_info_value",
+    "plus attach_model_revision/attach_pending_generation in",
+    "packages/sie_gateway/src/handlers/models.rs; schema of record is",
+    "packages/sie_gateway/src/openapi.rs::ModelInfoWire. The single-server",
+    "emitter is packages/sie_server/src/sie_server/api/models.py::ModelInfo,",
+    "which is a subset (no pending_generation)."
+  ],
+  "typed": [
+    "aliases",
+    "capabilities",
+    "dims",
+    "inputs",
+    "last_error",
+    "loaded",
+    "max_sequence_length",
+    "name",
+    "outputs",
+    "pending_generation",
+    "profiles",
+    "revision",
+    "routing",
+    "state"
+  ],
+  "excluded": {
+    "created": "OpenAI retrieve-model compat only. Fixed sentinel epoch (SIE has no per-model creation time); OpenAI clients use it for display/sorting. Carries no SIE meaning.",
+    "id": "OpenAI retrieve-model compat only. Byte-identical to `name`; typing both would imply they can differ.",
+    "object": "OpenAI retrieve-model compat only. Constant \"model\" discriminator for the OpenAI envelope.",
+    "owned_by": "OpenAI retrieve-model compat only. Constant \"sie\"."
+  },
+  "notes": {
+    "excluded_scope": "The four excluded keys are merged in by GET /v1/models/{model} for vanilla OpenAI 'retrieve model' clients; on GET /v1/models they live in the sibling `data` array instead, never on a `models` entry.",
+    "optionality": "Python marks every typed key optional (`total=False`). TypeScript requires `name`, `loaded`, `inputs` and `outputs` on both `ModelInfo` and `WireModelInfo`; its remaining keys are optional. `pending_generation` is gateway-only. `last_error`/`max_sequence_length`/`revision`/`capabilities` are the four the emitters can send as an explicit null, so the SDK types admit null on each. The fixture pins which keys are declarable, not which are always present.",
+    "ts_renames": "The TS SDK camelCases three top-level keys \u2014 max_sequence_length -> maxSequenceLength, last_error -> lastError, pending_generation -> pendingGeneration \u2014 and leaves nested objects wire-shaped. Its consumer test checks the wire-side names listed here.",
+    "aliases": "Short task-tier names resolving to this model. Always emitted, empty when the model has none, so callers can distinguish 'no aliases' from an older gateway. Only catalog- or operator-declared names appear; the gateway's compiled-in routing defaults are not public API and are never listed.",
+    "routing": "How the bare model name is served: `policy` (`remote_only`, `fallback`, `threshold`, or null for local only) and `upstream_kind` (`sie`, `openai`, or null). The single server and the gateway emit it on every entry."
+  }
+}

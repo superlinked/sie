@@ -59,6 +59,7 @@ pub async fn get_models(
                 .is_none_or(|p| p.visible(name, ext))
         })
         .collect();
+    let aliases_by_target = published_aliases_by_target(state.as_ref());
     let models: Vec<serde_json::Value> = model_names
         .iter()
         .map(|name| {
@@ -70,6 +71,7 @@ pub async fn get_models(
             };
             attach_model_revision(&mut body, state.as_ref(), name);
             attach_pending_generation(&mut body, state.as_ref(), name);
+            attach_model_aliases(&mut body, &aliases_by_target, name);
             body
         })
         .collect();
@@ -179,8 +181,54 @@ pub async fn get_model(
     }
     attach_model_revision(&mut body, state.as_ref(), &canonical_model);
     attach_pending_generation(&mut body, state.as_ref(), &canonical_model);
+    // Reached only after the same #1841 visibility gate the listing applies,
+    // so a detail hit on an invisible model 404s before this line.
+    attach_model_aliases(
+        &mut body,
+        &published_aliases_by_target(state.as_ref()),
+        &canonical_model,
+    );
 
     (StatusCode::OK, Json(body)).into_response()
+}
+
+/// Reverse the alias table once: canonical target -> its published aliases.
+///
+/// Built per request rather than per model — the map is small and the listing
+/// walks hundreds of entries. Only [`Config::published_model_aliases`] members
+/// appear, so the compiled-in `code`/`sql`/`guard` routing defaults stay
+/// private (#2843); publishing them would name a model absent from the managed
+/// catalog and freeze an internal default into public contract.
+///
+/// Nothing here decides VISIBILITY. The caller attaches aliases only to models
+/// that already survived the `#1841` org filter, so an alias pointing at a
+/// model this caller cannot see is never emitted — there is no listing in
+/// which to emit it. That ordering is the whole guard; keep it.
+fn published_aliases_by_target(state: &AppState) -> HashMap<String, Vec<String>> {
+    let mut by_target: HashMap<String, Vec<String>> = HashMap::new();
+    for (alias, target) in &state.config.model_aliases {
+        if !state.config.published_model_aliases.contains(alias) {
+            continue;
+        }
+        by_target
+            .entry(target.clone())
+            .or_default()
+            .push(alias.clone());
+    }
+    for aliases in by_target.values_mut() {
+        aliases.sort();
+    }
+    by_target
+}
+
+fn attach_model_aliases(body: &mut Value, by_target: &HashMap<String, Vec<String>>, model: &str) {
+    // Always emit the key, even when empty: a consumer distinguishing "no
+    // aliases" from "this gateway predates the field" needs the difference to
+    // be in the payload, not in its absence.
+    let aliases = by_target.get(model).cloned().unwrap_or_default();
+    if let Some(map) = body.as_object_mut() {
+        map.insert("aliases".to_string(), json!(aliases));
+    }
 }
 
 fn attach_model_revision(body: &mut Value, state: &AppState, model: &str) {
@@ -239,6 +287,7 @@ fn worker_only_model_info(name: &str, loaded: bool) -> Value {
             max_output_tokens: None,
             profile_max_output_tokens: HashMap::new(),
             grammar_capabilities: None,
+            streaming_supported: None,
             grammar_profile: None,
             profile_parents: HashMap::new(),
             tools_supported: None,
@@ -284,6 +333,8 @@ mod route_tests {
             k8s_port: 8080,
             health_mode: "ws".to_string(),
             nats_url: String::new(),
+            nats_user: String::new(),
+            nats_password: String::new(),
             nats_config_trusted_producers: vec!["sie-config".to_string()],
             auth_mode: "none".to_string(),
             auth_tokens: Vec::new(),
@@ -297,12 +348,18 @@ mod route_tests {
             multi_router: false,
             request_timeout: 30.0,
             max_stream_pending: 50_000,
+            max_lane_in_flight_items:
+                crate::queue::lane_admission::DEFAULT_MAX_LANE_IN_FLIGHT_ITEMS,
+            lane_backpressure_enforce: false,
             stream_max_age_s: 1_800,
+            stream_storage: crate::config::StreamStorage::Memory,
+            stream_num_replicas: 1,
             configured_gpus: Vec::new(),
             gpu_profile_map: HashMap::new(),
             configured_physical_lanes: Default::default(),
             static_queue_pools: Vec::new(),
             model_aliases: HashMap::new(),
+            published_model_aliases: Default::default(),
             bundles_dir: bundles_dir.to_string(),
             models_dir: models_dir.to_string(),
             payload_store_url: String::new(),
@@ -315,6 +372,17 @@ mod route_tests {
 
     // Returned tempdirs must outlive the router so they drop after the test.
     async fn build_router_with_state(
+    ) -> (Router, Arc<AppState>, tempfile::TempDir, tempfile::TempDir) {
+        build_router_with_aliases(HashMap::new(), Vec::new()).await
+    }
+
+    /// `build_router_with_state` with an alias table. `published` names the
+    /// subset `/v1/models` may advertise; anything in `aliases` but not in
+    /// `published` still RESOLVES and stays unlisted, which is exactly how the
+    /// compiled-in `code`/`sql`/`guard` built-ins behave (#2843).
+    async fn build_router_with_aliases(
+        aliases: HashMap<String, String>,
+        published: Vec<&str>,
     ) -> (Router, Arc<AppState>, tempfile::TempDir, tempfile::TempDir) {
         let bundles_dir = tempfile::TempDir::new().unwrap();
         let models_dir = tempfile::TempDir::new().unwrap();
@@ -329,10 +397,13 @@ mod route_tests {
         )
         .unwrap();
 
-        let config = Arc::new(test_config(
+        let mut base = test_config(
             bundles_dir.path().to_str().unwrap(),
             models_dir.path().to_str().unwrap(),
-        ));
+        );
+        base.model_aliases = aliases;
+        base.published_model_aliases = published.into_iter().map(|name| name.to_string()).collect();
+        let config = Arc::new(base);
         let model_registry = Arc::new(ModelRegistry::new(
             bundles_dir.path(),
             models_dir.path(),
@@ -624,6 +695,7 @@ mod route_tests {
             pool_name: String::new(),
             saturated: false,
             terminated: false,
+            unsupported_models: Vec::new(),
         }
     }
 
@@ -654,6 +726,140 @@ mod route_tests {
         assert_eq!(models[0]["name"], "BAAI/bge-m3");
         assert_eq!(models[0]["loaded"], false);
         assert_eq!(models[0]["pending_generation"]["total"], 0);
+    }
+
+    #[tokio::test]
+    async fn test_list_models_advertises_published_aliases_only() {
+        // The discoverability half of #2839: an alias you can send is useless
+        // if nothing tells you it exists. `rerank-fast` is catalog-declared and
+        // listed; `code` resolves identically but is an internal routing
+        // default, so it must not appear.
+        let mut aliases = HashMap::new();
+        aliases.insert("rerank-fast".to_string(), "BAAI/bge-m3".to_string());
+        aliases.insert("code".to_string(), "BAAI/bge-m3".to_string());
+        let (app, state, _bundles_dir, _models_dir) =
+            build_router_with_aliases(aliases, vec!["rerank-fast"]).await;
+        seed_model(&state, "BAAI/bge-m3");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/models")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let body = body_json(response).await;
+        let models = body["models"].as_array().unwrap();
+        assert_eq!(models[0]["aliases"], serde_json::json!(["rerank-fast"]));
+    }
+
+    #[tokio::test]
+    async fn test_list_models_emits_an_empty_alias_list_not_a_missing_key() {
+        // A consumer must be able to tell "this model has no aliases" from
+        // "this gateway predates the field". Absence cannot carry that.
+        let (app, state, _bundles_dir, _models_dir) = build_router_with_state().await;
+        seed_model(&state, "BAAI/bge-m3");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/models")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let body = body_json(response).await;
+        let models = body["models"].as_array().unwrap();
+        assert_eq!(models[0]["aliases"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn test_list_models_groups_and_sorts_multiple_aliases_per_model() {
+        // One model can carry several names — `fastino/gliner2-large-v1` is
+        // both knowledge-graph-best and named-entities-best in the live
+        // catalog. Order is sorted so the payload is deterministic.
+        let mut aliases = HashMap::new();
+        aliases.insert("named-entities-best".to_string(), "BAAI/bge-m3".to_string());
+        aliases.insert(
+            "knowledge-graph-best".to_string(),
+            "BAAI/bge-m3".to_string(),
+        );
+        let (app, state, _bundles_dir, _models_dir) =
+            build_router_with_aliases(aliases, vec!["named-entities-best", "knowledge-graph-best"])
+                .await;
+        seed_model(&state, "BAAI/bge-m3");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/models")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let body = body_json(response).await;
+        let models = body["models"].as_array().unwrap();
+        assert_eq!(
+            models[0]["aliases"],
+            serde_json::json!(["knowledge-graph-best", "named-entities-best"])
+        );
+    }
+
+    #[tokio::test]
+    async fn test_an_alias_to_an_unlisted_model_is_never_emitted() {
+        // The existence-oracle guard. An alias whose target is not in this
+        // caller's listing has no entry to attach to, so it cannot leak that
+        // the target exists. Structural, not a filter that could be forgotten.
+        let mut aliases = HashMap::new();
+        aliases.insert("secret-best".to_string(), "org-9/private".to_string());
+        let (app, state, _bundles_dir, _models_dir) =
+            build_router_with_aliases(aliases, vec!["secret-best"]).await;
+        seed_model(&state, "BAAI/bge-m3");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/models")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let body = serde_json::to_string(&body_json(response).await).unwrap();
+        assert!(!body.contains("secret-best"));
+        assert!(!body.contains("org-9/private"));
+    }
+
+    #[tokio::test]
+    async fn test_model_detail_carries_the_same_aliases() {
+        let mut aliases = HashMap::new();
+        aliases.insert("rerank-fast".to_string(), "BAAI/bge-m3".to_string());
+        aliases.insert("code".to_string(), "BAAI/bge-m3".to_string());
+        let (app, state, _bundles_dir, _models_dir) =
+            build_router_with_aliases(aliases, vec!["rerank-fast"]).await;
+        seed_model(&state, "BAAI/bge-m3");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/models/BAAI%2Fbge-m3")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_json(response).await;
+        assert_eq!(body["aliases"], serde_json::json!(["rerank-fast"]));
     }
 
     #[tokio::test]
@@ -1035,5 +1241,104 @@ mod route_tests {
             .as_str()
             .unwrap()
             .contains("anything"));
+    }
+
+    fn seed_remote_backed_model(state: &AppState, bundles_dir: &std::path::Path, model_id: &str) {
+        std::fs::write(
+            bundles_dir.join("remote.yaml"),
+            "name: remote\npriority: 1\nadapters:\n  - sie_server.adapters.remote.sie\n",
+        )
+        .unwrap();
+        state.model_registry.reload();
+        let mut profiles = HashMap::new();
+        profiles.insert(
+            "default".to_string(),
+            ProfileConfig {
+                kv_budget_tokens: None,
+                max_output_tokens: None,
+                grammar_profile: None,
+                chat_template_kwargs: None,
+                adapter_path: Some("sie_server.adapters.remote.sie:SieUpstreamAdapter".to_string()),
+                max_batch_tokens: Some(8192),
+                compute_precision: None,
+                adapter_options: Some(serde_json::json!({
+                    "loadtime": {"upstream": "team-sie", "upstream_model": "org/name"}
+                })),
+                extends: None,
+            },
+        );
+        state
+            .model_registry
+            .add_model_config(ModelConfig {
+                name: model_id.to_string(),
+                hf_revision: None,
+                adapter_module: None,
+                default_bundle: None,
+                pool: None,
+                profiles,
+                inputs: None,
+                tasks: None,
+                max_sequence_length: None,
+            })
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_models_report_routing_on_every_entry() {
+        let (app, state, bundles_dir, _models_dir) = build_router_with_state().await;
+        seed_remote_backed_model(&state, bundles_dir.path(), "acme/remote");
+        seed_model(&state, "BAAI/bge-m3");
+
+        let listing = body_json(
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/v1/models")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        let routing: HashMap<String, serde_json::Value> = listing["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|model| {
+                (
+                    model["name"].as_str().unwrap().to_string(),
+                    model["routing"].clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            routing,
+            HashMap::from([
+                (
+                    "acme/remote".to_string(),
+                    serde_json::json!({"policy": "remote_only", "upstream_kind": "sie"})
+                ),
+                (
+                    "BAAI/bge-m3".to_string(),
+                    serde_json::json!({"policy": null, "upstream_kind": null})
+                ),
+            ])
+        );
+
+        let detail = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/models/acme/remote")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(detail.status(), StatusCode::OK);
+        assert_eq!(
+            body_json(detail).await["routing"],
+            serde_json::json!({"policy": "remote_only", "upstream_kind": "sie"})
+        );
     }
 }

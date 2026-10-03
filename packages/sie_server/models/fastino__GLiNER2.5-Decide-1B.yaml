@@ -1,0 +1,38 @@
+# GLiNER2.5-Decide-1B: typed-decision classifier on the Ettin 1B encoder
+# (jhu-clsp/ettin-enc-from-dec-1b, ModernBERT; span architecture), loaded through
+# gliner2 2.x AutoExtractor. Served from the transformers5 bundle, which pins gliner2 2.x.
+#
+# Checkpoint caveat: the weights at this revision are the step-285000 checkpoint
+# (upload commit eac5ac1e). The 59.6% fast-decisions score on the model card was
+# measured on an earlier step-195000 checkpoint (stated in that revision's card);
+# the uploaded weights had not been re-evaluated.
+#
+# The encoder config stores its RoPE bases only in the transformers-5
+# rope_parameters form (160000 for full and sliding-window layers). The adapter
+# checks the bases the loaded encoder actually uses, and under transformers 4
+# writes them where that version reads them (it would otherwise run the
+# sliding-window layers at 10000).
+sie_id: fastino/GLiNER2.5-Decide-1B
+hf_id: fastino/GLiNER2.5-Decide-1B
+hf_revision: 52c94d3b698bf6d2619df9d898bdc1523ea3f1ca
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: null
+  extract: {}
+# Tokens per item: every question's prompt and labels, then the document. The
+# Ettin encoder config sets max_position_embeddings 7999 and the tokenizer
+# model_max_length 8192; 2048 tokens stays within both.
+max_sequence_length: 2048
+profiles:
+  default:
+    max_batch_tokens: 16384
+    compute_precision: float16
+    adapter_path: sie_server.adapters.gliner2.decide:GLiNER2DecideAdapter
+    adapter_options:
+      loadtime: {}
+      runtime: {}

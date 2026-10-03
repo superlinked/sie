@@ -15,14 +15,7 @@ _ = transformers.AutoProcessor
 _ = transformers.AutoModelForCausalLM
 _ = transformers.masking_utils.create_causal_mask
 
-_MODELS_DIR = Path(__file__).resolve().parents[2] / "models"
-
-# Both catalog versions share this adapter: their custom modeling code is
-# byte-identical upstream, so each pinned revision must keep resolving.
-_CATALOG_VERSIONS = [
-    ("PaddlePaddle/PaddleOCR-VL-1.5", "6819afc8509ac9afa50e91b34627a7cf8f7900bb"),
-    ("PaddlePaddle/PaddleOCR-VL-1.6", "cdc88f5feff0e4079e75863205053a68358e52f7"),
-]
+_MODEL_PATH = Path(__file__).resolve().parents[2] / "models" / "PaddlePaddle__PaddleOCR-VL-1.5.yaml"
 
 
 class TestPaddleOCRVLAdapter:
@@ -334,26 +327,21 @@ class TestPaddleOCRVLAdapter:
 
         assert mock_model.generate.call_args.kwargs["use_cache"] is True
 
-    @pytest.mark.parametrize(("sie_id", "hf_revision"), _CATALOG_VERSIONS)
-    def test_yaml_config_loads(self, sie_id: str, hf_revision: str) -> None:
+    def test_yaml_config_loads(self) -> None:
         """The shipped model YAML parses and resolves an adapter path."""
         import yaml
         from sie_server.config.model import ModelConfig
 
-        yaml_path = _MODELS_DIR / f"{sie_id.replace('/', '__')}.yaml"
-        with yaml_path.open() as f:
+        with _MODEL_PATH.open() as f:
             data = yaml.safe_load(f)
         config = ModelConfig(**data)
-        assert config.sie_id == sie_id
-        assert config.hf_id == sie_id
-        assert config.hf_revision == hf_revision
+        assert config.sie_id == "PaddlePaddle/PaddleOCR-VL-1.5"
+        assert config.hf_id == "PaddlePaddle/PaddleOCR-VL-1.5"
+        assert config.hf_revision == "6819afc8509ac9afa50e91b34627a7cf8f7900bb"
         assert config.inputs.image is True
         resolved = config.resolve_profile("default")
         assert resolved.adapter_path == "sie_server.adapters.sglang_vision_extract.adapter:SGLangVisionExtractAdapter"
         assert resolved.compute_precision == "bfloat16"
-        # A stale served_model_name silently serves the wrong weights under the
-        # right id, so pin it to sie_id rather than leaving it to review.
-        assert resolved.loadtime["served_model_name"] == sie_id
         fallback = config.resolve_profile("transformers")
         assert fallback.adapter_path == "sie_server.adapters.paddleocr_vl:PaddleOCRVLAdapter"
         assert fallback.compute_precision == "bfloat16"

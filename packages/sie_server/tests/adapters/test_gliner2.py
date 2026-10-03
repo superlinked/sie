@@ -1,13 +1,16 @@
 import sys
+from collections.abc import Iterator
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
 import yaml
-from sie_server.adapters.gliner2.adapter import GLiNER2Adapter
+from sie_server.adapters._word_window import WindowedSplitter
+from sie_server.adapters.gliner2.adapter import GLiNER2Adapter, pool_window_classifications
 from sie_server.adapters.gliner2.classification import GLiNER2ClassificationAdapter
+from sie_server.adapters.gliner2.words import PACKAGE_PATTERN, LinearWordSplitter
 from sie_server.core.loader import load_adapter, load_model_configs
 from sie_server.types.inputs import Item
 
@@ -199,7 +202,8 @@ def test_transformers5_bundle_carries_gliner2_classification_runtime() -> None:
     assert "sie_server.adapters.gliner2.classification" not in default["adapters"]
     assert "sie_server.adapters.gliner2.classification" in transformers5["adapters"]
     assert "sie_server.adapters.gliner2.adapter" not in transformers5["adapters"]
-    assert transformers5["deps"]["gliner2"] == ">=1.3.1,<2"
+    # The GLiNER2.5-Decide models share this bundle and need gliner2 2.x.
+    assert transformers5["deps"]["gliner2"] == "==2.0.0"
     profile = model["profiles"]["default"]
     assert profile["adapter_path"].endswith("gliner2.classification:GLiNER2ClassificationAdapter")
     assert profile["adapter_options"] == {
@@ -207,6 +211,7 @@ def test_transformers5_bundle_carries_gliner2_classification_runtime() -> None:
             "classification_task": "prompt_safety",
             "default_labels": ["safe", "unsafe"],
             "multi_label": False,
+            "positive_label": "unsafe",
         },
         "runtime": {},
     }
@@ -226,6 +231,7 @@ def test_gliguard_profile_executes_without_request_labels() -> None:
     assert output.classifications == [[{"label": "safe", "score": 0.8}]]
     schema = adapter._model.classify_text.call_args.args[1]
     assert schema["prompt_safety"]["labels"] == ["safe", "unsafe"]
+    assert adapter._positive_label == "unsafe"
 
 
 def test_classification_routing_seam_reuses_general_implementation() -> None:
@@ -240,10 +246,27 @@ def _adapter_with_counting_model(*, max_seq_length: int = 512) -> tuple[GLiNER2A
     return adapter, model
 
 
+class _Gliner2V1WordSplitter:
+    """gliner2 1.x's word splitter: lowercase the text, then match the package pattern."""
+
+    _PATTERN = PACKAGE_PATTERN
+
+    def __call__(self, text: str, lower: bool = True) -> Iterator[tuple[str, int, int]]:
+        if lower:
+            text = text.lower()
+        for match in self._PATTERN.finditer(text):
+            yield match.group(), match.start(), match.end()
+
+
+_Gliner2V1WordSplitter.__name__ = "WhitespaceTokenSplitter"
+
+
 def test_load_resolves_every_file_from_pinned_snapshot() -> None:
     fake_module = ModuleType("gliner2")
     fake_class = MagicMock()
-    fake_class.from_pretrained.return_value = MagicMock()
+    model = MagicMock()
+    model.processor.word_splitter = _Gliner2V1WordSplitter()
+    fake_class.from_pretrained.return_value = model
     fake_module.GLiNER2 = fake_class
     adapter = GLiNER2Adapter("fastino/gliner2-base-v1", revision="a" * 40)
 
@@ -265,6 +288,10 @@ def test_load_resolves_every_file_from_pinned_snapshot() -> None:
         map_location="cpu",
         quantize=False,
     )
+    splitter = model.processor.word_splitter
+    assert isinstance(splitter, WindowedSplitter)
+    assert isinstance(splitter.splitter, LinearWordSplitter)
+    assert splitter.splitter.lower_text_first
 
 
 def test_entity_offsets_use_python_unicode_character_indices() -> None:
@@ -620,3 +647,86 @@ def test_structured_extraction_rejects_schema_invalid_model_output(
 
     with pytest.raises(ValueError, match=match):
         adapter.extract([Item(text="Renée founded Acme")], output_schema=schema)
+
+
+SAFE, UNSAFE = "safe", "unsafe"
+
+
+@pytest.mark.parametrize(
+    ("windows", "positive_label", "expected"),
+    [
+        # Two labels: the text's P(unsafe) is its highest in any window, whichever label wins.
+        ([[(SAFE, 0.99)], [(UNSAFE, 0.62)], [(SAFE, 0.97)]], UNSAFE, [(UNSAFE, 0.62)]),
+        ([[(UNSAFE, 0.7)], [(UNSAFE, 0.9)], [(UNSAFE, 0.8)]], UNSAFE, [(UNSAFE, 0.9)]),
+        ([[(SAFE, 0.99)], [(SAFE, 0.6)], [(SAFE, 0.97)]], UNSAFE, [(SAFE, 0.6)]),
+        # Without a positive label: the most confident window.
+        ([[(SAFE, 0.99)], [(UNSAFE, 0.62)]], None, [(SAFE, 0.99)]),
+        ([[(SAFE, 0.6)], [(UNSAFE, 0.62)]], None, [(UNSAFE, 0.62)]),
+        # Ties go to the earliest window.
+        ([[(SAFE, 0.8)], [(UNSAFE, 0.8)]], None, [(SAFE, 0.8)]),
+        # A window gliner2 returned nothing for is skipped.
+        ([[], [(UNSAFE, 0.7)]], UNSAFE, [(UNSAFE, 0.7)]),
+        ([[], []], UNSAFE, []),
+    ],
+)
+def test_single_label_windows_pool_to_one_window_result(
+    windows: list[list[tuple[str, float]]], positive_label: str | None, expected: list[tuple[str, float]]
+) -> None:
+    pooled = pool_window_classifications(
+        windows, labels=[SAFE, UNSAFE], multi_label=False, positive_label=positive_label
+    )
+    assert pooled == expected
+
+
+def test_single_label_windows_with_more_labels_pool_by_the_positive_label_then_confidence() -> None:
+    labels = ["allow", "review", "block"]
+    windows = [[("allow", 0.9)], [("block", 0.55)], [("block", 0.7)], [("review", 0.95)]]
+    assert pool_window_classifications(windows, labels=labels, multi_label=False, positive_label="block") == [
+        ("block", 0.7)
+    ]
+    # No window took the positive label, whose probability elsewhere gliner2 does not return.
+    no_block = [[("allow", 0.9)], [("review", 0.95)]]
+    assert pool_window_classifications(no_block, labels=labels, multi_label=False, positive_label="block") == [
+        ("review", 0.95)
+    ]
+
+
+def test_multi_label_windows_pool_each_label_to_its_highest_confidence() -> None:
+    windows = [
+        [("prompt_injection", 0.4), ("benign", 0.9)],
+        [("prompt_injection", 0.95)],
+        [("policy_evasion", 0.6), ("benign", 0.7)],
+    ]
+    pooled = pool_window_classifications(
+        windows, labels=["prompt_injection", "policy_evasion", "benign"], multi_label=True, positive_label=None
+    )
+    assert dict(pooled) == {"prompt_injection": 0.95, "policy_evasion": 0.6, "benign": 0.9}
+
+
+def _linear_processor() -> Any:
+    """A processor with gliner2 1.x's word splitter and one subword per word."""
+    return SimpleNamespace(
+        word_splitter=_Gliner2V1WordSplitter(), tokenizer=SimpleNamespace(tokenize=lambda word: [word])
+    )
+
+
+def test_multi_label_classification_of_a_long_text_filters_pooled_labels_by_the_threshold() -> None:
+    adapter = GLiNER2Adapter("test-model", classification_task="jailbreak", max_seq_length=8)
+    adapter._use_linear_word_splitter(_linear_processor())
+    model = MagicMock()
+    adapter._model = model
+    model.batch_classify_text.return_value = [
+        {"jailbreak": [{"label": "benign", "confidence": 0.3}]},  # gliner2's fallback below the threshold
+        {"jailbreak": [{"label": "prompt_injection", "confidence": 0.8}]},
+    ]
+    text = " ".join(f"w{index}" for index in range(10))
+
+    output = adapter.extract(
+        [Item(text=text)], labels=["prompt_injection", "benign"], options={"multi_label": True, "threshold": 0.5}
+    )
+
+    assert model.batch_classify_text.call_args.args[0] == [
+        "w0 w1 w2 w3 w4 w5 w6 w7 ",
+        "w4 w5 w6 w7 w8 w9",
+    ]
+    assert output.classifications == [[{"label": "prompt_injection", "score": 0.8}]]

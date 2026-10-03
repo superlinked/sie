@@ -1,0 +1,45 @@
+{
+  "_comment": "One shared config-service/worker/gateway bundle-config-hash vector for an inherited profile whose effective loadtime selects the default profile's immutable derived serving artifact. Both manifest variants must match the exact expected SHA-256 in all three runtimes.",
+  "bundle_id": "derived-bundle",
+  "bundle": {
+    "name": "derived-bundle",
+    "priority": 10,
+    "adapters": ["test.derived_adapter"]
+  },
+  "model": {
+    "sie_id": "google/source-model",
+    "hf_id": "google/source-model",
+    "hf_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "tasks": {},
+    "profiles": {
+      "default": {
+        "adapter_path": "test.derived_adapter:Adapter",
+        "max_batch_tokens": 128,
+        "adapter_options": {
+          "loadtime": {
+            "serving_artifact": {
+              "format": "ctranslate2",
+              "repo_id": "superlinked/derived-model",
+              "revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "manifest_path": "sie-serving-artifact.json",
+              "manifest_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+              "compute_type": "bfloat16"
+            }
+          }
+        }
+      },
+      "inherited": {
+        "extends": "default",
+        "max_batch_tokens": 64
+      }
+    }
+  },
+  "manifest_sha256": {
+    "initial": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "changed": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+  },
+  "expected_hash": {
+    "initial": "b4ae71e7457e6f797a0d462464e155f1f85cbb03cf6dc4382842af7967e40865",
+    "changed": "dafbb6dd7b743517f808699e5a3f322bb95270420acb7726066207a65d895f08"
+  }
+}

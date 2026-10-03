@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import os
+import shutil
 import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from huggingface_hub import scan_cache_dir as real_scan_cache_dir
 from sie_server.core.disk_cache import (
     CachedModelInfo,
     DiskCacheConfig,
@@ -350,6 +352,30 @@ class TestModelDiskCacheManager:
         models_after = manager.get_cached_models()
         assert len(models_after) == 0
 
+    def test_evict_model_reuses_supplied_scan(self, manager: ModelDiskCacheManager, cache_dir: Path) -> None:
+        """Passing a scan in deletes the model without walking the cache again."""
+        model_dir = create_hf_cache_model(cache_dir, "test/model-to-evict", commit_hash="evict123")
+        cache_info = real_scan_cache_dir(cache_dir)
+        model = manager.get_cached_models()[0]
+
+        with patch("huggingface_hub.scan_cache_dir", wraps=real_scan_cache_dir) as scan_spy:
+            freed = manager.evict_model(model, cache_info=cache_info)
+
+        assert freed > 0
+        assert scan_spy.call_count == 0
+        assert not model_dir.exists()
+
+    def test_evict_model_revisions_missing_from_scan(self, manager: ModelDiskCacheManager, cache_dir: Path) -> None:
+        """A scan that no longer knows the model's revisions frees nothing."""
+        model_dir = create_hf_cache_model(cache_dir, "test/gone", commit_hash="gone123")
+        model = manager.get_cached_models()[0]
+
+        # The model disappears, then we hand eviction a scan taken afterwards.
+        shutil.rmtree(model_dir)
+        cache_info = real_scan_cache_dir(cache_dir)
+
+        assert manager.evict_model(model, cache_info=cache_info) == 0
+
     def test_evict_model_no_commit_hashes(self, manager: ModelDiskCacheManager) -> None:
         """Test evicting a model with no commit hashes does nothing."""
         model = CachedModelInfo(
@@ -496,6 +522,127 @@ class TestModelDiskCacheManager:
         assert not model1.exists()
         assert not model2.exists()
         assert model3.exists()  # Newest should remain
+
+    def test_ensure_space_scans_cache_once_for_multiple_evictions(
+        self, manager: ModelDiskCacheManager, cache_dir: Path
+    ) -> None:
+        """The whole eviction loop walks the cache exactly once, whatever the victim count."""
+        base_time = time.time()
+        model1 = create_hf_cache_model(cache_dir, "oldest/model", commit_hash="aaa", access_time=base_time - 3600)
+        model2 = create_hf_cache_model(cache_dir, "middle/model", commit_hash="bbb", access_time=base_time - 1800)
+        model3 = create_hf_cache_model(cache_dir, "newest/model", commit_hash="ccc", access_time=base_time)
+
+        call_count = [0]
+
+        def mock_disk_usage(_path: Path) -> MagicMock:
+            call_count[0] += 1
+            mock = MagicMock()
+            mock.used = 90 * (1024**3) if call_count[0] <= 2 else 70 * (1024**3)
+            mock.total = 100 * (1024**3)
+            return mock
+
+        with (
+            patch("shutil.disk_usage", side_effect=mock_disk_usage),
+            patch("huggingface_hub.scan_cache_dir", wraps=real_scan_cache_dir) as scan_spy,
+        ):
+            evicted = manager.ensure_space_before_download("brand-new/model")
+
+        # One scan for two evictions (was one per get_lru_model plus one per evict_model).
+        assert scan_spy.call_count == 1
+        # Victim order is still LRU, and eviction still stops as soon as pressure drops.
+        assert evicted == ["oldest/model", "middle/model"]
+        assert not model1.exists()
+        assert not model2.exists()
+        assert model3.exists()
+
+    def test_ensure_space_does_not_scan_without_pressure(self, manager: ModelDiskCacheManager, cache_dir: Path) -> None:
+        """Below the threshold the cache is never walked at all."""
+        create_hf_cache_model(cache_dir, "test/model", commit_hash="abc123")
+
+        mock_usage = MagicMock()
+        mock_usage.used = 50 * (1024**3)
+        mock_usage.total = 100 * (1024**3)
+
+        with (
+            patch("shutil.disk_usage", return_value=mock_usage),
+            patch("huggingface_hub.scan_cache_dir", wraps=real_scan_cache_dir) as scan_spy,
+        ):
+            evicted = manager.ensure_space_before_download("new/model")
+
+        assert evicted == []
+        assert scan_spy.call_count == 0
+
+    def test_ensure_space_stops_when_snapshot_exhausted(self, manager: ModelDiskCacheManager, cache_dir: Path) -> None:
+        """Sustained pressure evicts every candidate once, then stops (no rescan, no spin)."""
+        base_time = time.time()
+        model1 = create_hf_cache_model(cache_dir, "oldest/model", commit_hash="aaa", access_time=base_time - 3600)
+        model2 = create_hf_cache_model(cache_dir, "newest/model", commit_hash="bbb", access_time=base_time)
+
+        mock_usage = MagicMock()
+        mock_usage.used = 90 * (1024**3)  # Never drops below the threshold
+        mock_usage.total = 100 * (1024**3)
+
+        with (
+            patch("shutil.disk_usage", return_value=mock_usage),
+            patch("huggingface_hub.scan_cache_dir", wraps=real_scan_cache_dir) as scan_spy,
+        ):
+            evicted = manager.ensure_space_before_download("new/model")
+
+        assert evicted == ["oldest/model", "newest/model"]
+        assert scan_spy.call_count == 1
+        assert not model1.exists()
+        assert not model2.exists()
+
+    def test_ensure_space_nothing_evictable_scans_once(self, cache_dir: Path) -> None:
+        """With every candidate excluded, the single scan is still the only one."""
+        pinned_dir = create_hf_cache_model(cache_dir, "pinned/model", commit_hash="pin", access_time=time.time() - 3600)
+
+        config = DiskCacheConfig(cache_dir=cache_dir, pressure_threshold=0.85)
+        manager = ModelDiskCacheManager(config, pinned_provider=lambda: {"pinned/model"})
+
+        mock_usage = MagicMock()
+        mock_usage.used = 90 * (1024**3)
+        mock_usage.total = 100 * (1024**3)
+
+        with (
+            patch("shutil.disk_usage", return_value=mock_usage),
+            patch("huggingface_hub.scan_cache_dir", wraps=real_scan_cache_dir) as scan_spy,
+        ):
+            evicted = manager.ensure_space_before_download("new/model")
+
+        assert evicted == []
+        assert scan_spy.call_count == 1
+        assert pinned_dir.exists()
+
+    def test_ensure_space_survives_model_vanishing_mid_loop(
+        self, manager: ModelDiskCacheManager, cache_dir: Path
+    ) -> None:
+        """A model deleted behind the snapshot's back neither crashes nor hangs the loop."""
+        base_time = time.time()
+        first = create_hf_cache_model(cache_dir, "first/model", commit_hash="aaa", access_time=base_time - 3600)
+        second = create_hf_cache_model(cache_dir, "second/model", commit_hash="bbb", access_time=base_time - 1800)
+        third = create_hf_cache_model(cache_dir, "third/model", commit_hash="ccc", access_time=base_time)
+
+        def mock_disk_usage(_path: Path) -> MagicMock:
+            # Once the first victim is gone, a concurrent actor removes the next one.
+            if not first.exists() and second.exists():
+                shutil.rmtree(second)
+            mock = MagicMock()
+            mock.used = 90 * (1024**3)  # Sustained pressure: walk the whole snapshot
+            mock.total = 100 * (1024**3)
+            return mock
+
+        with (
+            patch("shutil.disk_usage", side_effect=mock_disk_usage),
+            patch("huggingface_hub.scan_cache_dir", wraps=real_scan_cache_dir) as scan_spy,
+        ):
+            evicted = manager.ensure_space_before_download("new/model")
+
+        assert scan_spy.call_count == 1
+        # The vanished model does not derail the loop: the later victim is still evicted.
+        assert evicted[0] == "first/model"
+        assert evicted[-1] == "third/model"
+        assert not third.exists()
 
     def test_touch_updates_directory_mtime(self, manager: ModelDiskCacheManager, cache_dir: Path) -> None:
         """Test touching updates model directory mtime."""

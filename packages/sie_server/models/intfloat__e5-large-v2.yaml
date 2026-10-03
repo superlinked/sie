@@ -1,5 +1,6 @@
 sie_id: intfloat/e5-large-v2
 hf_id: intfloat/e5-large-v2
+hf_revision: f169b11e22de13617baa190a028a32f3493550b6
 inputs:
   text: true
   image: false

@@ -38,8 +38,7 @@ tasks:
       # them on ``delta.tool_calls`` for SSE and on
       # ``message.tool_calls`` for non-streaming requests.
       tools: true
-      # Validated for code generation — MEASURED HumanEval 0.866 / MBPP 0.74 on
-      # Modal A100 (see benchmarks/generation/.../code/measured_baseline.json).
+      # Validated for code generation before enabling the code alias.
       # Backs the model="code" alias. Informational (not request-gated).
       code: true
       # Backs the model="sql" alias. NOTE: this profile runs the outlines

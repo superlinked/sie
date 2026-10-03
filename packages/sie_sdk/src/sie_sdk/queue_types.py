@@ -31,6 +31,8 @@ class WorkItem(_WorkItemRequired, total=False):
         operation: Inference operation: ``"encode"`` | ``"score"`` | ``"extract"``.
         model_id: Model identifier (e.g., ``"BAAI/bge-m3"``).
         profile_id: Profile name (e.g., ``"default"``).
+        display_model: The model id the caller asked for, when the gateway dispatched the
+            work to another route of it, such as a profile variant. Absent otherwise.
         pool_name: Target pool (e.g., ``"default"``).
         machine_profile: Required GPU type (e.g., ``"l4"``). Workers validate this.
         bundle_config_hash: Expected bundle config hash from the gateway's ModelRegistry.
@@ -55,9 +57,12 @@ class WorkItem(_WorkItemRequired, total=False):
         router_id: Originating gateway identifier (for observability).
         reply_subject: NATS subject where the worker should publish results.
         timestamp: Unix timestamp when the work item was created.
+        deadline: Absolute Unix timestamp, on the clock that stamps ``timestamp``,
+            after which no caller waits for this item. Absent when unknown.
     """
 
     bundle_config_hash: str
+    display_model: str
 
     # Item payload (inline or reference)
     item: dict[str, Any] | None
@@ -97,6 +102,8 @@ class WorkItem(_WorkItemRequired, total=False):
     # plus flags. Do not log it at info-level; debug is fine.
     traceparent: str | None
     tracestate: str | None
+
+    deadline: float
 
 
 class _WorkResultRequired(TypedDict):

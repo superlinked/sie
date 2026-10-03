@@ -18,9 +18,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 from sie_sdk import SIEAsyncClient, SIEClient, SIEConnectionError
-from sie_sdk.client._shared import validate_generate_grammar
-from sie_sdk.client.async_ import _AioResponse
-from sie_sdk.client.errors import ProvisioningError, RequestError, ServerError
+from sie_sdk.client._shared import MODAL_CONTINUATION_MAX_HOPS, validate_generate_grammar
+from sie_sdk.client.async_ import _AioResponse, _parse_generate_result_async
+from sie_sdk.client.errors import ModelLoadingError, ProvisioningError, RequestError, ServerError
+from sie_sdk.client.sync import _parse_generate_result
 
 
 def _ok_response(payload: dict, headers: dict[str, str] | None = None) -> MagicMock:
@@ -44,7 +45,9 @@ def _resp_504() -> MagicMock:
         "X-SIE-Units-Output-Tokens": "5",
         "X-SIE-Credits-Debited": "13",
     }
-    response.json.return_value = {"detail": {"code": "GATEWAY_TIMEOUT", "message": "Timeout waiting for queue result"}}
+    response.json.return_value = {
+        "detail": {"code": "GATEWAY_TIMEOUT", "message": "Timeout waiting for queue result", "param": "model"}
+    }
     response.content = json.dumps(response.json.return_value).encode("utf-8")
     return response
 
@@ -358,7 +361,11 @@ class TestSyncGenerate:
             assert client.last_retry_count == 0
             client.close()
 
-    def test_generate_wait_for_capacity_false_does_not_retry_model_loading(self) -> None:
+    def test_generate_wait_for_capacity_false_still_retries_model_loading(self) -> None:
+        # 503 MODEL_LOADING is retried regardless of wait_for_capacity,
+        # matching encode/score/extract/chat/responses/streaming: the worker
+        # already accepted the request and is loading the target model, so
+        # this is a pre-execution signal rather than a capacity wait.
         with (
             patch("sie_sdk.client.sync.httpx.Client") as mock_client,
             patch("sie_sdk.client.sync.time.sleep") as mock_sleep,
@@ -368,17 +375,36 @@ class TestSyncGenerate:
                 _ok_response(_ok_envelope()),
             ]
             client = SIEClient("http://localhost:8080")
-            with pytest.raises(ServerError, match="loading") as excinfo:
-                client.generate(
-                    "m",
-                    prompt="hi",
-                    max_new_tokens=8,
-                    wait_for_capacity=False,
-                    provision_timeout_s=10,
-                )
-            assert excinfo.value.code == "MODEL_LOADING"
+            result = client.generate(
+                "m",
+                prompt="hi",
+                max_new_tokens=8,
+                wait_for_capacity=False,
+                provision_timeout_s=10,
+            )
+            assert result["text"] == "ok"
+            assert mock_client.return_value.post.call_count == 2
+            assert client.last_retry_count == 1
+            mock_sleep.assert_called_once()
+            client.close()
+
+    def test_generate_model_loading_delay_exhausting_budget_raises_typed_error(self) -> None:
+        # When the server's Retry-After delay would consume the remaining
+        # provision budget, generate() must raise the typed ModelLoadingError
+        # immediately instead of sleeping through the budget and letting the
+        # NEXT loop iteration raise a generic ProvisioningError.
+        loading = _resp_503_model_loading()
+        loading.headers = {**loading.headers, "Retry-After": "60"}
+        with (
+            patch("sie_sdk.client.sync.httpx.Client") as mock_client,
+            patch("sie_sdk.client.sync.time.sleep") as mock_sleep,
+        ):
+            mock_client.return_value.post.return_value = loading
+            client = SIEClient("http://localhost:8080")
+            with pytest.raises(ModelLoadingError, match="provision timeout") as excinfo:
+                client.generate("m", prompt="hi", max_new_tokens=8, provision_timeout_s=10)
+            assert excinfo.value.model == "m"
             assert mock_client.return_value.post.call_count == 1
-            assert client.last_retry_count == 0
             mock_sleep.assert_not_called()
             client.close()
 
@@ -452,6 +478,52 @@ class TestSyncGenerate:
         assert client.last_retry_count == 0
         assert mock_client.call_args.kwargs["follow_redirects"] is False
         redirect.json.assert_not_called()
+
+    def test_generate_consumes_same_origin_modal_continuation_without_reposting(self) -> None:
+        redirect = MagicMock(
+            status_code=303,
+            headers={"Location": "/v1/generate/m?__modal_attempt_token=opaque"},
+            content=b"",
+        )
+        with patch("sie_sdk.client.sync.httpx.Client") as mock_client:
+            mock_client.return_value.post.return_value = redirect
+            mock_client.return_value.get.return_value = _ok_response(_ok_envelope())
+            client = SIEClient("https://gateway.example.test", api_key="secret")
+            try:
+                result = client.generate("m", prompt="hi", max_new_tokens=4)
+            finally:
+                client.close()
+
+        assert result["text"] == "ok"
+        assert mock_client.return_value.post.call_count == 1
+        mock_client.return_value.get.assert_called_once_with(
+            "/v1/generate/m?__modal_attempt_token=opaque",
+            headers={"Accept": "application/json"},
+            timeout=httpx.Timeout(150.0, connect=10.0),
+        )
+        assert client.last_retry_count == 0
+
+    def test_generate_fails_typed_when_modal_continuation_hops_are_exhausted(self) -> None:
+        redirect = MagicMock(
+            status_code=303,
+            headers={"Location": "/v1/generate/m?__modal_attempt_token=opaque"},
+            content=b"",
+        )
+        with patch("sie_sdk.client.sync.httpx.Client") as mock_client:
+            mock_client.return_value.post.return_value = redirect
+            mock_client.return_value.get.return_value = redirect
+            client = SIEClient("https://gateway.example.test", api_key="secret", timeout_s=300)
+            try:
+                with pytest.raises(
+                    ProvisioningError,
+                    match=f"remained in flight after {MODAL_CONTINUATION_MAX_HOPS} continuation hops",
+                ):
+                    client.generate("m", prompt="hi", max_new_tokens=4, provision_timeout_s=600)
+            finally:
+                client.close()
+
+        assert mock_client.return_value.post.call_count == 1
+        assert mock_client.return_value.get.call_count == MODAL_CONTINUATION_MAX_HOPS
 
     def test_generate_malformed_json_has_content_safe_diagnostics(self) -> None:
         response = MagicMock()
@@ -529,6 +601,7 @@ class TestSyncGenerate:
             # No backoff sleep happened for the 504.
             mock_sleep.assert_not_called()
             assert excinfo.value.status_code == 504
+            assert excinfo.value.param == "model"
             assert excinfo.value.request == {
                 "id": "req-generate-timeout",
                 "usage": {"output_tokens": 5},
@@ -684,6 +757,58 @@ class TestAsyncGenerate:
         assert ensure.return_value.post.call_args.kwargs["allow_redirects"] is False
 
     @pytest.mark.asyncio
+    async def test_generate_consumes_same_origin_modal_continuation_without_reposting(self) -> None:
+        client = SIEAsyncClient("https://gateway.example.test", api_key="secret")
+        client._post = AsyncMock(  # type: ignore[method-assign]
+            return_value=_aio_raw_resp(
+                303,
+                b"",
+                {"Location": "/v1/generate/m?__modal_attempt_token=opaque"},
+            )
+        )
+        continuation = AsyncMock(return_value=_aio_resp(200, _ok_envelope()))
+        with patch.object(client, "_ensure_session") as ensure:
+            ensure.return_value.post = _make_session_post(client._post)
+            ensure.return_value.get = _make_session_post(continuation)
+            try:
+                result = await client.generate("m", prompt="hi", max_new_tokens=4)
+            finally:
+                await client.close()
+
+        assert result["text"] == "ok"
+        assert client._post.call_count == 1
+        assert ensure.return_value.post.call_count == 1
+        assert continuation.call_count == 1
+        get_call = ensure.return_value.get.call_args
+        assert get_call.args[0] == "/v1/generate/m?__modal_attempt_token=opaque"
+        assert get_call.kwargs["allow_redirects"] is False
+
+    @pytest.mark.asyncio
+    async def test_generate_fails_typed_when_modal_continuation_hops_are_exhausted(self) -> None:
+        redirect = _aio_raw_resp(
+            303,
+            b"",
+            {"Location": "/v1/generate/m?__modal_attempt_token=opaque"},
+        )
+        client = SIEAsyncClient("https://gateway.example.test", api_key="secret", timeout_s=300)
+        client._post = AsyncMock(return_value=redirect)  # type: ignore[method-assign]
+        continuation = AsyncMock(return_value=redirect)
+        with patch.object(client, "_ensure_session") as ensure:
+            ensure.return_value.post = _make_session_post(client._post)
+            ensure.return_value.get = _make_session_post(continuation)
+            try:
+                with pytest.raises(
+                    ProvisioningError,
+                    match=f"remained in flight after {MODAL_CONTINUATION_MAX_HOPS} continuation hops",
+                ):
+                    await client.generate("m", prompt="hi", max_new_tokens=4, provision_timeout_s=600)
+            finally:
+                await client.close()
+
+        assert client._post.call_count == 1
+        assert continuation.call_count == MODAL_CONTINUATION_MAX_HOPS
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("body", [{"text": "ok"}, {"model": "m"}])
     async def test_generate_invalid_object_retains_request_metadata(self, body: dict) -> None:
         client = SIEAsyncClient("http://localhost:8080")
@@ -801,7 +926,7 @@ class TestAsyncGenerate:
             side_effect=[
                 _aio_resp(
                     504,
-                    {"error": {"code": "MODEL_LOADING", "message": "timeout"}},
+                    {"error": {"code": "GATEWAY_TIMEOUT", "message": "timeout"}},
                     {
                         "Retry-After": "0.01",
                         "content-type": "application/json",
@@ -828,6 +953,8 @@ class TestAsyncGenerate:
         assert client._post.call_count == 1
         mock_sleep.assert_not_called()
         assert excinfo.value.status_code == 504
+        assert excinfo.value.code == "GATEWAY_TIMEOUT"
+        assert excinfo.value.param is None
         assert excinfo.value.request == {
             "id": "req-async-generate-timeout",
             "usage": {"output_tokens": 5},
@@ -871,7 +998,11 @@ class TestAsyncGenerate:
         assert client._post.call_count == 2
 
     @pytest.mark.asyncio
-    async def test_generate_wait_for_capacity_false_does_not_retry_model_loading(self) -> None:
+    async def test_generate_wait_for_capacity_false_still_retries_model_loading(self) -> None:
+        # 503 MODEL_LOADING is retried regardless of wait_for_capacity,
+        # matching encode/score/extract/chat/responses/streaming: the worker
+        # already accepted the request and is loading the target model, so
+        # this is a pre-execution signal rather than a capacity wait.
         client = SIEAsyncClient("http://localhost:8080")
         client._post = AsyncMock(  # type: ignore[method-assign]
             side_effect=[
@@ -887,17 +1018,49 @@ class TestAsyncGenerate:
             ensure.return_value.post = _make_session_post(client._post)
             with patch("sie_sdk.client.async_.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
                 try:
-                    with pytest.raises(ServerError, match="loading") as excinfo:
-                        await client.generate(
-                            "m",
-                            prompt="hi",
-                            max_new_tokens=8,
-                            wait_for_capacity=False,
-                            provision_timeout_s=10,
-                        )
+                    result = await client.generate(
+                        "m",
+                        prompt="hi",
+                        max_new_tokens=8,
+                        wait_for_capacity=False,
+                        provision_timeout_s=10,
+                    )
                 finally:
                     await client.close()
-        assert excinfo.value.code == "MODEL_LOADING"
+        assert result["text"] == "ok"
+        assert client._post.call_count == 2
+        mock_sleep.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_generate_model_loading_delay_exhausting_budget_raises_typed_error(self) -> None:
+        # When the server's Retry-After delay would consume the remaining
+        # provision budget, generate() must raise the typed ModelLoadingError
+        # immediately instead of sleeping through the budget and letting the
+        # NEXT loop iteration raise a generic ProvisioningError.
+        client = SIEAsyncClient("http://localhost:8080")
+        client._post = AsyncMock(  # type: ignore[method-assign]
+            side_effect=[
+                _aio_resp(
+                    503,
+                    {"error": {"code": "MODEL_LOADING", "message": "loading"}},
+                    {
+                        "X-SIE-Error-Code": "MODEL_LOADING",
+                        "Retry-After": "60",
+                        "content-type": "application/json",
+                    },
+                ),
+                _aio_resp(200, _ok_envelope()),
+            ]
+        )
+        with patch.object(client, "_ensure_session") as ensure:
+            ensure.return_value.post = _make_session_post(client._post)
+            with patch("sie_sdk.client.async_.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+                try:
+                    with pytest.raises(ModelLoadingError, match="provision timeout") as excinfo:
+                        await client.generate("m", prompt="hi", max_new_tokens=8, provision_timeout_s=10)
+                finally:
+                    await client.close()
+        assert excinfo.value.model == "m"
         assert client._post.call_count == 1
         mock_sleep.assert_not_awaited()
 
@@ -1077,3 +1240,42 @@ class TestParseGenerateResultStrictContract:
 
         with pytest.raises(RequestError):
             _parse_generate_result_async(envelope)
+
+
+@pytest.mark.parametrize("images", [None, 0, -1, True, "1", 1.5, 2**32])
+def test_generate_parsers_omit_invalid_image_usage(images: object) -> None:
+    for parse in (_parse_generate_result, _parse_generate_result_async):
+        result = parse({"model": "test/model", "text": "ok", "usage": {"images": images}})
+        assert "images" not in result["usage"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_buffered_generate_preserves_image_usage_and_binding(asynchronous: bool) -> None:
+    body = _ok_envelope()
+    body["usage"]["images"] = 1
+    headers = {
+        "content-type": "application/json",
+        "x-sie-execution-identity-sha256": "a" * 64,
+        "x-sie-execution-binding-sha256": "b" * 64,
+        "x-sie-units-images": "1",
+    }
+    if asynchronous:
+        source = AsyncMock(return_value=_aio_raw_resp(200, json.dumps(body).encode(), headers))
+        session = MagicMock()
+        session.post = _make_session_post(source)
+        session.close = AsyncMock()
+        with patch("sie_sdk.client.async_.aiohttp.ClientSession", return_value=session):
+            async with SIEAsyncClient("http://localhost:8080") as client:
+                result = await client.generate("m", prompt="describe", max_new_tokens=8)
+    else:
+        response = _ok_response(body)
+        response.headers = headers
+        with patch("sie_sdk.client.sync.httpx.Client") as transport:
+            transport.return_value.post.return_value = response
+            with SIEClient("http://localhost:8080") as client:
+                result = client.generate("m", prompt="describe", max_new_tokens=8)
+    assert result["usage"]["images"] == 1
+    assert result["request"]["usage"]["images"] == 1
+    assert result["request"]["execution_identity_sha256"] == "a" * 64
+    assert result["request"]["execution_binding_sha256"] == "b" * 64

@@ -1,3 +1,4 @@
+import json
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -231,6 +232,59 @@ class TestHashConsistency:
 
         assert first_config == first_worker
         assert second_config == second_worker
+        assert first_config != second_config
+
+    def test_serving_artifact_manifest_digest_changes_worker_parity_hash(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        root = self._root / "serving_artifacts"
+        bundles_dir = root / "bundles"
+        models_dir = root / "models"
+        bundles_dir.mkdir(parents=True)
+        models_dir.mkdir(parents=True)
+        fixture = (
+            Path(__file__).resolve().parents[3]
+            / "conformance"
+            / "bundle_config_hash"
+            / "serving_artifact_expanded_profile_vector.json"
+        )
+        vector = json.loads(fixture.read_text())
+        bundle_id = vector["bundle_id"]
+        (bundles_dir / f"{bundle_id}.yaml").write_text(json.dumps(vector["bundle"]))
+
+        def resolve_worker_default_dir(name: str) -> Path:
+            if name == "bundles":
+                return bundles_dir
+            return root / name
+
+        monkeypatch.setattr(worker_ws, "_resolve_default_dir", resolve_worker_default_dir)
+
+        def hashes(manifest_sha256: str) -> tuple[str, str]:
+            model_config = json.loads(json.dumps(vector["model"]))
+            model_config["profiles"]["default"]["adapter_options"]["loadtime"]["serving_artifact"][
+                "manifest_sha256"
+            ] = manifest_sha256
+            (models_dir / "google__source-model.yaml").write_text(json.dumps(model_config))
+            config_hash = ModelRegistry(bundles_dir, models_dir).compute_bundle_config_hash(bundle_id)
+            worker_ws._bundle_adapter_modules.cache_clear()
+            try:
+                worker_registry = WorkerModelRegistry(
+                    models_dir=models_dir,
+                    model_filter=["google/source-model"],
+                    pool_name="default",
+                    enable_hot_reload=False,
+                )
+                worker_hash = compute_bundle_config_hash_cached(worker_registry, bundle_id)
+            finally:
+                worker_ws._bundle_adapter_modules.cache_clear()
+            return config_hash, worker_hash
+
+        first_config, first_worker = hashes(vector["manifest_sha256"]["initial"])
+        second_config, second_worker = hashes(vector["manifest_sha256"]["changed"])
+
+        assert first_config == first_worker == vector["expected_hash"]["initial"]
+        assert second_config == second_worker == vector["expected_hash"]["changed"]
         assert first_config != second_config
 
     def test_worker_hash_fails_closed_when_bundle_metadata_missing(self, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -1,6 +1,6 @@
 {
   "name": "@superlinked/sie-lancedb",
-  "version": "0.7.1",
+  "version": "0.9.0",
   "description": "SIE embedding function and reranker for LanceDB",
   "type": "module",
   "main": "./dist/index.cjs",
@@ -39,7 +39,7 @@
     "apache-arrow": "^18.1.0",
     "tsup": "^8.5.1",
     "typescript": "^5.9.3",
-    "vitest": "^4.1.0"
+    "vitest": "^5.0.0"
   },
   "engines": {
     "node": ">=22.0.0"
@@ -56,7 +56,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/superlinked/sie-internal.git",
+    "url": "https://github.com/superlinked/sie.git",
     "directory": "integrations/sie_ts_lancedb"
   },
   "publishConfig": {

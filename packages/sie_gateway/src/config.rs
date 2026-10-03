@@ -1,12 +1,14 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
+use std::time::Duration;
 
 use serde::Deserialize;
 
 use crate::state::demand_tracker::PhysicalLaneCatalog;
+use crate::state::pool_manager::PoolLimits;
 use crate::types::pool::PoolSpec;
 
-/// Modal platform proxy-auth credential (superlinked/sie-internal #1740).
+/// Modal platform proxy-auth credential.
 ///
 /// When a managed ingress endpoint (config service, generation-lane `/gen`
 /// WebSocket, OTLP collector) is deployed with `requires_proxy_auth=True`,
@@ -38,6 +40,54 @@ impl std::fmt::Debug for ModalProxyToken {
     }
 }
 
+/// JetStream storage backing for the work-queue and DLQ streams.
+///
+/// `Memory` (the default, and the only behaviour that existed before this
+/// knob) keeps queued and delivered-but-unacknowledged work **only in the
+/// broker's RAM**: a restart of the NATS pod — an OOM kill, a NATS rollout,
+/// or a node drain that evicts *that* pod — erases every queued item and the
+/// `DEAD_LETTERS` record that would have named them. Draining a node hosting
+/// only workers or gateways costs nothing here. At the default single replica
+/// any eviction of the one NATS pod loses the state; a replicated stream
+/// survives while a peer holding it stays up.
+/// `File` persists them to the broker's JetStream store so they survive a
+/// broker restart, at the cost of disk (a PVC on the NATS pods) and extra
+/// publish latency.
+///
+/// The default is deliberately unchanged: flipping a live cluster to `File`
+/// is an operator decision (disk sizing, PVCs, latency budget), not a code
+/// default. Set `SIE_STREAM_STORAGE=file` on BOTH the gateway and the worker
+/// sidecars, and enable the NATS sub-chart's `fileStore`, to opt in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StreamStorage {
+    #[default]
+    Memory,
+    File,
+}
+
+impl StreamStorage {
+    /// Parse the `SIE_STREAM_STORAGE` spelling. Unrecognized values fall back
+    /// to the default rather than panicking — a typo must not take the queue
+    /// edge down, and the effective value is logged at startup via `Config`'s
+    /// `Debug`.
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "memory" | "mem" => Some(Self::Memory),
+            "file" | "disk" => Some(Self::File),
+            _ => None,
+        }
+    }
+}
+
+impl From<StreamStorage> for async_nats::jetstream::stream::StorageType {
+    fn from(value: StreamStorage) -> Self {
+        match value {
+            StreamStorage::Memory => Self::Memory,
+            StreamStorage::File => Self::File,
+        }
+    }
+}
+
 // `Debug` is hand-written (below) rather than derived: several fields hold
 // secret material (`auth_tokens`, `admin_token`, `config_service_token`, and
 // `config_modal_proxy_token`) and `Config` is `{:?}`-formatted at startup, so a
@@ -61,6 +111,10 @@ pub struct Config {
 
     // NATS
     pub nats_url: String,
+    /// NATS user and password (`SIE_NATS_USER` / `SIE_NATS_PASSWORD`). Both
+    /// empty connects without credentials; see `nats_credentials`.
+    pub nats_user: String,
+    pub nats_password: String,
     /// Trusted-producer allowlist for `sie.config.models._all`. Defaults
     /// to `["sie-config"]`. Incoming `ConfigNotification`s whose
     /// `producer_id` is not in this list are dropped (neither the epoch
@@ -95,7 +149,27 @@ pub struct Config {
     // Tuning
     pub request_timeout: f64,
     pub max_stream_pending: u64,
+    /// Per-lane in-flight work-item ceiling
+    /// (`SIE_GATEWAY_MAX_LANE_IN_FLIGHT_ITEMS`). The per-lane decision is
+    /// always computed against this; whether it sheds is
+    /// `lane_backpressure_enforce`.
+    pub max_lane_in_flight_items: u64,
+    /// Act on the per-lane backpressure decision
+    /// (`SIE_GATEWAY_LANE_BACKPRESSURE_ENFORCE`, default `false`).
+    ///
+    /// The flag gates enforcement, not computation: with it off the gateway
+    /// still evaluates and records each lane's decision, and admission is
+    /// governed by the pool-wide `max_stream_pending` check exactly as before.
+    pub lane_backpressure_enforce: bool,
     pub stream_max_age_s: u64,
+    /// Storage backing for `WORK_POOL_{pool}` and `DEAD_LETTERS`
+    /// (`SIE_STREAM_STORAGE`, default `memory`). Must match the worker
+    /// sidecars: whoever creates the stream first wins, and JetStream does
+    /// NOT allow changing an existing stream's storage type in place.
+    pub stream_storage: StreamStorage,
+    /// JetStream replica count for those streams (`SIE_STREAM_REPLICAS`,
+    /// default 1). Values above 1 require a clustered NATS deployment.
+    pub stream_num_replicas: usize,
 
     // Configured GPUs (survives scale-to-zero)
     pub configured_gpus: Vec<String>,
@@ -116,6 +190,18 @@ pub struct Config {
     // (JSON map). Mirrors the `SIE_GATEWAY_GPU_ALIASES` mechanism.
     pub model_aliases: HashMap<String, String>,
 
+    // The subset of `model_aliases` that `/v1/models` may advertise (#2843).
+    //
+    // The three compiled-in built-ins are deliberately NOT in here. They are
+    // internal routing defaults, not product names: `code`/`sql` point at
+    // Qwen3-4B-Instruct-2507, which is absent from the managed launch catalog,
+    // so publishing them would both name a model a managed customer cannot
+    // otherwise see AND turn an implementation detail into a documented
+    // contract that could not be repointed later without a breaking change.
+    // Aliases an operator or a released catalog declared on purpose ARE
+    // publishable — those are the names the epic exists to make discoverable.
+    pub published_model_aliases: HashSet<String>,
+
     // Model registry paths (filesystem seed; same volume mounted into sie-config
     // for consistency, but the gateway never writes to them).
     pub bundles_dir: String,
@@ -127,21 +213,23 @@ pub struct Config {
     // examples); production Helm always sets this.
     pub config_service_url: Option<String>,
 
-    // Admin token the gateway presents as a bearer credential when calling
-    // `sie-config`'s bootstrap endpoints (`GET /v1/configs/export` and
-    // `GET /v1/configs/epoch`). Reuses SIE_ADMIN_TOKEN because both services
-    // share one admin secret in-cluster.
+    // Bearer the gateway presents to `sie-config` on its bootstrap and poll
+    // reads (`GET /v1/configs/bundles`, `/export`, `/epoch`), from
+    // `SIE_CONFIG_SERVICE_TOKEN`: a read-scoped sie-config token
+    // (`SIE_CONFIG_READ_TOKEN` there), separate from the inbound `admin_token`.
+    // Falls back to `SIE_ADMIN_TOKEN` only when that variable is unset.
     pub config_service_token: Option<String>,
 
     // Optional Modal platform proxy-auth token the gateway's config client
-    // presents ALONGSIDE `config_service_token` on `GET /v1/configs/*` calls
-    // (superlinked/sie-internal #1740). `Some` only when both
+    // presents ALONGSIDE `config_service_token` on `GET /v1/configs/*` calls.
+    // `Some` only when both
     // `SIE_MODAL_PROXY_TOKEN_ID` and `SIE_MODAL_PROXY_TOKEN_SECRET` are set;
     // absent on self-host / dev (no Modal edge), so no proxy headers are sent.
     pub config_modal_proxy_token: Option<ModalProxyToken>,
 
-    // Payload store (local path, s3://bucket/prefix, gs://bucket/prefix, or
-    // abfs(s)://container@account.dfs.core.windows.net/prefix)
+    // Payload store (local path, s3://bucket/prefix, gs://bucket/prefix,
+    // abfs(s)://container@account.dfs.core.windows.net/prefix, or
+    // oss://bucket/prefix)
     pub payload_store_url: String,
 
     // The gateway's own EXTERNAL https origin (`SIE_GATEWAY_PUBLIC_URL`,
@@ -150,6 +238,45 @@ pub struct Config {
     // refs). `None` = unconfigured; callers derive the origin from the
     // request's Host headers instead.
     pub public_base_url: Option<String>,
+}
+
+/// NATS user/password pair presented on connect.
+#[derive(Clone, PartialEq, Eq)]
+pub struct NatsCredentials {
+    pub user: String,
+    pub password: String,
+}
+
+impl std::fmt::Debug for NatsCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NatsCredentials")
+            .field("user", &self.user)
+            .field("password", &redacted_secret(&self.password))
+            .finish()
+    }
+}
+
+/// `url` with any `user[:password]@` userinfo replaced by `<redacted>@`, for
+/// logs. NATS credentials belong in `SIE_NATS_USER` / `SIE_NATS_PASSWORD`;
+/// the client ignores userinfo in `SIE_NATS_URL`.
+pub fn redact_url_userinfo(url: &str) -> String {
+    url.split(',')
+        .map(|server| {
+            let authority_start = server.find("://").map_or(0, |i| i + 3);
+            let authority_end = server[authority_start..]
+                .find(['/', '?', '#'])
+                .map_or(server.len(), |i| authority_start + i);
+            match server[authority_start..authority_end].rfind('@') {
+                Some(at) => format!(
+                    "{}<redacted>{}",
+                    &server[..authority_start],
+                    &server[authority_start + at..]
+                ),
+                None => server.to_string(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// Render a secret string for `Debug` output: an empty value stays empty (so
@@ -170,7 +297,8 @@ impl std::fmt::Debug for Config {
     /// preserving present/absent (and count) so misconfig is still diagnosable.
     /// `config_modal_proxy_token` relies on `ModalProxyToken`'s own redacting
     /// `Debug`. `nats_url` / `payload_store_url` are connection URLs kept
-    /// visible on purpose (redacting them would hide the target host).
+    /// visible on purpose (redacting them would hide the target host);
+    /// `nats_url` drops any userinfo.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Config")
             .field("host", &self.host)
@@ -181,7 +309,10 @@ impl std::fmt::Debug for Config {
             .field("k8s_service", &self.k8s_service)
             .field("k8s_port", &self.k8s_port)
             .field("health_mode", &self.health_mode)
-            .field("nats_url", &self.nats_url)
+            .field("nats_url", &redact_url_userinfo(&self.nats_url))
+            .field("nats_user", &self.nats_user)
+            // Secret: the NATS password (SIE_NATS_PASSWORD).
+            .field("nats_password", &redacted_secret(&self.nats_password))
             .field(
                 "nats_config_trusted_producers",
                 &self.nats_config_trusted_producers,
@@ -203,7 +334,11 @@ impl std::fmt::Debug for Config {
             .field("multi_router", &self.multi_router)
             .field("request_timeout", &self.request_timeout)
             .field("max_stream_pending", &self.max_stream_pending)
+            .field("max_lane_in_flight_items", &self.max_lane_in_flight_items)
+            .field("lane_backpressure_enforce", &self.lane_backpressure_enforce)
             .field("stream_max_age_s", &self.stream_max_age_s)
+            .field("stream_storage", &self.stream_storage)
+            .field("stream_num_replicas", &self.stream_num_replicas)
             .field("configured_gpus", &self.configured_gpus)
             .field("gpu_profile_map", &self.gpu_profile_map)
             .field("configured_physical_lanes", &self.configured_physical_lanes)
@@ -212,7 +347,7 @@ impl std::fmt::Debug for Config {
             .field("bundles_dir", &self.bundles_dir)
             .field("models_dir", &self.models_dir)
             .field("config_service_url", &self.config_service_url)
-            // Secret: same admin bearer as `admin_token`; keep present/absent.
+            // Secret: the sie-config bearer; keep present/absent.
             .field(
                 "config_service_token",
                 &self.config_service_token.as_ref().map(|_| "<redacted>"),
@@ -359,11 +494,87 @@ fn env_finite_float(key: &str, fallback: f64) -> f64 {
     value
 }
 
+/// The longest timeout the gateway arms: Tokio's own horizon for a deadline
+/// it cannot represent. Any `Instant` can be advanced by it without overflow.
+pub const MAX_TIMEOUT: Duration = Duration::from_secs(30 * 365 * 24 * 60 * 60);
+
+/// Converts seconds into a timeout: values that are not positive become zero,
+/// and larger values than [`MAX_TIMEOUT`] saturate to it.
+pub fn timeout_from_secs(seconds: f64) -> Duration {
+    if seconds > 0.0 {
+        Duration::try_from_secs_f64(seconds)
+            .unwrap_or(Duration::MAX)
+            .min(MAX_TIMEOUT)
+    } else {
+        Duration::ZERO
+    }
+}
+
+/// Read `SIE_STREAM_STORAGE`. An unset, empty, or unrecognized value keeps
+/// the historical `Memory` behaviour so a typo can never silently change the
+/// durability posture of a running cluster in the *other* direction either.
+fn env_stream_storage(key: &str) -> StreamStorage {
+    env::var(key)
+        .ok()
+        .as_deref()
+        .and_then(StreamStorage::parse)
+        .unwrap_or_default()
+}
+
 fn env_u64(key: &str, fallback: u64) -> u64 {
     env::var(key)
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(fallback)
+}
+
+/// Read the pool API bounds from `SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT`,
+/// `SIE_GATEWAY_POOL_MAX_TTL_S`, and `SIE_GATEWAY_MAX_POOLS`. An unset value
+/// keeps that bound's default; an unparsable one keeps it with a warning.
+pub fn pool_limits_from_env() -> PoolLimits {
+    let defaults = PoolLimits::default();
+    PoolLimits {
+        max_minimum_worker_count: env_pool_limit(
+            "SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT",
+            defaults.max_minimum_worker_count,
+        ),
+        max_ttl_seconds: match env_pool_limit(
+            "SIE_GATEWAY_POOL_MAX_TTL_S",
+            defaults.max_ttl_seconds,
+        ) {
+            0 => {
+                tracing::warn!(
+                    env = "SIE_GATEWAY_POOL_MAX_TTL_S",
+                    default = defaults.max_ttl_seconds,
+                    "ignoring a zero pool TTL limit, which would expire every pool at once; using the default"
+                );
+                defaults.max_ttl_seconds
+            }
+            ttl => ttl,
+        },
+        max_pools: env_pool_limit("SIE_GATEWAY_MAX_POOLS", defaults.max_pools),
+    }
+}
+
+fn env_pool_limit<T>(key: &str, default: T) -> T
+where
+    T: std::str::FromStr + std::fmt::Display + Copy,
+{
+    let Ok(raw) = env::var(key) else {
+        return default;
+    };
+    match raw.trim().parse() {
+        Ok(value) => value,
+        Err(_) => {
+            tracing::warn!(
+                env = key,
+                value = %raw,
+                default = %default,
+                "ignoring unparsable pool limit; using the default"
+            );
+            default
+        }
+    }
 }
 
 fn env_csv(key: &str) -> Vec<String> {
@@ -486,7 +697,12 @@ fn env_static_queue_pools(key: &str) -> Vec<PoolSpec> {
 /// — e.g. map `sql` to a BF16 bundle that avoids the FP8 SQL-accuracy
 /// regression (ADR 0001). `resolve_model_spec_with_aliases` (proxy.rs) applies
 /// the bundle and preserves concrete profile variants.
-fn build_model_aliases(overrides: HashMap<String, String>) -> HashMap<String, String> {
+/// Returns the resolution map plus the subset that may be advertised on
+/// `/v1/models`. Only explicitly-declared aliases are publishable; see
+/// [`Config::published_model_aliases`].
+fn build_model_aliases(
+    overrides: HashMap<String, String>,
+) -> (HashMap<String, String>, HashSet<String>) {
     let mut map: HashMap<String, String> = HashMap::new();
     // Built-in: the code-generation job → the model with a MEASURED
     // HumanEval/MBPP pass@1 baseline that also serves reliably
@@ -507,15 +723,19 @@ fn build_model_aliases(overrides: HashMap<String, String>) -> HashMap<String, St
         "guard".to_string(),
         "ibm-granite/granite-guardian-3.0-2b".to_string(),
     );
+    let mut published: HashSet<String> = HashSet::new();
     for (alias, target) in overrides {
         let alias = alias.trim().to_lowercase();
         let target = target.trim().to_string();
         if alias.is_empty() || target.is_empty() {
             continue;
         }
+        // An override that shadows a built-in name becomes publishable: the
+        // operator chose that name, so it is theirs, not an internal default.
+        published.insert(alias.clone());
         map.insert(alias, target);
     }
-    map
+    (map, published)
 }
 
 fn build_gpu_profile_map(
@@ -547,6 +767,19 @@ fn env_default(key: &str, fallback: &str) -> String {
     }
 }
 
+/// The bearer the gateway presents to `sie-config`. `SIE_CONFIG_SERVICE_TOKEN`
+/// decides whenever it is set, and a blank value means no credential. Only an
+/// unset `SIE_CONFIG_SERVICE_TOKEN` falls back to `SIE_ADMIN_TOKEN`, the
+/// inbound admin credential; `Config::audit_auth` reports that fallback.
+fn config_service_token_from_env() -> Option<String> {
+    let raw = if env::var_os("SIE_CONFIG_SERVICE_TOKEN").is_some() {
+        env::var("SIE_CONFIG_SERVICE_TOKEN").unwrap_or_default()
+    } else {
+        env::var("SIE_ADMIN_TOKEN").unwrap_or_default()
+    };
+    (!raw.trim().is_empty()).then_some(raw)
+}
+
 impl Config {
     pub fn load() -> Self {
         let mut auth_tokens = env_csv("SIE_AUTH_TOKENS");
@@ -560,7 +793,8 @@ impl Config {
             &configured_gpus,
             env_json_string_map("SIE_GATEWAY_GPU_ALIASES"),
         );
-        let model_aliases = build_model_aliases(env_json_string_map("SIE_GATEWAY_MODEL_ALIASES"));
+        let (model_aliases, published_model_aliases) =
+            build_model_aliases(env_json_string_map("SIE_GATEWAY_MODEL_ALIASES"));
 
         Self {
             host: "0.0.0.0".to_string(),
@@ -575,6 +809,8 @@ impl Config {
             health_mode: env_default("SIE_GATEWAY_HEALTH_MODE", "ws"),
 
             nats_url: env::var("SIE_NATS_URL").unwrap_or_default(),
+            nats_user: env::var("SIE_NATS_USER").unwrap_or_default(),
+            nats_password: env::var("SIE_NATS_PASSWORD").unwrap_or_default(),
             nats_config_trusted_producers: {
                 // Explicit opt-in to the legacy "trust anyone" behavior.
                 if env_bool("SIE_NATS_CONFIG_TRUST_ANY_PRODUCER") {
@@ -605,13 +841,23 @@ impl Config {
 
             request_timeout: env_finite_float("SIE_GATEWAY_REQUEST_TIMEOUT", 120.0),
             max_stream_pending: env_u64("SIE_GATEWAY_MAX_STREAM_PENDING", 50_000),
+            max_lane_in_flight_items: env_u64(
+                "SIE_GATEWAY_MAX_LANE_IN_FLIGHT_ITEMS",
+                crate::queue::lane_admission::DEFAULT_MAX_LANE_IN_FLIGHT_ITEMS,
+            ),
+            lane_backpressure_enforce: env_bool("SIE_GATEWAY_LANE_BACKPRESSURE_ENFORCE"),
             stream_max_age_s: env_u64("SIE_STREAM_MAX_AGE_S", 1_800),
+            stream_storage: env_stream_storage("SIE_STREAM_STORAGE"),
+            // `env_u64` already falls back on a parse failure; clamp 0 up to 1
+            // because JetStream treats 0 replicas as invalid.
+            stream_num_replicas: env_u64("SIE_STREAM_REPLICAS", 1).max(1) as usize,
 
             configured_gpus,
             gpu_profile_map,
             configured_physical_lanes,
             static_queue_pools: env_static_queue_pools("SIE_GATEWAY_STATIC_QUEUE_POOLS"),
             model_aliases,
+            published_model_aliases,
 
             bundles_dir: env_default("SIE_BUNDLES_DIR", "bundles"),
             models_dir: env_default("SIE_MODELS_DIR", "models"),
@@ -624,14 +870,7 @@ impl Config {
                     Some(raw)
                 }
             },
-            config_service_token: {
-                let raw = env::var("SIE_ADMIN_TOKEN").unwrap_or_default();
-                if raw.is_empty() {
-                    None
-                } else {
-                    Some(raw)
-                }
-            },
+            config_service_token: config_service_token_from_env(),
             config_modal_proxy_token: {
                 // #1740: opt-in Modal platform proxy-auth. Both halves required
                 // for the pair to be sent — a half-set pair is a misconfig, not
@@ -700,10 +939,35 @@ impl Config {
             ));
         }
 
-        if !is_enabled && (has_tokens || has_admin) {
+        let admin_is_config_credential = has_admin
+            && self.config_service_url.is_some()
+            && self.config_service_token.as_deref() == Some(self.admin_token.as_str());
+
+        // `admin_token` alone is not dead configuration while it is also the
+        // `sie-config` credential, so it never audits as an error. Only the
+        // inbound tokens prove intent. Without `config_service_url` the
+        // gateway never calls `sie-config`, so no credential is presented.
+        if !is_enabled && has_tokens {
             issues.push((
                 AuditLevel::Error,
-                "SIE_AUTH_TOKEN(S) or SIE_ADMIN_TOKEN is set but SIE_AUTH_MODE is not 'static'/'token'. Auth is DISABLED; the tokens are dead configuration. Set SIE_AUTH_MODE=token to enforce auth.".to_string(),
+                "SIE_AUTH_TOKEN(S) is set but SIE_AUTH_MODE is not 'static'/'token'. Auth is DISABLED; the tokens are dead configuration. Set SIE_AUTH_MODE=token to enforce auth.".to_string(),
+            ));
+        } else if !is_enabled && has_admin {
+            let usage = if admin_is_config_credential {
+                "the token is still presented to sie-config as its credential"
+            } else {
+                "the token is unused"
+            };
+            issues.push((
+                AuditLevel::Warn,
+                format!("SIE_ADMIN_TOKEN is set but SIE_AUTH_MODE is not 'static'/'token': admin routes are not gated inbound (auth is disabled); {usage}."),
+            ));
+        }
+
+        if admin_is_config_credential {
+            issues.push((
+                AuditLevel::Warn,
+                "The gateway presents SIE_ADMIN_TOKEN, its inbound admin credential, to sie-config because SIE_CONFIG_SERVICE_TOKEN is unset or equal to it. This is deprecated: set SIE_CONFIG_SERVICE_TOKEN to sie-config's read-scoped token (SIE_CONFIG_READ_TOKEN) so the gateway does not need an admin credential to load its catalog.".to_string(),
             ));
         }
 
@@ -729,6 +993,31 @@ impl Config {
         }
 
         issues
+    }
+
+    /// The first `AuditLevel::Error` from [`Self::audit_auth`], if any.
+    ///
+    /// An auth configuration that audits as an error has no valid reading, so
+    /// the request path treats it as a refusal instead of picking a default.
+    /// Callers may resolve this once: `Config` does not change after load.
+    pub fn auth_config_error(&self) -> Option<String> {
+        self.audit_auth()
+            .into_iter()
+            .find_map(|(level, message)| matches!(level, AuditLevel::Error).then_some(message))
+    }
+
+    /// Credentials for the NATS connection: `None` when neither
+    /// `SIE_NATS_USER` nor `SIE_NATS_PASSWORD` is set, an error when only one
+    /// of them is.
+    pub fn nats_credentials(&self) -> Result<Option<NatsCredentials>, String> {
+        match (self.nats_user.is_empty(), self.nats_password.is_empty()) {
+            (true, true) => Ok(None),
+            (false, false) => Ok(Some(NatsCredentials {
+                user: self.nats_user.clone(),
+                password: self.nats_password.clone(),
+            })),
+            _ => Err("SIE_NATS_USER and SIE_NATS_PASSWORD must be set together".to_string()),
+        }
     }
 
     /// Report NATS config-delta producer-trust soundness. Mirrors the
@@ -927,6 +1216,53 @@ mod tests {
     }
 
     #[test]
+    fn test_pool_limits_from_env_defaults_and_overrides() {
+        let keys = [
+            "SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT",
+            "SIE_GATEWAY_POOL_MAX_TTL_S",
+            "SIE_GATEWAY_MAX_POOLS",
+        ];
+        without_env(&keys, || {
+            assert_eq!(pool_limits_from_env(), PoolLimits::default());
+        });
+        with_env(
+            &[
+                ("SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT", "0"),
+                ("SIE_GATEWAY_POOL_MAX_TTL_S", " 86400 "),
+                ("SIE_GATEWAY_MAX_POOLS", "not-a-number"),
+            ],
+            || {
+                assert_eq!(
+                    pool_limits_from_env(),
+                    PoolLimits {
+                        max_minimum_worker_count: 0,
+                        max_ttl_seconds: 86_400,
+                        max_pools: PoolLimits::default().max_pools,
+                    }
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn test_pool_limits_ignore_a_zero_ttl_limit_but_keep_zero_pools() {
+        with_env(
+            &[
+                ("SIE_GATEWAY_POOL_MAX_TTL_S", "0"),
+                ("SIE_GATEWAY_MAX_POOLS", "0"),
+            ],
+            || {
+                let limits = pool_limits_from_env();
+                assert_eq!(
+                    limits.max_ttl_seconds,
+                    PoolLimits::default().max_ttl_seconds
+                );
+                assert_eq!(limits.max_pools, 0);
+            },
+        );
+    }
+
+    #[test]
     fn test_env_json_string_map() {
         with_env(&[("_TEST_JSON_MAP", r#"{"l4":"l4-spot"}"#)], || {
             let result = env_json_string_map("_TEST_JSON_MAP");
@@ -1070,7 +1406,7 @@ mod tests {
 
     #[test]
     fn test_build_model_aliases_has_builtin_code_default() {
-        let result = build_model_aliases(HashMap::new());
+        let (result, published) = build_model_aliases(HashMap::new());
         assert_eq!(
             result.get("code"),
             Some(&"Qwen/Qwen3-4B-Instruct-2507".to_string())
@@ -1083,6 +1419,11 @@ mod tests {
             result.get("guard"),
             Some(&"ibm-granite/granite-guardian-3.0-2b".to_string())
         );
+        // The built-ins resolve but are NOT public API (#2843). `code`/`sql`
+        // point at a model absent from the managed launch catalog, so listing
+        // them would name something a managed caller cannot otherwise see and
+        // freeze an internal default into a contract we could not repoint.
+        assert!(published.is_empty());
     }
 
     #[test]
@@ -1092,11 +1433,17 @@ mod tests {
         overrides.insert("SQL".to_string(), "Org/SQLModel".to_string()); // extend + lowercased
         overrides.insert("blank".to_string(), "".to_string()); // skipped (empty target)
 
-        let result = build_model_aliases(overrides);
+        let (result, published) = build_model_aliases(overrides);
 
         assert_eq!(result.get("code"), Some(&"Org/Coder".to_string()));
         assert_eq!(result.get("sql"), Some(&"Org/SQLModel".to_string()));
         assert!(!result.contains_key("blank"));
+        // An operator who names an alias owns that name, so it is publishable
+        // even when it shadows a built-in. A skipped entry never becomes one.
+        assert!(published.contains("code"));
+        assert!(published.contains("sql"));
+        assert!(!published.contains("blank"));
+        assert!(!published.contains("guard"));
     }
 
     #[test]
@@ -1188,6 +1535,21 @@ mod tests {
         with_env(&[("SIE_GATEWAY_REQUEST_TIMEOUT", "NaN")], || {
             let _ = Config::load();
         });
+    }
+
+    #[test]
+    fn test_timeout_from_secs_saturates_instead_of_panicking() {
+        assert_eq!(timeout_from_secs(45.5), Duration::from_millis(45_500));
+        for seconds in [0.0, -1.0, f64::NAN, f64::NEG_INFINITY] {
+            assert_eq!(timeout_from_secs(seconds), Duration::ZERO, "{seconds}");
+        }
+        for seconds in [f64::INFINITY, 1e300, 1e19, 2.0 * MAX_TIMEOUT.as_secs_f64()] {
+            assert_eq!(timeout_from_secs(seconds), MAX_TIMEOUT, "{seconds}");
+        }
+        let now = std::time::Instant::now();
+        assert!(now + MAX_TIMEOUT > now);
+        let now = tokio::time::Instant::now();
+        assert!(now + MAX_TIMEOUT > now);
     }
 
     #[test]
@@ -1408,22 +1770,158 @@ mod tests {
         });
     }
 
+    /// The shipped default must stay memory-backed / single-replica: this PR
+    /// makes durability configurable, it does NOT flip the production
+    /// posture. A change here is a deliberate operator-facing decision.
     #[test]
-    fn test_admin_token_populates_config_service_token() {
-        with_env(&[("SIE_ADMIN_TOKEN", "super-secret")], || {
+    fn test_stream_storage_defaults_to_memory_single_replica() {
+        without_env(&["SIE_STREAM_STORAGE", "SIE_STREAM_REPLICAS"], || {
             let cfg = Config::load();
-            assert_eq!(cfg.admin_token, "super-secret");
-            assert_eq!(cfg.config_service_token.as_deref(), Some("super-secret"));
+            assert_eq!(cfg.stream_storage, StreamStorage::Memory);
+            assert_eq!(cfg.stream_num_replicas, 1);
         });
     }
 
     #[test]
-    fn test_admin_token_unset_leaves_config_service_token_none() {
-        without_env(&["SIE_ADMIN_TOKEN"], || {
-            let cfg = Config::load();
-            assert!(cfg.admin_token.is_empty());
-            assert!(cfg.config_service_token.is_none());
+    fn test_stream_storage_from_env() {
+        with_env(
+            &[("SIE_STREAM_STORAGE", "file"), ("SIE_STREAM_REPLICAS", "3")],
+            || {
+                let cfg = Config::load();
+                assert_eq!(cfg.stream_storage, StreamStorage::File);
+                assert_eq!(cfg.stream_num_replicas, 3);
+            },
+        );
+    }
+
+    /// A typo must not take the queue edge down, and must not silently move
+    /// the cluster off its configured posture either — it falls back to the
+    /// shipped default and the effective value is visible in the startup
+    /// `Config` dump.
+    #[test]
+    fn test_stream_storage_rejects_garbage_and_zero_replicas() {
+        with_env(
+            &[
+                ("SIE_STREAM_STORAGE", "durable-please"),
+                ("SIE_STREAM_REPLICAS", "0"),
+            ],
+            || {
+                let cfg = Config::load();
+                assert_eq!(cfg.stream_storage, StreamStorage::Memory);
+                assert_eq!(cfg.stream_num_replicas, 1);
+            },
+        );
+    }
+
+    #[test]
+    fn test_stream_storage_parse_spellings() {
+        assert_eq!(StreamStorage::parse("Memory"), Some(StreamStorage::Memory));
+        assert_eq!(StreamStorage::parse(" FILE "), Some(StreamStorage::File));
+        assert_eq!(StreamStorage::parse("disk"), Some(StreamStorage::File));
+        assert_eq!(StreamStorage::parse(""), None);
+        assert_eq!(StreamStorage::parse("s3"), None);
+    }
+
+    const CONFIG_CREDENTIAL_VARS: &[&str] = &[
+        "SIE_CONFIG_SERVICE_URL",
+        "SIE_CONFIG_SERVICE_TOKEN",
+        "SIE_ADMIN_TOKEN",
+    ];
+    const CONFIG_URL: (&str, &str) = ("SIE_CONFIG_SERVICE_URL", "http://sie-config:8080");
+
+    fn load_with_config_credentials(vars: &[(&str, &str)]) -> Config {
+        let mut loaded = None;
+        without_env(CONFIG_CREDENTIAL_VARS, || {
+            for (key, value) in vars {
+                env::set_var(key, value);
+            }
+            loaded = Some(Config::load());
         });
+        loaded.expect("Config::load ran")
+    }
+
+    fn deprecation_warnings(cfg: &Config) -> usize {
+        cfg.audit_auth()
+            .iter()
+            .filter(|(lvl, msg)| *lvl == AuditLevel::Warn && msg.contains("deprecated"))
+            .count()
+    }
+
+    #[test]
+    fn test_config_service_token_is_separate_from_the_admin_token() {
+        let cfg = load_with_config_credentials(&[
+            CONFIG_URL,
+            ("SIE_CONFIG_SERVICE_TOKEN", "config-read-secret"),
+            ("SIE_ADMIN_TOKEN", "gateway-admin-secret"),
+        ]);
+        assert_eq!(cfg.admin_token, "gateway-admin-secret");
+        assert_eq!(
+            cfg.config_service_token.as_deref(),
+            Some("config-read-secret")
+        );
+        assert_eq!(deprecation_warnings(&cfg), 0);
+    }
+
+    #[test]
+    fn test_config_service_token_without_an_admin_token() {
+        let cfg =
+            load_with_config_credentials(&[("SIE_CONFIG_SERVICE_TOKEN", "config-read-secret")]);
+        assert!(cfg.admin_token.is_empty());
+        assert_eq!(
+            cfg.config_service_token.as_deref(),
+            Some("config-read-secret")
+        );
+    }
+
+    #[test]
+    fn test_unset_config_service_token_falls_back_to_the_admin_token() {
+        let cfg = load_with_config_credentials(&[CONFIG_URL, ("SIE_ADMIN_TOKEN", "super-secret")]);
+        assert_eq!(cfg.admin_token, "super-secret");
+        assert_eq!(cfg.config_service_token.as_deref(), Some("super-secret"));
+        assert_eq!(deprecation_warnings(&cfg), 1);
+        assert!(cfg.auth_config_error().is_none());
+    }
+
+    #[test]
+    fn test_admin_token_without_a_config_service_is_not_reported_as_the_config_credential() {
+        let cfg = load_with_config_credentials(&[("SIE_ADMIN_TOKEN", "super-secret")]);
+        assert!(cfg.config_service_url.is_none());
+        assert_eq!(deprecation_warnings(&cfg), 0);
+        assert!(!cfg
+            .audit_auth()
+            .iter()
+            .any(|(_, msg)| msg.contains("presented to sie-config")));
+    }
+
+    #[test]
+    fn test_blank_config_service_token_does_not_fall_back() {
+        for blank in ["", "   "] {
+            let cfg = load_with_config_credentials(&[
+                CONFIG_URL,
+                ("SIE_CONFIG_SERVICE_TOKEN", blank),
+                ("SIE_ADMIN_TOKEN", "gateway-admin-secret"),
+            ]);
+            assert_eq!(cfg.admin_token, "gateway-admin-secret");
+            assert!(cfg.config_service_token.is_none(), "{blank:?}");
+            assert_eq!(deprecation_warnings(&cfg), 0);
+        }
+    }
+
+    #[test]
+    fn test_no_config_service_credential() {
+        let cfg = load_with_config_credentials(&[]);
+        assert!(cfg.admin_token.is_empty());
+        assert!(cfg.config_service_token.is_none());
+    }
+
+    #[test]
+    fn test_config_service_token_equal_to_the_admin_token_is_reported() {
+        let cfg = load_with_config_credentials(&[
+            CONFIG_URL,
+            ("SIE_CONFIG_SERVICE_TOKEN", "shared-secret"),
+            ("SIE_ADMIN_TOKEN", "shared-secret"),
+        ]);
+        assert_eq!(deprecation_warnings(&cfg), 1);
     }
 
     #[test]
@@ -1495,17 +1993,20 @@ mod tests {
     fn test_config_debug_redacts_all_secret_fields() {
         // `Config` is `{:?}`-formatted at startup (and in tests), so EVERY
         // credential-bearing field must be redacted: the client API bearers
-        // (auth_tokens), the admin bearer (admin_token AND the config_service_token
-        // derived from it), and both halves of the Modal proxy token. Non-secret
-        // fields must stay visible for debuggability.
+        // (auth_tokens), the admin bearer (admin_token), the sie-config bearer
+        // (config_service_token), and both halves of the proxy token.
+        // Non-secret fields must stay visible for debuggability.
         with_env(
             &[
                 ("SIE_AUTH_MODE", "token"),
                 ("SIE_AUTH_TOKENS", "tok-secret-1,tok-secret-2"),
                 ("SIE_ADMIN_TOKEN", "super-admin-secret"),
+                ("SIE_CONFIG_SERVICE_TOKEN", "config-read-secret"),
                 ("SIE_MODAL_PROXY_TOKEN_ID", "wk-id-secret"),
                 ("SIE_MODAL_PROXY_TOKEN_SECRET", "ws-value-secret"),
-                ("SIE_NATS_URL", "nats://nats-host:4222"),
+                ("SIE_NATS_URL", "nats://url-user:url-secret@nats-host:4222"),
+                ("SIE_NATS_USER", "sie-gateway"),
+                ("SIE_NATS_PASSWORD", "nats-password-secret"),
             ],
             || {
                 let cfg = Config::load();
@@ -1514,17 +2015,21 @@ mod tests {
                 assert_eq!(cfg.admin_token, "super-admin-secret");
                 assert_eq!(
                     cfg.config_service_token.as_deref(),
-                    Some("super-admin-secret")
+                    Some("config-read-secret")
                 );
                 assert_eq!(cfg.auth_tokens.len(), 2);
 
                 let dbg = format!("{cfg:?}");
                 for leaked in [
-                    "super-admin-secret", // admin_token + config_service_token
+                    "super-admin-secret", // admin_token
+                    "config-read-secret", // config_service_token
                     "tok-secret-1",
                     "tok-secret-2", // auth_tokens
                     "wk-id-secret",
                     "ws-value-secret", // config_modal_proxy_token
+                    "nats-password-secret",
+                    "url-secret",
+                    "url-user",
                 ] {
                     assert!(
                         !dbg.contains(leaked),
@@ -1540,8 +2045,64 @@ mod tests {
                     dbg.contains("nats-host"),
                     "non-secret nats_url must stay visible: {dbg}"
                 );
+                assert!(
+                    dbg.contains("sie-gateway"),
+                    "non-secret nats_user must stay visible: {dbg}"
+                );
+                let credentials = cfg.nats_credentials().unwrap().unwrap();
+                assert!(!format!("{credentials:?}").contains("nats-password-secret"));
             },
         );
+    }
+
+    #[test]
+    fn nats_credentials_require_user_and_password_together() {
+        without_env(&["SIE_NATS_USER", "SIE_NATS_PASSWORD"], || {
+            assert_eq!(Config::load().nats_credentials(), Ok(None));
+        });
+        with_env(
+            &[
+                ("SIE_NATS_USER", "sie-gateway"),
+                ("SIE_NATS_PASSWORD", "pw"),
+            ],
+            || {
+                assert_eq!(
+                    Config::load().nats_credentials(),
+                    Ok(Some(NatsCredentials {
+                        user: "sie-gateway".to_string(),
+                        password: "pw".to_string(),
+                    }))
+                );
+            },
+        );
+        for (case, user, password) in [
+            ("user only", "sie-gateway", ""),
+            ("password only", "", "pw"),
+        ] {
+            with_env(
+                &[("SIE_NATS_USER", user), ("SIE_NATS_PASSWORD", password)],
+                || {
+                    assert!(Config::load().nats_credentials().is_err(), "{case}");
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn redact_url_userinfo_hides_credentials_only() {
+        assert_eq!(
+            redact_url_userinfo("nats://nats-host:4222"),
+            "nats://nats-host:4222"
+        );
+        assert_eq!(
+            redact_url_userinfo("nats://user:secret@nats-host:4222"),
+            "nats://<redacted>@nats-host:4222"
+        );
+        assert_eq!(
+            redact_url_userinfo("tls://token@a:4222,nats://b:4222/x@y"),
+            "tls://<redacted>@a:4222,nats://b:4222/x@y"
+        );
+        assert_eq!(redact_url_userinfo("user:p@ss@host"), "<redacted>@host");
     }
 
     // ── audit_auth ─────────────────────────────────────────────────
@@ -1562,6 +2123,8 @@ mod tests {
             k8s_port: 0,
             health_mode: String::new(),
             nats_url: String::new(),
+            nats_user: String::new(),
+            nats_password: String::new(),
             nats_config_trusted_producers: Vec::new(),
             auth_mode: mode.to_string(),
             auth_tokens: tokens.into_iter().map(String::from).collect(),
@@ -1575,12 +2138,17 @@ mod tests {
             multi_router: false,
             request_timeout: 0.0,
             max_stream_pending: 0,
+            max_lane_in_flight_items: 0,
+            lane_backpressure_enforce: false,
             stream_max_age_s: 0,
+            stream_storage: StreamStorage::Memory,
+            stream_num_replicas: 1,
             configured_gpus: Vec::new(),
             gpu_profile_map: HashMap::new(),
             configured_physical_lanes: PhysicalLaneCatalog::default(),
             static_queue_pools: Vec::new(),
             model_aliases: HashMap::new(),
+            published_model_aliases: Default::default(),
             bundles_dir: String::new(),
             models_dir: String::new(),
             config_service_url: None,
@@ -1605,6 +2173,54 @@ mod tests {
             "expected error about tokens + disabled auth, got {:?}",
             issues
         );
+    }
+
+    /// Through the `SIE_ADMIN_TOKEN` fallback the admin token can also be the
+    /// `sie-config` credential (`config_service_token`), so a gateway running
+    /// with inbound auth off may carry it legitimately. That must never audit
+    /// as an error, or the fail-closed middleware would refuse every request
+    /// on such a deploy.
+    #[test]
+    fn test_audit_auth_none_with_only_admin_token_is_not_an_error() {
+        for config_service_token in [None, Some("admin")] {
+            let mut cfg = cfg_with_auth("none", vec![], "admin", false);
+            cfg.config_service_token = config_service_token.map(String::from);
+            let issues = cfg.audit_auth();
+            assert!(
+                issues.iter().all(|(lvl, _)| *lvl != AuditLevel::Error),
+                "admin token alone must not be an error: {:?}",
+                issues
+            );
+            assert!(cfg.auth_config_error().is_none());
+        }
+    }
+
+    #[test]
+    fn test_audit_auth_none_admin_token_usage_follows_the_config_credential() {
+        let mut cfg = cfg_with_auth("none", vec![], "admin", false);
+        cfg.config_service_url = Some("http://sie-config:8080".to_string());
+        cfg.config_service_token = Some("config-read".to_string());
+        let issues = cfg.audit_auth();
+        assert!(issues
+            .iter()
+            .any(|(lvl, msg)| *lvl == AuditLevel::Warn && msg.contains("the token is unused")));
+        assert!(!issues.iter().any(|(_, msg)| msg.contains("deprecated")));
+
+        cfg.config_service_token = Some("admin".to_string());
+        let issues = cfg.audit_auth();
+        assert!(issues
+            .iter()
+            .any(|(lvl, msg)| *lvl == AuditLevel::Warn && msg.contains("presented to sie-config")));
+        assert!(issues
+            .iter()
+            .any(|(lvl, msg)| *lvl == AuditLevel::Warn && msg.contains("deprecated")));
+
+        cfg.config_service_url = None;
+        let issues = cfg.audit_auth();
+        assert!(issues
+            .iter()
+            .any(|(lvl, msg)| *lvl == AuditLevel::Warn && msg.contains("the token is unused")));
+        assert!(!issues.iter().any(|(_, msg)| msg.contains("deprecated")));
     }
 
     #[test]

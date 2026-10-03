@@ -1,3 +1,4 @@
+import base64
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -15,6 +16,7 @@ from sie_server.config.model import (
     Tasks,
 )
 from sie_server.core.registry import ModelRegistry
+from sie_server.types.inputs import MAX_ITEM_TEXT_BYTES
 
 # Patch msgpack for numpy support
 m.patch()
@@ -226,3 +228,76 @@ class TestMachineProfileValidation:
             headers={**JSON_HEADERS, "X-SIE-MACHINE-PROFILE": "l4-spot"},
         )
         assert response.status_code == 200
+
+
+class TestUndecodableImageValidation:
+    """Undecodable image bytes are a 400 INVALID_INPUT, never a 500.
+
+    Valid base64 that decodes to non-image bytes used to raise PIL's
+    ``UnidentifiedImageError`` (an ``OSError``) inside the adapter, missing the
+    ``ValueError`` -> 400 mapping and surfacing as a 500 ``INFERENCE_ERROR``
+    with a leaked ``BytesIO`` repr. Adapters now decode through
+    ``sie_server.types.inputs.decode_image``, whose ``InvalidMediaError``
+    reaches the client as 400 INVALID_INPUT with the same JSON-path message
+    style as the corrupt-base64 ingress error.
+    """
+
+    def test_undecodable_image_bytes_return_400_with_json_path(
+        self, client: TestClient, mock_adapter: MagicMock
+    ) -> None:
+        from sie_server.types.inputs import decode_image
+
+        def _decode_like_a_real_adapter(items: list[Any], output_types: list[str], **kwargs: Any) -> Any:
+            # Mirrors every image adapter/preprocessor: user bytes are opened
+            # via the shared decode_image seam, which raises here.
+            for i, item in enumerate(items):
+                for j, img in enumerate(item.images or []):
+                    decode_image(img, item_index=i, image_index=j)
+            raise AssertionError("expected decode_image to reject the payload")
+
+        mock_adapter.encode.side_effect = _decode_like_a_real_adapter
+
+        not_an_image = base64.b64encode(b"valid base64, but not an image").decode()
+        response = client.post(
+            "/v1/encode/test-model",
+            json={"items": [{"images": [{"data": not_an_image}]}]},
+            headers=JSON_HEADERS,
+        )
+
+        assert response.status_code == 400
+        detail = response.json()["detail"]
+        assert detail["code"] == "INVALID_INPUT"
+        assert "image data is not a decodable image" in detail["message"]
+        assert "$.items[0].images[0].data" in detail["message"]
+        assert "BytesIO" not in detail["message"]
+
+
+class TestItemTextSize:
+    """Each encode item's text and metadata are bounded at ingress, before any tokenization."""
+
+    def test_text_at_the_cap_is_encoded(self, client: TestClient, mock_adapter: MagicMock) -> None:
+        response = client.post(
+            "/v1/encode/test-model",
+            json={"items": [{"text": "x" * MAX_ITEM_TEXT_BYTES}]},
+            headers=JSON_HEADERS,
+        )
+
+        assert response.status_code == 200
+        mock_adapter.encode.assert_called_once()
+
+    def test_text_over_the_cap_is_rejected_before_encoding(
+        self, client: TestClient, mock_adapter: MagicMock, mock_registry: MagicMock
+    ) -> None:
+        response = client.post(
+            "/v1/encode/test-model",
+            json={"items": [{"text": "Hello world"}, {"text": "中" * (MAX_ITEM_TEXT_BYTES // 3 + 1)}]},
+            headers=JSON_HEADERS,
+        )
+
+        assert response.status_code == 400
+        assert response.json()["detail"] == {
+            "code": "INVALID_INPUT",
+            "message": f"Field 'items[1]' must hold at most {MAX_ITEM_TEXT_BYTES} bytes of UTF-8 text",
+        }
+        mock_adapter.encode.assert_not_called()
+        mock_registry.preprocessor_registry.prepare.assert_not_called()

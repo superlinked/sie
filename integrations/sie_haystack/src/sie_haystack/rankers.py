@@ -5,9 +5,35 @@ Provides SIERanker for reranking documents by relevance to a query.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from haystack import Document, component
+
+
+def _scores_by_index(results: Mapping[str, Any], count: int) -> list[float]:
+    """Map ScoreResult entries back to input positions by item_id.
+
+    Each input is sent with ``id=str(position)``, which the server echoes as
+    the entry's ``item_id``. Only an exact echo of a sent id is used: an entry
+    whose ``item_id`` is missing, not a string, or not a sent id is skipped
+    (that document keeps its 0.0 default), so a malformed entry can neither
+    crash the rerank nor mis-assign a score to the wrong document.
+
+    Args:
+        results: ScoreResult envelope from ``SIEClient.score()``.
+        count: Number of input documents.
+
+    Returns:
+        Scores indexed by input position (0.0 for any unscored/invalid item).
+    """
+    positions = {str(index): index for index in range(count)}
+    scores = [0.0] * count
+    for entry in results.get("scores", []):
+        item_id = entry.get("item_id")
+        if isinstance(item_id, str) and item_id in positions:
+            scores[positions[item_id]] = float(entry.get("score", 0.0))
+    return scores
 
 
 @component
@@ -103,15 +129,25 @@ class SIERanker:
 
         # Prepare items
         query_item = Item(text=query)
-        doc_items = [Item(text=doc.content or "") for doc in documents]
+        doc_items = [Item(text=doc.content or "", id=str(idx)) for idx, doc in enumerate(documents)]
 
         # Score documents
         results = self.client.score(self._model, query_item, doc_items)
 
+        # ``results`` is a ScoreResult envelope; ranked entries are under
+        # ``results["scores"]`` (each a ScoreEntry whose ``item_id`` echoes the
+        # input position sent as the item ``id``, plus ``score``). Map scores
+        # back to input order by item_id rather than zipping positionally — the
+        # entries are sorted by relevance, not by input order. The envelope also
+        # carries ``results["request"]`` (request id) and ``results["usage"]``
+        # (token usage); those are available but intentionally not surfaced
+        # through the Haystack contract.
+        score_by_index = _scores_by_index(results, len(documents))
+
         # Build scored documents
         scored_docs = []
-        for doc, result in zip(documents, results, strict=True):
-            score = self._extract_score(result)
+        for idx, doc in enumerate(documents):
+            score = score_by_index[idx]
             # Store score in document metadata
             doc_with_score = Document(
                 id=doc.id,
@@ -131,9 +167,3 @@ class SIERanker:
             ranked_docs = ranked_docs[:effective_top_k]
 
         return {"documents": ranked_docs}
-
-    def _extract_score(self, result: Any) -> float:
-        """Extract score from SDK result."""
-        if isinstance(result, dict):
-            return float(result.get("score", 0.0))
-        return float(getattr(result, "score", 0.0))

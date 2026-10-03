@@ -21,7 +21,6 @@ See: https://huggingface.co/vidore/colqwen2.5-v0.2
 
 from __future__ import annotations
 
-import io
 import logging
 import threading
 from pathlib import Path
@@ -38,7 +37,7 @@ from sie_server.adapters._types import ComputePrecision
 from sie_server.adapters._vision_patch_embed import rebind_vision_patch_embed
 from sie_server.core.inference_output import EncodeOutput
 from sie_server.core.postprocessor import MuveraConfig, MuveraPostprocessor
-from sie_server.types.inputs import media_bytes
+from sie_server.types.inputs import decode_image
 
 if TYPE_CHECKING:
     from PIL import Image
@@ -237,7 +236,16 @@ class ColQwen2Adapter(BaseAdapter):
         if attn_impl is not None:
             load_kwargs["attn_implementation"] = attn_impl
         if self._revision is not None:
-            load_kwargs["revision"] = self._revision
+            # The checkpoint is a PEFT adapter repo: transformers resolves
+            # adapter_config.json, swaps the load target to its
+            # base_model_name_or_path, and applies the TOP-LEVEL revision to
+            # that base-weights download - where this repo's sha does not
+            # exist (run 32963263930: "vidore/colqwen2.5-base does not appear
+            # to have a file named ... model.safetensors"). adapter_kwargs
+            # scopes the pin to the adapter repo's config and weights; the
+            # base stays on its own default branch, exactly as it did before
+            # the pin existed.
+            load_kwargs["adapter_kwargs"] = {"revision": self._revision}
 
         self._model = ColQwen2_5.from_pretrained(  # ty: ignore[unresolved-attribute]
             self._model_name_or_path,
@@ -343,15 +351,9 @@ class ColQwen2Adapter(BaseAdapter):
     # ------------------------------------------------------------------
 
     def _load_images(self, item: Any) -> list[Image.Image]:
-        from PIL import Image
-
-        pil_images = []
-        for img_input in item.images or []:
-            pil_img = Image.open(io.BytesIO(media_bytes(img_input, kind="image")))
-            if pil_img.mode != "RGB":
-                pil_img = pil_img.convert("RGB")
-            pil_images.append(pil_img)
-        return pil_images
+        # decode_image raises InvalidMediaError (-> 400 INVALID_INPUT) on
+        # non-bytes or undecodable payloads, and converts to RGB.
+        return [decode_image(img_input, image_index=j) for j, img_input in enumerate(item.images or [])]
 
     def _encode_images(self, images: list[Image.Image]) -> np.ndarray:
         """Encode images using ColQwen2.5 visual prompt pattern."""
@@ -498,8 +500,13 @@ class ColQwen2Adapter(BaseAdapter):
         config = MuveraConfig(**self._muvera_config) if self._muvera_config else MuveraConfig()
         return {"muvera": MuveraPostprocessor(token_dim=self._multivector_dim, config=config)}
 
-    def get_preprocessor(self) -> Any | None:
+    def get_preprocessor(self) -> Any:
         # ColQwen2.5 handles image processing internally via _encode_images()
         # because Qwen2VLProcessor requires text alongside images (visual prompt prefix).
-        # The generic ImagePreprocessor doesn't support this pattern.
-        return None
+        # The generic ImagePreprocessor doesn't support this pattern; image
+        # batches reach the worker through the pipeline's passthrough path.
+        # The base CharCountPreprocessor (cost-only; the adapter still owns its
+        # own tokenization) is required so TEXT queries route through
+        # ModelWorker batching instead of the unbatched direct-call path that
+        # serialized per-request threads on _forward_lock (#2874).
+        return super().get_preprocessor()

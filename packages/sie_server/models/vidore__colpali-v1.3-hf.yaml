@@ -1,5 +1,6 @@
 sie_id: vidore/colpali-v1.3-hf
 hf_id: vidore/colpali-v1.3-hf
+hf_revision: 133a9eb02947310513f52f8f0d39d622e0eab8dc
 inputs:
   text: true
   image: true

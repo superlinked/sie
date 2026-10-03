@@ -10,6 +10,29 @@ helm install sie-cluster oci://ghcr.io/superlinked/charts/sie-cluster \
   --create-namespace
 ```
 
+With the defaults, the chart generates the sie-config admin and read tokens
+(see [sie-config tokens](#sie-config-tokens)) and installs without a
+payload store, so work items larger than 1MB fail until one is configured (see
+[Payload store](#payload-store)). All worker pools are disabled by default;
+enable the pools you need (see [Configuration](#configuration)).
+
+## Local validation
+
+Prepare dependencies from the checked-in `Chart.yaml` and `Chart.lock`, then
+render with an explicit non-secret payload-store choice:
+
+```bash
+mise run helm -- dependencies
+mise run helm -- lint --set payloadStore.enabled=false
+mise run helm -- template --set payloadStore.enabled=false
+mise exec -- uv run --frozen --project . pytest -q tools/ci/tests/test_helm_render.py
+```
+
+The task temporarily stages the public model and bundle YAML files into the
+chart and removes them after each render. Helm's generated `charts/` directory
+is ignored and must not be committed. The render tests need that directory, so
+run them after `dependencies`.
+
 ## Architecture
 
 ```
@@ -46,7 +69,7 @@ canonical physical tuple.
 
 ## Cold Start Expectations
 
-When scaling from zero, expect the following latencies:
+The current GKE/EKS scale-from-zero guidance is:
 
 | Step | Duration | Notes |
 |-------|----------|-------|
@@ -54,6 +77,11 @@ When scaling from zero, expect the following latencies:
 | **Container startup** | 20-40s | Pull image, start process, health checks |
 | **Model loading** | 10-120s | Download weights (if not cached), load to GPU |
 | **Total cold start** | 3-7 min | First request to a scaled-to-zero pool |
+
+These figures are not an ACK performance claim; this repository has no ACK
+cold-start baseline. The Alibaba Terraform module defaults its shared NAT EIP
+to 100 Mbit/s, and observed ACK cold start depends on current GPU inventory and
+quota, effective bandwidth, image and model size, and cache state.
 
 ### Reducing Cold Start Time
 
@@ -75,36 +103,89 @@ The SDK handles this automatically with configurable retries.
 
 Pre-populate shared object storage with model weights so worker pods don't re-download from HuggingFace on every cold start. The Python SDK pulls from the cache first and falls back to HF on miss.
 
-**AWS (Terraform-managed bucket):**
+**AWS example:**
 
 ```bash
-# 1. Provision the bucket via the AWS Terraform module (created by default; create_model_cache=true)
-cd deploy/terraform/aws/examples/dev-g6-spot
-terraform apply
+# 1. Provision object storage and populate its /models prefix with model weights.
+MODEL_CACHE_URL="s3://<bucket>/models"
 
-# 2. One-time populate from your laptop
-sie-admin cache weights sync --bundle default \
-  --dest $(terraform output -raw model_cache_bucket_url)/
-
-# 3. Wire into Helm
+# 2. Wire the readable object-store URL into Helm.
 helm upgrade --install sie-cluster . \
   --set workers.common.clusterCache.enabled=true \
-  --set workers.common.clusterCache.url=$(terraform output -raw model_cache_bucket_url)
+  --set workers.common.clusterCache.url="$MODEL_CACHE_URL"
 ```
 
-The Terraform output already includes the `/models` prefix, so the same URL is used for both `sie-admin --target` and `clusterCache.url`.
+The configured URL must include the `/models` prefix and be readable by the worker workload identity. Because `payloadStore.enabled` defaults to `true`, the chart also derives a `/payloads` URL from this cache URL; grant the gateway workload write access and worker workloads read access to that prefix, configure a separate writable `payloadStore.url`, or set `payloadStore.enabled=false`.
 
-**Other clouds / BYO bucket:** point `workers.common.clusterCache.url` at any `s3://...`, `gs://...`, `abfs://...`, or `abfss://...` URL the workload identity can read; populate it with the same `sie-admin cache weights sync --dest ...` command.
+**Other clouds / BYO bucket:** point `workers.common.clusterCache.url` at any `s3://...`, `gs://...`, `abfs://...`, `abfss://...`, or `oss://...` URL the worker workload identity can read, and populate the `/models` prefix with your object-storage tooling or existing cache pipeline. With the default payload store enabled, also grant the gateway workload write access and worker workloads read access to the derived `/payloads` prefix, configure a separate writable `payloadStore.url`, or set `payloadStore.enabled=false`.
+
+## SGLang kernel cache
+
+SGLang, FlashInfer, DeepGEMM, Triton, and the CUDA driver can compile kernels
+after model weights are available. SIE remains fully cacheless-capable, but a
+persistent compiler cache can avoid repeating that work after a container or
+worker-pod replacement. It does not remove the first compilation on a genuinely
+empty cache, and CUDA graphs are still captured by each live SGLang process.
+
+For a local CUDA container, mount one named volume at the image's default cache
+path:
+
+```bash
+docker run --gpus all -p 8080:8080 \
+  -v sie-hf-cache:/app/.cache/huggingface \
+  -v sie-kernel-cache:/app/.cache/sie-kernels \
+  ghcr.io/superlinked/sie-server:latest-cuda13-sglang-cu130
+```
+
+CUDA images use `/app/.cache/sie-kernels` automatically; the named volume only
+upgrades that container-local default to survive container replacement. The
+adapter namespaces artifacts by the installed JIT dependency ABI and exact GPU
+product name, then sets upstream cache locations only when operators have not
+set those variables explicitly. An unwritable or unidentifiable cache falls
+back to ordinary compilation.
+
+For Kubernetes, enable retained per-replica claims globally or only for a
+specific generation lane:
+
+```yaml
+workers:
+  common:
+    kernelCache:
+      enabled: false
+      storageSize: 20Gi
+      storageClassName: ""  # cluster default
+  pools:
+    h100:
+      bundles:
+        sglang-cu130:
+          kernelCache:
+            enabled: true
+          preloadModels:
+            - Qwen/Qwen3.8-27B-FP8:h100-256k
+```
+
+Each StatefulSet ordinal receives its own `ReadWriteOnce` PVC, retained across
+scale-down and pod replacement by the StatefulSet's default PVC policy. Do not
+replace this with one concurrently writable RWX DeepGEMM cache. Ensure the
+chosen StorageClass can provision in every zone that may host the GPU pool;
+retained claims otherwise constrain later scheduling to their volume topology.
+`preloadModels` fills the cache while the worker is still NotReady.
+
+Adding or removing `volumeClaimTemplates` is an immutable StatefulSet change.
+For an existing release, enable or disable this setting during a controlled
+recreation of the affected worker StatefulSet; retained cache PVCs are
+disposable acceleration state and may be deleted separately when no longer
+needed.
 
 ## Payload store
 
 Work items larger than 1MB (for example images or long documents) are too big to put on the NATS queue inline, so the gateway offloads the payload to object storage and enqueues only a reference; workers fetch it back. **This is required for >1MB requests**: without a payload store the gateway cannot enqueue them and the request fails.
 
-It is therefore **enabled by default** (`payloadStore.enabled=true`) and is **decoupled from the optional cluster cache** above. When the payload store is enabled, the chart resolves a store URL and **fails the install if none is found**, so a missing payload store surfaces at deploy time instead of silently failing >1MB requests at runtime.
+It is therefore **enabled by default** (`payloadStore.enabled=true`) and is **decoupled from the optional cluster cache** above. When the payload store is enabled, the chart resolves a store URL. If none resolves, as with the chart defaults, the chart installs without a payload store and the release notes print a warning; >1MB requests then fail until a URL is configured.
 
 URL resolution, in order:
 
-1. `payloadStore.url`, if set: the terraform `payload_store_url` output (the `/payloads` prefix of the shared bucket), or any `s3://` / `gs://` / `abfs(s)://` URL the workload identity can read and write.
+1. `payloadStore.url`, if set: the terraform `payload_store_url` output (the `/payloads` prefix of the shared bucket), or any `s3://` / `gs://` / `abfs(s)://` / `oss://` URL the workload identity can read and write.
 2. otherwise derived from `workers.common.clusterCache.url` by swapping the trailing `/models` prefix for `/payloads` (the same bucket).
 
 ```bash
@@ -114,13 +195,87 @@ helm upgrade --install sie-cluster . \
   --set payloadStore.url=$(terraform output -raw payload_store_url)
 ```
 
-To run without large-payload support (for example a local/dev cluster), opt out:
+To run without large-payload support (for example a local/dev cluster) and without the warning, opt out:
 
 ```bash
 helm upgrade --install sie-cluster . --set payloadStore.enabled=false
 ```
 
-> **Upgrade note:** the payload store is on by default. An existing queue-mode install with *no* payload store and *no* cluster cache will fail on upgrade until it either sets a URL (above) or `payloadStore.enabled=false`. Installs that already set `workers.common.clusterCache.url` keep working; the payload store derives its URL from it.
+> **Upgrade note:** installs that already set `payloadStore.url` or `workers.common.clusterCache.url` render the same payload store as before. An install with neither no longer fails to render; it installs without a payload store and prints the warning above.
+
+### Alibaba Cloud ACK OSS and RRSA
+
+`values-ack.yaml` enables the payload store and configures every OSS-consuming
+container for `eu-central-1`, the private OSS endpoint, and disabled ECS
+metadata credentials. Install with Terraform's native OSS outputs and exact
+RRSA role-name annotation:
+
+```bash
+helm upgrade --install sie-cluster . -f values-ack.yaml \
+  --set workers.common.clusterCache.enabled=true \
+  --set workers.common.clusterCache.url="$(terraform output -raw model_cache_bucket_url)" \
+  --set payloadStore.url="$(terraform output -raw payload_store_url)" \
+  --set-string 'serviceAccount.annotations.pod-identity\.alibabacloud\.com/role-name'="$(terraform output -raw rrsa_workload_role_name)"
+```
+
+The shared `sie-server` ServiceAccount and
+`pod-identity.alibabacloud.com/injection: "on"` pod label engage ACK RRSA. Do
+not render long-lived AccessKeys or `ALIBABA_CLOUD_STS_ENDPOINT`; the Terraform
+webhook config leaves STS convenience-env injection off so the runtime keeps
+its fixed official endpoint policy. Mutable `sie-config` state remains on its
+local/PVC `SIE_CONFIG_STORE_DIR`; `oss://` is intentionally rejected for that
+epoch/CAS authority.
+
+ACK may install disk CSI classes without marking one as default. The ACK
+overlay therefore binds the config, Prometheus, Grafana, and Loki claims to
+`alicloud-disk-topology-alltype`, the topology-aware WFFC class, and raises the
+config/Grafana claims to ACK's 20 GiB dynamic-disk minimum. The retained
+capacities are 20 GiB config, 20 GiB Grafana, 100 GiB Prometheus, and 50 GiB
+Loki. The built-in class does not itself prove encryption. Deployments
+requiring encrypted PVCs must provide a governed encrypted WFFC class and
+override all four paths together:
+
+```yaml
+config:
+  configStore:
+    storageClassName: your-encrypted-class
+kube-prometheus-stack:
+  prometheus:
+    prometheusSpec:
+      storageSpec:
+        volumeClaimTemplate:
+          spec:
+            storageClassName: your-encrypted-class
+  grafana:
+    persistence:
+      storageClassName: your-encrypted-class
+loki:
+  singleBinary:
+    persistence:
+      storageClass: your-encrypted-class
+```
+
+The overlay also runs `sie-config` as UID/GID 1000 with `fsGroup: 1000` and
+`fsGroupChangePolicy: OnRootMismatch`, keeping the CSI volume writable without
+granting root execution.
+
+Storage class is not an ordinary values-only in-place migration for a bound
+PVC, and a StatefulSet volume-claim template is immutable. For an empty failed
+install, uninstall the exact release, independently prove that every retained
+old claim is `Pending`, unbound, and has no volume, delete only those exact
+empty claims, verify their absence, and then reinstall. StatefulSet and
+operator-created claims can survive Helm uninstall. A data-bearing installation
+requires a separately planned backup and volume migration; do not apply these
+overrides as an in-place Helm-only change.
+
+### Alibaba Cloud ACK ingress
+
+`values-ack.yaml` sets `ingress.enabled=false` because the Alibaba Terraform
+module does not install an ingress controller. Install and secure an
+ACK-compatible controller such as ingress-nginx first, wait for its controller
+and load balancer to be ready, and only then enable this chart's Ingress with a
+matching `ingress.className`. Until then, use cluster-private service access or
+an explicitly controlled port-forward.
 
 ## Autoscaling
 
@@ -157,9 +312,10 @@ release record conservative with maximum-length, high-entropy identities. With
 Helm 3.16.4, the external profile encodes 192 lanes to about 840 KiB and the
 worst bundled profile encodes 96 lanes to about 853 KiB, each leaving at least
 64 KiB below the 917,504-byte release budget at this revision.
-The ordinary post-install/post-upgrade hook applies the target shards and
-prunes removed release-managed ScaledObjects. It refuses to adopt a same-name
-object unless that object already carries this Helm release's exact identity.
+The ordinary post-install/post-upgrade/post-rollback hook applies the target
+shards and prunes removed release-managed ScaledObjects. It refuses to adopt a
+same-name object unless that object already carries this Helm release's exact
+identity.
 Because those manifests are intentionally non-secret ConfigMaps, restrict
 write access in the workload namespace to trusted control-plane principals.
 
@@ -200,13 +356,24 @@ the collector, Prometheus, KEDA, image, quota, or permission issue, and rerun
 the same forward upgrade. There is no extra migration command, pause
 annotation, values overlay, second release, or target-owned migration state.
 Canonical `0.6.20` can leave one inert hook ConfigMap containing obsolete
-manifest text; remove it once after success using the upgrade runbook's exact
-post-success check. Fresh installs and later compatible releases use the normal
-Helm procedure as well.
+manifest text. After the target health hooks succeed, inspect that exact source
+object and remove it once; deletion is post-success hygiene, not part of the
+cutover:
 
-The complete preflight, external-dependency requirements, over-limit lane
-reduction, verification, and one-time inert ConfigMap cleanup are in the
-[upgrade runbook](../../upgrade-runbook.md).
+```bash
+LEGACY_KEDA_CONFIGMAP="<SOURCE_FULLNAME>-keda-scaledobjects"
+kubectl get configmap "$LEGACY_KEDA_CONFIGMAP" -n <NAMESPACE> -o yaml
+# Delete only after confirming component=keda-apply and the old Helm hook annotations.
+kubectl delete configmap "$LEGACY_KEDA_CONFIGMAP" -n <NAMESPACE> --ignore-not-found
+```
+
+Fresh installs and later compatible releases use the normal Helm procedure.
+`helm rollback` runs the target revision's stored hooks: it re-applies that
+revision's ScaledObjects and prunes the others, and a target revision with
+autoscaling disabled first removes the release-owned ScaledObjects. Health
+gates run on install and upgrade only. A revision installed by an earlier chart
+version carries no rollback hooks, so rolling back to it leaves ScaledObjects
+unchanged; roll forward instead.
 
 Disabling autoscaling or uninstalling runs a small hook that deletes only
 ScaledObjects carrying this release's managed identity or the exact canonical
@@ -232,6 +399,20 @@ client timeout of at least 20 minutes. Helm applies that timeout to each
 Kubernetes operation/hook; it exceeds the longest default 15-minute Job. With
 a custom `pollingInterval` above 30 seconds, also make the timeout exceed the
 KEDA health deadline of `3 * pollingInterval + 240` seconds.
+
+Size `keda-apply`, `keda-cleanup`, and the KEDA ScaledObject/HPA gate with
+`hooks.resources`. The default memory limit is 1Gi. Requests stay at 128Mi.
+
+```yaml
+hooks:
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "200m"
+      memory: "1Gi"
+```
 
 ### Scale-from-Zero Trigger
 
@@ -333,10 +514,14 @@ See `values.yaml` for all options. Key settings:
 **Important**: All worker pools are disabled by default. You must explicitly enable
 the pools you need in your values override.
 
-The values below are an illustrative shape; concrete per-cluster sizes
-live in each cluster's own values file (e.g. the tester cluster's
-rtx6000 default bundle scales 3–10 — see
-`deploy/terraform/aws/internal-examples/tester-cluster/DEPLOY.md`).
+> **Bundle rename:** the CUDA 13 SGLang bundle formerly named `gemma` is now
+> `sglang-cu130`, and its image tag is `cuda13-sglang-cu130`. Existing values
+> overrides must rename the `workers.common.bundlePlatforms` key, worker bundle
+> key, and any explicit image tag together. There is no runtime alias because
+> the bundle name is part of worker routing and release-image identity.
+
+The values below are an illustrative shape; concrete per-cluster sizes belong
+in each deployment's own values file.
 
 ```yaml
 # Worker pool configuration (must explicitly enable pools)
@@ -405,13 +590,13 @@ fixed sidecar policy.
 
 For local CPU-only dev, `workers.pools.<name>.sidecar.emulatedChildCount` can
 render multiple CPU worker children with distinct IPC sockets and no
-`nvidia.com/gpu` request. This is intended for Tilt/e2e coverage of child
+`nvidia.com/gpu` request. This is intended for local integration coverage of child
 routing and metrics only; GPU pools must use `gpu.count` for real capacity.
 
 This is the Req6 one-child-at-a-time model placement topology. It distributes
 different models from one runtime bundle across the pod's GPU slots. A child can
-own multiple models, but one model is not spread across children, replicated for
-throughput, or tensor/model-parallelized for an oversized model.
+own multiple models, but one model is not spread across children or replicated
+for throughput. A model too large for one GPU needs a device group instead.
 
 Each worker pod serves exactly one runtime bundle. Different bundles render as
 different worker StatefulSets and therefore different worker identities.
@@ -433,6 +618,87 @@ workers:
           minReplicas: 0
           maxReplicas: 3
 ```
+
+### Tensor-Parallel Device Groups
+
+To serve one model across several GPUs, set `gpu.deviceGroup: true` alongside
+`gpu.count`. The pod then runs a single worker child that owns every GPU in the
+pod (`SIE_DEVICES=cuda:0,...,cuda:N-1`) instead of one child per GPU, and the
+model profile declares how many of them it uses:
+
+```yaml
+profiles:
+  default:
+    adapter_path: sie_server.adapters.sglang.generation:SGLangGenerationAdapter
+    adapter_options:
+      loadtime:
+        tensor_parallel_size: 4
+        request_read_timeout_s: 600
+        startup_timeout_s: 900
+```
+
+A complete device-group pool follows. Its CPU, memory, and shared-memory sizes
+are placeholders. Size them for the model and the node:
+
+```yaml
+workers:
+  pools:
+    l4-4x-group:
+      enabled: true
+      machineProfile: l4-4x
+      gpuType: nvidia-l4
+      gpu:
+        count: 4
+        product: NVIDIA-L4
+        deviceGroup: true
+      shmSize: 32Gi
+      resources:
+        requests:
+          cpu: "16"
+          memory: "64Gi"
+        limits:
+          cpu: "32"
+          memory: "128Gi"
+      bundles:
+        sglang:
+          minReplicas: 0
+          maxReplicas: 1
+```
+
+- The worker claims a contiguous block of `tensor_parallel_size` devices for
+  the model exclusively, evicting unpinned models to free a block when it has
+  to, and releases the block when the model unloads. Loading a single-GPU model
+  while every device is held evicts the least recently used unpinned group.
+- The SGLang generation and embedding adapters accept a width. The generation
+  adapter also requires `request_read_timeout_s` above width one, because a
+  stalled collective produces no bytes and no error, and its own
+  `startup_timeout_s`, because startup at a width is dominated by per-rank graph
+  compilation and capture, so neither `workers.common.modelReadyTimeoutSec` nor
+  the built-in default describes it. Keep the declared budget within
+  `workers.common.modelReadyTimeoutSec` and below the liveness probe budget.
+- A declared `startup_timeout_s` that is not a finite number of seconds above
+  zero is refused when the model loads rather than replaced by a default.
+- Width and placement are declared only through `tensor_parallel_size`. Engine
+  placement flags in `extra_launch_args` (including abbreviations such as
+  `--tp`) and device-visibility variables in `extra_env` are refused. So are the
+  flags that decide where the engine listens: `--nccl-port`, which has the
+  `loadtime.nccl_port` option instead, and `--host` and `--port`, which the
+  server passes for the engine's own HTTP listener and then talks to. They are
+  not this pod's `--host`/`--port`, which the chart sets on the worker
+  container.
+- `gpu.deviceGroup` requires `gpu.count >= 2`. `SIE_GPU_COUNT` and the cluster
+  health `gpu_count` count serving slots, so a device-group pod reports one
+  slot however many GPUs it holds.
+- Every worker pod mounts `/dev/shm` as an in-memory `emptyDir` whose size limit
+  is the pool's `shmSize`, or `workers.common.shmSize` (default `8Gi`) when the
+  pool sets none. Whatever the worker writes there counts against its container
+  memory limit. A tensor-parallel engine runs one process per GPU, and those
+  processes can exchange data through shared memory, so a device-group pool may
+  need a larger `shmSize`. Raise `resources.limits.memory` with it so the limit
+  covers both the engine processes and their shared memory.
+- Splitting a model across GPUs on a node without a fast GPU interconnect adds
+  communication overhead. For a model that fits one GPU, fan-out children
+  serving replicas usually deliver more throughput for the same GPUs.
 
 ### Queue Pool Patterns
 
@@ -484,6 +750,464 @@ For emergency or legacy static namespaces that are not backed by either
 gate. Prefer declaring static pools instead, so capped/dynamic pools keep their
 fail-closed isolation behavior.
 
+### Remote backends
+
+A model's remote profile forwards its requests to an upstream: another SIE
+deployment or an OpenAI-compatible endpoint outside this cluster. In a cluster,
+remote profiles run on worker lanes whose bundle is `remote`. The gateway
+routes every remote profile there, through the normal queue, because the
+`remote` bundle outranks `default` for the remote adapters. The gateway holds
+no upstream credential and calls no upstream.
+
+Enable the remote pool and define the upstreams:
+
+```yaml
+upstreams:
+  team-sie:
+    kind: sie
+    base_url: https://sie.example.internal
+    api_key_secret:
+      name: team-sie-upstream
+      key: api-key
+    rate_cap:
+      requests_per_minute: 600
+      max_concurrency: 32
+workers:
+  pools:
+    remote:
+      enabled: true
+```
+
+Below, `<fullname>` is the chart's full name: `<release>-sie-cluster`, or
+`fullnameOverride` when set, as every provider overlay does.
+
+- Each `upstreams` entry has the fields of the server's upstreams file:
+  `kind` (`sie` or `openai`), `base_url` (https outside loopback, with no
+  credentials, query or fragment), `rate_cap` (required) and an optional
+  `proxy_url`. An upstream of kind `openai` also declares the `endpoints` it
+  offers (`completions`, `chat`, `embeddings`, `rerank`) and may name request
+  fields to add to every call (`set_params`) or remove from it
+  (`strip_params`). `api_key_secret` names a Kubernetes Secret and key that you
+  create; the chart rejects a plain string, so a credential cannot be written
+  into values. The chart checks these fields as the server does when it
+  renders, and a test sends the same URLs and definitions through the chart
+  and the server's own parser.
+- Only the `worker` container of a `remote` lane receives the upstreams file
+  (the `<fullname>-upstreams` Secret, mounted read-only) and the credentials
+  (environment variables read from the Secrets you name). The file is a
+  Secret, not a ConfigMap, because it says where each credential is sent and
+  can hold `set_params` values. The worker sidecar, the gateway, sie-config and
+  every other worker lane receive neither, and every other lane runs with
+  remote serving switched off, so it refuses a remote profile even if one
+  reaches it. The chart owns `SIE_UPSTREAMS_FILE`, `SIE_REMOTE_SERVING` and
+  the credential variables, so `extraEnv` cannot set them, and an `extraEnv`
+  entry that reads an upstream's Secret anywhere else fails the render. An
+  upstream's Secret key must also differ from every Secret key the chart
+  hands to another component (the Hugging Face token, the gateway tokens, the
+  sie-config tokens and the NATS passwords).
+- sie-config receives the upstream names (`SIE_UPSTREAM_NAMES`), built from the
+  same `upstreams` values as the remote lanes' file, and refuses with a `422` a
+  model whose remote profile names any other upstream. Without a remote lane it
+  receives no names and refuses every remote profile, which no lane could
+  serve.
+- **A remote lane needs a NetworkPolicy, and the render fails without one.**
+  The worker API has no authentication of its own, so without a policy any pod
+  in the cluster, including worker lanes that run model code, could call a
+  remote lane directly and spend its credentials. The remote lanes' own policy
+  is on by default; see [Network policy for remote lanes](#network-policy-for-remote-lanes).
+- Remote lanes run as their own ServiceAccount, `<fullname>-worker-remote`,
+  with no Kubernetes API token, no cloud workload identity and no
+  `HF_TOKEN`. Without an identity they cannot read the payload store, so a
+  work item above 1MB for a remote model fails. To serve those, bind that
+  ServiceAccount to an identity limited to the payload store's `payloads/`
+  prefix through `workers.remote.serviceAccount.annotations`.
+- `workers.remote.serving: false` keeps remote lanes running but refuses every
+  remote profile and sends nothing upstream. The lanes then receive neither
+  the upstreams file nor the credentials.
+- A remote lane runs no model on an accelerator. It runs the `cpu-default`
+  worker image (`imageBundle: default`), which contains the remote adapters, and
+  the render fails when its resolved engine is not `pytorch`, its pool sets
+  `gpu.count` above 0, requests any resource other than `cpu`, `memory` and
+  `ephemeral-storage`, or sets a `runtimeClassName`. It does not inherit
+  `workers.common.runtimeClassName`.
+- The worker image must ship the `remote` bundle, which server images do from
+  the first release that includes #492. With an older image the worker exits
+  at start (`Bundle file not found`) and the lane restarts in a loop.
+- Workers read their environment at start. After rotating an upstream's
+  Secret, restart the remote lane:
+  `kubectl rollout restart statefulset/<fullname>-worker-remote-remote`.
+  A change to `upstreams` restarts it automatically.
+
+#### Network policy for remote lanes
+
+When a remote lane is enabled, the chart renders a `NetworkPolicy` for the
+remote lanes' pods (`workers.remote.networkPolicy.enabled`, on by default).
+A remote lane needs this policy or `workers.networkPolicy`, and the render
+fails when both are off. The policy takes effect only with a CNI that enforces
+NetworkPolicy.
+
+- **Ingress:** only this release's gateway pods, on the worker ports. The worker
+  API has no authentication of its own, so without this rule any pod in the
+  cluster could call a remote lane directly and spend its upstream credentials.
+  While this policy is on, `workers.networkPolicy` excludes the remote lanes, so
+  its `extraIngress` sources cannot reach them. NetworkPolicies are additive:
+  any other policy that selects these pods and admits more sources widens
+  access.
+- **Egress:** port 53 to the cluster resolver (`dnsTo`, by default the
+  `kube-dns` pods in `kube-system`); this release's NATS (4222), sie-config and
+  gateway (8080), telemetry collector (4327) and bundled Tempo (4317) pods; and
+  TCP 443 plus each upstream's explicit port, or its `proxy_url`'s explicit
+  port when a proxy carries its traffic, to `allowedCidrs` (every address by
+  default) except the denied ranges. A URL without a port adds nothing beyond
+  443, so give an `http` `proxy_url` its port explicitly or admit the proxy with
+  `extraEgress`. Nothing else is allowed.
+- **Denied ranges:** a fixed base that values cannot remove: the private ranges
+  (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16), the carrier-grade NAT range
+  (100.64.0.0/10), link-local (169.254.0.0/16, which holds the cloud metadata
+  services), 168.63.129.16, IPv6 unique-local (fc00::/7) and link-local
+  (fe80::/10), and the NAT64 prefixes (64:ff9b::/96, 64:ff9b:1::/48). Add more
+  with `extraDeniedCidrs`. Each IPv4 entry of `allowedCidrs` excludes the denied
+  ranges inside it, an entry inside a denied range fails the render, and the
+  only IPv6 entry is `::/0`. A denial equal to an allowed range also fails.
+  Every CIDR must use its network address; IPv4-mapped IPv6 addresses are
+  rejected because Kubernetes treats them as IPv4.
+
+**What the policy does not do.** NetworkPolicy matches addresses and ports, not
+host names. The remote lanes can reach any address outside the denied ranges on
+the allowed ports, not only the upstreams you declared. To limit egress to the
+declared hosts, use a policy engine with DNS-aware rules (for example Cilium or
+Calico), or route upstream traffic through an egress proxy that enforces a host
+allowlist: set the upstream's `proxy_url`, set `allowedCidrs: []`, and admit the
+proxy, and the payload store if you use one, with `extraEgress`. Port 53 is open
+only to `dnsTo`, but data tunnelled through the resolver itself is out of scope.
+
+Kubernetes does not apply NetworkPolicy to traffic from a pod's own node, so
+the node and `hostNetwork` pods on a remote lane's node can still reach the
+worker port. An IPv6 cluster that gives pods global addresses must add its pod
+range to `extraDeniedCidrs`.
+
+Some deployments need an `extraEgress` rule, because the policy blocks the
+destination:
+
+- **NATS outside this release** (`nats.install: false`).
+- **Private endpoints.** A payload store or an upstream reached through a
+  private endpoint, such as AWS PrivateLink or an Azure private endpoint, has an
+  address in the private ranges.
+- **Carrier-grade NAT addresses.** Alibaba Cloud's internal OSS endpoints
+  resolve to addresses in 100.64.0.0/10, and some clusters assign pod addresses
+  from that range. Admit the specific endpoint range, not the whole block: the
+  Alibaba Cloud metadata service is also in it, at 100.100.100.200.
+- **Pod identity through a node-local endpoint.** GKE Workload Identity reads
+  credentials from the GKE metadata server: 169.254.169.254 on TCP port 80
+  with Dataplane V2, or 169.254.169.252 on TCP port 988 without Dataplane V2.
+  EKS Pod Identity reads them from its agent (169.254.170.23, port 80).
+  The policy blocks these endpoints,
+  so a remote lane given an identity through
+  `workers.remote.serviceAccount.annotations` cannot obtain it until you admit
+  that one address and port. EKS IRSA, AKS workload identity and Alibaba Cloud
+  RRSA exchange a projected token at the provider's token endpoint on port 443;
+  they need a rule only when that endpoint has a private or carrier-grade NAT
+  address, such as a VPC endpoint.
+- **An OTLP endpoint other than this release's collector or Tempo**, inside or
+  outside the cluster. Without a rule, the remote lanes' telemetry is dropped.
+- **A NodeLocal DNSCache**: add its address to `dnsTo` as an `ipBlock`.
+
+For GKE Workload Identity with Dataplane V2:
+
+```yaml
+workers:
+  remote:
+    networkPolicy:
+      extraEgress:
+        - to:
+            - ipBlock:
+                cidr: 169.254.169.254/32
+          ports:
+            - port: 80
+              protocol: TCP
+```
+
+Without Dataplane V2, use `cidr: 169.254.169.252/32` and `port: 988` instead,
+as described in the [GKE Workload Identity documentation](https://docs.cloud.google.com/kubernetes-engine/docs/concepts/workload-identity).
+
+Admit 169.254.169.254 only where it serves workload identity, as on GKE with
+Workload Identity enabled. On nodes without it, this address serves the node's
+own credentials to any pod that can reach it.
+
+Each `extraEgress` rule needs a non-empty `to` (a scoped selector, or an
+`ipBlock` with a prefix length above /0) and `ports` (each with a port, and no
+range wider than 60000 ports). With `workers.remote.networkPolicy.enabled:
+false`, `workers.networkPolicy` must be on; it then limits who can reach the
+remote lanes, and their egress is not restricted.
+
+### High availability in one file
+
+`values-ha.yaml` is the tested composition of the durability knobs below with
+a replicated broker and a second gateway: two gateway replicas, a three-member
+NATS cluster with a JetStream file store per member, and file-backed work-queue
+streams replicated across all three. It also enables the
+[worker NetworkPolicy](#worker-networkpolicy). Layer it under a provider overlay:
+
+```bash
+helm install sie deploy/helm/sie-cluster \
+  -f deploy/helm/sie-cluster/values-aws.yaml \
+  -f deploy/helm/sie-cluster/values-ha.yaml
+```
+
+The NATS members authenticate their routes to each other as `sie-route` (see
+"NATS authentication").
+
+It does not make `sie-config` redundant; that service stays at one replica by
+template design until the chart provides leader election. And because a live
+stream's storage type cannot be changed, apply it to a fresh install or convert
+the streams during a maintenance window as described below.
+
+### Work-queue durability (memory vs file storage)
+
+The work queues ship **memory-backed and single-replica**, which is the only
+behavior this chart has ever had. `WORK_POOL_{pool}`, the per-worker
+direct-dispatch streams, and `DEAD_LETTERS` live in the NATS broker's RAM. That
+is durable against *worker* failure — a pod that dies mid-item leaves the item
+unacked and another worker picks it up — but **not** against *broker* failure. A
+restart of the NATS pod erases every queued and delivered-but-unacked item along
+with the dead-letter records that would have named them, and because the gateway
+is queue-only with no direct-HTTP fallback, the restart is a full inference
+outage for its duration.
+
+The trigger is specifically a restart of the **NATS** pod: an OOM kill, a NATS
+version or config rollout, or a node drain that evicts that pod. Draining a node
+that hosts only workers or gateways is harmless here, as is a worker or gateway
+rollout. At the default `streamReplicas: 1` any eviction of that single pod
+loses the state; with a replicated stream it survives while one peer holding it
+stays up, which is what makes rolling NATS maintenance safe.
+
+To opt into file-backed, replicated storage:
+
+```yaml
+queueRouting:
+  streamStorage: file   # default: memory
+  streamReplicas: 3     # default: 1
+nats:
+  config:
+    cluster:
+      enabled: true     # required for streamReplicas > 1
+      replicas: 3
+    jetstream:
+      fileStore:
+        enabled: true   # required for streamStorage=file
+        pvc:
+          size: 10Gi
+```
+
+`streamStorage` and `streamReplicas` are rendered into `SIE_STREAM_STORAGE` /
+`SIE_STREAM_REPLICAS` on **both** the gateway and the worker sidecars. Both
+create streams and whoever gets there first wins, so the chart is the single
+source of truth for the pair; the template rejects a render where the requested
+durability outruns what the broker is configured to provide, and both env names
+are reserved, so a `gateway.extraEnv` or
+`workers.common.workerSidecar.extraEnv` entry that tried to override one on a
+single side fails the render rather than silently splitting the two creators.
+
+That render guard is load-bearing for `streamReplicas`, because **NATS will not
+catch the mistake for you**: a single-node server accepts `num_replicas: 3` and
+then reports R3, with no peers to replicate to (verified against nats-server
+2.12.6). Without the guard, a replicated-looking stream would run
+single-copy.
+
+**The trade-off.** File storage puts a disk write in front of every publish
+ACK, so it costs publish latency on the inference hot path, and it needs a PVC
+per NATS pod sized for peak queue depth (`max_msgs` is 100,000 per pool stream)
+plus 24 h of `DEAD_LETTERS` retention. Replication multiplies that cost by the
+replica count and adds a quorum round trip. This is why the default is left
+memory-backed: whether the latency and disk are worth the durability depends on
+the workload, and that is an operator decision, not a chart default.
+
+**Changing it on a live cluster.** JetStream refuses an in-place storage-type
+change (err_code 10052), so flipping `streamStorage` does **not** convert
+existing streams. The gateway and sidecars log a warning naming the divergence
+and leave the streams alone, which is deliberate: converting would mean deleting
+and recreating the stream, destroying exactly the queued work that durability is
+meant to protect. Drain the pool and delete the streams during a maintenance
+window to pick up the new storage. `streamReplicas`, by contrast, **is**
+reconciled onto existing streams.
+
+### Work-item deadlines
+
+The gateway stamps every non-streaming work item with an absolute `deadline`
+(publish time plus the gateway request timeout). Worker sidecars use it to keep
+slow deliveries leased, to size backend calls, and to count work that is picked
+up after its caller gave up. Set these on
+`workers.common.workerSidecar.extraEnv`:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `SIE_WORK_DEADLINE_ENFORCE` | `false` | `true` ACK-drops expired work before execution instead of only counting it |
+| `SIE_WORK_DEADLINE_SKEW_TOLERANCE_MS` | `5000` | Allowed clock skew between gateway and worker hosts (at most 60000) |
+| `SIE_WORK_DEADLINE_MAX_BUDGET_S` | `180` | Largest accepted `deadline - timestamp`, and the ceiling on deadline-derived backend call budgets |
+
+`SIE_WORK_DEADLINE_MAX_BUDGET_S` must be at least the gateway's
+`SIE_GATEWAY_REQUEST_TIMEOUT` (120 s by default). If the gateway timeout is
+raised above it, workers ignore every deadline and log a rate-limited warning.
+The comparison spans the gateway and worker clocks, so keep the nodes
+synchronised (for example with NTP). Watch
+`sie_worker_work_item_deadline_exceeded_total` before enabling enforcement.
+
+### NATS authentication
+
+sie-config, the gateway, and the worker sidecars connect to NATS as separate
+users. The bundled server refuses anonymous connections and limits each user
+to the subjects that component uses:
+
+| User | Publish | Subscribe |
+| --- | --- | --- |
+| `sie-config` | `sie.config.models.>` | nothing |
+| `sie-gateway` | `sie.work.>`, `sie.dlq.>`, `cancel.>`, `work_cancel.>`, `batch_cancel.>`, `$JS.API.STREAM.INFO.*`, `$JS.API.STREAM.CREATE.*`, `$JS.API.STREAM.UPDATE.*`, `$JS.API.CONSUMER.INFO.*.*` | `sie.config.models._all`, `sie.health.>`, `_INBOX.>`, `$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.>` |
+| `sie-worker` | `_INBOX.>` (results), `sie.health.>`, `$JS.ACK.>`, `$JS.API.STREAM.INFO.*`, `$JS.API.STREAM.CREATE.*`, `$JS.API.STREAM.UPDATE.*`, `$JS.API.CONSUMER.LIST.*`, `$JS.API.CONSUMER.INFO.*.*`, `$JS.API.CONSUMER.CREATE.*.>`, `$JS.API.CONSUMER.DELETE.*.*`, `$JS.API.CONSUMER.MSG.NEXT.*.*` | `sie.config.models.*`, `cancel.>`, `work_cancel.>`, `batch_cancel.>`, `_INBOX_WORKER.>` |
+| `sie-route` | Routes between NATS members, when `nats.config.cluster.enabled=true` | |
+
+- Only `sie-config` can publish on `sie.config.models.>`, and only the
+  gateway can publish work and cancel signals.
+- A user that may manage JetStream streams or consumers can make the server
+  itself deliver stored messages to any subject: through a stream's republish
+  setting, a consumer's delivery subject, or the reply subject of a pull or
+  direct-get request. Subject permissions do not apply to those deliveries.
+  Each of them carries a reply subject or a `Nats-` header, and sie-config and
+  the gateway send neither on these subjects. The gateway and the worker
+  sidecars therefore drop config notifications and cancel signals that carry
+  either, and the gateway drops max-deliveries advisories that do.
+- The worker sidecars drop work that carries a `Nats-` header other than
+  `Nats-Msg-Id`, which the gateway sets for deduplication. This rejects work
+  that a stream republish or a stream source copied into a work stream.
+- The worker sidecar receives its own JetStream replies and pull deliveries
+  under the inbox prefix `_INBOX_WORKER`. The worker user can publish results
+  to the gateway's `_INBOX` subjects but cannot subscribe to them.
+- In a worker pod, only the sidecar container gets the worker credentials. The
+  container that runs model code has none.
+- Only gateway pods mount a Kubernetes API token. Worker, sie-config, and
+  mcp-edge pods set `automountServiceAccountToken: false`, and none of them
+  calls the Kubernetes API. They keep the `sie-server` ServiceAccount, so
+  cloud workload identity (EKS IRSA and Pod Identity, GKE and AKS workload
+  identity, ACK RRSA), which projects its own token, keeps working. Remote
+  lanes are the exception: they run as `<fullname>-worker-remote`, which has
+  no identity unless you give it one (see [Remote backends](#remote-backends)). The
+  gateway's pool Role covers every ConfigMap in the namespace, including the
+  NATS server configuration `<release>-nats-config`, because pool ConfigMaps
+  are named at runtime. The gateway pod can therefore change the NATS users,
+  and is trusted with the bus.
+- The NATS monitoring port (8222) stays unauthenticated. It shows connection
+  and subscription metadata, including user names, but no message contents
+  or passwords. The chart ships no NetworkPolicy for the NATS pods, so
+  restrict that port with one where that matters. The client (4222) and
+  cluster route (6222) ports require credentials.
+- `workers.networkPolicy` restricts only ingress to the worker pods. The
+  worker sidecars open their NATS connections outward, so the policy does not
+  affect NATS.
+- The chart does not configure TLS on NATS. Passwords and messages cross the
+  pod network in plaintext.
+- nats-box and the NATS `helm test` pod are disabled, because they would
+  connect without credentials.
+
+**What the worker user can still do.** All workers share the `sie-worker`
+user, because the subject names do not separate one worker from another. It
+keeps JetStream stream and consumer management, because the sidecars create
+their own direct-dispatch streams and repair the pool streams' settings. The
+server does not check a stream's subjects against the creating user's
+subscribe permissions. Anyone who holds the worker credentials, such as a
+compromised sidecar process, can therefore:
+
+- read gateway results and JetStream API replies, by creating a stream that
+  captures `_INBOX.>` and reading it through a consumer. A stream created with
+  `no_ack` can capture `$JS.API.>` and `$JS.ACK.>` the same way.
+- read, settle, and redeliver work queued for any pool, and create, change,
+  or delete any pool's durable consumers.
+- change any stream's configuration. Lowering `max_msgs` drops queued work,
+  and sealing a stream makes it refuse new work until the stream is deleted,
+  which no user in the matrix above may do.
+- add work to any pool without a `Nats-` header, through a subject transform
+  on the pool stream. The header check above does not catch this.
+- send heartbeats in the name of other workers.
+
+Removing these rights needs streams that only the gateway manages, or a
+separate NATS account per worker. Both are planned follow-ups.
+
+**Recovering a sealed or damaged stream.** With the default memory storage,
+restart NATS (`kubectl rollout restart statefulset/<release>-nats`). The
+gateway and the workers create the streams again, and queued work is lost.
+With file storage no user in the matrix may delete a stream. Upgrade once with
+`--set nats.auth.allowAnonymous=true --set nats.natsBox.enabled=true`, run
+`nats stream rm <stream> -f` in the nats-box pod, and upgrade again with
+`--set nats.auth.allowAnonymous=false --set nats.natsBox.enabled=false`.
+
+**Passwords.** The chart generates one Secret per user,
+`<release>-nats-auth-config`, `-gateway`, and `-worker`, plus `-route` when the
+NATS cluster is enabled. Each holds a random 48-character `password` of
+letters and digits that starts with a letter. On upgrade the chart reads the
+existing Secret with `lookup` and keeps its password. The render fails if a
+kept Secret has no `password` key, or a password shorter than 32 characters,
+with characters other than letters and digits, or starting with a digit. The
+Secrets carry `helm.sh/resource-policy: keep`. The NATS server reads the
+passwords from its environment, and each client container gets
+`SIE_NATS_USER` and `SIE_NATS_PASSWORD`.
+
+To manage a password yourself, set `nats.auth.existingSecrets.<config|gateway|worker|route>`
+to a Secret with a `password` key. For the bundled server it must be letters
+and digits and start with a letter: the server parses it as a configuration
+value, where a leading digit reads as a number, and embeds it in route URLs.
+
+Renderers without cluster access, such as `helm template` and many GitOps
+controllers, cannot read the existing Secrets and generate new passwords on
+every render. Use `existingSecrets` with them, or on Argo CD set
+`ignoreDifferences` on the Secrets' `/data` together with the
+`RespectIgnoreDifferences=true` sync option. Do not commit `helm template`
+output, which contains the passwords.
+
+**Rotating a password.** Delete the generated Secret (or change your own) and
+run `helm upgrade`. Then restart the NATS StatefulSet, which reads passwords
+only at start, and the workloads that use that user. They cannot connect until
+both sides have the new password. Helm keeps every rendered Secret in its
+release history, so a `helm rollback` to an earlier revision brings back the
+earlier password, and anyone who can read Secrets in the namespace can read the
+history.
+
+**Upgrading an existing release.** Authentication is on by default, so the
+upgrade changes the NATS server, sie-config, the gateway, and the workers
+together:
+
+- The NATS pod restarts. With the default memory-backed work queues, queued
+  and in-flight work is lost, as on any NATS restart (see "Work-queue
+  durability").
+- A gateway, sie-config, or worker pod that has not been replaced yet has no
+  credentials, and the server refuses it. Requests can fail with `503`, and
+  workers that have not restarted take no work until they do.
+
+To avoid that gap, upgrade in two steps. First upgrade with
+`--set nats.auth.allowAnonymous=true`: the server then also accepts anonymous
+connections, with unrestricted permissions. Once every pod has restarted,
+upgrade again with `--set nats.auth.allowAnonymous=false`. Set it explicitly:
+`--reuse-values` and `--reset-then-reuse-values` both keep the value from the
+first step. The second step only changes the NATS configuration, which the
+server reloads without restarting. `helm status` prints a warning while
+anonymous access is on.
+
+`helm upgrade --reuse-values` reuses the old release's NATS sub-chart values,
+which lack the chart's server wiring, so the render fails. Upgrade with
+`--reset-then-reuse-values` (Helm 3.14 or later) or pass your values with `-f`.
+The wiring lives in the `sieNatsAuth` keys under `nats.config.merge`,
+`nats.config.cluster.merge`, and `nats.container.env`. Keep them when you add
+your own settings next to them.
+
+**Opting out.** `nats.auth.enabled=false` renders NATS without users and
+connects the clients without credentials, as before. Use it only where the
+network already keeps other workloads away from NATS.
+
+**External NATS** (`nats.install=false`). The chart cannot configure your
+server. With `nats.auth.enabled=true`, set `nats.auth.existingSecrets.config`,
+`.gateway`, and `.worker`, and create the users `sie-config`, `sie-gateway`,
+and `sie-worker` with the permissions above. If your server needs no
+credentials, set `nats.auth.enabled=false`. The clients read credentials only
+from `SIE_NATS_USER` and `SIE_NATS_PASSWORD`. They remove any credentials in
+`nats.url` before connecting.
+
 ### Upgrading from the legacy single-bundle pool schema
 
 Releases up to and including 0.4.x used a flat schema where each pool
@@ -519,26 +1243,419 @@ Run these once per cluster after the upgrade settles. Leftover
 ScaledObjects will keep trying to scale deleted StatefulSets and spam
 KEDA logs; leftover PDBs will block node drains.
 
+## sie-config tokens
+
+sie-config serves the model catalog on `/v1/configs/*` and accepts two tokens
+there:
+
+| Token | sie-config variable | Authorizes | Held by |
+| --- | --- | --- | --- |
+| Admin | `SIE_ADMIN_TOKEN` | Every read and write | sie-config and the admin tooling that writes configs |
+| Read | `SIE_CONFIG_READ_TOKEN` | Every read, including `GET /v1/configs/export`; never a write | sie-config, every gateway pod, and every worker sidecar |
+
+The gateway presents the read token to load and refresh its catalog, and
+worker sidecars present it to reconcile missed config updates. Both receive it
+as `SIE_CONFIG_SERVICE_TOKEN`. The gateway always gets that variable, empty
+when the chart runs no sie-config, so it never presents another credential in
+its place. Neither receives the admin token, so a gateway or worker pod cannot
+write to sie-config.
+
+Every read-token holder can read every model config, through
+`GET /v1/configs/models/{id}` and the export, including `adapter_options` such
+as `loadtime.extra_env`. Never put secrets in model configs.
+
+Each token is either generated by the chart or managed by the operator, chosen
+per token:
+
+- **Generated (default).** With `config.auth.adminTokenSecretName` empty and
+  `config.auth.generateAdminToken=true`, the chart creates the Secret
+  `<fullname>-config-admin-token` (`sie-cluster-config-admin-token` for the
+  Quick Start release, `sie-config-admin-token` with a bundled cloud overlay)
+  holding a random 64-character token under
+  `config.auth.adminTokenSecretKey` (`SIE_ADMIN_TOKEN`). When sie-config has an
+  admin token, `config.auth.readTokenSecretName` is empty, and
+  `config.auth.generateReadToken=true`, it likewise creates
+  `<fullname>-config-read-token` holding a separate token under
+  `config.auth.readTokenSecretKey` (`SIE_CONFIG_READ_TOKEN`). An absent key, as
+  after `helm upgrade --reuse-values` from an older release, takes its
+  default. Upgrades read each existing Secret and keep its token; the render
+  fails if the Secret has no value under the configured key or the value is
+  shorter than 32 characters. Both Secrets carry
+  `helm.sh/resource-policy: keep`, so `helm uninstall` leaves them in place;
+  delete them manually when they are no longer needed.
+- **Operator-managed.** Set `config.auth.adminTokenSecretName` or
+  `config.auth.readTokenSecretName` (and the matching `...SecretKey` if the
+  key differs) to an existing Secret. The chart uses it unchanged and creates
+  no Secret for that token. Use this mode for both tokens with renderers that
+  cannot read the cluster, such as `helm template` or GitOps controllers (see
+  [GitOps and `helm template`](#gitops-and-helm-template)).
+
+The render fails when `config.auth.readTokenSecretName` and its key point at
+the admin token's Secret and key, since that would hand the admin token to
+every gateway and worker sidecar. The two tokens may share a Secret under
+different keys. The gateway and worker sidecar `extraEnv` lists cannot set
+`SIE_ADMIN_TOKEN` or `SIE_CONFIG_SERVICE_TOKEN`; the settings above are the only
+source.
+
+`config.auth.mode` is not read by any template and is kept only so existing
+values files stay valid; the settings above decide the tokens.
+
+Read the generated tokens, the admin token for admin tooling and the read
+token for read-only tooling. With `config.auth.adminTokenSecretName` or
+`config.auth.readTokenSecretName` set, that token is in the named Secret
+instead. `<fullname>` is `fullnameOverride` when set, which the bundled cloud
+overlays (`values-aws.yaml`, `values-gke.yaml`, `values-aks.yaml`, and
+`values-ack.yaml`) set to `sie`. Otherwise it is `<release>-<name>`, where
+`<name>` is `nameOverride` or `sie-cluster`, or the release name alone when it
+already contains `<name>`, as in the Quick Start. The result is cut to 63
+characters with no trailing hyphen. The install notes print these commands
+with the rendered names, and `helm get notes <release> -n sie` prints them
+again. Set `FULLNAME` to match, for example `FULLNAME=sie` for an overlay
+install:
+
+```bash
+FULLNAME=sie-cluster
+kubectl get secret -n sie "${FULLNAME}-config-admin-token" \
+  -o jsonpath='{.data.SIE_ADMIN_TOKEN}' | base64 -d
+kubectl get secret -n sie "${FULLNAME}-config-read-token" \
+  -o jsonpath='{.data.SIE_CONFIG_READ_TOKEN}' | base64 -d
+```
+
+`telemetry.deploymentEnv` is also sie-config's deployment environment
+(`SIE_DEPLOYMENT_ENV`). With `production` (the default) or `prod`, sie-config
+refuses every `/v1/configs` request unless an admin token is configured. Any
+other value lets sie-config serve the API without a token, which leaves catalog
+writes open to anything that can reach the Service. With
+`config.auth.generateAdminToken=false` and `config.auth.adminTokenSecretName`
+empty, the chart therefore renders only when `telemetry.deploymentEnv` is
+`staging`, `development`, or `ci`, and fails the render for production and
+for any unrecognized value. In that case the chart generates no read token,
+and the gateway and worker sidecars send none.
+
+With an admin token, sie-config also needs a read token:
+`config.auth.generateReadToken=false` with `config.auth.readTokenSecretName`
+empty fails the render, because the gateway and worker sidecars would have no
+credential for the catalog.
+
+The gateway reports `503` on `/readyz` until it has loaded its first complete
+catalog from sie-config, so a missing or mismatched token keeps new gateway
+pods out of the Service and fails `helm install --wait` instead of serving a
+partial catalog. Once a gateway pod has loaded its catalog, it stays ready
+through later sie-config outages. The gate proves that the gateway reached
+sie-config and, when sie-config requires a token, authenticated. It accepts
+whatever complete catalog sie-config serves and does not validate the
+catalog's contents.
+
+### Gateway admin token
+
+With `gateway.auth.mode` set to `token` or `static`, the gateway gates its own
+admin routes: `POST`, `PUT`, and `DELETE` requests under `/v1/pools`,
+`/v1/admin`, and `/v1/configs`, which include pool create, renew, and delete
+and `POST /v1/configs/resolve`. They accept the token in the Secret named by
+`gateway.auth.adminTokenSecretName` (key `gateway.auth.adminTokenSecretKey`,
+default `SIE_ADMIN_TOKEN`), which the chart passes to the gateway as
+`SIE_ADMIN_TOKEN`. When it is empty, those requests get `403` (`Admin token not
+configured`). The chart does not generate this token, and it must be separate
+from the sie-config tokens: the render fails when it names the Secret and key
+of the sie-config admin token, which would give every gateway pod catalog
+write access, or of the read token, which every worker sidecar holds.
+
+### Who holds which token
+
+- **sie-config admin token:** sie-config and the admin tooling you give it to.
+- **sie-config read token:** sie-config, every gateway pod, and every worker
+  sidecar. It can read the whole catalog, including every model config, but
+  cannot write.
+- **Gateway admin token (when set):** every gateway pod and the tooling that
+  manages pools.
+- **Upstream credentials (when remote backends are used):** the `worker`
+  container of each `remote` lane, from the Secrets that `upstreams` names.
+  Where each credential is sent is in the `<fullname>-upstreams` Secret, which
+  only that container mounts. Changing it takes write access to Secrets in the
+  release namespace: no workload of this chart has any Secret permission, and
+  the gateway's Role covers ConfigMaps and Leases only. See
+  [Remote backends](#remote-backends).
+
+Anyone who can read Secrets in the release namespace can read all of them.
+Limit Secret read access in that namespace accordingly.
+
+### Rotating the tokens
+
+sie-config accepts one admin token and one read token at a time, and every
+component reads its token at container start.
+
+- **Admin token:** update its Secret and restart sie-config, then give admin
+  tooling the new token. The gateway and the workers do not hold it and keep
+  working.
+- **Read token:** update its Secret, restart sie-config first, and then restart
+  the gateway and the worker StatefulSets. Until a gateway or worker sidecar
+  restarts, sie-config answers its old token with `403`: a running gateway
+  keeps serving its current catalog and still receives live NATS config
+  deltas, but its epoch poll and export catch-up fail; a new gateway pod stays
+  at `503`; and worker sidecars cannot reconcile missed updates.
+
+Helm stores the rendered Secrets, including the generated tokens, in every
+release revision. A `helm rollback` to a revision from before a rotation
+restores the old token, so rotate again after such a rollback. Anyone who can
+read Secrets in the release namespace can also read earlier tokens from the
+release history.
+
+### GitOps and `helm template`
+
+`helm template`, and GitOps controllers that render the chart the same way
+(for example Argo CD), cannot read the cluster. The chart's lookup of the
+existing Secrets finds nothing, so every render carries new random tokens.
+Applying each render replaces the tokens in the Secrets, and pods pick up
+different tokens as they restart: worker sidecars get `403` when they
+reconcile, new gateway pods stay at `503`, and every component fails once
+sie-config restarts with a token the others do not hold.
+
+- **Recommended:** create both Secrets outside the chart, for example with an
+  external secret manager, and set `config.auth.adminTokenSecretName` and
+  `config.auth.readTokenSecretName`.
+- **Argo CD with generated tokens:** have Argo CD keep the live tokens by
+  ignoring the Secrets' data both when diffing and when syncing. The example
+  names the Quick Start release's Secrets. With a bundled cloud overlay, name
+  `sie-config-admin-token` and `sie-config-read-token` instead, and otherwise
+  `<fullname>-config-admin-token` and `<fullname>-config-read-token` (see
+  [sie-config tokens](#sie-config-tokens)):
+
+  ```yaml
+  spec:
+    ignoreDifferences:
+      - kind: Secret
+        name: sie-cluster-config-admin-token
+        namespace: sie
+        jsonPointers:
+          - /data
+      - kind: Secret
+        name: sie-cluster-config-read-token
+        namespace: sie
+        jsonPointers:
+          - /data
+    syncPolicy:
+      syncOptions:
+        - RespectIgnoreDifferences=true
+  ```
+
+  `RespectIgnoreDifferences=true` makes Argo CD apply `ignoreDifferences`
+  during sync, not only in the diff. It takes effect only once a Secret exists,
+  so the first sync creates each Secret with the token from that render and
+  later syncs keep it.
+
+Do not commit `helm template` output to a repository: the rendered Secrets
+contain the generated tokens.
+
+### Upgrade notes
+
+> **Installs without `config.auth.adminTokenSecretName`:** the upgrade creates
+> the admin-token Secret and adds `SIE_ADMIN_TOKEN` to sie-config, so it rolls.
+> sie-config then requires a token for every `/v1/configs` request, including
+> on installs with a non-production `telemetry.deploymentEnv` that previously
+> served the API without one. Update admin tooling to send the admin token. To
+> keep an unauthenticated sie-config instead, set
+> `config.auth.generateAdminToken=false`; the chart renders that only when
+> `telemetry.deploymentEnv` is `staging`, `development`, or `ci`. An install
+> that uses another name (for example `dev`, `test`, `qa`, or `preprod`) fails
+> the render with that setting and must either keep the token or switch to one
+> of those names. Because the auth posture is keyed off the telemetry value,
+> switching the name also changes the anonymous-telemetry environment tag and,
+> unless `observability.otel.resource.deploymentEnvironment` is set explicitly,
+> the OTel `deployment.environment` label on dashboards.
+
+> **Separate read token:** the upgrade creates the read-token Secret (unless
+> `config.auth.readTokenSecretName` is set), adds `SIE_CONFIG_READ_TOKEN` to
+> sie-config, and gives the gateway and worker sidecars `SIE_CONFIG_SERVICE_TOKEN`
+> instead of `SIE_ADMIN_TOKEN`, so those pods roll. The admin-token Secret is
+> unchanged.
+>
+> - Run the sie-config, gateway, and worker sidecar images of this chart's
+>   release together. An older sie-config rejects the read token, so new
+>   gateway pods stay at `503` and worker sidecars cannot reconcile; older
+>   gateway and sidecar images present only `SIE_ADMIN_TOKEN`, which they no
+>   longer receive. During an ordinary rolling upgrade, new gateway pods that
+>   start before the new sie-config is ready stay at `503` until it is, while
+>   the old pods keep serving.
+> - The gateway no longer accepts the sie-config admin token on its admin
+>   routes. With `gateway.auth.mode` set to `token` or `static`, set
+>   `gateway.auth.adminTokenSecretName` before upgrading if you use those
+>   routes; until then they answer `403`.
+> - GitOps installs that set `config.auth.adminTokenSecretName` now get a
+>   generated read token, with the `helm template` behavior described above.
+>   Set `config.auth.readTokenSecretName` to an externally managed Secret
+>   before upgrading.
+> - Gateways and worker sidecars run outside this chart keep working with only
+>   `SIE_ADMIN_TOKEN`: when `SIE_CONFIG_SERVICE_TOKEN` is unset they fall back
+>   to it and log a deprecation warning. Move them to `SIE_CONFIG_SERVICE_TOKEN`
+>   with a read token.
+
 ## Ingress
 
-Enable the Ingress with `ingress.enabled=true` and route traffic to the gateway by
-hostname. Use the list-valued `ingress.hosts` to front the gateway with one or more
-hostnames — each entry becomes an Ingress rule (and, when TLS is enabled, a SAN on
-the cert):
+The Ingress is off by default, including in the AWS, GKE, AKS, and ACK
+overlays. Install an ingress controller first, then enable it with
+`ingress.enabled=true`, gateway auth, and TLS, and route traffic to the gateway
+by hostname. Use the list-valued `ingress.hosts` to front the gateway with one
+or more hostnames — each entry becomes an Ingress rule (and, when TLS is
+enabled, a SAN on the cert):
 
 ```yaml
+gateway:
+  auth:
+    mode: static
+    tokenSecretName: sie-gateway-auth   # Secret with comma-separated tokens
 ingress:
   enabled: true
   className: nginx
   hosts:
     - sie.example.com
     - api.example.com
+  tlsConfig:
+    enabled: true
 ```
+
+With the default `byo` TLS mode, create the `kubernetes.io/tls` Secret named by
+`ingress.tlsConfig.secretName` (default `sie-tls`) before installing, or use the
+`cert-manager` or `self-signed` mode described in [TLS / HTTPS](#tls--https).
 
 The singular `ingress.host` is the backward-compatible single-host shorthand; it is
 ignored whenever `ingress.hosts` is non-empty. With neither set the chart renders a
 host-less catch-all Ingress. All hosts share the single `ingress.tlsConfig.secretName`
 (one multi-SAN certificate).
+
+### Authentication and TLS requirements
+
+The gateway authenticates nothing by default (`gateway.auth.mode: none`). The
+chart refuses to render a gateway Ingress unless something authenticates its
+requests, because an Ingress publishes the inference API and the pool API,
+which keeps GPU workers warm, to anyone who can reach the ingress controller.
+A hostname or a certificate is not access control: hostnames are public DNS and
+certificates appear in Certificate Transparency logs. One of the following must
+hold:
+
+- the gateway requires a token: `gateway.auth.mode=static` with
+  `gateway.auth.tokenSecretName` naming a Secret of comma-separated tokens.
+  SDK clients pass one as `api_key`/`apiKey`, or read it from `SIE_API_KEY`
+  when their base URL comes from `SIE_BASE_URL`;
+- the oauth2-proxy edge is enabled (`auth.enabled=true`). It works through the
+  `nginx.ingress.kubernetes.io/auth-*` annotations, which only the ingress-nginx
+  controller honours; the NGINX Inc controller (`nginx.org/ingress-controller`)
+  ignores them even when its class is also named `nginx`. With cluster access
+  (`helm install`/`upgrade`), the chart looks up the IngressClass named by
+  `ingress.className` and requires its `spec.controller` to be listed in
+  `auth.ingress.acceptedControllers` (default `k8s.io/ingress-nginx`; add the
+  controller string of a second ingress-nginx installation, for example
+  `k8s.io/internal-ingress-nginx`). When `ingress.className` is empty, the API
+  server assigns one of the default IngressClasses, so every class marked as
+  default must use an accepted controller. An offline render
+  (`helm template`, including GitOps tools that render that way) cannot see
+  IngressClasses, so it accepts only `ingress.className=nginx` and cannot tell
+  the two controllers apart; use gateway token auth there if the class name
+  differs. The default `auth.oauth2Proxy.emailDomain: "*"` admits any account
+  the configured OIDC issuer authenticates; narrow it for a shared issuer;
+- `ingress.allowUnauthenticated=true` explicitly accepts an unauthenticated
+  Ingress, for example behind a private ingress controller.
+
+The Ingress also needs TLS, so tokens and session cookies do not cross the
+network in cleartext: `ingress.tlsConfig.enabled=true` with at least one host
+(the Ingress carries TLS only for named hosts, so an IP-only self-signed
+certificate from `selfSigned.leaf.ipAddresses` is not supported for the gateway
+Ingress), `ingress.tlsConfig.mode=disabled` as an explicit statement that TLS
+terminates upstream of the Ingress, or the explicit `ingress.allowPlaintext=true`.
+The MCP edge Ingress (`mcpEdge.ingress`) carries connector secrets and OAuth
+tokens and follows the same TLS rule, with `mcpEdge.ingress.allowPlaintext=true`
+as its explicit opt-in. Its certificate lives in its own Secret,
+`<release fullname>-mcp-tls`: `cert-manager` mode issues it, `byo` mode expects
+you to create it, and `self-signed` mode does not issue it, so the chart refuses
+`self-signed` with the MCP edge Ingress.
+
+Both opt-ins accept only a YAML boolean; a quoted `"false"` fails the render.
+`gateway.auth.mode` must be `none`, `static`, or `token` exactly as the gateway
+reads it, and token auth without `gateway.auth.tokenSecretName` (or a
+`SIE_AUTH_TOKEN(S)` entry in `gateway.extraEnv`) fails the render because the
+gateway would refuse every request. `gateway.auth.tokenSecretName` with auth
+mode `none` fails for the same reason. A `gateway.extraEnv` entry that overrides
+`SIE_AUTH_MODE` takes precedence over `gateway.auth.mode`.
+
+The same authentication requirement applies to `gateway.service.type:
+LoadBalancer` or `NodePort`, which are reachable from outside the cluster on
+most managed platforms; `gateway.service.allowUnauthenticated=true` is the
+explicit opt-in there. Because the gateway itself serves plain HTTP, those
+Service types also need `gateway.service.allowPlaintext=true`: configure TLS
+termination through your provider's load-balancer annotations in
+`gateway.service.annotations` where available, or prefer an Ingress with TLS. `config.service.type` must stay `ClusterIP`: sie-config
+is the configuration write authority and accepts unauthenticated writes unless
+an admin token is configured.
+
+With gateway token auth, pool create, renew, and delete also require the
+gateway admin token (see [Gateway admin token](#gateway-admin-token)).
+Independently of auth, the gateway bounds API-created pools:
+
+- the warm floor (`minimum_worker_count`, which applies to each of the pool's
+  machine profiles) and the `gpus` requirement may each add up to at most 4
+  workers per pool by default, and a pool's active lease keeps at most its
+  requirement warm;
+- the lease TTL is capped at 3600 s by default;
+- live API-created pools are capped at 64 by default. Each gateway replica
+  checks the pools it knows, including ones replicated from other replicas,
+  so concurrent creates on different replicas can briefly exceed the cap; it
+  is not a strict cluster-wide limit.
+
+Tune them with `SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT`,
+`SIE_GATEWAY_POOL_MAX_TTL_S`, and `SIE_GATEWAY_MAX_POOLS` in `gateway.extraEnv`.
+
+> **Upgrade note (breaking):** `values-aws.yaml`, `values-gke.yaml`, and
+> `values-aks.yaml` used to enable a host-less, TLS-less Ingress in front of an
+> unauthenticated gateway. Upgrading with those overlays now removes that
+> Ingress, and the install notes warn when that happens. To keep external
+> access, set `ingress.enabled=true` with gateway auth and TLS as above. To keep
+> the previous unauthenticated plain-HTTP catch-all Ingress unchanged, set both
+> `ingress.allowUnauthenticated=true` and `ingress.allowPlaintext=true`. An
+> upgrade with `--reuse-values` keeps `ingress.enabled=true` and fails the
+> render until one of these is chosen. An existing Ingress with gateway auth
+> but no TLS needs TLS or `ingress.allowPlaintext=true`.
+>
+> API-created pools stored before the upgrade keep working but are held to
+> the new per-pool budget: a pool whose `gpus` requirements add up to more than
+> `SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT` is allotted the budget in
+> machine-profile name order, becomes Active once the allotted workers are
+> available, and keeps only those warm; a warm floor that no longer fits is
+> spread over its lanes (at least one worker each on as many lanes as the budget
+> allows). Recreate such a pool within the budget, or raise the budget.
+
+### Worker NetworkPolicy
+
+Worker pods serve an HTTP API without authentication of their own; the gateway
+is the only in-chart caller. `workers.networkPolicy.enabled=true` renders an
+ingress `NetworkPolicy` whose only default rule admits this release's gateway
+pods to every worker HTTP port. Kubelet probes and traffic between containers
+of the same pod are unaffected. It requires a CNI that enforces NetworkPolicy.
+NetworkPolicies are additive: if another policy selects the worker pods and
+admits more sources, those sources keep access, so it restricts worker ingress
+only when no other policy grants broader access. Check for overlapping policies
+in the namespace. It is off by default and on in `values-ha.yaml`. Add
+`workers.networkPolicy.extraIngress` rules for any caller outside the chart that
+must reach workers directly, and list the worker ports (`workers.common.port`,
+plus one port per additional child container on multi-GPU pools) so the rule
+does not open every port on the worker pods. The chart rejects rules that admit
+every source (an empty peer, an unscoped selector, or an `ipBlock` with prefix
+length `/0`) or nearly every port (a port entry without `port`, or a range
+wider than 60000 ports); disable the policy instead to open the worker API to
+everything. These checks catch mistakes, not a determined operator: two `/1`
+halves still admit every address.
+
+```yaml
+workers:
+  networkPolicy:
+    enabled: true
+    extraIngress:
+      - from:
+          - namespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: benchmarks
+        ports:
+          - port: 8080
+            protocol: TCP
+```
 
 ## TLS / HTTPS
 
@@ -848,13 +1965,14 @@ telemetry:
   deploymentEnv: staging  # production (default) | staging | development | ci
 ```
 
-> **Internal Superlinked clusters:** any cluster owned by Superlinked that is
-> not a customer-facing production install MUST set `telemetry.deploymentEnv`
-> to one of `staging | development | ci`. The chart default is `production`
-> so that customer Helm installs are correctly tagged out of the box; internal
-> stacks must opt out explicitly to keep them out of the production telemetry
-> dashboards. See `deploy/terraform/{aws,gcp}/internal-examples/` for the
-> per-cluster mapping.
+> **Non-production deployments:** set `telemetry.deploymentEnv` to one of
+> `staging | development | ci`. The chart default is `production`, so every
+> non-production values overlay must opt out explicitly to keep its signals out
+> of production dashboards.
+
+`telemetry.deploymentEnv` is not only a dashboard tag: it is also passed to
+sie-config as `SIE_DEPLOYMENT_ENV` and decides whether sie-config may serve its
+API without an admin token. See [sie-config tokens](#sie-config-tokens).
 
 ## Observability
 

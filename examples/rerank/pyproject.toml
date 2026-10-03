@@ -3,9 +3,7 @@ name = "superlinked-sie-rerank-example"
 version = "0.1.0"
 description = "Rank exact primary-source passages with public SIE"
 requires-python = ">=3.12,<3.13"
-dependencies = [
-  "sie-sdk>=0.6.19,<0.7.0",
-]
+dependencies = []
 
 [tool.uv]
 package = false

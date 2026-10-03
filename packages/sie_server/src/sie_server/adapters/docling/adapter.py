@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from sie_server.adapters._base_adapter import BaseAdapter
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.core.inference_output import ExtractItemError, ExtractOutput
-from sie_server.types.inputs import is_document_input, is_image_input
+from sie_server.types.inputs import InvalidMediaError, is_image_input, media_bytes
 from sie_server.types.responses import ErrorCode
 
 if TYPE_CHECKING:
@@ -47,6 +47,12 @@ _ERR_REQUIRES_DOCUMENT = "Document or image input is required"
 _ERR_EXACTLY_ONE_IMAGE = "Docling OCR requires exactly one image per item"
 _ERR_CONVERSION_FAILED = "Document conversion failed"
 _ERR_EXPORT_FAILED = "Document export failed"
+
+# The retained PP-OCRv4 detector covers the compact, wide catalog fixture that
+# the English PP-OCRv3 detector truncates after its first word. Keep English
+# recognition for word boundaries while selecting that detector from the same
+# immutable artifact root.
+_RAPIDOCR_PP_OCRV4_DETECTOR = Path("RapidOcr/onnx/PP-OCRv4/det/ch_PP-OCRv4_det_mobile.onnx")
 
 
 def _positive_int(name: str, value: Any) -> int:
@@ -293,8 +299,18 @@ class DoclingAdapter(BaseAdapter):
         # that Docling's pipeline exploits; an image is the rasterized
         # fallback for callers that only have a page render.
         document = item.document
-        if is_document_input(document):
-            payload = document["data"]
+        if document is not None:
+            # Route document bytes through the typed media boundary rather than
+            # reading ``document["data"]`` raw. ``is_document_input`` gated on
+            # ``isinstance(data, bytes)``, so a base64-str ``data`` (e.g. the
+            # queue path, which builds Item from an unvalidated dict) silently
+            # fell to the image branch and returned the contradictory "Document
+            # or image input is required". ``media_bytes`` maps that to a
+            # correct typed 400 (INVALID_INPUT on both HTTP and queue paths).
+            try:
+                payload = media_bytes(document, kind="document")
+            except InvalidMediaError as exc:
+                return {}, 0, ExtractItemError(code=ErrorCode.INVALID_INPUT.value, message=str(exc))
             format_hint = document.get("format")
         else:
             images = item.images or []
@@ -405,12 +421,15 @@ class DoclingAdapter(BaseAdapter):
         # pages came back word-joined ("Documentreference"). The pinned artifact
         # revision ships BOTH language sets, so this stays a one-line flip if the
         # served traffic mix ever argues for CJK.
+        artifacts_path = self._artifacts_path or self._package_artifact_root
+        ocr_kwargs: dict[str, Any] = {"lang": ["en"]}
+        if artifacts_path is not None:
+            ocr_kwargs["det_model_path"] = str(artifacts_path / _RAPIDOCR_PP_OCRV4_DETECTOR)
         pdf_kwargs: dict[str, Any] = {
             "do_ocr": ocr_enabled,
             "document_timeout": self._document_timeout_s,
-            "ocr_options": RapidOcrOptions(lang=["en"]),
+            "ocr_options": RapidOcrOptions(**ocr_kwargs),
         }
-        artifacts_path = self._artifacts_path or self._package_artifact_root
         if artifacts_path is not None:
             pdf_kwargs["artifacts_path"] = artifacts_path
         if accelerator_options is not None:

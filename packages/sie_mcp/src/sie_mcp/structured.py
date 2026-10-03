@@ -1,4 +1,4 @@
-"""``extract_structured`` + ``generate_structured`` — the Req 12 structured jobs (#1308).
+"""Structured-output jobs for ``extract_structured`` and ``generate_structured``.
 
 Both produce schema/grammar-constrained output off the cluster via the
 OpenAI-compatible chat-completions surface (``response_format``), *not* the
@@ -14,9 +14,8 @@ of a ``grammar_capability`` / ``unsupported_field`` round-trip.
 
 It also *post-validates* the cluster's response against the requested schema.
 Decode-time grammar enforcement is the primary guarantee, but a serving-layer
-profile can bypass the grammar FSM (e.g. NEXTN speculative decoding on the
-Qwen3.5 default profile — see ``tools/validate_mcp_structured_gpu.py`` and
-#1302/#1231); when that happens the output is rejected with a clear error
+profile can bypass the grammar FSM (for example, speculative decoding can
+produce extra keys or truncated JSON); when that happens the output is rejected with a clear error
 rather than returned as if it conformed.
 """
 
@@ -120,7 +119,31 @@ def _is_outlines_backed(model: str) -> bool:
     return model in _OUTLINES_BACKED_MODELS
 
 
-def _walk_schema(node: Any, *, path: str, depth: int, counter: list[int]) -> None:
+def _schema_child_context(parent: str, key: str) -> str:
+    """Map a parent schema context + child key to the child's context.
+
+    Mirrors ``schema_child_context`` in the gateway
+    (``packages/sie_gateway/src/handlers/grammar.rs``) and
+    ``_schema_child_context`` in the server (``api/generate.py``). Keywords are
+    only meaningful in a ``"schema"`` position; a ``properties`` /
+    ``patternProperties`` / ``$defs`` map has *property names* for keys
+    (``"schema_map"``), so a property literally named ``if`` / ``then`` / ``$ref``
+    is data, not a keyword.
+    """
+    if parent == "schema":
+        if key in {"properties", "patternProperties", "$defs", "definitions", "dependentSchemas"}:
+            return "schema_map"
+        if key in {"oneOf", "anyOf", "allOf", "prefixItems"}:
+            return "schema_array"
+        if key in {"items", "additionalProperties", "contains", "propertyNames", "not", "if", "then", "else"}:
+            return "schema"
+        return "other"
+    if parent == "schema_map":
+        return "schema"
+    return "other"
+
+
+def _walk_schema(node: Any, *, path: str, depth: int, counter: list[int], context: str = "schema") -> None:
     # Mirror the gateway's per-node accounting: every visited value (objects,
     # array elements, scalars) counts toward ``_MAX_SCHEMA_NODES`` so a wide
     # schema is bounded even when it stays shallow.
@@ -132,22 +155,35 @@ def _walk_schema(node: Any, *, path: str, depth: int, counter: list[int]) -> Non
         msg = f"output_schema nesting depth exceeds limit ({_MAX_SCHEMA_DEPTH}) at {path}"
         raise StructuredOutputError(msg)
     if isinstance(node, dict):
-        # Reject before descending so the message names the shallowest occurrence.
-        for kw in _UNSUPPORTED_KEYWORDS:
-            if kw in node:
-                detail = (
-                    "'$ref' is not supported (the schema subset rejects all $ref, "
-                    "including internal '#/...', so recursion is not expressible)"
-                    if kw == "$ref"
-                    else f"JSON Schema keyword '{kw}' is not supported by the Outlines subset"
-                )
-                raise StructuredOutputError(f"{detail} at {path}.{kw}")
+        # Keywords are only rejected in an actual schema position. Under a
+        # ``properties`` map (``"schema_map"``) the keys are property *names*
+        # supplied by the caller, so a property named ``if`` / ``then`` / ``$ref``
+        # is data and must not be treated as a keyword, matching the same
+        # context-sensitive validation in the gateway and server.
+        if context == "schema":
+            # Reject before descending so the message names the shallowest occurrence.
+            for kw in _UNSUPPORTED_KEYWORDS:
+                if kw in node:
+                    detail = (
+                        "'$ref' is not supported (the schema subset rejects all $ref, "
+                        "including internal '#/...', so recursion is not expressible)"
+                        if kw == "$ref"
+                        else f"JSON Schema keyword '{kw}' is not supported by the Outlines subset"
+                    )
+                    raise StructuredOutputError(f"{detail} at {path}.{kw}")
         for key, child in node.items():
-            child_depth = depth + 1 if key in _SCHEMA_NESTING_KEYS else depth
-            _walk_schema(child, path=f"{path}.{key}", depth=child_depth, counter=counter)
+            child_depth = depth + 1 if context == "schema" and key in _SCHEMA_NESTING_KEYS else depth
+            _walk_schema(
+                child,
+                path=f"{path}.{key}",
+                depth=child_depth,
+                counter=counter,
+                context=_schema_child_context(context, key),
+            )
     elif isinstance(node, list):
+        child_context = "schema" if context in {"schema", "schema_array"} else "other"
         for i, child in enumerate(node):
-            _walk_schema(child, path=f"{path}[{i}]", depth=depth, counter=counter)
+            _walk_schema(child, path=f"{path}[{i}]", depth=depth, counter=counter, context=child_context)
 
 
 def validate_output_schema(schema: Any) -> None:
@@ -177,17 +213,16 @@ def _validate_against_schema(data: Any, schema: dict[str, Any]) -> None:
     """Post-validate cluster output against the requested schema (defense in depth).
 
     Decode-time grammar enforcement is the primary guarantee, but a serving
-    profile can bypass the grammar FSM (NEXTN speculative decoding on the
-    Qwen3.5 default profile leaks keys / truncates — see
-    ``tools/validate_mcp_structured_gpu.py`` and #1302/#1231). When the returned
+    profile can bypass the grammar FSM (speculative decoding can produce extra
+    keys or truncated JSON). When the returned
     object does not conform, raise rather than hand back non-conforming JSON as
     if it were schema-valid.
 
     ``jsonschema`` is a guaranteed transitive dependency of the MCP edge
-    (``mcp`` → ``jsonschema``); it is imported lazily so ``structured.py`` stays
-    importable standalone by the GPU validation harness (which adds the source
-    to ``sys.path`` without installing the package). If it is somehow absent the
-    check is skipped — this layer is additive safety, not the only guard.
+    (``mcp`` → ``jsonschema``); it is imported lazily to support lightweight
+    standalone validation without installing the package. If it is somehow
+    absent the check is skipped — this layer is additive safety, not the only
+    guard.
     """
     try:
         import jsonschema  # noqa: PLC0415  (lazy: keeps structured.py standalone-importable)

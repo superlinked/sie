@@ -1,17 +1,20 @@
 import logging
 from typing import TYPE_CHECKING, Annotated, Any
 
-from fastapi import APIRouter, Header, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 
+from sie_server.adapters.errors import InputTooLongError
 from sie_server.api.helpers import (
     InferenceErrorHandler,
     ModelStateChecker,
     RequestParser,
     ResponseBuilder,
+    ensure_finite_scores,
     oom_retry_after_from_registry,
 )
 from sie_server.api.options import resolve_runtime_options
+from sie_server.api.routing import remote_routing, route_request
 from sie_server.api.serialization import MsgPackResponse
 from sie_server.api.validation import validate_machine_profile_header
 from sie_server.core.inference_output import ScoreOutput
@@ -22,14 +25,14 @@ from sie_server.observability.worker_telemetry import worker_telemetry, worker_t
 from sie_server.types.inputs import Item
 from sie_server.types.openapi import ScoreResponseModel
 from sie_server.types.requests import ScoreRequest
-from sie_server.types.responses import ErrorCode, ScoreEntry, ScoreResponse, ScoreUsage
+from sie_server.types.responses import ErrorCode, ScoreEntry, ScoreInputTokensDetails, ScoreResponse, ScoreUsage
 
 if TYPE_CHECKING:
     from sie_server.core.registry import ModelRegistry
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/v1", tags=["score"])
+router = APIRouter(prefix="/v1", tags=["score"], dependencies=[Depends(remote_routing)])
 
 
 def _build_response(
@@ -80,6 +83,13 @@ def score_usage_from_output(output: ScoreOutput) -> ScoreUsage | None:
     usage = ScoreUsage(input_tokens=sum(output.input_token_counts))
     if output.input_image_counts is not None:
         usage["images"] = sum(output.input_image_counts)
+    content = output.content_token_counts
+    if (
+        content is not None
+        and len(content) == len(output.input_token_counts)
+        and all(count <= total for count, total in zip(content, output.input_token_counts, strict=True))
+    ):
+        usage["input_tokens_details"] = ScoreInputTokensDetails(content_tokens=sum(content))
     return usage
 
 
@@ -141,12 +151,13 @@ async def _score_via_worker(
         },
         400: {"description": "Invalid request"},
         404: {"description": "Model not found"},
+        413: {"description": "Request body exceeds the configured size limit"},
         502: {
             "description": (
                 "Terminal model-load failure (MODEL_LOAD_FAILED). "
                 "Carried in the ``detail`` envelope: ``{code, message, "
                 "error_class, permanent, attempts}``. No ``Retry-After`` "
-                "header — clients MUST NOT auto-retry. See sie-test#85."
+                "header — clients MUST NOT auto-retry."
             ),
         },
         503: {"description": "Model not loaded or service unavailable"},
@@ -205,11 +216,9 @@ async def score(
         span.set_attribute("batch_size", len(request.items))
 
         registry = http_request.app.state.registry
-        device = registry.device
 
         # Validate model state using helper (split to check capability before loading)
-        model_checker = ModelStateChecker(registry, model, span)
-        model_checker.check_exists()
+        ModelStateChecker(registry, model, span).check_exists()
 
         # Check model config supports scoring (before loading gate — fail fast)
         config = registry.get_config(model)
@@ -224,11 +233,6 @@ async def score(
                 },
             )
 
-        # Continue model state validation
-        model_checker.check_not_unloading()
-        model_checker.check_not_loading()
-        await model_checker.ensure_loaded(device)
-
         # Resolve profile and merge runtime options (outside inference try/except
         # so ValueError from invalid profiles returns 400, not 500)
         instruction = request.instruction
@@ -241,6 +245,13 @@ async def score(
 
         query = request.query
         items = request.items
+        route = await route_request(
+            http_request,
+            model,
+            span,
+            profile=request.options.get("profile") if request.options else None,
+            queued_items=len(items),
+        )
 
         # Score using worker with batching
         error_handler = InferenceErrorHandler(
@@ -254,7 +265,7 @@ async def score(
         try:
             worker_result = await _score_via_worker(
                 registry,
-                model,
+                route.key,
                 query,
                 items,
                 instruction=instruction,
@@ -266,10 +277,18 @@ async def score(
             timing = worker_result.timing
         except QueueFullError as e:
             raise error_handler.handle_queue_full(e) from e
+        except InputTooLongError as e:
+            raise error_handler.handle_input_too_long(e) from e
         except ValueError as e:
             raise error_handler.handle_value_error(e) from e
         except Exception as e:
-            raise error_handler.handle_inference_error(e) from e
+            raise error_handler.handle_inference_error(e, "Scoring") from e
+
+        # Fail closed on non-finite (NaN/inf) model output before it reaches
+        # serialization: JSON would 500 un-enveloped and msgpack would silently
+        # return 200 with the NaN ranked as valid. Checked after the inference
+        # try/except so the typed 500 is not re-wrapped by handle_inference_error.
+        ensure_finite_scores(scores, model)
 
         # Build response
         query_id = query.id
@@ -299,4 +318,5 @@ async def score(
 
         # Build response headers and return
         headers = ResponseBuilder.build_headers(timing)
+        headers.update(route.headers())
         return ResponseBuilder.build_response(response, accept, headers)

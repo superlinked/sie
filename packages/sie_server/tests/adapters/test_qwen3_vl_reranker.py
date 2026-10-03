@@ -126,7 +126,7 @@ def test_vl_reranker_allows_image_only_and_text_plus_image_items() -> None:
 def test_vl_reranker_rejects_undecodable_image_with_typed_error() -> None:
     adapter = Qwen3VLRerankerAdapter("unused")
 
-    with pytest.raises(InvalidMediaError, match="valid decodable image"):
+    with pytest.raises(InvalidMediaError, match="image data is not a decodable image"):
         adapter._load_first_image(Item(images=[{"data": b"not-an-image"}]))
 
 

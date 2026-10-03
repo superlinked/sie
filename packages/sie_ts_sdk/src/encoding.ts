@@ -76,8 +76,11 @@ export function sparseEmbeddingMap(result: EncodeResult): Map<number, number> {
   const indices = toNumberArray(sparse.indices);
   const values = toNumberArray(sparse.values);
   const map = new Map<number, number>();
-  for (let i = 0; i < indices.length; i++) {
-    map.set(indices[i]!, values[i]!);
+  for (const [index, tokenIndex] of indices.entries()) {
+    const weight = values[index];
+    if (weight !== undefined) {
+      map.set(tokenIndex, weight);
+    }
   }
   return map;
 }

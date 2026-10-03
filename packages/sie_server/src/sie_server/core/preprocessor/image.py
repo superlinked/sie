@@ -6,13 +6,12 @@ image-text models like CLIP and SigLIP that take single images.
 
 from __future__ import annotations
 
-import io
 import threading
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from sie_server.core.prepared import ImagePayload, PreparedBatch, PreparedItem
-from sie_server.types.inputs import media_bytes
+from sie_server.types.inputs import decode_image
 
 if TYPE_CHECKING:
     import torch
@@ -104,8 +103,6 @@ class ImagePreprocessor:
         Returns:
             PreparedBatch with ImagePayload items.
         """
-        from PIL import Image as PILImage
-
         prepared_items: list[PreparedItem[ImagePayload]] = []
         total_cost = 0
 
@@ -115,17 +112,28 @@ class ImagePreprocessor:
 
         for i, item in enumerate(items):
             if not item.images:
-                # Skip items without images (they may be text-only)
+                # Text-only items pass through with an empty payload (the same
+                # shape the no-preprocessor fallback emits) so the prepared
+                # batch stays aligned 1:1 with the request items. Dropping them
+                # starves the worker's per-item completion check and the
+                # request future never resolves (#3136); adapters that
+                # partition by modality (CLIP/SigLIP) encode them via the text
+                # tower.
+                prepared_items.append(
+                    PreparedItem(
+                        payload=ImagePayload(pixel_values=None, original_size=(0, 0)),
+                        cost=1,
+                        original_index=i,
+                    )
+                )
+                total_cost += 1
                 continue
 
-            # Load first image from bytes
+            # Load first image from bytes; undecodable or non-bytes payloads
+            # raise InvalidMediaError (-> 400 INVALID_INPUT) naming the item.
             img_input = item.images[0]
-            pil_img = PILImage.open(io.BytesIO(media_bytes(img_input, kind="image")))
+            pil_img = decode_image(img_input, item_index=i, image_index=0)
             original_size = pil_img.size
-
-            # Convert to RGB if needed
-            if pil_img.mode != "RGB":
-                pil_img = pil_img.convert("RGB")
 
             # Process through HuggingFace processor
             processed = processor(images=pil_img, return_tensors="pt")
@@ -162,13 +170,13 @@ class ImagePreprocessor:
         """
         import torch
 
-        if not prepared:
+        # Text passthrough entries carry no tensor (#3136); collation covers
+        # the image payloads only, in prepared order.
+        tensors = [p.payload.pixel_values for p in prepared if p.payload.pixel_values is not None]
+        if not tensors:
             return {"pixel_values": torch.tensor([])}
 
-        # Stack pixel values into batch
-        pixel_values = torch.stack([p.payload.pixel_values for p in prepared])
-
-        return {"pixel_values": pixel_values.to(device)}
+        return {"pixel_values": torch.stack(tensors).to(device)}
 
 
 class OpenCLIPImagePreprocessor:
@@ -236,24 +244,29 @@ class OpenCLIPImagePreprocessor:
         Returns:
             PreparedBatch with ImagePayload items.
         """
-        from PIL import Image as PILImage
-
         prepared_items: list[PreparedItem[ImagePayload]] = []
         total_cost = 0
 
         for i, item in enumerate(items):
             if not item.images:
-                # Skip items without images (they may be text-only)
+                # Text-only items pass through with an empty payload — same
+                # aligned-batch contract as ``ImagePreprocessor.prepare``
+                # (#3136).
+                prepared_items.append(
+                    PreparedItem(
+                        payload=ImagePayload(pixel_values=None, original_size=(0, 0)),
+                        cost=1,
+                        original_index=i,
+                    )
+                )
+                total_cost += 1
                 continue
 
-            # Load first image from bytes
+            # Load first image from bytes; undecodable or non-bytes payloads
+            # raise InvalidMediaError (-> 400 INVALID_INPUT) naming the item.
             img_input = item.images[0]
-            pil_img = PILImage.open(io.BytesIO(media_bytes(img_input, kind="image")))
+            pil_img = decode_image(img_input, item_index=i, image_index=0)
             original_size = pil_img.size
-
-            # Convert to RGB if needed
-            if pil_img.mode != "RGB":
-                pil_img = pil_img.convert("RGB")
 
             # open_clip val_preproc returns a [C, H, W] tensor (no batch dim)
             pixel_values = self._val_preproc(pil_img)
@@ -289,10 +302,10 @@ class OpenCLIPImagePreprocessor:
         """
         import torch
 
-        if not prepared:
+        # Text passthrough entries carry no tensor (#3136); collation covers
+        # the image payloads only, in prepared order.
+        tensors = [p.payload.pixel_values for p in prepared if p.payload.pixel_values is not None]
+        if not tensors:
             return {"pixel_values": torch.tensor([])}
 
-        # Stack pixel values into batch
-        pixel_values = torch.stack([p.payload.pixel_values for p in prepared])
-
-        return {"pixel_values": pixel_values.to(device)}
+        return {"pixel_values": torch.stack(tensors).to(device)}

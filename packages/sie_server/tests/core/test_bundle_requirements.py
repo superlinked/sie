@@ -25,9 +25,9 @@ def test_resolve_bundle_requirements_preserves_cli_semantics() -> None:
 
 def test_resolve_bundle_requirements_can_exclude_normalized_cuda_packages() -> None:
     assert resolve_bundle_requirements(
-        {"Flash_Attn": "==1", "xformers": "==2", "portable": "==3"},
+        {"Flash_Attn": "==1", "xformers": "==2", "FLA_core": {"version": "==3"}, "portable": "==4"},
         exclude_cuda=True,
-    ) == ["portable==3"]
+    ) == ["portable==4"]
 
 
 def test_release_pin_normalization_is_sorted_and_marker_free() -> None:

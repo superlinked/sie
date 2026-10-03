@@ -14,6 +14,7 @@ use opentelemetry::metrics::{Counter, Gauge, Histogram, ObservableGauge};
 use opentelemetry::trace::SpanContext;
 use opentelemetry::{global, Context, KeyValue};
 
+use crate::queue::lane_admission::LaneAdmissionOutcome;
 use crate::state::demand_tracker::{DemandTracker, PhysicalLane};
 
 pub const REQUESTS_METRIC_NAME: &str = "sie.gateway.requests";
@@ -55,12 +56,20 @@ pub const QUEUE_RESULT_CHUNK_STALE_RETRIES_METRIC_NAME: &str =
     "sie.gateway.queue.result_chunk.stale_retries";
 pub const QUEUE_RESULT_CHUNK_RESERVED_BYTES_METRIC_NAME: &str =
     "sie.gateway.queue.result_chunk.reserved_bytes";
+pub const QUEUE_WORKER_POOL_EVENTS_METRIC_NAME: &str = "sie.gateway.queue.worker_pool.events";
 pub const QUEUE_EVENTS_METRIC_NAME: &str = "sie.gateway.queue.events";
+pub const QUEUE_LANE_ADMISSION_DECISIONS_METRIC_NAME: &str =
+    "sie.gateway.queue.lane_admission.decisions";
 pub const PROVISIONING_RESPONSES_METRIC_NAME: &str = "sie.gateway.provisioning.responses";
+pub const ROUTING_UNSUPPORTED_MODEL_EXCLUSIONS_METRIC_NAME: &str =
+    "sie.gateway.routing.unsupported_model_exclusions";
 pub const GENERATION_EVENTS_METRIC_NAME: &str = "sie.gateway.generation.events";
 pub const GENERATION_TTFT_METRIC_NAME: &str = "sie.gateway.generation.ttft";
 pub const GENERATION_TPOT_METRIC_NAME: &str = "sie.gateway.generation.tpot";
 pub const GENERATION_TOKENS_METRIC_NAME: &str = "sie.gateway.generation.tokens";
+pub const KEY_SNAPSHOT_POLLS_METRIC_NAME: &str = "sie.gateway.key_snapshot.polls";
+pub const SETTLEMENT_CONFIRMS_METRIC_NAME: &str = "sie.gateway.settlement.confirms";
+pub const SETTLEMENT_CONFIRM_DURATION_METRIC_NAME: &str = "sie.gateway.settlement.confirm.duration";
 
 pub const REQUEST_LATENCY_BUCKETS: [f64; 21] = [
     0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.025, 0.03, 0.04, 0.05, 0.1, 0.2, 0.3, 0.5, 0.75,
@@ -77,6 +86,17 @@ pub const QUEUE_RESULT_WAIT_DURATION_BUCKETS: [f64; 13] = [
 ];
 pub const GENERATION_DURATION_BUCKETS: [f64; 15] = [
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0,
+];
+
+/// The settlement confirm is one control-plane round trip that may internally
+/// retry up to four times under a five-second client timeout each, so the
+/// interesting range runs from a sub-millisecond local hop to the ~20s worst
+/// case. `REQUEST_LATENCY_BUCKETS` is reused as the denominator series, so the
+/// shared boundaries below `1.0` are deliberately identical to it — that is
+/// what makes "confirm latency as a fraction of buffered response latency"
+/// readable off two histograms without a join.
+pub const SETTLEMENT_CONFIRM_DURATION_BUCKETS: [f64; 16] = [
+    0.0005, 0.001, 0.002, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 30.0,
 ];
 
 /// Runtime catalog allowlist for the bounded managed `lane` dimension.
@@ -108,6 +128,19 @@ struct ResultChunkReservationObservableState {
 #[derive(Clone, Debug, Default)]
 pub struct MetricLabels {
     pub machine_profile: String,
+    pub model: String,
+}
+
+/// One terminal inference-request observation. The type deliberately has no
+/// customer, credential, request, URL, payload, or error-text field.
+#[derive(Clone, Copy, Debug)]
+pub struct RequestCompletionObservation<'a> {
+    pub operation: &'a str,
+    pub status: u16,
+    pub machine_profile: &'a str,
+    pub model: &'a str,
+    pub duration_s: f64,
+    pub admission_outcome: AdmissionOutcome,
 }
 
 /// First-write-wins request-extension carrier for [`MetricLabels`].
@@ -135,6 +168,11 @@ pub enum AdmissionOutcome {
     AuthMisconfigured,
     RegionMismatch,
     LicenseExcluded,
+    /// A deployment's `ModelAccessPolicy::serving_refusal` declined to serve
+    /// the resolved model for now and answered 503. Distinct from
+    /// `AuthMisconfigured`: the request authenticated, and the refusal is a
+    /// retryable serving state rather than a broken credential setup.
+    ServingUnavailable,
     PayloadTooLarge,
     /// A policy gate refused the request because it could not read the field it
     /// gates on — e.g. a `multipart/form-data` inference body whose `model`
@@ -156,6 +194,7 @@ impl AdmissionOutcome {
             Self::AuthMisconfigured => "auth_misconfigured",
             Self::RegionMismatch => "region_mismatch",
             Self::LicenseExcluded => "license_excluded",
+            Self::ServingUnavailable => "serving_unavailable",
             Self::PayloadTooLarge => "payload_too_large",
             Self::InvalidRequest => "invalid_request",
             Self::InsufficientCredits => "insufficient_credits",
@@ -412,6 +451,27 @@ impl QueueResultOutcome {
     }
 }
 
+/// Bound events on a [`crate::queue::keyed_worker_pool::KeyedWorkerPool`].
+///
+/// Both are saturation of one shard's bounded channel; they differ only in the
+/// caller's policy at the bound. `Saturated` means the caller waited for a
+/// slot (nothing lost, the caller stalls); `Shed` means the caller declined to
+/// wait and left the work to its own retry path.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum QueueWorkerPoolEvent {
+    Saturated,
+    Shed,
+}
+
+impl QueueWorkerPoolEvent {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Saturated => "saturated",
+            Self::Shed => "shed",
+        }
+    }
+}
+
 /// Bounded validation failure for one chunked queue-result transfer.
 ///
 /// The gateway's result-chunk decoder is the sole source of these values. A
@@ -521,6 +581,75 @@ impl ProvisioningSurface {
     }
 }
 
+/// Terminal classification of one key-snapshot poll tick.
+///
+/// The managed gateway polls the control plane's versioned key snapshot on a
+/// fixed interval, offering the version it already holds as `If-None-Match`.
+/// This enum separates the three outcomes that a bare success/error split
+/// hides:
+///
+/// - `NotModified` — the control plane answered 304. The snapshot body was
+///   neither computed nor transferred.
+/// - `Installed` — a 200 whose body strictly advanced the held version. The
+///   fetch bought new information.
+/// - `Discarded` — a 200 whose body did NOT advance the held version, so the
+///   replica serialized, transferred, parsed, and then dropped it. This is the
+///   wasted-fetch case, and it is deliberately distinguishable from `Installed`
+///   rather than folded into one "200" bucket.
+/// - `Error` — the tick failed and the previous snapshot is still being served.
+#[allow(dead_code)] // Managed composition API; unused by the standalone gateway binary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum KeySnapshotPollOutcome {
+    NotModified,
+    Installed,
+    Discarded,
+    Error,
+}
+
+#[allow(dead_code)]
+impl KeySnapshotPollOutcome {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::NotModified => "not_modified",
+            Self::Installed => "installed",
+            Self::Discarded => "discarded",
+            Self::Error => "error",
+        }
+    }
+}
+
+/// Terminal classification of one managed settlement-confirmation attempt on
+/// the buffered response path.
+///
+/// `Skipped` is the branch that took no reservation and therefore never issued
+/// a control-plane call. It is counted but contributes no duration observation,
+/// so the duration histogram stays a clean measure of what the response
+/// actually waited for.
+#[allow(dead_code)] // Managed composition API; unused by the standalone gateway binary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SettlementConfirmOutcome {
+    Success,
+    Error,
+    Skipped,
+}
+
+#[allow(dead_code)]
+impl SettlementConfirmOutcome {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Error => "error",
+            Self::Skipped => "skipped",
+        }
+    }
+
+    /// Whether this outcome awaited a control-plane round trip and therefore
+    /// carries a meaningful duration.
+    fn is_timed(self) -> bool {
+        !matches!(self, Self::Skipped)
+    }
+}
+
 /// Generation transport stage represented by the consolidated integrity
 /// counter. Values are deliberately finite and do not carry request data.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -596,6 +725,8 @@ pub struct GenerationCompletionObservation {
     pub tpot_ms: Option<f64>,
     pub prompt_tokens: Option<u64>,
     pub completion_tokens: Option<u64>,
+    /// Prompt tokens the worker's engine served from its prefix cache.
+    pub cached_prompt_tokens: Option<u64>,
 }
 
 impl QueueEventOutcome {
@@ -693,12 +824,21 @@ struct GatewayTelemetry {
     #[allow(dead_code)] // Retains the observable callback registration.
     queue_result_chunk_reserved_bytes: ObservableGauge<u64>,
     queue_result_chunk_reserved_bytes_state: Arc<ResultChunkReservationObservableState>,
+    queue_worker_pool_events: Counter<u64>,
     queue_events: Counter<u64>,
+    queue_lane_admission_decisions: Counter<u64>,
     provisioning_responses: Counter<u64>,
+    routing_unsupported_model_exclusions: Counter<u64>,
     generation_events: Counter<u64>,
     generation_ttft: Histogram<f64>,
     generation_tpot: Histogram<f64>,
     generation_tokens: Counter<u64>,
+    #[allow(dead_code)] // Managed composition API.
+    key_snapshot_polls: Counter<u64>,
+    #[allow(dead_code)] // Managed composition API.
+    settlement_confirms: Counter<u64>,
+    #[allow(dead_code)] // Managed composition API.
+    settlement_confirm_duration: Histogram<f64>,
     capacity_snapshot_lock: Mutex<()>,
     previous_pending_lanes: Mutex<HashSet<LaneKey>>,
     previous_lease_lanes: Mutex<HashSet<LaneKey>>,
@@ -929,6 +1069,13 @@ impl GatewayTelemetry {
                 })
                 .build(),
             queue_result_chunk_reserved_bytes_state,
+            queue_worker_pool_events: meter
+                .u64_counter(QUEUE_WORKER_POOL_EVENTS_METRIC_NAME)
+                .with_description(
+                    "Bound events on the gateway's keyed inbox/cleanup worker pools.",
+                )
+                .with_unit("{event}")
+                .build(),
             queue_events: meter
                 .u64_counter(QUEUE_EVENTS_METRIC_NAME)
                 .with_description(
@@ -936,12 +1083,27 @@ impl GatewayTelemetry {
                 )
                 .with_unit("{event}")
                 .build(),
+            queue_lane_admission_decisions: meter
+                .u64_counter(QUEUE_LANE_ADMISSION_DECISIONS_METRIC_NAME)
+                .with_description(
+                    "Count of per-lane queue admission decisions, including shadow-mode sheds \
+                     that were recorded but not enforced.",
+                )
+                .with_unit("{decision}")
+                .build(),
             provisioning_responses: meter
                 .u64_counter(PROVISIONING_RESPONSES_METRIC_NAME)
                 .with_description(
                     "Count of semantic provisioning responses returned before execution.",
                 )
                 .with_unit("{response}")
+                .build(),
+            routing_unsupported_model_exclusions: meter
+                .u64_counter(ROUTING_UNSUPPORTED_MODEL_EXCLUSIONS_METRIC_NAME)
+                .with_description(
+                    "Count of queue-lane resolutions that passed over a lane because a worker in it cannot serve the requested model.",
+                )
+                .with_unit("{exclusion}")
                 .build(),
             generation_events: meter
                 .u64_counter(GENERATION_EVENTS_METRIC_NAME)
@@ -967,6 +1129,28 @@ impl GatewayTelemetry {
                 .with_description("Generation tokens accounted from terminal chunk usage.")
                 .with_unit("{token}")
                 .build(),
+            key_snapshot_polls: meter
+                .u64_counter(KEY_SNAPSHOT_POLLS_METRIC_NAME)
+                .with_description(
+                    "Terminal outcomes of the managed key-snapshot conditional poll.",
+                )
+                .with_unit("{poll}")
+                .build(),
+            settlement_confirms: meter
+                .u64_counter(SETTLEMENT_CONFIRMS_METRIC_NAME)
+                .with_description(
+                    "Terminal outcomes of the settlement confirmation on the buffered response path.",
+                )
+                .with_unit("{confirm}")
+                .build(),
+            settlement_confirm_duration: meter
+                .f64_histogram(SETTLEMENT_CONFIRM_DURATION_METRIC_NAME)
+                .with_description(
+                    "Time a buffered response waited on its control-plane settlement confirmation.",
+                )
+                .with_unit("s")
+                .with_boundaries(SETTLEMENT_CONFIRM_DURATION_BUCKETS.to_vec())
+                .build(),
             capacity_snapshot_lock: Mutex::new(()),
             previous_pending_lanes: Mutex::new(HashSet::new()),
             previous_lease_lanes: Mutex::new(HashSet::new()),
@@ -975,21 +1159,21 @@ impl GatewayTelemetry {
         }
     }
 
-    fn request_completed(
-        &self,
-        operation: &str,
-        status: u16,
-        machine_profile: &str,
-        duration_s: f64,
-        admission_outcome: AdmissionOutcome,
-    ) {
-        let request_attributes = request_attributes(operation, status, machine_profile);
+    fn request_completed(&self, observation: &RequestCompletionObservation<'_>) {
+        let request_attributes = request_attributes(
+            observation.operation,
+            observation.status,
+            observation.machine_profile,
+        );
         self.requests.add(1, &request_attributes);
         self.request_duration
-            .record(duration_s.max(0.0), &request_attributes);
+            .record(observation.duration_s.max(0.0), &request_attributes);
         self.admission_decisions.add(
             1,
-            &admission_attributes(operation, admission_outcome.as_str()),
+            &admission_attributes(
+                observation.operation,
+                observation.admission_outcome.as_str(),
+            ),
         );
     }
 
@@ -1034,6 +1218,22 @@ impl GatewayTelemetry {
         );
     }
 
+    #[allow(dead_code)] // Managed composition API.
+    fn record_key_snapshot_poll(&self, outcome: KeySnapshotPollOutcome) {
+        self.key_snapshot_polls
+            .add(1, &[KeyValue::new("outcome", outcome.as_str())]);
+    }
+
+    #[allow(dead_code)] // Managed composition API.
+    fn record_settlement_confirm(&self, outcome: SettlementConfirmOutcome, duration: Duration) {
+        let attributes = [KeyValue::new("outcome", outcome.as_str())];
+        self.settlement_confirms.add(1, &attributes);
+        if outcome.is_timed() {
+            self.settlement_confirm_duration
+                .record(duration.as_secs_f64(), &attributes);
+        }
+    }
+
     fn record_queue_publish(&self, observation: &QueuePublishObservation<'_>) {
         let attributes =
             queue_operation_attributes(observation.operation, observation.outcome.as_str());
@@ -1062,6 +1262,16 @@ impl GatewayTelemetry {
             self.queue_result_chunk_bytes_received
                 .add(payload_bytes, &[]);
         }
+    }
+
+    fn record_queue_worker_pool_event(&self, pool: &'static str, event: QueueWorkerPoolEvent) {
+        self.queue_worker_pool_events.add(
+            1,
+            &[
+                KeyValue::new("pool", pool),
+                KeyValue::new("event", event.as_str()),
+            ],
+        );
     }
 
     fn record_queue_result_chunk_rejection(&self, reason: QueueResultChunkRejectionReason) {
@@ -1124,6 +1334,26 @@ impl GatewayTelemetry {
         );
     }
 
+    fn record_queue_lane_admission_decision(
+        &self,
+        lane: &PhysicalLane,
+        outcome: LaneAdmissionOutcome,
+    ) {
+        self.queue_lane_admission_decisions.add(
+            1,
+            &[
+                KeyValue::new("pool", lane.pool().to_string()),
+                KeyValue::new("machine_profile", lane.machine_profile().to_string()),
+                KeyValue::new("bundle", lane.bundle().to_string()),
+                KeyValue::new("outcome", outcome.as_str()),
+            ],
+        );
+    }
+
+    fn record_unsupported_model_route_exclusion(&self) {
+        self.routing_unsupported_model_exclusions.add(1, &[]);
+    }
+
     fn record_provisioning_response(&self, surface: ProvisioningSurface, status: u16) {
         let status = if (100..=599).contains(&status) {
             status
@@ -1184,6 +1414,15 @@ impl GatewayTelemetry {
                 &[
                     KeyValue::new("operation", "generate"),
                     KeyValue::new("token.kind", "completion"),
+                ],
+            );
+        }
+        if let Some(cached_prompt_tokens) = observation.cached_prompt_tokens {
+            self.generation_tokens.add(
+                cached_prompt_tokens,
+                &[
+                    KeyValue::new("operation", "generate"),
+                    KeyValue::new("token.kind", "cached_prompt"),
                 ],
             );
         }
@@ -1434,7 +1673,7 @@ fn pinned_model_key(pool: &str, model: &str) -> PinnedModelKey {
     (sanitize_label(pool), sanitize_model_label(model))
 }
 
-fn sanitize_model_label(value: &str) -> String {
+pub(super) fn sanitize_model_label(value: &str) -> String {
     const MAX_MODEL_LABEL_LEN: usize = 256;
     if value.is_empty()
         || value.len() > MAX_MODEL_LABEL_LEN
@@ -1522,47 +1761,25 @@ fn record_lane_updates(instrument: &Gauge<f64>, values: &[LaneSnapshot]) {
 fn record_request_completed_to(
     telemetry: Option<&GatewayTelemetry>,
     span_context: Option<&SpanContext>,
-    operation: &str,
-    status: u16,
-    machine_profile: &str,
-    duration_s: f64,
-    admission_outcome: AdmissionOutcome,
+    observation: &RequestCompletionObservation<'_>,
 ) {
     if let Some(telemetry) = telemetry {
-        telemetry.request_completed(
-            operation,
-            status,
-            machine_profile,
-            duration_s,
-            admission_outcome,
-        );
+        telemetry.request_completed(observation);
     }
-    super::tracing::record_inference_completion_log(
-        span_context,
-        bounded_operation(operation),
-        status,
-    );
+    let bounded = RequestCompletionObservation {
+        operation: bounded_operation(observation.operation),
+        ..*observation
+    };
+    super::tracing::record_inference_completion_log(span_context, &bounded);
 }
 
 /// Record one completed inference request, its admission decision, and its one
 /// privacy-safe completion log from a single semantic call site.
 pub fn record_request_completed(
     span_context: Option<&SpanContext>,
-    operation: &str,
-    status: u16,
-    machine_profile: &str,
-    duration_s: f64,
-    admission_outcome: AdmissionOutcome,
+    observation: &RequestCompletionObservation<'_>,
 ) {
-    record_request_completed_to(
-        telemetry(),
-        span_context,
-        operation,
-        status,
-        machine_profile,
-        duration_s,
-        admission_outcome,
-    );
+    record_request_completed_to(telemetry(), span_context, observation);
 }
 
 #[allow(dead_code)] // Managed composition API plus disabled-path benchmark seam.
@@ -1618,6 +1835,53 @@ pub fn set_messaging_client_ready(ready: bool) {
     }
 }
 
+#[allow(dead_code)] // Managed composition API.
+fn record_key_snapshot_poll_to(
+    target: Option<&GatewayTelemetry>,
+    outcome: KeySnapshotPollOutcome,
+) -> bool {
+    let Some(target) = target else {
+        return false;
+    };
+    target.record_key_snapshot_poll(outcome);
+    true
+}
+
+/// Count one terminal key-snapshot poll tick.
+///
+/// The managed key poller calls this once per tick. The `not_modified` versus
+/// `installed`/`discarded` split is the conditional-GET hit rate for this
+/// replica; `discarded` additionally isolates full snapshot bodies that were
+/// fetched and then dropped because the version had not advanced.
+#[allow(dead_code)] // Managed composition API.
+pub fn record_key_snapshot_poll(outcome: KeySnapshotPollOutcome) {
+    let _ = record_key_snapshot_poll_to(telemetry(), outcome);
+}
+
+#[allow(dead_code)] // Managed composition API.
+fn record_settlement_confirm_to(
+    target: Option<&GatewayTelemetry>,
+    outcome: SettlementConfirmOutcome,
+    duration: Duration,
+) -> bool {
+    let Some(target) = target else {
+        return false;
+    };
+    target.record_settlement_confirm(outcome, duration);
+    true
+}
+
+/// Record one settlement-confirmation event on the buffered response path.
+///
+/// The duration is the wall-clock time the response was held waiting on the
+/// control plane, and is recorded only for the two outcomes that actually
+/// awaited it. Divide against `sie.gateway.request.duration` on the same
+/// process to read the confirm's share of buffered response latency.
+#[allow(dead_code)] // Managed composition API.
+pub fn record_settlement_confirm(outcome: SettlementConfirmOutcome, duration: Duration) {
+    let _ = record_settlement_confirm_to(telemetry(), outcome, duration);
+}
+
 fn record_queue_publish_to(
     target: Option<&GatewayTelemetry>,
     observation: &QueuePublishObservation<'_>,
@@ -1634,6 +1898,20 @@ fn record_queue_publish_to(
 /// histogram. The detached durability monitor owns the separate ACK event.
 pub fn record_queue_publish(observation: QueuePublishObservation<'_>) {
     let _ = record_queue_publish_to(telemetry(), &observation);
+}
+
+/// Count one per-lane queue admission decision.
+///
+/// `lane` must be an exact member of the deployment's physical lane catalog.
+/// Callers that cannot resolve one omit the observation rather than inventing
+/// a synthetic lane — the contract's `gateway_lane_admission_domain` forbids a
+/// fallback series, and the lane-free
+/// [`record_queue_publish`] counter still carries the aggregate
+/// `backpressure` outcome for an enforced shed.
+pub fn record_queue_lane_admission_decision(lane: &PhysicalLane, outcome: LaneAdmissionOutcome) {
+    if let Some(telemetry) = telemetry() {
+        telemetry.record_queue_lane_admission_decision(lane, outcome);
+    }
 }
 
 /// Record one terminal result-wait event exactly once.
@@ -1659,6 +1937,24 @@ fn record_queue_result_chunk_received_to(
 pub fn record_queue_result_chunk_received(payload_bytes: Option<usize>) {
     let payload_bytes = payload_bytes.and_then(|value| u64::try_from(value).ok());
     let _ = record_queue_result_chunk_received_to(telemetry(), payload_bytes);
+}
+
+fn record_queue_worker_pool_event_to(
+    target: Option<&GatewayTelemetry>,
+    pool: &'static str,
+    event: QueueWorkerPoolEvent,
+) -> bool {
+    let Some(target) = target else {
+        return false;
+    };
+    target.record_queue_worker_pool_event(pool, event);
+    true
+}
+
+/// Count one bound event on a keyed worker pool. `pool` is a compile-time
+/// constant per pool, so the attribute cardinality stays finite.
+pub fn record_queue_worker_pool_event(pool: &'static str, event: QueueWorkerPoolEvent) {
+    let _ = record_queue_worker_pool_event_to(telemetry(), pool, event);
 }
 
 fn record_queue_result_chunk_rejection_to(
@@ -1716,6 +2012,21 @@ pub fn record_queue_event(event: QueueEvent, outcome: QueueEventOutcome) {
     if let Some(telemetry) = telemetry() {
         telemetry.record_queue_event(event, outcome);
     }
+}
+
+fn record_unsupported_model_route_exclusion_to(target: Option<&GatewayTelemetry>) -> bool {
+    let Some(target) = target else {
+        return false;
+    };
+    target.record_unsupported_model_route_exclusion();
+    true
+}
+
+/// Count one queue-lane resolution that passed over a lane because a worker
+/// in it reported that it cannot serve the requested model. The counter
+/// carries no attributes, so model ids never become metric dimensions.
+pub fn record_unsupported_model_route_exclusion() {
+    let _ = record_unsupported_model_route_exclusion_to(telemetry());
 }
 
 fn record_provisioning_response_to(
@@ -1954,6 +2265,100 @@ mod tests {
         (telemetry, exporter, provider)
     }
 
+    fn every_admission_outcome() -> [AdmissionOutcome; 12] {
+        use AdmissionOutcome::*;
+        // A new variant fails to compile here until it is listed below.
+        let _exhaustive = |outcome: AdmissionOutcome| match outcome {
+            Admitted
+            | Unauthenticated
+            | Forbidden
+            | AuthMisconfigured
+            | RegionMismatch
+            | LicenseExcluded
+            | ServingUnavailable
+            | PayloadTooLarge
+            | InvalidRequest
+            | InsufficientCredits
+            | KeySpendLimitExceeded
+            | RateLimited => (),
+        };
+        [
+            Admitted,
+            Unauthenticated,
+            Forbidden,
+            AuthMisconfigured,
+            RegionMismatch,
+            LicenseExcluded,
+            ServingUnavailable,
+            PayloadTooLarge,
+            InvalidRequest,
+            InsufficientCredits,
+            KeySpendLimitExceeded,
+            RateLimited,
+        ]
+    }
+
+    #[test]
+    fn every_admission_outcome_is_declared_in_the_telemetry_contract() {
+        let contract: serde_yaml::Value = serde_yaml::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../telemetry/contract.yaml"
+        )))
+        .expect("telemetry contract parses");
+        let declared: HashSet<&str> = contract["enums"]["admission_outcome"]
+            .as_sequence()
+            .expect("admission_outcome is a contract enum")
+            .iter()
+            .map(|value| value.as_str().expect("enum values are strings"))
+            .collect();
+        for outcome in every_admission_outcome() {
+            assert!(
+                declared.contains(outcome.as_str()),
+                "{} is missing from enums.admission_outcome in telemetry/contract.yaml",
+                outcome.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn every_admission_outcome_exports_a_distinct_label() {
+        let labels: HashSet<&str> = every_admission_outcome()
+            .into_iter()
+            .map(AdmissionOutcome::as_str)
+            .collect();
+        assert_eq!(labels.len(), every_admission_outcome().len());
+    }
+
+    #[test]
+    fn unsupported_model_route_exclusions_export_one_attribute_free_counter() {
+        assert!(!record_unsupported_model_route_exclusion_to(None));
+
+        let (telemetry, exporter, provider) = metric_points();
+        assert!(record_unsupported_model_route_exclusion_to(Some(
+            &telemetry
+        )));
+        assert!(record_unsupported_model_route_exclusion_to(Some(
+            &telemetry
+        )));
+
+        provider.force_flush().expect("force_flush");
+        let resource_metrics = exporter.get_finished_metrics().expect("finished metrics");
+        let metric = resource_metrics
+            .iter()
+            .flat_map(|resource| resource.scope_metrics())
+            .flat_map(|scope| scope.metrics())
+            .find(|metric| metric.name() == ROUTING_UNSUPPORTED_MODEL_EXCLUSIONS_METRIC_NAME)
+            .expect("exclusion counter exported");
+        assert_eq!(metric.unit(), "{exclusion}");
+        let AggregatedMetrics::U64(MetricData::Sum(sum)) = metric.data() else {
+            panic!("exclusion counter must be a u64 sum");
+        };
+        let points: Vec<_> = sum.data_points().collect();
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].value(), 2);
+        assert_eq!(points[0].attributes().count(), 0);
+    }
+
     #[test]
     fn dispatch_contract_exports_one_counter_and_histogram_observation() {
         let (telemetry, exporter, provider) = metric_points();
@@ -2034,6 +2439,234 @@ mod tests {
             })
             .collect();
         assert_eq!(duration_attributes, dispatch_attributes);
+    }
+
+    /// The worker-pool counter is the two fixed pools crossed with the two
+    /// saturation events, so its whole series ceiling is four and cannot grow
+    /// with traffic, tenants, or models. Pinning the exported name here as
+    /// well as the shape: the collector drops metric names absent from its
+    /// contract filter, so a rename that misses `telemetry/contract.yaml`
+    /// would emit into a void rather than fail loudly.
+    #[test]
+    fn queue_worker_pool_counter_is_a_closed_pool_by_event_classification() {
+        // Uninitialised telemetry must be a no-op, not a panic: these pools run
+        // on the inbox hot path, which is live before the provider is built in
+        // some test and early-startup paths.
+        assert!(
+            !record_queue_worker_pool_event_to(None, "inbox", QueueWorkerPoolEvent::Saturated),
+            "a None target must return before instrumenting"
+        );
+
+        let (telemetry, exporter, provider) = metric_points();
+        for (pool, event) in [
+            ("inbox", QueueWorkerPoolEvent::Saturated),
+            ("inbox", QueueWorkerPoolEvent::Saturated),
+            ("payload_cleanup", QueueWorkerPoolEvent::Shed),
+        ] {
+            telemetry.record_queue_worker_pool_event(pool, event);
+        }
+
+        provider.force_flush().expect("force_flush");
+        let resource_metrics = exporter.get_finished_metrics().expect("finished metrics");
+        let metrics: Vec<_> = resource_metrics
+            .iter()
+            .flat_map(|resource| resource.scope_metrics())
+            .flat_map(|scope| scope.metrics())
+            .collect();
+        let events = metrics
+            .iter()
+            .find(|metric| metric.name() == QUEUE_WORKER_POOL_EVENTS_METRIC_NAME)
+            .expect("queue worker pool counter");
+        assert_eq!(events.name(), "sie.gateway.queue.worker_pool.events");
+        assert_eq!(events.unit(), "{event}");
+        let AggregatedMetrics::U64(MetricData::Sum(sum)) = events.data() else {
+            panic!("queue worker pool events must export as a u64 sum")
+        };
+        let mut observed: Vec<(String, String, u64)> = sum
+            .data_points()
+            .map(|point| {
+                let mut keys: Vec<&str> = point.attributes().map(|a| a.key.as_str()).collect();
+                keys.sort();
+                assert_eq!(
+                    keys,
+                    vec!["event", "pool"],
+                    "pool and event are the only dimensions"
+                );
+                let attributes: HashMap<_, _> = point
+                    .attributes()
+                    .map(|attribute| {
+                        (
+                            attribute.key.as_str(),
+                            attribute.value.as_str().into_owned(),
+                        )
+                    })
+                    .collect();
+                (
+                    attributes["pool"].clone(),
+                    attributes["event"].clone(),
+                    point.value(),
+                )
+            })
+            .collect();
+        observed.sort();
+        assert_eq!(
+            observed,
+            vec![
+                ("inbox".to_string(), "saturated".to_string(), 2),
+                ("payload_cleanup".to_string(), "shed".to_string(), 1),
+            ]
+        );
+    }
+
+    /// The key-snapshot poll counter is a pure four-value classification with
+    /// no other dimension, so its whole series ceiling is four.
+    #[test]
+    fn key_snapshot_poll_counter_is_a_closed_four_value_classification() {
+        let (telemetry, exporter, provider) = metric_points();
+        for outcome in [
+            KeySnapshotPollOutcome::NotModified,
+            KeySnapshotPollOutcome::NotModified,
+            KeySnapshotPollOutcome::Installed,
+            KeySnapshotPollOutcome::Discarded,
+            KeySnapshotPollOutcome::Error,
+        ] {
+            telemetry.record_key_snapshot_poll(outcome);
+        }
+
+        provider.force_flush().expect("force_flush");
+        let resource_metrics = exporter.get_finished_metrics().expect("finished metrics");
+        let metrics: Vec<_> = resource_metrics
+            .iter()
+            .flat_map(|resource| resource.scope_metrics())
+            .flat_map(|scope| scope.metrics())
+            .collect();
+        assert_eq!(metrics.len(), 1, "one event owns exactly one instrument");
+        let polls = metrics
+            .iter()
+            .find(|metric| metric.name() == KEY_SNAPSHOT_POLLS_METRIC_NAME)
+            .expect("key snapshot poll counter");
+        assert_eq!(polls.unit(), "{poll}");
+        let AggregatedMetrics::U64(MetricData::Sum(sum)) = polls.data() else {
+            panic!("key snapshot polls must export as a u64 sum")
+        };
+        let mut observed: Vec<(String, u64)> = sum
+            .data_points()
+            .map(|point| {
+                let attributes: Vec<&str> = point.attributes().map(|a| a.key.as_str()).collect();
+                assert_eq!(attributes, vec!["outcome"], "outcome is the only dimension");
+                let outcome = point
+                    .attributes()
+                    .next()
+                    .expect("outcome")
+                    .value
+                    .as_str()
+                    .into_owned();
+                (outcome, point.value())
+            })
+            .collect();
+        observed.sort();
+        assert_eq!(
+            observed,
+            vec![
+                ("discarded".to_string(), 1),
+                ("error".to_string(), 1),
+                ("installed".to_string(), 1),
+                ("not_modified".to_string(), 2),
+            ]
+        );
+    }
+
+    /// The confirm that never happened is counted but not timed: `skipped`
+    /// increments the counter and contributes no histogram observation, so the
+    /// duration series stays a clean measure of what a response actually waited
+    /// for.
+    #[test]
+    fn settlement_confirm_counts_every_branch_but_times_only_the_awaited_ones() {
+        let (telemetry, exporter, provider) = metric_points();
+        telemetry.record_settlement_confirm(
+            SettlementConfirmOutcome::Success,
+            Duration::from_millis(25),
+        );
+        telemetry
+            .record_settlement_confirm(SettlementConfirmOutcome::Error, Duration::from_secs(20));
+        telemetry
+            .record_settlement_confirm(SettlementConfirmOutcome::Skipped, Duration::from_secs(9));
+
+        provider.force_flush().expect("force_flush");
+        let resource_metrics = exporter.get_finished_metrics().expect("finished metrics");
+        let metrics: Vec<_> = resource_metrics
+            .iter()
+            .flat_map(|resource| resource.scope_metrics())
+            .flat_map(|scope| scope.metrics())
+            .collect();
+        assert_eq!(metrics.len(), 2, "one event owns exactly two instruments");
+
+        let confirms = metrics
+            .iter()
+            .find(|metric| metric.name() == SETTLEMENT_CONFIRMS_METRIC_NAME)
+            .expect("settlement confirm counter");
+        assert_eq!(confirms.unit(), "{confirm}");
+        let AggregatedMetrics::U64(MetricData::Sum(sum)) = confirms.data() else {
+            panic!("settlement confirms must export as a u64 sum")
+        };
+        let mut counted: Vec<String> = sum
+            .data_points()
+            .map(|point| {
+                assert_eq!(point.value(), 1);
+                point
+                    .attributes()
+                    .next()
+                    .expect("outcome")
+                    .value
+                    .as_str()
+                    .into_owned()
+            })
+            .collect();
+        counted.sort();
+        assert_eq!(
+            counted,
+            vec![
+                "error".to_string(),
+                "skipped".to_string(),
+                "success".to_string()
+            ],
+            "every branch is counted, including the one that issued no call"
+        );
+
+        let duration = metrics
+            .iter()
+            .find(|metric| metric.name() == SETTLEMENT_CONFIRM_DURATION_METRIC_NAME)
+            .expect("settlement confirm duration");
+        assert_eq!(duration.unit(), "s");
+        let AggregatedMetrics::F64(MetricData::Histogram(histogram)) = duration.data() else {
+            panic!("settlement confirm duration must export as an f64 histogram")
+        };
+        let mut timed: Vec<(String, u64, f64)> = histogram
+            .data_points()
+            .map(|point| {
+                assert_eq!(
+                    point.bounds().collect::<Vec<_>>(),
+                    SETTLEMENT_CONFIRM_DURATION_BUCKETS
+                );
+                let outcome = point
+                    .attributes()
+                    .next()
+                    .expect("outcome")
+                    .value
+                    .as_str()
+                    .into_owned();
+                (outcome, point.count(), point.sum())
+            })
+            .collect();
+        timed.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            timed,
+            vec![
+                ("error".to_string(), 1, 20.0),
+                ("success".to_string(), 1, 0.025)
+            ],
+            "the skipped branch awaited nothing and must not be timed"
+        );
     }
 
     #[test]
@@ -2391,6 +3024,7 @@ mod tests {
             tpot_ms: Some(25.0),
             prompt_tokens: Some(11),
             completion_tokens: Some(7),
+            cached_prompt_tokens: Some(8),
         });
 
         provider.force_flush().expect("force_flush");
@@ -2505,7 +3139,11 @@ mod tests {
             .collect();
         assert_eq!(
             token_values,
-            HashMap::from([("prompt".to_string(), 11), ("completion".to_string(), 7)])
+            HashMap::from([
+                ("prompt".to_string(), 11),
+                ("completion".to_string(), 7),
+                ("cached_prompt".to_string(), 8),
+            ])
         );
     }
 
@@ -2786,7 +3424,14 @@ mod tests {
     #[test]
     fn request_and_keda_contract_exports_exact_names_units_labels_and_freshness() {
         let (telemetry, exporter, provider) = metric_points();
-        telemetry.request_completed("encode", 200, "l4-spot", 0.025, AdmissionOutcome::Admitted);
+        telemetry.request_completed(&RequestCompletionObservation {
+            operation: "encode",
+            status: 200,
+            machine_profile: "l4-spot",
+            model: "BAAI/bge-m3",
+            duration_s: 0.025,
+            admission_outcome: AdmissionOutcome::Admitted,
+        });
         let lane = |value| LaneSnapshot {
             pool: "DEFAULT".to_string(),
             machine_profile: "L4-SPOT".to_string(),
@@ -3490,27 +4135,28 @@ mod tests {
         let (telemetry, _exporter, provider) = metric_points();
         let exercise_enabled = |target: &GatewayTelemetry, iterations: usize| {
             for index in 0..iterations {
-                record_request_completed_to(
-                    Some(target),
-                    None,
-                    black_box("encode"),
-                    black_box(200),
-                    black_box("l4-spot"),
-                    black_box((index % 100) as f64 / 1_000.0),
-                    black_box(AdmissionOutcome::Admitted),
-                );
+                let observation = RequestCompletionObservation {
+                    operation: black_box("encode"),
+                    status: black_box(200),
+                    machine_profile: black_box("l4-spot"),
+                    model: black_box("BAAI/bge-m3"),
+                    duration_s: black_box((index % 100) as f64 / 1_000.0),
+                    admission_outcome: black_box(AdmissionOutcome::Admitted),
+                };
+                record_request_completed_to(Some(target), None, black_box(&observation));
             }
         };
         let exercise_disabled = |iterations: usize| {
             for index in 0..iterations {
-                record_request_completed(
-                    None,
-                    black_box("encode"),
-                    black_box(200),
-                    black_box("l4-spot"),
-                    black_box((index % 100) as f64 / 1_000.0),
-                    black_box(AdmissionOutcome::Admitted),
-                );
+                let observation = RequestCompletionObservation {
+                    operation: black_box("encode"),
+                    status: black_box(200),
+                    machine_profile: black_box("l4-spot"),
+                    model: black_box("BAAI/bge-m3"),
+                    duration_s: black_box((index % 100) as f64 / 1_000.0),
+                    admission_outcome: black_box(AdmissionOutcome::Admitted),
+                };
+                record_request_completed(None, black_box(&observation));
             }
         };
 

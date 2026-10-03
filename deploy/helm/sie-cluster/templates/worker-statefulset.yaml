@@ -1,5 +1,6 @@
 {{- $root := . -}}
 {{- $_ := include "sie-cluster.worker.validateLanes" $root -}}
+{{- $_ := include "sie-cluster.upstreams.validate" $root -}}
 {{/*
 Safety guard: the worker-sidecar container is the production data path (NATS ->
 Rust sidecar -> UDS IPC -> colocated adapter process). The sidecar needs
@@ -32,8 +33,18 @@ fast at render time.
 {{- fail (printf "workers.common.modelReadyTimeoutSec=%d must be lower than the adapter worker liveness budget (%d * %d = %ds); increase workers.common.probes.liveness.failureThreshold/periodSeconds or lower modelReadyTimeoutSec" $modelReadyTimeoutS $workerLivenessFailures $workerLivenessPeriodS $workerLivenessBudgetS) }}
 {{- end }}
 {{- $reservedOtelEnv := include "sie-cluster.otel.reservedEnvNames" $root | fromJsonArray -}}
-{{- $reservedWorkerEnv := concat $reservedOtelEnv (list "SIE_BUNDLE" "SIE_GPU_TYPE" "SIE_MACHINE_PROFILE" "SIE_POOL" "SIE_WORKER_ID") -}}
-{{- $reservedSidecarEnv := concat $reservedOtelEnv (list "SIE_BUNDLE" "SIE_GPU_COUNT" "SIE_HEALTH_PUBLISH_ENABLED" "SIE_HEALTH_PUBLISH_INTERVAL_MS" "SIE_MACHINE_PROFILE" "SIE_OTEL_LANE" "SIE_POOL" "SIE_WORKER_ID") -}}
+{{- $reservedWorkerEnv := concat $reservedOtelEnv (list "SIE_BUNDLE" "SIE_GPU_TYPE" "SIE_MACHINE_PROFILE" "SIE_POOL" "SIE_REMOTE_SERVING" "SIE_SGLANG_KERNEL_CACHE_ROOT" "SIE_UPSTREAMS_FILE" "SIE_WORKER_ID") -}}
+{{- range $upstreamName, $_ := (default dict $root.Values.upstreams) -}}
+{{- $reservedWorkerEnv = append $reservedWorkerEnv (include "sie-cluster.upstream.keyEnvName" $upstreamName) -}}
+{{- end -}}
+{{- /* The SIE_STREAM_* trio is chart-owned on the sidecar for the same
+     reason as on the gateway: both create the work streams, first creator
+     wins, so the chart renders one value onto both. An extraEnv override
+     here would move only the workers and silently reintroduce the divergence
+     the gateway-deployment render guards exist to prevent. The sidecar's
+     sie-config credential comes only from config.auth, so SIE_ADMIN_TOKEN and
+     SIE_CONFIG_SERVICE_TOKEN are reserved too. */}}
+{{- $reservedSidecarEnv := concat $reservedOtelEnv (list "SIE_ADMIN_TOKEN" "SIE_BUNDLE" "SIE_CONFIG_SERVICE_TOKEN" "SIE_GPU_COUNT" "SIE_HEALTH_PUBLISH_ENABLED" "SIE_HEALTH_PUBLISH_INTERVAL_MS" "SIE_MACHINE_PROFILE" "SIE_NATS_PASSWORD" "SIE_NATS_USER" "SIE_OTEL_LANE" "SIE_POOL" "SIE_STREAM_MAX_AGE_S" "SIE_STREAM_REPLICAS" "SIE_STREAM_STORAGE" "SIE_WORKER_ID") -}}
 {{- include "sie-cluster.env.assertNoReserved" (dict "path" "workers.common.extraEnv" "entries" $root.Values.workers.common.extraEnv "reserved" $reservedWorkerEnv) -}}
 {{- include "sie-cluster.env.assertNoReserved" (dict "path" "workers.common.workerSidecar.extraEnv" "entries" $root.Values.workers.common.workerSidecar.extraEnv "reserved" $reservedSidecarEnv) -}}
 {{- range $poolName, $pool := .Values.workers.pools }}
@@ -42,6 +53,10 @@ fast at render time.
 {{- fail (printf "workers.pools.%s: missing required `bundles:` map. Define at least one bundle under the pool (e.g. `bundles: { default: { minReplicas: 0, maxReplicas: 1 } }`)." $poolName) }}
 {{- end }}
 {{- $platform := default $root.Values.workers.common.platform $pool.platform }}
+{{- $shmSize := default (dig "shmSize" "" $root.Values.workers.common) (dig "shmSize" "" $pool) | toString | trim }}
+{{- if eq $shmSize "" }}
+{{- fail (printf "workers.pools.%s: the /dev/shm size is empty. Set workers.pools.%s.shmSize or workers.common.shmSize to a Kubernetes quantity (e.g. 8Gi)." $poolName $poolName) }}
+{{- end }}
 {{- $payloadStoreUrl := include "sie-cluster.payloadStoreUrl" $root }}
 {{- range $bundleName, $bundleCfg := $pool.bundles }}
 {{- if dig "enabled" true $bundleCfg }}
@@ -79,9 +94,9 @@ fast at render time.
        and image with `sglang`) set this to the bundle whose image they reuse. Labels, env
        vars, --bundle flag, and metrics still use $bundle. */ -}}
 {{- $imageBundle := default $bundle $bundleCfg.imageBundle }}
-{{- /* Fail fast when a bundle is placed on a platform whose image the release
-       pipeline does not build — mirrors docker_task.platform_supports_bundle and
-       .github/release-matrix.json. Inert for bundles absent from bundlePlatforms. */ -}}
+{{- /* Fail fast when a bundle is placed on a platform without a matching
+       published image. This mirrors bundlePlatforms and is inert for bundles
+       absent from that map. */ -}}
 {{- $bundlePlatforms := $root.Values.workers.common.bundlePlatforms | default dict }}
 {{- $requiredPlatform := index $bundlePlatforms $imageBundle | default "" }}
 {{- if and $requiredPlatform (ne $requiredPlatform $platform) }}
@@ -91,17 +106,73 @@ fast at render time.
 {{- if not (or (eq $engine "pytorch") (eq $engine "candle")) }}
 {{- fail (printf "workers.pools.%s.bundles.%s.engine must be one of: pytorch, candle" $poolName $bundleName) }}
 {{- end }}
+{{- $remoteLane := eq $bundle "remote" }}
+{{- if and $remoteLane (ne $engine "pytorch") }}
+{{- fail (printf "workers.pools.%s.bundles.remote: the remote adapters run only in the pytorch worker; set engine: pytorch on this pool or bundle" $poolName) }}
+{{- end }}
 {{- if and (eq $engine "candle") (ne $bundle "candle") }}
 {{- fail (printf "workers.pools.%s.bundles.%s.engine=candle requires bundle=candle so gateway routing and worker heartbeats agree" $poolName $bundleName) }}
 {{- end }}
+{{- $kernelCacheCommon := default dict $root.Values.workers.common.kernelCache }}
+{{- if not (kindIs "map" $kernelCacheCommon) }}
+{{- fail "workers.common.kernelCache must be a map with an enabled boolean" }}
+{{- end }}
+{{- $kernelCacheEnabled := false }}
+{{- if hasKey $kernelCacheCommon "enabled" }}
+{{- if not (kindIs "bool" (index $kernelCacheCommon "enabled")) }}
+{{- fail "workers.common.kernelCache.enabled must be a boolean" }}
+{{- end }}
+{{- $kernelCacheEnabled = index $kernelCacheCommon "enabled" }}
+{{- end }}
+{{- if hasKey $bundleCfg "kernelCache" }}
+{{- if not (kindIs "map" $bundleCfg.kernelCache) }}
+{{- fail (printf "workers.pools.%s.bundles.%s.kernelCache must be a map with an enabled boolean" $poolName $bundleName) }}
+{{- end }}
+{{- if hasKey $bundleCfg.kernelCache "enabled" }}
+{{- if not (kindIs "bool" (index $bundleCfg.kernelCache "enabled")) }}
+{{- fail (printf "workers.pools.%s.bundles.%s.kernelCache.enabled must be a boolean" $poolName $bundleName) }}
+{{- end }}
+{{- $kernelCacheEnabled = index $bundleCfg.kernelCache "enabled" }}
+{{- end }}
+{{- end }}
+{{- if and $kernelCacheEnabled (ne $engine "pytorch") }}
+{{- fail (printf "workers.pools.%s.bundles.%s.kernelCache is supported only for pytorch/SGLang workers" $poolName $bundleName) }}
+{{- end }}
+{{- $kernelCacheStorageSize := dig "storageSize" "" $kernelCacheCommon | toString | trim }}
+{{- if and $kernelCacheEnabled (eq $kernelCacheStorageSize "") }}
+{{- fail "workers.common.kernelCache.storageSize must be non-empty when the kernel cache is enabled" }}
+{{- end }}
 {{- $gpuCount := int $pool.gpu.count }}
+{{- if and $remoteLane (gt $gpuCount 0) }}
+{{- fail (printf "workers.pools.%s.bundles.remote: a remote lane holds upstream credentials and runs no model on an accelerator; set workers.pools.%s.gpu.count to 0" $poolName $poolName) }}
+{{- end }}
+{{- if and $remoteLane (eq $imageBundle "remote") }}
+{{- fail (printf "workers.pools.%s.bundles.remote: no remote worker image is published; set imageBundle: default to run the remote adapters on the %s-default image" $poolName $platform) }}
+{{- end }}
+{{- if $remoteLane }}
+{{- range $resourceKind := list "requests" "limits" }}
+{{- range $resource, $_ := (dig $resourceKind dict (default dict $pool.resources)) }}
+{{- if not (has $resource (list "cpu" "memory" "ephemeral-storage")) }}
+{{- fail (printf "workers.pools.%s.resources.%s: a remote lane runs no model on an accelerator and requests only cpu, memory and ephemeral-storage" $poolName $resourceKind) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if $pool.runtimeClassName }}
+{{- fail (printf "workers.pools.%s.runtimeClassName: a remote lane runs on the cluster's default container runtime, never a GPU runtime; remove the runtime class" $poolName) }}
+{{- end }}
+{{- end }}
+{{- $deliverUpstreams := and $remoteLane (dig "remote" "serving" true $root.Values.workers) }}
 {{- $poolSidecar := default dict $pool.sidecar }}
 {{- $emulatedChildCount := int (dig "emulatedChildCount" 0 $poolSidecar) }}
 {{- if and (gt $emulatedChildCount 0) (gt $gpuCount 0) }}
 {{- fail (printf "workers.pools.%s.sidecar.emulatedChildCount is CPU-only; GPU pools use gpu.count for child fanout." $poolName) }}
 {{- end }}
+{{- $deviceGroup := dig "deviceGroup" false $pool.gpu }}
+{{- if and $deviceGroup (lt $gpuCount 2) }}
+{{- fail (printf "workers.pools.%s.gpu.deviceGroup requires gpu.count >= 2; a single accelerator is the ordinary pool shape." $poolName) }}
+{{- end }}
 {{- $workerChildCount := 1 }}
-{{- if gt $gpuCount 1 }}
+{{- if and (gt $gpuCount 1) (not $deviceGroup) }}
 {{- $workerChildCount = $gpuCount }}
 {{- else if gt $emulatedChildCount 1 }}
 {{- $workerChildCount = $emulatedChildCount }}
@@ -154,6 +225,22 @@ spec:
       {{- include "sie-cluster.worker.selectorLabels" $root | nindent 6 }}
       sie.superlinked.com/pool: {{ $poolName | quote }}
       sie.superlinked.com/bundle: {{ $bundle | quote }}
+  {{- if $kernelCacheEnabled }}
+  # One retained claim per StatefulSet ordinal. Never point multiple workers at
+  # one writable DeepGEMM cache: upstream compilation is not cross-process safe.
+  volumeClaimTemplates:
+    - metadata:
+        name: kernel-cache
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- $kernelCacheStorageClass := dig "storageClassName" "" $kernelCacheCommon | toString | trim }}
+        {{- if $kernelCacheStorageClass }}
+        storageClassName: {{ $kernelCacheStorageClass | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ $kernelCacheStorageSize | quote }}
+  {{- end }}
   template:
     metadata:
       labels:
@@ -171,14 +258,22 @@ spec:
         sie.superlinked.com/queue-pool: {{ $queuePool | quote }}
       annotations:
         checksum/otel-resource: {{ include "sie-cluster.otel.resourceChecksum" $root | quote }}
+        {{- if $deliverUpstreams }}
+        checksum/upstreams: {{ include "sie-cluster.upstreams.file" $root | sha256sum | quote }}
+        {{- end }}
     spec:
       {{- include "sie-cluster.imagePullSecrets" $root | nindent 6 }}
       {{- if $pool.runtimeClassName }}
       runtimeClassName: {{ $pool.runtimeClassName | quote }}
-      {{- else if $root.Values.workers.common.runtimeClassName }}
+      {{- else if and $root.Values.workers.common.runtimeClassName (not $remoteLane) }}
       runtimeClassName: {{ $root.Values.workers.common.runtimeClassName | quote }}
       {{- end }}
+      {{- if $remoteLane }}
+      serviceAccountName: {{ include "sie-cluster.worker.remoteServiceAccountName" $root }}
+      {{- else }}
       serviceAccountName: {{ include "sie-cluster.serviceAccountName" $root }}
+      {{- end }}
+      automountServiceAccountToken: false
       terminationGracePeriodSeconds: 65
       securityContext:
         # SIE server runs as sie user (uid 1000, gid 1000)
@@ -294,7 +389,7 @@ spec:
             # HuggingFace cache
             - name: HF_HOME
               value: {{ $root.Values.workers.common.hfCache.home | quote }}
-            {{- if $root.Values.workers.common.hfCache.tokenSecret }}
+            {{- if and $root.Values.workers.common.hfCache.tokenSecret (not $remoteLane) }}
             - name: HF_TOKEN
               valueFrom:
                 secretKeyRef:
@@ -305,6 +400,12 @@ spec:
             {{- if $root.Values.workers.common.clusterCache.enabled }}
             - name: SIE_CLUSTER_CACHE
               value: {{ $root.Values.workers.common.clusterCache.url | quote }}
+            {{- end }}
+            {{- if $kernelCacheEnabled }}
+            # The adapter adds an installed-ABI + exact-GPU namespace below
+            # this per-child root before setting upstream compiler cache vars.
+            - name: SIE_SGLANG_KERNEL_CACHE_ROOT
+              value: {{ printf "/var/cache/sie-kernels/%s" $workerContainerName | quote }}
             {{- end }}
             - name: SIE_POOL
               value: {{ $queuePool | quote }}
@@ -328,6 +429,27 @@ spec:
               value: {{ printf "%s-%s" $platform $bundle | quote }}
             - name: SIE_DEPLOYMENT_ENV
               value: {{ if and $root.Values.telemetry $root.Values.telemetry.deploymentEnv }}{{ $root.Values.telemetry.deploymentEnv | quote }}{{ else }}"production"{{ end }}
+            {{- if $remoteLane }}
+            - name: SIE_REMOTE_SERVING
+              value: {{ ternary "1" "0" $deliverUpstreams | quote }}
+            {{- if $deliverUpstreams }}
+            - name: SIE_UPSTREAMS_FILE
+              value: "/etc/sie/upstreams/upstreams.yaml"
+            {{- range $upstreamName, $upstream := (default dict $root.Values.upstreams) }}
+            {{- with $upstream.api_key_secret }}
+            - name: {{ include "sie-cluster.upstream.keyEnvName" $upstreamName }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .name | quote }}
+                  key: {{ .key | quote }}
+            {{- end }}
+            {{- end }}
+            {{- end }}
+            {{- else }}
+            # Only remote lanes hold upstreams; every other lane refuses a remote profile.
+            - name: SIE_REMOTE_SERVING
+              value: "0"
+            {{- end }}
             {{- if $root.Values.workers.common.workerSidecar.enabled }}
             # worker-sidecar owns the NATS loop; the adapter process
             # exposes the IPC server over a shared Unix socket. The chart fails render
@@ -395,11 +517,20 @@ spec:
           volumeMounts:
             - name: model-cache
               mountPath: /models
+            {{- if $kernelCacheEnabled }}
+            - name: kernel-cache
+              mountPath: /var/cache/sie-kernels
+            {{- end }}
             - name: shm
               mountPath: /dev/shm
             {{- if $root.Values.workers.common.workerSidecar.enabled }}
             - name: sie-ipc
               mountPath: /var/run/sie
+            {{- end }}
+            {{- if $deliverUpstreams }}
+            - name: upstreams
+              mountPath: /etc/sie/upstreams
+              readOnly: true
             {{- end }}
         {{- end }}
         {{- if $root.Values.workers.common.workerSidecar.enabled }}
@@ -465,6 +596,7 @@ spec:
             {{- if $root.Values.nats.enabled }}
             - name: SIE_NATS_URL
               value: {{ $root.Values.nats.url | default (printf "nats://%s:4222" ($root.Values.nats.serviceName | default (printf "%s-nats" $root.Release.Name))) | quote }}
+            {{- include "sie-cluster.nats.clientAuthEnv" (dict "root" $root "component" "worker") | nindent 12 }}
             {{- end }}
             {{- if $root.Values.config.enabled }}
             - name: SIE_NATS_CONFIG_TRUSTED_PRODUCERS
@@ -476,13 +608,7 @@ spec:
             # /v1/configs/export through adapter IPC.
             - name: SIE_CONFIG_SERVICE_URL
               value: {{ include "sie-cluster.config.internalUrl" $root | quote }}
-            {{- if $root.Values.config.auth.adminTokenSecretName }}
-            - name: SIE_ADMIN_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: {{ $root.Values.config.auth.adminTokenSecretName }}
-                  key: {{ $root.Values.config.auth.adminTokenSecretKey }}
-            {{- end }}
+            {{- include "sie-cluster.config.serviceTokenEnv" $root | nindent 12 }}
             {{- if $configReconcile.pollIntervalMs }}
             - name: SIE_WORKER_CONFIG_POLL_INTERVAL_MS
               value: {{ $configReconcile.pollIntervalMs | quote }}
@@ -504,6 +630,13 @@ spec:
             # consumers must agree on max_age or retries race against purge.
             - name: SIE_STREAM_MAX_AGE_S
               value: {{ .streamMaxAgeSec | default 1800 | quote }}
+            # Work-queue durability, in lockstep with the gateway for the same
+            # first-creator-wins reason. Validated once in
+            # templates/gateway-deployment.yaml.
+            - name: SIE_STREAM_STORAGE
+              value: {{ lower (default "memory" .streamStorage) | quote }}
+            - name: SIE_STREAM_REPLICAS
+              value: {{ int (default 1 .streamReplicas) | quote }}
             {{- if .maxAckPending }}
             - name: SIE_MAX_ACK_PENDING
               value: {{ .maxAckPending | quote }}
@@ -567,8 +700,11 @@ spec:
               value: {{ $machineProfile | quote }}
             {{- if $pool.gpu }}
             {{- if $pool.gpu.count }}
+            # Serving slots, not cards: a device-group pod runs one engine that
+            # owns every accelerator, so the sidecar must not advertise the
+            # card count as capacity.
             - name: SIE_GPU_COUNT
-              value: {{ $pool.gpu.count | quote }}
+              value: {{ $workerChildCount | quote }}
             {{- end }}
             {{- end }}
             {{- if $payloadStoreUrl }}
@@ -678,7 +814,7 @@ spec:
         - name: shm
           emptyDir:
             medium: Memory
-            sizeLimit: 8Gi
+            sizeLimit: {{ $shmSize }}
         # Model cache (emptyDir - ephemeral, no zone-lock issues)
         - name: model-cache
           emptyDir:
@@ -690,6 +826,11 @@ spec:
           emptyDir:
             medium: Memory
             sizeLimit: 64Mi
+        {{- end }}
+        {{- if $deliverUpstreams }}
+        - name: upstreams
+          secret:
+            secretName: {{ include "sie-cluster.upstreams.secretName" $root }}
         {{- end }}
 {{- end }}
 {{- end }}

@@ -208,6 +208,25 @@ def test_responses_rejects_redirect_without_retrying() -> None:
         client.close()
 
 
+def test_responses_consumes_modal_continuation_without_reposting() -> None:
+    redirect = _sync_response(
+        303,
+        {},
+        headers={"location": "/v1/responses?__modal_attempt_token=opaque"},
+    )
+    with patch("sie_sdk.client.sync.httpx.Client") as client_cls:
+        client_cls.return_value.post.return_value = redirect
+        client_cls.return_value.get.return_value = _sync_response(200, _payload())
+        client = SIEClient("https://gateway.example.test")
+
+        result = client.responses("m", "Hi")
+
+        assert result["status"] == "completed"
+        assert client_cls.return_value.post.call_count == 1
+        assert client_cls.return_value.get.call_args.args[0] == "/v1/responses?__modal_attempt_token=opaque"
+        client.close()
+
+
 def test_responses_does_not_retry_midflight_transport_failure() -> None:
     with patch("sie_sdk.client.sync.httpx.Client") as client_cls:
         client_cls.return_value.post.side_effect = httpx.ReadError("connection reset")
@@ -353,4 +372,25 @@ async def test_async_responses_does_not_retry_post_publish_timeout() -> None:
         "usage": {"output_tokens": 4},
         "credits_debited": 12,
     }
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_async_responses_consumes_modal_continuation_without_reposting() -> None:
+    client = SIEAsyncClient("https://gateway.example.test")
+    session = _patch_async_session(
+        client,
+        post_returns=_AsyncRaw(
+            303,
+            {},
+            headers={"location": "/v1/responses?__modal_attempt_token=opaque"},
+        ),
+    )
+    session.get = MagicMock(return_value=_AsyncRaw(200, _payload()))
+
+    result = await client.responses("m", "Hi")
+
+    assert result["status"] == "completed"
+    assert session.post.call_count == 1
+    assert session.get.call_args.args[0] == "/v1/responses?__modal_attempt_token=opaque"
     await client.close()

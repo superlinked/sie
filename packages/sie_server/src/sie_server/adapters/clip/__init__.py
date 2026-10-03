@@ -19,7 +19,6 @@ Example configuration:
 
 from __future__ import annotations
 
-import io
 import logging
 import os
 import threading
@@ -28,14 +27,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import torch
-from PIL import Image
 from torch.nn import functional
 
 from sie_server.adapters._base_adapter import BaseAdapter
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_NOT_LOADED, ComputePrecision
 from sie_server.core.inference_output import EncodeOutput
-from sie_server.types.inputs import media_bytes
+from sie_server.core.preprocessor import ImagePreprocessor
+from sie_server.types.inputs import decode_image
 
 if TYPE_CHECKING:
     from transformers import CLIPModel, CLIPProcessor
@@ -261,7 +260,7 @@ class CLIPAdapter(BaseAdapter):
         embeddings: list[Any] = [None] * len(items)
 
         if image_indices:
-            image_vecs = self._encode_image_items([items[i] for i in image_indices])
+            image_vecs = self._encode_image_items([items[i] for i in image_indices], image_indices)
             for slot, i in enumerate(image_indices):
                 embeddings[i] = image_vecs[slot]
 
@@ -314,49 +313,62 @@ class CLIPAdapter(BaseAdapter):
                     self._preprocess_pool = pool
         return pool
 
-    def _preprocess_one(self, img_input: Any) -> torch.Tensor:
+    def _preprocess_one(
+        self, img_input: Any, *, item_index: int | None = None, image_index: int | None = None
+    ) -> torch.Tensor:
         """Decode + preprocess a single image input into a ``[C, H, W]`` tensor.
 
         Stateless per call — the HF image processor and PIL release the GIL on
         the heavy work, so this is safe to fan across the preprocessing pool.
+        ``item_index``/``image_index`` name the request-local position in the
+        typed decode error.
         """
         assert self._processor is not None
 
-        img_bytes = media_bytes(img_input, kind="image")
-        pil_img = Image.open(io.BytesIO(img_bytes))
-        # Convert to RGB if necessary (CLIP expects RGB)
-        if pil_img.mode != "RGB":
-            pil_img = pil_img.convert("RGB")
+        # decode_image raises InvalidMediaError (-> 400 INVALID_INPUT) on
+        # non-bytes or undecodable payloads; CLIP expects RGB.
+        pil_img = decode_image(img_input, item_index=item_index, image_index=image_index)
         processed = self._processor(images=pil_img, return_tensors="pt")
         return processed["pixel_values"][0]
 
-    def _preprocess_image_batch(self, img_inputs: list[Any]) -> torch.Tensor:
-        """Preprocess a flat list of image inputs into a ``[N, C, H, W]`` tensor.
+    def _preprocess_image_batch(self, jobs: list[tuple[int, int, Any]]) -> torch.Tensor:
+        """Preprocess flat ``(item_index, image_index, image_input)`` jobs into ``[N, C, H, W]``.
 
         Per-image preprocessing is independent, so a single stacked tensor is
         bit-identical to preprocessing each image on its own — it is only fanned
-        across threads to overlap the CPU-bound decode/resize.
+        across threads to overlap the CPU-bound decode/resize. Each job carries
+        its request-local indices so a decode failure names the exact field.
         """
-        if len(img_inputs) == 1:
-            tensors = [self._preprocess_one(img_inputs[0])]
+
+        def run(job: tuple[int, int, Any]) -> torch.Tensor:
+            item_index, image_index, img_input = job
+            return self._preprocess_one(img_input, item_index=item_index, image_index=image_index)
+
+        if len(jobs) == 1:
+            tensors = [run(jobs[0])]
         else:
             pool = self._get_preprocess_pool()
-            tensors = list(pool.map(self._preprocess_one, img_inputs))
+            tensors = list(pool.map(run, jobs))
         return torch.stack(tensors, dim=0)
 
-    def _encode_image_items(self, items: list[Item]) -> Any:
+    def _encode_image_items(self, items: list[Item], item_indices: list[int]) -> Any:
         """Encode image items as one stacked forward, mean-pooling per item.
 
-        Returns a ``[len(items), dim]`` float32 array, one row per item.
+        ``item_indices`` maps each entry of ``items`` back to its request-local
+        position (the partition in ``encode`` filters to image items), so a
+        decode failure names the original item. Returns a ``[len(items), dim]``
+        float32 array, one row per item.
         """
         assert self._model is not None
 
         # Flatten every image across the items, remembering per-item counts so
         # the stacked features can be split back and mean-pooled per item.
         counts = [len(item.images or []) for item in items]
-        flat_inputs = [img for item in items for img in (item.images or [])]
+        flat_jobs = [
+            (item_indices[slot], j, img) for slot, item in enumerate(items) for j, img in enumerate(item.images or [])
+        ]
 
-        pixel_values = self._preprocess_image_batch(flat_inputs).to(self._device)
+        pixel_values = self._preprocess_image_batch(flat_jobs).to(self._device)
 
         with torch.inference_mode():
             image_features = _feature_tensor(self._model.get_image_features(pixel_values=pixel_values))
@@ -422,18 +434,28 @@ class CLIPAdapter(BaseAdapter):
             msg = f"Unsupported output types: {unsupported}. CLIP only supports 'dense'."
             raise ValueError(msg)
 
-    def get_preprocessor(self) -> Any | None:
-        """Return an ImagePreprocessor for CPU/GPU overlap.
+    def get_preprocessor(self) -> Any:
+        """Return text AND image preprocessors (registered by modality).
+
+        Registering ONLY the image preprocessor left text-only requests with
+        no ``"text"`` preprocessor, so they fell through to the unbatched
+        direct-call path in ``EncodePipeline`` — per-request threads spinning
+        on the adapter's ``_tokenizer_lock`` with no batch formation, which is
+        worse than serial under concurrency (#2874). The base
+        ``CharCountPreprocessor`` (cost-only; the adapter still owns its own
+        tokenization) routes text requests through ``ModelWorker`` batching,
+        where ``_encode_texts`` runs the fused batch as one forward. Same
+        pattern as NemoColEmbed (#1163) and the SigLIP twin.
 
         Returns:
-            ImagePreprocessor wrapping the CLIPProcessor, or None if not loaded.
+            ``[CharCountPreprocessor, ImagePreprocessor]``, or just the text
+            preprocessor if the image processor is unavailable.
         """
+        text_preprocessor = super().get_preprocessor()
         if self._processor is None:
-            return None
+            return text_preprocessor
 
-        from sie_server.core.preprocessor import ImagePreprocessor
-
-        return ImagePreprocessor(self._processor, self._model_name_or_path)
+        return [text_preprocessor, ImagePreprocessor(self._processor, self._model_name_or_path)]
 
     def unload(self) -> None:
         """Shut down the preprocessing pool, then unload model weights."""

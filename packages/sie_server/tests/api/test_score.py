@@ -13,6 +13,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sie_server.adapters.base import ModelCapabilities, ModelDims
 from sie_server.api.score import router as score_router
+from sie_server.api.score import score_usage_from_output
 from sie_server.config.model import (
     EmbeddingDim,
     EncodeTask,
@@ -25,6 +26,7 @@ from sie_server.core.inference_output import ScoreOutput
 from sie_server.core.registry import ModelRegistry
 from sie_server.core.timing import RequestTiming
 from sie_server.core.worker import WorkerResult
+from sie_server.types.inputs import MAX_ITEM_TEXT_BYTES
 
 # Patch msgpack for numpy support
 m.patch()
@@ -515,6 +517,43 @@ class TestScoreEndpoint:
         assert data["detail"]["code"] == "INVALID_INPUT"
         assert data["detail"]["message"] == "Expected `str | null`, got `int` - at `$.query.text`"
 
+    def test_score_query_over_the_text_cap_rejected(self, client: TestClient, mock_adapter: MagicMock) -> None:
+        """A query over the per-item text bound is a 400 before anything scores it."""
+        response = client.post(
+            "/v1/score/test-reranker",
+            json={"query": {"text": "q" * (MAX_ITEM_TEXT_BYTES + 1)}, "items": [{"text": "Doc"}]},
+            headers=JSON_HEADERS,
+        )
+        assert response.status_code == 400
+        assert response.json()["detail"] == {
+            "code": "INVALID_INPUT",
+            "message": f"Field 'query' must hold at most {MAX_ITEM_TEXT_BYTES} bytes of UTF-8 text",
+        }
+        mock_adapter.score_pairs.assert_not_called()
+
+    def test_score_item_over_the_text_cap_rejected(self, client: TestClient, mock_adapter: MagicMock) -> None:
+        response = client.post(
+            "/v1/score/test-reranker",
+            json={
+                "query": {"text": "Query"},
+                "items": [{"text": "Doc"}, {"text": "é" * (MAX_ITEM_TEXT_BYTES // 2 + 1)}],
+            },
+            headers=JSON_HEADERS,
+        )
+        assert response.status_code == 400
+        assert response.json()["detail"]["message"] == (
+            f"Field 'items[1]' must hold at most {MAX_ITEM_TEXT_BYTES} bytes of UTF-8 text"
+        )
+        mock_adapter.score_pairs.assert_not_called()
+
+    def test_score_items_at_the_text_cap_accepted(self, client: TestClient) -> None:
+        response = client.post(
+            "/v1/score/test-reranker",
+            json={"query": {"text": "Query"}, "items": [{"text": "x" * MAX_ITEM_TEXT_BYTES}]},
+            headers=JSON_HEADERS,
+        )
+        assert response.status_code == 200
+
     def test_score_missing_query_rejected(self, client: TestClient) -> None:
         """Missing query is rejected."""
         response = client.post(
@@ -749,3 +788,88 @@ class TestScoreProfileResolution:
             headers=JSON_HEADERS,
         )
         assert response.status_code == 200
+
+
+class TestScoreNonFiniteGuard:
+    """Non-finite (NaN/inf) model output must fail closed on both wire formats.
+
+    Regression for pass-2 audit A2: a cross-encoder emitting NaN/inf scores
+    (observed on cross-encoder/ms-marco-MiniLM-L-6-v2 on CPU) crashed
+    json.dumps into a bare un-enveloped 500 on the JSON path, and returned
+    HTTP 200 with the NaN ranked as a valid score on the msgpack path (silent
+    corruption for any msgpack client). Both now fail closed with a typed,
+    enveloped 500 INFERENCE_ERROR naming the model.
+    """
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+    @pytest.mark.parametrize("accept", ["application/json", "application/msgpack"])
+    def test_non_finite_scores_fail_closed(
+        self, client: TestClient, mock_adapter: MagicMock, bad: float, accept: str
+    ) -> None:
+        # One valid score, one non-finite: the bad value must abort the response.
+        mock_adapter.score.side_effect = None
+        mock_adapter.score.return_value = [0.9, bad]
+
+        response = client.post(
+            "/v1/score/test-reranker",
+            json={
+                "query": {"text": "Query"},
+                "items": [{"text": "Doc A"}, {"text": "Doc B"}],
+            },
+            headers={"Accept": accept},
+        )
+
+        # Never HTTP 200 with a NaN ranked as valid; never a bare 500 without
+        # an error envelope. Errors are always emitted as JSON detail envelopes
+        # regardless of the requested Accept.
+        assert response.status_code == 500
+        detail = response.json()["detail"]
+        assert detail["code"] == "INFERENCE_ERROR"
+        assert "test-reranker" in detail["message"]
+        assert "non-finite" in detail["message"]
+
+    def test_all_finite_scores_still_succeed(self, client: TestClient, mock_adapter: MagicMock) -> None:
+        """The guard does not reject ordinary finite scores (incl. negatives/zero)."""
+        mock_adapter.score.side_effect = None
+        mock_adapter.score.return_value = [-3.5, 0.0, 2.1]
+
+        response = client.post(
+            "/v1/score/test-reranker",
+            json={
+                "query": {"text": "Query"},
+                "items": [{"text": "A"}, {"text": "B"}, {"text": "C"}],
+            },
+            headers=JSON_HEADERS,
+        )
+        assert response.status_code == 200
+        assert len(response.json()["scores"]) == 3
+
+
+class TestScoreUsageContentBreakdown:
+    """``usage.input_tokens_details.content_tokens`` reports the caller's text."""
+
+    def test_reports_content_tokens_beside_the_templated_total(self) -> None:
+        output = ScoreOutput(
+            scores=np.array([0.5, 0.25], dtype=np.float32),
+            input_token_counts=[80, 90],
+            content_token_counts=[7, 17],
+        )
+
+        assert score_usage_from_output(output) == {
+            "input_tokens": 170,
+            "input_tokens_details": {"content_tokens": 24},
+        }
+
+    def test_omits_the_breakdown_when_the_adapter_does_not_split_it(self) -> None:
+        output = ScoreOutput(scores=np.array([0.5], dtype=np.float32), input_token_counts=[80])
+
+        assert score_usage_from_output(output) == {"input_tokens": 80}
+
+    def test_omits_a_breakdown_larger_than_its_pair(self) -> None:
+        output = ScoreOutput(
+            scores=np.array([0.5], dtype=np.float32),
+            input_token_counts=[80],
+            content_token_counts=[81],
+        )
+
+        assert score_usage_from_output(output) == {"input_tokens": 80}

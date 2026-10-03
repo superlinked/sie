@@ -1,8 +1,8 @@
 """Environment-driven configuration for the SIE MCP edge service.
 
 The edge holds one server-side cluster credential (`SIE_API_KEY`) and validates
-per-user connector secrets at its own boundary — the Req 12 auth shim. Real
-per-user key issuance + metering integrates later via Req 10 (#1313).
+per-user connector secrets at its own boundary. Issued per-user keys and metering
+can integrate at that boundary later.
 """
 
 import os
@@ -10,7 +10,7 @@ from dataclasses import dataclass
 
 _DEFAULT_BASE_URL = "http://localhost:8080"
 _DEFAULT_MODEL = "docling"
-# answer_questions (#1309) model ids: dense encoder and cross-encoder reranker.
+# answer_questions model ids: dense encoder and cross-encoder reranker.
 # The grounded-answer generator reuses _DEFAULT_GENERATE_MODEL (defined below).
 _DEFAULT_ENCODE_MODEL = "BAAI/bge-m3"
 _DEFAULT_RERANK_MODEL = "BAAI/bge-reranker-v2-m3"
@@ -33,7 +33,7 @@ _DEFAULT_QA_MAX_CHUNKS = 2000
 _DEFAULT_CAPTION_MODEL = "microsoft/Florence-2-base-ft"
 # CLIP is the zero-shot default: it is contrastively trained for cosine ranking,
 # so client-side cosine/argmax separates labels cleanly. SigLIP's sigmoid-trained
-# embeddings rank poorly under naive cosine (validated live on Modal) — override
+# embeddings rank poorly under naive cosine — override
 # via SIE_MCP_EMBED_MODEL if you supply your own scoring.
 _DEFAULT_EMBED_MODEL = "openai/clip-vit-base-patch32"
 _DEFAULT_IMAGE_TOP_K = 5
@@ -74,9 +74,8 @@ DEFAULT_MAX_DOCUMENT_BYTES = 50 * 1024 * 1024
 # rendered to images. Override via SIE_MCP_MAX_IMAGE_BYTES.
 DEFAULT_MAX_IMAGE_BYTES = 20 * 1024 * 1024
 
-# Provisional VL-OCR default for the scanned/complex-page quality upgrade (#1307).
-# The committed OCR-engine choice is owned by Req 1's ADR (#955); pin MinerU2.5-Pro
-# here as the demo default and re-source from #955 once that decision lands.
+# Provisional VL-OCR default for scanned and complex pages. Pin MinerU2.5-Pro
+# here as the demo default; deployments can override it through configuration.
 DEFAULT_VLOCR_MODEL = "opendatalab/MinerU2.5-Pro-2604-1.2B"
 
 # GLiNER models for extract_entities / redact_pii. Env-overridable (SIE_MCP_EXTRACT_MODEL
@@ -200,9 +199,9 @@ class MCPConfig:
     qa_max_questions: int
     qa_max_chunks: int
     # claude.ai connectors are OAuth-only (no pasteable Bearer); the edge bridges
-    # the OAuth handshake onto the connector-secret shim (#1312). `public_base_url`
+    # the OAuth handshake onto the connector-secret shim. `public_base_url`
     # pins the externally reachable origin used to build OAuth metadata URLs; when
-    # unset it is derived per-request from forwarded host/proto headers.
+    # unset it is derived per-request from a loopback or SIE_MCP_ALLOWED_HOSTS Host header.
     oauth_enabled: bool
     public_base_url: str | None
     oauth_redirect_uris: tuple[str, ...]

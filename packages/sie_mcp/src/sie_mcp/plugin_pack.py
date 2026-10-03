@@ -1,4 +1,4 @@
-"""Build a ready-to-share plugin install pack for a hosted SIE MCP edge."""
+"""Build a ready-to-share plugin install pack for an SIE MCP edge."""
 
 from __future__ import annotations
 
@@ -56,11 +56,14 @@ def build_plugin_pack(
     mcp_url: str,
     out_dir: Path,
     connector_secret: str | None = None,
-    cluster_label: str = "sie-test",
+    cluster_label: str = "sie-cluster",
     claude_code_skill_mds: Iterable[str] = (),
     cowork_guide_md: str | None = None,
 ) -> PluginPackReport:
-    """Write a hosted-cluster plugin pack: skill ZIP, Claude Code skill, and install guide."""
+    """Write a plugin pack: skill ZIP, Claude Code skill, and install guide."""
+    # Keep accepting the former keyword without using or persisting it. Users
+    # provide connector credentials only at installation time.
+    del connector_secret
     normalized_url = normalize_mcp_url(mcp_url)
     name = skill_name(skill_md)
 
@@ -83,7 +86,6 @@ def build_plugin_pack(
         render_install_guide(
             cluster_label=cluster_label,
             mcp_url=normalized_url,
-            connector_secret=connector_secret,
             skill_name_value=name,
             skill_zip_name=skill_zip.name,
             claude_code_skill_names=tuple(path.parent.name for path in claude_code_skills),
@@ -128,48 +130,69 @@ def render_install_guide(
     *,
     cluster_label: str,
     mcp_url: str,
-    connector_secret: str | None,
     skill_name_value: str,
     skill_zip_name: str,
     claude_code_skill_names: tuple[str, ...],
     has_cowork_guide: bool,
 ) -> str:
     """Render endpoint-specific install instructions for the generated plugin pack."""
-    secret = connector_secret or "<connector-secret>"
-    auth_header = f"Authorization: Bearer {secret}"
+    secret_placeholder = "<connector-secret-from-local-secret-store>"  # noqa: S105 - non-secret placeholder.
+    auth_header = f"Authorization: Bearer {secret_placeholder}"
     claude_code_add = (
         "claude mcp add --scope user --transport http "
-        f"{skill_name_value} {shlex.quote(mcp_url)} --header {shlex.quote(auth_header)}"
+        f"{shlex.quote(skill_name_value)} {shlex.quote(mcp_url)} "
+        '--header "Authorization: Bearer '
+        '${SIE_MCP_CONNECTOR_SECRET:?set it from your local secret store}"'
+    )
+    claude_code_names = ", ".join(f"`{name}`" for name in claude_code_skill_names)
+    claude_code_files = (
+        f"- `claude-code/*/SKILL.md` - Claude Code skill files ({claude_code_names}).\n"
+        if claude_code_skill_names
+        else ""
+    )
+    claude_code_install = (
+        "mkdir -p ~/.claude/skills\ncp -R claude-code/* ~/.claude/skills/\n" if claude_code_skill_names else ""
+    )
+    claude_code_skills_note = (
+        "Restart Claude Code after adding the server and skills. "
+        f"The included Claude Code skills ({claude_code_names}) call the MCP tools "
+        "exposed by the edge directly. "
+        if claude_code_skill_names
+        else "Restart Claude Code after adding the server. "
+    )
+    redaction_note = (
+        "The MCP redaction flow returns redacted text and counts, but not a local "
+        "placeholder-to-original map; do not use it when de-redaction is required."
+        if "redact-pii" in claude_code_skill_names
+        else ""
     )
     cowork_note = "- `cowork/superlinked.md` - Cowork/plugin install notes.\n" if has_cowork_guide else ""
 
     return (
         f"# Superlinked MCP plugin pack for {cluster_label}\n\n"
         "This pack connects an agent surface to an already-running Superlinked MCP edge. "
-        "Use it for the hosted sie-test flow or any managed test cluster where an operator "
-        "has given you an MCP URL and connector secret. You do not need to deploy AWS infra.\n\n"
+        "Use it for any hosted or self-hosted cluster where an operator has given you "
+        "an MCP URL and connector secret.\n\n"
         "## Files\n\n"
         f"- `{skill_zip_name}` - uploadable skill ZIP for claude.ai.\n"
-        f"- `claude-code/*/SKILL.md` - Claude Code skill files ({', '.join(claude_code_skill_names)}).\n"
+        f"{claude_code_files}"
         f"{cowork_note}"
         "\n"
         "## Connector\n\n"
         f"- MCP endpoint: `{mcp_url}`\n"
-        f"- Connector secret: `{secret}`\n\n"
-        "The connector secret is used only in connector settings or the Claude Code MCP command. "
-        "It is not embedded in the skill ZIP or the Claude Code skill file.\n\n"
+        "- Connector secret: retrieve it from your connector configuration or local secret store.\n\n"
+        "No connector secret is embedded in any file in this pack. Keep it in connector settings "
+        "or a local secret store; never paste it into chat.\n\n"
         "## Claude Code\n\n"
-        "Run these commands from this directory:\n\n"
+        "Load the secret into a local environment variable from your secret store, then run "
+        "these commands from this directory. Do not save the value in this pack:\n\n"
         "```bash\n"
         f"{claude_code_add}\n"
-        "mkdir -p ~/.claude/skills\n"
-        "cp -R claude-code/* ~/.claude/skills/\n"
+        f"{claude_code_install}"
+        "unset SIE_MCP_CONNECTOR_SECRET\n"
         "```\n\n"
-        "Restart Claude Code after adding the server and skills. The Claude Code skills mirror "
-        "the PR #1336 parse, summarize, entity-extraction, and PII-redaction flows, but call "
-        "the MCP tools exposed by the Req 12 edge instead of the gateway-backed `sie_tools` CLI. "
-        "The MCP redaction flow returns redacted text and counts, but not a local "
-        "placeholder-to-original map; do not use it when de-redaction is required.\n\n"
+        f"{claude_code_skills_note}"
+        f"{redaction_note}\n\n"
         "## claude.ai / Claude desktop app\n\n"
         "1. Add a custom connector with the MCP endpoint above.\n"
         "2. Click Connect and complete the OAuth sign-in. Enter the connector secret on the "

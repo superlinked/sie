@@ -5,10 +5,9 @@
  * The server is started automatically via globalSetup.ts.
  *
  * To run integration tests:
- *   mise run ts test-integration
+ *   mise run ts -- test-integration
  *
- * These tests mirror the Python SDK integration tests in:
- *   packages/sie_sdk/tests/test_integration.py
+ * These tests exercise the same public surface as the Python SDK integration coverage.
  */
 
 import { readFileSync } from "node:fs";

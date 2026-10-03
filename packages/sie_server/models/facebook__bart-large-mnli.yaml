@@ -1,5 +1,6 @@
 sie_id: facebook/bart-large-mnli
 hf_id: facebook/bart-large-mnli
+hf_revision: d7645e127eaf1aefc7862fd59a17a5aa8558b8ce
 inputs:
   text: true
   image: false

@@ -11,7 +11,6 @@ on the sentence-transformers 5.0 line the default bundle pins.
 
 from __future__ import annotations
 
-import io
 import sys
 from pathlib import Path
 from typing import Any, cast
@@ -19,7 +18,6 @@ from typing import Any, cast
 import numpy as np
 import torch
 from huggingface_hub import snapshot_download
-from PIL import Image
 from sentence_transformers import SparseEncoder
 
 from sie_server.adapters._base_adapter import BaseAdapter
@@ -28,7 +26,7 @@ from sie_server.adapters._types import ERR_NOT_LOADED, ComputePrecision
 from sie_server.adapters._utils import validate_output_types
 from sie_server.core.inference_output import EncodeOutput, SparseVector
 from sie_server.core.loader import is_immutable_revision
-from sie_server.types.inputs import Item, media_bytes
+from sie_server.types.inputs import Item, decode_image
 
 ERR_REQUIRES_TEXT_OR_IMAGE = "SparseEncoderVisionAdapter requires text or image input per item"
 
@@ -191,7 +189,7 @@ class SparseEncoderVisionAdapter(BaseAdapter):
 
         validate_output_types(output_types, {"sparse"}, type(self).__name__)
 
-        inputs = [self._extract_input(item) for item in items]
+        inputs = [self._extract_input(item, item_index=i) for i, item in enumerate(items)]
 
         with torch.inference_mode():
             # SparseEncoder has separate methods for query vs document
@@ -232,14 +230,12 @@ class SparseEncoderVisionAdapter(BaseAdapter):
             is_query=is_query,
         )
 
-    def _extract_input(self, item: Item) -> Any:
+    def _extract_input(self, item: Item, *, item_index: int | None = None) -> Any:
         """Return the SparseEncoder input for an item: PIL image or text."""
         if item.images:
-            img_bytes = media_bytes(item.images[0], kind="image")
-            pil_img = Image.open(io.BytesIO(img_bytes))
-            if pil_img.mode != "RGB":
-                pil_img = pil_img.convert("RGB")
-            return pil_img
+            # decode_image raises InvalidMediaError (-> 400 INVALID_INPUT) on
+            # non-bytes or undecodable payloads, and converts to RGB.
+            return decode_image(item.images[0], item_index=item_index, image_index=0)
         if item.text is not None:
             return item.text
         raise ValueError(ERR_REQUIRES_TEXT_OR_IMAGE)

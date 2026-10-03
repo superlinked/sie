@@ -29,12 +29,10 @@ See: https://huggingface.co/docs/transformers/model_doc/owlv2
 from __future__ import annotations
 
 import logging
-from io import BytesIO
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import torch
-from PIL import Image as PILImage
 
 from sie_server.adapters._base_adapter import BaseAdapter
 from sie_server.adapters._spec import AdapterSpec
@@ -42,7 +40,7 @@ from sie_server.adapters._types import ERR_NOT_LOADED, ComputePrecision
 from sie_server.core.inference_output import EncodeOutput, ExtractOutput
 from sie_server.core.preprocessor import DetectionPreprocessor
 from sie_server.core.preprocessor.vision import collect_detection_prepared_items
-from sie_server.types.inputs import media_bytes
+from sie_server.types.inputs import decode_image
 from sie_server.types.responses import DetectedObject
 
 if TYPE_CHECKING:
@@ -54,6 +52,13 @@ logger = logging.getLogger(__name__)
 
 _ERR_NO_LABELS = "Owlv2Adapter requires labels for object detection"
 _ERR_ENCODE_NOT_SUPPORTED = "Owlv2Adapter does not support encode(). Use extract() instead."
+
+
+def _square_side(image_processor: Any) -> int:
+    """The side of the square OWLv2 resizes every padded image to (960 for base, 1008 for large)."""
+    size = getattr(image_processor, "size", None) or {}
+    side = size.get("height") if isinstance(size, dict) else getattr(size, "height", None)
+    return int(side) if side else 1008
 
 
 class Owlv2Adapter(BaseAdapter):
@@ -127,9 +132,13 @@ class Owlv2Adapter(BaseAdapter):
             dtype,
         )
 
+        # The fast (torchvision) image processor. The slow NumPy one spent
+        # 0.24 s on a 640 x 480 photo and 15.6 s on an 8192 x 1728 one on an
+        # L4-class host, against a 0.1 s forward pass, and produced the same
+        # 960 x 960 input to within resampling noise.
         self._processor = Owlv2Processor.from_pretrained(
             self._model_name_or_path,
-            use_fast=False,
+            use_fast=True,
             **shared_kwargs,
         )
         self._model = Owlv2ForObjectDetection.from_pretrained(
@@ -146,6 +155,7 @@ class Owlv2Adapter(BaseAdapter):
         self._preprocessor = DetectionPreprocessor(
             image_processor=image_processor,
             model_name=self._model_name_or_path,
+            max_side=2 * _square_side(image_processor),
         )
 
         logger.info("OWL-v2 model loaded successfully")
@@ -228,7 +238,7 @@ class Owlv2Adapter(BaseAdapter):
             image_indices: list[int] = []
 
             for idx, item in enumerate(items):
-                img = self._extract_image(item)
+                img = self._extract_image(item, item_index=idx)
                 if img is not None:
                     images.append(img)
                     image_indices.append(idx)
@@ -391,7 +401,7 @@ class Owlv2Adapter(BaseAdapter):
 
         return objects
 
-    def _extract_image(self, item: Item) -> Image | None:
+    def _extract_image(self, item: Item, *, item_index: int | None = None) -> Image | None:
         """Extract PIL Image from item.
 
         Expects ImageInput format (SDK wire format with .data bytes).
@@ -406,10 +416,9 @@ class Owlv2Adapter(BaseAdapter):
         if not isinstance(img, dict) or "data" not in img:
             return None
 
-        pil_img = PILImage.open(BytesIO(media_bytes(img, kind="image")))
-        if pil_img.mode != "RGB":
-            pil_img = pil_img.convert("RGB")
-        return pil_img
+        # decode_image raises InvalidMediaError (-> 400 INVALID_INPUT) on
+        # non-bytes or undecodable payloads, and converts to RGB.
+        return decode_image(img, item_index=item_index, image_index=0)
 
     def get_preprocessor(self) -> Any | None:
         """Return preprocessor for CPU/GPU overlap.

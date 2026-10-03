@@ -837,7 +837,9 @@ mod tests {
             decode_audio(wav_pcm16(16_000, 1, &frames), None, AudioLimits::default()).unwrap();
         let pcm = prepared.pcm_s16le();
         let reconstructed = pcm
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|bytes| f32::from(i16::from_le_bytes([bytes[0], bytes[1]])) / 32_768.0)
             .collect::<Vec<_>>();
         assert_eq!(reconstructed.len(), prepared.samples.len());

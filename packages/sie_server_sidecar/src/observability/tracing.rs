@@ -48,12 +48,12 @@ pub fn metrics_provider_enabled() -> bool {
     METER_PROVIDER.get().is_some()
 }
 
-// The OTLP transport/proxy/resource plumbing is shared via `sie-telemetry`
-// (#2339); the imports below keep every historical call-site and test name
+// The OTLP transport/proxy/resource plumbing is shared via `sie-telemetry`;
+// the imports below keep every historical call-site and test name
 // resolvable inside this module.
 use sie_telemetry::env::{cleaned_env, sie_tracing_enabled};
 use sie_telemetry::exporters::build_span_exporter;
-use sie_telemetry::resource::{instance_prefix_env, resource_from_values, service_instance_id};
+use sie_telemetry::resource::{instance_prefix_env, resource_from_env, service_instance_id};
 use sie_telemetry::transport::{
     configured_signal_endpoints, endpoint_origin_for_log, otlp_metrics_protocol,
     trace_export_config, OtlpProtocol, SignalExportConfig,
@@ -222,10 +222,10 @@ fn sidecar_service_name(configured: Option<&str>) -> String {
     }
 }
 
-/// Build the resource attributes shared with the gateway and managed lanes.
+/// Build the resource attributes shared with the gateway and other runtimes.
 /// The sidecar's historical shape: no `service.version` attribute and no
 /// `SIE_DEPLOYMENT_ENV` / `AWS_REGION` fallbacks (unlike gateway + worker —
-/// drift flagged in #2339, deliberately not normalized here).
+/// deliberately not normalized here).
 fn otlp_resource(service_name: &str) -> Resource {
     otlp_resource_from_values(
         service_name,
@@ -243,7 +243,7 @@ fn otlp_resource_from_values(
     otel_cloud_region: Option<&str>,
     cloud_region: Option<&str>,
 ) -> Resource {
-    resource_from_values(
+    resource_from_env(
         service_name,
         service_instance_id,
         deployment_environment.unwrap_or(UNKNOWN_RESOURCE_VALUE),
@@ -261,7 +261,9 @@ fn init_tracer(config: &SignalExportConfig) -> Result<Tracer, String> {
 
     let provider = SdkTracerProvider::builder()
         .with_resource(otlp_resource(&service_name))
-        .with_batch_exporter(exporter)
+        .with_span_processor(sie_telemetry::batch_fanin::BatchFanInSpanProcessor::new(
+            opentelemetry_sdk::trace::BatchSpanProcessor::builder(exporter).build(),
+        ))
         .build();
     let tracer = provider.tracer("sie-worker-sidecar");
     global::set_tracer_provider(provider.clone());

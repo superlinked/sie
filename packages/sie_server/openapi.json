@@ -3,7 +3,7 @@
   "info": {
     "title": "SIE Server",
     "description": "Search Inference Engine - GPU inference server for search workloads",
-    "version": "0.7.1"
+    "version": "0.9.0"
   },
   "paths": {
     "/healthz": {
@@ -32,7 +32,7 @@
           "health"
         ],
         "summary": "Livez",
-        "description": "GPU-aware liveness probe.\n\nUnlike /healthz (process-alive only), this exercises the GPU with a tiny CUDA\nsync. A wedged CUDA context (``device-side assert``) is unrecoverable in\nPyTorch, so failing liveness lets the kubelet restart the pod \u2014 the only path\nback to a serving worker (see issue #1025).\n\nIt deliberately does NOT consult the lifecycle ready flag, so graceful\nshutdown draining (when the worker marks itself not-ready) never trips a\nrestart. Wire this to the K8s ``livenessProbe`` with a tolerant\n``failureThreshold`` so a momentarily busy GPU is not mistaken for a wedge.\n\nReturns:\n    200 OK with \"ok\" body if the GPU can run a kernel (or this is a CPU\n    worker). 503 Service Unavailable with \"gpu unhealthy\" if wedged.",
+        "description": "GPU-aware liveness probe.\n\nUnlike /healthz (process-alive only), this exercises the GPU with a tiny CUDA\nsync. A wedged CUDA context (``device-side assert``) is unrecoverable in\nPyTorch, so failing liveness lets the kubelet restart the pod \u2014 the only path\nback to a serving worker.\n\nIt deliberately does NOT consult the lifecycle ready flag, so graceful\nshutdown draining (when the worker marks itself not-ready) never trips a\nrestart. Wire this to the K8s ``livenessProbe`` with a tolerant\n``failureThreshold`` so a momentarily busy GPU is not mistaken for a wedge.\n\nReturns:\n    200 OK with \"ok\" body if the GPU can run a kernel (or this is a CPU\n    worker). 503 Service Unavailable with \"gpu unhealthy\" if wedged.",
         "operationId": "livez_livez_get",
         "responses": {
           "200": {
@@ -52,7 +52,7 @@
           "health"
         ],
         "summary": "Readyz",
-        "description": "Readiness probe.\n\nReturns 200 if the server is ready to accept traffic.\nUsed by Kubernetes to determine if traffic should be routed to this pod.\n\nReadiness has two conditions:\n- Lifecycle state, managed by the lifespan handler: ready after startup\n  completes, not ready during shutdown (draining in-flight requests).\n- GPU health: a tiny CUDA sync confirms the device can still run kernels. A\n  wedged CUDA context (``device-side assert``) keeps returning sticky errors\n  from every inference while a process-alive check stays green, so without\n  this the gateway would keep routing to a dead worker (see issue #1025).\n\nReturns:\n    200 OK with \"ok\" body if ready.\n    503 Service Unavailable if starting up / shutting down (\"not ready\") or\n    the GPU context is wedged (\"gpu unhealthy\").",
+        "description": "Readiness probe.\n\nReturns 200 if the server is ready to accept traffic.\nUsed by Kubernetes to determine if traffic should be routed to this pod.\n\nReadiness has two conditions:\n- Lifecycle state, managed by the lifespan handler: ready after startup\n  completes, not ready during shutdown (draining in-flight requests).\n- GPU health: a tiny CUDA sync confirms the device can still run kernels. A\n  wedged CUDA context (``device-side assert``) keeps returning sticky errors\n  from every inference while a process-alive check stays green, so without\n  this the gateway would keep routing to a dead worker.\n\nReturns:\n    200 OK with \"ok\" body if ready.\n    503 Service Unavailable if starting up / shutting down (\"not ready\") or\n    the GPU context is wedged (\"gpu unhealthy\").",
         "operationId": "readyz_readyz_get",
         "responses": {
           "200": {
@@ -115,6 +115,24 @@
               ],
               "title": "X-Sie-Machine-Profile"
             }
+          },
+          {
+            "name": "X-SIE-Remote",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The only accepted value is `forbid`. It keeps the request off remote upstreams: local capacity serves or refuses it, and a model served only by an upstream answers 400. Any other value answers 400.",
+              "title": "X-Sie-Remote"
+            },
+            "description": "The only accepted value is `forbid`. It keeps the request off remote upstreams: local capacity serves or refuses it, and a model served only by an upstream answers 400. Any other value answers 400."
           }
         ],
         "responses": {
@@ -135,8 +153,11 @@
           "404": {
             "description": "Model not found"
           },
+          "413": {
+            "description": "Request body exceeds the configured size limit"
+          },
           "502": {
-            "description": "Terminal model-load failure (MODEL_LOAD_FAILED). Carried in the ``detail`` envelope: ``{code, message, error_class, permanent, attempts}``. No ``Retry-After`` header \u2014 clients MUST NOT auto-retry. See sie-test#85."
+            "description": "Terminal model-load failure (MODEL_LOAD_FAILED). Carried in the ``detail`` envelope: ``{code, message, error_class, permanent, attempts}``. No ``Retry-After`` header \u2014 clients MUST NOT auto-retry."
           },
           "503": {
             "description": "Model not loaded or service unavailable"
@@ -218,6 +239,24 @@
               ],
               "title": "X-Sie-Machine-Profile"
             }
+          },
+          {
+            "name": "X-SIE-Remote",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The only accepted value is `forbid`. It keeps the request off remote upstreams: local capacity serves or refuses it, and a model served only by an upstream answers 400. Any other value answers 400.",
+              "title": "X-Sie-Remote"
+            },
+            "description": "The only accepted value is `forbid`. It keeps the request off remote upstreams: local capacity serves or refuses it, and a model served only by an upstream answers 400. Any other value answers 400."
           }
         ],
         "responses": {
@@ -238,8 +277,11 @@
           "404": {
             "description": "Model not found"
           },
+          "413": {
+            "description": "Request body exceeds the configured size limit"
+          },
           "502": {
-            "description": "Terminal model-load failure (MODEL_LOAD_FAILED). Carried in the ``detail`` envelope: ``{code, message, error_class, permanent, attempts}``. No ``Retry-After`` header \u2014 clients MUST NOT auto-retry. See sie-test#85."
+            "description": "Terminal model-load failure (MODEL_LOAD_FAILED). Carried in the ``detail`` envelope: ``{code, message, error_class, permanent, attempts}``. No ``Retry-After`` header \u2014 clients MUST NOT auto-retry."
           },
           "503": {
             "description": "Model not loaded or service unavailable"
@@ -305,6 +347,24 @@
               ],
               "title": "X-Sie-Machine-Profile"
             }
+          },
+          {
+            "name": "X-SIE-Remote",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The only accepted value is `forbid`. It keeps the request off remote upstreams: local capacity serves or refuses it, and a model served only by an upstream answers 400. Any other value answers 400.",
+              "title": "X-Sie-Remote"
+            },
+            "description": "The only accepted value is `forbid`. It keeps the request off remote upstreams: local capacity serves or refuses it, and a model served only by an upstream answers 400. Any other value answers 400."
           }
         ],
         "responses": {
@@ -355,6 +415,9 @@
           },
           "503": {
             "description": "Model loading or unavailable"
+          },
+          "504": {
+            "description": "Non-streaming generation exceeded its first_chunk_timeout_s or overall_timeout_s"
           },
           "422": {
             "description": "Validation Error",
@@ -428,6 +491,24 @@
               ],
               "title": "X-Sie-Machine-Profile"
             }
+          },
+          {
+            "name": "X-SIE-Remote",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The only accepted value is `forbid`. It keeps the request off remote upstreams: local capacity serves or refuses it, and a model served only by an upstream answers 400. Any other value answers 400.",
+              "title": "X-Sie-Remote"
+            },
+            "description": "The only accepted value is `forbid`. It keeps the request off remote upstreams: local capacity serves or refuses it, and a model served only by an upstream answers 400. Any other value answers 400."
           }
         ],
         "responses": {
@@ -448,8 +529,11 @@
           "404": {
             "description": "Model not found"
           },
+          "413": {
+            "description": "Request body exceeds the configured size limit"
+          },
           "502": {
-            "description": "Terminal model-load failure (MODEL_LOAD_FAILED). Carried in the ``detail`` envelope: ``{code, message, error_class, permanent, attempts}``. No ``Retry-After`` header \u2014 clients MUST NOT auto-retry. See sie-test#85."
+            "description": "Terminal model-load failure (MODEL_LOAD_FAILED). Carried in the ``detail`` envelope: ``{code, message, error_class, permanent, attempts}``. No ``Retry-After`` header \u2014 clients MUST NOT auto-retry."
           },
           "503": {
             "description": "Model not loaded or service unavailable"
@@ -574,6 +658,24 @@
               ],
               "title": "X-Sie-Machine-Profile"
             }
+          },
+          {
+            "name": "X-SIE-Remote",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The only accepted value is `forbid`. It keeps the request off remote upstreams: local capacity serves or refuses it, and a model served only by an upstream answers 400. Any other value answers 400.",
+              "title": "X-Sie-Remote"
+            },
+            "description": "The only accepted value is `forbid`. It keeps the request off remote upstreams: local capacity serves or refuses it, and a model served only by an upstream answers 400. Any other value answers 400."
           }
         ],
         "responses": {
@@ -668,7 +770,7 @@
           "openai-compat"
         ],
         "summary": "Create Embeddings",
-        "description": "Create embeddings using OpenAI-compatible API.\n\nThis endpoint is compatible with OpenAI's /v1/embeddings API, allowing\ndrop-in replacement for any OpenAI SDK or client.\n\nArgs:\n    request: OpenAI-format embedding request.\n    http_request: FastAPI request (for app state).\n    x_machine_profile: Machine profile header for routing validation.\n\nReturns:\n    OpenAI-format embedding response with embeddings and usage info.",
+        "description": "Create embeddings using OpenAI-compatible API.\n\nThis endpoint is compatible with OpenAI's /v1/embeddings API, allowing\ndrop-in replacement for any OpenAI SDK or client. Route-generated errors\nare emitted as top-level OpenAI ``{\"error\": {...}}`` envelopes, matching\n``/v1/completions``. The one exception is 422 request-body validation,\nwhich still returns FastAPI's ``HTTPValidationError`` ``{\"detail\": [...]}``\nshape (out of scope for this route's error handling; known residual).\n\nArgs:\n    request: OpenAI-format embedding request.\n    http_request: FastAPI request (for app state).\n    x_machine_profile: Machine profile header for routing validation.\n\nReturns:\n    OpenAI-format embedding response with embeddings and usage info.",
         "operationId": "create_embeddings_v1_embeddings_post",
         "parameters": [
           {
@@ -686,6 +788,24 @@
               ],
               "title": "X-Sie-Machine-Profile"
             }
+          },
+          {
+            "name": "X-SIE-Remote",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The only accepted value is `forbid`. It keeps the request off remote upstreams: local capacity serves or refuses it, and a model served only by an upstream answers 400. Any other value answers 400.",
+              "title": "X-Sie-Remote"
+            },
+            "description": "The only accepted value is `forbid`. It keeps the request off remote upstreams: local capacity serves or refuses it, and a model served only by an upstream answers 400. Any other value answers 400."
           }
         ],
         "requestBody": {
@@ -716,10 +836,33 @@
             "description": "Model not found"
           },
           "502": {
-            "description": "Terminal model-load failure (MODEL_LOAD_FAILED). Carried in the ``detail`` envelope: ``{code, message, error_class, permanent, attempts}``. No ``Retry-After`` header \u2014 clients MUST NOT auto-retry. See sie-test#85."
+            "description": "Terminal model-load failure (MODEL_LOAD_FAILED). Carried in the top-level OpenAI ``error`` envelope, whose object adds the model-load extras ``error_class``, ``permanent``, and ``attempts`` to ``{message, type, param, code}``. No ``Retry-After`` header \u2014 clients MUST NOT auto-retry.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpenAIEmbeddingsModelLoadFailedErrorResponse"
+                }
+              }
+            }
           },
           "503": {
-            "description": "Service unavailable"
+            "description": "Service unavailable (retryable). A cold model starts a background load and returns ``MODEL_LOADING`` with a ``Retry-After`` header immediately instead of blocking the request \u2014 clients should retry after the indicated delay. Also returned while unloading, on a full queue, and under transient resource exhaustion. The body is the top-level OpenAI ``error`` envelope.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying the MODEL_LOADING request.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpenAIEmbeddingsErrorResponse"
+                }
+              }
+            }
           },
           "422": {
             "description": "Validation Error",
@@ -758,6 +901,24 @@
               ],
               "title": "X-Sie-Machine-Profile"
             }
+          },
+          {
+            "name": "X-SIE-Remote",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The only accepted value is `forbid`. It keeps the request off remote upstreams: local capacity serves or refuses it, and a model served only by an upstream answers 400. Any other value answers 400.",
+              "title": "X-Sie-Remote"
+            },
+            "description": "The only accepted value is `forbid`. It keeps the request off remote upstreams: local capacity serves or refuses it, and a model served only by an upstream answers 400. Any other value answers 400."
           }
         ],
         "responses": {
@@ -791,6 +952,9 @@
           },
           "503": {
             "description": "Model loading or temporarily unavailable"
+          },
+          "504": {
+            "description": "Non-streaming generation exceeded its first_chunk_timeout_s or overall_timeout_s"
           },
           "422": {
             "description": "Validation Error",
@@ -839,6 +1003,24 @@
               ],
               "title": "X-Sie-Machine-Profile"
             }
+          },
+          {
+            "name": "X-SIE-Remote",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The only accepted value is `forbid`. It keeps the request off remote upstreams: local capacity serves or refuses it, and a model served only by an upstream answers 400. Any other value answers 400.",
+              "title": "X-Sie-Remote"
+            },
+            "description": "The only accepted value is `forbid`. It keeps the request off remote upstreams: local capacity serves or refuses it, and a model served only by an upstream answers 400. Any other value answers 400."
           }
         ],
         "responses": {
@@ -866,6 +1048,9 @@
           },
           "503": {
             "description": "Model loading or temporarily unavailable"
+          },
+          "504": {
+            "description": "Non-streaming generation exceeded its first_chunk_timeout_s or overall_timeout_s"
           },
           "422": {
             "description": "Validation Error",
@@ -976,6 +1161,17 @@
               }
             ],
             "description": "Request timing breakdown"
+          },
+          "usage": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/UsageModel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Authoritative usage when the worker reported counts"
           }
         },
         "type": "object",
@@ -1139,6 +1335,17 @@
             "type": "array",
             "title": "Items",
             "description": "Extraction results for each input item"
+          },
+          "usage": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/UsageModel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Authoritative usage when the worker reported counts"
           }
         },
         "type": "object",
@@ -1357,6 +1564,31 @@
             "minimum": 0.0,
             "title": "Total Tokens",
             "description": "Total prompt and generated tokens"
+          },
+          "prompt_tokens_details": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PromptTokensDetailsModel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Prompt-token breakdown; omitted when the engine does not report prefix-cache hits"
+          },
+          "images": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 4294967295.0,
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Images",
+            "description": "Observed input images on successful image-conditioned generation; omitted for text-only requests"
           }
         },
         "type": "object",
@@ -1383,6 +1615,11 @@
       },
       "ModelCapabilities": {
         "properties": {
+          "streaming": {
+            "type": "boolean",
+            "title": "Streaming",
+            "default": true
+          },
           "grammar": {
             "items": {
               "type": "string"
@@ -1508,6 +1745,9 @@
                 "type": "null"
               }
             ]
+          },
+          "routing": {
+            "$ref": "#/components/schemas/ModelRouting"
           }
         },
         "type": "object",
@@ -1549,6 +1789,44 @@
         ],
         "title": "ModelLoadError",
         "description": "Diagnostic detail for a recorded load failure.\n\nSurfaced in :class:`ModelInfo` when the registry has a sticky\nfailure for the model. Attributes mirror the server-side\n:class:`sie_server.core.load_errors.LoadFailure`."
+      },
+      "ModelRouting": {
+        "properties": {
+          "policy": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "remote_only",
+                  "fallback",
+                  "threshold"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Policy"
+          },
+          "upstream_kind": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "sie",
+                  "openai"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Upstream Kind"
+          }
+        },
+        "type": "object",
+        "title": "ModelRouting",
+        "description": "How the bare model name is served."
       },
       "ModelsListResponse": {
         "properties": {
@@ -1745,25 +2023,10 @@
                   "type": "string"
                 },
                 "type": "array"
-              },
-              {
-                "items": {
-                  "type": "integer"
-                },
-                "type": "array"
-              },
-              {
-                "items": {
-                  "items": {
-                    "type": "integer"
-                  },
-                  "type": "array"
-                },
-                "type": "array"
               }
             ],
             "title": "Input",
-            "description": "Input text(s) or token array(s) to embed."
+            "description": "Input text or list of texts to embed. Token-id arrays are rejected with 400."
           },
           "encoding_format": {
             "anyOf": [
@@ -1792,7 +2055,7 @@
               }
             ],
             "title": "Dimensions",
-            "description": "Number of dimensions (not supported by SIE, ignored)"
+            "description": "Requested embedding width. SIE always returns the model's native dense width, so this is accepted only when it equals that width; any other value is rejected with 400 `unsupported_field` rather than ignored."
           },
           "user": {
             "anyOf": [
@@ -1850,6 +2113,130 @@
         ],
         "title": "OpenAIEmbeddingResponse",
         "description": "OpenAI-compatible embedding response."
+      },
+      "OpenAIEmbeddingsErrorModel": {
+        "properties": {
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "description": "Client-safe error message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Type",
+            "description": "OpenAI error type, e.g. 'server_error'"
+          },
+          "param": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Param",
+            "description": "Offending request field, when known"
+          },
+          "code": {
+            "type": "string",
+            "title": "Code",
+            "description": "Stable SIE error code, e.g. 'MODEL_LOADING'"
+          }
+        },
+        "type": "object",
+        "required": [
+          "message",
+          "type",
+          "code"
+        ],
+        "title": "OpenAIEmbeddingsErrorModel",
+        "description": "Inner object of the top-level OpenAI ``{\"error\": {...}}`` envelope that\n``/v1/embeddings`` route-generated errors emit (e.g. a retryable 503\n``MODEL_LOADING``). Matches the shape ``/v1/completions`` returns."
+      },
+      "OpenAIEmbeddingsErrorResponse": {
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/OpenAIEmbeddingsErrorModel"
+          }
+        },
+        "type": "object",
+        "required": [
+          "error"
+        ],
+        "title": "OpenAIEmbeddingsErrorResponse",
+        "description": "Top-level OpenAI error envelope for a retryable ``/v1/embeddings`` error."
+      },
+      "OpenAIEmbeddingsModelLoadFailedErrorModel": {
+        "properties": {
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "description": "Client-safe error message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Type",
+            "description": "OpenAI error type ('server_error')"
+          },
+          "param": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Param",
+            "description": "Unused for this error; always null"
+          },
+          "code": {
+            "type": "string",
+            "const": "MODEL_LOAD_FAILED",
+            "title": "Code",
+            "description": "Stable error code"
+          },
+          "error_class": {
+            "type": "string",
+            "title": "Error Class",
+            "description": "Classified model-load failure category"
+          },
+          "permanent": {
+            "type": "boolean",
+            "title": "Permanent",
+            "description": "Whether operator action is required before retrying"
+          },
+          "attempts": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Attempts",
+            "description": "Number of failed model-load attempts"
+          }
+        },
+        "type": "object",
+        "required": [
+          "message",
+          "type",
+          "code",
+          "error_class",
+          "permanent",
+          "attempts"
+        ],
+        "title": "OpenAIEmbeddingsModelLoadFailedErrorModel",
+        "description": "Inner error object for a terminal ``/v1/embeddings`` model-load failure,\ncarrying the terminal-failure short-circuit fields alongside the OpenAI shape."
+      },
+      "OpenAIEmbeddingsModelLoadFailedErrorResponse": {
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/OpenAIEmbeddingsModelLoadFailedErrorModel"
+          }
+        },
+        "type": "object",
+        "required": [
+          "error"
+        ],
+        "title": "OpenAIEmbeddingsModelLoadFailedErrorResponse",
+        "description": "Top-level OpenAI error envelope for a terminal ``/v1/embeddings`` model-load failure."
       },
       "OpenAIResponseOutputMessageModel": {
         "properties": {
@@ -1934,6 +2321,16 @@
             "type": "integer",
             "minimum": 0.0,
             "title": "Total Tokens"
+          },
+          "input_tokens_details": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PromptTokensDetailsModel"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "type": "object",
@@ -2026,6 +2423,22 @@
         "title": "ProfileInfo",
         "description": "Information about a profile."
       },
+      "PromptTokensDetailsModel": {
+        "properties": {
+          "cached_tokens": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Cached Tokens",
+            "description": "Prompt tokens served from the engine's prefix cache instead of being prefilled"
+          }
+        },
+        "type": "object",
+        "required": [
+          "cached_tokens"
+        ],
+        "title": "PromptTokensDetailsModel",
+        "description": "Breakdown of the prompt tokens in one generation request."
+      },
       "RelationModel": {
         "properties": {
           "head": {
@@ -2085,6 +2498,22 @@
         ],
         "title": "ScoreEntryModel",
         "description": "Single score entry."
+      },
+      "ScoreInputTokensDetailsModel": {
+        "properties": {
+          "content_tokens": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Content Tokens",
+            "description": "Caller text inside the scored pairs (query, post-truncation document, supplied instruction), each tokenized alone; the remainder of input_tokens is the reranker's prompt template"
+          }
+        },
+        "type": "object",
+        "required": [
+          "content_tokens"
+        ],
+        "title": "ScoreInputTokensDetailsModel",
+        "description": "Breakdown of score input tokens."
       },
       "ScoreResponseModel": {
         "properties": {
@@ -2153,6 +2582,17 @@
             ],
             "title": "Images",
             "description": "Images processed across query-document pairs"
+          },
+          "input_tokens_details": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ScoreInputTokensDetailsModel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Content/template breakdown when the reranker reports it"
           }
         },
         "type": "object",
@@ -2256,6 +2696,35 @@
         "title": "TimingInfoModel",
         "description": "Request timing breakdown."
       },
+      "UsageModel": {
+        "properties": {
+          "input_tokens": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Input Tokens",
+            "description": "Post-truncation input tokens processed"
+          },
+          "images": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Images",
+            "description": "Images processed across the request's items"
+          }
+        },
+        "type": "object",
+        "required": [
+          "input_tokens"
+        ],
+        "title": "UsageModel",
+        "description": "Authoritative worker-emitted usage.\n\nPost-tokenization counts, never a character estimate. A reported 0 is a\nmeasurement (a video-only encode reads no text); an absent block means the\ncounts were unavailable on this path."
+      },
       "ValidationError": {
         "properties": {
           "loc": {
@@ -2296,12 +2765,55 @@
         ],
         "title": "ValidationError"
       },
+      "AudioInputModel": {
+        "description": "Audio input for audio models.",
+        "properties": {
+          "data": {
+            "contentEncoding": "base64",
+            "description": "Audio data. Base64-encoded on the JSON path; native binary on the msgpack path.",
+            "title": "Data",
+            "type": "string"
+          },
+          "format": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Audio format: 'wav', 'mp3', etc.",
+            "title": "Format"
+          },
+          "sample_rate": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Sample rate in Hz. Must be positive.",
+            "title": "Sample Rate"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "AudioInputModel",
+        "type": "object"
+      },
       "DocumentInputModel": {
         "description": "Document input for composite-document extractors (PDF, DOCX, HTML, ...).",
         "properties": {
           "data": {
-            "description": "Document bytes (raw file content)",
-            "format": "binary",
+            "contentEncoding": "base64",
+            "description": "Document bytes (raw file content). Base64-encoded on the JSON path; native binary on the msgpack path.",
             "title": "Data",
             "type": "string"
           },
@@ -2403,8 +2915,8 @@
         "description": "Image input for multimodal models.",
         "properties": {
           "data": {
-            "description": "Image data as bytes",
-            "format": "binary",
+            "contentEncoding": "base64",
+            "description": "Image data. Base64-encoded on the JSON path; native binary on the msgpack path.",
             "title": "Data",
             "type": "string"
           },
@@ -2455,7 +2967,7 @@
               }
             ],
             "default": null,
-            "description": "Text content to encode",
+            "description": "Text content to encode. An item's text and metadata may hold at most 2097152 bytes of UTF-8 together by default (SIE_MAX_ITEM_TEXT_BYTES).",
             "examples": [
               "Hello, world!"
             ],
@@ -2476,6 +2988,30 @@
             "default": null,
             "description": "Images for multimodal models",
             "title": "Images"
+          },
+          "audio": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AudioInputModel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Audio for audio models"
+          },
+          "video": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/VideoInputModel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Video for video models"
           },
           "document": {
             "anyOf": [
@@ -2500,11 +3036,40 @@
               }
             ],
             "default": null,
-            "description": "Arbitrary metadata. Returned in response.",
+            "description": "Arbitrary metadata. Returned in response. Counts toward the item's text size limit.",
             "title": "Metadata"
           }
         },
         "title": "ItemModel",
+        "type": "object"
+      },
+      "VideoInputModel": {
+        "description": "Video input for video models.",
+        "properties": {
+          "data": {
+            "contentEncoding": "base64",
+            "description": "Video data. Base64-encoded on the JSON path; native binary on the msgpack path.",
+            "title": "Data",
+            "type": "string"
+          },
+          "format": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Video format: 'mp4', 'webm', etc.",
+            "title": "Format"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "VideoInputModel",
         "type": "object"
       },
       "EncodeRequestModel": {
@@ -2559,6 +3124,7 @@
                 "items": {
                   "type": "string"
                 },
+                "maxItems": 1000,
                 "type": "array"
               },
               {
@@ -2690,6 +3256,34 @@
             "description": "Client-safe error message",
             "title": "Message",
             "type": "string"
+          },
+          "param": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Exact unsupported request field, when applicable",
+            "title": "Param"
+          },
+          "retry_after_s": {
+            "anyOf": [
+              {
+                "maximum": 60,
+                "minimum": 1,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Authoritative retry hint in seconds for RESOURCE_EXHAUSTED only; null for other terminal errors",
+            "title": "Retry After S"
           }
         },
         "required": [
@@ -2701,6 +3295,44 @@
       },
       "GenerateChunk": {
         "description": "One SIE-native Server-Sent Event from a streaming generate request.",
+        "oneOf": [
+          {
+            "properties": {
+              "done": {
+                "const": true
+              },
+              "error": {
+                "type": "null"
+              },
+              "execution_identity_sha256": {
+                "type": "string"
+              },
+              "execution_binding_sha256": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "execution_identity_sha256",
+              "execution_binding_sha256"
+            ]
+          },
+          {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "execution_identity_sha256"
+                  ]
+                },
+                {
+                  "required": [
+                    "execution_binding_sha256"
+                  ]
+                }
+              ]
+            }
+          }
+        ],
         "properties": {
           "request_id": {
             "description": "Request id shared by every event in the stream",
@@ -2790,6 +3422,34 @@
             ],
             "default": null,
             "description": "Terminal generation error"
+          },
+          "execution_identity_sha256": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Optional worker-origin execution identity, only on a successful terminal event together with execution_binding_sha256. Older or self-hosted deployments may omit both. Distinct from the catalog weights revision and executed bundle/config hash.",
+            "title": "Execution Identity Sha256"
+          },
+          "execution_binding_sha256": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Optional worker-origin execution binding, with the same successful-terminal complete-pair contract",
+            "title": "Execution Binding Sha256"
           }
         },
         "required": [
@@ -2832,6 +3492,7 @@
               }
             ],
             "default": null,
+            "description": "EBNF output cannot be verified, so true is rejected with 400 unsupported_field",
             "title": "Strict"
           }
         },
@@ -2905,6 +3566,7 @@
               }
             ],
             "default": null,
+            "description": "When true, the finished output must parse as JSON and validate against json_schema; otherwise the request fails with MODEL_OUTPUT_PARSE_ERROR",
             "title": "Strict"
           }
         },
@@ -2945,6 +3607,7 @@
               }
             ],
             "default": null,
+            "description": "When true, the finished output must match regex in full; otherwise the request fails with MODEL_OUTPUT_PARSE_ERROR",
             "title": "Strict"
           }
         },

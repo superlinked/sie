@@ -4,12 +4,17 @@ import asyncio
 import time
 from contextlib import ExitStack
 from pathlib import Path
+from typing import Any, ClassVar
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import msgpack
 import numpy as np
 import pytest
+from sie_server.adapters._base_adapter import BaseAdapter
+from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters.laya.adapter import LayaAdapter
 from sie_server.config.model import EmbeddingDim, EncodeTask, ModelConfig, ProfileConfig, Tasks
+from sie_server.core.extract_cost import MAX_EXTRACT_LABELS
 from sie_server.core.inference_output import ExtractOutput, ScoreOutput
 from sie_server.core.loader import expand_profile_variants, load_model_config
 from sie_server.core.registry import ModelRegistry
@@ -24,6 +29,7 @@ from sie_server.ipc_types import (
     ScoreBatchItem,
 )
 from sie_server.queue_executor import QueueExecutor, _validate_prepared_audio
+from sie_server.types.inputs import MAX_ITEM_TEXT_BYTES, InvalidInputError, Item
 
 _MODELS_DIR = Path(__file__).resolve().parents[1] / "models"
 
@@ -333,9 +339,10 @@ class TestEnsureModelReady:
         reg.start_load_async.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_transient_failure_is_not_terminal(self) -> None:
-        """A TRANSIENT in-cooldown failure (OOM/NETWORK/TIMEOUT) stays
-        retryable — it must not be reported as terminal ``failed``.
+    async def test_transient_failure_in_cooldown_is_retried_later(self) -> None:
+        """A TRANSIENT in-cooldown failure is not terminal: the sidecar NAKs
+        the item with a delay so it is redelivered, possibly to another
+        worker, instead of dead-lettering it or holding it here.
         """
         from sie_server.core.load_errors import LoadErrorClass, LoadFailure
 
@@ -349,7 +356,44 @@ class TestEnsureModelReady:
         )
         reg.start_load_async = AsyncMock(return_value=False)
         ex = QueueExecutor(reg)
-        assert await ex.ensure_model_ready("test/model") == "loading_in_progress"
+        assert await ex.ensure_model_ready("test/model") == "retry_later"
+        reg.start_load_async.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_transient_failure_past_its_cooldown_starts_a_new_load(self) -> None:
+        from sie_server.core.load_errors import LoadErrorClass, LoadFailure
+
+        reg = _make_registry(loaded=False, loading=False)
+        reg.get_failure.return_value = LoadFailure(
+            error_class=LoadErrorClass.NETWORK,
+            message="HfHubHTTPError: 503",
+            attempts=2,
+            last_attempt_ts=time.monotonic() - 1000.0,
+            cooldown_s=60.0,
+        )
+        reg.start_load_async = AsyncMock(return_value=True)
+        ex = QueueExecutor(reg)
+        assert await ex.ensure_model_ready("test/model") == "loading_started"
+        reg.start_load_async.assert_awaited_once_with("test/model", "cpu")
+
+    @pytest.mark.asyncio
+    async def test_transient_failure_recorded_mid_start_is_retried_later(self) -> None:
+        from sie_server.core.load_errors import LoadErrorClass, LoadFailure
+
+        reg = _make_registry(loaded=False, loading=False)
+        reg.get_failure.side_effect = [
+            None,
+            LoadFailure(
+                error_class=LoadErrorClass.NETWORK,
+                message="ConnectionError: reset",
+                attempts=1,
+                last_attempt_ts=time.monotonic(),
+                cooldown_s=30.0,
+            ),
+        ]
+        reg.start_load_async = AsyncMock(return_value=False)
+        ex = QueueExecutor(reg)
+        assert await ex.ensure_model_ready("test/model") == "retry_later"
 
     @pytest.mark.asyncio
     async def test_permanent_failure_recorded_mid_start_returns_failed(self) -> None:
@@ -495,6 +539,55 @@ class TestProcessEncodeBatch:
         mock_encode.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_overly_deep_output_schema_is_isolated_as_invalid_input(self) -> None:
+        reg = _make_registry()
+        worker = AsyncMock()
+        fut: asyncio.Future[WorkerResult] = asyncio.Future()
+        fut.set_result(WorkerResult(output=ExtractOutput(entities=[[]]), timing=RequestTiming()))
+        worker.submit_extract_preformed_batch = AsyncMock(return_value=[fut])
+        reg.start_worker = AsyncMock(return_value=worker)
+        schema: dict = {"type": "string"}
+        for _ in range(400):
+            schema = {"type": "object", "properties": {"a": schema}}
+        deep = _extract_item(wiid="deep.0")
+        deep.output_schema = schema
+
+        outcome = await QueueExecutor(reg).process_extract_batch(
+            ProcessExtractBatchRequest(model_id="test/model", items=[deep, _extract_item(wiid="ok.0")])
+        )
+
+        by_id = {item.work_item_id: item for item in outcome.outcomes}
+        assert by_id["deep.0"].disposition == "publish_error_and_ack"
+        assert by_id["deep.0"].error_code == "INVALID_INPUT"
+        assert by_id["ok.0"].disposition == "publish_and_ack"
+        submitted = worker.submit_extract_preformed_batch.await_args.args[0]
+        assert [request.output_schema for request in submitted] == [None]
+
+    @pytest.mark.asyncio
+    async def test_too_many_labels_is_isolated_as_invalid_input(self) -> None:
+        reg = _make_registry()
+        worker = AsyncMock()
+        fut: asyncio.Future[WorkerResult] = asyncio.Future()
+        fut.set_result(WorkerResult(output=ExtractOutput(entities=[[]]), timing=RequestTiming()))
+        worker.submit_extract_preformed_batch = AsyncMock(return_value=[fut])
+        reg.start_worker = AsyncMock(return_value=worker)
+        over = _extract_item(wiid="over.0")
+        over.labels = [f"label {index}" for index in range(MAX_EXTRACT_LABELS + 1)]
+        at_limit = _extract_item(wiid="limit.0")
+        at_limit.labels = [f"label {index}" for index in range(MAX_EXTRACT_LABELS)]
+
+        outcome = await QueueExecutor(reg).process_extract_batch(
+            ProcessExtractBatchRequest(model_id="test/model", items=[over, at_limit])
+        )
+
+        by_id = {item.work_item_id: item for item in outcome.outcomes}
+        assert by_id["over.0"].disposition == "publish_error_and_ack"
+        assert by_id["over.0"].error_code == "INVALID_INPUT"
+        assert by_id["limit.0"].disposition == "publish_and_ack"
+        submitted = worker.submit_extract_preformed_batch.await_args.args[0]
+        assert [len(request.labels) for request in submitted] == [MAX_EXTRACT_LABELS]
+
+    @pytest.mark.asyncio
     async def test_malformed_item_isolated_as_invalid_input(self) -> None:
         """A typed-decode failure on one item in a sub-group is isolated as an
         INVALID_INPUT outcome; the valid item in the same group still runs.
@@ -529,6 +622,66 @@ class TestProcessEncodeBatch:
         # The malformed item never reached inference; only the valid one did.
         mock_encode.assert_awaited_once()
         assert len(mock_encode.await_args.kwargs["items"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_item_over_the_text_cap_is_isolated_as_invalid_input(self) -> None:
+        """An item over the per-item text bound fails alone with INVALID_INPUT,
+        naming its place in the request, before anything tokenizes it. A sibling
+        at the bound still runs, and the rejected item reports no units.
+        """
+        reg = _make_registry()
+
+        async def fake_run_encode(**kwargs):
+            return [{"dense": [0.0]} for _ in kwargs["items"]], RequestTiming()
+
+        with patch(
+            "sie_server.core.encode_pipeline.EncodePipeline.run_encode",
+            new=AsyncMock(side_effect=fake_run_encode),
+        ) as mock_encode:
+            outcome = await QueueExecutor(reg).process_encode_batch(
+                ProcessEncodeBatchRequest(
+                    model_id="test/model",
+                    items=[
+                        _encode_item(wiid="req-1.0", item={"text": "x" * MAX_ITEM_TEXT_BYTES}, item_index=0),
+                        # Two bytes per character: over the bound in bytes, not in characters.
+                        _encode_item(wiid="req-1.1", item={"text": "é" * (MAX_ITEM_TEXT_BYTES // 2 + 1)}, item_index=1),
+                    ],
+                )
+            )
+
+        by_id = {o.work_item_id: o for o in outcome.outcomes}
+        assert by_id["req-1.0"].disposition == "publish_and_ack"
+        rejected = by_id["req-1.1"]
+        assert rejected.disposition == "publish_error_and_ack"
+        assert rejected.error_code == "INVALID_INPUT"
+        assert rejected.error == f"Field 'items[1]' must hold at most {MAX_ITEM_TEXT_BYTES} bytes of UTF-8 text"
+        assert rejected.units is None
+        mock_encode.assert_awaited_once()
+        (encoded,) = mock_encode.await_args.kwargs["items"]
+        assert len(encoded.text) == MAX_ITEM_TEXT_BYTES
+
+    @pytest.mark.asyncio
+    async def test_metadata_msgspec_cannot_encode_is_still_measured(self) -> None:
+        """IPC frames are decoded with ``msgpack.unpackb``, which leaves a timestamp
+        extension as ``msgpack.Timestamp``. Measuring it must not raise and fail
+        the whole batch; the item is encoded as before.
+        """
+        reg = _make_registry()
+        frame = msgpack.packb({"text": "hi", "metadata": {"at": msgpack.Timestamp(1, 0)}}, datetime=False)
+        item = msgpack.unpackb(frame, raw=False)
+
+        async def fake_run_encode(**kwargs):
+            return [{"dense": [0.0]} for _ in kwargs["items"]], RequestTiming()
+
+        with patch(
+            "sie_server.core.encode_pipeline.EncodePipeline.run_encode",
+            new=AsyncMock(side_effect=fake_run_encode),
+        ):
+            outcome = await QueueExecutor(reg).process_encode_batch(
+                ProcessEncodeBatchRequest(model_id="test/model", items=[_encode_item(item=item)])
+            )
+
+        assert outcome.outcomes[0].disposition == "publish_and_ack"
 
     @pytest.mark.asyncio
     async def test_merges_profile_runtime_options_into_adapter_call(self) -> None:
@@ -1186,6 +1339,36 @@ class TestProcessScoreBatch:
         assert len(requests) == 1
 
     @pytest.mark.asyncio
+    async def test_query_or_item_over_the_text_cap_is_invalid_input(self) -> None:
+        reg = _make_registry()
+        worker = AsyncMock()
+        fut: asyncio.Future[WorkerResult] = asyncio.Future()
+        fut.set_result(
+            WorkerResult(output=ScoreOutput(scores=np.array([0.9], dtype=np.float32)), timing=RequestTiming())
+        )
+        worker.submit_score_preformed_batch = AsyncMock(return_value=[fut])
+        reg.start_worker = AsyncMock(return_value=worker)
+        good = _score_item(wiid="good.0")
+        long_query = _score_item(wiid="query.0")
+        long_query.query_item = {"text": "q" * (MAX_ITEM_TEXT_BYTES + 1)}
+        long_doc = _score_item(wiid="doc.0")
+        long_doc.score_items = [{"text": "a"}, {"text": "中" * (MAX_ITEM_TEXT_BYTES // 3 + 1)}]
+
+        outcome = await QueueExecutor(reg).process_score_batch(
+            ProcessScoreBatchRequest(model_id="test/model", items=[good, long_query, long_doc])
+        )
+
+        by_id = {o.work_item_id: o for o in outcome.outcomes}
+        assert by_id["good.0"].disposition == "publish_and_ack"
+        for wiid, field in (("query.0", "query"), ("doc.0", "items[1]")):
+            assert by_id[wiid].disposition == "publish_error_and_ack"
+            assert by_id[wiid].error_code == "INVALID_INPUT"
+            assert by_id[wiid].error == f"Field '{field}' must hold at most {MAX_ITEM_TEXT_BYTES} bytes of UTF-8 text"
+            assert by_id[wiid].units is None
+        (request,) = worker.submit_score_preformed_batch.await_args.args[0]
+        assert request.query.text == "q"
+
+    @pytest.mark.asyncio
     async def test_multimodal_score_items_contribute_media_batch_cost(self) -> None:
         reg = _make_registry()
         worker = AsyncMock()
@@ -1305,6 +1488,83 @@ class TestProcessExtractBatch:
         assert prepare_call.kwargs == {"instruction": "find bottles", "task": "detect"}
         requests = worker.submit_extract_preformed_batch.await_args.args[0]
         assert requests[0].prepared_items == [prepared_item]
+
+    @pytest.mark.asyncio
+    async def test_extract_rejects_a_non_string_options_instruction_per_item(self) -> None:
+        reg = _make_registry()
+        worker = AsyncMock()
+        fut: asyncio.Future[WorkerResult] = asyncio.Future()
+        fut.set_result(WorkerResult(output=ExtractOutput(entities=[[]]), timing=RequestTiming()))
+        worker.submit_extract_preformed_batch = AsyncMock(return_value=[fut])
+        reg.start_worker = AsyncMock(return_value=worker)
+
+        def item(index: int, options: dict[str, object]) -> ExtractBatchItem:
+            return ExtractBatchItem(
+                work_item_id=f"req-{index}.0",
+                request_id=f"req-{index}",
+                item_index=0,
+                total_items=1,
+                timestamp=time.time(),
+                item={"text": "Charged twice."},
+                labels=["billing"],
+                options=options,
+            )
+
+        outcome = await QueueExecutor(reg).process_extract_batch(
+            ProcessExtractBatchRequest(
+                model_id="test/model",
+                items=[item(1, {"instruction": ["x"]}), item(2, {"instruction": "Classify."})],
+            )
+        )
+
+        by_id = {o.work_item_id: o for o in outcome.outcomes}
+        assert by_id["req-1.0"].error_code == "INVALID_INPUT"
+        assert by_id["req-2.0"].disposition == "publish_and_ack"
+        requests = worker.submit_extract_preformed_batch.await_args.args[0]
+        assert [request.instruction for request in requests] == ["Classify."]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("instruction", "options", "expected"),
+        [
+            (None, {"instruction": "Classify the ticket."}, "Classify the ticket."),
+            ("From the request.", {"instruction": "From the options."}, "From the request."),
+            (None, None, None),
+        ],
+    )
+    async def test_extract_instruction_falls_back_to_options_like_http(
+        self, instruction: str | None, options: dict[str, str] | None, expected: str | None
+    ) -> None:
+        reg = _make_registry()
+        worker = AsyncMock()
+        fut: asyncio.Future[WorkerResult] = asyncio.Future()
+        fut.set_result(WorkerResult(output=ExtractOutput(entities=[[]]), timing=RequestTiming()))
+        worker.submit_extract_preformed_batch = AsyncMock(return_value=[fut])
+        reg.start_worker = AsyncMock(return_value=worker)
+
+        await QueueExecutor(reg).process_extract_batch(
+            ProcessExtractBatchRequest(
+                model_id="test/model",
+                items=[
+                    ExtractBatchItem(
+                        work_item_id="req-1.0",
+                        request_id="req-1",
+                        item_index=0,
+                        total_items=1,
+                        timestamp=time.time(),
+                        item={"text": "Charged twice."},
+                        labels=["billing"],
+                        instruction=instruction,
+                        options=options,
+                    )
+                ],
+            )
+        )
+
+        requests = worker.submit_extract_preformed_batch.await_args.args[0]
+        assert requests[0].instruction == expected
+        cost_hook = reg.get.return_value.extract_item_costs
+        assert cost_hook.call_args.kwargs["instruction"] == expected
 
     @pytest.mark.asyncio
     async def test_extract_results_echo_or_generate_original_item_ids(self) -> None:
@@ -1511,6 +1771,157 @@ class TestProcessExtractBatch:
         assert outcome.outcomes[0].nak_delay_ms == 13_000
         assert outcome.outcomes[0].error_code is None
         assert outcome.outcomes[0].error is None
+
+    @pytest.mark.asyncio
+    async def test_adapter_cost_hook_sizes_prepared_items(self) -> None:
+        reg = _make_registry()
+        adapter = _RowCostAdapter()
+        reg.get.return_value = adapter
+        worker = _extract_worker(ExtractOutput(entities=[[]]))
+        reg.start_worker = AsyncMock(return_value=worker)
+        schema = {"q": {"type": "noul", "instructions": "x"}}
+
+        await QueueExecutor(reg).process_extract_batch(
+            ProcessExtractBatchRequest(model_id="test/model", items=[_schema_extract_item(schema)])
+        )
+
+        (request,) = worker.submit_extract_preformed_batch.await_args.args[0]
+        assert [p.cost for p in request.prepared_items] == [1000]
+        assert adapter.hook_calls == [
+            {"labels": None, "output_schema": schema, "instruction": None, "options": request.options}
+        ]
+
+    @pytest.mark.asyncio
+    async def test_default_cost_hook_keeps_character_count(self) -> None:
+        reg = _make_registry()
+        reg.get.return_value = _PlainExtractAdapter()
+        worker = _extract_worker(ExtractOutput(entities=[[]]))
+        reg.start_worker = AsyncMock(return_value=worker)
+
+        await QueueExecutor(reg).process_extract_batch(
+            ProcessExtractBatchRequest(model_id="test/model", items=[_extract_item()])
+        )
+
+        (request,) = worker.submit_extract_preformed_batch.await_args.args[0]
+        assert [p.cost for p in request.prepared_items] == [len("Alice works at Acme.")]
+
+    @pytest.mark.asyncio
+    async def test_item_over_the_text_cap_is_invalid_input_before_any_cost_estimate(self) -> None:
+        """Text and ``metadata.state`` count toward one per-item bound. An item over
+        it fails alone with INVALID_INPUT and no units, before the adapter's cost
+        hook or the worker sees it; an item at the bound still runs.
+        """
+        reg = _make_registry()
+        adapter = _RowCostAdapter()
+        reg.get.return_value = adapter
+        worker = _extract_worker(ExtractOutput(entities=[[]]))
+        reg.start_worker = AsyncMock(return_value=worker)
+        at_cap = _extract_item(wiid="req-1.0", item_index=0)
+        at_cap.item = {"text": "x" * MAX_ITEM_TEXT_BYTES}
+        long_text = _extract_item(wiid="req-1.1", item_index=1)
+        long_text.item = {"text": "x" * (MAX_ITEM_TEXT_BYTES + 1)}
+        long_state = _extract_item(wiid="req-1.2", item_index=2)
+        long_state.item = {"metadata": {"state": {"turns": ["x" * (MAX_ITEM_TEXT_BYTES // 2)] * 2}}}
+
+        outcome = await QueueExecutor(reg).process_extract_batch(
+            ProcessExtractBatchRequest(model_id="test/model", items=[at_cap, long_text, long_state])
+        )
+
+        by_id = {o.work_item_id: o for o in outcome.outcomes}
+        assert by_id["req-1.0"].disposition == "publish_and_ack"
+        for wiid, message in (
+            ("req-1.1", f"Field 'items[1]' must hold at most {MAX_ITEM_TEXT_BYTES} bytes of UTF-8 text"),
+            (
+                "req-1.2",
+                f"Field 'items[2]' must hold at most {MAX_ITEM_TEXT_BYTES} bytes of UTF-8 text and metadata",
+            ),
+        ):
+            assert by_id[wiid].disposition == "publish_error_and_ack"
+            assert by_id[wiid].error_code == "INVALID_INPUT"
+            assert by_id[wiid].error == message
+            assert by_id[wiid].units is None
+            assert by_id[wiid].result_msgpack is None
+        assert len(adapter.hook_calls) == 1
+        (request,) = worker.submit_extract_preformed_batch.await_args.args[0]
+        assert len(request.items[0].text) == MAX_ITEM_TEXT_BYTES
+
+    @pytest.mark.asyncio
+    async def test_laya_request_error_publishes_invalid_input(self) -> None:
+        """A caller mistake raised as InvalidInputError (here a Laya question error) is INVALID_INPUT, not a 500."""
+        schema = {"q": {"type": "rank", "instructions": "x"}}
+        with pytest.raises(InvalidInputError) as excinfo:
+            LayaAdapter("convaiinnovations/laya")._resolve_questions(None, schema, None)
+        outcomes = []
+        for exc in (excinfo.value, ValueError("internal fault")):
+            reg = _make_registry()
+            fut: asyncio.Future[WorkerResult] = asyncio.Future()
+            fut.set_exception(exc)
+            worker = AsyncMock()
+            worker.submit_extract_preformed_batch = AsyncMock(return_value=[fut])
+            reg.start_worker = AsyncMock(return_value=worker)
+            outcome = await QueueExecutor(reg).process_extract_batch(
+                ProcessExtractBatchRequest(model_id="test/model", items=[_schema_extract_item(schema)])
+            )
+            outcomes.append(outcome.outcomes[0])
+
+        invalid, internal = outcomes
+        assert invalid.disposition == "publish_error_and_ack"
+        assert invalid.error_code == "INVALID_INPUT"
+        assert invalid.error == "question 'q': unknown type 'rank'; use one of ['choice', 'noul', 'score']"
+        assert internal.error_code == "inference_error"
+
+
+class _PlainExtractAdapter(BaseAdapter):
+    """An extract adapter that keeps ModelAdapter's default (no per-item cost hook)."""
+
+    spec: ClassVar[AdapterSpec] = AdapterSpec(inputs=("text",), outputs=("json",))
+
+    def load(self, device: str) -> None:
+        pass
+
+    def extract(self, items: list[Item], **kwargs: Any) -> ExtractOutput:
+        return ExtractOutput(entities=[[] for _ in items])
+
+
+class _RowCostAdapter(_PlainExtractAdapter):
+    """Reports its own per-item costs, like an adapter that runs several model rows per item."""
+
+    def __init__(self) -> None:
+        self.hook_calls: list[dict[str, Any]] = []
+
+    def extract_item_costs(
+        self,
+        items: list[Item],
+        *,
+        labels: list[str] | None = None,
+        output_schema: dict[str, Any] | None = None,
+        instruction: str | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> list[int] | None:
+        self.hook_calls.append(
+            {"labels": labels, "output_schema": output_schema, "instruction": instruction, "options": options}
+        )
+        return [1000 + 10 * i for i in range(len(items))]
+
+
+def _extract_worker(output: ExtractOutput) -> AsyncMock:
+    worker = AsyncMock()
+    fut: asyncio.Future[WorkerResult] = asyncio.Future()
+    fut.set_result(WorkerResult(output=output, timing=RequestTiming()))
+    worker.submit_extract_preformed_batch = AsyncMock(return_value=[fut])
+    return worker
+
+
+def _schema_extract_item(output_schema: dict[str, Any]) -> ExtractBatchItem:
+    return ExtractBatchItem(
+        work_item_id="req-1.0",
+        request_id="req-1",
+        item_index=0,
+        total_items=1,
+        timestamp=time.time(),
+        item={"text": "Alice works at Acme."},
+        output_schema=output_schema,
+    )
 
 
 # -----------------------------------------------------------------------------

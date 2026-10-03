@@ -1,0 +1,53 @@
+name: Release native sidecar asset
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+      tag_name:
+        required: true
+        type: string
+      sha:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+        with:
+          version: 2026.5.5
+          install_args: --jobs=1
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: docker-service-sie-server-sidecar-${{ inputs.version }}
+          path: image-artifact
+      - name: Extract and validate the binary from the same tested image
+        env:
+          RELEASE_SHA: ${{ inputs.sha }}
+          RELEASE_TAG: ${{ inputs.tag_name }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+          test "$RELEASE_TAG" = "v$RELEASE_VERSION"
+          mise exec -- uv run --frozen --project . python -m tools.ci.build_sidecar_release_asset \
+            --directory image-artifact --out artifact --version "$RELEASE_VERSION" \
+            --source-revision "$RELEASE_SHA" --run-id '${{ github.run_id }}'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: native-sidecar-${{ inputs.version }}
+          path: artifact/
+          if-no-files-found: error
+          retention-days: 30

@@ -42,7 +42,8 @@ RUN find .venv -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
 FROM python:3.12-slim AS runtime
 
 # Create non-root user
-RUN useradd --create-home --shell /bin/bash sie
+RUN groupadd --gid 1000 sie \
+    && useradd --uid 1000 --gid 1000 --create-home --shell /bin/bash sie
 
 WORKDIR /app
 

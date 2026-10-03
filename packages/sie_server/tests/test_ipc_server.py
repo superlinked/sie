@@ -17,6 +17,7 @@ import msgpack
 import msgspec
 import numpy as np
 import pytest
+import sie_server.api.ws as ws_module
 import sie_server.ipc_server as ipc_server_module
 import yaml
 from sie_config.model_registry import ModelRegistry as ConfigModelRegistry
@@ -149,13 +150,27 @@ def _make_executor() -> tuple[QueueExecutor, MagicMock]:
     reg.loaded_model_names = ["test/model"]
     reg.is_loaded.return_value = True
     reg.is_loading.return_value = False
+    reg._config_version = 0
     config = MagicMock()
     config.sie_id = "test/model"
     config.outputs = ["dense"]
+    config.tasks.generate = object()
+    config.model_dump.return_value = {"sie_id": "test/model", "tasks": {"generate": {}}}
     config.resolve_profile.return_value.runtime = {}
     reg.get_config.return_value = config
     reg.get_configs_snapshot.return_value = {}
     return QueueExecutor(reg), reg
+
+
+def _generation_config(model_id: str, *, revision: str = "v1", generation: bool = True) -> MagicMock:
+    config = MagicMock()
+    config.tasks.generate = object() if generation else None
+    config.model_dump.return_value = {
+        "sie_id": model_id,
+        "revision": revision,
+        "tasks": {"generate": {} if generation else None},
+    }
+    return config
 
 
 @pytest.fixture(autouse=True)
@@ -510,6 +525,24 @@ class TestFraming:
             assert resp["ok"] is True
             assert resp["body"]["ready"] is True
             health.assert_awaited_once_with()
+        finally:
+            await client.close()
+
+    @pytest.mark.asyncio
+    async def test_first_ping_reports_ready_with_the_sidecar_heartbeat_probe(self, server_and_path) -> None:
+        srv, sock = server_and_path
+        mark_ready()
+        register_liveness_probe(srv.is_heartbeat_fresh)
+        client = await _Client.connect(sock)
+        try:
+            with patch(
+                "sie_server.ipc_server.gpu_is_healthy_async",
+                new=AsyncMock(return_value=True),
+            ):
+                first = await client.rpc("Ping", {"timestamp_ms": 1.0})
+                second = await client.rpc("Ping", {"timestamp_ms": 2.0})
+            assert first["body"]["ready"] is True
+            assert second["body"]["ready"] is True
         finally:
             await client.close()
 
@@ -998,18 +1031,19 @@ profiles:
         assert worker_telemetry._dimensions(base_id, "rtx-pro-6000") == expected_dimensions
         executor._descriptor_cache[variant_id] = MagicMock()
 
-        with pytest.raises(ValueError, match="legacy scalar"):
-            await executor.apply_model_config(
-                ApplyModelConfigRequest(
-                    bundle_id="sglang",
-                    model_id=base_id,
-                    epoch=8,
-                    bundle_config_hash="from-sie-config",
-                    profiles_added=["default"],
-                    model_config=_qwen_invalid_legacy_lora_yaml(),
-                )
+        resp = await executor.apply_model_config(
+            ApplyModelConfigRequest(
+                bundle_id="sglang",
+                model_id=base_id,
+                epoch=8,
+                bundle_config_hash="from-sie-config",
+                profiles_added=["default"],
+                model_config=_qwen_invalid_legacy_lora_yaml(),
             )
+        )
 
+        assert resp.applied is True
+        assert resp.unsupported_models == [base_id]
         assert registry.has_model(base_id)
         assert registry.has_model(variant_id)
         assert registry._model_filter == {base_id, variant_id}
@@ -1035,8 +1069,8 @@ profiles:
         )
         assert registry.has_model(variant_id)
 
-        load_lock = registry._get_load_lock()
-        await load_lock.acquire()
+        admission_lock = registry._get_load_admission_lock()
+        await admission_lock.acquire()
         remove_task = asyncio.create_task(
             executor.apply_model_config(
                 ApplyModelConfigRequest(
@@ -1067,11 +1101,11 @@ profiles:
 
         try:
             await asyncio.sleep(0)
-            load_lock.release()
+            admission_lock.release()
             await asyncio.gather(remove_task, readd_task)
         finally:
-            if load_lock.locked():
-                load_lock.release()
+            if admission_lock.locked():
+                admission_lock.release()
             for task in (remove_task, readd_task):
                 if not task.done():
                     task.cancel()
@@ -1285,6 +1319,11 @@ profiles:
     async def test_replace_model_configs_rejects_duplicate_export_entries(self) -> None:
         registry = ModelRegistry(models_dir=None)
         executor = QueueExecutor(registry)
+        previous = ModelConfig(**yaml.safe_load(_worker_telemetry_model_yaml("kept/model")))
+        registry.add_config(previous)
+        registry._loaded["kept/model"] = MagicMock()
+        registry._do_unload = AsyncMock()
+        version = registry._config_version
 
         with pytest.raises(ValueError, match="duplicate model config"):
             await executor.replace_model_configs(
@@ -1304,6 +1343,36 @@ profiles:
                     ],
                 )
             )
+
+        assert registry.get_configs_snapshot() == {"kept/model": previous}
+        assert registry._config_version == version
+        registry._do_unload.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("reverse_order", [False, True])
+    async def test_replace_model_configs_rejects_pool_conflicts_before_mutation(self, reverse_order: bool) -> None:
+        registry = ModelRegistry(models_dir=None, pool_name="default")
+        executor = QueueExecutor(registry)
+        previous = ModelConfig(**yaml.safe_load(_worker_telemetry_model_yaml("kept/model")))
+        registry.add_config(previous)
+        registry._loaded["kept/model"] = MagicMock()
+        registry._do_unload = AsyncMock()
+        version = registry._config_version
+        entries = [
+            ReplaceModelConfigEntry(model_id="Qwen/Qwen3.6-27B", model_config=_qwen_default_only_yaml()),
+            ReplaceModelConfigEntry(model_id="new/model", model_config=_worker_telemetry_model_yaml("new/model")),
+        ]
+        if reverse_order:
+            entries.reverse()
+
+        with pytest.raises(ValueError, match=r"cannot register .* into pool"):
+            await executor.replace_model_configs(
+                ReplaceModelConfigsRequest(bundle_id="default", epoch=8, bundle_config_hash="", models=entries)
+            )
+
+        assert registry.get_configs_snapshot() == {"kept/model": previous}
+        assert registry._config_version == version
+        registry._do_unload.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_replace_model_configs_keeps_loaded_model_for_identical_config(self) -> None:
@@ -1458,6 +1527,496 @@ profiles:
         assert resp.applied_models == ["tenant/model"]
         assert not registry.has_model("default/model")
         assert registry.has_model("tenant/model")
+
+    @pytest.mark.asyncio
+    async def test_replace_model_configs_keeps_rejected_models_and_applies_the_rest(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        def model_yaml(model_id: str, *, max_batch_tokens: int = 4096, profile_extra: str = "") -> str:
+            return f"""
+sie_id: {model_id}
+hf_id: sentence-transformers/all-MiniLM-L6-v2
+tasks:
+  encode:
+    dense:
+      dim: 384
+profiles:
+  default:
+    adapter_path: sie_server.adapters.sentence_transformer:Adapter
+    max_batch_tokens: {max_batch_tokens}
+{profile_extra}"""
+
+        def request(epoch: int, entries: list[tuple[str, str]]) -> ReplaceModelConfigsRequest:
+            return ReplaceModelConfigsRequest(
+                bundle_id="default",
+                epoch=epoch,
+                bundle_config_hash="",
+                models=[ReplaceModelConfigEntry(model_id=mid, model_config=body) for mid, body in entries],
+            )
+
+        registry = ModelRegistry(models_dir=None)
+        executor = QueueExecutor(registry)
+        await executor.replace_model_configs(
+            request(
+                7,
+                [(model_id, model_yaml(model_id)) for model_id in ("kept/model", "broken/model", "stale/model")],
+            )
+        )
+        previous_broken = registry.get_config("broken/model")
+        registry._loaded["broken/model"] = MagicMock()
+        registry._do_unload = AsyncMock()
+
+        with caplog.at_level("WARNING", logger="sie_server.queue_executor"):
+            resp = await executor.replace_model_configs(
+                request(
+                    8,
+                    [
+                        ("kept/model", model_yaml("kept/model", max_batch_tokens=8192)),
+                        ("broken/model", model_yaml("broken/model", profile_extra="    max_output_token: 512")),
+                        ("renamed/model", model_yaml("other/model")),
+                        ("empty/model", ""),
+                        ("list/model", "- not\n- a mapping\n"),
+                        ("Qwen/Qwen3.6-27B", _qwen_invalid_legacy_lora_yaml()),
+                    ],
+                )
+            )
+
+        assert resp.applied is True
+        assert resp.applied_models == ["broken/model", "kept/model"]
+        assert registry.get_config("kept/model").profiles["default"].max_batch_tokens == 8192
+        assert registry.get_config("broken/model") is previous_broken
+        registry._do_unload.assert_not_awaited()
+        assert not registry.has_model("stale/model")
+        assert not registry.has_model("other/model")
+
+        reference = QueueExecutor(ModelRegistry(models_dir=None))
+        expected = await reference.replace_model_configs(
+            request(
+                8,
+                [
+                    ("kept/model", model_yaml("kept/model", max_batch_tokens=8192)),
+                    ("broken/model", model_yaml("broken/model")),
+                ],
+            )
+        )
+        assert expected.bundle_config_hash
+        assert resp.bundle_config_hash == expected.bundle_config_hash
+
+        rejected = [
+            record.getMessage() for record in caplog.records if "Rejected exported model" in record.getMessage()
+        ]
+        assert len(rejected) == 5
+        assert "'broken/model'" in rejected[0]
+        assert "max_output_token" in rejected[0]
+        assert "model_id mismatch" in rejected[1]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "invalid_config",
+        [
+            pytest.param("unknown_field: 1\n" + _qwen_profile_variant_yaml(), id="schema"),
+            pytest.param(_qwen_invalid_legacy_lora_yaml(), id="default-lora"),
+            pytest.param(
+                _qwen_profile_variant_yaml().replace(
+                    "        max_seq_length: 32768",
+                    "        max_seq_length: 32768\n      runtime:\n        lora_id: legacy-lora",
+                ),
+                id="variant-lora",
+            ),
+        ],
+    )
+    async def test_replace_model_configs_keeps_profile_variants_of_a_rejected_model(self, invalid_config: str) -> None:
+        def request(epoch: int, model_config: str) -> ReplaceModelConfigsRequest:
+            return ReplaceModelConfigsRequest(
+                bundle_id="sglang",
+                epoch=epoch,
+                bundle_config_hash="",
+                models=[ReplaceModelConfigEntry(model_id="Qwen/Qwen3.6-27B", model_config=model_config)],
+            )
+
+        registry = ModelRegistry(models_dir=None)
+        executor = QueueExecutor(registry)
+        await executor.replace_model_configs(request(7, _qwen_profile_variant_yaml()))
+        previous = {name: registry.get_config(name) for name in ("Qwen/Qwen3.6-27B", "Qwen/Qwen3.6-27B:rtx-pro-6000")}
+
+        resp = await executor.replace_model_configs(request(8, invalid_config))
+
+        assert resp.applied_models == sorted(previous)
+        assert all(registry.get_config(name) is config for name, config in previous.items())
+
+    @pytest.mark.asyncio
+    async def test_replace_model_configs_retains_parsed_identity_when_export_id_is_empty(self) -> None:
+        registry = ModelRegistry(models_dir=None)
+        executor = QueueExecutor(registry)
+
+        def request(model_config: str) -> ReplaceModelConfigsRequest:
+            return ReplaceModelConfigsRequest(
+                bundle_id="sglang",
+                epoch=8,
+                bundle_config_hash="",
+                models=[ReplaceModelConfigEntry(model_id="", model_config=model_config)],
+            )
+
+        await executor.replace_model_configs(request(_qwen_profile_variant_yaml()))
+        previous = registry.get_configs_snapshot()
+        version = registry._config_version
+
+        resp = await executor.replace_model_configs(request(_qwen_invalid_legacy_lora_yaml()))
+
+        assert resp.applied_models == sorted(previous)
+        assert registry.get_configs_snapshot() == previous
+        assert registry._config_version == version
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("invalid_first", [False, True])
+    @pytest.mark.parametrize(
+        "invalid_config",
+        [
+            pytest.param("unknown_field: 1\n" + _qwen_profile_variant_yaml(), id="schema"),
+            pytest.param("sie_id: [broken", id="yaml"),
+        ],
+    )
+    async def test_replace_model_configs_rejects_unidentified_invalid_entry_before_mutation(
+        self, invalid_config: str, invalid_first: bool
+    ) -> None:
+        registry = ModelRegistry(models_dir=None)
+        executor = QueueExecutor(registry)
+        await executor.replace_model_configs(
+            ReplaceModelConfigsRequest(
+                bundle_id="sglang",
+                epoch=7,
+                bundle_config_hash="",
+                models=[ReplaceModelConfigEntry(model_id="", model_config=_qwen_profile_variant_yaml())],
+            )
+        )
+        previous = registry.get_configs_snapshot()
+        version = registry._config_version
+        registry._loaded["Qwen/Qwen3.6-27B"] = MagicMock()
+        registry._do_unload = AsyncMock()
+        entries = [
+            ReplaceModelConfigEntry(model_id="", model_config=invalid_config),
+            ReplaceModelConfigEntry(model_id="new/model", model_config=_worker_telemetry_model_yaml("new/model")),
+        ]
+        if not invalid_first:
+            entries.reverse()
+
+        with pytest.raises(ValueError, match=r"cannot identify .*snapshot was not applied"):
+            await executor.replace_model_configs(
+                ReplaceModelConfigsRequest(bundle_id="sglang", epoch=8, bundle_config_hash="", models=entries)
+            )
+
+        assert registry.get_configs_snapshot() == previous
+        assert registry._config_version == version
+        registry._do_unload.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("invalid_first", [False, True])
+    @pytest.mark.parametrize(
+        "invalid_config",
+        [
+            pytest.param("unknown_field: 1\n" + _qwen_profile_variant_yaml(), id="schema"),
+            pytest.param(_qwen_invalid_legacy_lora_yaml(), id="legacy-lora"),
+        ],
+    )
+    async def test_replace_model_configs_valid_entry_wins_over_a_rejected_duplicate(
+        self, invalid_config: str, invalid_first: bool
+    ) -> None:
+        def request(epoch: int, model_configs: list[str]) -> ReplaceModelConfigsRequest:
+            return ReplaceModelConfigsRequest(
+                bundle_id="sglang",
+                epoch=epoch,
+                bundle_config_hash="",
+                models=[
+                    ReplaceModelConfigEntry(model_id="Qwen/Qwen3.6-27B", model_config=model_config)
+                    for model_config in model_configs
+                ],
+            )
+
+        registry = ModelRegistry(models_dir=None)
+        executor = QueueExecutor(registry)
+        await executor.replace_model_configs(request(7, [_qwen_profile_variant_yaml()]))
+
+        entries = [invalid_config, _qwen_default_only_yaml()]
+        if not invalid_first:
+            entries.reverse()
+        resp = await executor.replace_model_configs(request(8, entries))
+
+        assert resp.applied_models == ["Qwen/Qwen3.6-27B"]
+        assert not registry.has_model("Qwen/Qwen3.6-27B:rtx-pro-6000")
+
+
+# -----------------------------------------------------------------------------
+# Bundle config view: control-plane hash scope and unsupported models
+# -----------------------------------------------------------------------------
+
+_ADAPTERS_ADDED_IN_LATER_IMAGE = frozenset(
+    {"sie_server.adapters.laya.adapter", "sie_server.adapters.gliformer.adapter"}
+)
+
+
+def _default_bundle_export() -> tuple[list[ReplaceModelConfigEntry], list[str], str]:
+    """Export the shipped catalog for the default bundle the way the sidecar forwards it."""
+    root = _repo_root()
+    config_registry = ConfigModelRegistry(root / "packages/sie_server/bundles", root / "packages/sie_server/models")
+    entries = [
+        ReplaceModelConfigEntry(
+            model_id=model_id,
+            model_config=yaml.safe_dump(config_registry.get_full_config(model_id), sort_keys=False),
+        )
+        for model_id in config_registry.list_models()
+        if "default" in config_registry.get_model_export_bundles(model_id)
+        and config_registry.get_model_pool_name(model_id) == "default"
+    ]
+    adapters = config_registry.get_bundle_adapters(["default"])["default"]
+    return entries, adapters, config_registry.compute_bundle_config_hash_for_pool("default", "default")
+
+
+def _route_ids_using(entries: list[ReplaceModelConfigEntry], modules: frozenset[str]) -> list[str]:
+    routes = []
+    for entry in entries:
+        for profile_name, profile in yaml.safe_load(entry.model_config)["profiles"].items():
+            adapter_path = profile.get("adapter_path") or ""
+            if adapter_path.split(":", maxsplit=1)[0] in modules:
+                routes.append(entry.model_id if profile_name == "default" else f"{entry.model_id}:{profile_name}")
+    return sorted(routes)
+
+
+def _earlier_image(monkeypatch: pytest.MonkeyPatch, adapters: list[str]) -> None:
+    earlier = frozenset(adapters) - _ADAPTERS_ADDED_IN_LATER_IMAGE
+    monkeypatch.setattr(ws_module, "_bundle_adapter_modules", lambda bundle_id: earlier)
+
+
+def _sentence_transformer_yaml(model_id: str, *, max_batch_tokens: int = 4096, profile_extra: str = "") -> str:
+    return f"""
+sie_id: {model_id}
+hf_id: sentence-transformers/all-MiniLM-L6-v2
+tasks:
+  encode:
+    dense:
+      dim: 384
+profiles:
+  default:
+    adapter_path: sie_server.adapters.sentence_transformer:Adapter
+    max_batch_tokens: {max_batch_tokens}
+{profile_extra}"""
+
+
+class TestBundleConfigView:
+    @pytest.mark.asyncio
+    async def test_earlier_image_keeps_the_control_plane_hash_when_the_bundle_gains_adapters(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        entries, adapters, control_plane_hash = _default_bundle_export()
+        added_routes = _route_ids_using(entries, _ADAPTERS_ADDED_IN_LATER_IMAGE)
+        assert frozenset(adapters) >= _ADAPTERS_ADDED_IN_LATER_IMAGE
+        assert added_routes
+        _earlier_image(monkeypatch, adapters)
+
+        def request(bundle_adapters: list[str] | None) -> ReplaceModelConfigsRequest:
+            return ReplaceModelConfigsRequest(
+                bundle_id="default",
+                epoch=1,
+                bundle_config_hash=control_plane_hash,
+                models=entries,
+                bundle_adapters=bundle_adapters,
+            )
+
+        image_scoped = await QueueExecutor(ModelRegistry(models_dir=None)).replace_model_configs(request(None))
+        assert image_scoped.bundle_config_hash != control_plane_hash
+        assert image_scoped.unsupported_models == []
+
+        resp = await QueueExecutor(ModelRegistry(models_dir=None)).replace_model_configs(request(adapters))
+        assert resp.bundle_config_hash == control_plane_hash
+        assert resp.unsupported_models == added_routes
+
+        monkeypatch.undo()
+        current = await QueueExecutor(ModelRegistry(models_dir=None)).replace_model_configs(request(adapters))
+        assert current.bundle_config_hash == control_plane_hash
+        assert current.unsupported_models == []
+
+    @pytest.mark.asyncio
+    async def test_delta_scope_follows_the_control_plane_and_reports_unsupported_models(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        entries, adapters, control_plane_hash = _default_bundle_export()
+        _earlier_image(monkeypatch, adapters)
+        executor = QueueExecutor(ModelRegistry(models_dir=None))
+        laya = next(entry for entry in entries if entry.model_id == "convaiinnovations/laya")
+        others = [entry for entry in entries if entry.model_id != laya.model_id]
+        await executor.replace_model_configs(
+            ReplaceModelConfigsRequest(
+                bundle_id="default",
+                epoch=1,
+                bundle_config_hash="",
+                models=others,
+                bundle_adapters=adapters,
+            )
+        )
+
+        resp = await executor.apply_model_config(
+            ApplyModelConfigRequest(
+                bundle_id="default",
+                model_id=laya.model_id,
+                epoch=2,
+                bundle_config_hash=control_plane_hash,
+                model_config=laya.model_config,
+                bundle_adapters=adapters,
+            )
+        )
+
+        assert resp.bundle_config_hash == control_plane_hash
+        assert laya.model_id in resp.unsupported_models
+
+    @pytest.mark.asyncio
+    async def test_ping_after_a_sidecar_restart_never_reports_the_scoped_hash_without_its_list(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        entries, adapters, control_plane_hash = _default_bundle_export()
+        _earlier_image(monkeypatch, adapters)
+        registry = ModelRegistry(models_dir=None)
+        executor = QueueExecutor(registry)
+        applied = await executor.replace_model_configs(
+            ReplaceModelConfigsRequest(
+                bundle_id="default",
+                epoch=1,
+                bundle_config_hash=control_plane_hash,
+                models=entries,
+                bundle_adapters=adapters,
+            )
+        )
+        assert applied.bundle_config_hash == control_plane_hash
+        assert applied.unsupported_models
+
+        # A restarted sidecar has no committed state and adopts the Ping hash,
+        # which carries no unsupported models.
+        sock = _short_sock_path()
+        srv = IpcServer(sock, executor, worker_id="worker-test", stale_after_ms=10_000, bundle_id="default")
+        await srv.start()
+        try:
+            client = await _Client.connect(sock)
+            try:
+                ping = await client.rpc("Ping", {"timestamp_ms": 1.0})
+            finally:
+                await client.close()
+        finally:
+            await srv.stop(drain_timeout_s=1.0)
+
+        assert ping["ok"] is True
+        assert "unsupported_models" not in ping["body"]
+        assert ping["body"]["bundle_config_hash"] != control_plane_hash
+        assert ping["body"]["bundle_config_hash"] == compute_bundle_config_hash_cached(registry, "default")
+
+    @pytest.mark.asyncio
+    async def test_rejected_entries_keep_the_hash_and_are_reported_unless_their_hashed_fields_match(self) -> None:
+        def request(epoch: int, entries: list[tuple[str, str]]) -> ReplaceModelConfigsRequest:
+            return ReplaceModelConfigsRequest(
+                bundle_id="default",
+                epoch=epoch,
+                bundle_config_hash="",
+                models=[ReplaceModelConfigEntry(model_id=mid, model_config=body) for mid, body in entries],
+                bundle_adapters=["sie_server.adapters.sentence_transformer"],
+            )
+
+        newer_field = "    newer_schema_field: 1"
+        executor = QueueExecutor(ModelRegistry(models_dir=None))
+        await executor.replace_model_configs(
+            request(7, [(mid, _sentence_transformer_yaml(mid)) for mid in ("served/same", "served/changed")])
+        )
+
+        resp = await executor.replace_model_configs(
+            request(
+                8,
+                [
+                    ("served/same", _sentence_transformer_yaml("served/same", profile_extra=newer_field)),
+                    (
+                        "served/changed",
+                        _sentence_transformer_yaml("served/changed", max_batch_tokens=8192, profile_extra=newer_field),
+                    ),
+                    ("added/model", _sentence_transformer_yaml("added/model", profile_extra=newer_field)),
+                ],
+            )
+        )
+
+        reference = await QueueExecutor(ModelRegistry(models_dir=None)).replace_model_configs(
+            request(
+                8,
+                [
+                    ("served/same", _sentence_transformer_yaml("served/same")),
+                    ("served/changed", _sentence_transformer_yaml("served/changed", max_batch_tokens=8192)),
+                    ("added/model", _sentence_transformer_yaml("added/model")),
+                ],
+            )
+        )
+        assert reference.bundle_config_hash
+        assert resp.bundle_config_hash == reference.bundle_config_hash
+        assert resp.unsupported_models == ["added/model", "served/changed"]
+        assert reference.unsupported_models == []
+
+        accepted = await executor.apply_model_config(
+            ApplyModelConfigRequest(
+                bundle_id="default",
+                model_id="added/model",
+                epoch=9,
+                bundle_config_hash="",
+                model_config=_sentence_transformer_yaml("added/model"),
+            )
+        )
+        assert accepted.bundle_config_hash == reference.bundle_config_hash
+        assert accepted.unsupported_models == ["served/changed"]
+
+    @pytest.mark.asyncio
+    async def test_rejected_per_model_options_are_reported_when_hashed_fields_change(self) -> None:
+        def request(epoch: int, model_config: str) -> ReplaceModelConfigsRequest:
+            return ReplaceModelConfigsRequest(
+                bundle_id="sglang",
+                epoch=epoch,
+                bundle_config_hash="",
+                models=[ReplaceModelConfigEntry(model_id="Qwen/Qwen3.6-27B", model_config=model_config)],
+            )
+
+        executor = QueueExecutor(ModelRegistry(models_dir=None))
+        served = await executor.replace_model_configs(request(7, _qwen_profile_variant_yaml()))
+
+        schema_only = await executor.replace_model_configs(
+            request(8, "unknown_field: 1\n" + _qwen_profile_variant_yaml())
+        )
+        assert schema_only.unsupported_models == []
+        assert schema_only.bundle_config_hash == served.bundle_config_hash
+
+        legacy_lora = await executor.replace_model_configs(request(9, _qwen_invalid_legacy_lora_yaml()))
+        assert legacy_lora.unsupported_models
+        assert all(model.startswith("Qwen/Qwen3.6-27B") for model in legacy_lora.unsupported_models)
+        assert legacy_lora.bundle_config_hash != served.bundle_config_hash
+
+    @pytest.mark.asyncio
+    async def test_unsupported_models_roundtrip_over_ipc(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(ws_module, "_bundle_adapter_modules", lambda bundle_id: frozenset())
+        executor = QueueExecutor(ModelRegistry(models_dir=None))
+        sock = _short_sock_path()
+        srv = IpcServer(sock, executor, worker_id="worker-test", stale_after_ms=10_000)
+        await srv.start()
+        try:
+            client = await _Client.connect(sock)
+            try:
+                resp = await client.rpc(
+                    "ApplyModelConfig",
+                    {
+                        "bundle_id": "default",
+                        "model_id": "new/model",
+                        "epoch": 3,
+                        "bundle_config_hash": "",
+                        "profiles_added": ["default"],
+                        "model_config": _sentence_transformer_yaml("new/model"),
+                        "bundle_adapters": ["sie_server.adapters.sentence_transformer"],
+                    },
+                )
+                assert resp["ok"] is True
+                assert resp["body"]["unsupported_models"] == ["new/model"]
+                assert resp["body"]["bundle_config_hash"]
+            finally:
+                await client.close()
+        finally:
+            await srv.stop(drain_timeout_s=1.0)
 
 
 # -----------------------------------------------------------------------------
@@ -1758,7 +2317,7 @@ class TestGenerationSidecarIpc:
 
         assert resp["ok"] is True
         assert resp["body"] == {"matched": True}
-        srv._get_streaming_processor.assert_awaited_once_with(prewarm=False)  # type: ignore[attr-defined]
+        srv._get_streaming_processor.assert_awaited_once_with()  # type: ignore[attr-defined]
         processor.signal_cancel.assert_called_once_with("req-123")
 
     @pytest.mark.asyncio
@@ -1780,7 +2339,7 @@ class TestGenerationSidecarIpc:
         processor.signal_cancel.assert_called_once_with("req-123")
 
     @pytest.mark.asyncio
-    async def test_cancel_created_processor_still_prewarms_on_generate(self) -> None:
+    async def test_cancel_created_processor_still_prewarms_requested_model_on_generate(self) -> None:
         executor, _reg = _make_executor()
         processor = MagicMock()
         sock = _short_sock_path()
@@ -1788,12 +2347,262 @@ class TestGenerationSidecarIpc:
         srv._prewarm_generation_grammars = AsyncMock()  # type: ignore[method-assign]
 
         with patch("sie_server.processors.streaming.StreamingProcessor", return_value=processor):
-            cancel_processor = await srv._get_streaming_processor(prewarm=False)
-            generate_processor = await srv._get_streaming_processor()
+            cancel_processor = await srv._get_streaming_processor()
+            generate_processor = await srv._get_streaming_processor(prewarm_model_id="google/madlad400-3b-mt")
 
         assert cancel_processor is processor
         assert generate_processor is processor
-        srv._prewarm_generation_grammars.assert_awaited_once_with(processor)  # type: ignore[attr-defined]
+        srv._prewarm_generation_grammars.assert_awaited_once_with(  # type: ignore[attr-defined]
+            processor,
+            "google/madlad400-3b-mt",
+        )
+
+    @pytest.mark.asyncio
+    async def test_generation_prewarm_does_not_touch_unrelated_grammar_model(self) -> None:
+        executor, reg = _make_executor()
+        madlad = _generation_config("google/madlad400-3b-mt")
+        qwen = _generation_config("Qwen/Qwen3.5-4B")
+        reg.get_config.return_value = madlad
+        reg.get_configs_snapshot.return_value = {
+            "google/madlad400-3b-mt": madlad,
+            "Qwen/Qwen3.5-4B": qwen,
+        }
+        processor = MagicMock()
+        processor.prewarm_grammars_for_model = AsyncMock()
+        srv = IpcServer(_short_sock_path(), executor, worker_id="w")
+        srv._streaming_processor = processor
+
+        await srv._get_streaming_processor(prewarm_model_id="google/madlad400-3b-mt")
+
+        processor.prewarm_grammars_for_model.assert_awaited_once_with("google/madlad400-3b-mt")
+        assert all(
+            args != ("Qwen/Qwen3.5-4B",) for args, _kwargs in processor.prewarm_grammars_for_model.await_args_list
+        )
+        assert reg.get_config.call_count == 1
+        assert all(call.args == ("google/madlad400-3b-mt",) for call in reg.get_config.call_args_list)
+        madlad.model_dump.assert_called_once_with(mode="json")
+        reg.get_configs_snapshot.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_generation_prewarm_runs_once_per_requested_model(self) -> None:
+        executor, reg = _make_executor()
+        config = _generation_config("google/madlad400-3b-mt")
+        reg.get_config.return_value = config
+        processor = MagicMock()
+        processor.prewarm_grammars_for_model = AsyncMock()
+        srv = IpcServer(_short_sock_path(), executor, worker_id="w")
+        srv._streaming_processor = processor
+
+        await srv._get_streaming_processor(prewarm_model_id="google/madlad400-3b-mt")
+        await srv._get_streaming_processor(prewarm_model_id="google/madlad400-3b-mt")
+
+        processor.prewarm_grammars_for_model.assert_awaited_once_with("google/madlad400-3b-mt")
+        config.model_dump.assert_called_once_with(mode="json")
+
+    @pytest.mark.asyncio
+    async def test_generation_prewarm_rejects_unknown_model_before_allocating_state(self) -> None:
+        executor, reg = _make_executor()
+        reg.get_config.side_effect = KeyError("attacker/unknown")
+        processor = MagicMock()
+        processor.prewarm_grammars_for_model = AsyncMock()
+        srv = IpcServer(_short_sock_path(), executor, worker_id="w")
+        srv._streaming_processor = processor
+
+        await srv._get_streaming_processor(prewarm_model_id="attacker/unknown")
+
+        processor.prewarm_grammars_for_model.assert_not_awaited()
+        assert srv._generation_prewarm_locks == {}
+        assert srv._generation_prewarm_completed == {}
+        assert srv._generation_prewarm_authority_cache == {}
+
+    @pytest.mark.asyncio
+    async def test_generation_prewarm_rejects_non_generation_model_before_allocating_state(self) -> None:
+        executor, reg = _make_executor()
+        reg.get_config.return_value = _generation_config("embed/model", generation=False)
+        processor = MagicMock()
+        processor.prewarm_grammars_for_model = AsyncMock()
+        srv = IpcServer(_short_sock_path(), executor, worker_id="w")
+        srv._streaming_processor = processor
+
+        await srv._get_streaming_processor(prewarm_model_id="embed/model")
+
+        processor.prewarm_grammars_for_model.assert_not_awaited()
+        assert srv._generation_prewarm_locks == {}
+        assert srv._generation_prewarm_completed == {}
+        assert srv._generation_prewarm_authority_cache == {}
+
+    @pytest.mark.asyncio
+    async def test_generation_prewarm_different_models_run_concurrently(self) -> None:
+        executor, reg = _make_executor()
+        model_ids = ("google/madlad400-3b-mt", "Qwen/Qwen3.5-4B")
+        configs = {model_id: _generation_config(model_id) for model_id in model_ids}
+        reg.get_config.side_effect = lambda model_id: configs[model_id]
+        started = {model_id: asyncio.Event() for model_id in model_ids}
+        release = asyncio.Event()
+
+        async def prewarm(model_id: str) -> None:
+            started[model_id].set()
+            await release.wait()
+
+        processor = MagicMock()
+        processor.prewarm_grammars_for_model = AsyncMock(side_effect=prewarm)
+        srv = IpcServer(_short_sock_path(), executor, worker_id="w")
+        srv._streaming_processor = processor
+        tasks: list[asyncio.Task[object]] = []
+        results: list[object] = []
+        try:
+            tasks.append(asyncio.create_task(srv._get_streaming_processor(prewarm_model_id=model_ids[0])))
+            await asyncio.wait_for(started[model_ids[0]].wait(), timeout=1)
+            tasks.append(asyncio.create_task(srv._get_streaming_processor(prewarm_model_id=model_ids[1])))
+            await asyncio.wait_for(started[model_ids[1]].wait(), timeout=1)
+        finally:
+            release.set()
+            results = list(await asyncio.gather(*tasks, return_exceptions=True))
+
+        assert processor.prewarm_grammars_for_model.await_count == 2
+        assert results == [processor, processor]
+
+    @pytest.mark.asyncio
+    async def test_generation_prewarm_same_model_converges_under_concurrency(self) -> None:
+        executor, reg = _make_executor()
+        model_id = "google/madlad400-3b-mt"
+        reg.get_config.return_value = _generation_config(model_id)
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def prewarm(_model_id: str) -> None:
+            started.set()
+            await release.wait()
+
+        processor = MagicMock()
+        processor.prewarm_grammars_for_model = AsyncMock(side_effect=prewarm)
+        srv = IpcServer(_short_sock_path(), executor, worker_id="w")
+        srv._streaming_processor = processor
+        first = asyncio.create_task(srv._get_streaming_processor(prewarm_model_id=model_id))
+        await asyncio.wait_for(started.wait(), timeout=1)
+        second = asyncio.create_task(srv._get_streaming_processor(prewarm_model_id=model_id))
+        try:
+            await asyncio.sleep(0)
+            assert processor.prewarm_grammars_for_model.await_count == 1
+            assert second.done() is False
+        finally:
+            release.set()
+
+        assert await asyncio.gather(first, second) == [processor, processor]
+        processor.prewarm_grammars_for_model.assert_awaited_once_with(model_id)
+
+    @pytest.mark.asyncio
+    async def test_generation_prewarm_retries_after_ordinary_failure(self) -> None:
+        executor, reg = _make_executor()
+        model_id = "google/madlad400-3b-mt"
+        reg.get_config.return_value = _generation_config(model_id)
+        attempts = 0
+
+        async def prewarm(_model_id: str) -> None:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise RuntimeError("compile failed")
+
+        processor = MagicMock()
+        processor.prewarm_grammars_for_model = AsyncMock(side_effect=prewarm)
+        srv = IpcServer(_short_sock_path(), executor, worker_id="w")
+        srv._streaming_processor = processor
+
+        await srv._get_streaming_processor(prewarm_model_id=model_id)
+        assert model_id not in srv._generation_prewarm_completed
+        await srv._get_streaming_processor(prewarm_model_id=model_id)
+
+        assert attempts == 2
+        assert srv._generation_prewarm_completed[model_id] == srv._generation_prewarm_authority(model_id)
+
+    @pytest.mark.asyncio
+    async def test_generation_prewarm_retries_after_cancellation(self) -> None:
+        executor, reg = _make_executor()
+        model_id = "google/madlad400-3b-mt"
+        reg.get_config.return_value = _generation_config(model_id)
+        started = asyncio.Event()
+        blocker = asyncio.Event()
+        attempts = 0
+
+        async def prewarm(_model_id: str) -> None:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                started.set()
+                await blocker.wait()
+
+        processor = MagicMock()
+        processor.prewarm_grammars_for_model = AsyncMock(side_effect=prewarm)
+        srv = IpcServer(_short_sock_path(), executor, worker_id="w")
+        srv._streaming_processor = processor
+
+        first = asyncio.create_task(srv._get_streaming_processor(prewarm_model_id=model_id))
+        await asyncio.wait_for(started.wait(), timeout=1)
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        assert model_id not in srv._generation_prewarm_completed
+
+        await srv._get_streaming_processor(prewarm_model_id=model_id)
+
+        assert attempts == 2
+        assert model_id in srv._generation_prewarm_completed
+
+    @pytest.mark.asyncio
+    async def test_generation_prewarm_repeats_after_config_hot_reload(self) -> None:
+        executor, reg = _make_executor()
+        model_id = "google/madlad400-3b-mt"
+        config_v1 = _generation_config(model_id, revision="v1")
+        config_v2 = _generation_config(model_id, revision="v2")
+        current = [config_v1]
+        reg.get_config.side_effect = lambda _model_id: current[0]
+        processor = MagicMock()
+        processor.prewarm_grammars_for_model = AsyncMock()
+        srv = IpcServer(_short_sock_path(), executor, worker_id="w")
+        srv._streaming_processor = processor
+
+        await srv._get_streaming_processor(prewarm_model_id=model_id)
+        first_authority = srv._generation_prewarm_completed[model_id]
+        current[0] = config_v2
+        reg._config_version += 1
+        await srv._get_streaming_processor(prewarm_model_id=model_id)
+
+        assert processor.prewarm_grammars_for_model.await_count == 2
+        assert srv._generation_prewarm_completed[model_id] != first_authority
+        assert srv._generation_prewarm_completed[model_id] == srv._generation_prewarm_authority(model_id)
+        config_v1.model_dump.assert_called_once_with(mode="json")
+        config_v2.model_dump.assert_called_once_with(mode="json")
+
+    @pytest.mark.asyncio
+    async def test_generation_prewarm_inflight_aba_does_not_publish_false_completion(self) -> None:
+        executor, reg = _make_executor()
+        model_id = "google/madlad400-3b-mt"
+        current = [_generation_config(model_id, revision="A")]
+        reg.get_config.side_effect = lambda _model_id: current[0]
+        attempts = 0
+
+        async def prewarm(_model_id: str) -> None:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                current[0] = _generation_config(model_id, revision="B", generation=False)
+                reg._config_version += 1
+                assert reg.get_config(model_id).tasks.generate is None
+                current[0] = _generation_config(model_id, revision="A")
+                reg._config_version += 1
+
+        processor = MagicMock()
+        processor.prewarm_grammars_for_model = AsyncMock(side_effect=prewarm)
+        srv = IpcServer(_short_sock_path(), executor, worker_id="w")
+        srv._streaming_processor = processor
+
+        await srv._get_streaming_processor(prewarm_model_id=model_id)
+
+        assert model_id not in srv._generation_prewarm_completed
+        await srv._get_streaming_processor(prewarm_model_id=model_id)
+        assert attempts == 2
+        assert srv._generation_prewarm_completed[model_id] == srv._generation_prewarm_authority(model_id)
 
     @pytest.mark.asyncio
     async def test_process_generate_sends_progress_before_lazy_processor(self) -> None:
@@ -1805,9 +2614,10 @@ class TestGenerationSidecarIpc:
         writer = _CapturingWriter()
         work_item_msgpack = msgpack.packb({"request_id": "req-1"}, use_bin_type=True)
 
-        async def get_processor() -> MagicMock:
+        async def get_processor(*, prewarm_model_id: str | None = None) -> MagicMock:
             frames = _decode_written_frames(writer)
             assert [frame["body"]["kind"] for frame in frames] == ["in_progress"]
+            assert prewarm_model_id == "test/model"
             return processor
 
         get_processor_mock = AsyncMock(side_effect=get_processor)
@@ -1822,7 +2632,7 @@ class TestGenerationSidecarIpc:
         frames = _decode_written_frames(writer)
         assert [frame["body"]["kind"] for frame in frames] == ["in_progress", "done"]
         assert [frame["request_id"] for frame in frames] == ["ipc-req-1", "ipc-req-1"]
-        get_processor_mock.assert_awaited_once()
+        get_processor_mock.assert_awaited_once_with(prewarm_model_id="test/model")
         processor.process.assert_awaited_once()
 
 

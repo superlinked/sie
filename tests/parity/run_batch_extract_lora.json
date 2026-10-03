@@ -1,0 +1,52 @@
+{
+  "description": "RunBatch with op=extract + non-empty lora_key + one valid item + one invalid (extract payload missing). Pins Python adapter_call_loop invariants for the sie-worker sidecar contract: lora_key injection into options['lora'], invalid-before-valid ordering, and preserved identity for invalid payloads.",
+  "input": {
+    "model_id": "test/parity-extract",
+    "batch_id": 500,
+    "lora_key": "extract-lora-v1",
+    "total_cost": 20,
+    "items": [
+      {
+        "op": "extract",
+        "work_item_id": "w0",
+        "request_id": "r0",
+        "item_index": 0,
+        "extract": null
+      },
+      {
+        "op": "extract",
+        "extract": {
+          "work_item_id": "w1",
+          "request_id": "r1",
+          "item_index": 1,
+          "total_items": 2,
+          "timestamp": 0.0,
+          "item": {"text": "Acme Corp filed in 2023."},
+          "labels": ["organization", "year"],
+          "options": null
+        }
+      }
+    ]
+  },
+  "expected_canonical_outcomes": [
+    {
+      "work_item_id": "w0",
+      "request_id": "r0",
+      "item_index": 0,
+      "disposition": "publish_error_and_ack",
+      "error_code": "run_batch_invalid_item"
+    },
+    {
+      "work_item_id": "w1",
+      "request_id": "r1",
+      "item_index": 1,
+      "disposition": "publish_and_ack",
+      "error_code": null
+    }
+  ],
+  "expected_lora_in_options": "extract-lora-v1",
+  "notes": {
+    "elided_fields": ["inference_ms", "tokenization_ms", "postprocessing_ms", "result_msgpack", "raw_output", "error", "nak_delay_ms"],
+    "rationale": "expected_lora_in_options=\"extract-lora-v1\" pins the Python-side options['lora'] injection. The invalid-item appears at item_index=0 and keeps its identity so the Rust dispatcher can publish and ACK the original work item."
+  }
+}

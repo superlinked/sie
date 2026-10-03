@@ -1,0 +1,41 @@
+{
+  "description": "RunBatch with op=score, valid items, lora_key=\"\". Pins the Python score dispatch path: adapter_call_loop._dispatch_score must hand the inner ProcessScoreBatchRequest to the executor with item identifiers preserved. Score is base-only on the Python adapter path, so this fixture exercises the simple base path.",
+  "input": {
+    "model_id": "test/parity-score",
+    "batch_id": 400,
+    "lora_key": "",
+    "total_cost": 10,
+    "items": [
+      {
+        "op": "score",
+        "score": {
+          "work_item_id": "w0",
+          "request_id": "r0",
+          "item_index": 0,
+          "total_items": 1,
+          "timestamp": 0.0,
+          "query_item": {"text": "is python a snake?"},
+          "score_items": [
+            {"text": "yes, it is a kind of snake"},
+            {"text": "no, it is a programming language"}
+          ],
+          "options": null
+        }
+      }
+    ]
+  },
+  "expected_canonical_outcomes": [
+    {
+      "work_item_id": "w0",
+      "request_id": "r0",
+      "item_index": 0,
+      "disposition": "publish_and_ack",
+      "error_code": null
+    }
+  ],
+  "expected_lora_in_options": null,
+  "notes": {
+    "elided_fields": ["inference_ms", "tokenization_ms", "postprocessing_ms", "result_msgpack", "raw_output", "error", "nak_delay_ms"],
+    "rationale": "Score has no LoRA support on either backend — empty lora_key is the only valid score-with-LoRA-aware-test we can write without exercising the WARN path. The score-with-non-empty-lora WARN path is covered by run_batch_score_lora_warns.json."
+  }
+}

@@ -987,6 +987,11 @@
           "refId": "A"
         },
         {
+          "expr": "histogram_quantile(0.95, sum by (le, model, profile, grammar) (rate(sie_worker_generation_worker_wait_seconds_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\"}[$rate_window])))",
+          "legendFormat": "worker wait {{model}} / {{profile}} / {{grammar}}",
+          "refId": "W"
+        },
+        {
           "expr": "histogram_quantile(0.95, sum by (le, model, profile, grammar) (rate(sie_worker_generation_tpot_seconds_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\"}[$rate_window])))",
           "legendFormat": "TPOT {{model}} / {{profile}} / {{grammar}}",
           "refId": "B"

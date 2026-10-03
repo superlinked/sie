@@ -57,9 +57,8 @@ The generated Claude Code skill pack includes:
 - `redact-pii`: calls `redact_pii`.
 
 The redaction MCP tool intentionally does not return a placeholder-to-original
-map. That keeps original PII from being handed back to the calling model. Use the
-older local `sie_tools` redaction flow from PR #1336 if a de-redaction map is
-required.
+map. That keeps original PII from being handed back to the calling model. Do not
+use this flow when de-redaction is required.
 
 ## Credentials Model
 
@@ -67,9 +66,10 @@ There are two different credentials:
 
 - Server operator credential: `SIE_API_KEY`, used by the MCP edge to call the SIE
   cluster gateway. Only the edge process should have this.
-- Connector credential: `SIE_MCP_CONNECTOR_SECRETS`, used by users or agent
-  surfaces to authenticate to `/mcp`. Give users this connector secret, not the
-  cluster API key.
+- Server connector-credential map: `SIE_MCP_CONNECTOR_SECRETS`, read by the MCP
+  edge to validate clients. Give users their connector secret, not the cluster
+  API key. Client-side shell examples use the singular
+  `SIE_MCP_CONNECTOR_SECRET` only to construct an authorization header.
 
 The edge also needs `SIE_BASE_URL`, the gateway URL for the SIE cluster. For an
 in-cluster Helm deployment this can be left unset and the chart points at the
@@ -79,22 +79,22 @@ gateway service.
 
 Use this when an operator has already given you:
 
-- An MCP URL such as `https://<mcp-host>/mcp`.
+- An MCP URL such as `https://mcp.example.com/mcp`.
 - A connector secret.
 
 From the repo root:
 
 ```bash
-export SIE_MCP_URL="https://<mcp-host>/mcp"
-export SIE_MCP_CONNECTOR_SECRET="<connector-secret>"
+export SIE_MCP_URL="https://mcp.example.com/mcp"
 
 uv run --package sie-mcp sie-mcp plugin-pack \
-  --cluster-label sie \
+  --cluster-label my-sie-cluster \
   --mcp-url "$SIE_MCP_URL"
 ```
 
 The generated pack is written to
-`packages/sie_mcp/dist/superlinked-docs-plugin/` and contains:
+`packages/sie_mcp/dist/superlinked-docs-plugin/` and contains no connector
+credential:
 
 - `INSTALL.md`: endpoint-specific install commands.
 - `superlinked-docs-skill.zip`: uploadable claude.ai skill ZIP.
@@ -105,6 +105,7 @@ Install it into Claude Code:
 
 ```bash
 cd packages/sie_mcp/dist/superlinked-docs-plugin
+export SIE_MCP_CONNECTOR_SECRET='replace-with-connector-secret'
 
 claude mcp add --scope user --transport http superlinked-docs \
   "$SIE_MCP_URL" \
@@ -112,6 +113,7 @@ claude mcp add --scope user --transport http superlinked-docs \
 
 mkdir -p ~/.claude/skills
 cp -R claude-code/* ~/.claude/skills/
+unset SIE_MCP_CONNECTOR_SECRET
 ```
 
 Restart Claude Code after adding the MCP server and skills.
@@ -135,8 +137,8 @@ This starts only the lightweight MCP edge locally; document processing still run
 on the configured SIE cluster.
 
 ```bash
-export SIE_BASE_URL="https://<cluster-gateway>"
-export SIE_API_KEY="<cluster-api-key>"                 # omit if the gateway has no auth
+export SIE_BASE_URL="https://gateway.example.com"
+export SIE_API_KEY='replace-with-cluster-api-key'       # omit if the gateway has no auth
 export SIE_MCP_CONNECTOR_SECRETS="local-dev-secret:local-dev"
 
 uv run --package sie-mcp sie-mcp serve --host 127.0.0.1 --port 8088
@@ -239,7 +241,7 @@ Run the package tests from the repo root:
 uv run --package sie-mcp python -m pytest packages/sie_mcp/tests
 ```
 
-For a focused check of this plugin-pack and PR #1336 integration path:
+For a focused check of the plugin-pack and document-offload path:
 
 ```bash
 uv run --package sie-mcp python -m pytest \
@@ -259,13 +261,17 @@ git diff --check
 Once the local edge is running, generate an install pack that points at it:
 
 ```bash
-SIE_MCP_CONNECTOR_SECRET=local-dev-secret uv run --package sie-mcp sie-mcp plugin-pack \
+uv run --package sie-mcp sie-mcp plugin-pack \
   --cluster-label local-dev \
   --mcp-url http://127.0.0.1:8088/mcp \
   --out-dir /tmp/sie-mcp-plugin-pack
+
+export SIE_MCP_CONNECTOR_SECRET='local-dev-secret'
 ```
 
 Then follow `/tmp/sie-mcp-plugin-pack/INSTALL.md`.
+The guide contains a placeholder; retrieve the local-only connector secret from
+your environment or local secret store when running its install command.
 
 ## Build And Run The Docker Server
 
@@ -293,11 +299,14 @@ Then reuse the smoke-test commands above with
 The Helm chart has an optional `mcpEdge` section. A typical hosted deployment has
 one public HTTPS host for the MCP edge and a connector secret for users.
 
+The commands below use `local-dev-secret` as a local-only demo connector secret.
+Replace it before any shared or production deployment.
+
 Create the connector secret:
 
 ```bash
 kubectl -n sie create secret generic sie-mcp-connector-secrets \
-  --from-literal=connector-secrets="tester-secret:tester"
+  --from-literal=connector-secrets="local-dev-secret:local-dev"
 ```
 
 If the edge calls an external gateway that requires a cluster API key, create a
@@ -305,26 +314,43 @@ separate secret for that server-side key:
 
 ```bash
 kubectl -n sie create secret generic sie-mcp-cluster-api-key \
-  --from-literal=api-key="<cluster-api-key>"
+  --from-literal=api-key='replace-with-cluster-api-key'
 ```
 
 Enable the edge:
+
+Replace the example `v0.7.1` image tag below with the SIE release you want
+to deploy.
+
+The edge Ingress carries connector secrets and OAuth tokens, so the chart
+requires TLS for it. This example issues the certificate with cert-manager
+(installed in the cluster) and Let's Encrypt:
 
 ```bash
 helm upgrade sie deploy/helm/sie-cluster -n sie --reuse-values \
   --set mcpEdge.enabled=true \
   --set mcpEdge.image.repository=ghcr.io/superlinked/sie-mcp \
-  --set mcpEdge.image.tag=<tag> \
+  --set mcpEdge.image.tag=v0.7.1 \
   --set mcpEdge.existingSecretName=sie-mcp-connector-secrets \
-  --set mcpEdge.publicUrl=https://<mcp-host> \
+  --set mcpEdge.publicUrl=https://mcp.example.com \
   --set mcpEdge.ingress.enabled=true \
-  --set mcpEdge.ingress.host=<mcp-host>
+  --set mcpEdge.ingress.host=mcp.example.com \
+  --set ingress.tlsConfig.enabled=true \
+  --set ingress.tlsConfig.mode=cert-manager \
+  --set ingress.tlsConfig.certManager.email=ops@example.com
 ```
+
+To use a certificate you manage instead, create a `kubernetes.io/tls` Secret
+named `<release fullname>-mcp-tls` (for example `sie-mcp-tls`) and set only
+`ingress.tlsConfig.enabled=true`. When TLS terminates in front of the Ingress,
+set `ingress.tlsConfig.mode=disabled`. `mcpEdge.ingress.allowPlaintext=true`
+serves the edge over plain HTTP, which exposes connector secrets and OAuth
+tokens on the network; use it only on a private network.
 
 For an external gateway instead of the in-cluster gateway, add:
 
 ```bash
---set mcpEdge.clusterBaseUrl=https://<cluster-gateway> \
+--set mcpEdge.clusterBaseUrl=https://gateway.example.com \
 --set mcpEdge.clusterApiKey.existingSecretName=sie-mcp-cluster-api-key
 ```
 
@@ -332,16 +358,19 @@ Verify:
 
 ```bash
 kubectl -n sie rollout status deploy/sie-mcp --timeout=180s
-curl -s https://<mcp-host>/healthz
+curl -s https://mcp.example.com/healthz
 ```
 
 Then generate a user install pack:
 
 ```bash
-SIE_MCP_CONNECTOR_SECRET=tester-secret uv run --package sie-mcp sie-mcp plugin-pack \
-  --cluster-label <cluster-name> \
-  --mcp-url https://<mcp-host>/mcp
+uv run --package sie-mcp sie-mcp plugin-pack \
+  --cluster-label my-sie-cluster \
+  --mcp-url https://mcp.example.com/mcp
 ```
+
+Keep the real connector secret in connector configuration or a local secret
+store. The generated pack contains only placeholder-based instructions.
 
 ## How Users Use It In Claude Code
 
@@ -365,9 +394,9 @@ The skill instructions tell Claude Code to:
 
 ## Troubleshooting
 
-`401` from `/mcp` means the connector secret is missing or wrong. Re-run the
-generated `claude mcp add ... --header "Authorization: Bearer ..."` command from
-`INSTALL.md`.
+`401` from `/mcp` means the connector secret is missing or wrong. Retrieve the
+secret into `SIE_MCP_CONNECTOR_SECRET`, then re-run the placeholder-based
+`claude mcp add ...` command from `INSTALL.md`.
 
 `/healthz` works but tools fail usually means the edge cannot call the SIE
 cluster. Check `SIE_BASE_URL`, `SIE_API_KEY`, and cluster worker availability.
@@ -376,5 +405,13 @@ The first document request can take longer than later requests because model
 workers may need to start or load weights.
 
 claude.ai custom connectors require a public HTTPS MCP URL and the OAuth bridge.
-Set `SIE_MCP_PUBLIC_URL=https://<mcp-host>` for hosted deployments so OAuth
-metadata contains stable public URLs.
+For hosted deployments, export the public origin before starting the MCP edge:
+
+```bash
+export SIE_MCP_PUBLIC_URL='https://mcp.example.com'
+```
+
+The OAuth metadata advertises this origin as the authorization server, so pin it
+on every exposed deployment. Unpinned, the edge serves OAuth metadata only when the
+request `Host` is loopback or listed in `SIE_MCP_ALLOWED_HOSTS`, and ignores
+`X-Forwarded-Host`.

@@ -1,5 +1,6 @@
 sie_id: urchade/gliner_medium-v2.1
 hf_id: urchade/gliner_medium-v2.1
+hf_revision: 40ec419335d09393f298636f471328b722c6da9e
 inputs:
   text: true
   image: false

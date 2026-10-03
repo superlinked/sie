@@ -18,7 +18,6 @@ See: https://huggingface.co/vidore/colpali-v1.3-hf
 
 from __future__ import annotations
 
-import io
 import logging
 import threading
 from pathlib import Path
@@ -33,7 +32,7 @@ from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ComputePrecision
 from sie_server.core.inference_output import EncodeOutput
 from sie_server.core.postprocessor import MuveraConfig, MuveraPostprocessor
-from sie_server.types.inputs import media_bytes
+from sie_server.types.inputs import decode_image
 
 if TYPE_CHECKING:
     from PIL import Image
@@ -368,18 +367,9 @@ class ColPaliAdapter(BaseAdapter):
         Returns:
             List of PIL Images.
         """
-        from PIL import Image
-
-        pil_images = []
-        for img_input in item.images or []:
-            img_bytes = media_bytes(img_input, kind="image")
-            pil_img = Image.open(io.BytesIO(img_bytes))
-            # Convert to RGB if necessary
-            if pil_img.mode != "RGB":
-                pil_img = pil_img.convert("RGB")
-            pil_images.append(pil_img)
-
-        return pil_images
+        # decode_image raises InvalidMediaError (-> 400 INVALID_INPUT) on
+        # non-bytes or undecodable payloads, and converts to RGB.
+        return [decode_image(img_input, image_index=j) for j, img_input in enumerate(item.images or [])]
 
     def _encode_images(self, images: list[Image.Image]) -> np.ndarray:
         """Encode document images into multi-vector embeddings.
@@ -626,14 +616,27 @@ class ColPaliAdapter(BaseAdapter):
         config = MuveraConfig(**self._muvera_config) if self._muvera_config else MuveraConfig()
         return {"muvera": MuveraPostprocessor(token_dim=self._multivector_dim, config=config)}
 
-    def get_preprocessor(self) -> Any | None:
-        """Return an ImagePreprocessor for CPU/GPU overlap.
+    def get_preprocessor(self) -> Any:
+        """Return text AND image preprocessors (registered by modality).
+
+        Registering ONLY the image preprocessor left text queries with no
+        ``"text"`` preprocessor, so they fell through to the unbatched
+        direct-call path in ``EncodePipeline`` — per-request threads
+        serializing on ``_forward_lock``/``_tokenizer_lock`` with no batch
+        formation, worse than serial under concurrency (#2874). The base
+        ``CharCountPreprocessor`` (cost-only; the adapter still owns its own
+        tokenization) routes text queries through ``ModelWorker`` batching,
+        whose single inference thread makes the locks uncontended. Same
+        pattern as NemoColEmbed (#1163).
 
         Returns:
-            ImagePreprocessor wrapping the ColPaliProcessor, or None if not loaded.
+            ``[CharCountPreprocessor, ImagePreprocessor]`` (the latter
+            wrapping the ColPaliProcessor), or just the text preprocessor if
+            the image processor is not loaded.
         """
+        text_preprocessor = super().get_preprocessor()
         if self._processor is None:
-            return None
+            return text_preprocessor
 
         from transformers import ColPaliProcessor
 
@@ -650,8 +653,11 @@ class ColPaliAdapter(BaseAdapter):
             # the race without a pool-wide lock (which collapsed eval throughput).
             return ColPaliProcessor.from_pretrained(model_name_or_path, **load_kwargs)
 
-        return ImagePreprocessor(
-            self._processor,
-            self._model_name_or_path,
-            processor_factory=_make_processor,
-        )
+        return [
+            text_preprocessor,
+            ImagePreprocessor(
+                self._processor,
+                self._model_name_or_path,
+                processor_factory=_make_processor,
+            ),
+        ]

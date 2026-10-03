@@ -3,7 +3,7 @@
 Example:
     >>> from sie_sdk import SIEClient
     >>> client = SIEClient("http://localhost:8080")
-    >>> result = client.encode("bge-m3", {"text": "Hello world"})
+    >>> result = client.encode("BAAI/bge-m3", {"text": "Hello world"})
     >>> result["dense"]  # np.ndarray, shape [1024]
 
 For ColBERT/late interaction models, use the scoring module:
@@ -12,19 +12,27 @@ For ColBERT/late interaction models, use the scoring module:
 """
 
 from sie_sdk.client import (
+    AccountInactiveError,
+    AccountStateUnavailableError,
     EstimateUnroutableError,
+    IncompleteBatchError,
     InputTooLongError,
+    InsufficientCreditsError,
+    JobFailedError,
     LoraLoadingError,
     ModelLoadFailedError,
     ModelLoadingError,
     PoolError,
     ProvisioningError,
+    RateLimitError,
     RequestError,
+    ResourceExhaustedError,
     ServerError,
     SIEAsyncClient,
     SIEClient,
     SIEConnectionError,
     SIEError,
+    SpendLimitError,
 )
 from sie_sdk.encoding import (
     SparseVector,
@@ -34,8 +42,9 @@ from sie_sdk.encoding import (
     sparse_embedding,
     sparse_embedding_dict,
 )
+from sie_sdk.exceptions import GatedModelError
 from sie_sdk.files import resolve_upload
-from sie_sdk.jobs import build_job_body, connection_name
+from sie_sdk.jobs import MalformedChunkError, build_job_body, connection_name
 from sie_sdk.types import (
     # Response types
     AppliedRate,
@@ -93,6 +102,8 @@ from sie_sdk.types import (
 __version__ = "0.1.0"
 
 __all__ = [
+    "AccountInactiveError",
+    "AccountStateUnavailableError",
     "AppliedRate",
     "AssignedWorkerInfo",
     "Batch",
@@ -116,13 +127,17 @@ __all__ = [
     "File",
     "FileDeleted",
     "FileList",
+    "GatedModelError",
     "GenerateChunk",
     "GenerateResult",
     "GenerationUsage",
     "HealthResponse",
+    "IncompleteBatchError",
     "InputTooLongError",
+    "InsufficientCreditsError",
     "Item",
     "JobChunk",
+    "JobFailedError",
     "JobFieldMap",
     "JobList",
     "JobResultItem",
@@ -131,6 +146,7 @@ __all__ = [
     "JobStatus",
     "JobSubmitResult",
     "LoraLoadingError",
+    "MalformedChunkError",
     "ModelInfo",
     "ModelLoadFailedError",
     "ModelLoadingError",
@@ -144,7 +160,9 @@ __all__ = [
     "PoolStatusInfo",
     "ProvisioningError",
     "RateIdentity",
+    "RateLimitError",
     "RequestError",
+    "ResourceExhaustedError",
     "SIEAsyncClient",
     "SIEClient",
     "SIEConnectionError",
@@ -153,6 +171,7 @@ __all__ = [
     "ServerError",
     "SparseResult",
     "SparseVector",
+    "SpendLimitError",
     "StatusMessage",
     "TimingInfo",
     "WorkerInfo",

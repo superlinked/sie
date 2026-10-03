@@ -1,15 +1,19 @@
 """Tests for extract endpoint."""
 
 import asyncio
-from typing import Any
+from typing import Any, ClassVar
 from unittest.mock import AsyncMock, MagicMock
 
 import msgpack
 import msgpack_numpy as m
+import msgspec
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sie_server.adapters._base_adapter import BaseAdapter
+from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters.base import ModelCapabilities, ModelDims
+from sie_server.api.extract import _extract_via_worker
 from sie_server.api.extract import router as extract_router
 from sie_server.config.model import (
     EmbeddingDim,
@@ -19,13 +23,20 @@ from sie_server.config.model import (
     ProfileConfig,
     Tasks,
 )
-from sie_server.core.extract_cost import build_extract_prepared_items, extract_item_cost
+from sie_server.core.extract_cost import (
+    MAX_EXTRACT_LABELS,
+    MAX_OUTPUT_SCHEMA_DEPTH,
+    MAX_OUTPUT_SCHEMA_VALUES,
+    build_extract_prepared_items,
+    extract_item_cost,
+    output_schema_shape_error,
+)
 from sie_server.core.inference_output import ExtractItemError, ExtractOutput
 from sie_server.core.registry import ModelRegistry
 from sie_server.core.timing import RequestTiming
 from sie_server.core.worker import WorkerResult
 from sie_server.core.worker.handlers.extract import ExtractHandler
-from sie_server.types.inputs import Item
+from sie_server.types.inputs import MAX_ITEM_TEXT_BYTES, Item
 from sie_server.types.responses import Classification, Entity
 
 # Patch msgpack for numpy support
@@ -182,6 +193,19 @@ class TestExtractEndpoint:
         assert len(data["items"]) == 1
         assert "entities" in data["items"][0]
         assert "data" in data["items"][0]
+
+    @pytest.mark.parametrize("instruction", [["x"], {"a": 1}, 3])
+    def test_extract_rejects_a_non_string_options_instruction(
+        self, client: TestClient, mock_adapter: MagicMock, instruction: object
+    ) -> None:
+        response = client.post(
+            "/v1/extract/test-extractor",
+            json={"items": [{"text": "x"}], "params": {"labels": ["a"], "options": {"instruction": instruction}}},
+            headers=JSON_HEADERS,
+        )
+
+        assert response.status_code == 400
+        mock_adapter.extract.assert_not_called()
 
     def test_extract_item_error_is_preserved_in_local_response(
         self,
@@ -381,6 +405,73 @@ class TestExtractEndpoint:
         )
         assert response.status_code == 400  # Custom validation error (not Pydantic)
 
+    def test_extract_over_cap_labels_rejected(self, client: TestClient) -> None:
+        """A labels list past the cap is a typed 400 naming the limit.
+
+        GLiNER-family adapters run one forward pass per label, so an unbounded
+        labels list is an uncapped compute vector — mirror the score/rerank
+        candidate cap with a named 400 rather than letting it through.
+        """
+        response = client.post(
+            "/v1/extract/test-extractor",
+            json={
+                "items": [{"text": "Apple Inc."}],
+                "params": {"labels": [f"label-{i}" for i in range(MAX_EXTRACT_LABELS + 1)]},
+            },
+            headers=JSON_HEADERS,
+        )
+        assert response.status_code == 400
+        data = response.json()
+        assert data["detail"]["code"] == "INVALID_INPUT"
+        assert str(MAX_EXTRACT_LABELS) in data["detail"]["message"]
+        assert "labels" in data["detail"]["message"]
+
+    def test_extract_overly_deep_output_schema_rejected(self, client: TestClient) -> None:
+        """A schema nested past the bound is a 400 at ingress.
+
+        The worker's batching key and adapter compilers walk the schema
+        recursively; hundreds of levels would otherwise surface as a
+        RecursionError inside the worker instead of a 400.
+        """
+        schema: dict[str, Any] = {"type": "string"}
+        for _ in range(400):
+            schema = {"type": "object", "properties": {"a": schema}}
+        response = client.post(
+            "/v1/extract/test-extractor",
+            json={"items": [{"text": "Apple Inc."}], "params": {"output_schema": schema}},
+            headers=JSON_HEADERS,
+        )
+        assert response.status_code == 400
+        data = response.json()
+        assert data["detail"]["code"] == "INVALID_INPUT"
+        assert str(MAX_OUTPUT_SCHEMA_DEPTH) in data["detail"]["message"]
+
+    def test_output_schema_shape_limits(self) -> None:
+        def nested(levels: int) -> dict[str, Any]:
+            node: dict[str, Any] = {}
+            for _ in range(levels - 1):
+                node = {"a": node}
+            return node
+
+        assert output_schema_shape_error(nested(MAX_OUTPUT_SCHEMA_DEPTH)) is None
+        assert "nest" in (output_schema_shape_error(nested(MAX_OUTPUT_SCHEMA_DEPTH + 1)) or "")
+        assert output_schema_shape_error(nested(5000)) is not None  # iterative: no RecursionError
+        wide = {"properties": {f"p{i}": {"type": "string"} for i in range(MAX_OUTPUT_SCHEMA_VALUES)}}
+        assert "at most" in (output_schema_shape_error(wide) or "")
+        assert output_schema_shape_error({"type": "object", "properties": {"n": {"type": "string"}}}) is None
+
+    def test_extract_at_cap_labels_accepted(self, client: TestClient) -> None:
+        """A labels list exactly at the cap is accepted."""
+        response = client.post(
+            "/v1/extract/test-extractor",
+            json={
+                "items": [{"text": "Apple Inc."}],
+                "params": {"labels": [f"label-{i}" for i in range(MAX_EXTRACT_LABELS)]},
+            },
+            headers=JSON_HEADERS,
+        )
+        assert response.status_code == 200
+
     def test_extract_non_dict_items_rejected(self, client: TestClient) -> None:
         """Non-dict items return 400, not 500."""
         response = client.post(
@@ -450,6 +541,117 @@ class TestExtractEndpoint:
         assert data["detail"]["code"] == "INVALID_INPUT"
         assert "requires image input" in data["detail"]["message"]
         mock_registry.start_worker.assert_not_called()
+
+
+# msgpack framing of ``{"state": <str of 65,536 bytes or more>}``.
+_STATE_FRAMING = len(msgspec.msgpack.encode({"state": "x" * 70_000})) - 70_000
+
+
+class TestExtractItemTextSize:
+    """Each item's text and metadata are bounded at ingress, before any work."""
+
+    def test_text_at_the_cap_is_extracted(self, client: TestClient, mock_adapter: MagicMock) -> None:
+        response = client.post(
+            "/v1/extract/test-extractor",
+            json={"items": [{"text": "x" * MAX_ITEM_TEXT_BYTES}], "params": {"labels": ["person"]}},
+            headers=JSON_HEADERS,
+        )
+
+        assert response.status_code == 200
+        (items,) = mock_adapter.extract.call_args.args
+        assert len(items[0].text) == MAX_ITEM_TEXT_BYTES
+
+    def test_text_over_the_cap_rejects_the_request_before_any_work(
+        self, client: TestClient, mock_adapter: MagicMock, mock_registry: MagicMock
+    ) -> None:
+        response = client.post(
+            "/v1/extract/test-extractor",
+            json={
+                "items": [{"text": "Apple Inc."}, {"text": "x" * (MAX_ITEM_TEXT_BYTES + 1)}],
+                "params": {"labels": ["organization"]},
+            },
+            headers=JSON_HEADERS,
+        )
+
+        assert response.status_code == 400
+        assert response.json()["detail"] == {
+            "code": "INVALID_INPUT",
+            "message": f"Field 'items[1]' must hold at most {MAX_ITEM_TEXT_BYTES} bytes of UTF-8 text",
+        }
+        mock_registry.start_worker.assert_not_called()
+        mock_adapter.extract_item_costs.assert_not_called()
+        mock_adapter.extract.assert_not_called()
+
+    def test_multibyte_text_is_measured_in_utf8_bytes(self, client: TestClient, mock_adapter: MagicMock) -> None:
+        # Two bytes per character: over the cap in bytes, about half of it in characters.
+        text = "é" * (MAX_ITEM_TEXT_BYTES // 2 + 1)
+        response = client.post(
+            "/v1/extract/test-extractor",
+            json={"items": [{"text": text}], "params": {"labels": ["person"]}},
+            headers=JSON_HEADERS,
+        )
+
+        assert response.status_code == 400
+        assert str(MAX_ITEM_TEXT_BYTES) in response.json()["detail"]["message"]
+        mock_adapter.extract.assert_not_called()
+
+    def test_msgpack_body_over_the_cap_is_rejected(self, client: TestClient, mock_adapter: MagicMock) -> None:
+        body = msgpack.packb(
+            {"items": [{"text": "x" * (MAX_ITEM_TEXT_BYTES + 1)}], "params": {"labels": ["person"]}},
+            use_bin_type=True,
+        )
+        response = client.post(
+            "/v1/extract/test-extractor",
+            content=body,
+            headers={"Content-Type": "application/msgpack", **JSON_HEADERS},
+        )
+
+        assert response.status_code == 400
+        assert response.json()["detail"]["code"] == "INVALID_INPUT"
+        mock_adapter.extract.assert_not_called()
+
+    def test_metadata_state_at_the_cap_is_extracted(self, client: TestClient, mock_adapter: MagicMock) -> None:
+        state = "x" * (MAX_ITEM_TEXT_BYTES - _STATE_FRAMING)
+        response = client.post(
+            "/v1/extract/test-extractor",
+            json={"items": [{"metadata": {"state": state}}], "params": {"labels": ["approve", "deny"]}},
+            headers=JSON_HEADERS,
+        )
+
+        assert response.status_code == 200
+        (items,) = mock_adapter.extract.call_args.args
+        assert items[0].metadata == {"state": state}
+
+    def test_metadata_state_over_the_cap_is_rejected(self, client: TestClient, mock_adapter: MagicMock) -> None:
+        state = {"ticket": "x" * (MAX_ITEM_TEXT_BYTES - _STATE_FRAMING)}
+        response = client.post(
+            "/v1/extract/test-extractor",
+            json={"items": [{"metadata": {"state": state}}], "params": {"labels": ["approve", "deny"]}},
+            headers=JSON_HEADERS,
+        )
+
+        assert response.status_code == 400
+        assert response.json()["detail"]["message"] == (
+            f"Field 'items[0]' must hold at most {MAX_ITEM_TEXT_BYTES} bytes of UTF-8 text and metadata"
+        )
+        mock_adapter.extract.assert_not_called()
+
+    def test_ordinary_items_with_metadata_are_unaffected(self, client: TestClient, mock_adapter: MagicMock) -> None:
+        response = client.post(
+            "/v1/extract/test-extractor",
+            json={
+                "items": [
+                    {"text": "Steve Jobs founded Apple.", "metadata": {"entities": [{"text": "Apple"}]}},
+                    {"metadata": {"state": {"turns": ["refund please", "approved"]}}},
+                ],
+                "params": {"labels": ["person"]},
+            },
+            headers=JSON_HEADERS,
+        )
+
+        assert response.status_code == 200
+        assert len(response.json()["items"]) == 2
+        mock_adapter.extract.assert_called_once()
 
 
 class TestExtractEntityResults:
@@ -705,6 +907,87 @@ class TestExtractHandlerSchemaForwarding:
         assert output.data == [{"name": "Ada"}]
         assert adapter.extract.call_args.kwargs["output_schema"] is schema
 
+    def test_run_inference_forwards_original_nested_options(self) -> None:
+        handler = ExtractHandler()
+        options = {
+            "label_groups": {"urgency": ["low", "high"], "topic": ["billing", "bug"]},
+            "examples": [{"text": "Refund me", "labels": ["topic.billing"]}],
+            "threshold": 0.2,
+        }
+        metadata = self._metadata({})
+        metadata.output_schema = None
+        metadata.options = options
+        adapter = MagicMock()
+        adapter.extract.return_value = ExtractOutput(entities=[[]])
+
+        handler.run_inference(
+            adapter, [Item(text="Charged twice")], handler.make_config_key(metadata), None, [metadata]
+        )
+
+        forwarded = adapter.extract.call_args.kwargs["options"]
+        assert forwarded == options
+        assert list(forwarded["label_groups"]) == ["urgency", "topic"]
+        assert isinstance(forwarded["examples"][0], dict)
+
+    def test_options_that_differ_only_in_key_order_do_not_share_a_batch(self) -> None:
+        handler = ExtractHandler()
+
+        def key(options: dict[str, Any]) -> tuple[Any, ...]:
+            metadata = self._metadata({})
+            metadata.output_schema = None
+            metadata.options = options
+            return handler.make_config_key(metadata)
+
+        urgency_first = {"label_groups": {"urgency": ["low", "high"], "topic": ["billing", "bug"]}}
+        topic_first = {"label_groups": {"topic": ["billing", "bug"], "urgency": ["low", "high"]}}
+        example_a = {"examples": [{"text": "x", "labels": {"urgency": "low", "topic": "bug"}}]}
+        example_b = {"examples": [{"text": "x", "labels": {"topic": "bug", "urgency": "low"}}]}
+
+        assert key(urgency_first) != key(topic_first)
+        assert key(example_a) != key(example_b)
+        assert key(dict(urgency_first)) == key(urgency_first)
+        assert len({key(urgency_first), key(topic_first), key(dict(topic_first))}) == 2
+
+    def test_schemas_that_differ_only_in_property_order_do_not_share_a_batch(self) -> None:
+        handler = ExtractHandler()
+        first = {"type": "object", "properties": {"a": {"type": "string"}, "b": {"type": "string"}}}
+        second = {"type": "object", "properties": {"b": {"type": "string"}, "a": {"type": "string"}}}
+
+        assert handler.make_config_key(self._metadata(first)) != handler.make_config_key(self._metadata(second))
+
+    def test_run_inference_keeps_whisper_timestamp_granularities_a_list(self) -> None:
+        # Regression: rebuilding options from the batching key turned this list
+        # into a tuple, which Whisper's option parser rejects.
+        from sie_server.adapters.whisper.adapter import _parse_options
+
+        handler = ExtractHandler()
+        metadata = self._metadata({})
+        metadata.output_schema = None
+        metadata.options = {"timestamp_granularities": ["word", "segment"], "language": "en"}
+        adapter = MagicMock()
+        parsed: list[Any] = []
+
+        def extract(items: list[Item], **kwargs: Any) -> ExtractOutput:
+            parsed.append(_parse_options(kwargs["options"]))
+            return ExtractOutput(entities=[[] for _ in items])
+
+        adapter.extract.side_effect = extract
+
+        handler.run_inference(adapter, [Item(text="x")], handler.make_config_key(metadata), None, [metadata])
+
+        assert parsed == [("en", None, frozenset({"word", "segment"}))]
+
+    def test_run_inference_passes_none_for_absent_options(self) -> None:
+        handler = ExtractHandler()
+        metadata = self._metadata({})
+        metadata.output_schema = None
+        adapter = MagicMock()
+        adapter.extract.return_value = ExtractOutput(entities=[[]])
+
+        handler.run_inference(adapter, [Item(text="x")], handler.make_config_key(metadata), None, [metadata])
+
+        assert adapter.extract.call_args.kwargs["options"] is None
+
 
 class TestFormatOutput:
     """Tests for ExtractHandler.format_output classification behavior."""
@@ -855,3 +1138,81 @@ class TestExtractCost:
         ]
         prepared = build_extract_prepared_items(items)
         assert [(p.cost, p.original_index) for p in prepared] == [(3, 0), (11, 1)]
+
+
+class _PlainExtractAdapter(BaseAdapter):
+    """An extract adapter that keeps ModelAdapter's default (no per-item cost hook)."""
+
+    spec: ClassVar[AdapterSpec] = AdapterSpec(inputs=("text",), outputs=("json",))
+
+    def load(self, device: str) -> None:
+        pass
+
+    def extract(self, items: list[Item], **kwargs: Any) -> ExtractOutput:
+        return ExtractOutput(entities=[[] for _ in items])
+
+
+class _RowCostAdapter(_PlainExtractAdapter):
+    """Reports its own per-item costs, like an adapter that runs several model rows per item."""
+
+    def __init__(self) -> None:
+        self.hook_calls: list[dict[str, Any]] = []
+
+    def extract_item_costs(
+        self,
+        items: list[Item],
+        *,
+        labels: list[str] | None = None,
+        output_schema: dict[str, Any] | None = None,
+        instruction: str | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> list[int] | None:
+        self.hook_calls.append(
+            {"labels": labels, "output_schema": output_schema, "instruction": instruction, "options": options}
+        )
+        return [1000 + 10 * i for i in range(len(items))]
+
+
+def _cost_capture_registry(adapter: BaseAdapter) -> tuple[MagicMock, MagicMock]:
+    registry = MagicMock(spec=["get", "get_config", "start_worker"])
+    registry.get.return_value = adapter
+    worker = MagicMock()
+
+    async def submit_extract(*, prepared_items: list[Any], items: list[Item], **kwargs: Any) -> asyncio.Future:
+        future = asyncio.get_running_loop().create_future()
+        future.set_result(WorkerResult(output=ExtractOutput(entities=[[] for _ in items]), timing=RequestTiming()))
+        return future
+
+    worker.submit_extract = AsyncMock(side_effect=submit_extract)
+    registry.start_worker = AsyncMock(return_value=worker)
+    return registry, worker
+
+
+class TestExtractItemCostHook:
+    """``_extract_via_worker`` sizes batches from the adapter's per-item cost hook when it has one."""
+
+    @pytest.mark.asyncio
+    async def test_hook_costs_reach_the_worker(self) -> None:
+        adapter = _RowCostAdapter()
+        registry, worker = _cost_capture_registry(adapter)
+        items = [Item(text="a"), Item(text="bb"), Item(metadata={"state": {"k": "v"}})]
+        schema = {"q": {"type": "noul", "instructions": "x"}}
+
+        await _extract_via_worker(registry, "m", items, output_schema=schema, instruction=None, options={"max_len": 64})
+
+        prepared = worker.submit_extract.await_args.kwargs["prepared_items"]
+        assert [(p.cost, p.original_index) for p in prepared] == [(1000, 0), (1010, 1), (1020, 2)]
+        assert adapter.hook_calls == [
+            {"labels": None, "output_schema": schema, "instruction": None, "options": {"max_len": 64}}
+        ]
+
+    @pytest.mark.asyncio
+    async def test_default_hook_keeps_character_and_byte_costs(self) -> None:
+        registry, worker = _cost_capture_registry(_PlainExtractAdapter())
+        document = {"data": b"%PDF-1.4 fake", "format": "pdf"}
+        items = [Item(text="hello"), Item(document=document)]
+
+        await _extract_via_worker(registry, "m", items, labels=["person"])
+
+        prepared = worker.submit_extract.await_args.kwargs["prepared_items"]
+        assert [p.cost for p in prepared] == [5, len(document["data"])]

@@ -80,6 +80,44 @@ def test_accepts_schema_at_depth_limit() -> None:
     validate_output_schema(leaf)  # no raise
 
 
+def test_accepts_property_names_colliding_with_keywords() -> None:
+    # A property *name* that collides with a JSON-Schema keyword is data, not a
+    # keyword: under ``properties`` the keys are caller-supplied names. The subset
+    # walk must accept them, matching the gateway and server validators.
+    schema = {
+        "type": "object",
+        "properties": {
+            "if": {"type": "string"},
+            "then": {"type": "string"},
+            "else": {"type": "string"},
+            "$ref": {"type": "string"},
+            "dependentSchemas": {"type": "boolean"},
+            "unevaluatedProperties": {"type": "integer"},
+        },
+    }
+    validate_output_schema(schema)  # no raise
+
+
+def test_accepts_keyword_named_property_nested_in_pattern_properties() -> None:
+    # ``patternProperties`` is also a schema-map: its keys are patterns (data),
+    # so a keyword-named pattern key must be accepted. Using ``then`` here is
+    # deliberate — if ``patternProperties`` were walked as a *schema* context
+    # instead of ``schema_map``, this key would be rejected as a keyword.
+    schema = {
+        "type": "object",
+        "patternProperties": {"then": {"type": "object", "properties": {"if": {"type": "string"}}}},
+    }
+    validate_output_schema(schema)  # no raise
+
+
+def test_rejects_keyword_in_real_schema_position_under_properties() -> None:
+    # The gate must not over-accept: a genuine keyword sitting in a *schema*
+    # position (the value of a property is a schema) is still rejected.
+    schema = {"type": "object", "properties": {"a": {"type": "object", "if": {"x": True}}}}
+    with pytest.raises(StructuredOutputError, match="if"):
+        validate_output_schema(schema)
+
+
 # ── gateway safety caps (mirror handlers/grammar.rs) ─────────────────────
 
 

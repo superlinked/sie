@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import NonCallableMagicMock, create_autospec
 
 import numpy as np
 import pyarrow as pa
 import pytest
+from sie_sdk import SIEClient
 
 EMBEDDING_DIM = 384
 MULTIVECTOR_TOKEN_DIM = 128
@@ -44,6 +45,12 @@ def _create_mock_encode_result(
     return result
 
 
+def _server_item_id(item: Any, index: int) -> str:
+    """Return the ``item_id`` the SIE server reports: the sent ``id``, else ``item-<index>``."""
+    item_id = item.get("id") if isinstance(item, dict) else None
+    return item_id if item_id is not None else f"item-{index}"
+
+
 def _create_mock_score_result(
     query: str,
     items: list[dict],
@@ -57,7 +64,7 @@ def _create_mock_score_result(
     for rank, idx in enumerate(sorted_indices):
         results.append(
             {
-                "item_id": idx,
+                "item_id": items[idx]["id"],
                 "score": float(scores[idx]),
                 "rank": rank,
             }
@@ -89,9 +96,9 @@ def _create_mock_extract_result(text: str, labels: list[str]) -> dict[str, Any]:
 
 
 @pytest.fixture
-def mock_sie_client() -> MagicMock:
+def mock_sie_client() -> NonCallableMagicMock:
     """Create a mocked SIEClient for unit testing."""
-    client = MagicMock()
+    client = create_autospec(SIEClient, instance=True)
 
     def mock_encode(
         _model: str,
@@ -126,7 +133,7 @@ def mock_sie_client() -> MagicMock:
         **kwargs: Any,
     ) -> dict[str, Any]:
         query_text = _get_text(query)
-        item_dicts = [{"text": _get_text(i)} for i in items]
+        item_dicts = [{"id": _server_item_id(i, idx), "text": _get_text(i)} for idx, i in enumerate(items)]
         return {
             "model": _model,
             "scores": _create_mock_score_result(query_text, item_dicts),
@@ -169,10 +176,10 @@ def mock_sie_client() -> MagicMock:
             raise RequestError(404, f"Model '{model_name}' not found")
         return _model_registry[model_name]
 
-    client.encode = MagicMock(side_effect=mock_encode)
-    client.score = MagicMock(side_effect=mock_score)
-    client.extract = MagicMock(side_effect=mock_extract)
-    client.get_model = MagicMock(side_effect=mock_get_model)
+    client.encode.side_effect = mock_encode
+    client.score.side_effect = mock_score
+    client.extract.side_effect = mock_extract
+    client.get_model.side_effect = mock_get_model
     client.base_url = "http://localhost:8080"
 
     return client

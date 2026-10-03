@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from PIL import Image
-from sie_server.adapters.grounding_dino.adapter import GroundingDINOAdapter
+from sie_server.adapters.grounding_dino.adapter import GroundingDINOAdapter, _canonical_label
 from sie_server.core.inference_output import ExtractOutput
 from sie_server.types.inputs import ImageInput, Item
 
@@ -319,6 +319,44 @@ class TestGroundingDINOAdapter:
         scores.detach.return_value.cpu.assert_called_once_with()
         scores.detach.return_value.cpu.return_value.tolist.assert_called_once_with()
 
+    def test_results_to_objects_maps_decoded_phrases_back_onto_the_callers_labels(self) -> None:
+        """The post-processor lowercases and fragments multi-word labels; callers get their own back."""
+        adapter = GroundingDINOAdapter("IDEA-Research/grounding-dino-tiny")
+        boxes = MagicMock()
+        boxes.__len__.return_value = 3
+        boxes.detach.return_value.cpu.return_value.tolist.return_value = [
+            [10.0, 20.0, 110.0, 220.0],
+            [0.0, 0.0, 50.0, 50.0],
+            [5.0, 5.0, 15.0, 15.0],
+        ]
+        scores = MagicMock()
+        scores.detach.return_value.cpu.return_value.tolist.return_value = [0.9, 0.5, 0.4]
+
+        objects = adapter._results_to_objects(
+            {
+                "boxes": boxes,
+                "scores": scores,
+                "text_labels": ["leather handbag", "handbag backpack", "camera"],
+            },
+            ["Red Leather Handbag", "backpack", "camera — acceptance 1959"],
+        )
+
+        # A span merged across two labels ("handbag backpack") goes to the
+        # label it covers completely, not to the one it merely touches.
+        assert [obj["label"] for obj in objects] == ["Red Leather Handbag", "backpack", "camera — acceptance 1959"]
+
+    def test_canonical_label_prefers_the_label_the_phrase_covers_most(self) -> None:
+        labels = ["handbag", "red handbag", "backpack"]
+        assert _canonical_label("handbag", labels) == "handbag"
+        assert _canonical_label("red handbag", labels) == "red handbag"
+        assert _canonical_label("backpack.", labels) == "backpack"
+        # A repeated word counts once, so it cannot outscore the earlier label.
+        assert _canonical_label("red car", ["red car", "red red car"]) == "red car"
+        # No labels (an instruction prompt) or no overlap: the phrase stands.
+        assert _canonical_label("dog", None) == "dog"
+        assert _canonical_label("dog", labels) == "dog"
+        assert _canonical_label("dog", ["", "  "]) == "dog"
+
     def test_results_to_objects_empty_does_not_transfer_scores(self) -> None:
         adapter = GroundingDINOAdapter("IDEA-Research/grounding-dino-tiny")
         scores = MagicMock()
@@ -391,3 +429,26 @@ class TestGroundingDINOIntegration:
             assert "bbox" in obj
             if obj["bbox"]:
                 assert len(obj["bbox"]) == 4
+
+
+def test_extract_image_rejects_undecodable_bytes_with_typed_error() -> None:
+    """Non-image bytes are a typed InvalidMediaError (-> 400), not a PIL OSError 500."""
+    from sie_server.types.inputs import InvalidMediaError
+
+    adapter = GroundingDINOAdapter("IDEA-Research/grounding-dino-tiny")
+
+    with pytest.raises(InvalidMediaError, match="image data is not a decodable image"):
+        adapter._extract_image(Item(images=[ImageInput(data=b"valid base64, not an image", format="jpeg")]))
+
+
+def test_extract_fallback_names_the_offending_item_index() -> None:
+    """The inline-decode fallback loop passes each item's request-local index."""
+    from sie_server.types.inputs import InvalidMediaError
+
+    adapter = GroundingDINOAdapter("IDEA-Research/grounding-dino-tiny")
+    adapter._model = MagicMock()
+    adapter._processor = MagicMock()
+    items = [Item(), Item(), Item(images=[ImageInput(data=b"valid base64, not an image", format="png")])]
+
+    with pytest.raises(InvalidMediaError, match=r"at `\$\.items\[2\]\.images\[0\]\.data`"):
+        adapter.extract(items, labels=["cat"])

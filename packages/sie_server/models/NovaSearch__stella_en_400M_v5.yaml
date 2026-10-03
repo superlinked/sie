@@ -1,5 +1,6 @@
 sie_id: NovaSearch/stella_en_400M_v5
 hf_id: NovaSearch/stella_en_400M_v5
+hf_revision: ffeb2b7ee715c226d4ffe5e4619f7dbb48624c20
 inputs:
   text: true
   image: false

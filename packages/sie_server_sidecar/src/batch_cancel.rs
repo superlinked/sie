@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use crate::subject::normalize_model_id;
 
 const BATCH_CANCEL_TTL: Duration = Duration::from_secs(120);
+const MAX_REQUEST_CANCEL_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 const REQUEST_CANCEL_MAX_ENTRIES: usize = 100_000;
 const REQUEST_CANCEL_ORDER_COMPACTION_FACTOR: usize = 2;
 
@@ -71,7 +72,7 @@ impl RequestCancelState {
                 len: 0,
                 next_generation: 1,
             })),
-            ttl,
+            ttl: ttl.min(MAX_REQUEST_CANCEL_TTL),
             max_entries,
         }
     }
@@ -225,10 +226,20 @@ pub(crate) fn request_id_from_batch_cancel_subject(
 }
 
 pub(crate) fn request_id_from_work_cancel_subject(subject: &str) -> Option<(String, String)> {
+    router_and_request_id(subject, "work_cancel")
+}
+
+/// The gateway's request cancel `cancel.{router_id}.{request_id}`, which it
+/// also sends when a dispatch never became durable.
+pub(crate) fn request_id_from_generation_cancel_subject(subject: &str) -> Option<(String, String)> {
+    router_and_request_id(subject, "cancel")
+}
+
+fn router_and_request_id(subject: &str, prefix: &str) -> Option<(String, String)> {
     let mut parts = subject.splitn(3, '.');
     match (parts.next(), parts.next(), parts.next()) {
-        (Some("work_cancel"), Some(router_id), Some(request_id))
-            if !router_id.is_empty() && !request_id.is_empty() =>
+        (Some(head), Some(router_id), Some(request_id))
+            if head == prefix && !router_id.is_empty() && !request_id.is_empty() =>
         {
             Some((router_id.to_string(), request_id.to_string()))
         }
@@ -279,6 +290,30 @@ mod tests {
             None
         );
         assert_eq!(request_id_from_work_cancel_subject("cancel.gw.req"), None);
+    }
+
+    #[test]
+    fn generation_cancel_subject_parser_keeps_router_namespace() {
+        assert_eq!(
+            request_id_from_generation_cancel_subject("cancel.gw.req.with.dots"),
+            Some(("gw".to_string(), "req.with.dots".to_string()))
+        );
+        assert_eq!(request_id_from_generation_cancel_subject("cancel.gw"), None);
+        assert_eq!(
+            request_id_from_generation_cancel_subject("cancel..req"),
+            None
+        );
+        assert_eq!(
+            request_id_from_generation_cancel_subject("work_cancel.gw.req"),
+            None
+        );
+    }
+
+    #[test]
+    fn request_cancel_state_bounds_an_oversized_ttl() {
+        let state = RequestCancelState::new(Duration::MAX);
+        state.cancel("gw".into(), "req".into());
+        assert!(state.is_cancelled("gw", "req"));
     }
 
     #[test]

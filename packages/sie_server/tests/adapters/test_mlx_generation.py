@@ -8,16 +8,21 @@ SSE parsing, and cover the device-swap factory, the kwarg translation, and the
 
 from __future__ import annotations
 
+import socket
+from pathlib import Path
 from typing import Any, Self
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
-from sie_server.adapters._generation_base import collect_generation
+from sie_server.adapters._generation_base import GenerationUnsupportedFieldError, collect_generation
+from sie_server.adapters.mlx import _server
 from sie_server.adapters.mlx.generation import MLXGenerationAdapter
 from sie_server.adapters.sglang.generation import (
     SGLangGenerationAdapter,
     _translate_to_mlx_kwargs,
 )
+from sie_server.core.load_errors import EngineExitedError
+from sie_server.types.grammar import GrammarSpec
 
 
 @pytest.fixture
@@ -41,6 +46,27 @@ def test_capabilities(adapter: MLXGenerationAdapter) -> None:
     caps = adapter.capabilities
     assert caps.inputs == ["text"]
     assert caps.outputs == ["tokens"]
+
+
+@pytest.mark.parametrize("exit_code", [0, 1, -9])
+def test_exited_child_is_reported_and_rejected(adapter: MLXGenerationAdapter, exit_code: int) -> None:
+    adapter._process = MagicMock(poll=MagicMock(return_value=exit_code))
+    assert adapter.engine_exit_code() == exit_code
+    with pytest.raises(EngineExitedError, match=f"process exited with code {exit_code}"):
+        adapter._check_loaded()
+
+
+def test_running_child_remains_loaded(adapter: MLXGenerationAdapter) -> None:
+    adapter._process = MagicMock(poll=MagicMock(return_value=None))
+    assert adapter.engine_exit_code() is None
+    adapter._check_loaded()
+
+
+def test_unloaded_adapter_has_no_engine_exit_code() -> None:
+    adapter = MLXGenerationAdapter(model_name_or_path="Qwen/Qwen3.5-4B")
+    assert adapter.engine_exit_code() is None
+    with pytest.raises(RuntimeError, match="not loaded"):
+        adapter._check_loaded()
 
 
 # -- Device swap + kwarg translation -----------------------------------------
@@ -120,12 +146,15 @@ def test_load_aborts_when_warmup_fails(adapter: MLXGenerationAdapter) -> None:
         patch("sie_server.adapters.mlx.generation._server.wait_for_server", return_value=True),
         patch("sie_server.adapters.mlx.generation._server.warmup_model", return_value=False),
         patch("sie_server.adapters.mlx.generation._server.terminate_process") as term,
+        patch("sie_server.adapters.mlx.generation._server.release_port") as release,
         pytest.raises(RuntimeError, match="warm up"),
     ):
         adapter.load("mps")
     assert adapter._server_url is None
     assert adapter._process is None
+    assert adapter._port is None
     term.assert_called_once()
+    release.assert_called_once_with(30210)
 
 
 # -- generate(): OpenAI /v1/completions SSE parsing ---------------------------
@@ -221,6 +250,33 @@ async def test_generate_rejects_images(adapter: MLXGenerationAdapter) -> None:
         await gen.__anext__()
 
 
+async def test_generate_rejects_videos_as_unsupported_field(adapter: MLXGenerationAdapter) -> None:
+    with pytest.raises(GenerationUnsupportedFieldError) as error:
+        gen = adapter.generate(prompt="hi", max_new_tokens=8, videos=[{"data": b"x", "format": "mp4"}])
+        await gen.__anext__()
+    assert error.value.param == "videos"
+    assert error.value.code == "unsupported_field"
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_preflight_rejects_grammar_as_unsupported_field(adapter: MLXGenerationAdapter, stream: bool) -> None:
+    grammar = GrammarSpec(kind="json_schema", value={"type": "object"}, strict=True)
+
+    with pytest.raises(GenerationUnsupportedFieldError) as error:
+        adapter.preflight_generate({"prompt": "hi", "max_new_tokens": 8, "grammar": grammar}, stream=stream)
+
+    assert error.value.param == "grammar"
+    assert error.value.code == "unsupported_field"
+    assert adapter.preflight_generate({"prompt": "hi", "max_new_tokens": 8}, stream=stream) is None
+
+
+async def test_generate_rejects_grammar_instead_of_ignoring_it(adapter: MLXGenerationAdapter) -> None:
+    with pytest.raises(GenerationUnsupportedFieldError) as error:
+        gen = adapter.generate(prompt="hi", max_new_tokens=8, grammar=GrammarSpec(kind="regex", value="[a-z]+"))
+        await gen.__anext__()
+    assert error.value.param == "grammar"
+
+
 async def test_generate_rejects_unsupported_min_new_tokens(adapter: MLXGenerationAdapter) -> None:
     with pytest.raises(ValueError, match="min_new_tokens is not supported"):
         gen = adapter.generate(prompt="hi", max_new_tokens=8, min_new_tokens=2)
@@ -242,6 +298,102 @@ def test_unload_terminates_subprocess(adapter: MLXGenerationAdapter) -> None:
     term.assert_called_once_with(sentinel)
     assert adapter._process is None
     assert adapter._server_url is None
+
+
+def test_output_log_failure_releases_port(adapter: MLXGenerationAdapter) -> None:
+    """The port is reserved before the log is opened, so a /tmp failure must
+    still hand it back — otherwise repeated failures exhaust the span.
+    """
+    adapter._process = None
+    with (
+        patch("sie_server.adapters.mlx.generation._server.mlx_lm_available", return_value=True),
+        patch("sie_server.adapters.mlx.generation._server.find_free_port", return_value=30210),
+        patch(
+            "sie_server.adapters.mlx.generation._server.open_output_log",
+            side_effect=OSError("no space left on device"),
+        ),
+        patch("sie_server.adapters.mlx.generation._server.release_port") as release,
+        pytest.raises(OSError, match="no space left on device"),
+    ):
+        adapter.load("mps")
+    assert adapter._server_url is None
+    assert adapter._port is None
+    release.assert_called_once_with(30210)
+
+
+def test_launch_failure_releases_port(adapter: MLXGenerationAdapter) -> None:
+    """A failed exec must release the port and drop the log it opened."""
+    adapter._process = None
+    fake_log = type("L", (), {"name": "/tmp/mlx_launch_test_does_not_exist.log", "close": lambda self: None})()  # noqa: S108 — fake path; unlink is suppressed
+    with (
+        patch("sie_server.adapters.mlx.generation._server.mlx_lm_available", return_value=True),
+        patch("sie_server.adapters.mlx.generation._server.find_free_port", return_value=30210),
+        patch("sie_server.adapters.mlx.generation._server.open_output_log", return_value=fake_log),
+        patch(
+            "sie_server.adapters.mlx.generation._server.launch_mlx_server",
+            side_effect=OSError("exec format error"),
+        ),
+        patch("sie_server.adapters.mlx.generation._server.terminate_process"),
+        patch("sie_server.adapters.mlx.generation._server.release_port") as release,
+        pytest.raises(OSError, match="exec format error"),
+    ):
+        adapter.load("mps")
+    assert adapter._server_url is None
+    assert adapter._port is None
+    release.assert_called_once_with(30210)
+
+
+def test_unload_releases_port_and_cleans_output_log(adapter: MLXGenerationAdapter) -> None:
+    """Unload returns the reserved port to the pool and removes the temp log."""
+    adapter._process = None
+    adapter._port = 30210
+    adapter._output_file = _server.open_output_log(prefix="sie_test_mlx_")
+    log_path = Path(adapter._output_file.name)
+
+    with patch("sie_server.adapters.mlx.generation._server.release_port") as mock_release:
+        adapter.unload()
+
+    mock_release.assert_called_once_with(30210)
+    assert adapter._port is None
+    assert adapter._output_file is None
+    assert not log_path.exists()
+
+
+# -- Port reservation (mirrors sglang/_server.py — see test_sglang.py) ---------
+
+
+def test_release_returns_reserved_port_to_pool(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(_server, "_RESERVED_PORTS", set())
+    port = _server.find_free_port()
+    assert port in _server._RESERVED_PORTS
+    _server.release_port(port)
+    assert port not in _server._RESERVED_PORTS
+
+
+def test_exhausted_span_recovers_after_release(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Releasing one port un-bricks allocation after the span exhausts.
+
+    LRU eviction→reload churn scenario: without release_port the reserved set
+    only grows, and once all 100 ports are reserved every MLX generation load
+    fails until a full process restart.
+    """
+    # Anchor the scan on a port the OS just proved bindable, so the test
+    # doesn't depend on the state of the real MLX range (30200-30299).
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        anchor = s.getsockname()[1]
+    monkeypatch.setattr(_server, "_RESERVED_PORTS", set(range(anchor, anchor + 100)))
+    with pytest.raises(RuntimeError, match="Could not find free port"):
+        _server.find_free_port(anchor)
+    _server.release_port(anchor)
+    assert _server.find_free_port(anchor) == anchor
+
+
+def test_release_tolerates_none_and_unreserved_ports(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(_server, "_RESERVED_PORTS", set())
+    _server.release_port(None)
+    _server.release_port(54321)  # never reserved — must be a no-op
+    assert not _server._RESERVED_PORTS
 
 
 def test_memory_footprint_zero(adapter: MLXGenerationAdapter) -> None:

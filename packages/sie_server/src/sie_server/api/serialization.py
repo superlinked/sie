@@ -10,13 +10,9 @@ Serialization behavior:
 
 from typing import Any
 
-import msgpack
-import msgpack_numpy as m
 import numpy as np
 from fastapi import Response
-
-# Patch msgpack for numpy support
-m.patch()
+from sie_sdk._msgpack import packb as pack_msgpack
 
 
 class MsgPackResponse(Response):
@@ -35,9 +31,9 @@ class MsgPackResponse(Response):
         media_type: str | None = None,
         background: Any = None,
     ) -> None:
-        # Serialize directly — TypedDicts are plain dicts and msgpack-numpy
-        # handles numpy arrays natively, so no pre-processing is needed.
-        body = msgpack.packb(content, use_bin_type=True)
+        # Serialize directly — TypedDicts are plain dicts and the numeric-only
+        # codec handles NumPy arrays without process-global MessagePack hooks.
+        body = pack_msgpack(content, use_bin_type=True)
         super().__init__(
             content=body,
             status_code=status_code,

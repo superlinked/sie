@@ -2,8 +2,8 @@ sie_id: google/gemma-4-E2B-it
 hf_id: google/gemma-4-E2B-it
 # ── Engine (see issue #1415) ──
 #
-# Served by the dedicated ``gemma`` bundle (packages/sie_server/bundles/
-# gemma.yaml): sglang 0.5.13 + torch 2.11 (cu130) on a CUDA 13 base. 0.5.13 is
+# Served by the shared ``sglang-cu130`` bundle (packages/sie_server/bundles/
+# sglang-cu130.yaml): sglang 0.5.13 + torch 2.11 (cu130) on a CUDA 13 base. 0.5.13 is
 # the validated engine; 0.5.11 (first release with Gemma 4) has a JIT-kernel
 # compile bug. E2B was smoke-validated on a Modal L4 2026-06-18 (serves +
 # /v1/chat/completions 200). ``kv_budget_tokens`` / ``mem_fraction_static`` /

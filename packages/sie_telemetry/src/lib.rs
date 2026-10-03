@@ -1,8 +1,8 @@
-//! Shared OpenTelemetry *plumbing* for the SIE Rust crates (#2339).
+//! Shared OpenTelemetry *plumbing* for the SIE Rust crates.
 //!
 //! Extracted from the three copy-forked `observability/` stacks
-//! (`sie_gateway`, `sie_server_sidecar`, `sie_server_rust`): OTLP
-//! transport/endpoint/protocol resolution, Modal proxy authentication,
+//! (`sie_gateway`, `sie_server_sidecar`, and the native worker): OTLP
+//! transport/endpoint/protocol resolution, authenticated proxy headers,
 //! resource identity, exporter construction, env helpers, and W3C trace
 //! propagation. Extraction preserved each consumer's behavior — the crate
 //! exposes `_from_values` seams and parameters (e.g. `service_version`)
@@ -13,6 +13,7 @@
 //! pipeline. Those are per-crate surfaces (their name sets are disjoint;
 //! see `telemetry/contract.yaml` and the parity test).
 
+pub mod batch_fanin;
 pub mod env;
 pub mod exporters;
 pub mod propagation;

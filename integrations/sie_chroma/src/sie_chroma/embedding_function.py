@@ -81,17 +81,35 @@ class SIEEmbeddingFunction(EmbeddingFunction[Documents]):
         Returns:
             List of embedding vectors as numpy arrays (ChromaDB's expected format).
         """
-        if not documents:
+        return self._encode(documents, options=None)
+
+    def embed_query(self, input: Documents) -> Embeddings:
+        """Generate embeddings for query texts.
+
+        ChromaDB calls this for ``query_texts``. Uses is_query=True for
+        asymmetric models.
+
+        Args:
+            input: List of query texts to embed.
+
+        Returns:
+            List of embedding vectors as numpy arrays (ChromaDB's expected format).
+        """
+        return self._encode(input, options={"is_query": True})
+
+    def _encode(self, texts: Documents, *, options: dict[str, Any] | None) -> Embeddings:
+        if not texts:
             return []
 
         import numpy as np
 
-        items = [Item(text=text) for text in documents]
+        items = [Item(text=text) for text in texts]
 
         results = self.client.encode(
             self._model,
             items,
             output_types=["dense"],
+            options=options,
         )
 
         embeddings: Embeddings = []
@@ -179,15 +197,34 @@ class SIESparseEmbeddingFunction:
             List of sparse embeddings. Each sparse embedding is a dict
             mapping token indices (int) to weights (float).
         """
-        if not documents:
+        return self._encode(documents, options=None)
+
+    def embed_query(self, input: Documents) -> SparseEmbeddings:
+        """Generate sparse embeddings for query texts.
+
+        ChromaDB calls this for string queries. Uses is_query=True for
+        asymmetric models.
+
+        Args:
+            input: List of query texts to embed.
+
+        Returns:
+            List of sparse embeddings. Each sparse embedding is a dict
+            mapping token indices (int) to weights (float).
+        """
+        return self._encode(input, options={"is_query": True})
+
+    def _encode(self, texts: Documents, *, options: dict[str, Any] | None) -> SparseEmbeddings:
+        if not texts:
             return []
 
-        items = [Item(text=text) for text in documents]
+        items = [Item(text=text) for text in texts]
 
         results = self.client.encode(
             self._model,
             items,
             output_types=["sparse"],
+            options=options,
         )
 
         return [sparse_embedding_dict(result) for result in results]

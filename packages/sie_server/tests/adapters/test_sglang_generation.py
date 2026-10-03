@@ -13,26 +13,42 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Self
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
-from sie_server.adapters._generation_base import GenerationChunk, collect_generation, suppress_thinking_blocks
-from sie_server.adapters.sglang.cuda13 import SGLangStrictThinkingAdapter
+from sie_server.adapters._generation_base import (
+    GenerationChunk,
+    GenerationError,
+    GenerationInvalidRequestError,
+    collect_generation,
+    suppress_thinking_blocks,
+)
+from sie_server.adapters._types import ERR_NOT_LOADED
+from sie_server.adapters.sglang import _server
+from sie_server.adapters.sglang import generation as generation_module
+from sie_server.adapters.sglang.cuda13 import SGLangCuda13Adapter, SGLangStrictThinkingAdapter
+from sie_server.adapters.sglang.gemma import SGLangGemmaAdapter
 from sie_server.adapters.sglang.generation import (
     SGLangGenerationAdapter,
     _chunk_from_sglang_event,
     _encode_image_data,
-    _mamba_scheduler_strategy_value,
+    _encode_video_data,
+    _mamba_strategy_value,
     _p_unsafe_from_verdict_logprobs,
     _parse_sglang_generate_response,
+    _raise_for_sglang_event_error,
+    _raise_for_sglang_http_error,
     _thresholded_verdict,
 )
-from sie_server.types.grammar import GrammarSpec
+from sie_server.types.grammar import OUTLINES_JSON_SCHEMA_TYPE_MESSAGE, GrammarSpec
 from sie_server.types.inputs import InvalidMediaError
 
 
@@ -84,31 +100,33 @@ def test_load_required_memory_bytes_uses_mem_fraction_static() -> None:
     assert adapter.load_required_memory_bytes(device_type="cpu", device_total_bytes=10 * gb) is None
 
 
+@pytest.mark.parametrize("flag", ["--mamba-scheduler-strategy", "--mamba-radix-cache-strategy"])
 @pytest.mark.parametrize(
     ("args", "expected"),
     [
         # two-token form (Qwen3.5-4B YAML shape) → exact value
-        (["--mamba-scheduler-strategy", "extra_buffer"], "extra_buffer"),
-        (["--mamba-scheduler-strategy", "default"], "default"),
+        (["FLAG", "extra_buffer"], "extra_buffer"),
+        (["FLAG", "default"], "default"),
         # flag=value form
-        (["--mamba-scheduler-strategy=extra_buffer"], "extra_buffer"),
-        (["--mamba-scheduler-strategy=default"], "default"),
+        (["FLAG=extra_buffer"], "extra_buffer"),
+        (["FLAG=default"], "default"),
         # absent → None
         (["--disable-overlap-schedule"], None),
         ([], None),
         # trailing flag with no value → None (no crash)
-        (["--mamba-scheduler-strategy"], None),
+        (["FLAG"], None),
         # a stray ``extra_buffer`` token elsewhere must NOT be read as the value
-        (["--some-other-flag", "extra_buffer", "--mamba-scheduler-strategy", "default"], "default"),
+        (["--some-other-flag", "extra_buffer", "FLAG", "default"], "default"),
         # last occurrence wins (argparse semantics)
-        (
-            ["--mamba-scheduler-strategy", "default", "--mamba-scheduler-strategy", "extra_buffer"],
-            "extra_buffer",
-        ),
+        (["FLAG", "default", "FLAG", "extra_buffer"], "extra_buffer"),
     ],
 )
-def test_mamba_scheduler_strategy_value(args: list[str], expected: str | None) -> None:
-    assert _mamba_scheduler_strategy_value(args) == expected
+def test_mamba_strategy_value(flag: str, args: list[str], expected: str | None) -> None:
+    assert _mamba_strategy_value([arg.replace("FLAG", flag) for arg in args], flag) == expected
+
+
+def test_mamba_strategy_value_ignores_the_other_engines_spelling() -> None:
+    assert _mamba_strategy_value(["--mamba-scheduler-strategy", "extra_buffer"], "--mamba-radix-cache-strategy") is None
 
 
 def test_speculative_launch_args_support_qwen_eagle_and_gemma_assistant() -> None:
@@ -189,6 +207,58 @@ def test_load_drops_is_embedding(
     assert child_env["SIE_SGLANG_MM_PROCESS_CONFIG_COMPAT"] == "1"
     expected_compat_dir = Path(__file__).resolve().parents[2] / "src/sie_server/adapters/sglang/_compat"
     assert child_env["PYTHONPATH"].split(os.pathsep)[0] == str(expected_compat_dir)
+
+
+@pytest.mark.parametrize("digits", [None, 19])
+@patch("sie_server.adapters.sglang._server.subprocess.Popen")
+@patch("sie_server.adapters.sglang._server.requests.get")
+@patch("sie_server.adapters.sglang._server.find_free_port")
+def test_load_passes_json_number_max_digits_to_the_child(
+    mock_find_port: MagicMock,
+    mock_requests_get: MagicMock,
+    mock_popen: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+    digits: int | None,
+) -> None:
+    monkeypatch.delenv("SIE_SGLANG_JSON_NUMBER_MAX_DIGITS", raising=False)
+    mock_find_port.return_value = 30005
+    mock_process = MagicMock()
+    mock_process.poll.return_value = None
+    mock_popen.return_value = mock_process
+    mock_requests_get.return_value = MagicMock(status_code=200)
+    adapter = SGLangGenerationAdapter(
+        model_name_or_path="Qwen/Qwen3-4B-Instruct",
+        grammar_backend="xgrammar",
+        json_number_max_digits=digits,
+    )
+
+    adapter.load("cuda:0")
+
+    child_env = mock_popen.call_args.kwargs["env"]
+    if digits is None:
+        assert "SIE_SGLANG_JSON_NUMBER_MAX_DIGITS" not in child_env
+    else:
+        assert child_env["SIE_SGLANG_JSON_NUMBER_MAX_DIGITS"] == "19"
+
+
+@pytest.mark.parametrize(
+    ("digits", "backend", "message"),
+    [
+        (0, "xgrammar", "positive integer"),
+        (-1, "xgrammar", "positive integer"),
+        (True, "xgrammar", "positive integer"),
+        ("19", "xgrammar", "positive integer"),
+        (19, "outlines", "needs grammar_backend 'xgrammar'"),
+        (19, None, "needs grammar_backend 'xgrammar'"),
+    ],
+)
+def test_json_number_max_digits_rejects_unusable_settings(digits: object, backend: str | None, message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        SGLangGenerationAdapter(
+            model_name_or_path="Qwen/Qwen3-4B-Instruct",
+            grammar_backend=backend,
+            json_number_max_digits=digits,  # type: ignore[arg-type]
+        )
 
 
 @patch("sie_server.adapters.sglang._server.subprocess.Popen")
@@ -410,7 +480,7 @@ def test_generate_surfaces_in_band_sglang_error(mock_async_client: MagicMock, ad
 
     with pytest.raises(
         RuntimeError,
-        match="SGLang /generate error: vision processor rejected image",
+        match="SGLang /generate returned an in-band error",
     ):
         asyncio.run(_collect())
 
@@ -422,7 +492,8 @@ def test_generate_collect_into_result(mock_async_client: MagicMock, adapter) -> 
         'data: {"text": "abcdef", "meta_info": {"prompt_tokens": 1, "completion_tokens": 2, "finish_reason": {"type": "length"}}}',
     ]
     stream = _FakeStreamingResponse(sse_lines)
-    mock_async_client.return_value = _make_client_with_stream(stream)
+    client_instance = _make_client_with_stream(stream)
+    mock_async_client.return_value = client_instance
     adapter._server_url = "http://localhost:30005"
 
     result = asyncio.run(
@@ -432,6 +503,34 @@ def test_generate_collect_into_result(mock_async_client: MagicMock, adapter) -> 
     assert result.finish_reason == "length"
     assert result.prompt_tokens == 1
     assert result.completion_tokens == 2
+    client_instance.post.assert_not_awaited()
+
+
+@patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
+def test_queue_child_task_wrapper_close_does_not_abort_terminal_request(
+    mock_async_client: MagicMock,
+    adapter,
+) -> None:
+    stream = _FakeStreamingResponse(
+        [
+            'data: {"text": "done", "meta_info": {"prompt_tokens": 1, "completion_tokens": 1, "finish_reason": {"type": "stop"}}}',
+        ]
+    )
+    client_instance = _make_client_with_stream(stream)
+    mock_async_client.return_value = client_instance
+    adapter._server_url = "http://localhost:30005"
+
+    async def _run() -> None:
+        chunks = suppress_thinking_blocks(adapter.generate(prompt="Hi", max_new_tokens=8))
+        while True:
+            chunk = await asyncio.create_task(anext(chunks))
+            if chunk.done:
+                break
+        await chunks.aclose()
+
+    asyncio.run(_run())
+
+    client_instance.post.assert_not_awaited()
 
 
 @patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
@@ -463,7 +562,9 @@ def test_generate_n_gt_one_fans_out_into_candidates(mock_async_client: MagicMock
     resp.json = MagicMock(return_value=sglang_results)
     resp.raise_for_status = MagicMock()
     client_instance = _make_client_with_stream(_FakeStreamingResponse([]))
-    client_instance.post = AsyncMock(return_value=resp)
+    resp.aread = AsyncMock()
+    resp.__aenter__ = AsyncMock(return_value=resp)
+    client_instance.stream.return_value = resp
     mock_async_client.return_value = client_instance
     adapter._server_url = "http://localhost:30005"
 
@@ -487,7 +588,7 @@ def test_generate_n_gt_one_fans_out_into_candidates(mock_async_client: MagicMock
     assert term.prompt_tokens == 4
     assert term.completion_tokens == 25
     # The request asked SGLang for n candidates, non-streaming.
-    body = client_instance.post.call_args.kwargs["json"]
+    body = client_instance.stream.call_args.kwargs["json"]
     assert body["sampling_params"]["n"] == 2
     assert body["stream"] is False
 
@@ -572,6 +673,37 @@ def test_generate_forwards_image_data(mock_async_client: MagicMock, adapter) -> 
     assert "image_data" not in body["sampling_params"]
 
 
+def test_encode_video_data_builds_data_uris_and_clamps_format() -> None:
+    out = _encode_video_data([{"data": b"\x00\x00\x00\x18ftypisom", "format": "mp4"}])
+    assert out is not None
+    assert out[0].startswith("data:video/mp4;base64,")
+    assert base64.b64decode(out[0].split(",", 1)[1]) == b"\x00\x00\x00\x18ftypisom"
+    clamped = _encode_video_data([{"data": b"x", "format": "x-mpegurl"}])
+    assert clamped is not None
+    assert clamped[0].startswith("data:video/mp4;base64,")
+    assert _encode_video_data(None) is None
+    assert _encode_video_data([]) is None
+    with pytest.raises(InvalidMediaError):
+        _encode_video_data([{"data": "not-bytes", "format": "mp4"}])
+
+
+@patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
+def test_generate_forwards_video_data(mock_async_client: MagicMock, adapter) -> None:
+    sse_lines = [
+        'data: {"text": "red", "meta_info": {"prompt_tokens": 5, "completion_tokens": 1, "finish_reason": {"type": "stop"}}}',
+    ]
+    mock_async_client.return_value = _make_client_with_stream(_FakeStreamingResponse(sse_lines))
+    adapter._server_url = "http://localhost:30005"
+
+    videos = [{"data": b"\x00\x00\x00\x18ftypisom", "format": "mp4"}]
+    asyncio.run(collect_generation(adapter.generate(prompt="<video>what happens", max_new_tokens=8, videos=videos)))
+
+    body = client_instance_stream_body(mock_async_client)
+    assert body["video_data"][0].startswith("data:video/mp4;base64,")
+    assert "video_data" not in body["sampling_params"]
+    assert "image_data" not in body
+
+
 @patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
 def test_generate_omits_image_data_without_images(mock_async_client: MagicMock, adapter) -> None:
     """Text-only generation never sets ``image_data`` — the body stays
@@ -643,7 +775,9 @@ def test_generate_best_of_ranks_by_logprob_and_trims(mock_async_client: MagicMoc
     resp.json = MagicMock(return_value=sglang_results)
     resp.raise_for_status = MagicMock()
     client_instance = _make_client_with_stream(_FakeStreamingResponse([]))
-    client_instance.post = AsyncMock(return_value=resp)
+    resp.aread = AsyncMock()
+    resp.__aenter__ = AsyncMock(return_value=resp)
+    client_instance.stream.return_value = resp
     mock_async_client.return_value = client_instance
     adapter._server_url = "http://localhost:30005"
 
@@ -658,7 +792,7 @@ def test_generate_best_of_ranks_by_logprob_and_trims(mock_async_client: MagicMoc
     assert term.candidates is not None
     assert len(term.candidates) == 1  # trimmed to n
     assert term.candidates[0]["text"] == " best"  # highest cumulative logprob (-0.2)
-    body = client_instance.post.call_args.kwargs["json"]
+    body = client_instance.stream.call_args.kwargs["json"]
     assert body["sampling_params"]["n"] == 3  # over-generated best_of
     assert body["return_logprob"] is True  # ranking needs logprobs
 
@@ -703,6 +837,100 @@ def test_generate_streaming_n_gt_one_fans_out_choice_index(mock_async_client: Ma
     body = mock_async_client.return_value.stream.call_args.kwargs["json"]
     assert body["sampling_params"]["n"] == 2
     assert body["stream"] is True
+
+
+@patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
+def test_generate_streaming_n_gt_one_aclose_aborts_incomplete_request(
+    mock_async_client: MagicMock,
+    adapter,
+) -> None:
+    class _NeverEnding(_FakeStreamingResponse):
+        async def aiter_lines(self):
+            yield 'data: {"index": 0, "text": "first", "meta_info": {"prompt_tokens": 1}}'
+            await asyncio.Event().wait()  # pragma: no cover - closed by the test
+
+    client_instance = _make_client_with_stream(_NeverEnding(lines=[]))
+    mock_async_client.return_value = client_instance
+    adapter._server_url = "http://localhost:30005"
+
+    async def _run() -> None:
+        chunks = adapter.generate(prompt="Hi", max_new_tokens=8, n=2, stream=True)
+        first = await anext(chunks)
+        assert first.text_delta == "first"
+        await chunks.aclose()
+        if adapter._abort_tasks:
+            await asyncio.gather(*tuple(adapter._abort_tasks))
+
+    asyncio.run(_run())
+
+    request_rid = client_instance.stream.call_args.kwargs["json"]["rid"]
+    client_instance.post.assert_awaited_once()
+    args, kwargs = client_instance.post.await_args
+    assert args[0].endswith("/abort_request")
+    assert kwargs["json"] == {"rid": request_rid}
+
+
+@patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
+def test_generate_streaming_n_gt_one_cancellation_aborts_incomplete_request(
+    mock_async_client: MagicMock,
+    adapter,
+) -> None:
+    class _NeverEnding(_FakeStreamingResponse):
+        async def aiter_lines(self):
+            yield 'data: {"index": 0, "text": "first", "meta_info": {"prompt_tokens": 1}}'
+            await asyncio.Event().wait()  # pragma: no cover - cancelled by the test
+
+    client_instance = _make_client_with_stream(_NeverEnding(lines=[]))
+    mock_async_client.return_value = client_instance
+    adapter._server_url = "http://localhost:30005"
+
+    async def _run() -> None:
+        chunks = adapter.generate(prompt="Hi", max_new_tokens=8, n=2, stream=True)
+        assert (await anext(chunks)).text_delta == "first"
+        pending = asyncio.create_task(anext(chunks))
+        await asyncio.sleep(0)
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        if adapter._abort_tasks:
+            await asyncio.gather(*tuple(adapter._abort_tasks))
+
+    asyncio.run(_run())
+
+    request_rid = client_instance.stream.call_args.kwargs["json"]["rid"]
+    client_instance.post.assert_awaited_once()
+    args, kwargs = client_instance.post.await_args
+    assert args[0].endswith("/abort_request")
+    assert kwargs["json"] == {"rid": request_rid}
+
+
+@patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
+def test_generate_streaming_n_gt_one_terminal_close_does_not_abort(
+    mock_async_client: MagicMock,
+    adapter,
+) -> None:
+    stream = _FakeStreamingResponse(
+        [
+            'data: {"index": 0, "text": "A", "meta_info": {"prompt_tokens": 1, "completion_tokens": 1, "finish_reason": {"type": "stop"}}}',
+            'data: {"index": 1, "text": "B", "meta_info": {"prompt_tokens": 1, "completion_tokens": 1, "finish_reason": {"type": "stop"}}}',
+            "data: [DONE]",
+        ]
+    )
+    client_instance = _make_client_with_stream(stream)
+    mock_async_client.return_value = client_instance
+    adapter._server_url = "http://localhost:30005"
+
+    async def _run() -> None:
+        chunks = adapter.generate(prompt="Hi", max_new_tokens=8, n=2, stream=True)
+        while not (await anext(chunks)).done:
+            pass
+        await chunks.aclose()
+        if adapter._abort_tasks:
+            await asyncio.gather(*tuple(adapter._abort_tasks))
+
+    asyncio.run(_run())
+
+    client_instance.post.assert_not_awaited()
 
 
 @patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
@@ -760,6 +988,88 @@ def test_gemma_generate_preserves_reasoning_markers_for_sie_suppression(mock_asy
     body = client_instance.stream.call_args.kwargs["json"]
     assert body["sampling_params"]["skip_special_tokens"] is False
     assert result.text == "answer"
+
+
+def _posted_generate_body(
+    mock_async_client: MagicMock,
+    prompt: str,
+    *,
+    reasoning_parser: str | None,
+    n: int | None = None,
+    stream: bool = False,
+) -> dict[str, Any]:
+    finish = '"meta_info": {"prompt_tokens": 1, "completion_tokens": 1, "finish_reason": {"type": "stop"}}'
+    if n is not None and not stream:
+        response = MagicMock()
+        response.json = MagicMock(
+            return_value=[
+                {
+                    "text": "x",
+                    "meta_info": {"finish_reason": {"type": "stop"}, "completion_tokens": 1, "prompt_tokens": 1},
+                }
+            ]
+            * n
+        )
+        response.raise_for_status = MagicMock()
+        response.aread = AsyncMock()
+        response.__aenter__ = AsyncMock(return_value=response)
+        client_instance = _make_client_with_stream(_FakeStreamingResponse([]))
+        client_instance.stream.return_value = response
+    elif n is not None:
+        lines = [f'data: {{"index": {index}, "text": "x", {finish}}}' for index in range(n)] + ["data: [DONE]"]
+        client_instance = _make_client_with_stream(_FakeStreamingResponse(lines))
+    else:
+        client_instance = _make_client_with_stream(_FakeStreamingResponse([f'data: {{"text": "x", {finish}}}']))
+    mock_async_client.return_value = client_instance
+    adapter = SGLangGenerationAdapter(
+        model_name_or_path="zai-org/GLM-5.3-Flash",
+        served_model_name="zai-org/GLM-5.3-Flash",
+        reasoning_parser=reasoning_parser,
+    )
+    adapter._server_url = "http://localhost:30005"
+
+    async def _drain() -> None:
+        async for _ in adapter.generate(prompt=prompt, max_new_tokens=8, n=n, stream=stream):
+            pass
+
+    asyncio.run(_drain())
+    return client_instance.stream.call_args.kwargs["json"]
+
+
+@pytest.mark.parametrize(("n", "stream"), [(None, False), (2, True), (2, False)])
+@patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
+def test_generate_requires_reasoning_when_the_prompt_leaves_thinking_open(
+    mock_async_client: MagicMock, n: int | None, stream: bool
+) -> None:
+    body = _posted_generate_body(
+        mock_async_client, "[gMASK]<sop><|user|>Hi<|assistant|><think>", reasoning_parser="glm45", n=n, stream=stream
+    )
+
+    assert body["require_reasoning"] is True
+
+
+@pytest.mark.parametrize(
+    ("prompt", "reasoning_parser"),
+    [
+        ("<|im_start|>assistant\n<think>\n\n</think>\n\n", "qwen3"),
+        ("<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n", "qwen3"),
+        ("[gMASK]<sop><|user|>Hi<|assistant|><think>", None),
+    ],
+)
+@patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
+def test_generate_leaves_reasoning_to_the_engine_default_otherwise(
+    mock_async_client: MagicMock, prompt: str, reasoning_parser: str | None
+) -> None:
+    body = _posted_generate_body(mock_async_client, prompt, reasoning_parser=reasoning_parser)
+
+    assert "require_reasoning" not in body
+
+
+@patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
+def test_generate_requires_reasoning_after_a_seeded_gemma_channel(mock_async_client: MagicMock) -> None:
+    body = _posted_generate_body(mock_async_client, "<|turn>model\n<|channel>", reasoning_parser="gemma4")
+
+    assert body["require_reasoning"] is True
 
 
 @patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
@@ -914,6 +1224,112 @@ def test_generate_explicit_min_new_tokens_overrides_profile_default_when_valid(
     assert sampling_params["min_new_tokens"] == 2
 
 
+@pytest.fixture(
+    params=[
+        pytest.param(GrammarSpec(kind="json_schema", value={"type": "string"}), id="json_schema"),
+        pytest.param(GrammarSpec(kind="regex", value="[a-z]+"), id="regex"),
+        pytest.param(GrammarSpec(kind="ebnf", value='root ::= "ok"'), id="ebnf"),
+    ]
+)
+def grammar_default_sampling_spec(request: pytest.FixtureRequest) -> GrammarSpec:
+    return request.param
+
+
+@pytest.mark.parametrize(
+    ("min_new_tokens", "top_k", "repetition_penalty"),
+    [
+        pytest.param(None, None, None, id="inherited"),
+        pytest.param(0, None, None, id="explicit-zero"),
+        pytest.param(2, 5, 1.2, id="explicit-overrides"),
+    ],
+)
+@patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
+def test_generate_grammar_default_sampling(
+    mock_async_client: MagicMock,
+    grammar_default_sampling_spec: GrammarSpec,
+    min_new_tokens: int | None,
+    top_k: int | None,
+    repetition_penalty: float | None,
+) -> None:
+    sse_lines = [
+        'data: {"text": "ok", "meta_info": {"prompt_tokens": 1, "completion_tokens": 1, "finish_reason": {"type": "stop"}}}',
+    ]
+    client_instance = _make_client_with_stream(_FakeStreamingResponse(sse_lines))
+    mock_async_client.return_value = client_instance
+    default_sampling = {"min_new_tokens": 10, "top_k": 17, "repetition_penalty": 1.1}
+    expected_defaults = default_sampling.copy()
+    adapter = SGLangGenerationAdapter("test-model", default_sampling=default_sampling)
+    adapter._server_url = "http://localhost:30005"
+    grammar = grammar_default_sampling_spec
+
+    asyncio.run(
+        collect_generation(
+            adapter.generate(
+                prompt="Hi",
+                max_new_tokens=3,
+                min_new_tokens=min_new_tokens,
+                top_k=top_k,
+                repetition_penalty=repetition_penalty,
+                grammar=grammar,
+            )
+        )
+    )
+
+    sampling_params = client_instance.stream.call_args.kwargs["json"]["sampling_params"]
+    assert sampling_params["max_new_tokens"] == 3
+    if min_new_tokens is None:
+        assert "min_new_tokens" not in sampling_params
+    else:
+        assert sampling_params["min_new_tokens"] == min_new_tokens
+    assert sampling_params["top_k"] == (17 if top_k is None else top_k)
+    assert sampling_params["repetition_penalty"] == pytest.approx(
+        1.1 if repetition_penalty is None else repetition_penalty
+    )
+    expected_grammar = json.dumps(grammar.value) if grammar.kind == "json_schema" else grammar.value
+    assert {key: sampling_params[key] for key in ("json_schema", "regex", "ebnf") if key in sampling_params} == {
+        grammar.kind: expected_grammar
+    }
+    assert adapter._default_sampling == expected_defaults
+    assert default_sampling == expected_defaults
+
+    for max_new_tokens in (1, 64):
+        asyncio.run(collect_generation(adapter.generate(prompt="Hi", max_new_tokens=max_new_tokens)))
+        unconstrained_sampling = client_instance.stream.call_args.kwargs["json"]["sampling_params"]
+        assert unconstrained_sampling["min_new_tokens"] == min(10, max_new_tokens)
+        assert unconstrained_sampling["top_k"] == 17
+        assert unconstrained_sampling["repetition_penalty"] == pytest.approx(1.1)
+        assert not {"json_schema", "regex", "ebnf"}.intersection(unconstrained_sampling)
+
+    assert adapter._default_sampling == expected_defaults
+    assert default_sampling == expected_defaults
+
+
+@patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
+def test_generate_grammar_default_sampling_rejects_explicit_min_above_max(
+    mock_async_client: MagicMock,
+    grammar_default_sampling_spec: GrammarSpec,
+) -> None:
+    adapter = SGLangGenerationAdapter(
+        "test-model",
+        default_sampling={"min_new_tokens": 10, "top_k": 17, "repetition_penalty": 1.1},
+    )
+    adapter._server_url = "http://localhost:30005"
+
+    with pytest.raises(ValueError, match=r"min_new_tokens \(10\) must not exceed max_new_tokens \(1\)"):
+        asyncio.run(
+            collect_generation(
+                adapter.generate(
+                    prompt="Hi",
+                    max_new_tokens=1,
+                    min_new_tokens=10,
+                    grammar=grammar_default_sampling_spec,
+                )
+            )
+        )
+
+    mock_async_client.assert_not_called()
+
+
 @pytest.mark.parametrize("seed", [-1, 0, 1])
 @patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
 def test_generate_maps_seed_to_sglang_sampling_seed(mock_async_client: MagicMock, adapter, seed: int) -> None:
@@ -979,6 +1395,35 @@ def test_generate_aclose_triggers_abort_request(mock_async_client: MagicMock, ad
 
     # /abort_request was POSTed best-effort with the rid carried in the body.
     client_instance.post.assert_awaited()
+    args, _ = client_instance.post.await_args
+    assert args[0].endswith("/abort_request")
+
+
+@patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
+def test_generate_task_cancellation_triggers_abort_request(mock_async_client: MagicMock, adapter) -> None:
+    class _NeverEnding(_FakeStreamingResponse):
+        async def aiter_lines(self):
+            yield 'data: {"text": "first"}'
+            await asyncio.Event().wait()  # pragma: no cover - cancelled by the test
+
+    client_instance = _make_client_with_stream(_NeverEnding(lines=[]))
+    mock_async_client.return_value = client_instance
+    adapter._server_url = "http://localhost:30005"
+
+    async def _run() -> None:
+        chunks = adapter.generate(prompt="Hi", max_new_tokens=64)
+        assert (await anext(chunks)).text_delta == "first"
+        pending = asyncio.create_task(anext(chunks))
+        await asyncio.sleep(0)
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        if adapter._abort_tasks:
+            await asyncio.gather(*tuple(adapter._abort_tasks))
+
+    asyncio.run(_run())
+
+    client_instance.post.assert_awaited_once()
     args, _ = client_instance.post.await_args
     assert args[0].endswith("/abort_request")
 
@@ -1054,6 +1499,100 @@ def test_unload_terminates_process(mock_killpg: MagicMock, mock_getpgid: MagicMo
     mock_killpg.assert_called()
     assert adapter._process is None
     assert adapter._server_url is None
+
+
+@patch("sie_server.adapters.sglang._server.os.getpgid")
+@patch("sie_server.adapters.sglang._server.os.killpg")
+def test_unload_releases_port_and_cleans_output_log(
+    mock_killpg: MagicMock,
+    mock_getpgid: MagicMock,
+    adapter,
+) -> None:
+    """Unload returns the reserved port to the pool and removes the temp log."""
+    mock_process = MagicMock()
+    mock_process.pid = 12345
+    mock_process.wait.return_value = None
+    mock_getpgid.return_value = 12345
+
+    adapter._process = mock_process
+    adapter._server_url = "http://localhost:30005"
+    adapter._device = "cuda:0"
+    adapter._port = 30005
+    adapter._output_file = _server.open_output_log(prefix="sie_test_sglang_")
+    log_path = Path(adapter._output_file.name)
+
+    with patch("sie_server.adapters.sglang._server.release_port") as mock_release:
+        adapter.unload()
+
+    mock_release.assert_called_once_with(30005)
+    assert adapter._port is None
+    assert adapter._output_file is None
+    assert not log_path.exists()
+
+
+@patch("sie_server.adapters.sglang._server.os.getpgid")
+@patch("sie_server.adapters.sglang._server.os.killpg")
+@patch("sie_server.adapters.sglang._server.wait_for_server", return_value=False)
+@patch("sie_server.adapters.sglang._server.subprocess.Popen")
+@patch("sie_server.adapters.sglang._server.find_free_port")
+def test_failed_startup_releases_port_and_cleans_output_log(
+    mock_find_port: MagicMock,
+    mock_popen: MagicMock,
+    mock_wait: MagicMock,
+    mock_killpg: MagicMock,
+    mock_getpgid: MagicMock,
+    adapter,
+) -> None:
+    """A startup-health failure must not leak the reserved port or the temp log."""
+    mock_find_port.return_value = 30006
+    mock_process = MagicMock()
+    mock_process.pid = 12345
+    mock_process.poll.return_value = None  # Process running but not healthy (timeout path)
+    mock_popen.return_value = mock_process
+    mock_getpgid.return_value = 12345
+
+    with (
+        patch("sie_server.adapters.sglang._server.release_port") as mock_release,
+        pytest.raises(RuntimeError, match="failed to start"),
+    ):
+        adapter.load("cuda:0")
+
+    mock_release.assert_called_once_with(30006)
+    assert adapter._port is None
+    assert adapter._server_url is None
+    assert adapter._output_file is None
+
+
+@patch("sie_server.adapters.sglang._server.subprocess.Popen")
+@patch("sie_server.adapters.sglang._server.find_free_port")
+def test_speculative_guard_abort_releases_port_and_cleans_output_log(
+    mock_find_port: MagicMock,
+    mock_popen: MagicMock,
+) -> None:
+    """The pre-launch extra_buffer validation abort must not leak the port or log.
+
+    The guard raises after the port was reserved and the temp log opened but
+    before the subprocess launches — a distinct abort seam from the
+    startup-health failure above.
+    """
+    mock_find_port.return_value = 30007
+    adapter = SGLangGenerationAdapter(
+        model_name_or_path="Qwen/Qwen3.5-4B",
+        served_model_name="Qwen/Qwen3.5-4B",
+        speculative={"enabled": True, "algorithm": "nextn"},
+    )
+
+    with (
+        patch("sie_server.adapters.sglang._server.release_port") as mock_release,
+        pytest.raises(RuntimeError, match="extra_buffer"),
+    ):
+        adapter.load("cuda:0")
+
+    mock_release.assert_called_once_with(30007)
+    assert adapter._port is None
+    assert adapter._server_url is None
+    assert adapter._output_file is None
+    mock_popen.assert_not_called()
 
 
 @patch("sie_server.adapters.sglang.generation.asyncio.new_event_loop")
@@ -1229,12 +1768,9 @@ def test_parse_response_with_list_shape() -> None:
     assert result.completion_tokens == 1
 
 
-def test_parse_response_missing_meta_defaults_to_stop() -> None:
-    result = _parse_sglang_generate_response({"text": "xyz"})
-    assert result.text == "xyz"
-    assert result.finish_reason == "stop"
-    assert result.prompt_tokens == 0
-    assert result.completion_tokens == 0
+def test_parse_response_missing_meta_is_an_error() -> None:
+    with pytest.raises(GenerationError, match="without a finish reason"):
+        _parse_sglang_generate_response({"text": "xyz"})
 
 
 def test_chunk_translator_surfaces_logprobs_3tuple() -> None:
@@ -1488,7 +2024,9 @@ def test_generate_n_gt_one_non_streaming_emits_per_candidate_logprobs(mock_async
     resp.json = MagicMock(return_value=sglang_results)
     resp.raise_for_status = MagicMock()
     client_instance = _make_client_with_stream(_FakeStreamingResponse([]))
-    client_instance.post = AsyncMock(return_value=resp)
+    resp.aread = AsyncMock()
+    resp.__aenter__ = AsyncMock(return_value=resp)
+    client_instance.stream.return_value = resp
     mock_async_client.return_value = client_instance
     adapter._server_url = "http://localhost:30005"
 
@@ -1528,11 +2066,24 @@ def test_generate_n_gt_one_non_streaming_omits_logprobs_when_not_requested(
             },
         },
     ]
+    sglang_results.append(
+        {
+            "text": "b",
+            "meta_info": {
+                "finish_reason": {"type": "stop"},
+                "completion_tokens": 1,
+                "prompt_tokens": 3,
+                "output_token_logprobs": [[-1.0, 2, "b"]],
+            },
+        }
+    )
     resp = MagicMock()
     resp.json = MagicMock(return_value=sglang_results)
     resp.raise_for_status = MagicMock()
     client_instance = _make_client_with_stream(_FakeStreamingResponse([]))
-    client_instance.post = AsyncMock(return_value=resp)
+    resp.aread = AsyncMock()
+    resp.__aenter__ = AsyncMock(return_value=resp)
+    client_instance.stream.return_value = resp
     mock_async_client.return_value = client_instance
     adapter._server_url = "http://localhost:30005"
 
@@ -1584,8 +2135,7 @@ class TestGuardVerdictThreshold:
         assert _thresholded_verdict(lp, {"threshold": 0.5}) == "Yes"
         assert _thresholded_verdict(lp, {"threshold": 0.8}) == "No"
 
-    def test_no_threshold_or_no_logprobs_leaves_output(self) -> None:
-        # Missing/invalid threshold or absent verdict logprobs -> None (raw kept).
+    def test_no_threshold_or_no_logprobs_is_invalid(self) -> None:
         assert _thresholded_verdict(self._chunk_logprobs(-0.1, -2.0), {}) is None
         assert _thresholded_verdict((), {"threshold": 0.8}) is None
 
@@ -1799,10 +2349,8 @@ def test_guard_verdict_in_second_position_applies_threshold(mock_async_client: M
 
 
 @patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
-def test_guard_no_verdict_in_scan_window_falls_back_to_raw(mock_async_client: MagicMock) -> None:
-    """H2 fallback: no Yes/No anywhere in the first N positions → the raw buffered
-    output is preserved (never dropped or hung).
-    """
+def test_guard_no_verdict_in_scan_window_fails_closed(mock_async_client: MagicMock) -> None:
+    """A missing verdict must never be returned as a successful guard result."""
     sse_lines = [
         _guard_event("a", [_sglang_token("a", -0.1)], [_guard_top(filler="a")]),
         _guard_event(
@@ -1820,9 +2368,10 @@ def test_guard_no_verdict_in_scan_window_falls_back_to_raw(mock_async_client: Ma
     ]
     mock_async_client.return_value = _make_client_with_stream(_FakeStreamingResponse(sse_lines))
     chunks = _drive_guard(_guard_adapter(), sse_lines)
-    # Raw output preserved: the concatenated deltas reproduce the model output.
-    assert "".join(c.text_delta for c in chunks) == "abc"
-    assert any(c.done for c in chunks)
+    assert all(c.text_delta == "" for c in chunks)
+    assert chunks[-1].done
+    assert chunks[-1].finish_reason == "error"
+    assert chunks[-1].error_code == "invalid_guard_verdict"
 
 
 @patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
@@ -1847,10 +2396,8 @@ def test_guard_no_client_logprobs_strips_forced_logprobs_on_success(mock_async_c
 
 
 @patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
-def test_guard_no_client_logprobs_strips_forced_logprobs_on_fallback(mock_async_client: MagicMock) -> None:
-    """M4: on the fallback path (no verdict parsed) the forced logprobs are still
-    stripped when the client did not request them.
-    """
+def test_guard_no_client_logprobs_strips_forced_logprobs_on_error(mock_async_client: MagicMock) -> None:
+    """Unusable guard output exposes neither raw text nor forced logprobs."""
     sse_lines = [
         _guard_event("a", [_sglang_token("a", -0.1)], [_guard_top(filler="a")]),
         _guard_event(
@@ -1864,14 +2411,13 @@ def test_guard_no_client_logprobs_strips_forced_logprobs_on_fallback(mock_async_
     mock_async_client.return_value = _make_client_with_stream(_FakeStreamingResponse(sse_lines))
     chunks = _drive_guard(_guard_adapter(), sse_lines)
     assert all(c.logprobs is None for c in chunks)
-    assert "".join(c.text_delta for c in chunks) == "ab"
+    assert "".join(c.text_delta for c in chunks) == ""
+    assert chunks[-1].error_code == "invalid_guard_verdict"
 
 
 @patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
-def test_guard_client_logprobs_preserved_minus_verdict_entry(mock_async_client: MagicMock) -> None:
-    """M4: client DID request logprobs → logprobs preserved, minus the consumed
-    verdict entry (the position that produced the verdict).
-    """
+def test_guard_client_logprobs_omitted_for_rewritten_verdict(mock_async_client: MagicMock) -> None:
+    """Rewritten verdicts cannot expose logprobs for discarded tokens."""
     # Position 0: leading whitespace (no verdict). Position 1: the "Yes" verdict.
     # Both arrive in one event so the buffer holds two entries at resolution; the
     # consumed verdict entry (position 1) is dropped, the whitespace entry kept.
@@ -1888,10 +2434,7 @@ def test_guard_client_logprobs_preserved_minus_verdict_entry(mock_async_client: 
     chunks = _drive_guard(_guard_adapter(), sse_lines, logprobs=True, top_logprobs=20)
     verdict_chunk = next(c for c in chunks if c.text_delta)
     assert verdict_chunk.text_delta == "Yes"
-    # The consumed verdict entry (position 1) is dropped; the leading whitespace
-    # entry remains so callers still get the surrounding token metadata.
-    assert verdict_chunk.logprobs is not None
-    assert [e["token"] for e in verdict_chunk.logprobs] == [" "]
+    assert verdict_chunk.logprobs is None
 
 
 @patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
@@ -1982,3 +2525,1385 @@ print("mm-process-config-ready")
     assert completed.returncode == 0, completed.stderr
     assert "Error in sitecustomize" not in completed.stderr
     assert completed.stdout.strip() == "mm-process-config-ready"
+
+
+def test_mm_process_config_compat_raises_the_bound_for_single_image_requests_only(tmp_path: Path) -> None:
+    package_root = tmp_path / "site"
+    processors = package_root / "sglang" / "srt" / "multimodal" / "processors"
+    processors.mkdir(parents=True)
+    for package in (
+        package_root / "sglang",
+        package_root / "sglang" / "srt",
+        package_root / "sglang" / "srt" / "multimodal",
+        processors,
+    ):
+        (package / "__init__.py").write_text("", encoding="utf-8")
+    # The pinned SGLang release forwards image_config itself inside
+    # process_mm_data, after the hook runs; the fake does the same.
+    (processors / "base_processor.py").write_text(
+        """class BaseMultimodalProcessor:
+    def __init__(self):
+        self.image_config = {"min_pixels": 65536, "max_pixels": 1003520}
+
+    def process_mm_data(self, input_text, images=None, videos=None, audios=None, **kwargs):
+        if images and self.image_config:
+            kwargs.setdefault("images_kwargs", {}).update(self.image_config)
+        return kwargs
+""",
+        encoding="utf-8",
+    )
+    compat_dir = Path(__file__).resolve().parents[2] / "src/sie_server/adapters/sglang/_compat"
+    script = """import sitecustomize
+from sglang.srt.multimodal.processors.base_processor import BaseMultimodalProcessor
+
+processor = BaseMultimodalProcessor()
+one = processor.process_mm_data("x", images=[b"page"])
+two = processor.process_mm_data("x", images=[b"a", b"b"])
+assert one["images_kwargs"] == {"min_pixels": 65536, "max_pixels": 3211264}, one
+assert two["images_kwargs"] == {"min_pixels": 65536, "max_pixels": 1003520}, two
+assert processor.image_config == {"min_pixels": 65536, "max_pixels": 1003520}
+assert processor.process_mm_data("x", images=None) == {}
+print("single-image-bound-ready")
+"""
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join((str(compat_dir), str(package_root)))
+    env["SIE_SGLANG_MM_PROCESS_CONFIG_COMPAT"] = "1"
+    env["SIE_SGLANG_SINGLE_IMAGE_MAX_PIXELS"] = "3211264"
+    completed = subprocess.run(  # noqa: S603 - executes the fixed local interpreter
+        [sys.executable, "-c", script],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "single-image-bound-ready"
+
+
+def test_mm_process_config_compat_redacts_media_load_failures(tmp_path: Path) -> None:
+    package_root = tmp_path / "fake-package"
+    processors = package_root / "sglang" / "srt" / "multimodal" / "processors"
+    processors.mkdir(parents=True)
+    for package in (
+        package_root / "sglang",
+        package_root / "sglang" / "srt",
+        package_root / "sglang" / "srt" / "multimodal",
+        processors,
+    ):
+        (package / "__init__.py").write_text("", encoding="utf-8")
+    (processors / "base_processor.py").write_text(
+        """import enum
+
+
+class Modality(enum.Enum):
+    IMAGE = 1
+    VIDEO = 2
+
+
+class BaseMultimodalProcessor:
+    def process_mm_data(self, input_text, images=None, videos=None, audios=None, **kwargs):
+        return kwargs
+
+    @classmethod
+    def _load_single_item(cls, data, modality, frame_count_limit=None, audio_sample_rate=None, discard=True):
+        try:
+            if data == "ok":
+                return "loaded"
+            raise ValueError(f"cannot decode {data}")
+        except Exception as e:
+            raise RuntimeError(f"Error while loading data {data}: {e}")
+""",
+        encoding="utf-8",
+    )
+
+    compat_dir = Path(__file__).resolve().parents[2] / "src/sie_server/adapters/sglang/_compat"
+    script = """import sitecustomize
+import traceback
+
+from sglang.srt.multimodal.processors.base_processor import BaseMultimodalProcessor, Modality
+
+secret = "data:video/mp4;base64,PRIVATEPAYLOADPRIVATEPAYLOAD"
+assert BaseMultimodalProcessor._load_single_item("ok", Modality.VIDEO) == "loaded"
+try:
+    BaseMultimodalProcessor._load_single_item(secret, Modality.VIDEO, None, None, True)
+except ValueError as exc:
+    rendered = "".join(traceback.format_exception(exc))
+    assert "PRIVATEPAYLOAD" not in rendered, rendered
+    assert str(exc) == "Error while loading VIDEO data (ValueError)", str(exc)
+else:
+    raise AssertionError("load failure was swallowed")
+print("media-load-redaction-ready")
+"""
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join((str(compat_dir), str(package_root)))
+    env["SIE_SGLANG_MM_PROCESS_CONFIG_COMPAT"] = "1"
+
+    completed = subprocess.run(  # noqa: S603 - executes the fixed local interpreter
+        [sys.executable, "-c", script],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "PRIVATEPAYLOAD" not in completed.stderr
+    assert completed.stdout.strip() == "media-load-redaction-ready"
+
+
+@pytest.mark.parametrize(
+    ("n", "stream", "best_of"), [(1, True, None), (2, True, None), (2, False, None), (1, False, 2)]
+)
+@patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
+def test_backend_grammar_abort_never_emits_placeholder_or_usage(
+    mock_async_client: MagicMock, adapter, n: int, stream: bool, best_of: int | None
+) -> None:
+    schema = {
+        "type": "object",
+        "properties": {"value": {"type": ["string", "null"]}},
+        "required": ["value"],
+        "additionalProperties": False,
+    }
+    abort = {
+        "text": "[]",
+        "meta_info": {
+            "prompt_tokens": 1,
+            "completion_tokens": 1,
+            "finish_reason": {
+                "type": "abort",
+                "status_code": 400,
+                "message": "Invalid grammar request: private-schema-content",
+            },
+        },
+    }
+    client = _make_client_with_stream(_FakeStreamingResponse(["data: " + json.dumps(abort)]))
+    response = MagicMock()
+    response.json.return_value = [
+        {"text": "valid", "meta_info": {"finish_reason": {"type": "stop"}}},
+        abort,
+    ]
+    response.aread = AsyncMock()
+    response.__aenter__ = AsyncMock(return_value=response)
+    if not stream:
+        client.stream.return_value = response
+    mock_async_client.return_value = client
+    adapter._server_url = "http://localhost:30005"
+    chunks = []
+
+    async def consume() -> None:
+        async for chunk in adapter.generate(
+            prompt="Extract the optional value.",
+            max_new_tokens=64,
+            n=n,
+            stream=stream,
+            best_of=best_of,
+            grammar=GrammarSpec(kind="json_schema", value=schema),
+        ):
+            chunks.append(chunk)
+
+    with pytest.raises(GenerationInvalidRequestError, match="rejected the requested json_schema grammar") as exc:
+        asyncio.run(consume())
+    assert exc.value.code == "invalid_request"
+    assert exc.value.param == "grammar"
+    assert "private-schema-content" not in str(exc.value)
+    assert chunks == []
+
+
+@pytest.mark.parametrize(
+    "finish", ["abort", "error", "cancelled", {"type": "abort", "status_code": 500}, {"type": "unknown"}]
+)
+def test_chunk_translator_rejects_failed_or_unknown_terminal(finish: Any) -> None:
+    with pytest.raises(GenerationError):
+        _chunk_from_sglang_event(
+            {"text": "[]", "meta_info": {"finish_reason": finish, "prompt_tokens": 1, "completion_tokens": 1}},
+            previous_cumulative_text="",
+            first_yield_done=False,
+        )
+
+
+@pytest.mark.parametrize("meta", [None, {}, []])
+def test_chunk_translator_rejects_terminal_without_reason(meta: Any) -> None:
+    with pytest.raises(GenerationError, match="without a finish reason"):
+        _chunk_from_sglang_event(
+            {"text": "[]", "finished": True, "meta_info": meta},
+            previous_cumulative_text="",
+            first_yield_done=False,
+        )
+
+
+def test_legacy_parser_rejects_backend_abort() -> None:
+    with pytest.raises(GenerationError, match="aborted"):
+        _parse_sglang_generate_response({"text": "[]", "meta_info": {"finish_reason": {"type": "abort"}}})
+
+
+@pytest.mark.parametrize("finish", [{}, {"type": None}])
+def test_chunk_translator_rejects_malformed_nonnull_finish_metadata(finish: Any) -> None:
+    with pytest.raises(GenerationError, match="malformed finish reason"):
+        _chunk_from_sglang_event(
+            {"text": "[]", "meta_info": {"finish_reason": finish, "prompt_tokens": 1, "completion_tokens": 1}},
+            previous_cumulative_text="",
+            first_yield_done=False,
+        )
+
+
+@pytest.mark.parametrize("indexes", [[], [0], [0, 0], [0, 2], [0, True], [0, "1"], [1, None]])
+@patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
+def test_streaming_candidates_require_exact_distinct_terminals(mock_async_client: MagicMock, adapter, indexes) -> None:
+    events = [
+        {
+            **({"index": index} if index is not None else {}),
+            "text": "value",
+            "meta_info": {
+                "finish_reason": {"type": "stop"},
+                "prompt_tokens": 4,
+                "completion_tokens": 1,
+            },
+        }
+        for index in indexes
+    ]
+    mock_async_client.return_value = _make_client_with_stream(
+        _FakeStreamingResponse([*("data: " + json.dumps(event) for event in events), "data: [DONE]"])
+    )
+    adapter._server_url = "http://localhost:30005"
+    chunks = []
+
+    async def consume() -> None:
+        async for chunk in adapter.generate(prompt="Two values", max_new_tokens=8, n=2, stream=True):
+            chunks.append(chunk)
+
+    with pytest.raises(GenerationError):
+        asyncio.run(consume())
+    assert not any(chunk.done for chunk in chunks)
+    assert all(chunk.prompt_tokens is None and chunk.completion_tokens is None for chunk in chunks)
+
+
+@pytest.mark.parametrize(("count", "n", "best_of"), [(0, 2, None), (1, 2, None), (3, 2, None), (2, 1, 3)])
+@patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
+def test_buffered_candidates_require_exact_count_before_ranking(
+    mock_async_client: MagicMock, adapter, count: int, n: int, best_of: int | None
+) -> None:
+    response = MagicMock()
+    response.json.return_value = [
+        {"text": "value", "meta_info": {"finish_reason": {"type": "stop"}}} for _ in range(count)
+    ]
+    client = _make_client_with_stream(_FakeStreamingResponse([]))
+    response.aread = AsyncMock()
+    response.__aenter__ = AsyncMock(return_value=response)
+    client.stream.return_value = response
+    mock_async_client.return_value = client
+    adapter._server_url = "http://localhost:30005"
+    chunks = []
+
+    async def consume() -> None:
+        async for chunk in adapter.generate(prompt="Two values", max_new_tokens=8, n=n, best_of=best_of):
+            chunks.append(chunk)
+
+    with pytest.raises(GenerationError, match="incorrect candidate count"):
+        asyncio.run(consume())
+    assert chunks == []
+
+
+@pytest.mark.parametrize("text", ["", "No", "Maybe"])
+@patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
+def test_guard_missing_verdict_distribution_is_typed_error(mock_async_client: MagicMock, text: str) -> None:
+    lines = [_guard_event(text, [_sglang_token(text, -0.1)], [], terminal=True), "data: [DONE]"]
+    mock_async_client.return_value = _make_client_with_stream(_FakeStreamingResponse(lines))
+    chunks = _drive_guard(_guard_adapter(), lines, logprobs=True)
+    assert len(chunks) == 1
+    terminal = chunks[0]
+    assert terminal.text_delta == ""
+    assert terminal.logprobs is None
+    assert terminal.finish_reason == "error"
+    assert terminal.error_code == "invalid_guard_verdict"
+    assert terminal.prompt_tokens == 5
+    assert terminal.completion_tokens == 1
+
+
+@pytest.mark.parametrize("invalid", [float("nan"), float("inf"), float("-inf"), 0.1, True, "-0.1"])
+def test_guard_invalid_verdict_probability_cannot_be_safe(invalid: Any) -> None:
+    logprobs = ({"token": "No", "logprob": -0.1, "top_logprobs": [_lp("Yes", invalid), _lp("No", -0.1)]},)
+    assert _thresholded_verdict(logprobs, {"threshold": 0.5}) is None
+
+
+@pytest.mark.parametrize("threshold", [float("nan"), float("inf"), -0.1, 1.1, True, "0.5"])
+def test_guard_invalid_threshold_cannot_be_safe(threshold: Any) -> None:
+    logprobs = ({"token": "Yes", "logprob": -0.5, "top_logprobs": [_lp("Yes", -0.5), _lp("No", -0.5)]},)
+    assert _thresholded_verdict(logprobs, {"threshold": threshold}) is None
+
+
+def test_guard_very_small_probabilities_are_normalized_without_underflow() -> None:
+    logprobs = ({"token": "Yes", "logprob": -1000, "top_logprobs": [_lp("Yes", -1000), _lp("No", -1001)]},)
+    assert _thresholded_verdict(logprobs, {"threshold": 0.5}) == "Yes"
+
+
+@patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
+def test_guard_eos_with_verdict_alternatives_is_not_a_verdict(mock_async_client: MagicMock) -> None:
+    lines = [_guard_event("", [_sglang_token("<|end_of_text|>", -0.1)], [_guard_top(yes=-4, no=-3)], terminal=True)]
+    mock_async_client.return_value = _make_client_with_stream(_FakeStreamingResponse(lines))
+    chunks = _drive_guard(_guard_adapter(), lines)
+    assert chunks[-1].error_code == "invalid_guard_verdict"
+    assert chunks[-1].text_delta == ""
+
+
+@pytest.mark.parametrize("combined", [False, True])
+@patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
+def test_guard_tail_cannot_change_thresholded_verdict(mock_async_client: MagicMock, combined: bool) -> None:
+    lines = [
+        _guard_event("Yes", [_sglang_token("Yes", -0.1)], [_guard_top(yes=-0.1, no=-3)]),
+        _guard_event(
+            "Yes because",
+            [_sglang_token("Yes", -0.1), _sglang_token(" because", -0.2)],
+            [_guard_top(yes=-0.1, no=-3), _guard_top(filler=" because")],
+            terminal=True,
+        ),
+    ]
+    if combined:
+        lines = lines[-1:]
+    mock_async_client.return_value = _make_client_with_stream(_FakeStreamingResponse(lines))
+    chunks = _drive_guard(_guard_adapter(), lines, logprobs=True, top_logprobs=20)
+    assert all(chunk.logprobs is None for chunk in chunks)
+    assert "".join(c.text_delta for c in chunks) == "Yes"
+    assert chunks[-1].done
+    assert chunks[-1].completion_tokens == 2
+
+
+@pytest.mark.parametrize("invalid", [None, "-0.1", True, False, float("nan"), float("inf"), float("-inf"), 0.1])
+@pytest.mark.parametrize("position", ["sampled", "alternative"])
+@patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
+def test_guard_malformed_wire_probability_fails_closed(
+    mock_async_client: MagicMock, invalid: Any, position: str
+) -> None:
+    sampled = invalid if position == "sampled" else -0.1
+    alternative = invalid if position == "alternative" else -0.1
+    lines = [
+        _guard_event(
+            "No",
+            [_sglang_token("No", sampled)],
+            [[_sglang_token("Yes", alternative), _sglang_token("No", -0.1)]],
+            terminal=True,
+        )
+    ]
+    mock_async_client.return_value = _make_client_with_stream(_FakeStreamingResponse(lines))
+    chunks = _drive_guard(_guard_adapter(), lines)
+    assert chunks[-1].error_code == "invalid_guard_verdict"
+    assert chunks[-1].finish_reason == "error"
+    assert not any(c.text_delta for c in chunks)
+
+
+@pytest.mark.parametrize("malformed_tail", ["sampled", "alternative", "missing_top", "malformed_top"])
+@patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
+def test_guard_valid_verdict_ignores_malformed_trailing_metadata(
+    mock_async_client: MagicMock, malformed_tail: str
+) -> None:
+    tokens = [_sglang_token("Yes", -0.1), _sglang_token(" because", -0.2)]
+    top: list[Any] = [_guard_top(yes=-0.1, no=-3), _guard_top(filler=" because")]
+    if malformed_tail == "sampled":
+        tokens[1][0] = True
+    elif malformed_tail == "alternative":
+        top[1][0][0] = "-0.1"
+    elif malformed_tail == "missing_top":
+        top.pop()
+    else:
+        top[1] = None
+    lines = [_guard_event("Yes because", tokens, top, terminal=True)]
+    mock_async_client.return_value = _make_client_with_stream(_FakeStreamingResponse(lines))
+    chunks = _drive_guard(_guard_adapter(), lines, logprobs=True)
+    assert "".join(chunk.text_delta for chunk in chunks) == "Yes"
+    assert chunks[-1].error_code is None
+    assert all(chunk.logprobs is None for chunk in chunks)
+
+
+@pytest.mark.parametrize(("sampled", "opposing"), [("Yes", "No"), ("No", "Yes")])
+@patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
+def test_guard_uses_sampled_probability_when_absent_from_top_alternatives(
+    mock_async_client: MagicMock, sampled: str, opposing: str
+) -> None:
+    lines = [_guard_event(sampled, [_sglang_token(sampled, -0.1)], [[_sglang_token(opposing, -3)]], terminal=True)]
+    mock_async_client.return_value = _make_client_with_stream(_FakeStreamingResponse(lines))
+    chunks = _drive_guard(_guard_adapter(), lines)
+    assert "".join(chunk.text_delta for chunk in chunks) == sampled
+    assert chunks[-1].error_code is None
+
+
+@pytest.mark.parametrize("sampled", ["Yes", "No"])
+@pytest.mark.parametrize("later_verdict", [False, True])
+@patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
+def test_guard_missing_opposing_probability_fails_closed(
+    mock_async_client: MagicMock, sampled: str, later_verdict: bool
+) -> None:
+    tokens = [_sglang_token(sampled, -0.1)]
+    top = [[_sglang_token(sampled, -0.1)]]
+    if later_verdict:
+        tokens.append(_sglang_token("No", -0.1))
+        top.append(_guard_top(yes=-3, no=-0.1))
+    lines = [_guard_event(sampled, tokens, top, terminal=True)]
+    mock_async_client.return_value = _make_client_with_stream(_FakeStreamingResponse(lines))
+    chunks = _drive_guard(_guard_adapter(), lines)
+    assert chunks[-1].error_code == "invalid_guard_verdict"
+    assert not any(chunk.text_delta for chunk in chunks)
+
+
+def test_guard_first_sampled_verdict_requires_complete_evidence() -> None:
+    later_safe = {"token": "No", "logprob": -0.1, "top_logprobs": [_lp("Yes", -3), _lp("No", -0.1)]}
+    incomplete_yes = {"token": "Yes", "logprob": -0.1, "top_logprobs": [_lp("Yes", -0.1)]}
+    assert _p_unsafe_from_verdict_logprobs((incomplete_yes, later_safe)) is None
+    missing_sampled = {"token": "Yes", "top_logprobs": [_lp("Yes", -0.1), _lp("No", -3)]}
+    assert _p_unsafe_from_verdict_logprobs((missing_sampled, later_safe)) is None
+
+
+_TYPE_DIAGNOSTIC = "Failed to compile json grammar: 'type' must be a string"
+_TYPE_GRAMMAR = GrammarSpec(kind="json_schema", value={"type": ["string", "null"]})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("n", "stream", "best_of"), [(1, False, None), (1, True, None), (2, True, None), (2, False, None), (1, False, 2)]
+)
+@pytest.mark.parametrize("transport", ["http", "abort"])
+async def test_outlines_type_refusal_across_generate_paths(adapter, n, stream, best_of, transport) -> None:
+    abort = {
+        "text": "[]",
+        "meta_info": {
+            "prompt_tokens": 1,
+            "completion_tokens": 1,
+            "finish_reason": {"type": "abort", "status_code": 400, "message": _TYPE_DIAGNOSTIC},
+        },
+    }
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if transport == "http":
+            return httpx.Response(400, json={"error": {"message": _TYPE_DIAGNOSTIC}})
+        if body["stream"]:
+            return httpx.Response(200, text="data: " + json.dumps(abort) + "\n\n")
+        return httpx.Response(200, json=[abort] * body["sampling_params"]["n"])
+
+    chunks = []
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        adapter._http_client = client
+        adapter._server_url = "http://localhost:30005"
+        with pytest.raises(GenerationInvalidRequestError) as error:
+            async for chunk in adapter.generate(
+                prompt="Optional value", max_new_tokens=8, n=n, stream=stream, best_of=best_of, grammar=_TYPE_GRAMMAR
+            ):
+                chunks.append(chunk)
+    assert error.value.code == "invalid_request"
+    assert error.value.param == "grammar"
+    assert str(error.value) == OUTLINES_JSON_SCHEMA_TYPE_MESSAGE
+    assert chunks == []
+
+
+@pytest.mark.parametrize(
+    ("backend", "grammar", "status", "message"),
+    [
+        ("xgrammar", _TYPE_GRAMMAR, 400, _TYPE_DIAGNOSTIC),
+        (None, _TYPE_GRAMMAR, 400, _TYPE_DIAGNOSTIC),
+        ("outlines", None, 400, _TYPE_DIAGNOSTIC),
+        ("outlines", GrammarSpec(kind="regex", value=".*"), 400, _TYPE_DIAGNOSTIC),
+        ("outlines", _TYPE_GRAMMAR, 500, _TYPE_DIAGNOSTIC),
+        ("outlines", _TYPE_GRAMMAR, 400.0, _TYPE_DIAGNOSTIC),
+        ("outlines", _TYPE_GRAMMAR, "400", _TYPE_DIAGNOSTIC),
+        ("outlines", _TYPE_GRAMMAR, 400, _TYPE_DIAGNOSTIC + " secret"),
+        ("outlines", _TYPE_GRAMMAR, 400, "secret " + _TYPE_DIAGNOSTIC),
+        ("outlines", _TYPE_GRAMMAR, 400, [_TYPE_DIAGNOSTIC]),
+        ("outlines", _TYPE_GRAMMAR, 400, "x" * 8192),
+    ],
+)
+def test_abort_type_refusal_requires_exact_diagnostic_and_context(backend, grammar, status, message) -> None:
+    event = {"meta_info": {"finish_reason": {"type": "abort", "status_code": status, "message": message}}}
+    with pytest.raises(GenerationError) as error:
+        _raise_for_sglang_event_error(event, grammar=grammar, grammar_backend=backend)
+    assert str(error.value) != OUTLINES_JSON_SCHEMA_TYPE_MESSAGE
+    assert "secret" not in str(error.value)
+    assert _TYPE_DIAGNOSTIC not in str(error.value)
+
+
+def test_unqualified_in_band_error_is_not_a_type_refusal() -> None:
+    with pytest.raises(GenerationError) as error:
+        _raise_for_sglang_event_error(
+            {"error": {"message": _TYPE_DIAGNOSTIC}}, grammar=_TYPE_GRAMMAR, grammar_backend="outlines"
+        )
+    assert error.value.code == "inference_error"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"not json",
+        b'{"detail":"Failed to compile json grammar: \'type\' must be a string"}',
+        b'{"error":{"message":"Failed to compile json grammar: \'type\' must be a string","message":"secret"}}',
+        b'{"error":{"message":"secret","message":"Failed to compile json grammar: \'type\' must be a string"}}',
+        json.dumps({"error": {"message": _TYPE_DIAGNOSTIC, "schema": "secret"}}).encode(),
+        json.dumps({"error": {"message": _TYPE_DIAGNOSTIC + " secret"}}).encode(),
+        json.dumps({"error": {"message": [_TYPE_DIAGNOSTIC]}}).encode(),
+        json.dumps({"error": {"message": _TYPE_DIAGNOSTIC}}).encode() + b" " * 4096,
+        b"[" * 2000 + b"]" * 2000,
+    ],
+)
+async def test_http_type_refusal_rejects_unknown_malformed_or_oversized_body(body) -> None:
+    response = httpx.Response(400, content=body, request=httpx.Request("POST", "http://localhost/generate"))
+    with pytest.raises(httpx.HTTPStatusError) as error:
+        await _raise_for_sglang_http_error(response, grammar=_TYPE_GRAMMAR, grammar_backend="outlines")
+    assert "secret" not in str(error.value)
+    assert _TYPE_DIAGNOSTIC not in str(error.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "backend", "grammar"),
+    [
+        (500, "outlines", _TYPE_GRAMMAR),
+        (502, "outlines", _TYPE_GRAMMAR),
+        (400, "xgrammar", _TYPE_GRAMMAR),
+        (400, "outlines", None),
+        (400, "outlines", GrammarSpec(kind="regex", value=".*")),
+    ],
+)
+async def test_http_type_refusal_requires_status_backend_and_grammar(status, backend, grammar) -> None:
+    response = httpx.Response(
+        status,
+        json={"error": {"message": _TYPE_DIAGNOSTIC}},
+        request=httpx.Request("POST", "http://localhost/generate"),
+    )
+    with pytest.raises(httpx.HTTPStatusError):
+        await _raise_for_sglang_http_error(response, grammar=grammar, grammar_backend=backend)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("modality", "param"), [("VIDEO", "videos"), ("IMAGE", "images")])
+async def test_http_media_load_failure_is_invalid_request(modality: str, param: str) -> None:
+    response = httpx.Response(
+        400,
+        json={"error": {"message": f"Error while loading {modality} data (ValueError)"}},
+        request=httpx.Request("POST", "http://localhost/generate"),
+    )
+    with pytest.raises(GenerationInvalidRequestError) as error:
+        await _raise_for_sglang_http_error(response, grammar=None, grammar_backend=None)
+    assert error.value.param == param
+
+
+@pytest.mark.parametrize(("modality", "param"), [("VIDEO", "videos"), ("IMAGE", "images")])
+def test_stream_media_load_failure_is_invalid_request(modality: str, param: str) -> None:
+    event = {"error": {"message": f"Error while loading {modality} data (RuntimeError)"}}
+    with pytest.raises(GenerationInvalidRequestError) as error:
+        _raise_for_sglang_event_error(event)
+    assert error.value.param == param
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "message"),
+    [
+        (400, "Error while loading data data:video/mp4;base64,AAAA: boom"),
+        (400, "Error while loading VIDEO data (ValueError) extra"),
+        (400, "Error while loading AUDIO data (ValueError)"),
+        (500, "Error while loading VIDEO data (ValueError)"),
+    ],
+)
+async def test_media_load_mapping_requires_the_exact_hook_message(status: int, message: str) -> None:
+    response = httpx.Response(
+        status, json={"error": {"message": message}}, request=httpx.Request("POST", "http://localhost/generate")
+    )
+    with pytest.raises(httpx.HTTPStatusError):
+        await _raise_for_sglang_http_error(response, grammar=None, grammar_backend=None)
+    if status == 400:
+        with pytest.raises(GenerationError) as error:
+            _raise_for_sglang_event_error({"error": {"message": message}})
+        assert not isinstance(error.value, GenerationInvalidRequestError)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["oversized", "timeout", "cancel"])
+@pytest.mark.parametrize(
+    ("n", "stream", "best_of"), [(1, False, None), (2, True, None), (2, False, None), (1, False, 2)]
+)
+async def test_http_error_read_is_bounded_and_closes_stream(adapter, mode, n, stream, best_of) -> None:
+    closed = asyncio.Event()
+    started = asyncio.Event()
+    reads = []
+
+    class ErrorStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            started.set()
+            if mode == "oversized":
+                reads.append(1)
+                yield b" " * 4097
+                raise AssertionError("oversized body must not be drained")
+            await asyncio.Event().wait()
+            yield b""
+
+        async def aclose(self):
+            closed.set()
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _: httpx.Response(400, stream=ErrorStream()))
+    ) as client:
+        adapter._http_client = client
+        adapter._server_url = "http://localhost:30005"
+        iterator = adapter.generate(
+            prompt="Optional value", max_new_tokens=8, grammar=_TYPE_GRAMMAR, n=n, stream=stream, best_of=best_of
+        )
+        task = asyncio.create_task(anext(iterator))
+        await started.wait()
+        if mode == "cancel":
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        else:
+            with pytest.raises(httpx.HTTPStatusError):
+                await asyncio.wait_for(task, timeout=3)
+        await iterator.aclose()
+    assert closed.is_set()
+    assert reads == ([1] if mode == "oversized" else [])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "encoding", ["gzip", "br", "GZIP", "IDENTITY", "identity, gzip", "identity, identity", "unknown", ""]
+)
+@pytest.mark.parametrize(
+    ("n", "stream", "best_of"), [(1, False, None), (2, True, None), (2, False, None), (1, False, 2)]
+)
+async def test_encoded_http_error_is_not_read_or_decompressed(adapter, encoding, n, stream, best_of) -> None:
+    closed = asyncio.Event()
+
+    class EncodedErrorStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            raise AssertionError("encoded error must not be read or decompressed")
+            yield b""
+
+        async def aclose(self):
+            closed.set()
+
+    def respond(_):
+        return httpx.Response(400, headers={"Content-Encoding": encoding}, stream=EncodedErrorStream())
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        adapter._http_client = client
+        adapter._server_url = "http://localhost:30005"
+        with pytest.raises(httpx.HTTPStatusError):
+            async for _ in adapter.generate(
+                prompt="Optional value", max_new_tokens=8, grammar=_TYPE_GRAMMAR, n=n, stream=stream, best_of=best_of
+            ):
+                raise AssertionError("error response must not yield a generation chunk")
+    assert closed.is_set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("n", "stream", "best_of"), [(1, False, None), (2, True, None), (2, False, None), (1, False, 2)]
+)
+async def test_duplicate_event_keys_raise_typed_error_before_output(adapter, n, stream, best_of) -> None:
+    payload = '{"text":"secret","text":"[]","meta_info":{"finish_reason":{"type":"stop"},"prompt_tokens":1,"completion_tokens":1}}'
+
+    def respond(request):
+        body = json.loads(request.content)
+        content = "data: " + payload + "\n\n" if body["stream"] else "[" + payload + "]"
+        return httpx.Response(200, text=content)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        adapter._http_client = client
+        adapter._server_url = "http://localhost:30005"
+        with pytest.raises(GenerationError, match="duplicate JSON keys") as error:
+            async for _ in adapter.generate(
+                prompt="Optional value", max_new_tokens=8, grammar=_TYPE_GRAMMAR, n=n, stream=stream, best_of=best_of
+            ):
+                raise AssertionError("duplicate keys must not yield text or usage")
+    assert error.value.code == "inference_error"
+    assert "secret" not in str(error.value)
+
+
+def _tp_adapter(
+    adapter_class: type[SGLangGenerationAdapter] = SGLangGenerationAdapter, **overrides: Any
+) -> SGLangGenerationAdapter:
+    kwargs: dict[str, Any] = {
+        "model_name_or_path": "Qwen/Qwen3-4B-Instruct",
+        "max_seq_length": 32768,
+        "mem_fraction_static": 0.85,
+        "served_model_name": "Qwen/Qwen3-4B-Instruct",
+    }
+    # A width above one requires a finite streaming read cap and a declared
+    # startup budget, so supply both by default here and let the tests that are
+    # about those rules set them explicitly.
+    declared = overrides.get("tensor_parallel_size", 1)
+    if isinstance(declared, int) and not isinstance(declared, bool) and declared > 1:
+        kwargs["request_read_timeout_s"] = 120.0
+        kwargs["startup_timeout_s"] = 600.0
+    kwargs.update(overrides)
+    return adapter_class(**kwargs)
+
+
+def _launch(adapter: SGLangGenerationAdapter, mock_popen: MagicMock, device: str = "cuda:0") -> tuple[list[str], dict]:
+    adapter.load(device)
+    return mock_popen.call_args[0][0], mock_popen.call_args.kwargs["env"]
+
+
+@patch("sie_server.adapters.sglang._server.subprocess.Popen")
+@patch("sie_server.adapters.sglang._server.requests.get")
+@patch("sie_server.adapters.sglang._server.find_free_port")
+def test_default_width_is_one_and_leaves_the_launch_unchanged(
+    mock_find_port: MagicMock,
+    mock_requests_get: MagicMock,
+    mock_popen: MagicMock,
+) -> None:
+    """Every profile that does not ask for a width must launch exactly as before."""
+    mock_find_port.return_value = 30005
+    mock_popen.return_value = MagicMock(poll=MagicMock(return_value=None))
+    mock_requests_get.return_value = MagicMock(status_code=200)
+
+    cmd, env = _launch(_tp_adapter(), mock_popen)
+
+    assert cmd[cmd.index("--tensor-parallel-size") + 1] == "1"
+    assert "--disable-piecewise-cuda-graph" not in cmd
+    assert env["CUDA_VISIBLE_DEVICES"] == "0"
+
+
+@patch("sie_server.adapters.sglang._server.subprocess.Popen")
+@patch("sie_server.adapters.sglang._server.requests.get")
+@patch("sie_server.adapters.sglang._server.find_free_port")
+def test_declared_width_masks_the_whole_group_and_disables_piecewise_capture(
+    mock_find_port: MagicMock,
+    mock_requests_get: MagicMock,
+    mock_popen: MagicMock,
+) -> None:
+    """Width four claims four ordered devices and turns off the capture path.
+
+    SGLang's default piecewise capture is measured to hang at width two and to
+    exhaust memory at width four on a memory fraction that serves at width one.
+    """
+    mock_find_port.return_value = 30005
+    mock_popen.return_value = MagicMock(poll=MagicMock(return_value=None))
+    mock_requests_get.return_value = MagicMock(status_code=200)
+
+    cmd, env = _launch(_tp_adapter(tensor_parallel_size=4), mock_popen)
+
+    assert cmd[cmd.index("--tensor-parallel-size") + 1] == "4"
+    assert "--disable-piecewise-cuda-graph" in cmd
+    assert env["CUDA_VISIBLE_DEVICES"] == "0,1,2,3"
+
+
+@patch("sie_server.adapters.sglang._server.subprocess.Popen")
+@patch("sie_server.adapters.sglang._server.requests.get")
+@patch("sie_server.adapters.sglang._server.find_free_port")
+def test_group_is_anchored_on_the_placement_device(
+    mock_find_port: MagicMock,
+    mock_requests_get: MagicMock,
+    mock_popen: MagicMock,
+) -> None:
+    mock_find_port.return_value = 30005
+    mock_popen.return_value = MagicMock(poll=MagicMock(return_value=None))
+    mock_requests_get.return_value = MagicMock(status_code=200)
+
+    _cmd, env = _launch(_tp_adapter(tensor_parallel_size=2), mock_popen, device="cuda:2")
+
+    assert env["CUDA_VISIBLE_DEVICES"] == "2,3"
+
+
+@patch("sie_server.adapters.sglang._server.subprocess.Popen")
+@patch("sie_server.adapters.sglang._server.requests.get")
+@patch("sie_server.adapters.sglang._server.find_free_port")
+def test_profile_environment_cannot_move_or_widen_the_device_claim(
+    mock_find_port: MagicMock,
+    mock_requests_get: MagicMock,
+    mock_popen: MagicMock,
+) -> None:
+    """The mask is the registry's decision, not the profile's.
+
+    Before the width was typed, a profile could set CUDA_VISIBLE_DEVICES in
+    ``extra_env`` and silently serve on devices the registry had not reserved
+    and was not accounting for. The mask is now written last.
+    """
+    mock_find_port.return_value = 30005
+    mock_popen.return_value = MagicMock(poll=MagicMock(return_value=None))
+    mock_requests_get.return_value = MagicMock(status_code=200)
+
+    adapter = _tp_adapter(
+        tensor_parallel_size=2,
+        extra_env={"CUDA_VISIBLE_DEVICES": "4,5,6,7", "SIE_UNRELATED": "kept"},
+    )
+    _cmd, env = _launch(adapter, mock_popen)
+
+    assert env["CUDA_VISIBLE_DEVICES"] == "0,1"
+    assert env["SIE_UNRELATED"] == "kept"
+
+
+@patch("sie_server.adapters.sglang._server.subprocess.Popen")
+@patch("sie_server.adapters.sglang._server.requests.get")
+@patch("sie_server.adapters.sglang._server.find_free_port")
+def test_capture_path_can_be_re_enabled_explicitly(
+    mock_find_port: MagicMock,
+    mock_requests_get: MagicMock,
+    mock_popen: MagicMock,
+) -> None:
+    """A profile that has measured its own engine build may opt back in."""
+    mock_find_port.return_value = 30005
+    mock_popen.return_value = MagicMock(poll=MagicMock(return_value=None))
+    mock_requests_get.return_value = MagicMock(status_code=200)
+
+    cmd, _env = _launch(
+        _tp_adapter(tensor_parallel_size=4, disable_piecewise_cuda_graph=False),
+        mock_popen,
+    )
+
+    assert "--disable-piecewise-cuda-graph" not in cmd
+
+
+@pytest.mark.parametrize("adapter_class", [SGLangCuda13Adapter, SGLangStrictThinkingAdapter, SGLangGemmaAdapter])
+@patch("sie_server.adapters.sglang._server.subprocess.Popen")
+@patch("sie_server.adapters.sglang._server.requests.get")
+@patch("sie_server.adapters.sglang._server.find_free_port")
+def test_cuda13_adapters_turn_off_the_prefill_capture_path_by_its_current_name(
+    mock_find_port: MagicMock,
+    mock_requests_get: MagicMock,
+    mock_popen: MagicMock,
+    adapter_class: type[SGLangGenerationAdapter],
+) -> None:
+    """The CUDA 13 engine removed the piecewise flag; its prefill-phase flag replaces it."""
+    mock_find_port.return_value = 30005
+    mock_popen.return_value = MagicMock(poll=MagicMock(return_value=None))
+    mock_requests_get.return_value = MagicMock(status_code=200)
+
+    cmd, _env = _launch(_tp_adapter(adapter_class, tensor_parallel_size=4), mock_popen)
+
+    assert "--disable-prefill-cuda-graph" in cmd
+    assert "--disable-piecewise-cuda-graph" not in cmd
+
+
+@pytest.mark.parametrize("adapter_class", [SGLangCuda13Adapter, SGLangStrictThinkingAdapter, SGLangGemmaAdapter])
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        ({}, True),
+        ({"disable_piecewise_cuda_graph": False}, False),
+        ({"disable_cuda_graph": True}, False),
+    ],
+)
+@patch("sie_server.adapters.sglang._server.subprocess.Popen")
+@patch("sie_server.adapters.sglang._server.requests.get")
+@patch("sie_server.adapters.sglang._server.find_free_port")
+def test_cuda13_adapters_keep_the_prefill_graph_off_at_width_one(
+    mock_find_port: MagicMock,
+    mock_requests_get: MagicMock,
+    mock_popen: MagicMock,
+    overrides: dict[str, Any],
+    expected: bool,
+    adapter_class: type[SGLangGenerationAdapter],
+) -> None:
+    """Every CUDA 13 profile was sized on an engine that never captured this graph.
+
+    A profile may opt back in, and turning all CUDA graphs off needs no second flag.
+    """
+    mock_find_port.return_value = 30005
+    mock_popen.return_value = MagicMock(poll=MagicMock(return_value=None))
+    mock_requests_get.return_value = MagicMock(status_code=200)
+
+    cmd, _env = _launch(_tp_adapter(adapter_class, **overrides), mock_popen)
+
+    assert cmd[cmd.index("--tensor-parallel-size") + 1] == "1"
+    assert ("--disable-prefill-cuda-graph" in cmd) is expected
+
+
+@patch("sie_server.adapters.sglang._server.subprocess.Popen")
+@patch("sie_server.adapters.sglang._server.requests.get")
+@patch("sie_server.adapters.sglang._server.find_free_port")
+def test_cuda13_speculative_guard_accepts_the_renamed_mamba_flag(
+    mock_find_port: MagicMock,
+    mock_requests_get: MagicMock,
+    mock_popen: MagicMock,
+) -> None:
+    mock_find_port.return_value = 30005
+    mock_popen.return_value = MagicMock(poll=MagicMock(return_value=None))
+    mock_requests_get.return_value = MagicMock(status_code=200)
+
+    cmd, env = _launch(
+        _tp_adapter(
+            SGLangCuda13Adapter,
+            speculative={"enabled": True, "algorithm": "eagle"},
+            extra_launch_args=["--mamba-radix-cache-strategy", "extra_buffer"],
+        ),
+        mock_popen,
+    )
+
+    assert cmd[cmd.index("--mamba-radix-cache-strategy") + 1] == "extra_buffer"
+    assert env["SGLANG_ENABLE_SPEC_V2"] == "1"
+
+
+@patch("sie_server.adapters.sglang._server.subprocess.Popen")
+@patch("sie_server.adapters.sglang._server.find_free_port")
+def test_cuda13_speculative_guard_rejects_the_retired_mamba_flag(
+    mock_find_port: MagicMock,
+    mock_popen: MagicMock,
+) -> None:
+    """The CUDA 13 engine no longer declares the old spelling, so it cannot satisfy the guard."""
+    mock_find_port.return_value = 30007
+    adapter = _tp_adapter(
+        SGLangCuda13Adapter,
+        speculative={"enabled": True, "algorithm": "eagle"},
+        extra_launch_args=["--mamba-scheduler-strategy", "extra_buffer"],
+    )
+
+    with pytest.raises(RuntimeError, match="'--mamba-radix-cache-strategy extra_buffer'"):
+        adapter.load("cuda:0")
+
+    mock_popen.assert_not_called()
+
+
+@pytest.mark.parametrize("bad", [0, -1, 9, 2.0, "4", True, None])
+def test_invalid_width_is_refused_at_construction(bad: Any) -> None:
+    """A bad width fails where it is declared, not as an engine crash later."""
+    with pytest.raises(ValueError, match="tensor_parallel_size"):
+        _tp_adapter(tensor_parallel_size=bad)
+
+
+def test_width_one_is_the_only_width_that_needs_no_extra_devices() -> None:
+    assert _server.resolve_device_group(0, 1) == [0]
+    assert _server.resolve_device_group(3, 1) == [3]
+
+
+def test_launcher_refuses_a_repeated_device() -> None:
+    """Two ranks on one card deadlock rather than fail, so refuse it early."""
+    with pytest.raises(ValueError, match="distinct"):
+        _server.launch_sglang_server(["true"], device_indices=[0, 0], output_file=MagicMock())
+
+
+def test_launcher_refuses_an_empty_group() -> None:
+    with pytest.raises(ValueError, match="at least one device"):
+        _server.launch_sglang_server(["true"], device_indices=[], output_file=MagicMock())
+
+
+def test_width_above_one_requires_a_finite_streaming_read_cap() -> None:
+    """A stalled collective emits no bytes and raises nothing.
+
+    An unbounded read would hold the request open forever, and with it every
+    accelerator in the group.
+    """
+    with pytest.raises(ValueError, match="request_read_timeout_s"):
+        SGLangGenerationAdapter(
+            model_name_or_path="Qwen/Qwen3-4B-Instruct",
+            served_model_name="Qwen/Qwen3-4B-Instruct",
+            tensor_parallel_size=4,
+        )
+
+
+def test_width_one_keeps_the_unbounded_default() -> None:
+    """Single-device serving is unchanged: the worker owns request lifetime."""
+    adapter = _tp_adapter()
+
+    assert adapter._request_read_timeout_s is None
+
+
+@pytest.mark.parametrize("bad", [0, -1, float("inf"), float("nan"), True, "30"])
+def test_invalid_read_cap_is_refused(bad: Any) -> None:
+    with pytest.raises(ValueError, match="request_read_timeout_s"):
+        _tp_adapter(request_read_timeout_s=bad)
+
+
+@pytest.mark.parametrize("raw", ["inf", "+inf", "Infinity", "nan"])
+def test_a_non_finite_inherited_read_cap_leaves_a_wide_profile_without_one(
+    monkeypatch: pytest.MonkeyPatch, raw: str
+) -> None:
+    """An infinite cap from the environment is no cap, so width two must still refuse it."""
+    monkeypatch.setenv("SIE_SGLANG_GENERATE_READ_TIMEOUT_S", raw)
+    monkeypatch.setattr(generation_module, "_GENERATE_READ_TIMEOUT_S", generation_module._resolve_read_timeout())
+
+    assert generation_module._GENERATE_READ_TIMEOUT_S is None
+    with pytest.raises(ValueError, match="must also declare a finite"):
+        _tp_adapter(tensor_parallel_size=2, request_read_timeout_s=None)
+
+
+def test_declared_read_cap_reaches_the_http_client() -> None:
+    adapter = _tp_adapter(tensor_parallel_size=2, request_read_timeout_s=45.5)
+
+    assert adapter._request_read_timeout_s == 45.5
+
+
+def _clear_startup_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in (*_server.STARTUP_TIMEOUT_ENV_VARS, _server.LIVENESS_BUDGET_ENV_VAR):
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_width_above_one_requires_a_declared_startup_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Startup at a width is graph work per rank, so no inherited default describes it."""
+    _clear_startup_environment(monkeypatch)
+
+    with pytest.raises(ValueError, match="must also declare startup_timeout_s"):
+        _tp_adapter(tensor_parallel_size=2, startup_timeout_s=None)
+
+
+def test_an_environment_startup_budget_does_not_satisfy_a_width(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A process-wide default is set for every model a worker loads, not for this profile."""
+    _clear_startup_environment(monkeypatch)
+    for name in _server.STARTUP_TIMEOUT_ENV_VARS:
+        monkeypatch.setenv(name, "1200")
+
+    with pytest.raises(ValueError, match="must also declare startup_timeout_s"):
+        _tp_adapter(tensor_parallel_size=4, startup_timeout_s=None)
+
+
+def test_width_one_keeps_inheriting_the_startup_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear_startup_environment(monkeypatch)
+    monkeypatch.setenv("SIE_SGLANG_STARTUP_TIMEOUT_S", "1234")
+
+    assert _tp_adapter()._startup_timeout_s == 1234
+    assert _tp_adapter(tensor_parallel_size=1)._startup_timeout_s == 1234
+
+
+@pytest.mark.parametrize("width", [1, 2])
+@pytest.mark.parametrize("bad", [0, -1, float("inf"), float("nan"), True, "900"])
+def test_invalid_startup_budget_is_refused_at_construction(
+    monkeypatch: pytest.MonkeyPatch, width: int, bad: Any
+) -> None:
+    """An unusable declared budget fails where it is declared instead of being replaced by a fallback."""
+    _clear_startup_environment(monkeypatch)
+    monkeypatch.setenv("SIE_SGLANG_STARTUP_TIMEOUT_S", "1200")
+
+    with pytest.raises(ValueError, match="startup_timeout_s"):
+        _tp_adapter(tensor_parallel_size=width, startup_timeout_s=bad)
+
+
+@patch("sie_server.adapters.sglang._server.wait_for_server", return_value=True)
+@patch("sie_server.adapters.sglang._server.subprocess.Popen")
+@patch("sie_server.adapters.sglang._server.find_free_port")
+def test_declared_startup_budget_bounds_a_group_launch(
+    mock_find_port: MagicMock,
+    mock_popen: MagicMock,
+    mock_wait_for_server: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_startup_environment(monkeypatch)
+    monkeypatch.setenv("SIE_MODEL_READY_TIMEOUT_S", "300")
+    mock_find_port.return_value = 30005
+    mock_popen.return_value = MagicMock(poll=MagicMock(return_value=None))
+
+    _launch(_tp_adapter(tensor_parallel_size=2, startup_timeout_s=1500), mock_popen)
+
+    assert mock_wait_for_server.call_args.kwargs["timeout_s"] == 1500
+
+
+@patch("sie_server.adapters.sglang._server.subprocess.Popen")
+@patch("sie_server.adapters.sglang._server.requests.get")
+@patch("sie_server.adapters.sglang._server.find_free_port")
+def test_a_dead_engine_fails_immediately_instead_of_timing_out_per_request(
+    mock_find_port: MagicMock,
+    mock_requests_get: MagicMock,
+    mock_popen: MagicMock,
+) -> None:
+    """A crashed engine is a terminal answer, not a connection error forever.
+
+    Measured on a four-rank group: a killed rank refused health in about 5 seconds while its
+    process tree took about 67 seconds to exit. Before this check the adapter
+    never noticed either, and kept accepting requests it could not serve.
+    """
+    mock_find_port.return_value = 30005
+    process = MagicMock()
+    process.poll.return_value = None
+    mock_popen.return_value = process
+    mock_requests_get.return_value = MagicMock(status_code=200)
+
+    adapter = _tp_adapter(tensor_parallel_size=2)
+    adapter.load("cuda:0")
+    adapter._check_loaded()  # alive: no raise
+
+    process.poll.return_value = -9
+
+    with pytest.raises(RuntimeError, match="exited with code -9"):
+        adapter._check_loaded()
+
+
+def test_an_unloaded_adapter_still_reports_not_loaded_first() -> None:
+    """The dead-engine check must not mask the ordinary not-loaded error."""
+    adapter = _tp_adapter()
+
+    with pytest.raises(RuntimeError, match=re.escape(ERR_NOT_LOADED)):
+        adapter._check_loaded()
+
+
+@patch("sie_server.adapters.sglang._server.subprocess.Popen")
+@patch("sie_server.adapters.sglang._server.requests.get")
+@patch("sie_server.adapters.sglang._server.find_free_port")
+def test_width_one_reserves_no_collective_port(
+    mock_find_port: MagicMock,
+    mock_requests_get: MagicMock,
+    mock_popen: MagicMock,
+) -> None:
+    """Single-device serving does not rendezvous, so nothing extra is taken."""
+    mock_find_port.return_value = 30005
+    mock_popen.return_value = MagicMock(poll=MagicMock(return_value=None))
+    mock_requests_get.return_value = MagicMock(status_code=200)
+
+    adapter = _tp_adapter()
+    cmd, _env = _launch(adapter, mock_popen)
+
+    assert adapter._nccl_port is None
+    assert "--nccl-port" not in cmd
+    assert "--watchdog-timeout" not in cmd
+
+
+@patch("sie_server.adapters.sglang._server.subprocess.Popen")
+@patch("sie_server.adapters.sglang._server.requests.get")
+@patch("sie_server.adapters.sglang._server.find_free_port")
+def test_a_group_reserves_its_own_collective_port(
+    mock_find_port: MagicMock,
+    mock_requests_get: MagicMock,
+    mock_popen: MagicMock,
+) -> None:
+    """The engine otherwise picks a random port and two groups can collide.
+
+    A collision does not fail, it hangs in rendezvous, which is the failure
+    shape hardest to attribute.
+    """
+    mock_find_port.side_effect = [30005, 30207]
+    mock_popen.return_value = MagicMock(poll=MagicMock(return_value=None))
+    mock_requests_get.return_value = MagicMock(status_code=200)
+
+    adapter = _tp_adapter(tensor_parallel_size=2)
+    cmd, _env = _launch(adapter, mock_popen)
+
+    assert adapter._nccl_port == 30207
+    assert cmd[cmd.index("--nccl-port") + 1] == "30207"
+    # Reserved from a span kept clear of the HTTP ports.
+    assert mock_find_port.call_args_list[-1].args[0] == _server.NCCL_BASE_PORT
+
+
+@patch("sie_server.adapters.sglang._server.os.getpgid")
+@patch("sie_server.adapters.sglang._server.os.killpg")
+def test_unload_returns_the_collective_port(
+    mock_killpg: MagicMock,
+    mock_getpgid: MagicMock,
+) -> None:
+    """Both spans exhaust under reload churn if either is leaked."""
+    mock_process = MagicMock()
+    mock_process.pid = 12345
+    mock_process.wait.return_value = None
+    mock_getpgid.return_value = 12345
+
+    adapter = _tp_adapter(tensor_parallel_size=2)
+    adapter._process = mock_process
+    adapter._server_url = "http://localhost:30005"
+    adapter._device = "cuda:0"
+    adapter._port = 30005
+    # What ``load`` sets when it takes the rendezvous port from the span.
+    adapter._nccl_port = 30207
+    adapter._reserved_nccl_port = 30207
+    adapter._output_file = _server.open_output_log(prefix="sie_test_sglang_")
+
+    with patch("sie_server.adapters.sglang._server.release_port") as mock_release:
+        adapter.unload()
+
+    released = [call.args[0] for call in mock_release.call_args_list]
+    assert released == [30005, 30207]
+    assert adapter._nccl_port is None
+    assert adapter._reserved_nccl_port is None
+
+
+_DECLARED_NCCL_PORT = 30499
+
+
+def _reserving_http_port(port: int = 30005) -> Any:
+    """A ``find_free_port`` that reserves what it hands out, as the real one does."""
+
+    def reserve(start_port: int = _server.BASE_PORT) -> int:
+        _server._RESERVED_PORTS.add(port)
+        return port
+
+    return reserve
+
+
+@patch("sie_server.adapters.sglang._server.os.getpgid", return_value=12345)
+@patch("sie_server.adapters.sglang._server.os.killpg")
+@patch("sie_server.adapters.sglang._server.subprocess.Popen")
+@patch("sie_server.adapters.sglang._server.requests.get")
+def test_a_declared_collective_port_is_reserved_while_loaded_and_returned_on_unload(
+    mock_requests_get: MagicMock,
+    mock_popen: MagicMock,
+    mock_killpg: MagicMock,
+    mock_getpgid: MagicMock,
+) -> None:
+    mock_popen.return_value = MagicMock(pid=12345, poll=MagicMock(return_value=None), wait=MagicMock(return_value=None))
+    mock_requests_get.return_value = MagicMock(status_code=200)
+    adapter = _tp_adapter(tensor_parallel_size=2, nccl_port=_DECLARED_NCCL_PORT)
+
+    try:
+        with patch("sie_server.adapters.sglang._server.find_free_port", side_effect=_reserving_http_port()):
+            cmd, _env = _launch(adapter, mock_popen)
+
+        assert cmd[cmd.index("--nccl-port") + 1] == str(_DECLARED_NCCL_PORT)
+        assert _DECLARED_NCCL_PORT in _server._RESERVED_PORTS
+
+        adapter.unload()
+
+        assert _DECLARED_NCCL_PORT not in _server._RESERVED_PORTS
+        assert 30005 not in _server._RESERVED_PORTS
+    finally:
+        _server.release_port(_DECLARED_NCCL_PORT)
+        _server.release_port(30005)
+
+
+@patch("sie_server.adapters.sglang._server.subprocess.Popen")
+@patch("sie_server.adapters.sglang._server.requests.get")
+def test_a_declared_port_another_model_holds_is_refused_without_leaking(
+    mock_requests_get: MagicMock,
+    mock_popen: MagicMock,
+) -> None:
+    """Two groups sharing a rendezvous port hang rather than fail."""
+    mock_requests_get.return_value = MagicMock(status_code=200)
+    adapter = _tp_adapter(tensor_parallel_size=2, nccl_port=_DECLARED_NCCL_PORT)
+    _server._RESERVED_PORTS.add(_DECLARED_NCCL_PORT)
+
+    try:
+        with (
+            patch("sie_server.adapters.sglang._server.find_free_port", side_effect=_reserving_http_port()),
+            pytest.raises(RuntimeError, match="already reserved by another model"),
+        ):
+            adapter.load("cuda:0")
+
+        mock_popen.assert_not_called()
+        assert 30005 not in _server._RESERVED_PORTS
+        assert _DECLARED_NCCL_PORT in _server._RESERVED_PORTS, "the other model's reservation must survive"
+    finally:
+        _server.release_port(_DECLARED_NCCL_PORT)
+        _server.release_port(30005)
+
+
+def test_a_declared_collective_port_at_width_one_is_refused() -> None:
+    """A single rank never rendezvouses, so the port would be silently ignored."""
+    with pytest.raises(ValueError, match="nccl_port applies only above"):
+        _tp_adapter(nccl_port=_DECLARED_NCCL_PORT)
+
+
+@patch("sie_server.adapters.sglang._server.subprocess.Popen")
+@patch("sie_server.adapters.sglang._server.requests.get")
+@patch("sie_server.adapters.sglang._server.find_free_port")
+def test_a_declared_watchdog_bound_reaches_the_engine(
+    mock_find_port: MagicMock,
+    mock_requests_get: MagicMock,
+    mock_popen: MagicMock,
+) -> None:
+    """A wedged forward batch must crash the engine inside a budget SIE owns."""
+    mock_find_port.side_effect = [30005, 30207]
+    mock_popen.return_value = MagicMock(poll=MagicMock(return_value=None))
+    mock_requests_get.return_value = MagicMock(status_code=200)
+
+    cmd, _env = _launch(_tp_adapter(tensor_parallel_size=2, watchdog_timeout_s=90.0), mock_popen)
+
+    assert cmd[cmd.index("--watchdog-timeout") + 1] == "90.0"
+
+
+@pytest.mark.parametrize("bad", [0, -1, float("inf"), True, "90"])
+def test_an_invalid_watchdog_bound_is_refused(bad: Any) -> None:
+    with pytest.raises(ValueError, match="watchdog_timeout_s"):
+        _tp_adapter(watchdog_timeout_s=bad)
+
+
+@pytest.mark.parametrize("bad", [0, 80, 70000, True, "30207"])
+def test_an_invalid_collective_port_is_refused(bad: Any) -> None:
+    with pytest.raises(ValueError, match="nccl_port must be"):
+        _tp_adapter(tensor_parallel_size=2, nccl_port=bad)
+
+
+@patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
+def test_generate_terminal_reports_prefix_cache_hits(mock_async_client: MagicMock, adapter) -> None:
+    sse_lines = [
+        'data: {"text": "Hi", "meta_info": {"prompt_tokens": 120, "cached_tokens": 96}}',
+        'data: {"text": "Hi there", "meta_info": {"prompt_tokens": 120, "completion_tokens": 2, "cached_tokens": 96, "finish_reason": {"type": "stop"}}}',
+        "data: [DONE]",
+    ]
+    mock_async_client.return_value = _make_client_with_stream(_FakeStreamingResponse(sse_lines))
+    adapter._server_url = "http://localhost:30005"
+
+    result = asyncio.run(collect_generation(adapter.generate(prompt="Hi", max_new_tokens=8)))
+
+    assert result.prompt_tokens == 120
+    assert result.cached_tokens == 96
+
+
+@pytest.mark.parametrize(
+    ("meta_cached", "expected"),
+    [
+        ("", None),
+        (', "cached_tokens": 0', 0),
+        (', "cached_tokens": 500', 120),
+        (', "cached_tokens": -1', None),
+        (', "cached_tokens": true', None),
+        (', "cached_tokens": "96"', None),
+    ],
+)
+@patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
+def test_generate_cached_tokens_is_validated_and_clamped(
+    mock_async_client: MagicMock, adapter, meta_cached: str, expected: int | None
+) -> None:
+    terminal = (
+        '{"text": "ok", "meta_info": {"prompt_tokens": 120, "completion_tokens": 1'
+        + meta_cached
+        + ', "finish_reason": {"type": "stop"}}}'
+    )
+    mock_async_client.return_value = _make_client_with_stream(_FakeStreamingResponse([f"data: {terminal}"]))
+    adapter._server_url = "http://localhost:30005"
+
+    result = asyncio.run(collect_generation(adapter.generate(prompt="Hi", max_new_tokens=8)))
+
+    assert result.cached_tokens == expected
+
+
+@patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
+def test_generate_streaming_n_gt_one_reports_cached_tokens_once(mock_async_client: MagicMock, adapter) -> None:
+    sse_lines = [
+        'data: {"index": 0, "text": "A", "meta_info": {"prompt_tokens": 30, "cached_tokens": 24}}',
+        'data: {"index": 1, "text": "X", "meta_info": {"prompt_tokens": 30, "cached_tokens": 30}}',
+        'data: {"index": 0, "text": "Al", "meta_info": {"prompt_tokens": 30, "cached_tokens": 24, "completion_tokens": 2, "finish_reason": {"type": "stop"}}}',
+        'data: {"index": 1, "text": "Xr", "meta_info": {"prompt_tokens": 30, "cached_tokens": 30, "completion_tokens": 2, "finish_reason": {"type": "stop"}}}',
+        "data: [DONE]",
+    ]
+    mock_async_client.return_value = _make_client_with_stream(_FakeStreamingResponse(sse_lines))
+    adapter._server_url = "http://localhost:30005"
+
+    async def _collect() -> list[GenerationChunk]:
+        return [c async for c in adapter.generate(prompt="hi", max_new_tokens=8, n=2, stream=True)]
+
+    term = asyncio.run(_collect())[-1]
+    assert term.done is True
+    assert term.prompt_tokens == 30
+    assert term.cached_tokens == 24
+
+
+@patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
+def test_generate_n_gt_one_reports_cached_tokens_with_prompt_tokens(mock_async_client: MagicMock, adapter) -> None:
+    sglang_results = [
+        {
+            "text": " a",
+            "meta_info": {
+                "finish_reason": {"type": "stop"},
+                "completion_tokens": 1,
+                "prompt_tokens": 40,
+                "cached_tokens": 32,
+            },
+        },
+        {
+            "text": " b",
+            "meta_info": {
+                "finish_reason": {"type": "stop"},
+                "completion_tokens": 1,
+                "prompt_tokens": 40,
+                "cached_tokens": 40,
+            },
+        },
+    ]
+    resp = MagicMock()
+    resp.json = MagicMock(return_value=sglang_results)
+    resp.raise_for_status = MagicMock()
+    resp.aread = AsyncMock()
+    resp.__aenter__ = AsyncMock(return_value=resp)
+    client_instance = _make_client_with_stream(_FakeStreamingResponse([]))
+    client_instance.stream.return_value = resp
+    mock_async_client.return_value = client_instance
+    adapter._server_url = "http://localhost:30005"
+
+    async def _collect() -> list[GenerationChunk]:
+        return [c async for c in adapter.generate(prompt="hi", max_new_tokens=4, n=2)]
+
+    (term,) = asyncio.run(_collect())
+    assert term.prompt_tokens == 40
+    assert term.cached_tokens == 32

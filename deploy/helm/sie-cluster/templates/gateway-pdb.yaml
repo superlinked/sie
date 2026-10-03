@@ -1,0 +1,29 @@
+{{- /* Voluntary disruptions (node drain, cluster upgrade, descheduler) have
+     nothing stopping them from evicting every gateway pod at once, which
+     takes the whole inference gateway down together with the in-flight NATS
+     `_INBOX` result subscriptions those pods own.
+
+     Rendered only when the tier is guaranteed to have a spare pod. At
+     gateway.replicas=1 a maxUnavailable=1 PDB is worse than no PDB: as soon
+     as the single pod is unhealthy `disruptionsAllowed` drops to 0 and the
+     budget blocks the very drain that would reschedule it. Operators can
+     force the decision either way with gateway.podDisruptionBudget.enabled. */ -}}
+{{- $pdb := default (dict) .Values.gateway.podDisruptionBudget -}}
+{{- $enabled := gt (int .Values.gateway.replicas) 1 -}}
+{{- if and (hasKey $pdb "enabled") (kindIs "bool" $pdb.enabled) -}}
+{{- $enabled = $pdb.enabled -}}
+{{- end -}}
+{{- if $enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "sie-cluster.gateway.serviceName" . }}
+  namespace: {{ include "sie-cluster.namespace" . }}
+  labels:
+    {{- include "sie-cluster.gateway.labels" . | nindent 4 }}
+spec:
+  maxUnavailable: {{ dig "maxUnavailable" 1 $pdb }}
+  selector:
+    matchLabels:
+      {{- include "sie-cluster.gateway.selectorLabels" . | nindent 6 }}
+{{- end }}

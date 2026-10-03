@@ -29,10 +29,9 @@ import {
   type DType,
   type EncodeOptions,
   type EncodeResult,
-  type ModelInfo,
-  type ScoreResult,
   SIEClient,
   type SIEClientOptions,
+  type ScoreResult,
   toNumberArray,
 } from "@superlinked/sie-sdk";
 
@@ -287,14 +286,16 @@ export class SIEReranker {
     }
 
     // Score with SIE
-    const items = texts.map((text) => ({ text }));
+    const items = texts.map((text, idx) => ({ id: String(idx), text }));
     const scoreResult: ScoreResult = await this.client.score(this.model, { text: query }, items);
 
-    // Build score array indexed by input position
+    // Build score array indexed by input position; each entry's itemId echoes
+    // the id sent for its row.
+    const positions = new Map(items.map((item, idx) => [item.id, idx]));
     const scores = new Float32Array(texts.length);
     for (const entry of scoreResult.scores) {
-      const idx = typeof entry.itemId === "string" ? Number.parseInt(entry.itemId) : entry.itemId;
-      if (idx < scores.length) {
+      const idx = positions.get(entry.itemId);
+      if (idx !== undefined) {
         scores[idx] = entry.score;
       }
     }
@@ -311,7 +312,7 @@ export class SIEReranker {
         columnArrays[field.name] = vals;
       }
     }
-    columnArrays["_relevance_score"] = Array.from(scores);
+    columnArrays._relevance_score = Array.from(scores);
 
     const newTable = arrow.tableFromArrays(columnArrays);
     const batch = newTable.batches[0];
@@ -384,7 +385,11 @@ export class SIEReranker {
     }
 
     const table = arrow.tableFromArrays(columnArrays);
-    return table.batches[0]!;
+    const batch = table.batches[0];
+    if (!batch) {
+      throw new Error("Failed to merge result batches");
+    }
+    return batch;
   }
 
   async close(): Promise<void> {

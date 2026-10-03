@@ -696,6 +696,7 @@ fn merge_apply_model_config_response(
         resp.bundle_config_hash,
     );
     existing.config_version = existing.config_version.max(resp.config_version);
+    merge_unsupported_models(&mut existing.unsupported_models, resp.unsupported_models);
 }
 
 fn merge_replace_model_configs_response(
@@ -713,6 +714,7 @@ fn merge_replace_model_configs_response(
         resp.bundle_config_hash,
     );
     existing.config_version = existing.config_version.max(resp.config_version);
+    merge_unsupported_models(&mut existing.unsupported_models, resp.unsupported_models);
 
     let mut existing_models = existing.applied_models.clone();
     let mut new_models = resp.applied_models;
@@ -743,6 +745,13 @@ fn merge_replace_model_configs_response(
             .collect();
         existing.applied_profiles.sort();
     }
+}
+
+/// A model is unsupported on the pod when any child cannot serve it.
+fn merge_unsupported_models(existing: &mut Vec<String>, next: Vec<String>) {
+    existing.extend(next);
+    existing.sort();
+    existing.dedup();
 }
 
 fn merge_bundle_hash(applied: &mut bool, existing_hash: &mut String, next_hash: String) {
@@ -812,13 +821,19 @@ impl InferenceBackend for AdapterWorkerPool {
     }
 
     async fn run_batch(&self, req: RunBatchRequest) -> Result<BatchOutcome, BackendError> {
+        self.run_batch_with_budget(req, None).await
+    }
+
+    async fn run_batch_with_budget(
+        &self,
+        req: RunBatchRequest,
+        budget: Option<Duration>,
+    ) -> Result<BatchOutcome, BackendError> {
         let model_id = req.model_id.clone();
         let child = self.child_for_model(&model_id);
-        self.run_child_batch(
-            model_id,
-            child,
-            |ipc| async move { ipc.run_batch(req).await },
-        )
+        self.run_child_batch(model_id, child, |ipc| async move {
+            ipc.run_batch_with_budget(req, budget).await
+        })
         .await
         .map_err(map_ipc_error)
     }
@@ -1184,12 +1199,53 @@ mod tests {
     }
 
     #[test]
+    fn config_merges_union_unsupported_models_across_children() {
+        let mut applied = None;
+        for unsupported in [
+            vec!["b".to_string(), "a".to_string()],
+            vec!["a".to_string()],
+        ] {
+            merge_apply_model_config_response(
+                &mut applied,
+                ApplyModelConfigResponse {
+                    unsupported_models: unsupported,
+                    applied: true,
+                    bundle_config_hash: "h1".into(),
+                    config_version: 1,
+                },
+            );
+        }
+        let applied = applied.expect("combined apply");
+        assert!(applied.applied);
+        assert_eq!(applied.unsupported_models, ["a", "b"]);
+
+        let mut replaced = None;
+        for unsupported in [Vec::new(), vec!["c".to_string()]] {
+            merge_replace_model_configs_response(
+                &mut replaced,
+                ReplaceModelConfigsResponse {
+                    unsupported_models: unsupported,
+                    applied: true,
+                    bundle_config_hash: "h1".into(),
+                    config_version: 1,
+                    applied_models: vec!["c".into()],
+                    applied_profiles: vec!["default".into()],
+                },
+            );
+        }
+        let replaced = replaced.expect("combined replace");
+        assert!(replaced.applied);
+        assert_eq!(replaced.unsupported_models, ["c"]);
+    }
+
+    #[test]
     fn apply_config_merge_preserves_any_child_rejection() {
         let mut combined = None;
 
         merge_apply_model_config_response(
             &mut combined,
             ApplyModelConfigResponse {
+                unsupported_models: Vec::new(),
                 applied: false,
                 bundle_config_hash: "h1".into(),
                 config_version: 1,
@@ -1198,6 +1254,7 @@ mod tests {
         merge_apply_model_config_response(
             &mut combined,
             ApplyModelConfigResponse {
+                unsupported_models: Vec::new(),
                 applied: true,
                 bundle_config_hash: "h1".into(),
                 config_version: 2,
@@ -1217,6 +1274,7 @@ mod tests {
         merge_apply_model_config_response(
             &mut combined,
             ApplyModelConfigResponse {
+                unsupported_models: Vec::new(),
                 applied: true,
                 bundle_config_hash: "h1".into(),
                 config_version: 1,
@@ -1225,6 +1283,7 @@ mod tests {
         merge_apply_model_config_response(
             &mut combined,
             ApplyModelConfigResponse {
+                unsupported_models: Vec::new(),
                 applied: true,
                 bundle_config_hash: "h2".into(),
                 config_version: 1,
@@ -1241,6 +1300,7 @@ mod tests {
         merge_replace_model_configs_response(
             &mut combined,
             ReplaceModelConfigsResponse {
+                unsupported_models: Vec::new(),
                 applied: true,
                 bundle_config_hash: "h1".into(),
                 config_version: 1,
@@ -1251,6 +1311,7 @@ mod tests {
         merge_replace_model_configs_response(
             &mut combined,
             ReplaceModelConfigsResponse {
+                unsupported_models: Vec::new(),
                 applied: true,
                 bundle_config_hash: "h1".into(),
                 config_version: 1,
@@ -1279,6 +1340,7 @@ mod tests {
             merge_replace_model_configs_response(
                 &mut combined,
                 ReplaceModelConfigsResponse {
+                    unsupported_models: Vec::new(),
                     applied: true,
                     bundle_config_hash: "h1".into(),
                     config_version: 1,

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 import yaml
 from sie_server.adapters._generation_base import GenerationChunk
@@ -240,6 +241,125 @@ async def test_extract_async_refills_bounded_requests_and_preserves_order(
     assert peak_active == 2
 
 
+def test_max_concurrent_dispatch_matches_the_request_bound(adapter: SGLangVisionExtractAdapter) -> None:
+    assert adapter.max_concurrent_dispatch() == 2
+
+
+@pytest.mark.asyncio
+async def test_extract_async_bound_is_shared_across_concurrent_batches(
+    adapter: SGLangVisionExtractAdapter,
+) -> None:
+    active = 0
+    peak_active = 0
+    release = asyncio.Event()
+    started = 0
+
+    async def generate(prompt: str, *, images: list[ImageInput], **_: Any) -> AsyncIterator[GenerationChunk]:
+        nonlocal active, peak_active, started
+        active += 1
+        started += 1
+        peak_active = max(peak_active, active)
+        await release.wait()
+        active -= 1
+        yield GenerationChunk(
+            text_delta=images[0]["data"].decode(),
+            done=True,
+            finish_reason="stop",
+            prompt_tokens=1,
+            completion_tokens=1,
+        )
+
+    adapter.generate = generate  # ty: ignore[invalid-assignment]
+    batches = [
+        asyncio.create_task(adapter._extract_async("p", [_image(f"{b}{i}") for i in range(2)], max_new_tokens=8))
+        for b in "ab"
+    ]
+    for _ in range(50):
+        if started >= 2:
+            break
+        await asyncio.sleep(0.01)
+    await asyncio.sleep(0.05)
+    assert peak_active == 2
+    release.set()
+    results = await asyncio.gather(*batches)
+    assert [[r.text for r in batch] for batch in results] == [["a0", "a1"], ["b0", "b1"]]
+
+
+@pytest.mark.asyncio
+async def test_extract_async_closes_each_buffered_generation_iterator(
+    adapter: SGLangVisionExtractAdapter,
+) -> None:
+    sources: list[Any] = []
+
+    class _TrackingPageGeneration:
+        def __init__(self, marker: str) -> None:
+            self.marker = marker
+            self.yielded = False
+            self.close_calls = 0
+
+        def __aiter__(self) -> _TrackingPageGeneration:
+            return self
+
+        async def __anext__(self) -> GenerationChunk:
+            if self.yielded:
+                raise StopAsyncIteration
+            self.yielded = True
+            return GenerationChunk(
+                text_delta=self.marker,
+                done=True,
+                finish_reason="stop",
+                prompt_tokens=1,
+                completion_tokens=1,
+            )
+
+        async def aclose(self) -> None:
+            self.close_calls += 1
+
+    def generate(*args: Any, images: list[ImageInput], **kwargs: Any) -> AsyncIterator[GenerationChunk]:
+        _ = (args, kwargs)
+        source = _TrackingPageGeneration(images[0]["data"].decode())
+        sources.append(source)
+        return source
+
+    adapter.generate = generate  # ty: ignore[invalid-assignment]
+
+    results = await adapter._extract_async(
+        "rendered prompt",
+        [_image("one"), _image("two")],
+        max_new_tokens=32,
+    )
+
+    assert [result.text for result in results] == ["one", "two"]
+    assert len(sources) == 2
+    assert all(source.close_calls == 1 for source in sources)
+
+
+@pytest.mark.asyncio
+async def test_extract_async_success_does_not_abort_completed_sglang_request(
+    adapter: SGLangVisionExtractAdapter,
+) -> None:
+    paths: list[str] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        return httpx.Response(
+            200,
+            content=(
+                b'data: {"text": "page", "meta_info": {"prompt_tokens": 10, '
+                b'"completion_tokens": 1, "finish_reason": {"type": "stop"}}}\n\n'
+            ),
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
+    adapter._http_client = client
+
+    results = await adapter._extract_async("rendered prompt", [_image("page")], max_new_tokens=32)
+    await client.aclose()
+
+    assert [result.text for result in results] == ["page"]
+    assert paths == ["/generate"]
+
+
 def test_extract_requires_loaded_request_loop(adapter: SGLangVisionExtractAdapter) -> None:
     with pytest.raises(RuntimeError, match="Model not loaded"):
         adapter.extract([Item(images=[_image("page")])])
@@ -405,6 +525,62 @@ print("native-lighton-ready")
     assert completed.stdout.strip() == "native-lighton-ready"
 
 
+def test_vision_compat_chains_generic_sglang_hook(tmp_path: Path) -> None:
+    package_root = tmp_path / "fake-package"
+    processors = package_root / "sglang" / "srt" / "multimodal" / "processors"
+    processors.mkdir(parents=True)
+    for package in (
+        package_root / "sglang",
+        package_root / "sglang" / "srt",
+        package_root / "sglang" / "srt" / "multimodal",
+        processors,
+    ):
+        (package / "__init__.py").write_text("", encoding="utf-8")
+    (processors / "base_processor.py").write_text(
+        """class BaseMultimodalProcessor:
+    def process_mm_data(self, input_text, images=None, videos=None, audios=None, **kwargs):
+        return kwargs
+
+    @classmethod
+    def _load_single_item(cls, data, modality, *args):
+        try:
+            raise ValueError(data)
+        except Exception as e:
+            raise RuntimeError(f"Error while loading data {data}: {e}")
+""",
+        encoding="utf-8",
+    )
+
+    adapters = Path(__file__).resolve().parents[2] / "src/sie_server/adapters"
+    vision_compat = adapters / "sglang_vision_extract/_compat"
+    generic_compat = adapters / "sglang/_compat"
+    script = """import sitecustomize
+from sglang.srt.multimodal.processors.base_processor import BaseMultimodalProcessor
+
+try:
+    BaseMultimodalProcessor._load_single_item("data:image/png;base64,PRIVATEIMAGE", None)
+except ValueError as exc:
+    assert "PRIVATEIMAGE" not in str(exc), str(exc)
+print("chained-generic-hook")
+"""
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join((str(vision_compat), str(generic_compat), str(package_root)))
+    env["SIE_SGLANG_MM_PROCESS_CONFIG_COMPAT"] = "1"
+
+    completed = subprocess.run(  # noqa: S603 - executes the fixed local interpreter
+        [sys.executable, "-c", script],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "PRIVATEIMAGE" not in completed.stderr
+    assert completed.stdout.strip() == "chained-generic-hook"
+
+
 def test_resolve_processor_dir_preserves_local_path(tmp_path: Path) -> None:
     instance = SGLangVisionExtractAdapter(tmp_path)
 
@@ -427,3 +603,14 @@ async def test_aclose_client_runs_on_dedicated_request_loop(adapter: SGLangVisio
         assert adapter._http_client is None
     finally:
         adapter.unload()
+
+
+def test_a_new_request_loop_gets_a_new_request_bound(adapter: SGLangVisionExtractAdapter) -> None:
+    adapter._request_slots = asyncio.Semaphore(1)
+    adapter._start_request_loop()
+    try:
+        assert adapter._request_slots is None
+    finally:
+        loop = adapter._request_loop
+        assert loop is not None
+        loop.call_soon_threadsafe(loop.stop)

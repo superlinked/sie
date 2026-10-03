@@ -298,6 +298,21 @@ class EngineConfig(BaseSettings):
             ),
         ),
     ] = 0.5
+    idle_coalesce_ms: Annotated[
+        float,
+        Field(
+            ge=0.0,
+            description=(
+                "Accumulation window for the FIRST batch after a worker was "
+                "idle (#2874). An idle worker used to dispatch immediately "
+                "with whatever was pending, shredding bursty arrivals into a "
+                "train of small serialized forwards. With this window the "
+                "batcher coalesces until arrivals have been quiet for this "
+                "long (bounded by max_batch_wait_ms), so a lone request waits "
+                "at most this window. 0 restores immediate idle dispatch."
+            ),
+        ),
+    ] = 3.0
     max_concurrent_requests: Annotated[
         int,
         Field(description="Maximum concurrent requests (queue size)"),

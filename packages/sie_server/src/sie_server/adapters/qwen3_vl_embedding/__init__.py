@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import io
 import logging
 import unicodedata
 from pathlib import Path
@@ -16,7 +15,7 @@ from sie_server.adapters._types import ERR_NOT_LOADED, ComputePrecision
 from sie_server.adapters._vision_patch_embed import rebind_vision_patch_embed
 from sie_server.core.inference_output import EncodeOutput
 from sie_server.core.video_frames import extract_frames
-from sie_server.types.inputs import media_bytes
+from sie_server.types.inputs import decode_image
 
 if TYPE_CHECKING:
     from PIL import Image
@@ -428,18 +427,11 @@ class Qwen3VLEmbeddingAdapter(BaseAdapter):
     # ------------------------------------------------------------------
 
     def _load_images(self, item: Any) -> list[Image.Image]:
-        from PIL import Image
-
-        pil_images = []
-        for idx, img_input in enumerate(item.images or []):
-            try:
-                pil_img = Image.open(io.BytesIO(media_bytes(img_input, kind="image")))
-                if pil_img.mode != "RGB":
-                    pil_img = pil_img.convert("RGB")
-                pil_images.append(pil_img)
-            except (OSError, KeyError) as exc:
-                logger.warning("Failed to load image %d: %s", idx, exc)
-        return pil_images
+        # decode_image raises InvalidMediaError (-> 400 INVALID_INPUT) on
+        # non-bytes or undecodable payloads, and converts to RGB. Faulting
+        # matches the video half (an undecodable video raises VideoDecodeError)
+        # instead of silently embedding without the image the caller sent.
+        return [decode_image(img_input, image_index=j) for j, img_input in enumerate(item.images or [])]
 
     def _extract_video_frames(self, item: Any) -> list[Image.Image]:
         """Sample frames from the item's video, as image content parts.
@@ -500,9 +492,14 @@ class Qwen3VLEmbeddingAdapter(BaseAdapter):
             counts[position] = count
         return counts
 
-    def get_preprocessor(self) -> Any | None:
+    def get_preprocessor(self) -> Any:
         # Qwen3-VL processor requires text alongside images (for chat template
         # token insertion). The generic ImagePreprocessor calls processor(images=...)
-        # without text, which crashes Qwen3VLProcessor. Return None to use the
-        # direct adapter call path where we handle the conversation template.
-        return None
+        # without text, which crashes Qwen3VLProcessor — so no image
+        # preprocessor; image batches reach the worker through the pipeline's
+        # passthrough path and the adapter handles the conversation template.
+        # The base CharCountPreprocessor (cost-only; the adapter still owns its
+        # own tokenization) is required so TEXT requests route through
+        # ModelWorker batching instead of the unbatched direct-call path
+        # (#2874).
+        return super().get_preprocessor()

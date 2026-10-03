@@ -2,12 +2,16 @@
  * Shared provisioning / retry loop for non-streaming POST endpoints.
  *
  * Both {@link SIEClient.generate} and {@link SIEClient.chatCompletions}
- * receive identical pre-execution capacity signals from the gateway —
+ * receive the same pre-execution capacity signals from the gateway —
  * `503` with a known error code (`PROVISIONING`, `MODEL_LOADING` or
- * `RESOURCE_EXHAUSTED`). They both need to retry those SAFE
- * pre-execution signals while honouring a caller-supplied
- * `waitForCapacity` flag plus a `provisionTimeout` budget. A `504` is
- * post-publish and therefore terminal here (non-idempotent generation).
+ * `RESOURCE_EXHAUSTED`) — and retry them under a `provisionTimeout`
+ * budget. Only `503 PROVISIONING` is gated by the caller's
+ * `waitForCapacity` flag; `503 MODEL_LOADING` and `503
+ * RESOURCE_EXHAUSTED` are retried regardless (the worker already
+ * accepted the request). A `504` is post-publish, and a rejected
+ * `performFetch` may fire after the body was sent, so both are terminal
+ * here — this loop serves non-idempotent generation and a retry could
+ * double-bill.
  *
  * This helper centralises that loop. Callers supply a `performFetch`
  * callback that issues a fresh `fetch` per attempt (the request must be
@@ -23,20 +27,33 @@
 import {
   ModelLoadingError,
   ProvisioningError,
+  RateLimitError,
   RequestError,
   ResourceExhaustedError,
   ServerError,
 } from "../errors.js";
 import {
+  BACKPRESSURE_503_DEFAULT_DELAY,
+  BACKPRESSURE_503_ERROR_CODES,
   DEFAULT_RETRY_DELAY,
   HTTP_GATEWAY_TIMEOUT,
+  HTTP_TOO_MANY_REQUESTS,
   MODEL_LOADING_DEFAULT_DELAY,
   MODEL_LOADING_ERROR_CODE,
   PROVISIONING_ERROR_CODE,
+  RATE_LIMIT_DEFAULT_DELAY,
   RESOURCE_EXHAUSTED_ERROR_CODE,
   RESOURCE_EXHAUSTED_MAX_RETRIES,
+  RETRY_AFTER_GATED_503_ERROR_CODES,
 } from "./constants.js";
-import { getErrorCode, getRetryAfter, handleError, throwIfModelLoadFailed } from "./parsing.js";
+import {
+  getErrorCode,
+  getErrorParam,
+  getRetryAfter,
+  handleError,
+  readRequestId,
+  throwIfModelLoadFailed,
+} from "./parsing.js";
 import { applyRetryJitter, computeOomBackoff } from "./retry.js";
 
 /** Options controlling the provisioning retry loop. */
@@ -46,9 +63,20 @@ export interface ProvisioningOptions {
   /** GPU label passed through to `ProvisioningError`. May be `undefined`. */
   gpu: string | undefined;
   /**
-   * When `true`, the loop retries `503 PROVISIONING` / `503 MODEL_LOADING`
-   * until the provision budget is exhausted. When `false`, the first
-   * provisioning signal throws (the call-site opted out of waiting).
+   * Controls `503 PROVISIONING` ONLY. When `true`, the loop retries a
+   * `PROVISIONING` signal until `provisionTimeoutMs` is exhausted; when
+   * `false`, the first `PROVISIONING` signal throws `ProvisioningError`
+   * (the call-site opted out of capacity waiting). It does NOT gate any
+   * other outcome:
+   *   - `503 MODEL_LOADING` and `503 RESOURCE_EXHAUSTED` are retried
+   *     regardless of this flag (each retry bounded by
+   *     `provisionTimeoutMs`; `RESOURCE_EXHAUSTED` additionally bounded by
+   *     `RESOURCE_EXHAUSTED_MAX_RETRIES`) because the worker already
+   *     accepted the request — matching the Python SDK.
+   *   - A `504` gateway timeout and any rejected `performFetch`
+   *     (fetch-level connection failure) are ALWAYS terminal here, never
+   *     retried under any flag value: this loop serves non-idempotent
+   *     generation, so a retry could double-bill.
    */
   waitForCapacity: boolean;
   /**
@@ -90,17 +118,111 @@ export function nextOomRetryDelay(opts: {
   elapsedMs: number;
   provisionTimeoutMs: number;
   model: string;
+  param?: string | null;
 }): number {
-  const { retryAfter, oomRetries, maxOomRetries, elapsedMs, provisionTimeoutMs, model } = opts;
+  const { retryAfter, oomRetries, maxOomRetries, elapsedMs, provisionTimeoutMs, model, param } =
+    opts;
   const message = `Server resource exhausted after ${oomRetries} retry attempt(s) for model '${model}'`;
   if (oomRetries >= maxOomRetries || elapsedMs >= provisionTimeoutMs) {
-    throw new ResourceExhaustedError(message, { model, retries: oomRetries });
+    throw new ResourceExhaustedError(message, { model, retries: oomRetries, param });
   }
   const delay = computeOomBackoff(retryAfter, oomRetries);
   if (delay >= provisionTimeoutMs - elapsedMs) {
-    throw new ResourceExhaustedError(message, { model, retries: oomRetries });
+    throw new ResourceExhaustedError(message, { model, retries: oomRetries, param });
   }
   return delay;
+}
+
+/**
+ * Delay (ms) before retrying a pre-execution admission rejection, or
+ * `undefined` when the response is not a retryable admission signal (the
+ * caller then falls through to its existing terminal handling).
+ *
+ * Handles the pass-2 audit backpressure/billing signals that are safe to retry
+ * because NO work has been published to the queue yet — they are admission
+ * decisions the gateway/self-hosted server makes *before* dispatch, so
+ * retrying is idempotent even on the non-idempotent generate paths:
+ *
+ * - `429 TOO_MANY_REQUESTS` (code `RATE_LIMIT`, B1) — per-key/per-account rate
+ *   limiting. On give-up (provision-timeout budget spent) throws a typed
+ *   {@link RateLimitError} carrying the last `Retry-After`.
+ * - `503 BILLING_CAPACITY_UNAVAILABLE` (B2 — a gateway-local billing-family
+ *   cap, NOT customer credit exhaustion) and `503 QUEUE_FULL` (B7 — self-hosted
+ *   queue backpressure, #3180). On give-up throws the server's terminal 503
+ *   verbatim via {@link handleError} (a {@link ServerError} preserving the code).
+ * - `503 QUEUE_UNAVAILABLE` / `transport_failure` carrying a usable
+ *   `Retry-After`: the gateway rejected the publish under queue backpressure.
+ *   Without the hint these codes stay terminal. The give-up matches the
+ *   previous arm.
+ *
+ * `packages/wire-fixtures/retry_classification.json` pins these decisions for
+ * both SDKs.
+ *
+ * Retry timing mirrors the PROVISIONING arm: the server-supplied `Retry-After`
+ * is honored verbatim, and only the SDK's own fallback default is jittered.
+ * Give-up mirrors `nextOomRetryDelay`: when the budget is spent OR the next
+ * wait would consume the rest of it (leaving no room for the retried request to
+ * run), the typed root cause is surfaced NOW instead of sleeping the budget
+ * away and letting the outer loop mask it.
+ *
+ * IMPORTANT: 402/403 credit/account failures are deliberately NOT handled here.
+ * They are terminal and must never be retried; {@link handleError} maps them to
+ * typed exceptions on the first response. Mirrors the Python SDK's
+ * `admission_retry_delay`.
+ *
+ * @internal
+ */
+export async function admissionRetryDelay(
+  response: Response,
+  opts: { startTime: number; provisionTimeoutMs: number },
+): Promise<number | undefined> {
+  const { startTime, provisionTimeoutMs } = opts;
+  const { status } = response;
+
+  if (status === HTTP_TOO_MANY_REQUESTS) {
+    const retryAfter = getRetryAfter(response);
+    const elapsed = Date.now() - startTime;
+    const remaining = provisionTimeoutMs - elapsed;
+    const delay = retryAfter ?? applyRetryJitter(Math.min(RATE_LIMIT_DEFAULT_DELAY, remaining));
+    if (remaining <= 0 || delay >= remaining) {
+      // Preserve the gateway request id from the final 429 so the typed
+      // give-up stays correlatable with gateway logs, matching the direct
+      // terminal 429 mapped by `handleError` (#3136).
+      throw new RateLimitError(
+        `Rate limited (429); retry budget (${provisionTimeoutMs}ms) exhausted after ${elapsed}ms`,
+        {
+          retryAfter,
+          requestId: readRequestId(response),
+          param: await getErrorParam(response.clone()),
+        },
+      );
+    }
+    return delay;
+  }
+
+  if (status === 503) {
+    const code = await getErrorCode(response.clone());
+    const retryAfter = getRetryAfter(response);
+    const backpressure =
+      code !== undefined &&
+      (BACKPRESSURE_503_ERROR_CODES.has(code) ||
+        (RETRY_AFTER_GATED_503_ERROR_CODES.has(code) && retryAfter !== undefined));
+    if (backpressure) {
+      const elapsed = Date.now() - startTime;
+      const remaining = provisionTimeoutMs - elapsed;
+      const delay =
+        retryAfter ?? applyRetryJitter(Math.min(BACKPRESSURE_503_DEFAULT_DELAY, remaining));
+      if (remaining <= 0 || delay >= remaining) {
+        // Budget spent (or the next wait would consume it): surface the
+        // server's terminal 503 (ServerError, code preserved). `handleError`
+        // always throws.
+        await handleError(response);
+      }
+      return delay;
+    }
+  }
+
+  return undefined;
 }
 
 /**
@@ -125,6 +247,15 @@ export async function withProvisioningRetry(
   let oomRetries = 0;
 
   while (true) {
+    // INTENTIONAL divergence from the Python SDK: Python's generate() retries
+    // `httpx.ConnectError` because httpx guarantees it fires *before* the
+    // request body is sent. `fetch` offers no such distinction — a rejected
+    // fetch promise (`TypeError`) can mean a pre-connect DNS/refused failure
+    // OR a connection reset *after* the (non-idempotent, non-deduped) request
+    // body was transmitted, when a worker may already be generating. Retrying
+    // here could issue a second billable generation, so fetch-level failures
+    // from `performFetch` are surfaced as terminal `SIEConnectionError`
+    // instead of being retried.
     const response = await performFetch();
 
     // 502 MODEL_LOAD_FAILED is terminal — surface immediately.
@@ -138,6 +269,7 @@ export async function withProvisioningRetry(
             "No capacity available. Server is provisioning.",
             opts.gpu,
             getRetryAfter(response),
+            await getErrorParam(response.clone()),
           );
         }
         const elapsed = Date.now() - startTime;
@@ -146,6 +278,7 @@ export async function withProvisioningRetry(
             `Provisioning timeout after ${elapsed}ms`,
             opts.gpu,
             getRetryAfter(response),
+            await getErrorParam(response.clone()),
           );
         }
         const retryAfter = getRetryAfter(response);
@@ -156,7 +289,11 @@ export async function withProvisioningRetry(
       if (errorCode === MODEL_LOADING_ERROR_CODE) {
         const elapsed = Date.now() - startTime;
         if (elapsed >= opts.provisionTimeoutMs) {
-          throw new ModelLoadingError(`Model loading timeout for '${opts.model}'`, opts.model);
+          throw new ModelLoadingError(
+            `Model loading timeout for '${opts.model}'`,
+            opts.model,
+            await getErrorParam(response.clone()),
+          );
         }
         const delay = getRetryAfter(response) ?? MODEL_LOADING_DEFAULT_DELAY;
         await sleep(Math.min(delay, opts.provisionTimeoutMs - elapsed));
@@ -172,11 +309,28 @@ export async function withProvisioningRetry(
           elapsedMs: Date.now() - startTime,
           provisionTimeoutMs: opts.provisionTimeoutMs,
           model: opts.model,
+          param: await getErrorParam(response.clone()),
         });
         oomRetries += 1;
         await sleep(delay);
         continue;
       }
+    }
+
+    // Retryable pre-execution admission backpressure (pass-2 audit B1/B2/B7):
+    // a 429 RATE_LIMIT, or a retryable 503 (BILLING_CAPACITY_UNAVAILABLE /
+    // QUEUE_FULL). These are admission rejections BEFORE the work is published,
+    // so retrying is safe (unlike the post-publish 504 below). Honor
+    // Retry-After within the provision-timeout budget; a give-up throws a typed
+    // RateLimitError (429) or the server's terminal 503. 402/403 credit/account
+    // errors are terminal and NOT handled here.
+    const admissionDelay = await admissionRetryDelay(response, {
+      startTime,
+      provisionTimeoutMs: opts.provisionTimeoutMs,
+    });
+    if (admissionDelay !== undefined) {
+      await sleep(admissionDelay);
+      continue;
     }
 
     // Do NOT retry 504. A 504 GATEWAY_TIMEOUT is a *post-publish* timeout:
@@ -192,6 +346,8 @@ export async function withProvisioningRetry(
           "non-idempotent (retrying could double-bill). Re-issue manually if needed.",
         await getErrorCode(response.clone()),
         HTTP_GATEWAY_TIMEOUT,
+        readRequestId(response),
+        await getErrorParam(response.clone()),
       );
     }
 

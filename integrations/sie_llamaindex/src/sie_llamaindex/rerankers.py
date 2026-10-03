@@ -12,7 +12,34 @@ from llama_index.core.postprocessor.types import BaseNodePostprocessor
 from llama_index.core.schema import NodeWithScore, QueryBundle
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from sie_sdk import SIEAsyncClient, SIEClient
+
+
+def _scores_by_index(results: Mapping[str, Any], count: int) -> list[float]:
+    """Map ScoreResult entries back to input positions by item_id.
+
+    Each input is sent with ``id=str(position)``, which the server echoes as
+    the entry's ``item_id``. Only an exact echo of a sent id is used: an entry
+    whose ``item_id`` is missing, not a string, or not a sent id is skipped
+    (that input keeps its 0.0 default), so a malformed entry can neither
+    crash the rerank nor mis-assign a score to the wrong input.
+
+    Args:
+        results: ScoreResult envelope from ``SIEClient.score()``.
+        count: Number of input items.
+
+    Returns:
+        Scores indexed by input position (0.0 for any unscored/invalid item).
+    """
+    positions = {str(index): index for index in range(count)}
+    scores = [0.0] * count
+    for entry in results.get("scores", []):
+        item_id = entry.get("item_id")
+        if isinstance(item_id, str) and item_id in positions:
+            scores[positions[item_id]] = float(entry.get("score", 0.0))
+    return scores
 
 
 class SIENodePostprocessor(BaseNodePostprocessor):
@@ -135,7 +162,7 @@ class SIENodePostprocessor(BaseNodePostprocessor):
 
         query_text = query_bundle.query_str
         query_item = Item(text=query_text)
-        doc_items = [Item(text=node.node.get_content()) for node in nodes]
+        doc_items = [Item(text=node.node.get_content(), id=str(idx)) for idx, node in enumerate(nodes)]
 
         results = self.client.score(
             self.model,
@@ -154,40 +181,23 @@ class SIENodePostprocessor(BaseNodePostprocessor):
     def _build_reranked_nodes(
         self,
         nodes: list[NodeWithScore],
-        results: list[Any],
+        results: Mapping[str, Any],
     ) -> list[NodeWithScore]:
         """Build reranked nodes from score results.
 
         Args:
             nodes: Original nodes.
-            results: Score results from SIE.
+            results: ScoreResult envelope from ``SIEClient.score()``. Ranked
+                entries live under ``results["scores"]`` (each a ScoreEntry whose
+                ``item_id`` echoes the input position sent as the item ``id``,
+                plus ``score``), already sorted by relevance descending. The
+                envelope also exposes ``results["request"]`` (request id) and
+                ``results["usage"]`` (token usage); those are available but
+                intentionally not plumbed through the LlamaIndex contract.
 
         Returns:
-            Reranked nodes with new scores.
+            Reranked nodes (relevance descending) with new scores.
         """
-        reranked = []
-
-        for result in results:
-            # Handle dict or object result
-            if isinstance(result, dict):
-                idx = result.get("item_id", result.get("index", 0))
-                score = result.get("score", 0.0)
-            else:
-                idx = getattr(result, "item_id", getattr(result, "index", 0))
-                score = getattr(result, "score", 0.0)
-
-            # Parse index if it's a string
-            if isinstance(idx, str):
-                idx = int(idx)
-
-            if idx < len(nodes):
-                original_node = nodes[idx]
-                # Create new NodeWithScore with updated score
-                reranked.append(
-                    NodeWithScore(
-                        node=original_node.node,
-                        score=float(score),
-                    )
-                )
-
-        return reranked
+        scores = _scores_by_index(results, len(nodes))
+        order = sorted(range(len(nodes)), key=lambda i: scores[i], reverse=True)
+        return [NodeWithScore(node=nodes[i].node, score=scores[i]) for i in order]

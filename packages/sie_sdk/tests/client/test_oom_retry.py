@@ -25,7 +25,9 @@ def _resp_oom(retry_after: str = "0.01") -> MagicMock:
     resp = MagicMock()
     resp.status_code = 503
     resp.headers = {"Retry-After": retry_after, "content-type": "application/json"}
-    resp.json.return_value = {"detail": {"code": "RESOURCE_EXHAUSTED", "message": "Server resource pressure"}}
+    resp.json.return_value = {
+        "detail": {"code": "RESOURCE_EXHAUSTED", "message": "Server resource pressure", "param": "model"}
+    }
     return resp
 
 
@@ -86,6 +88,8 @@ class TestSyncOomRetry:
             assert excinfo.value.retries == 2
             assert excinfo.value.code == "RESOURCE_EXHAUSTED"
             assert excinfo.value.status_code == 503
+            assert excinfo.value.param == "model"
+            assert excinfo.value.retry_after == 0.01
             assert mock_client.return_value.post.call_count == 3
             client.close()
 
@@ -241,7 +245,15 @@ class TestSyncOomRetry:
 def _aio_oom() -> object:
     return _AioResponse(
         503,
-        json.dumps({"detail": {"code": "RESOURCE_EXHAUSTED", "message": "Server resource pressure"}}).encode(),
+        json.dumps(
+            {
+                "detail": {
+                    "code": "RESOURCE_EXHAUSTED",
+                    "message": "Server resource pressure",
+                    "param": "model",
+                }
+            }
+        ).encode(),
         {"Retry-After": "0.01", "content-type": "application/json"},
     )
 
@@ -283,5 +295,7 @@ class TestAsyncOomRetry:
                 await client.encode("bge-m3", {"text": "hi"}, max_oom_retries=2)
 
             assert excinfo.value.retries == 2
+            assert excinfo.value.param == "model"
+            assert excinfo.value.retry_after == 0.01
             assert client._post.await_count == 3
             await client.close()

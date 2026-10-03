@@ -384,3 +384,32 @@ class TestCLIPAdapter:
             cos = float(np.dot(got, expected) / denom)
             assert cos >= 0.9999, f"item {i} cosine {cos}"
             assert np.allclose(got, expected, atol=1e-5), f"item {i} value mismatch"
+
+
+def test_preprocess_one_rejects_undecodable_bytes_with_typed_error() -> None:
+    """Non-image bytes are a typed InvalidMediaError (-> 400), not a PIL OSError 500."""
+    from sie_server.types.inputs import InvalidMediaError
+
+    adapter = CLIPAdapter("openai/clip-vit-base-patch32")
+    adapter._processor = _FakeVisionProcessor()
+
+    with pytest.raises(InvalidMediaError, match="image data is not a decodable image"):
+        adapter._preprocess_one({"data": b"valid base64, but not an image"})
+
+
+def test_undecodable_bytes_name_the_original_item_index() -> None:
+    """The flattened preprocessing jobs keep each image's request-local indices.
+
+    encode() partitions to image items (here original positions 0 and 2); the
+    decode failure must name the request-local index 2, not subset slot 1.
+    """
+    from sie_server.types.inputs import InvalidMediaError
+
+    adapter = CLIPAdapter("openai/clip-vit-base-patch32")
+    adapter._model = MagicMock()
+    adapter._processor = _FakeVisionProcessor()
+    good = Item(images=[{"data": _png_bytes((1, 2, 3)), "format": "png"}])
+    bad = Item(images=[{"data": b"valid base64, but not an image"}])
+
+    with pytest.raises(InvalidMediaError, match=r"at `\$\.items\[2\]\.images\[0\]\.data`"):
+        adapter._encode_image_items([good, bad], [0, 2])

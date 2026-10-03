@@ -1,5 +1,6 @@
 sie_id: MoritzLaurer/deberta-v3-base-zeroshot-v2.0
 hf_id: MoritzLaurer/deberta-v3-base-zeroshot-v2.0
+hf_revision: 8e7e5af5983a0ddb1a5b45a38b129ab69e2258e8
 inputs:
   text: true
   image: false

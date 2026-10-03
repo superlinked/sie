@@ -85,7 +85,7 @@ describe("SIEClient.chatCompletions", () => {
     const [url, init] = mockFetch.mock.calls[0];
     expect(url).toBe("http://localhost:8080/v1/chat/completions");
     expect(init.method).toBe("POST");
-    expect(init.redirect).toBe("error");
+    expect(init.redirect).toBe("manual");
     expect(init.headers["Content-Type"]).toBe("application/json");
     expect(init.headers.Accept).toBe("application/json");
     const body = JSON.parse(init.body);

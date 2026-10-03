@@ -1,5 +1,6 @@
 sie_id: jackboyla/glirel-large-v0
 hf_id: jackboyla/glirel-large-v0
+hf_revision: 40a523e12a8432d6da364cf2a195a28755ff04d3
 inputs:
   text: true
   image: false

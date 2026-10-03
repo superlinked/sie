@@ -35,9 +35,10 @@
 {{- $promAddr = include "sie-cluster.kubePrometheusStack.prometheusAddress" . }}
 {{- end }}
 {{- /*
-  ScaledObjects are rendered into a ConfigMap and applied by a post-install/post-upgrade
-  hook Job. This avoids the chicken-and-egg problem where Helm validates ScaledObject CRDs
-  before the KEDA sub-chart has installed them.
+  ScaledObjects are rendered into a ConfigMap and applied by a post-install/post-upgrade/
+  post-rollback hook Job. This avoids the chicken-and-egg problem where Helm validates
+  ScaledObject CRDs before the KEDA sub-chart has installed them. Rollback reuses the target
+  revision's stored hooks, so it re-applies that revision's shards.
 */ -}}
 # RBAC for the apply Job (weight 1; must exist before the Job at weight 2)
 apiVersion: v1
@@ -48,7 +49,7 @@ metadata:
   labels:
     app.kubernetes.io/component: keda-apply
   annotations:
-    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook: post-install,post-upgrade,post-rollback
     helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
     helm.sh/hook-weight: "1"
 ---
@@ -60,7 +61,7 @@ metadata:
   labels:
     app.kubernetes.io/component: keda-apply
   annotations:
-    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook: post-install,post-upgrade,post-rollback
     helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
     helm.sh/hook-weight: "1"
 rules:
@@ -79,7 +80,7 @@ metadata:
   labels:
     app.kubernetes.io/component: keda-apply
   annotations:
-    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook: post-install,post-upgrade,post-rollback
     helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
     helm.sh/hook-weight: "1"
 roleRef:
@@ -322,7 +323,7 @@ metadata:
   labels:
     app.kubernetes.io/component: keda-apply
   annotations:
-    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook: post-install,post-upgrade,post-rollback
     helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
     helm.sh/hook-weight: "2"
 spec:
@@ -479,12 +480,7 @@ spec:
               fi
               echo "SUCCESS: ScaledObjects applied and obsolete release objects pruned"
           resources:
-            requests:
-              cpu: 100m
-              memory: 128Mi
-            limits:
-              cpu: 200m
-              memory: 256Mi
+            {{- include "sie-cluster.hooks.resources" . | nindent 12 }}
       tolerations:
         - key: nvidia.com/gpu
           operator: Exists

@@ -1,0 +1,6 @@
+name: ctranslate2
+priority: 19
+adapters:
+- sie_server.adapters.ctranslate2.generation
+deps:
+  ctranslate2: '==4.8.1'

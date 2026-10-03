@@ -3,10 +3,14 @@
 POST /v1/embeddings - Generate embeddings using OpenAI's API format.
 
 This enables zero-friction migration from OpenAI, Azure OpenAI, or any
-OpenAI-compatible embedding service. Works with LangChain's OpenAIEmbeddings
-class out of the box:
+OpenAI-compatible embedding service. Input must be text; token-id arrays are
+rejected with 400, so LangChain's OpenAIEmbeddings needs its client-side
+tiktoken chunking turned off:
 
-    embeddings = OpenAIEmbeddings(base_url="http://localhost:8080/v1")
+    embeddings = OpenAIEmbeddings(
+        base_url="http://localhost:8080/v1",
+        check_embedding_ctx_length=False,
+    )
 
 This module implements the OpenAI-compatible embeddings API surface.
 """
@@ -16,33 +20,55 @@ from __future__ import annotations
 import base64
 import logging
 import time
-from typing import Annotated, Literal
+from typing import TYPE_CHECKING, Annotated, Literal
 
 import numpy as np
-from fastapi import APIRouter, Header, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
+from pydantic.json_schema import SkipJsonSchema
 
-from sie_server.api.helpers import check_sdk_version, oom_retry_after_from_registry
+from sie_server.adapters.errors import InputTooLongError, UpstreamUnavailableError
+from sie_server.api.helpers import (
+    WORKER_DRAINED_RETRY_AFTER_S,
+    ModelStateChecker,
+    check_sdk_version,
+    oom_retry_after_from_registry,
+    openai_error_response,
+    upstream_unavailable_exception,
+)
+from sie_server.api.options import resolve_runtime_options_with_profile
+from sie_server.api.routing import error_code, fallback_refusal, remote_routing, route_request
 from sie_server.api.validation import validate_machine_profile_header
-from sie_server.core.encode_pipeline import EncodePipeline
+from sie_server.core.encode_pipeline import EncodePipeline, resolve_encode_output_types
+from sie_server.core.model_suggestions import suggestion_suffix
 from sie_server.core.oom import is_oom_error
 from sie_server.core.worker import QueueFullError
+from sie_server.core.worker.types import WorkerDrainedError
 from sie_server.observability.tracing import tracer
 from sie_server.observability.worker_telemetry import worker_telemetry, worker_telemetry_enabled
-from sie_server.types.inputs import Item
+from sie_server.types.inputs import InvalidInputError, Item, item_size_error
+from sie_server.types.openapi import (
+    OpenAIEmbeddingsErrorResponse,
+    OpenAIEmbeddingsModelLoadFailedErrorResponse,
+)
 from sie_server.types.responses import ErrorCode
+
+if TYPE_CHECKING:
+    from sie_server.core.registry import ModelRegistry
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/v1", tags=["openai-compat"])
+router = APIRouter(prefix="/v1", tags=["openai-compat"], dependencies=[Depends(remote_routing)])
 
 
 # OpenAI-compatible request/response types
 
 
-# Type alias for OpenAI input formats
-# OpenAI accepts: string, array of strings, array of tokens, or array of token arrays
-OpenAIInput = str | list[str] | list[int] | list[list[int]]
+OpenAIInput = str | list[str]
+# Parsed but never published, so the route can reject OpenAI token-id input
+# with the same 400 envelope as the gateway instead of a 422.
+TokenArrayInput = list[int] | list[list[int]]
 
 
 class OpenAIEmbeddingRequest(BaseModel):
@@ -55,8 +81,8 @@ class OpenAIEmbeddingRequest(BaseModel):
 
     model: Annotated[str, Field(description="Model ID to use for embedding")]
     input: Annotated[
-        OpenAIInput,
-        Field(description="Input text(s) or token array(s) to embed."),
+        OpenAIInput | SkipJsonSchema[TokenArrayInput],
+        Field(description="Input text or list of texts to embed. Token-id arrays are rejected with 400."),
     ]
     encoding_format: Annotated[
         Literal["float", "base64"] | None,
@@ -64,7 +90,14 @@ class OpenAIEmbeddingRequest(BaseModel):
     ]
     dimensions: Annotated[
         int | None,
-        Field(default=None, description="Number of dimensions (not supported by SIE, ignored)"),
+        Field(
+            default=None,
+            description=(
+                "Requested embedding width. SIE always returns the model's native dense "
+                "width, so this is accepted only when it equals that width; any other "
+                "value is rejected with 400 `unsupported_field` rather than ignored."
+            ),
+        ),
     ]
     user: Annotated[
         str | None,
@@ -123,106 +156,98 @@ def _estimate_tokens(texts: list[str]) -> int:
     return max(1, total_chars // 4)
 
 
-def _normalize_input(input_data: OpenAIInput, registry: object, model: str) -> tuple[list[str], int]:
-    """Normalize OpenAI input format to list of strings.
+def _normalize_input(input_data: OpenAIInput | TokenArrayInput) -> list[str]:
+    """Return the request's input as a list of texts.
 
-    OpenAI accepts:
-    - str: single text
-    - list[str]: multiple texts
-    - list[int]: single token array
-    - list[list[int]]: multiple token arrays
-
-    Args:
-        input_data: Raw input from request
-        registry: Model registry (for tokenizer access)
-        model: Model name
-
-    Returns:
-        Tuple of (list of texts, token count)
+    Raises:
+        HTTPException: 400 ``invalid_request`` for token-id input, which SIE
+            cannot map back to the text the caller tokenized.
     """
-    # Single string
     if isinstance(input_data, str):
-        return [input_data], _estimate_tokens([input_data])
-
-    # Empty list
-    if not input_data:
-        return [], 0
-
-    # Check if it's a token array (list[int]) or list of token arrays (list[list[int]])
-    first = input_data[0]
-
-    if isinstance(first, str):
-        # list[str] - multiple texts
-        return list(input_data), _estimate_tokens(input_data)  # type: ignore
-
-    if isinstance(first, int):
-        # list[int] - single token array, decode it
-        token_count = len(input_data)
-        text = _decode_tokens(input_data, registry, model)  # type: ignore
-        return [text], token_count
-
-    if isinstance(first, list):
-        # list[list[int]] - multiple token arrays
-        texts = []
-        token_count = 0
-        for tokens in input_data:
-            if isinstance(tokens, list) and all(isinstance(t, int) for t in tokens):
-                texts.append(_decode_tokens(tokens, registry, model))
-                token_count += len(tokens)
-            else:
-                # Unexpected format
-                texts.append(str(tokens))
-        return texts, token_count
-
-    # Fallback: convert to string
-    return [str(input_data)], 1
+        return [input_data]
+    texts = [value for value in input_data if isinstance(value, str)]
+    if len(texts) == len(input_data):
+        return texts
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail={
+            "error": {
+                "code": "invalid_request",
+                "message": "token-array embeddings input is not supported; use text input",
+                "type": "invalid_request_error",
+                "param": "input",
+            }
+        },
+    )
 
 
-def _decode_tokens(tokens: list[int], registry: object, model: str) -> str:
-    """Decode token IDs back to text using the model's tokenizer.
+def _openai_state_error(error: HTTPException) -> HTTPException:
+    """Re-wrap a native model-state ``detail`` in this surface's OpenAI envelope.
 
-    Args:
-        tokens: List of token IDs
-        registry: Model registry
-        model: Model name
-
-    Returns:
-        Decoded text string
+    :class:`ModelStateChecker` raises the SIE-native ``{code, message, ...}``
+    detail shape served by the native routes. This surface keeps errors
+    OpenAI-parseable, so rebuild the detail as ``{"error": {...}}`` while
+    preserving the SIE-native ``code`` (``MODEL_LOADING`` /
+    ``MODEL_LOAD_FAILED``) plus auxiliary fields (``error_class``,
+    ``permanent``, ``attempts``) — the SDK's ``get_error_code`` and
+    ``raise_if_model_load_failed`` branch on exactly those. Headers are
+    preserved verbatim: ``Retry-After`` presence/absence carries the
+    retryability contract (present on 503 ``MODEL_LOADING``, absent on the
+    terminal 502 ``MODEL_LOAD_FAILED``).
     """
-    try:
-        preprocessor_registry = registry.preprocessor_registry  # type: ignore
-        if preprocessor_registry.has_preprocessor(model, "text"):
-            tokenizer = preprocessor_registry.get_tokenizer(model)
-            if tokenizer is not None:
-                return tokenizer.decode(tokens, skip_special_tokens=True)
-    except (AttributeError, TypeError, ValueError) as e:
-        logger.debug("Token decoding failed for model %s: %s", model, e)
-
-    # Fallback: can't decode, return placeholder
-    # This happens if the model doesn't have a registered tokenizer
-    logger.warning("Cannot decode tokens for model %s, using placeholder", model)
-    return f"[{len(tokens)} tokens]"
+    detail = error.detail if isinstance(error.detail, dict) else {}
+    if "error" in detail:
+        return error
+    inner: dict[str, object] = dict(detail)
+    inner.setdefault("message", "service unavailable")
+    inner["type"] = (
+        "invalid_request_error" if error.status_code < status.HTTP_500_INTERNAL_SERVER_ERROR else "server_error"
+    )
+    return HTTPException(status_code=error.status_code, detail={"error": inner}, headers=error.headers)
 
 
-async def _load_model_if_needed(registry: object, model: str, device: str, span: object) -> None:
-    """Load model if not already loaded."""
-    if not registry.is_loaded(model):  # type: ignore
-        try:
-            logger.info("Loading model %s on device %s", model, device)
-            await registry.load_async(model, device=device)  # type: ignore
-        except Exception as e:
-            logger.exception("Failed to load model %s", model)
-            span.set_attribute("error", "model_load_failed")  # type: ignore
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail={
-                    "error": {
-                        "code": "model_not_available",
-                        "message": f"Failed to load model: {e}",
-                        "type": "server_error",
-                    }
-                },
-            ) from e
+def _validate_dimensions(requested: int | None, registry: ModelRegistry, model: str) -> None:
+    """Reject a ``dimensions`` value this model cannot honour.
+
+    In OpenAI's API ``dimensions`` truncates the embedding (Matryoshka), so a
+    client migrating from ``text-embedding-3-*`` may legitimately send it. SIE
+    always returns the model's native dense width. Ignoring the field — as this
+    endpoint used to — means such a client silently receives vectors of a width
+    it never asked for and writes them into a vector store. That surfaces much
+    later, either as a dimension error on insert or, worse, as a silently
+    wrong index built against the wrong width.
+
+    Failing loudly matches ``/v1/completions``, which already rejects fields it
+    cannot honour with ``400 unsupported_field``. An exact match is accepted so
+    a client that simply pins its model's real width keeps working.
+
+    Raises:
+        HTTPException: 400 when the value cannot be honoured.
+    """
+    if requested is None:
+        return
+
+    native = registry.get_config(model).dims.get("dense")
+    if native is not None and requested == native:
+        return
+
+    detail = (
+        f"'dimensions' is not supported by this endpoint: model '{model}' returns "
+        f"{native}-dimensional embeddings and SIE does not truncate them."
+        if native is not None
+        else f"'dimensions' is not supported by this endpoint: model '{model}' declares no dense embedding width."
+    )
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail={
+            "error": {
+                "code": "unsupported_field",
+                "message": f"{detail} Omit 'dimensions', or set it to {native}." if native is not None else detail,
+                "type": "invalid_request_error",
+                "param": "dimensions",
+            }
+        },
+    )
 
 
 def _build_embeddings_response(
@@ -230,7 +255,6 @@ def _build_embeddings_response(
     texts: list[str],
     model: str,
     encoding_format: str,
-    token_count: int | None = None,
 ) -> OpenAIEmbeddingResponse:
     """Build OpenAI-format response from encoding results.
 
@@ -239,7 +263,6 @@ def _build_embeddings_response(
         texts: Input texts
         model: Model name
         encoding_format: "float" or "base64"
-        token_count: Known token count (from token input), or None to estimate
     """
     embeddings_data: list[OpenAIEmbeddingData] = []
 
@@ -276,9 +299,7 @@ def _build_embeddings_response(
             )
         )
 
-    # Use provided token count or estimate
-    if token_count is None or token_count == 0:
-        token_count = _estimate_tokens(texts)
+    token_count = _estimate_tokens(texts)
 
     return OpenAIEmbeddingResponse(
         object="list",
@@ -293,6 +314,7 @@ def _build_embeddings_response(
 
 @router.post(
     "/embeddings",
+    response_model=OpenAIEmbeddingResponse,
     responses={
         200: {"description": "Embeddings generated successfully"},
         400: {"description": "Invalid request"},
@@ -300,23 +322,48 @@ def _build_embeddings_response(
         502: {
             "description": (
                 "Terminal model-load failure (MODEL_LOAD_FAILED). "
-                "Carried in the ``detail`` envelope: ``{code, message, "
-                "error_class, permanent, attempts}``. No ``Retry-After`` "
-                "header — clients MUST NOT auto-retry. See sie-test#85."
+                "Carried in the top-level OpenAI ``error`` envelope, whose "
+                "object adds the model-load extras ``error_class``, "
+                "``permanent``, and ``attempts`` to ``{message, type, param, "
+                "code}``. No ``Retry-After`` header — clients MUST NOT "
+                "auto-retry."
             ),
+            "model": OpenAIEmbeddingsModelLoadFailedErrorResponse,
         },
-        503: {"description": "Service unavailable"},
+        503: {
+            "description": (
+                "Service unavailable (retryable). A cold model starts a "
+                "background load and returns ``MODEL_LOADING`` with a "
+                "``Retry-After`` header immediately instead of blocking the "
+                "request — clients should retry after the indicated delay. "
+                "Also returned while unloading, on a full queue, and under "
+                "transient resource exhaustion. The body is the top-level "
+                "OpenAI ``error`` envelope."
+            ),
+            "model": OpenAIEmbeddingsErrorResponse,
+            "headers": {
+                "Retry-After": {
+                    "description": "Seconds to wait before retrying the MODEL_LOADING request.",
+                    "schema": {"type": "integer", "minimum": 1},
+                }
+            },
+        },
     },
 )
 async def create_embeddings(
     request: OpenAIEmbeddingRequest,
     http_request: Request,
+    response: Response,
     x_machine_profile: Annotated[str | None, Header(alias="X-SIE-MACHINE-PROFILE")] = None,
-) -> OpenAIEmbeddingResponse:
+) -> OpenAIEmbeddingResponse | JSONResponse:
     """Create embeddings using OpenAI-compatible API.
 
     This endpoint is compatible with OpenAI's /v1/embeddings API, allowing
-    drop-in replacement for any OpenAI SDK or client.
+    drop-in replacement for any OpenAI SDK or client. Route-generated errors
+    are emitted as top-level OpenAI ``{"error": {...}}`` envelopes, matching
+    ``/v1/completions``. The one exception is 422 request-body validation,
+    which still returns FastAPI's ``HTTPValidationError`` ``{"detail": [...]}``
+    shape (out of scope for this route's error handling; known residual).
 
     Args:
         request: OpenAI-format embedding request.
@@ -326,6 +373,18 @@ async def create_embeddings(
     Returns:
         OpenAI-format embedding response with embeddings and usage info.
     """
+    try:
+        return await _create_embeddings(request, http_request, response, x_machine_profile)
+    except HTTPException as exc:
+        return openai_error_response(fallback_refusal(http_request, exc.status_code, error_code(exc)) or exc)
+
+
+async def _create_embeddings(
+    request: OpenAIEmbeddingRequest,
+    http_request: Request,
+    response: Response,
+    x_machine_profile: str | None,
+) -> OpenAIEmbeddingResponse:
     # Validate machine profile header
     validate_machine_profile_header(x_machine_profile)
     check_sdk_version(http_request)
@@ -338,7 +397,7 @@ async def create_embeddings(
 
         registry = http_request.app.state.registry
 
-        # Check if model exists first (needed for token decoding)
+        # Check if model exists first
         if not registry.has_model(model):
             span.set_attribute("error", "model_not_found")
             raise HTTPException(
@@ -346,44 +405,89 @@ async def create_embeddings(
                 detail={
                     "error": {
                         "code": "model_not_found",
-                        "message": f"Model '{model}' not found",
+                        "message": f"Model '{model}' not found{suggestion_suffix(model, registry.model_names)}",
                         "type": "invalid_request_error",
                     }
                 },
             )
 
-        # Check if model is being unloaded
-        if registry.is_unloading(model):
-            span.set_attribute("error", "model_unloading")
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail={
-                    "error": {
-                        "code": "model_not_available",
-                        "message": f"Model '{model}' is unloading",
-                        "type": "server_error",
-                    }
-                },
-            )
+        # Validated before any load work: an unhonourable 'dimensions' must not
+        # cost the caller a cold model load first.
+        _validate_dimensions(request.dimensions, registry, model)
 
-        # Normalize input (handles strings, token arrays, etc.)
-        texts, token_count = _normalize_input(request.input, registry, model)
+        texts = _normalize_input(request.input)
 
         if not texts:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail={"code": "invalid_request_error", "message": "Input cannot be empty"},
+                detail={
+                    "error": {
+                        "code": "invalid_request",
+                        "message": "Input cannot be empty",
+                        "type": "invalid_request_error",
+                        "param": "input",
+                    }
+                },
             )
+
+        items = [Item(text=text) for text in texts]
+        for index, item in enumerate(items):
+            if error := item_size_error(item, f"input[{index}]"):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "error": {
+                            "code": "invalid_request",
+                            "message": error,
+                            "type": "invalid_request_error",
+                            "param": "input",
+                        }
+                    },
+                )
 
         span.set_attribute("batch_size", len(texts))
 
-        # Load model if needed
-        device = registry.device
-        await _load_model_if_needed(registry, model, device, span)
-
-        # Get config and convert texts to SIE Items
         config = registry.get_config(model)
-        items = [Item(text=text) for text in texts]
+
+        # Same profile resolution as native /v1/encode with no request params,
+        # which is the body the gateway rewrites this route into.
+        options, selected_profile = resolve_runtime_options_with_profile(config, None, span)
+        # The OpenAI response format carries float vectors only.
+        options["output_dtype"] = "float32"
+        try:
+            adapter_output_types, response_output_types = resolve_encode_output_types(
+                config, ["dense"], selected_profile, options
+            )
+        except ValueError as e:
+            span.set_attribute("error", "unsupported_output_types")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "error": {
+                        "code": "invalid_request",
+                        "message": str(e),
+                        "type": "invalid_request_error",
+                        "param": "model",
+                    }
+                },
+            ) from e
+
+        # Model load states: mirror the native routes' ModelStateChecker
+        # contract instead of blocking the request on a cold load. A recorded
+        # terminal failure short-circuits as 502 MODEL_LOAD_FAILED with no
+        # Retry-After (and, critically, no re-triggered doomed load); a cold
+        # model kicks off a background load and returns 503 MODEL_LOADING +
+        # Retry-After immediately so clients retry instead of hanging. This is
+        # single-node parity with the gateway's /v1/embeddings behavior.
+        try:
+            route = await route_request(http_request, model, span, queued_items=len(items))
+        except HTTPException as error:
+            raise _openai_state_error(error) from error
+
+        lora = options.get("lora_id")
+        if lora is not None:
+            await ModelStateChecker(registry, route.key, span).ensure_lora_loaded(lora)
+            options["lora"] = lora
 
         # Run encoding
         telemetry_enabled = worker_telemetry_enabled()
@@ -391,13 +495,14 @@ async def create_embeddings(
         try:
             results, timing = await EncodePipeline.run_encode(
                 registry=registry,
-                model=model,
+                model=route.key,
                 items=items,
-                output_types=["dense"],
-                instruction=None,
-                config=config,
-                is_query=False,
-                options={},
+                output_types=adapter_output_types,
+                instruction=options.get("instruction"),
+                config=registry.get_config(route.key),
+                is_query=bool(options.get("is_query", False)),
+                options=options,
+                response_output_types=response_output_types,
             )
         except QueueFullError as e:
             span.set_attribute("error", "queue_full")
@@ -417,6 +522,69 @@ async def create_embeddings(
                         "code": "server_overloaded",
                         "message": str(e),
                         "type": "server_error",
+                    }
+                },
+            ) from e
+        except WorkerDrainedError as e:
+            # The model was evicted while this request sat in the worker
+            # queue, so it never ran. Mirror the native endpoints' retryable
+            # 503 MODEL_LOADING — in the OpenAI envelope — so the SDK retries
+            # (and re-triggers the load) instead of seeing a terminal 500.
+            logger.info("Embeddings request drained on eviction for model %s: %s", model, e)
+            span.set_attribute("error", "model_loading")
+            if inference_started is not None:
+                worker_telemetry().item_completed(
+                    operation="embeddings",
+                    outcome="retry",
+                    model=model,
+                    profile="default",
+                    duration_s=time.perf_counter() - inference_started,
+                    item_count=len(items),
+                )
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={
+                    "error": {
+                        "code": ErrorCode.MODEL_LOADING.value,
+                        "message": f"Model '{model}' was evicted before this request ran, please retry",
+                        "type": "server_error",
+                    }
+                },
+                headers={"Retry-After": str(WORKER_DRAINED_RETRY_AFTER_S)},
+            ) from e
+        except UpstreamUnavailableError as e:
+            logger.warning("Embeddings for model %s were not served by its upstream: %s", model, e)
+            span.set_attribute("error", f"upstream_{e.kind}")
+            if inference_started is not None:
+                worker_telemetry().item_completed(
+                    operation="embeddings",
+                    outcome="retry",
+                    model=model,
+                    profile="default",
+                    duration_s=time.perf_counter() - inference_started,
+                    item_count=len(items),
+                )
+            raise _openai_state_error(upstream_unavailable_exception(e, model)) from e
+        except (InputTooLongError, InvalidInputError) as e:
+            too_long = isinstance(e, InputTooLongError)
+            span.set_attribute("error", "input_too_long" if too_long else "invalid_input")
+            if inference_started is not None:
+                worker_telemetry().item_completed(
+                    operation="embeddings",
+                    outcome="error",
+                    model=model,
+                    profile="default",
+                    duration_s=time.perf_counter() - inference_started,
+                    item_count=len(items),
+                )
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "error": {
+                        "code": ErrorCode.INPUT_TOO_LONG.value if too_long else "invalid_request",
+                        "message": str(e),
+                        "type": "invalid_request_error",
+                        "param": "input",
                     }
                 },
             ) from e
@@ -465,7 +633,7 @@ async def create_embeddings(
                 detail={
                     "error": {
                         "code": "inference_error",
-                        "message": f"Inference error: {e}",
+                        "message": "internal error during embeddings",
                         "type": "server_error",
                     }
                 },
@@ -491,4 +659,5 @@ async def create_embeddings(
                 postprocessing_s=timing.postprocessing_ms / 1000.0,
                 units=units,
             )
-        return _build_embeddings_response(results, texts, model, encoding_format, token_count)
+        response.headers.update(route.headers())
+        return _build_embeddings_response(results, texts, model, encoding_format)

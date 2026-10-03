@@ -1,0 +1,11 @@
+name: remote
+priority: 1
+default: false
+# Remote profiles forward to an operator-defined upstream. A cluster serves
+# them on a CPU worker lane that alone holds the upstream credentials. The
+# default bundle lists the same adapters so a single server can serve them;
+# this bundle's lower priority makes the gateway pick it whenever both match.
+adapters:
+- sie_server.adapters.remote.openai
+- sie_server.adapters.remote.sie
+deps: {}

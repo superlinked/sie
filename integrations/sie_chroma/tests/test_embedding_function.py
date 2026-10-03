@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import contextlib
+import uuid
 
+import chromadb
 import numpy as np
 from sie_chroma import SIEEmbeddingFunction, SIESparseEmbeddingFunction
 
@@ -251,3 +253,61 @@ class TestSIESparseEmbeddingFunction:
             for k, v in embedding.items():
                 assert isinstance(k, int)
                 assert isinstance(v, float)
+
+
+class TestQueryMode:
+    """ChromaDB embeds ``query_texts`` through ``embed_query``, so asymmetric
+    models must see ``is_query=True`` there and only there.
+    """
+
+    def test_collection_query_texts_encode_as_queries(
+        self, mock_sie_client: object, sample_documents: list[str]
+    ) -> None:
+        embedding_function = SIEEmbeddingFunction(model="test-model")
+        embedding_function._client = mock_sie_client
+        collection = chromadb.EphemeralClient().create_collection(
+            name=f"sie-query-mode-{uuid.uuid4().hex}",
+            embedding_function=embedding_function,
+        )
+
+        collection.add(ids=[str(i) for i in range(len(sample_documents))], documents=sample_documents)
+        assert mock_sie_client.encode.call_args.kwargs["options"] is None
+
+        result = collection.query(query_texts=["How do neural networks learn?"], n_results=2)
+        assert mock_sie_client.encode.call_args.kwargs["options"] == {"is_query": True}
+        assert len(result["ids"][0]) == 2
+
+    def test_embed_query_returns_dense_vectors(self, mock_sie_client: object) -> None:
+        embedding_function = SIEEmbeddingFunction(model="test-model")
+        embedding_function._client = mock_sie_client
+
+        embeddings = embedding_function.embed_query(["What is machine learning?"])
+
+        assert len(embeddings) == 1
+        assert isinstance(embeddings[0], np.ndarray)
+        assert len(embeddings[0]) == 384
+        call_kwargs = mock_sie_client.encode.call_args.kwargs
+        assert call_kwargs["output_types"] == ["dense"]
+        assert call_kwargs["options"] == {"is_query": True}
+
+    def test_sparse_embed_query_encodes_as_query(self, mock_sie_client: object) -> None:
+        embedding_function = SIESparseEmbeddingFunction(model="test-model")
+        embedding_function._client = mock_sie_client
+
+        embeddings = embedding_function.embed_query(["What is machine learning?"])
+
+        assert len(embeddings) == 1
+        assert isinstance(embeddings[0], dict)
+        call_kwargs = mock_sie_client.encode.call_args.kwargs
+        assert call_kwargs["output_types"] == ["sparse"]
+        assert call_kwargs["options"] == {"is_query": True}
+
+    def test_sparse_documents_do_not_encode_as_queries(
+        self, mock_sie_client: object, sample_documents: list[str]
+    ) -> None:
+        embedding_function = SIESparseEmbeddingFunction(model="test-model")
+        embedding_function._client = mock_sie_client
+
+        embedding_function(sample_documents)
+
+        assert mock_sie_client.encode.call_args.kwargs["options"] is None

@@ -12,7 +12,7 @@ from pathlib import Path
 
 from rich.console import Console
 
-from document_to_markdown.config import DATA_DIR, PDF_DIR, DocumentSource, load_config, select_documents
+from document_to_markdown.config import PDF_DIR, DocumentSource, load_config, select_documents
 
 console = Console()
 
@@ -37,6 +37,12 @@ def _download(document: DocumentSource, destination: Path) -> tuple[bytes, str]:
         if error.code != 403 or curl is None:
             raise
         try:
+            # Deliberately WITHOUT the browser user-agent above, and that is the
+            # whole reason this fallback works. fema.gov serves plain curl and
+            # refuses the Chrome user-agent string with 403 — a WAF apparently
+            # reading "Chrome from a datacenter" as a scraper and "curl" as an
+            # honest tool. Backwards from what anyone debugging a 403 would
+            # guess, so it is written down rather than left to be rediscovered.
             response = subprocess.run(
                 [curl, "-fsSL", "--retry", "3", document.url],
                 check=True,
@@ -44,7 +50,10 @@ def _download(document: DocumentSource, destination: Path) -> tuple[bytes, str]:
                 timeout=180,
             )
             payload = response.stdout
-            retrieval = "publisher"
+            # Distinguished from a clean first attempt. "publisher" was true of
+            # both and could not tell them apart, so a record of a fetch that
+            # needed the fallback read exactly like one that did not.
+            retrieval = "publisher-after-403-via-curl"
         except subprocess.CalledProcessError:
             if document.fixture_path is None or not document.fixture_path.exists():
                 raise
@@ -87,7 +96,11 @@ def fetch_documents(slugs: list[str], *, refresh: bool) -> Path:
         )
         console.print(f"[green]{status:10}[/] {document.slug}  {len(payload) / 1024:.1f} KiB  {checksum[:12]}")
 
-    manifest_path = DATA_DIR / "manifest.json"
+    # Beside the PDFs, not in the fetched evidence tree. The recorded run's
+    # provenance is data/inputs/sources.json, which `python3 fetch.py`
+    # downloads and verify-run reads; this one describes what you just
+    # downloaded, so a fresh fetch can never overwrite the recorded one.
+    manifest_path = PDF_DIR / "manifest.json"
     manifest_path.write_text(
         json.dumps(
             {

@@ -144,6 +144,15 @@ pub mod openai_code {
     pub const RATE_LIMIT_EXCEEDED: &str = "rate_limit_exceeded";
     /// OpenAI-compatible scale-from-zero / worker provisioning signal.
     pub const PROVISIONING: &str = "provisioning";
+    /// Worker terminal for a generation that finished nominally but produced
+    /// no visible output text or tool calls (e.g. private reasoning consumed
+    /// the whole budget, #3104/#3136). Terminal and non-retryable: tokens were
+    /// genuinely consumed, so it settles exactly like ``inference_error``.
+    pub const EMPTY_MODEL_OUTPUT: &str = "empty_model_output";
+    /// Worker terminal for a guard model whose first output positions carry
+    /// no complete Yes/No verdict distribution. Terminal and non-retryable;
+    /// settles like ``empty_model_output``.
+    pub const INVALID_GUARD_VERDICT: &str = "invalid_guard_verdict";
 }
 
 /// OpenAI-shaped error body:

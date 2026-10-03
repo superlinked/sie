@@ -26,6 +26,7 @@ import json
 import logging
 import math
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -33,7 +34,8 @@ import tempfile
 import threading
 import uuid
 from collections.abc import AsyncIterator
-from typing import Any, cast
+from pathlib import Path
+from typing import Any, Literal, cast
 
 import httpx
 
@@ -41,16 +43,28 @@ from sie_server.adapters._generation_base import (
     FinishReason,
     GenerationAdapter,
     GenerationChunk,
+    GenerationError,
+    GenerationInvalidRequestError,
     GenerationResult,
+    reasoning_starts_in_prompt,
+    resolve_reasoning_format,
 )
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_NOT_LOADED, ComputePrecision
 from sie_server.adapters.sglang import _server
 from sie_server.observability.generation_diagnostics import GenerationStreamTimer
-from sie_server.types.grammar import GrammarSpec
-from sie_server.types.inputs import ImageInput, media_bytes
+from sie_server.types.grammar import (
+    OUTLINES_JSON_SCHEMA_TYPE_DIAGNOSTIC,
+    OUTLINES_JSON_SCHEMA_TYPE_MESSAGE,
+    GrammarSpec,
+)
+from sie_server.types.inputs import ImageInput, VideoInput, media_bytes
 
 logger = logging.getLogger(__name__)
+
+# Pixels per visual token for the Qwen3.x vision encoders SGLang serves here: a
+# 16-pixel patch merged 2x2, so one token covers 32x32 pixels.
+_MERGED_PATCH_PIXELS = 32 * 32
 
 # HTTP timeout knobs for /generate. The worker-side admission/cancel layer is
 # the source of truth for total request lifetime, so the streaming read timeout
@@ -73,9 +87,8 @@ _ABORT_REQUEST_TIMEOUT_S = float(os.environ.get("SIE_SGLANG_ABORT_REQUEST_TIMEOU
 # distribution. A guard's verdict usually sits at position 0, but a leading
 # whitespace/punctuation/preamble token can push it back a slot — so we scan
 # the first few positions for the first one that carries a Yes/No top_logprobs
-# distribution. Mirrors the eval runner's ``content[:3]`` scan
-# (``sie_bench.eval.generation_runner._p_unsafe_from_logprobs``) so serving and
-# eval agree on which position the verdict is read from.
+# distribution. The first-three-position scan keeps serving aligned with the
+# evaluation convention for locating the verdict.
 _GUARD_VERDICT_SCAN_POSITIONS = 3
 
 
@@ -87,24 +100,100 @@ def _resolve_read_timeout() -> float | None:
         value = float(raw)
     except ValueError:
         return None
-    return value if value > 0 else None
+    return value if math.isfinite(value) and value > 0 else None
 
 
 _GENERATE_READ_TIMEOUT_S: float | None = _resolve_read_timeout()
 
 
-def _mamba_scheduler_strategy_value(extra_launch_args: list[str]) -> str | None:
-    """Return the value passed to ``--mamba-scheduler-strategy``, or ``None``.
+def _resolve_profile_read_timeout(declared: float | None, *, tensor_parallel_size: int) -> float | None:
+    """Return the streaming read cap for one adapter instance.
 
-    Parses both the two-token form (``["--mamba-scheduler-strategy",
-    "extra_buffer"]``) and the ``--mamba-scheduler-strategy=value`` form; the
-    last occurrence wins (argparse semantics). Returns ``None`` when the flag is
-    absent. The speculative guard uses this to require the value be *exactly*
-    ``extra_buffer`` — substring-matching the joined args would let a wrong value
-    (e.g. ``--mamba-scheduler-strategy default``) slip past if the token
+    Args:
+        declared: The profile's own value, or None to inherit the module
+            default.
+        tensor_parallel_size: Declared width. Above one a finite cap is
+            required rather than optional.
+
+    Raises:
+        ValueError: If the declared value is not a positive finite number, or
+            if a width above one is left without a cap. A stalled collective
+            emits no bytes and raises nothing, so an unbounded read on a
+            multi-accelerator load is a request that never ends and a group of
+            accelerators that is never freed.
+    """
+    if declared is not None:
+        if isinstance(declared, bool) or not isinstance(declared, (int, float)):
+            msg = f"request_read_timeout_s must be a number, got {declared!r}"
+            raise ValueError(msg)
+        if not math.isfinite(declared) or declared <= 0:
+            msg = f"request_read_timeout_s must be a finite number greater than zero, got {declared!r}"
+            raise ValueError(msg)
+        return float(declared)
+    effective = _GENERATE_READ_TIMEOUT_S
+    if tensor_parallel_size > 1 and effective is None:
+        msg = (
+            f"a profile declaring tensor_parallel_size={tensor_parallel_size} must also declare a finite "
+            "request_read_timeout_s. A stalled collective produces no bytes and no error, so an "
+            "unbounded read would hold the request and its accelerators open indefinitely."
+        )
+        raise ValueError(msg)
+    return effective
+
+
+def _resolve_profile_startup_timeout(declared: float | None, *, tensor_parallel_size: int) -> float:
+    """Return the engine startup budget for one adapter instance.
+
+    Args:
+        declared: The profile's own value, or None to inherit the environment
+            or module default.
+        tensor_parallel_size: Declared width. Above one the profile must
+            declare its own budget rather than inherit one.
+
+    Raises:
+        ValueError: If the declared value is not a positive finite number, or
+            if a width above one declares none. A group's startup is dominated
+            by per-rank graph compilation and capture rather than by weights,
+            so a process-wide default says nothing about how long this profile
+            needs, and a capture that stalls never fails on its own.
+    """
+    if declared is None and tensor_parallel_size > 1:
+        msg = (
+            f"a profile declaring tensor_parallel_size={tensor_parallel_size} must also declare "
+            "startup_timeout_s. Startup at a width above one is dominated by per-rank graph compilation "
+            "and capture rather than by weights, so no environment or default budget fits it, and a "
+            "capture that stalls never fails on its own."
+        )
+        raise ValueError(msg)
+    return _server.resolve_startup_timeout(declared)
+
+
+_JSON_NUMBER_MAX_DIGITS_ENV = "SIE_SGLANG_JSON_NUMBER_MAX_DIGITS"
+
+
+def _validate_json_number_max_digits(value: Any, grammar_backend: str | None) -> int | None:
+    """Return a usable JSON number digit bound, or None when the profile sets none."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        msg = f"json_number_max_digits must be a positive integer, got {value!r}"
+        raise ValueError(msg)
+    if grammar_backend != "xgrammar":
+        msg = f"json_number_max_digits bounds XGrammar's JSON grammars and needs grammar_backend 'xgrammar', got {grammar_backend!r}"
+        raise ValueError(msg)
+    return value
+
+
+def _mamba_strategy_value(extra_launch_args: list[str], flag: str) -> str | None:
+    """Return the value passed to the mamba strategy ``flag``, or ``None``.
+
+    Parses both the two-token form (``[flag, "extra_buffer"]``) and the
+    ``flag=value`` form; the last occurrence wins (argparse semantics). Returns
+    ``None`` when the flag is absent. The speculative guard uses this to require
+    the value be *exactly* ``extra_buffer`` — substring-matching the joined args
+    would let a wrong value (e.g. ``no_buffer``) slip past if the token
     ``extra_buffer`` happened to appear elsewhere in the args.
     """
-    flag = "--mamba-scheduler-strategy"
     prefix = f"{flag}="
     value: str | None = None
     for i, arg in enumerate(extra_launch_args):
@@ -156,17 +245,117 @@ def _encode_image_data(images: list[ImageInput] | None) -> list[str] | None:
     return encoded
 
 
-def _raise_for_sglang_event_error(event: Any) -> None:
-    """Propagate an error carried inside SGLang's HTTP-200 SSE stream."""
-    if not isinstance(event, dict) or "error" not in event:
-        return
-    error = event["error"]
-    message = error.get("message") if isinstance(error, dict) else error
-    if not isinstance(message, str) or not message.strip():
-        message = "unknown in-band SGLang error"
-    message = message.strip()[:500]
-    logger.error("SGLang /generate in-band error: %s", message)
-    raise RuntimeError(f"SGLang /generate error: {message}")
+_ALLOWED_VIDEO_FORMATS = frozenset({"mp4", "mkv", "avi"})
+
+
+def _encode_video_data(videos: list[VideoInput] | None) -> list[str] | None:
+    """Translate wire ``VideoInput`` entries into SGLang ``video_data`` data URIs.
+
+    Only inline data URIs are emitted: SGLang would fetch an ``http(s)`` value
+    itself. ``None`` without videos keeps the request body unchanged.
+    """
+    if not videos:
+        return None
+    encoded: list[str] = []
+    for video in videos:
+        raw = media_bytes(video, kind="video")
+        fmt = (video.get("format") or "mp4").strip().lower()
+        if fmt not in _ALLOWED_VIDEO_FORMATS:
+            fmt = "mp4"
+        encoded.append(f"data:video/{fmt};base64,{base64.b64encode(raw).decode('ascii')}")
+    return encoded
+
+
+_JSON_SCHEMA_TYPE_DIAGNOSTIC = f"Failed to compile json grammar: {OUTLINES_JSON_SCHEMA_TYPE_DIAGNOSTIC}"
+_MAX_ERROR_BODY_BYTES = 4096
+# Exact message the SGLang compat hook raises for an undecodable image or video.
+_MEDIA_LOAD_ERROR = re.compile(r"Error while loading (IMAGE|VIDEO) data \([A-Za-z_][A-Za-z0-9_]*\)")
+_MEDIA_LOAD_PARAMS = {"IMAGE": "images", "VIDEO": "videos"}
+
+
+def _raise_for_media_load_error(message: object) -> None:
+    match = _MEDIA_LOAD_ERROR.fullmatch(message) if isinstance(message, str) else None
+    if match is not None:
+        modality = match.group(1)
+        raise GenerationInvalidRequestError(
+            _MEDIA_LOAD_PARAMS[modality], f"The generation backend could not decode the {modality.lower()} input"
+        )
+
+
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise GenerationError("SGLang /generate returned duplicate JSON keys")
+        result[key] = value
+    return result
+
+
+async def _raise_for_sglang_http_error(
+    response: httpx.Response, *, grammar: GrammarSpec | None, grammar_backend: str | None
+) -> None:
+    if response.status_code == 400 and response.headers.get("content-encoding", "identity") == "identity":
+
+        async def read_error() -> bytes:
+            body = bytearray()
+            async for chunk in response.aiter_bytes():
+                if len(body) + len(chunk) > _MAX_ERROR_BODY_BYTES:
+                    return b""
+                body.extend(chunk)
+            return bytes(body)
+
+        try:
+            body = await asyncio.wait_for(read_error(), timeout=1.0)
+            payload = json.loads(body, object_pairs_hook=_unique_json_object)
+        except (ValueError, RecursionError, GenerationError, httpx.HTTPError, TimeoutError):
+            pass
+        else:
+            error = payload.get("error") if isinstance(payload, dict) and payload.keys() == {"error"} else None
+            message = error.get("message") if isinstance(error, dict) and error.keys() == {"message"} else None
+            if (
+                message == _JSON_SCHEMA_TYPE_DIAGNOSTIC
+                and grammar_backend == "outlines"
+                and grammar is not None
+                and grammar.kind == "json_schema"
+            ):
+                raise GenerationInvalidRequestError("grammar", OUTLINES_JSON_SCHEMA_TYPE_MESSAGE)
+            _raise_for_media_load_error(message)
+    response.raise_for_status()
+
+
+def _raise_for_sglang_event_error(
+    event: Any, *, grammar: GrammarSpec | None = None, grammar_backend: str | None = None, terminal: bool = False
+) -> None:
+    """Reject upstream failures before consuming their text or usage."""
+    if not isinstance(event, dict):
+        raise GenerationError("SGLang /generate returned an invalid event")
+    if "error" in event:
+        error = event["error"]
+        _raise_for_media_load_error(error.get("message") if isinstance(error, dict) else None)
+        raise GenerationError("SGLang /generate returned an in-band error")
+    meta = event.get("meta_info")
+    finish = meta.get("finish_reason") if isinstance(meta, dict) else None
+    kind = finish.get("type") if isinstance(finish, dict) else finish
+    if finish is not None and kind is None:
+        raise GenerationError("SGLang /generate returned a malformed finish reason")
+    if kind == "abort":
+        if isinstance(finish, dict) and type(finish.get("status_code")) is int and finish["status_code"] == 400:
+            if grammar is not None:
+                if (
+                    grammar_backend == "outlines"
+                    and grammar.kind == "json_schema"
+                    and finish.get("message") == _JSON_SCHEMA_TYPE_DIAGNOSTIC
+                ):
+                    raise GenerationInvalidRequestError("grammar", OUTLINES_JSON_SCHEMA_TYPE_MESSAGE)
+                raise GenerationInvalidRequestError(
+                    "grammar", f"The generation backend rejected the requested {grammar.kind} grammar"
+                )
+            raise GenerationInvalidRequestError("prompt", "The generation backend rejected the request")
+        raise GenerationError("SGLang /generate aborted the request")
+    if kind is not None and kind not in ("stop", "length"):
+        raise GenerationError("SGLang /generate returned an unsupported finish reason")
+    if (terminal or event.get("finished")) and kind is None:
+        raise GenerationError("SGLang /generate completed without a finish reason")
 
 
 def _tail_file(path: str, *, max_lines: int = 200) -> str:
@@ -233,6 +422,12 @@ class SGLangGenerationAdapter(GenerationAdapter):
     requires_main_thread: bool = False
     manages_own_load_timeout: bool = True
 
+    # Spellings and defaults of the engine pinned by the ``sglang`` bundle.
+    # Adapters routed to a bundle that pins a newer engine override them.
+    _PREFILL_GRAPH_OFF_FLAG = "--disable-piecewise-cuda-graph"
+    _MAMBA_STRATEGY_FLAG = "--mamba-scheduler-strategy"
+    _PREFILL_GRAPH_OFF_AT_EVERY_WIDTH = False
+
     def __init__(
         self,
         model_name_or_path: str,
@@ -262,8 +457,8 @@ class SGLangGenerationAdapter(GenerationAdapter):
         # this, so it is inert for every other model.
         guard: dict[str, Any] | None = None,
         speculative: dict[str, Any] | None = None,
-        # When ``speculative.enabled``, the adapter normally REQUIRES
-        # ``--mamba-scheduler-strategy extra_buffer`` in ``extra_launch_args``
+        # When ``speculative.enabled``, the adapter normally REQUIRES the mamba
+        # strategy flag set to ``extra_buffer`` in ``extra_launch_args``
         # — the Qwen3.x Gated-DeltaNet NEXTN + radix-cache pairing. Models whose
         # speculative path doesn't need it (e.g. Gemma 4 MTP — a standard
         # hybrid-attention model using an external ``-it-assistant`` NEXTN draft)
@@ -279,12 +474,67 @@ class SGLangGenerationAdapter(GenerationAdapter):
         # adapters in one batch (SGLang ``--max-loras-per-batch``).
         lora_paths: dict[str, str] | None = None,
         max_loras_per_batch: int = 4,
+        # Tensor-parallel width. One is every existing profile and keeps the
+        # launch argv byte-identical. Above one, this adapter owns that many
+        # whole accelerators for the life of the load, which is an exclusive
+        # claim the registry accounts for rather than a placement hint.
+        tensor_parallel_size: int = 1,
+        # Wall-clock cap on the gap between streamed bytes. None keeps the
+        # module default, which is unbounded so the worker's own admission and
+        # cancel layer owns request lifetime. A width above one must set it:
+        # a stalled collective produces no bytes and no error, so an unbounded
+        # read would hold the request open indefinitely. The cap fails the
+        # request; it does not unload or restart the engine.
+        request_read_timeout_s: float | None = None,
+        # Seconds a single forward batch may take before the engine crashes
+        # itself. None keeps the engine's own default. A crashed engine fails
+        # every later request; the adapter does not unload or restart it.
+        watchdog_timeout_s: float | None = None,
+        # Collective rendezvous port. None lets SIE reserve one beside the HTTP
+        # port, which is the point: the engine's own default is a random port,
+        # and two groups starting together can collide on it.
+        nccl_port: int | None = None,
+        # SGLang enables a prefill CUDA-graph capture path by default (the
+        # piecewise path before 0.5.20). It is measured to hang indefinitely at
+        # width two and to exhaust memory at width four, on a card and memory
+        # fraction where width one serves normally, so any width above one
+        # disables it unless a profile opts back in explicitly. None means
+        # "decide from the width", or off at every width for an adapter whose
+        # profiles were sized on an engine that never captured it.
+        disable_piecewise_cuda_graph: bool | None = None,
+        # Upper bound on the digits a JSON-schema grammar lets a number carry,
+        # in its integer part and in its fraction. XGrammar leaves both
+        # unbounded, so a greedy decode that starts repeating a digit runs to
+        # ``max_new_tokens``. None keeps the backend's unbounded numbers; the
+        # bound needs the ``xgrammar`` backend, which the child's sitecustomize
+        # patches.
+        json_number_max_digits: int | None = None,
         **kwargs: Any,  # accept extra args from loader for compatibility
     ) -> None:
         _ = kwargs
+        self._json_number_max_digits = _validate_json_number_max_digits(json_number_max_digits, grammar_backend)
         self._model_name_or_path = str(model_name_or_path)
         self._max_seq_length = max_seq_length
         self._mem_fraction_static = mem_fraction_static
+        self._tensor_parallel_size = _server.validate_tensor_parallel_size(tensor_parallel_size)
+        self._watchdog_timeout_s = _server.validate_optional_positive(watchdog_timeout_s, field="watchdog_timeout_s")
+        self._declared_nccl_port = _server.validate_optional_port(nccl_port)
+        if self._declared_nccl_port is not None and self._tensor_parallel_size == 1:
+            msg = "nccl_port applies only above tensor_parallel_size=1; a single rank has no rendezvous"
+            raise ValueError(msg)
+        self._nccl_port: int | None = None
+        # Declared or chosen, the rendezvous port is reserved in the shared set,
+        # so teardown hands back exactly what this adapter holds.
+        self._reserved_nccl_port: int | None = None
+        self._request_read_timeout_s = _resolve_profile_read_timeout(
+            request_read_timeout_s,
+            tensor_parallel_size=self._tensor_parallel_size,
+        )
+        self._disable_piecewise_cuda_graph = (
+            self._PREFILL_GRAPH_OFF_AT_EVERY_WIDTH or self._tensor_parallel_size > 1
+            if disable_piecewise_cuda_graph is None
+            else disable_piecewise_cuda_graph
+        )
         self._compute_precision = compute_precision
         self._trust_remote_code = trust_remote_code
         self._revision = revision
@@ -332,12 +582,16 @@ class SGLangGenerationAdapter(GenerationAdapter):
         self._speculative_needs_extra_buffer = speculative_needs_extra_buffer
         self._extra_launch_args = list(extra_launch_args or [])
         self._extra_env = dict(extra_env or {})
-        self._startup_timeout_s = _server.resolve_startup_timeout(startup_timeout_s)
+        self._startup_timeout_s = _resolve_profile_startup_timeout(
+            startup_timeout_s,
+            tensor_parallel_size=self._tensor_parallel_size,
+        )
         self._lora_paths = dict(lora_paths or {})
         self._max_loras_per_batch = max_loras_per_batch
 
         self._process: subprocess.Popen[bytes] | None = None
         self._server_url: str | None = None
+        self._port: int | None = None
         self._device: str | None = None
         self._output_file: tempfile._TemporaryFileWrapper | None = None
         # Shared httpx client. Opened lazily on the first ``generate()`` call
@@ -430,6 +684,43 @@ class SGLangGenerationAdapter(GenerationAdapter):
         """Return the child parser used to separate private reasoning output."""
         return self._reasoning_parser
 
+    @property
+    def image_token_budget(self) -> int | None:
+        """Return the most visual tokens ONE image of a single-image request can expand to.
+
+        A Qwen3.x vision encoder emits one token per merged 32x32 patch, so the
+        bound is ``ceil(max_pixels / 1024)``. ``max_pixels`` is
+        ``SIE_SGLANG_SINGLE_IMAGE_MAX_PIXELS`` from the profile's ``extra_env``
+        when set (the compat hook applies it to single-image requests), else
+        the launch's ``--mm-process-config`` ``image.max_pixels``. ``None`` when
+        neither is set, and the worker falls back to its family-wide estimate.
+        """
+        single = str(self._extra_env.get("SIE_SGLANG_SINGLE_IMAGE_MAX_PIXELS", "")).strip()
+        if single.isdigit() and int(single) > 0:
+            return math.ceil(int(single) / _MERGED_PATCH_PIXELS)
+        return self.multi_image_token_budget
+
+    @property
+    def multi_image_token_budget(self) -> int | None:
+        """Return the most visual tokens each image of a multi-image request can expand to.
+
+        Read from the launch's ``--mm-process-config`` ``image.max_pixels``;
+        ``None`` when the launch sets no image bound.
+        """
+        args = self._extra_launch_args
+        if "--mm-process-config" not in args:
+            return None
+        index = args.index("--mm-process-config")
+        if index + 1 >= len(args):
+            return None
+        try:
+            max_pixels = json.loads(args[index + 1]).get("image", {}).get("max_pixels")
+        except (json.JSONDecodeError, AttributeError):
+            return None
+        if not isinstance(max_pixels, int) or max_pixels <= 0:
+            return None
+        return math.ceil(max_pixels / _MERGED_PATCH_PIXELS)
+
     def _compat_pythonpath_entries(self) -> tuple[str, ...]:
         """Return trusted compatibility paths for the SGLang child.
 
@@ -445,14 +736,54 @@ class SGLangGenerationAdapter(GenerationAdapter):
     def load(self, device: str) -> None:
         self._device = device
         device_index = _server.parse_device_index(device)
+        # Derived from the anchor and the declared width by the one shared
+        # rule, so this adapter claims exactly the cards the registry reserved.
+        device_indices = _server.resolve_device_group(device_index, self._tensor_parallel_size)
+        # Before any accelerator is claimed: a width the model's own head counts
+        # cannot be divided by fails here rather than minutes into the engine's
+        # own assertion, with the whole group held in the meantime.
+        _server.validate_width_against_model_config(
+            self._tensor_parallel_size,
+            model_name_or_path=self._model_name_or_path,
+            revision=self._revision,
+        )
         port = _server.find_free_port()
+        self._port = port
         self._server_url = f"http://localhost:{port}"
 
+        # The port (and, once opened, the log fd) belong to this adapter from
+        # the reservation above onward, so every raise below hands them back
+        # rather than leaking one slot of the 100-port span per attempt: a full
+        # /tmp in open_output_log, a failed exec, the pre-launch speculative
+        # validation, an exhausted rendezvous span, or a cancelled load
+        # included.
+        try:
+            # Only a group rendezvouses, so width one reserves nothing and its
+            # launch argv is unchanged.
+            if self._tensor_parallel_size > 1:
+                if self._declared_nccl_port is not None:
+                    _server.reserve_port(self._declared_nccl_port)
+                    self._reserved_nccl_port = self._declared_nccl_port
+                else:
+                    self._reserved_nccl_port = _server.find_free_port(_server.NCCL_BASE_PORT)
+                self._nccl_port = self._reserved_nccl_port
+            self._start_server(port=port, device_indices=device_indices, server_url=self._server_url)
+        except BaseException:
+            self._abort_failed_load()
+            raise
+
+    def _start_server(self, *, port: int, device_indices: list[int], server_url: str) -> None:
+        """Launch the SGLang child and block until it serves the model.
+
+        Always called under ``load``'s abort-on-failure guard, so it raises
+        without cleaning up the port or log itself.
+        """
         logger.info(
-            "Starting SGLang generation server for %s on device=%s (gpu_id=%d) at port %d",
+            "Starting SGLang generation server for %s on device=%s (gpu_ids=%s, tp=%d) at port %d",
             self._model_name_or_path,
-            device,
-            device_index,
+            self._device,
+            ",".join(str(index) for index in device_indices),
+            self._tensor_parallel_size,
             port,
         )
 
@@ -471,8 +802,12 @@ class SGLangGenerationAdapter(GenerationAdapter):
             str(self._max_seq_length),
             "--mem-fraction-static",
             str(self._mem_fraction_static),
-            "--tp",
-            "1",
+            # Full flag name, not the "--tp" abbreviation. Nothing upstream
+            # disables abbreviation matching, so a future upstream flag sharing
+            # that prefix would break every SIE launch with an ambiguous-option
+            # error rather than a clear one.
+            "--tensor-parallel-size",
+            str(self._tensor_parallel_size),
             "--log-level",
             "warning",
             "--served-model-name",
@@ -484,6 +819,18 @@ class SGLangGenerationAdapter(GenerationAdapter):
             cmd.extend(["--revision", self._revision])
         if self._disable_cuda_graph:
             cmd.append("--disable-cuda-graph")
+        # Distinct from --disable-cuda-graph, which turns off graph replay
+        # entirely. This disables only the prefill capture path, so width
+        # above one keeps decode graph replay and its throughput.
+        if self._disable_piecewise_cuda_graph and not self._disable_cuda_graph:
+            cmd.append(self._PREFILL_GRAPH_OFF_FLAG)
+        # A forward batch that exceeds this crashes the engine rather than
+        # hanging, so requests fail instead of waiting on a rank that will not
+        # answer.
+        if self._watchdog_timeout_s is not None:
+            cmd.extend(["--watchdog-timeout", str(self._watchdog_timeout_s)])
+        if self._nccl_port is not None:
+            cmd.extend(["--nccl-port", str(self._nccl_port)])
         if self._attention_backend:
             cmd.extend(["--attention-backend", self._attention_backend])
         if self._grammar_backend:
@@ -507,8 +854,8 @@ class SGLangGenerationAdapter(GenerationAdapter):
         # SGLang 0.5.10+ requires ``SGLANG_ENABLE_SPEC_V2=1`` for NEXTN spec
         # decoding to coexist with the radix cache on hybrid-architecture
         # models (Qwen3.5 family — Gated DeltaNet + Gated Attention). The
-        # ``--mamba-scheduler-strategy extra_buffer`` flag, set via the model
-        # YAML's ``extra_launch_args``, is the matching CLI side; both are
+        # mamba strategy flag set to ``extra_buffer`` in the model YAML's
+        # ``extra_launch_args`` is the matching CLI side; both are
         # required as a pair. Empirically validated 2026-05-18 on L4 +
         # A100-40GB. Set unconditionally when speculative is on — the env var
         # is a no-op when sglang doesn't see speculative args.
@@ -516,24 +863,24 @@ class SGLangGenerationAdapter(GenerationAdapter):
         if self._speculative and self._speculative.get("enabled"):
             extra_env["SGLANG_ENABLE_SPEC_V2"] = "1"
             # The pair is required: setting ``SGLANG_ENABLE_SPEC_V2=1``
-            # without ``--mamba-scheduler-strategy extra_buffer`` (or
+            # without the mamba strategy set to ``extra_buffer`` (or
             # equivalent) crashes the radix cache mid-run on Qwen3.5
             # hybrid models with a confusing "spec_v2 requires extra
             # buffer" trace. Refuse to launch when the YAML omits the
             # flag so the misconfiguration surfaces as a startup error
             # instead of a runtime OOM that pages oncall.
             # Require the flag AND its exact ``extra_buffer`` value — a present
-            # flag with a wrong value (e.g. ``--mamba-scheduler-strategy default``)
-            # must not bypass the guard. Parse the flag's value precisely (both
+            # flag with a wrong value (e.g. ``no_buffer``) must not bypass the
+            # guard. Parse the flag's value precisely (both
             # the two-token and ``flag=value`` forms; last occurrence wins) rather
             # than substring-matching the joined args, which a stray
             # ``extra_buffer`` token elsewhere could satisfy.
             if (
                 self._speculative_needs_extra_buffer
-                and _mamba_scheduler_strategy_value(self._extra_launch_args) != "extra_buffer"
+                and _mamba_strategy_value(self._extra_launch_args, self._MAMBA_STRATEGY_FLAG) != "extra_buffer"
             ):
                 raise RuntimeError(
-                    "speculative decoding requires '--mamba-scheduler-strategy extra_buffer' "
+                    f"speculative decoding requires '{self._MAMBA_STRATEGY_FLAG} extra_buffer' "
                     "in extra_launch_args (see Qwen3.5-4B model YAML). Add the flag, set "
                     "speculative_needs_extra_buffer=false (non-DeltaNet models e.g. Gemma 4 "
                     "MTP), or disable speculative.enabled in the model config."
@@ -542,6 +889,8 @@ class SGLangGenerationAdapter(GenerationAdapter):
         # auto-imports sitecustomize from PYTHONPATH during child startup.
         extra_env["PYTHONPATH"] = os.pathsep.join(self._compat_pythonpath_entries())
         extra_env["SIE_SGLANG_MM_PROCESS_CONFIG_COMPAT"] = "1"
+        if self._json_number_max_digits is not None:
+            extra_env[_JSON_NUMBER_MAX_DIGITS_ENV] = str(self._json_number_max_digits)
         logger.warning(
             "Resolved SGLang generation command: %s",
             " ".join(shlex.quote(str(arg)) for arg in cmd),
@@ -552,24 +901,27 @@ class SGLangGenerationAdapter(GenerationAdapter):
         )
         self._process = _server.launch_sglang_server(
             cmd,
-            device_index=device_index,
+            device_indices=device_indices,
             output_file=self._output_file,
             extra_env=extra_env or None,
         )
 
         if not _server.wait_for_server(
-            self._server_url,
+            server_url,
             self._process,
             output_file=self._output_file,
             timeout_s=self._startup_timeout_s,
         ):
+            # Capture crash-vs-timeout before terminate makes poll() ambiguous.
+            crash_exit_code = self._process.poll()
             log_path = getattr(self._output_file, "name", None)
             if log_path:
                 logger.error("SGLang failed to reach health. log_path=%s", log_path)
                 logger.error("SGLang startup log tail:\n%s", _tail_file(str(log_path)))
             _server.terminate_process(self._process)
             self._process = None
-            raise _server.startup_failure_error(self._output_file)
+            # Build the error before `load`'s abort deletes the log it reads.
+            raise _server.startup_failure_error(self._output_file, crash_exit_code=crash_exit_code)
 
         # Best-effort runtime verification that the
         # ``--grammar-backend`` flag actually took effect. SGLang's
@@ -588,6 +940,28 @@ class SGLangGenerationAdapter(GenerationAdapter):
             self._model_name_or_path,
             self._server_url,
         )
+
+    def _abort_failed_load(self) -> None:
+        """Tear down a partially-started child + reset state after a failed load.
+
+        The registry does not call unload() on a failed load, so this mirrors
+        unload(): terminate the child, release the reserved port, drop the temp
+        log, and clear _server_url/_device so the adapter does not look "loaded"
+        (_check_loaded() gates only on _server_url). Mirrors the MLX sibling.
+        """
+        _server.terminate_process(self._process)
+        self._process = None
+        _server.release_port(self._port)
+        # Guarded rather than unconditional: width one never reserves a
+        # collective port, and its teardown must stay exactly as it was.
+        if self._reserved_nccl_port is not None:
+            _server.release_port(self._reserved_nccl_port)
+            self._reserved_nccl_port = None
+        self._nccl_port = None
+        self._port = None
+        self._server_url = None
+        self._device = None
+        self._cleanup_output_log()
 
     def _verify_grammar_backend_log(self) -> None:
         """Scan ``self._output_file`` for evidence SGLang accepted the
@@ -796,6 +1170,19 @@ class SGLangGenerationAdapter(GenerationAdapter):
         self._abort_tasks.add(task)
         task.add_done_callback(self._abort_tasks.discard)
 
+    def _spawn_abort_request_if_live(self, client: httpx.AsyncClient, rid: str) -> None:
+        """Schedule an abort only while the shared SGLang client is usable."""
+        server_url = self._server_url
+        if server_url is None:
+            return
+        if client.is_closed:
+            logger.debug(
+                "skipping /abort_request for rid=%s: shared HTTP client already closed",
+                rid,
+            )
+            return
+        self._spawn_abort_request(client, server_url, rid)
+
     def _clear_pending_aclose(self, task: asyncio.Task[None]) -> None:
         # Only clear the slot if it still references *this* task. A second
         # ``unload()`` call between the first task finishing and its
@@ -891,8 +1278,33 @@ class SGLangGenerationAdapter(GenerationAdapter):
             logger.info("Shutting down SGLang generation server for %s", self._model_name_or_path)
             _server.terminate_process(self._process)
             self._process = None
+        # Release only after the child is down so a concurrent load can't be
+        # handed a port the dying child still holds bound.
+        _server.release_port(self._port)
+        # Guarded rather than unconditional: width one never reserves a
+        # collective port, and its teardown must stay exactly as it was.
+        if self._reserved_nccl_port is not None:
+            _server.release_port(self._reserved_nccl_port)
+            self._reserved_nccl_port = None
+        self._nccl_port = None
+        self._port = None
         self._server_url = None
         self._device = None
+        self._cleanup_output_log()
+
+    def _cleanup_output_log(self) -> None:
+        """Close + delete the subprocess stdout/stderr log (best-effort, idempotent).
+
+        Without this, one ``sglang_*.log`` leaks into /tmp per load — unbounded
+        under LRU-eviction / hot-reload churn — and the open fd is held for the
+        subprocess lifetime. Mirrors the MLX sibling's cleanup.
+        """
+        if self._output_file is not None:
+            with contextlib.suppress(OSError):
+                self._output_file.close()
+            with contextlib.suppress(OSError):
+                Path(self._output_file.name).unlink()
+            self._output_file = None
 
     def memory_footprint(self) -> int:
         # SGLang pre-allocates in the subprocess; let the registry measure GPU.
@@ -911,6 +1323,32 @@ class SGLangGenerationAdapter(GenerationAdapter):
     def _check_loaded(self) -> None:
         if self._server_url is None:
             raise RuntimeError(ERR_NOT_LOADED)
+        self._check_engine_alive()
+
+    def _check_engine_alive(self) -> None:
+        """Fail a request whose engine child has already exited.
+
+        Without this the adapter never notices. Every request goes on to open a
+        connection to a port nobody is listening on, waits out the connect
+        timeout and returns a transport error, forever, with no reload and no
+        readiness change. On one accelerator that is a wasteful way to say
+        "dead". On four it strands four accelerators behind a queue of requests
+        that cannot succeed.
+
+        Measured on a four-rank group: a killed rank makes the engine
+        refuse health in about 5 seconds, but its process tree takes about 67
+        seconds to exit. This check is what turns the rest of that window, and
+        everything after it, into one terminal answer rather than a timeout per
+        request.
+
+        Raises:
+            EngineExitedError: Naming the exit code, so a crash is
+                distinguishable from an orderly unload in a log.
+        """
+        _server.raise_if_engine_exited(self._process, self._served_model_name)
+
+    def engine_exit_code(self) -> int | None:
+        return _server.engine_exit_code(self._process)
 
     async def _get_or_create_http_client(self) -> httpx.AsyncClient:
         """Return the shared client, opening it if this is the first call.
@@ -953,7 +1391,7 @@ class SGLangGenerationAdapter(GenerationAdapter):
                 self._http_client = httpx.AsyncClient(
                     timeout=httpx.Timeout(
                         connect=_GENERATE_CONNECT_TIMEOUT_S,
-                        read=_GENERATE_READ_TIMEOUT_S,
+                        read=self._request_read_timeout_s,
                         write=_GENERATE_WRITE_TIMEOUT_S,
                         pool=_GENERATE_POOL_TIMEOUT_S,
                     ),
@@ -985,6 +1423,7 @@ class SGLangGenerationAdapter(GenerationAdapter):
         stream: bool = False,
         lora_path: str | None = None,
         images: list[ImageInput] | None = None,
+        videos: list[VideoInput] | None = None,
     ) -> AsyncIterator[GenerationChunk]:
         self._check_loaded()
 
@@ -994,6 +1433,14 @@ class SGLangGenerationAdapter(GenerationAdapter):
         # tokens (the chat template renders them worker-side). ``None`` when
         # there are no images, keeping the text-only request body unchanged.
         image_data = _encode_image_data(images)
+        # SGLang's native /generate treats a request as non-reasoning unless it
+        # says otherwise: a grammar then constrains the open thinking block and
+        # --enable-strict-thinking never engages. Its chat endpoint derives this
+        # from the chat template; here the rendered prompt carries it.
+        require_reasoning = self._reasoning_parser is not None and reasoning_starts_in_prompt(
+            prompt, resolve_reasoning_format(None, self)
+        )
+        video_data = _encode_video_data(videos)
 
         # Guard verdict thresholding only runs on the single-candidate (n=1)
         # path, so reject multi-candidate sampling up front — otherwise a guard
@@ -1001,13 +1448,6 @@ class SGLangGenerationAdapter(GenerationAdapter):
         # verdict from the multi-candidate path. Inert for non-guard models.
         if self._guard and ((n is not None and n > 1) or (best_of is not None and best_of > 1)):
             raise ValueError("guard models support single-candidate generation only (n=1, best_of<=1)")
-        # Whether the CLIENT asked for logprobs, captured before the guard
-        # forcing below. Guard models force logprobs on internally to compute
-        # the verdict threshold; those forced logprobs are an implementation
-        # detail and MUST NOT leak to a client that did not request them
-        # (GenerationChunk.logprobs contract). The streaming guard intercept
-        # uses this to decide whether to strip the forced logprobs.
-        client_requested_logprobs = logprobs
         # Thresholding needs the verdict-token distribution — force logprobs on
         # even if the caller didn't ask. Only affects the n=1 path below.
         if self._guard:
@@ -1068,6 +1508,8 @@ class SGLangGenerationAdapter(GenerationAdapter):
         # alongside ``return_logprob``. Added to the request bodies below.
         # Merge default sampling from model config (request fields win).
         for k, v in self._default_sampling.items():
+            if grammar is not None and k == "min_new_tokens":
+                continue
             sampling_params.setdefault(k, v)
         # A profile-level minimum is a soft default, while the request's
         # ``max_new_tokens`` is a hard caller limit. Cap the default to that
@@ -1139,16 +1581,21 @@ class SGLangGenerationAdapter(GenerationAdapter):
         if stream and return_count > 1:
             sp = dict(sampling_params)
             sp["n"] = return_count
+            rid = uuid.uuid4().hex
             sbody: dict[str, Any] = {
                 "text": prompt,
                 "sampling_params": sp,
                 "stream": True,
-                "rid": uuid.uuid4().hex,
+                "rid": rid,
             }
             if lora_path:
                 sbody["lora_path"] = lora_path
             if image_data:
                 sbody["image_data"] = image_data
+            if require_reasoning:
+                sbody["require_reasoning"] = True
+            if video_data:
+                sbody["video_data"] = video_data
             if logprobs:
                 sbody["return_logprob"] = True
                 # Without this SGLang omits the decoded token TEXT from
@@ -1160,6 +1607,7 @@ class SGLangGenerationAdapter(GenerationAdapter):
                     sbody["top_logprobs_num"] = top_logprobs
             sclient = await self._get_or_create_http_client()
             last_text: dict[int, str] = {}
+            completed_candidates: set[int] = set()
             # Per-candidate logprob watermark: SGLang's
             # ``meta_info.output_token_logprobs`` is a per-candidate cumulative
             # list growing across events for that index. Slicing
@@ -1168,107 +1616,125 @@ class SGLangGenerationAdapter(GenerationAdapter):
             # single-candidate cursor at line ~1013.
             logprobs_surfaced: dict[int, int] = {}
             prompt_tokens: int | None = None
+            cached_tokens: int | None = None
             total_completion = 0
             emitted_first = False
-            async with sclient.stream("POST", f"{self._server_url}/generate", json=sbody) as sresp:
-                sresp.raise_for_status()
-                async for raw_line in sresp.aiter_lines():
-                    line = raw_line.strip()
-                    if line.startswith("data:"):
-                        line = line[len("data:") :].strip()
-                    if not line or line == "[DONE]":
-                        continue
-                    try:
-                        event = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    _raise_for_sglang_event_error(event)
-                    idx = int(event.get("index", 0))
-                    cumulative = event.get("text", "")
-                    if not isinstance(cumulative, str):
-                        cumulative = last_text.get(idx, "")
-                    delta = cumulative[len(last_text.get(idx, "")) :]
-                    last_text[idx] = cumulative
-                    meta = event.get("meta_info") or {}
-                    if prompt_tokens is None and isinstance(meta.get("prompt_tokens"), int):
-                        prompt_tokens = meta["prompt_tokens"]
-                    fr = meta.get("finish_reason")
-                    fr_type = fr.get("type") if isinstance(fr, dict) else fr
-                    candidate_done = fr_type is not None
-                    if candidate_done and isinstance(meta.get("completion_tokens"), int):
-                        total_completion += meta["completion_tokens"]
-                    # Per-candidate logprob slice — same shape conversion as the
-                    # single-candidate path (`_chunk_from_sglang_event`), but
-                    # the cursor is keyed by candidate index so each candidate
-                    # gets its own monotonic slice.
-                    chunk_logprobs: tuple[dict[str, Any], ...] | None = None
-                    if logprobs and isinstance(meta, dict):
-                        all_token_lp = meta.get("output_token_logprobs")
-                        all_top_lp = meta.get("output_top_logprobs")
-                        prior = logprobs_surfaced.get(idx, 0)
-                        if isinstance(all_token_lp, list) and len(all_token_lp) > prior:
-                            new_slice = all_token_lp[prior:]
-                            new_top_slice = (
-                                all_top_lp[prior:]
-                                if isinstance(all_top_lp, list) and len(all_top_lp) >= len(all_token_lp)
-                                else [None] * len(new_slice)
-                            )
-                            built: list[dict[str, Any]] = []
-                            for token_entry, top_entry in zip(new_slice, new_top_slice, strict=False):
-                                tok_lp, _tok_id, tok_text = _unpack_sglang_token_logprob(token_entry)
-                                if tok_lp is None:
-                                    continue
-                                top_list: list[dict[str, Any]] = []
-                                if isinstance(top_entry, list):
-                                    for top_token in top_entry:
-                                        t_lp, _t_id, t_text = _unpack_sglang_token_logprob(top_token)
-                                        if t_lp is None:
-                                            continue
-                                        top_list.append(
-                                            {
-                                                "token": t_text or "",
-                                                "logprob": float(t_lp),
-                                                "bytes": list((t_text or "").encode("utf-8")),
-                                            }
-                                        )
-                                built.append(
-                                    {
-                                        "token": tok_text or "",
-                                        "logprob": float(tok_lp),
-                                        "bytes": list((tok_text or "").encode("utf-8")),
-                                        "top_logprobs": top_list,
-                                    }
+            terminal_yielded = False
+            try:
+                async with sclient.stream("POST", f"{self._server_url}/generate", json=sbody) as sresp:
+                    await _raise_for_sglang_http_error(sresp, grammar=grammar, grammar_backend=self._grammar_backend)
+                    async for raw_line in sresp.aiter_lines():
+                        line = raw_line.strip()
+                        if line.startswith("data:"):
+                            line = line[len("data:") :].strip()
+                        if not line or line == "[DONE]":
+                            continue
+                        try:
+                            event = json.loads(line, object_pairs_hook=_unique_json_object)
+                        except json.JSONDecodeError:
+                            continue
+                        _raise_for_sglang_event_error(event, grammar=grammar, grammar_backend=self._grammar_backend)
+                        idx = event.get("index")
+                        if not isinstance(idx, int) or isinstance(idx, bool) or not 0 <= idx < return_count:
+                            raise GenerationError("SGLang /generate returned an invalid candidate index")
+                        if idx in completed_candidates:
+                            raise GenerationError("SGLang /generate returned an event after the candidate terminal")
+                        cumulative = event.get("text", "")
+                        if not isinstance(cumulative, str):
+                            cumulative = last_text.get(idx, "")
+                        delta = cumulative[len(last_text.get(idx, "")) :]
+                        last_text[idx] = cumulative
+                        meta = event.get("meta_info") or {}
+                        if prompt_tokens is None and isinstance(meta.get("prompt_tokens"), int):
+                            prompt_tokens = meta["prompt_tokens"]
+                            cached_tokens = _cached_prompt_tokens(meta, prompt_tokens)
+                        fr = meta.get("finish_reason")
+                        fr_type = fr.get("type") if isinstance(fr, dict) else fr
+                        candidate_done = fr_type is not None
+                        if candidate_done:
+                            completed_candidates.add(idx)
+                        if candidate_done and isinstance(meta.get("completion_tokens"), int):
+                            total_completion += meta["completion_tokens"]
+                        # Per-candidate logprob slice — same shape conversion as the
+                        # single-candidate path (`_chunk_from_sglang_event`), but
+                        # the cursor is keyed by candidate index so each candidate
+                        # gets its own monotonic slice.
+                        chunk_logprobs: tuple[dict[str, Any], ...] | None = None
+                        if logprobs and isinstance(meta, dict):
+                            all_token_lp = meta.get("output_token_logprobs")
+                            all_top_lp = meta.get("output_top_logprobs")
+                            prior = logprobs_surfaced.get(idx, 0)
+                            if isinstance(all_token_lp, list) and len(all_token_lp) > prior:
+                                new_slice = all_token_lp[prior:]
+                                new_top_slice = (
+                                    all_top_lp[prior:]
+                                    if isinstance(all_top_lp, list) and len(all_top_lp) >= len(all_token_lp)
+                                    else [None] * len(new_slice)
                                 )
-                            if built:
-                                chunk_logprobs = tuple(built)
-                            # Advance to the cumulative reported length rather
-                            # than incrementing by ``len(built)`` so a skipped
-                            # malformed entry does not re-surface next event.
-                            logprobs_surfaced[idx] = len(all_token_lp)
-                    if not delta and not candidate_done and not chunk_logprobs:
-                        continue
-                    is_first = bool(delta) and not emitted_first
-                    emitted_first = emitted_first or bool(delta)
-                    yield GenerationChunk(
-                        text_delta=delta,
-                        done=False,
-                        is_first=is_first,
-                        finish_reason=cast("FinishReason | None", fr_type if candidate_done else None),
-                        choice_index=idx,
-                        logprobs=chunk_logprobs,
-                    )
-            # Single global terminal closes the multi-candidate stream (carries
-            # aggregate usage). Each candidate already received its own
-            # ``finish_reason`` on the per-choice completion chunk above; this
-            # terminal is the stream-level "all candidates done" signal that
-            # drives the processor's loop break and the gateway's [DONE].
-            yield GenerationChunk(
-                text_delta="",
-                done=True,
-                finish_reason="stop",
-                prompt_tokens=prompt_tokens,
-                completion_tokens=total_completion,
-            )
+                                built: list[dict[str, Any]] = []
+                                for token_entry, top_entry in zip(new_slice, new_top_slice, strict=False):
+                                    tok_lp, _tok_id, tok_text = _unpack_sglang_token_logprob(token_entry)
+                                    if tok_lp is None:
+                                        continue
+                                    top_list: list[dict[str, Any]] = []
+                                    if isinstance(top_entry, list):
+                                        for top_token in top_entry:
+                                            t_lp, _t_id, t_text = _unpack_sglang_token_logprob(top_token)
+                                            if t_lp is None:
+                                                continue
+                                            top_list.append(
+                                                {
+                                                    "token": t_text or "",
+                                                    "logprob": float(t_lp),
+                                                    "bytes": list((t_text or "").encode("utf-8")),
+                                                }
+                                            )
+                                    built.append(
+                                        {
+                                            "token": tok_text or "",
+                                            "logprob": float(tok_lp),
+                                            "bytes": list((tok_text or "").encode("utf-8")),
+                                            "top_logprobs": top_list,
+                                        }
+                                    )
+                                if built:
+                                    chunk_logprobs = tuple(built)
+                                # Advance to the cumulative reported length rather
+                                # than incrementing by ``len(built)`` so a skipped
+                                # malformed entry does not re-surface next event.
+                                logprobs_surfaced[idx] = len(all_token_lp)
+                        if not delta and not candidate_done and not chunk_logprobs:
+                            continue
+                        is_first = bool(delta) and not emitted_first
+                        emitted_first = emitted_first or bool(delta)
+                        yield GenerationChunk(
+                            text_delta=delta,
+                            done=False,
+                            is_first=is_first,
+                            finish_reason=cast("FinishReason | None", fr_type if candidate_done else None),
+                            choice_index=idx,
+                            logprobs=chunk_logprobs,
+                        )
+                if len(completed_candidates) != return_count:
+                    raise GenerationError("SGLang /generate ended before all candidates completed")
+                # Single global terminal closes the multi-candidate stream (carries
+                # aggregate usage). Each candidate already received its own
+                # ``finish_reason`` on the per-choice completion chunk above; this
+                # terminal is the stream-level "all candidates done" signal that
+                # drives the processor's loop break and the gateway's [DONE].
+                terminal_yielded = True
+                yield GenerationChunk(
+                    text_delta="",
+                    done=True,
+                    finish_reason="stop",
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=total_completion,
+                    cached_tokens=cached_tokens,
+                )
+            except (GeneratorExit, asyncio.CancelledError):
+                if not terminal_yielded:
+                    self._spawn_abort_request_if_live(sclient, rid)
+                raise
             return
 
         gen_count = best_of if (best_of is not None and best_of > 1) else return_count
@@ -1283,6 +1749,10 @@ class SGLangGenerationAdapter(GenerationAdapter):
                 nbody["lora_path"] = lora_path
             if image_data:
                 nbody["image_data"] = image_data
+            if require_reasoning:
+                nbody["require_reasoning"] = True
+            if video_data:
+                nbody["video_data"] = video_data
             if logprobs or rank:
                 nbody["return_logprob"] = True
                 # Surface decoded token text (see streaming body below) so the
@@ -1291,25 +1761,36 @@ class SGLangGenerationAdapter(GenerationAdapter):
                 if top_logprobs is not None and top_logprobs > 0:
                     nbody["top_logprobs_num"] = top_logprobs
             nclient = await self._get_or_create_http_client()
-            nresp = await nclient.post(f"{self._server_url}/generate", json=nbody)
-            nresp.raise_for_status()
-            results = nresp.json()
+            async with nclient.stream("POST", f"{self._server_url}/generate", json=nbody) as nresp:
+                await _raise_for_sglang_http_error(nresp, grammar=grammar, grammar_backend=self._grammar_backend)
+                await nresp.aread()
+                results = nresp.json(object_pairs_hook=_unique_json_object)
             # SGLang returns a list of ``n`` result objects for ``n > 1``;
             # tolerate a single dict defensively.
             if isinstance(results, dict):
                 results = [results]
+            if not isinstance(results, list):
+                raise GenerationError("SGLang /generate returned an invalid candidate list")
+            for result in results:
+                _raise_for_sglang_event_error(
+                    result, grammar=grammar, grammar_backend=self._grammar_backend, terminal=True
+                )
+            if len(results) != gen_count:
+                raise GenerationError("SGLang /generate returned an incorrect candidate count")
             if rank:
                 # Highest cumulative token-logprob first; keep the top return_count.
                 results = sorted(results, key=_cumulative_logprob, reverse=True)[:return_count]
             candidates: list[dict[str, Any]] = []
             total_completion = 0
             prompt_tokens: int | None = None
+            cached_tokens: int | None = None
             for r in results:
                 meta = r.get("meta_info", {}) if isinstance(r, dict) else {}
                 fr = meta.get("finish_reason")
                 fr_type = fr.get("type") if isinstance(fr, dict) else fr
                 if prompt_tokens is None and isinstance(meta.get("prompt_tokens"), int):
                     prompt_tokens = meta["prompt_tokens"]
+                    cached_tokens = _cached_prompt_tokens(meta, prompt_tokens)
                 if isinstance(meta.get("completion_tokens"), int):
                     total_completion += meta["completion_tokens"]
                 # Per-candidate logprobs: only emit when the request
@@ -1358,7 +1839,7 @@ class SGLangGenerationAdapter(GenerationAdapter):
                 candidates.append(
                     {
                         "text": r.get("text", "") if isinstance(r, dict) else "",
-                        "finish_reason": fr_type if isinstance(fr_type, str) else "stop",
+                        "finish_reason": fr_type,
                         "logprobs": cand_logprobs,
                     }
                 )
@@ -1368,6 +1849,7 @@ class SGLangGenerationAdapter(GenerationAdapter):
                 finish_reason="stop",
                 prompt_tokens=prompt_tokens,
                 completion_tokens=total_completion,
+                cached_tokens=cached_tokens,
                 candidates=tuple(candidates),
             )
             return
@@ -1387,6 +1869,10 @@ class SGLangGenerationAdapter(GenerationAdapter):
             body["lora_path"] = lora_path
         if image_data:
             body["image_data"] = image_data
+        if require_reasoning:
+            body["require_reasoning"] = True
+        if video_data:
+            body["video_data"] = video_data
         # OpenAI ``logprobs`` → SGLang ``return_logprob`` (top-level body
         # flag, not under sampling_params). ``top_logprobs`` →
         # ``top_logprobs_num``. SGLang surfaces them under
@@ -1422,21 +1908,13 @@ class SGLangGenerationAdapter(GenerationAdapter):
         # ``async with`` — we just borrow a reference. Cancellation /
         # GeneratorExit still cleans up the stream context below.
         client = await self._get_or_create_http_client()
+        terminal_yielded = False
         try:
             async with client.stream("POST", f"{self._server_url}/generate", json=body) as response:
-                if response.status_code != 200:
-                    # Drain a bit of the body for diagnostics, then raise.
-                    body_preview = await response.aread()
-                    logger.error(
-                        "SGLang /generate stream error %d: %s",
-                        response.status_code,
-                        body_preview[:500],
-                    )
-                    response.raise_for_status()
+                await _raise_for_sglang_http_error(response, grammar=grammar, grammar_backend=self._grammar_backend)
 
                 last_cumulative_text = ""
                 first_yield_done = False
-                terminal_yielded = False
                 # Number of token-logprob entries already surfaced
                 # on prior chunks. SGLang accumulates them on
                 # ``meta_info.output_token_logprobs`` (a flat list,
@@ -1444,20 +1922,8 @@ class SGLangGenerationAdapter(GenerationAdapter):
                 # so we slice off the tail-since-last-event each
                 # round to build per-chunk OpenAI-shape logprobs.
                 logprobs_surfaced = 0
-                # Guard verdict buffering (CHECK POLICY) — inert for non-guard
-                # models. A guard's Yes/No verdict can sit a few token positions
-                # in, behind a leading whitespace/punctuation/preamble token that
-                # SGLang spreads across streaming chunks. We accumulate the
-                # leading chunks' per-token logprob entries (``guard_lp_buffer``)
-                # and SUPPRESS their text (the guard consumer wants just the
-                # verdict, not the preamble) until a verdict resolves within the
-                # first ``_GUARD_VERDICT_SCAN_POSITIONS`` positions — or the
-                # stream terminates first, in which case we flush the raw buffered
-                # chunks unchanged (fallback, never drop output).
                 guard_active = bool(self._guard)
                 guard_resolved = False
-                guard_lp_buffer: list[dict[str, Any]] = []
-                guard_pending: list[GenerationChunk] = []
 
                 async for raw_line in response.aiter_lines():
                     line = raw_line.strip()
@@ -1468,12 +1934,12 @@ class SGLangGenerationAdapter(GenerationAdapter):
                     if not line or line == "[DONE]":
                         continue
                     try:
-                        event = json.loads(line)
+                        event = json.loads(line, object_pairs_hook=_unique_json_object)
                     except json.JSONDecodeError:
-                        logger.warning("SGLang stream: skipping non-JSON line: %s", line[:200])
+                        logger.warning("SGLang stream: skipping non-JSON line")
                         continue
 
-                    _raise_for_sglang_event_error(event)
+                    _raise_for_sglang_event_error(event, grammar=grammar, grammar_backend=self._grammar_backend)
                     chunk = _chunk_from_sglang_event(
                         event,
                         previous_cumulative_text=last_cumulative_text,
@@ -1504,73 +1970,37 @@ class SGLangGenerationAdapter(GenerationAdapter):
                             cumulative_lp = event_meta.get("output_token_logprobs")
                             if isinstance(cumulative_lp, list):
                                 logprobs_surfaced = max(logprobs_surfaced, len(cumulative_lp))
-                    # Guard verdict thresholding (CHECK POLICY): resolve the
-                    # P(unsafe)>=threshold verdict from the first parseable
-                    # position within ``_GUARD_VERDICT_SCAN_POSITIONS`` and emit a
-                    # single verdict chunk. Inert for non-guard models, which take
-                    # the byte-for-byte unchanged ``else`` path below.
-                    if guard_active and not guard_resolved:
-                        # Accumulate this chunk's forced logprob entries so a
-                        # verdict that lands on a later token position is visible.
-                        if chunk.logprobs:
-                            guard_lp_buffer.extend(chunk.logprobs)
-                        guard_pending.append(chunk)
-                        verdict = _thresholded_verdict(tuple(guard_lp_buffer), self._guard)
-                        if verdict is not None:
-                            guard_resolved = True
-                            # Carry through terminal state if the verdict resolved
-                            # on (or only by) the terminal chunk, so done /
-                            # finish_reason / completion_tokens are preserved.
-                            last = guard_pending[-1]
-                            # Strip the internally-forced logprobs when the client
-                            # did not ask for them (implementation detail). When
-                            # the client did ask, drop the single verdict entry
-                            # that was consumed/rewritten (it described the raw
-                            # sampled token, not the served threshold verdict) and
-                            # keep the rest of the buffered token metadata.
-                            if client_requested_logprobs:
-                                v_idx = _verdict_position(tuple(guard_lp_buffer))
-                                kept = [e for i, e in enumerate(guard_lp_buffer) if i != v_idx]
-                                remaining = tuple(kept) or None
+                    if guard_active:
+                        if chunk.error_code is not None or chunk.finish_reason in ("error", "cancelled"):
+                            chunk = dataclasses.replace(chunk, text_delta="", is_first=False, logprobs=None)
+                        elif not guard_resolved:
+                            guard_lp_buffer = _guard_verdict_logprobs(event)
+                            verdict = _thresholded_verdict(guard_lp_buffer, self._guard)
+                            if verdict is not None:
+                                guard_resolved = True
+                                chunk = dataclasses.replace(chunk, text_delta=verdict, is_first=True, logprobs=None)
+                            elif chunk.done:
+                                chunk = dataclasses.replace(
+                                    chunk,
+                                    text_delta="",
+                                    is_first=False,
+                                    logprobs=None,
+                                    finish_reason="error",
+                                    error_code="invalid_guard_verdict",
+                                    error_message="guard model did not produce a valid thresholded verdict",
+                                )
                             else:
-                                remaining = None
-                            verdict_chunk = dataclasses.replace(
-                                last,
-                                text_delta=verdict,
-                                is_first=True,
-                                logprobs=remaining,
-                            )
-                            stream_timer.mark_yield(has_text=True)
-                            yield verdict_chunk
-                            if verdict_chunk.done:
-                                break
-                        elif chunk.done:
-                            # Terminal reached without a parseable verdict in the
-                            # first N positions: flush the raw buffered chunks
-                            # unchanged so the response is never dropped. Strip the
-                            # forced logprobs only when the client didn't ask.
-                            guard_resolved = True
-                            for buffered in guard_pending:
-                                if not client_requested_logprobs:
-                                    buffered = dataclasses.replace(buffered, logprobs=None)
-                                stream_timer.mark_yield(has_text=bool(buffered.text_delta))
-                                yield buffered
-                            break
-                        # else: keep buffering (suppress this leading chunk's text).
-                    else:
-                        # Guard tail chunks (after the verdict resolved) must still
-                        # honour the M4 logprobs contract: strip the internally
-                        # forced logprobs when the client didn't request them.
-                        if guard_active and not client_requested_logprobs and chunk.logprobs is not None:
-                            chunk = dataclasses.replace(chunk, logprobs=None)
-                        stream_timer.mark_yield(has_text=bool(chunk.text_delta))
-                        yield chunk
-                        if chunk.done:
-                            break
+                                chunk = dataclasses.replace(chunk, text_delta="", is_first=False, logprobs=None)
+                        else:
+                            chunk = dataclasses.replace(chunk, text_delta="", is_first=False, logprobs=None)
+                    stream_timer.mark_yield(has_text=bool(chunk.text_delta))
+                    yield chunk
+                    if chunk.done:
+                        break
 
                 if not terminal_yielded:
                     raise RuntimeError("SGLang stream terminated without terminal event")
-        except GeneratorExit:
+        except (GeneratorExit, asyncio.CancelledError):
             # Caller dropped the iterator (cancellation / aclose). Issue a
             # best-effort POST to /abort_request so SGLang frees the slot
             # promptly. CRITICAL: do NOT ``await`` the abort here. The
@@ -1583,7 +2013,7 @@ class SGLangGenerationAdapter(GenerationAdapter):
             # ignored GeneratorExit`` if the await is interrupted. Instead
             # we spawn the abort as an independent, tracked background task
             # (bounded by ``_ABORT_REQUEST_TIMEOUT_S`` < the 2s cap) on the
-            # adapter's long-lived loop and re-raise GeneratorExit cleanly.
+            # adapter's long-lived loop and re-raise cancellation cleanly.
             # The shared client is reused so the abort piggybacks on an
             # existing connection rather than paying a fresh TCP handshake.
             # If a concurrent ``unload()`` / ``aclose_client()`` already
@@ -1591,14 +2021,8 @@ class SGLangGenerationAdapter(GenerationAdapter):
             # in ``_abort_request``) and the abort silently no-ops, leaking
             # the SGLang GPU slot until SGLang's own timeout. Skip the abort
             # in that case — there is no live client to drive it.
-            server_url = self._server_url
-            if server_url is not None and not client.is_closed:
-                self._spawn_abort_request(client, server_url, rid)
-            elif server_url is not None:
-                logger.debug(
-                    "skipping /abort_request for rid=%s: shared HTTP client already closed",
-                    rid,
-                )
+            if not terminal_yielded:
+                self._spawn_abort_request_if_live(client, rid)
             raise
         finally:
             # Emit TPOT regardless of normal completion vs cancellation.
@@ -1609,45 +2033,80 @@ class SGLangGenerationAdapter(GenerationAdapter):
             )
 
 
+def _cached_prompt_tokens(meta: Any, prompt_tokens: int | None) -> int | None:
+    """Read SGLang's per-request prefix-cache hit count from ``meta_info``.
+
+    ``meta_info.cached_tokens`` counts the prompt tokens SGLang served from
+    its radix cache instead of prefilling. It is clamped to ``prompt_tokens``
+    so a usage block never reports more cached than total input tokens.
+    """
+    if not isinstance(meta, dict):
+        return None
+    cached = meta.get("cached_tokens")
+    if not isinstance(cached, int) or isinstance(cached, bool) or cached < 0:
+        return None
+    if prompt_tokens is not None:
+        return min(cached, prompt_tokens)
+    return cached
+
+
+def _guard_verdict_logprobs(event: dict[str, Any]) -> tuple[dict[str, Any], ...]:
+    meta = event.get("meta_info")
+    if not isinstance(meta, dict):
+        return ()
+    tokens, top = meta.get("output_token_logprobs"), meta.get("output_top_logprobs")
+    if not isinstance(tokens, list) or not isinstance(top, list):
+        return ()
+    entries: list[dict[str, Any]] = []
+    for index, token in enumerate(tokens[:_GUARD_VERDICT_SCAN_POSITIONS]):
+        if index >= len(top):
+            return ()
+        alternatives = top[index]
+        if not isinstance(alternatives, list):
+            return ()
+        parsed: list[dict[str, Any]] = []
+        for raw in [token, *alternatives]:
+            if not isinstance(raw, (list, tuple)) or len(raw) < 3 or not isinstance(raw[2], str):
+                return ()
+            value = raw[0]
+            if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value) or value > 0:
+                return ()
+            parsed.append({"token": raw[2], "logprob": value, "bytes": list(raw[2].encode("utf-8"))})
+        entries.append({**parsed[0], "top_logprobs": parsed[1:]})
+        if parsed[0]["token"].strip().lower() in ("yes", "no"):
+            break
+    return tuple(entries)
+
+
 def _p_unsafe_from_entry(entry: Any) -> float | None:
     """``P(unsafe)`` from one OpenAI-shape content token's ``top_logprobs``.
 
     Renormalises ``exp(lp_yes)/(exp(lp_yes)+exp(lp_no))`` over the ``yes``/``no``
-    verdict tokens in this single position. ``None`` when neither appears.
+    verdict tokens in this single position. Both probabilities are required.
     """
-    if not isinstance(entry, dict):
+    if not isinstance(entry, dict) or str(entry.get("token") or "").strip().lower() not in ("yes", "no"):
         return None
     lp_yes: float | None = None
     lp_no: float | None = None
-    for top in entry.get("top_logprobs") or []:
+    for top in [entry, *(entry.get("top_logprobs") or [])]:
         if not isinstance(top, dict):
             continue
         tok = str(top.get("token") or "").strip().lower()
         val = top.get("logprob")
-        if not isinstance(val, (int, float)) or isinstance(val, bool):
+        if tok not in ("yes", "no"):
             continue
+        if not isinstance(val, (int, float)) or isinstance(val, bool) or not math.isfinite(val) or val > 0:
+            return None
         if tok == "yes":
             lp_yes = val if lp_yes is None else max(lp_yes, val)
         elif tok == "no":
             lp_no = val if lp_no is None else max(lp_no, val)
-    if lp_yes is None and lp_no is None:
+    if lp_yes is None or lp_no is None:
         return None
-    ey = math.exp(lp_yes) if lp_yes is not None else 0.0
-    en = math.exp(lp_no) if lp_no is not None else 0.0
+    offset = max(lp_yes, lp_no)
+    ey = math.exp(lp_yes - offset)
+    en = math.exp(lp_no - offset)
     return ey / (ey + en) if (ey + en) > 0 else None
-
-
-def _verdict_position(chunk_logprobs: Any, scan_positions: int = _GUARD_VERDICT_SCAN_POSITIONS) -> int | None:
-    """Index of the first position (within ``scan_positions``) carrying a verdict
-    distribution, or ``None``. The consumed/rewritten verdict entry the streaming
-    intercept drops from client-requested logprobs.
-    """
-    if not chunk_logprobs:
-        return None
-    for idx, entry in enumerate(chunk_logprobs[:scan_positions]):
-        if _p_unsafe_from_entry(entry) is not None:
-            return idx
-    return None
 
 
 def _p_unsafe_from_verdict_logprobs(
@@ -1657,19 +2116,18 @@ def _p_unsafe_from_verdict_logprobs(
 
     ``chunk_logprobs`` is the OpenAI ``content`` shape this adapter builds —
     ``({"token", "logprob", "top_logprobs": [{"token", "logprob"}, ...]}, ...)``.
-    Scans the first up-to ``scan_positions`` content tokens for the first whose
-    ``top_logprobs`` carries a ``yes``/``no`` verdict distribution, then
+    Scans the first up-to ``scan_positions`` content tokens for the first sampled
+    ``yes``/``no`` verdict and validates its distribution, then
     renormalises ``exp(lp_yes)/(exp(lp_yes)+exp(lp_no))`` over those two tokens.
     Scanning past position 0 keeps a leading whitespace/punctuation/preamble
     token from hiding the verdict, matching the eval runner's ``content[:3]``
-    scan. ``None`` when no verdict token appears in range (caller keeps raw).
+    scan. ``None`` when no verdict token appears in range.
     """
     if not chunk_logprobs:
         return None
     for entry in chunk_logprobs[:scan_positions]:
-        p_unsafe = _p_unsafe_from_entry(entry)
-        if p_unsafe is not None:
-            return p_unsafe
+        if isinstance(entry, dict) and str(entry.get("token") or "").strip().lower() in ("yes", "no"):
+            return _p_unsafe_from_entry(entry)
     return None
 
 
@@ -1678,19 +2136,23 @@ def _thresholded_verdict(
     guard: dict[str, Any],
     scan_positions: int = _GUARD_VERDICT_SCAN_POSITIONS,
 ) -> str | None:
-    """The guard's thresholded verdict token, or ``None`` to leave output as-is.
+    """The guard's thresholded verdict token, or ``None`` for an invalid verdict.
 
     ``guard`` is ``{"threshold": float, "positive": "Yes", "negative": "No"}``
     (positive/negative default to Yes/No). Returns the ``positive`` label iff
     ``P(unsafe) >= threshold``, else ``negative``; ``None`` when P(unsafe) can't
-    be computed (no verdict logprobs within ``scan_positions``) so the raw model
-    token is preserved.
+    be computed from valid verdict logprobs within ``scan_positions``.
     """
     p_unsafe = _p_unsafe_from_verdict_logprobs(chunk_logprobs, scan_positions)
     if p_unsafe is None:
         return None
     threshold = guard.get("threshold")
-    if not isinstance(threshold, (int, float)) or isinstance(threshold, bool):
+    if (
+        not isinstance(threshold, (int, float))
+        or isinstance(threshold, bool)
+        or not math.isfinite(threshold)
+        or not 0 <= threshold <= 1
+    ):
         return None
     positive = str(guard.get("positive") or "Yes")
     negative = str(guard.get("negative") or "No")
@@ -1741,6 +2203,7 @@ def _chunk_from_sglang_event(
     OpenAI ``ChatCompletionTokenLogprob`` shape for the tokens
     introduced by *this* event.
     """
+    _raise_for_sglang_event_error(event)
     if not isinstance(event, dict):
         return None
     cumulative = event.get("text", "")
@@ -1823,20 +2286,18 @@ def _chunk_from_sglang_event(
                 chunk_logprobs = tuple(built)
 
     if is_terminal:
-        finish_reason: FinishReason
-        if raw_finish in ("stop", "length", "cancelled", "error"):
-            finish_reason = raw_finish  # type: ignore[assignment]
-        else:
-            finish_reason = "stop"
+        finish_reason = cast("Literal['stop', 'length']", raw_finish)
         prompt_tokens = meta.get("prompt_tokens") if isinstance(meta, dict) else None
         completion_tokens = meta.get("completion_tokens") if isinstance(meta, dict) else None
+        terminal_prompt_tokens = int(prompt_tokens) if isinstance(prompt_tokens, int) else None
         return GenerationChunk(
             text_delta=delta,
             done=True,
             is_first=is_first,
             finish_reason=finish_reason,
-            prompt_tokens=int(prompt_tokens) if isinstance(prompt_tokens, int) else None,
+            prompt_tokens=terminal_prompt_tokens,
             completion_tokens=int(completion_tokens) if isinstance(completion_tokens, int) else None,
+            cached_tokens=_cached_prompt_tokens(meta, terminal_prompt_tokens),
             logprobs=chunk_logprobs,
         )
 
@@ -1902,6 +2363,7 @@ def _parse_sglang_generate_response(result: Any) -> GenerationResult:
         msg = f"SGLang /generate returned unexpected shape: {type(result).__name__}"
         raise RuntimeError(msg)
 
+    _raise_for_sglang_event_error(result, terminal=True)
     text = result.get("text", "")
     if not isinstance(text, str):
         msg = "SGLang /generate response missing 'text'"
@@ -1914,11 +2376,11 @@ def _parse_sglang_generate_response(result: Any) -> GenerationResult:
     raw_finish = meta.get("finish_reason")
     if isinstance(raw_finish, dict):
         raw_finish = raw_finish.get("type")
-    finish_reason = raw_finish if raw_finish in ("stop", "length") else "stop"
+    finish_reason = cast("Literal['stop', 'length']", raw_finish)
 
     return GenerationResult(
         text=text,
-        finish_reason=finish_reason,  # type: ignore[arg-type]
+        finish_reason=finish_reason,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
     )

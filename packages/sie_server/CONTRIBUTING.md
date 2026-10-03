@@ -14,12 +14,12 @@ mise trust && mise install
 ## Running Tests
 
 ```bash
-mise run test packages/sie_server
+mise run test -- packages/sie_server
 ```
 
 ## Code Style
 
-- Format with `mise run lint -f`
+- Format with `mise run lint -- -f`
 - Type check with `mise run typecheck`
 
 ## Pull Requests

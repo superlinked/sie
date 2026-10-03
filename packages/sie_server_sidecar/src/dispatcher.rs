@@ -4,8 +4,9 @@
 //!
 //!   fetch -> decode + validate (subject, reply_subject, model_id)
 //!         -> group by model_id
-//!         -> per model (concurrent, capped by batch_semaphore):
-//!              EnsureModelReady
+//!         -> per model (concurrent):
+//!              EnsureModelReady (still loading -> park the group in its own task)
+//!              then, capped by batch_semaphore:
 //!              apply per-model batch_budget (overflow -> NAK fast)
 //!              fan out encode/score/extract concurrently:
 //!                 resolve payload -> IPC ProcessXxxBatch -> publish + ACK
@@ -54,6 +55,11 @@ use crate::scheduler::{
 use crate::shutdown::Shutdown;
 use crate::subject::{extract_model_id, is_worker_direct_work_subject};
 use crate::tokenize::TokenizerRegistry;
+use crate::work_deadline::{
+    apparent_age_ms, unix_now_s, ClockSkewSignal, DeadlineStatus, WorkDeadlinePolicy,
+    CLOCK_SKEW_WARNINGS, EXPIRED_DROP_WARNINGS, EXPIRED_EXECUTE_WARNINGS,
+    REJECTED_DEADLINE_WARNINGS,
+};
 use crate::work_types::WorkItem;
 use half::f16;
 
@@ -63,7 +69,7 @@ const MODEL_LOADING_ERROR_CODE: &str = "MODEL_LOADING";
 /// executor reports [`ReadinessState::Failed`] (registry holds a PERMANENT
 /// `LoadFailure`). The gateway maps this code to a typed HTTP 502 via
 /// `build_model_load_failed_response` (unary/batch path) — the fast-path twin
-/// of the #1786 `run_batch` mapping. Kept byte-identical to the gateway
+/// of the `run_batch` mapping. Kept byte-identical to the gateway
 /// constant `sie_gateway::handlers::proxy::MODEL_LOAD_FAILED_ERROR_CODE` and
 /// the Python `ErrorCode.MODEL_LOAD_FAILED`.
 const MODEL_LOAD_FAILED_ERROR_CODE: &str = "MODEL_LOAD_FAILED";
@@ -252,6 +258,7 @@ struct GenerateDeliveryLogContext {
     work_item_id: String,
     request_id: String,
     model_id: String,
+    reply_subject: String,
     delivery: DeliveryContext,
 }
 
@@ -356,6 +363,22 @@ fn caller_item_id_from_value(value: &MsgValue) -> Option<String> {
 /// True if `reply_subject` is acceptable for use on a `WorkItem`.
 /// Empty is allowed (fire-and-forget). Non-empty subjects must start
 /// with `_INBOX.` so malicious producers can't redirect results.
+/// The first `Nats-` header on a work delivery other than `Nats-Msg-Id`.
+///
+/// The gateway publishes work with at most `Nats-Msg-Id`. The NATS server adds
+/// other `Nats-` headers when it copies stored messages into a work stream on
+/// a user's behalf, past that user's publish permissions: a stream republish
+/// adds `Nats-Stream`, and a stream source adds `Nats-Stream-Source`.
+pub fn unexpected_work_header(headers: Option<&async_nats::HeaderMap>) -> Option<String> {
+    headers?.iter().find_map(|(name, _)| {
+        let name: &str = name.as_ref();
+        let nats_header = name
+            .get(..5)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("nats-"));
+        (nats_header && !name.eq_ignore_ascii_case("Nats-Msg-Id")).then(|| name.to_string())
+    })
+}
+
 pub(crate) fn reply_subject_is_safe(reply_subject: &str) -> bool {
     reply_subject.is_empty() || reply_subject.starts_with(INBOX_PREFIX)
 }
@@ -578,9 +601,17 @@ pub struct Dispatcher {
     /// `SIE_PULL_QUANTUM_INCLUDE_QUEUE_MS=1`. See
     /// `crate::pull_quantum_includes_queue_ms` for the rationale.
     pub latency_tracker: Arc<Mutex<LatencyTracker>>,
-    /// Caps concurrent model-group processing. Acquired once per group,
-    /// held for the lifetime of the encode/score/extract fan-out.
+    /// Caps concurrent model-group processing. Acquired once per group
+    /// after its model is ready, held for the lifetime of the
+    /// encode/score/extract fan-out.
     pub batch_semaphore: Arc<Semaphore>,
+    /// Caps queue items parked while their model loads, at one fetch
+    /// (`SIE_NATS_FETCH_BUDGET`). A parked item gives its pull-loop admission
+    /// permit back and holds one of these instead, so a cold model cannot
+    /// stop the pull loop admitting work for models that are already loaded.
+    parked_item_permits: Arc<Semaphore>,
+    /// Groups parked while their model loads, joined at shutdown.
+    parked_group_handles: Arc<std::sync::Mutex<Vec<JoinHandle<()>>>>,
     /// Bounds the largest CPU allocation path independently of batch fan-out.
     /// One 12-minute 48 kHz decode can transiently hold about 230 MiB.
     audio_prep_semaphore: Arc<Semaphore>,
@@ -624,6 +655,8 @@ pub struct Dispatcher {
     pub generation_handles: Arc<Mutex<Vec<JoinHandle<()>>>>,
     pub batch_cancel_state: BatchCancelState,
     pub request_cancel_state: RequestCancelState,
+    /// Gateway-stamped deadline enforcement, read from env at construction.
+    pub work_deadline: WorkDeadlinePolicy,
 }
 
 impl Dispatcher {
@@ -670,6 +703,8 @@ impl Dispatcher {
             runtime_state,
             latency_tracker,
             batch_semaphore: Arc::new(Semaphore::new(default_max_concurrent_batches())),
+            parked_item_permits: Arc::new(Semaphore::new(default_batch_budget().max(1) as usize)),
+            parked_group_handles: Arc::new(std::sync::Mutex::new(Vec::new())),
             audio_prep_semaphore: Arc::new(Semaphore::new(default_audio_prep_permits())),
             tokenizer_registry,
             scheduler_registry,
@@ -680,6 +715,7 @@ impl Dispatcher {
             generation_handles: Arc::new(Mutex::new(Vec::new())),
             batch_cancel_state,
             request_cancel_state,
+            work_deadline: WorkDeadlinePolicy::from_env(),
         }
     }
 }
@@ -698,6 +734,12 @@ impl Dispatcher {
         Fut: std::future::Future<Output = Result<(), String>>,
     {
         let model_id = wi.model_id.clone();
+        if self.model_is_unsupported(&model_id) {
+            return Err(GenerateDispatchError::new(
+                "BUNDLE_CONFIG_MISMATCH",
+                "worker configuration cannot serve this model",
+            ));
+        }
         match self.backend.ensure_model_ready(&model_id).await {
             Ok(response) => match response.state {
                 ReadinessState::Ready => {}
@@ -737,7 +779,7 @@ impl Dispatcher {
 
         let _execution_guard = if let Some(state) = self.config_apply_state.as_ref() {
             let guard = state.lock_execution().await;
-            if !state.accepts_bundle_config_hash(&wi.bundle_config_hash) {
+            if !state.accepts_work(&wi.bundle_config_hash, &wi.model_id) {
                 return Err(GenerateDispatchError::new(
                     "BUNDLE_CONFIG_MISMATCH",
                     "worker configuration changed before generation execution",
@@ -759,6 +801,13 @@ impl Dispatcher {
         let state = Arc::new(Mutex::new(LocalGenerateState::default()));
         let callback_state = Arc::clone(&state);
 
+        // The local-ingest streaming lane's execution-commit point, past its
+        // own bundle-hash barrier above. Local ingest bypasses the broker, so
+        // these observations are normally near zero — which is the correct
+        // answer for this lane, not a reason to omit it. Omitting it would
+        // rebuild the blind spot this metric was fixed for: a generation path
+        // that executes real work and reports nothing.
+        record_work_item_ages(&self.runtime_state.telemetry, std::iter::once(&wi));
         let _inflight_guard = InflightBatchGuard::enter(Arc::clone(&self.runtime_state));
         let result = self
             .worker_pool
@@ -865,6 +914,12 @@ impl Dispatcher {
             })
     }
 
+    fn model_is_unsupported(&self, model_id: &str) -> bool {
+        self.config_apply_state
+            .as_ref()
+            .is_some_and(|state| state.model_is_unsupported(model_id))
+    }
+
     fn current_bundle_config_hash(&self) -> Option<String> {
         self.config_apply_state
             .as_ref()
@@ -903,6 +958,9 @@ impl Dispatcher {
         delivery: &Delivery,
         stage: &'static str,
     ) -> bool {
+        if self.settle_if_expired(wi, delivery, stage).await {
+            return true;
+        }
         let Some(scope) = self.cancellation_for(
             &wi.router_id,
             &wi.request_id,
@@ -927,6 +985,128 @@ impl Dispatcher {
             }
         }
         true
+    }
+
+    /// Handle a NATS delivery whose gateway deadline has passed. With
+    /// enforcement on it is ACK-dropped; otherwise it is counted and executed.
+    /// Local-ingest callers bound their own calls and always get a result, and
+    /// generation keeps its own cancellation contract.
+    async fn settle_if_expired(
+        &self,
+        wi: &WorkItem,
+        delivery: &Delivery,
+        stage: &'static str,
+    ) -> bool {
+        if wi.operation == "generate" || !matches!(delivery, Delivery::Nats(..)) {
+            return false;
+        }
+        let now = unix_now_s();
+        let DeadlineStatus::Expired(overdue) =
+            self.work_deadline.status(wi.deadline, wi.timestamp, now)
+        else {
+            return false;
+        };
+        let telemetry = &self.runtime_state.telemetry;
+        if !self.work_deadline.enforce {
+            if stage == "before_ipc" {
+                telemetry.work_item_deadline_exceeded(&wi.operation, "executed");
+                if let Some(suppressed) = EXPIRED_EXECUTE_WARNINGS.allow() {
+                    warn!(
+                        request_id = %wi.request_id,
+                        work_item_id = %wi.work_item_id,
+                        operation = %wi.operation,
+                        overdue_ms = overdue.as_millis() as u64,
+                        apparent_age_ms = apparent_age_ms(wi.timestamp, now),
+                        suppressed,
+                        "executing work item past its deadline because SIE_WORK_DEADLINE_ENFORCE is off"
+                    );
+                }
+            }
+            return false;
+        }
+        telemetry.work_item_deadline_exceeded(&wi.operation, "dropped");
+        if let Some(suppressed) = EXPIRED_DROP_WARNINGS.allow() {
+            warn!(
+                request_id = %wi.request_id,
+                work_item_id = %wi.work_item_id,
+                operation = %wi.operation,
+                overdue_ms = overdue.as_millis() as u64,
+                apparent_age_ms = apparent_age_ms(wi.timestamp, now),
+                stage,
+                suppressed,
+                "ACK-dropping work item past its deadline"
+            );
+        }
+        if let Err(e) = ack_with_reason(delivery, telemetry, "deadline_exceeded").await {
+            warn!(error = %e, stage, "ack failed on expired work item");
+        }
+        true
+    }
+
+    /// Warn when a delivery's deadline is ignored for its budget, or when its
+    /// timestamps show that this worker's clock and the gateway's disagree by
+    /// more than the skew tolerance.
+    fn observe_deadline_clock(&self, wi: &WorkItem, delivery: &Delivery) {
+        let Delivery::Nats(msg, ..) = delivery else {
+            return;
+        };
+        if wi.operation == "generate" {
+            return;
+        }
+        if let Some(budget_s) = self
+            .work_deadline
+            .rejected_budget_s(wi.deadline, wi.timestamp)
+        {
+            if let Some(suppressed) = REJECTED_DEADLINE_WARNINGS.allow() {
+                warn!(
+                    request_id = %wi.request_id,
+                    deadline_budget_s = budget_s,
+                    max_budget_s = self.work_deadline.max_budget.as_secs(),
+                    suppressed,
+                    "ignoring a work item deadline that is not within SIE_WORK_DEADLINE_MAX_BUDGET_S of its timestamp; raise the setting to at least the gateway request timeout"
+                );
+            }
+            return;
+        }
+        let now = unix_now_s();
+        let first_delivery = msg.info().is_ok_and(|info| info.delivered == 1);
+        let Some(signal) =
+            self.work_deadline
+                .clock_skew_signal(wi.deadline, wi.timestamp, first_delivery, now)
+        else {
+            return;
+        };
+        let Some(suppressed) = CLOCK_SKEW_WARNINGS.allow() else {
+            return;
+        };
+        match signal {
+            ClockSkewSignal::TimestampAhead { ahead_ms } => warn!(
+                request_id = %wi.request_id,
+                ahead_ms,
+                skew_tolerance_ms = self.work_deadline.skew_tolerance.as_millis() as u64,
+                suppressed,
+                "work item was published later than this worker's clock reads; the worker clock is likely behind the gateway clock"
+            ),
+            ClockSkewSignal::FirstDeliveryExpired { overdue_ms } => warn!(
+                request_id = %wi.request_id,
+                overdue_ms,
+                apparent_age_ms = apparent_age_ms(wi.timestamp, now),
+                suppressed,
+                "first delivery of a work item is already past its deadline; it waited in the stream longer than its budget or this worker's clock is ahead of the gateway clock"
+            ),
+        }
+    }
+
+    /// Keep a held NATS delivery's JetStream lease alive until it settles or
+    /// its lease horizon passes, so slow queues and long backend calls do not
+    /// trigger a redelivery of work that is still running.
+    fn hold_progress_lease(&self, wi: &WorkItem, delivery: &mut Delivery) {
+        if let Some(horizon) =
+            self.work_deadline
+                .lease_horizon(wi.deadline, wi.timestamp, unix_now_s())
+        {
+            delivery.hold_progress_lease(horizon, &self.runtime_state.telemetry);
+        }
     }
 
     async fn retain_uncancelled(
@@ -975,6 +1155,8 @@ fn classify_cancellation(
         .then_some(WorkCancellation::BatchDirect)
 }
 
+/// First work item this worker must not execute under its current config: an
+/// unknown bundle config hash, or a model the worker reported it cannot serve.
 fn unknown_bundle_config_hash<'a>(
     items: impl IntoIterator<Item = &'a WorkItem>,
     state: Option<&ConfigApplyState>,
@@ -983,7 +1165,7 @@ fn unknown_bundle_config_hash<'a>(
     let mut first_unknown: Option<&'a str> = None;
     let mut count = 0usize;
     for wi in items {
-        if !state.accepts_bundle_config_hash(&wi.bundle_config_hash) {
+        if !state.accepts_work(&wi.bundle_config_hash, &wi.model_id) {
             count += 1;
             if first_unknown.is_none() {
                 first_unknown = Some(wi.bundle_config_hash.as_str());
@@ -991,6 +1173,18 @@ fn unknown_bundle_config_hash<'a>(
         }
     }
     first_unknown.map(|hash| (hash, count))
+}
+
+/// Telemetry reason for NAKing `model_id` work that a config barrier refused.
+/// A model the worker reports it cannot serve is `model_unsupported`, as it is
+/// at intake and before readiness; any other refusal is an old bundle hash
+/// (`retry`).
+fn barrier_nak_reason(state: Option<&ConfigApplyState>, model_id: &str) -> &'static str {
+    if state.is_some_and(|state| state.model_is_unsupported(model_id)) {
+        "model_unsupported"
+    } else {
+        "retry"
+    }
 }
 
 impl Dispatcher {
@@ -1009,8 +1203,10 @@ impl Dispatcher {
     ///
     /// Concurrency:
     /// * group by `model_id` only.
-    /// * model groups run concurrently, capped by `batch_semaphore` to
-    ///   avoid ACK-timeout storms.
+    /// * model groups run concurrently; once a group's model is ready its
+    ///   dispatch is capped by `batch_semaphore` to avoid ACK-timeout storms,
+    ///   and a group whose model is still loading is parked in its own task
+    ///   so this call does not wait for the load.
     /// * within a model, encode/score/extract run concurrently via
     ///   `tokio::join!` so slow payload fetches don't block other ops.
     pub(crate) async fn handle_batch(self: &Arc<Self>, messages: Vec<QueuedMessage>) {
@@ -1028,6 +1224,22 @@ impl Dispatcher {
             self.runtime_state
                 .telemetry
                 .nats_received(msg.info().ok().map(|info| info.delivered as u64));
+            if let Some(header) = unexpected_work_header(msg.headers.as_ref()) {
+                warn!(
+                    subject = %msg.subject,
+                    header = %header,
+                    "rejecting work the NATS server copied from another stream — ACKing to drop",
+                );
+                if let Err(e) = ack(
+                    &Delivery::Nats(msg, admission_permit, None),
+                    &self.runtime_state.telemetry,
+                )
+                .await
+                {
+                    warn!(error = %e, "ack failed on drop");
+                }
+                continue;
+            }
             // Source of truth for routing is the NATS subject (JetStream
             // already used it to dispatch to this consumer). If the subject
             // doesn't yield a model_id, we can't trust the payload either,
@@ -1040,7 +1252,7 @@ impl Dispatcher {
                         "could not extract model_id from subject — NAKing for redelivery",
                     );
                     nak_one(
-                        &Delivery::Nats(msg, admission_permit),
+                        &Delivery::Nats(msg, admission_permit, None),
                         base_delay_ms,
                         &self.runtime_state.telemetry,
                     )
@@ -1059,7 +1271,7 @@ impl Dispatcher {
                             "rejecting WorkItem with suspicious reply_subject — ACKing to drop",
                         );
                         match ack(
-                            &Delivery::Nats(msg, admission_permit),
+                            &Delivery::Nats(msg, admission_permit, None),
                             &self.runtime_state.telemetry,
                         )
                         .await
@@ -1071,7 +1283,8 @@ impl Dispatcher {
                         }
                         continue;
                     }
-                    let delivery = Delivery::Nats(msg, admission_permit);
+                    let mut delivery = Delivery::Nats(msg, admission_permit, None);
+                    self.observe_deadline_clock(&wi, &delivery);
                     if self.settle_if_cancelled(&wi, &delivery, "intake").await {
                         continue;
                     }
@@ -1105,6 +1318,25 @@ impl Dispatcher {
                         );
                         wi.model_id = subject_model;
                     }
+                    if self.model_is_unsupported(&wi.model_id) {
+                        debug!(
+                            work_item_id = %wi.work_item_id,
+                            request_id = %wi.request_id,
+                            model = %wi.model_id,
+                            "worker cannot serve this model under its current config — NAKing for redelivery"
+                        );
+                        nak_one_with_reason(
+                            &delivery,
+                            base_delay_ms,
+                            &self.runtime_state.telemetry,
+                            "model_unsupported",
+                        )
+                        .await;
+                        continue;
+                    }
+                    if wi.operation != "generate" {
+                        self.hold_progress_lease(&wi, &mut delivery);
+                    }
                     decoded.push((wi, delivery));
                 }
                 Err(e) => {
@@ -1114,7 +1346,7 @@ impl Dispatcher {
                     // item on a transient msgpack glitch.
                     warn!(error = %e, subject = %msg.subject, "failed to decode WorkItem — NAKing for redelivery");
                     nak_one(
-                        &Delivery::Nats(msg, admission_permit),
+                        &Delivery::Nats(msg, admission_permit, None),
                         base_delay_ms,
                         &self.runtime_state.telemetry,
                     )
@@ -1153,7 +1385,7 @@ impl Dispatcher {
                     // Generation bypasses the scheduler; re-bundle the permit
                     // with the message so intake capacity stays held until
                     // the generate task settles the delivery.
-                    Delivery::Nats(msg, permit) => {
+                    Delivery::Nats(msg, permit, _) => {
                         generate_items.push((wi, QueuedMessage::new(msg, permit)))
                     }
                     delivery @ Delivery::Local(_) => {
@@ -1196,22 +1428,7 @@ impl Dispatcher {
         for (model_id, items) in model_groups {
             let this = Arc::clone(self);
             futs.push(async move {
-                let permit = match this.batch_semaphore.clone().acquire_owned().await {
-                    Ok(p) => p,
-                    Err(_) => {
-                        warn!(model = %model_id, "batch semaphore closed — dropping group");
-                        return;
-                    }
-                };
-                let count_model_group_inflight = this.scheduler_registry.is_none();
-                if count_model_group_inflight {
-                    this.runtime_state.inflight_batches.inc();
-                }
-                let result = this.handle_model_group(&model_id, items).await;
-                if count_model_group_inflight {
-                    this.runtime_state.inflight_batches.dec();
-                }
-                drop(permit);
+                let result = this.handle_model_group(&model_id, items, None).await;
                 if let Err(e) = result {
                     warn!(model = %model_id, error = %ErrChain(&e), "model group handling failed");
                 }
@@ -1258,6 +1475,21 @@ impl Dispatcher {
             "generate delivery received"
         );
 
+        if self.model_is_unsupported(&model_id) {
+            info!(
+                work_item_id = %wi.work_item_id,
+                model = %model_id,
+                "worker cannot serve this model under its current config — NAKing before readiness"
+            );
+            nak_msg_with_reason(
+                &msg,
+                base_delay_ms,
+                &self.runtime_state.telemetry,
+                "model_unsupported",
+            )
+            .await;
+            return;
+        }
         let readiness_resp = match self.backend.ensure_model_ready(&model_id).await {
             Ok(r) => r,
             Err(e) => {
@@ -1439,7 +1671,7 @@ impl Dispatcher {
             }
             ReadinessState::Failed => {
                 // Terminal load failure (permanent cooldown). Re-driving would
-                // hang the streaming client forever (#1786 fast-path gap), so
+                // hang the streaming client forever, so
                 // publish a terminal MODEL_LOAD_FAILED chunk + ACK — the
                 // gateway's streaming collector maps the code to a typed
                 // failure exactly like the batch path.
@@ -1652,14 +1884,17 @@ impl Dispatcher {
         // a queued A request can never execute after the worker advances to B.
         let _execution_guard = if let Some(state) = self.config_apply_state.as_ref() {
             let guard = state.lock_execution().await;
-            if !state.accepts_bundle_config_hash(&wi.bundle_config_hash) {
+            if !state.accepts_work(&wi.bundle_config_hash, &model_id) {
+                let reason = barrier_nak_reason(Some(state), &model_id);
                 info!(
                     model = %model_id,
                     expected_hash = %wi.bundle_config_hash,
                     local_hash = %state.current_bundle_config_hash(),
-                    "generate bundle config hash changed before execution — NAKing"
+                    reason,
+                    "generate work refused at the config barrier before execution — NAKing"
                 );
-                nak_msg(&msg, base_delay_ms, &self.runtime_state.telemetry).await;
+                nak_msg_with_reason(&msg, base_delay_ms, &self.runtime_state.telemetry, reason)
+                    .await;
                 return;
             }
             Some(guard)
@@ -1729,6 +1964,7 @@ impl Dispatcher {
             work_item_id: wi.work_item_id.clone(),
             request_id: wi.request_id.clone(),
             model_id: model_id.clone(),
+            reply_subject: wi.reply_subject.clone(),
             delivery,
         });
         let executed_bundle_config_hash: Arc<str> = Arc::from(wi.bundle_config_hash.clone());
@@ -1736,6 +1972,11 @@ impl Dispatcher {
         let msg_for_events = Arc::clone(&msg);
         let delivery_log_for_events = Arc::clone(&delivery_log);
         let telemetry_for_events = self.runtime_state.telemetry.clone();
+        // Generation's execution-commit point. It never reaches
+        // `apply_outcome`, so without this call the most expensive operation in
+        // the system — and the one B2 singles out as excluded from
+        // cancellation — would be entirely absent from the age distribution.
+        record_work_item_ages(&self.runtime_state.telemetry, std::iter::once(&wi));
         self.runtime_state.inflight_batches.inc();
         let result = self
             .worker_pool
@@ -1810,10 +2051,146 @@ impl Dispatcher {
         }
     }
 
+    /// Move a group whose model is still loading into its own task, so the
+    /// wait holds no batch permit, keeps no pull-loop dispatch task alive,
+    /// and gives back each item's pull-loop admission permit. Items trade
+    /// that permit for a parked-item permit; items beyond the parked-item
+    /// capacity are NAKed for redelivery rather than held.
+    fn park_model_group(self: &Arc<Self>, model_id: &str, items: Vec<(WorkItem, Delivery)>) {
+        let mut parked = Vec::with_capacity(items.len());
+        let mut overflow = Vec::new();
+        for (wi, mut delivery) in items {
+            if delivery.holds_admission_permit() {
+                match Arc::clone(&self.parked_item_permits).try_acquire_owned() {
+                    Ok(permit) => delivery.exchange_admission_permit(permit),
+                    Err(_) => {
+                        overflow.push((wi, delivery));
+                        continue;
+                    }
+                }
+            }
+            parked.push((wi, delivery));
+        }
+        // Parked items are progress-ACKed, so JetStream never redelivers
+        // them on its own; bound the wait by the envelope it would give an
+        // unacknowledged message instead.
+        let ready_deadline =
+            tokio::time::Instant::now() + crate::nats_consumer::redelivery_envelope();
+        let this = Arc::clone(self);
+        let model = model_id.to_string();
+        let handle = tokio::spawn(async move {
+            if !overflow.is_empty() {
+                info!(
+                    model = %model,
+                    overflow = overflow.len(),
+                    "parked-item capacity exhausted while the model loads — NAKing overflow"
+                );
+                nak_all(
+                    &overflow,
+                    base_nak_delay_ms(),
+                    &this.runtime_state.telemetry,
+                )
+                .await;
+            }
+            if parked.is_empty() {
+                return;
+            }
+            if let Err(e) = this
+                .handle_model_group(&model, parked, Some(ready_deadline))
+                .await
+            {
+                warn!(model = %model, error = %ErrChain(&e), "parked model group handling failed");
+            }
+        });
+        let mut handles = self
+            .parked_group_handles
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        handles.retain(|h| !h.is_finished());
+        handles.push(handle);
+    }
+
+    /// `EnsureModelReady` for `items`. A parked group's call is bounded by its
+    /// readiness deadline and progress-ACKs the group while it is pending, so
+    /// a slow call neither outlives the deadline nor lets JetStream redeliver
+    /// the group. `None` when the group was NAKed instead: the worker lists the
+    /// model in `unsupported_models` (a config commit can add it after
+    /// intake), the deadline passed first, a progress ACK failed, or shutdown
+    /// requested redelivery.
+    async fn ensure_model_ready_by(
+        &self,
+        model_id: &str,
+        items: &[(WorkItem, Delivery)],
+        ready_deadline: Option<tokio::time::Instant>,
+    ) -> Option<Result<crate::ipc_types::EnsureModelReadyResponse, BackendError>> {
+        if self.model_is_unsupported(model_id) {
+            info!(
+                model = %model_id,
+                group_size = items.len(),
+                "worker cannot serve this model under its current config — NAKing group before readiness"
+            );
+            for (_, delivery) in items {
+                nak_one_with_reason(
+                    delivery,
+                    base_nak_delay_ms(),
+                    &self.runtime_state.telemetry,
+                    "model_unsupported",
+                )
+                .await;
+            }
+            return None;
+        }
+        let readiness = self.backend.ensure_model_ready(model_id);
+        let Some(deadline) = ready_deadline else {
+            return Some(readiness.await);
+        };
+        tokio::pin!(readiness);
+        let progress_every = Duration::from_secs(crate::nats_consumer::ACK_WAIT_SECS)
+            / READINESS_PROGRESS_ACK_WAIT_FRACTION as u32;
+        loop {
+            let next_progress = (tokio::time::Instant::now() + progress_every).min(deadline);
+            let shutdown_wait = async {
+                match self.shutdown.as_ref() {
+                    Some(shutdown) => shutdown.wait().await,
+                    None => std::future::pending().await,
+                }
+            };
+            tokio::select! {
+                // A ready response must not start work when shutdown is also ready.
+                biased;
+                () = shutdown_wait => {
+                    nak_all(items, NAK_DELAY_DRAINING_MS, &self.runtime_state.telemetry).await;
+                    return None;
+                }
+                result = &mut readiness => return Some(result),
+                () = tokio::time::sleep_until(next_progress) => {
+                    if next_progress >= deadline {
+                        self.nak_group_past_ready_deadline(model_id, items).await;
+                        return None;
+                    }
+                    if !progress_all(items, &self.runtime_state.telemetry).await {
+                        nak_all(items, base_nak_delay_ms(), &self.runtime_state.telemetry).await;
+                        return None;
+                    }
+                }
+            }
+        }
+    }
+
+    async fn nak_group_past_ready_deadline(&self, model_id: &str, items: &[(WorkItem, Delivery)]) {
+        info!(
+            model = %model_id,
+            group_size = items.len(),
+            "model not ready within the parked readiness wait — NAKing group"
+        );
+        nak_all(items, base_nak_delay_ms(), &self.runtime_state.telemetry).await;
+    }
+
     async fn handle_model_group(
         self: &Arc<Self>,
         model_id: &str,
         items: Vec<(WorkItem, Delivery)>,
+        ready_deadline: Option<tokio::time::Instant>,
     ) -> Result<(), DispatchError> {
         let mut items = self
             .retain_uncancelled(items, "before_model_readiness")
@@ -1835,9 +2212,15 @@ impl Dispatcher {
                 group_size,
                 local_hash = %local_hash,
                 expected_hash,
-                "request bundle config hash is unknown locally — NAKing group"
+                "request bundle config hash is unknown locally, or the model is unsupported — NAKing group"
             );
-            nak_all(&items, base_delay_ms, &self.runtime_state.telemetry).await;
+            nak_all_at_barrier(
+                &items,
+                base_delay_ms,
+                &self.runtime_state.telemetry,
+                self.config_apply_state.as_deref(),
+            )
+            .await;
             return Ok(());
         }
         let readiness_resp = loop {
@@ -1845,7 +2228,13 @@ impl Dispatcher {
             if items.is_empty() {
                 return Ok(());
             }
-            let readiness_resp = match self.backend.ensure_model_ready(model_id).await {
+            let Some(readiness) = self
+                .ensure_model_ready_by(model_id, &items, ready_deadline)
+                .await
+            else {
+                return Ok(());
+            };
+            let readiness_resp = match readiness {
                 Ok(r) => r,
                 Err(e) => {
                     warn!(
@@ -1864,7 +2253,7 @@ impl Dispatcher {
             if readiness_resp.state == ReadinessState::Failed {
                 // Terminal load failure (permanent cooldown on the Python
                 // registry). Re-driving `EnsureModelReady` would loop forever
-                // and hang the client (#1786 fast-path gap), so dead-letter
+                // and hang the client, so dead-letter
                 // the whole group as `MODEL_LOAD_FAILED` — the gateway maps
                 // that code to a typed 502, exactly like the batch/`run_batch`
                 // path. ACK each item after publishing its error so JetStream
@@ -1880,6 +2269,14 @@ impl Dispatcher {
             if let Some(delay_ms) =
                 readiness_progress_delay_ms(&readiness_resp.state, base_delay_ms)
             {
+                let Some(ready_deadline) = ready_deadline else {
+                    self.park_model_group(model_id, items);
+                    return Ok(());
+                };
+                if tokio::time::Instant::now() >= ready_deadline {
+                    self.nak_group_past_ready_deadline(model_id, &items).await;
+                    return Ok(());
+                }
                 info!(
                     model = %model_id,
                     group_size,
@@ -1906,6 +2303,21 @@ impl Dispatcher {
             nak_all(&items, base_delay_ms, &self.runtime_state.telemetry).await;
             return Ok(());
         };
+
+        // A parked group's last progress ACK may be a full readiness delay
+        // old; refresh it so the batch-permit wait starts from a full ACK wait.
+        if ready_deadline.is_some() && !progress_all(&items, &self.runtime_state.telemetry).await {
+            nak_all(&items, base_delay_ms, &self.runtime_state.telemetry).await;
+            return Ok(());
+        }
+        let Ok(_batch_permit) = self.batch_semaphore.acquire().await else {
+            warn!(model = %model_id, "batch semaphore closed — dropping group");
+            return Ok(());
+        };
+        let _inflight_batch = self
+            .scheduler_registry
+            .is_none()
+            .then(|| InflightBatchGuard::enter(Arc::clone(&self.runtime_state)));
 
         items = self
             .retain_uncancelled(items, "after_model_readiness")
@@ -2156,16 +2568,17 @@ impl Dispatcher {
                     expected_hash,
                     unknown_hash_count,
                     local_hash = %state.current_bundle_config_hash(),
-                    "encode bundle config hash changed before execution — NAKing"
+                    "encode work refused at the config barrier before execution — NAKing"
                 );
                 let msgs_only: Vec<(WorkItem, Delivery)> = resolved
                     .into_iter()
                     .map(|(wi, delivery, _, _, _)| (wi, delivery))
                     .collect();
-                nak_all(
+                nak_all_at_barrier(
                     &msgs_only,
                     base_nak_delay_ms(),
                     &self.runtime_state.telemetry,
+                    Some(state),
                 )
                 .await;
                 return Ok(());
@@ -2189,6 +2602,10 @@ impl Dispatcher {
         if resolved.is_empty() {
             return Ok(());
         }
+        record_work_item_ages(
+            &self.runtime_state.telemetry,
+            resolved.iter().map(|(wi, _, _, _, _)| wi),
+        );
 
         let batch_items: Vec<EncodeBatchItem> = resolved
             .iter()
@@ -2320,16 +2737,17 @@ impl Dispatcher {
                     expected_hash,
                     unknown_hash_count,
                     local_hash = %state.current_bundle_config_hash(),
-                    "score bundle config hash changed before execution — NAKing"
+                    "score work refused at the config barrier before execution — NAKing"
                 );
                 let msgs_only: Vec<(WorkItem, Delivery)> = prepared
                     .into_iter()
                     .map(|(wi, delivery, _, _, _)| (wi, delivery))
                     .collect();
-                nak_all(
+                nak_all_at_barrier(
                     &msgs_only,
                     base_nak_delay_ms(),
                     &self.runtime_state.telemetry,
+                    Some(state),
                 )
                 .await;
                 return Ok(());
@@ -2353,6 +2771,10 @@ impl Dispatcher {
         if prepared.is_empty() {
             return Ok(());
         }
+        record_work_item_ages(
+            &self.runtime_state.telemetry,
+            prepared.iter().map(|(wi, _, _, _, _)| wi),
+        );
 
         // Rust-tokenisation wire-noop on score: Python's
         // `_process_single_score` does not consume `prepared_tokens`
@@ -2511,16 +2933,17 @@ impl Dispatcher {
                     expected_hash,
                     unknown_hash_count,
                     local_hash = %state.current_bundle_config_hash(),
-                    "extract bundle config hash changed before execution — NAKing"
+                    "extract work refused at the config barrier before execution — NAKing"
                 );
                 let msgs_only: Vec<(WorkItem, Delivery)> = resolved
                     .into_iter()
                     .map(|(wi, delivery, _, _, _)| (wi, delivery))
                     .collect();
-                nak_all(
+                nak_all_at_barrier(
                     &msgs_only,
                     base_nak_delay_ms(),
                     &self.runtime_state.telemetry,
+                    Some(state),
                 )
                 .await;
                 return Ok(());
@@ -2544,6 +2967,10 @@ impl Dispatcher {
         if resolved.is_empty() {
             return Ok(());
         }
+        record_work_item_ages(
+            &self.runtime_state.telemetry,
+            resolved.iter().map(|(wi, _, _, _, _)| wi),
+        );
 
         let mut batch_items = Vec::with_capacity(resolved.len());
         for (wi, _, item, prepared_audio, fm) in &mut resolved {
@@ -2714,6 +3141,11 @@ impl Dispatcher {
             Disposition::PublishAndAck | Disposition::PublishErrorAndAck => {
                 if should_publish(&outcome.disposition) {
                     let queue_ms = queue_ms_from(wi.timestamp);
+                    // NOTE: `sie.worker.work_item.age` is NOT recorded here.
+                    // It is recorded at each execution-commit point (see
+                    // [`record_work_item_ages`]) so that every operation shares
+                    // one definition and generation, which never reaches this
+                    // function, is not silently missing from the distribution.
                     let timings = Some(Timings {
                         queue_ms,
                         payload_fetch_ms,
@@ -2901,7 +3333,7 @@ impl Dispatcher {
     /// Dead-letter a whole (op, model) group on a TERMINAL load failure:
     /// publish a typed `MODEL_LOAD_FAILED` error `WorkResult` for every item
     /// and ACK it. This is the [`ReadinessState::Failed`] fast-path twin of
-    /// the batch/`run_batch` `MODEL_LOAD_FAILED` mapping (#1786) — the gateway
+    /// the batch/`run_batch` `MODEL_LOAD_FAILED` mapping — the gateway
     /// turns the code into an HTTP 502 so the client fails fast instead of
     /// blocking while the sidecar re-drives a doomed model forever.
     ///
@@ -3090,6 +3522,45 @@ impl Dispatcher {
     pub async fn take_generation_handles(&self) -> Vec<JoinHandle<()>> {
         let mut guard = self.generation_handles.lock().await;
         guard.drain(..).collect()
+    }
+
+    /// Wait, up to `deadline`, for groups parked while their model loads.
+    /// Called at shutdown after the pull loops stop and before the scheduler
+    /// drain: a parked group sees the shutdown signal, NAKs its items and
+    /// exits, or enqueues them if its model became ready first.
+    pub async fn join_parked_groups(&self, deadline: Duration) {
+        let handles: Vec<JoinHandle<()>> = self
+            .parked_group_handles
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .drain(..)
+            .collect();
+        if handles.is_empty() {
+            return;
+        }
+        let mut pending = handles;
+        let joined = tokio::time::timeout(deadline, async {
+            while let Some(handle) = pending.last_mut() {
+                let _ = handle.await;
+                pending.pop();
+            }
+        })
+        .await;
+        if joined.is_err() {
+            // An aborted group drops its deliveries unsettled, so JetStream
+            // redelivers them after the ACK wait.
+            warn!(
+                parked_groups = pending.len(),
+                deadline_ms = deadline.as_millis() as u64,
+                "parked model groups did not settle before the shutdown deadline — aborting them"
+            );
+            for handle in &pending {
+                handle.abort();
+            }
+            for handle in pending {
+                let _ = handle.await;
+            }
+        }
     }
 
     /// Resolve every encode item's payload then submit it into the
@@ -3694,6 +4165,79 @@ where
     out
 }
 
+/// Record the transport-queue age of every work item this worker is COMMITTING
+/// TO EXECUTE, measured from the gateway publish timestamp on each envelope.
+///
+/// Call this at an execution-commit point: after the cancellation filter has
+/// removed abandoned items, AFTER the bundle-config execution barrier, and
+/// immediately before the batch (or the generation stream) is handed to the
+/// backend. There are six such points — the three batch handlers, the scheduler
+/// drain, the NATS generation lane, and the local-ingest generation lane — and
+/// every one of them must call this, because `sie.worker.work_item.age` exists
+/// to answer "how much work does this cluster execute after its client gave up"
+/// and a missing path silently biases that distribution toward zero.
+///
+/// The barrier ordering is load-bearing in the other direction. A bundle-hash
+/// change NAKs the whole batch without ever calling the backend, so recording
+/// before the barrier would count redelivered work as executed. Hash changes
+/// land during a config rollout, which is also when backlog builds, so that
+/// over-count would land exactly where the number has to be trustworthy.
+///
+/// Age at execution START is deliberate, and it is the reason this is not
+/// recorded next to the result publish in [`Dispatcher::apply_outcome`]:
+///
+/// - Generation never passes through `apply_outcome` at all. It streams from
+///   its own task, so a publish-time observation would omit the single most
+///   expensive operation to run for nobody — which is precisely the case the
+///   measurement exists to size.
+/// - Age at publish is age at execution start PLUS execution time. For an
+///   embedding batch that difference is milliseconds, but for generation it is
+///   tens of seconds, so mixing the two would make the per-operation
+///   comparison meaningless.
+/// - Age at execution start is the quantity a deadline check would actually
+///   evaluate: it is what a worker knows at the instant it decides whether
+///   spending GPU on this item is still worth anything.
+///
+/// Items that never execute are deliberately NOT observed: cancellation
+/// ack-drops, payload-fetch failures, unknown-operation rejections,
+/// bundle-hash mismatches, and NAK-for-redelivery all leave before this point.
+/// Counting them would answer a different question ("how long do items sit in
+/// the queue") with a series whose name promises this one. A NAK'd item that is
+/// later redelivered and does execute is observed then, carrying its full age
+/// since the original gateway publish, which is the correct and more alarming
+/// number.
+///
+/// One caveat for readers of the resulting distribution: broker-delivered work
+/// and local-ingest work share a series when one sidecar serves both. Local
+/// ingest has no broker hop, so it contributes near-zero ages and pulls the p50
+/// down. That is an accurate statement about the work this process ran, but it
+/// is not a statement about broker staleness alone.
+///
+/// One clock read covers the whole batch: a 4096-item request would otherwise
+/// pay 4096 `SystemTime::now()` calls for a diagnostic.
+fn record_work_item_ages<'a>(
+    telemetry: &crate::observability::metrics::SidecarTelemetry,
+    items: impl IntoIterator<Item = &'a WorkItem>,
+) {
+    if !telemetry.is_enabled() {
+        return;
+    }
+    let Ok(now) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) else {
+        return;
+    };
+    let now_s = now.as_secs_f64();
+    for wi in items {
+        // A zero/absent publish timestamp has no measurable age. Recording 0
+        // would plant a false spike in the lowest bucket rather than admitting
+        // the envelope carried nothing. Negative and non-finite deltas (clock
+        // skew) are dropped by the facade for the same reason.
+        if wi.timestamp <= 0.0 {
+            continue;
+        }
+        telemetry.work_item_age_observed(&wi.operation, now_s - wi.timestamp);
+    }
+}
+
 fn queue_ms_from(timestamp_s: f64) -> f64 {
     if timestamp_s <= 0.0 {
         return 0.0;
@@ -3819,6 +4363,11 @@ async fn handle_generate_event(
 ) -> Result<(), DispatchError> {
     match event.kind.as_str() {
         "publish" => {
+            if event.reply_subject != delivery_log.reply_subject {
+                return Err(DispatchError::Ipc(IpcError::Server(
+                    "generation publish reply_subject mismatch".to_string(),
+                )));
+            }
             let payload =
                 stamp_generate_execution_hash(event.payload, executed_bundle_config_hash)?;
             publisher.publish_raw(&event.reply_subject, payload).await?;
@@ -4124,12 +4673,20 @@ async fn ack(
     delivery: &Delivery,
     telemetry: &crate::observability::metrics::SidecarTelemetry,
 ) -> Result<(), DispatchError> {
+    ack_with_reason(delivery, telemetry, "completed").await
+}
+
+async fn ack_with_reason(
+    delivery: &Delivery,
+    telemetry: &crate::observability::metrics::SidecarTelemetry,
+    reason: &str,
+) -> Result<(), DispatchError> {
     let result = delivery.ack().await.map_err(DispatchError::Ack);
     if matches!(delivery, Delivery::Nats(..)) {
         telemetry.nats_operation(
             "ack",
             if result.is_ok() { "success" } else { "error" },
-            "completed",
+            reason,
             1,
         );
     }
@@ -4145,6 +4702,29 @@ async fn nak_all(
         nak_one(d, delay_ms, telemetry).await;
     }
     debug!(count = items.len(), delay_ms, "NAKed group");
+}
+
+/// NAK work a config barrier refused, each item counted with its own reason
+/// ([`barrier_nak_reason`]).
+async fn nak_all_at_barrier(
+    items: &[(WorkItem, Delivery)],
+    delay_ms: u64,
+    telemetry: &crate::observability::metrics::SidecarTelemetry,
+    state: Option<&ConfigApplyState>,
+) {
+    for (wi, d) in items {
+        nak_one_with_reason(
+            d,
+            delay_ms,
+            telemetry,
+            barrier_nak_reason(state, &wi.model_id),
+        )
+        .await;
+    }
+    debug!(
+        count = items.len(),
+        delay_ms, "NAKed group at a config barrier"
+    );
 }
 
 async fn nak_one(
@@ -4242,6 +4822,15 @@ async fn nak_msg(
     delay_ms: u64,
     telemetry: &crate::observability::metrics::SidecarTelemetry,
 ) {
+    nak_msg_with_reason(msg, delay_ms, telemetry, "retry").await;
+}
+
+async fn nak_msg_with_reason(
+    msg: &Message,
+    delay_ms: u64,
+    telemetry: &crate::observability::metrics::SidecarTelemetry,
+    reason: &str,
+) {
     let delay = std::time::Duration::from_millis(delay_ms);
     let result = msg
         .ack_with(async_nats::jetstream::AckKind::Nak(Some(delay)))
@@ -4249,7 +4838,7 @@ async fn nak_msg(
     telemetry.nats_operation(
         "nak",
         if result.is_ok() { "success" } else { "error" },
-        "retry",
+        reason,
         1,
     );
     match result {
@@ -4627,17 +5216,18 @@ async fn process_scheduler_batch(
                 expected_hash,
                 unknown_hash_count,
                 local_hash = %state.current_bundle_config_hash(),
-                "scheduler bundle config hash changed before execution — NAKing batch"
+                "scheduler work refused at the config barrier before execution — NAKing batch"
             );
             let msgs_only: Vec<(WorkItem, Delivery)> = batch
                 .metadata
                 .into_iter()
                 .map(|meta| (meta.wi, meta.delivery))
                 .collect();
-            nak_all(
+            nak_all_at_barrier(
                 &msgs_only,
                 base_nak_delay_ms(),
                 &dispatcher.runtime_state.telemetry,
+                Some(state),
             )
             .await;
             return;
@@ -4647,6 +5237,29 @@ async fn process_scheduler_batch(
         None
     };
 
+    // AFTER the config execution barrier above, not before it. The barrier can
+    // still NAK the whole batch for a bundle-hash change, and a NAK'd batch
+    // never reaches `run_batch` — counting it here would report work as
+    // executed that was only redelivered. That matters more than it sounds:
+    // hash changes land during a config rollout, which is also when backlog
+    // builds, so the over-count would bias the distribution exactly under the
+    // conditions B2 needs it to be trustworthy. The three batch handlers and
+    // both generation paths clear their barrier before recording for the same
+    // reason.
+    record_work_item_ages(
+        &dispatcher.runtime_state.telemetry,
+        batch.metadata.iter().map(|meta| &meta.wi),
+    );
+
+    let run_batch_budget = dispatcher.work_deadline.run_batch_budget(
+        batch
+            .metadata
+            .iter()
+            .filter(|meta| matches!(meta.delivery, Delivery::Nats(..)))
+            .map(|meta| (meta.wi.deadline, meta.wi.timestamp)),
+        unix_now_s(),
+    );
+
     // Capture this monotonic boundary immediately before the backend RPC. The
     // enqueue→dispatch histogram therefore includes time parked behind the
     // scheduler pipeline permit, config execution barrier, and local request
@@ -4654,7 +5267,11 @@ async fn process_scheduler_batch(
     // the backend roundtrip.
     let dispatch_started_at = Instant::now();
 
-    let outcome = match dispatcher.backend.run_batch(req).await {
+    let outcome = match dispatcher
+        .backend
+        .run_batch_with_budget(req, run_batch_budget)
+        .await
+    {
         Ok(o) => o,
         Err(e) => {
             dispatcher.runtime_state.inflight_batches.dec();
@@ -5440,6 +6057,7 @@ mod tests {
             traceparent: None,
             tracestate: None,
             timestamp: 0.0,
+            deadline: None,
         }
     }
 
@@ -5460,6 +6078,609 @@ mod tests {
             payload_fetch_ms: 0.0,
             prepared_tokens: None,
         })
+    }
+
+    /// Reports `LoadingInProgress` for one model until `loaded` is set and
+    /// `Ready` for every other model; records which models were encoded.
+    /// When `later_probe_delay` is set, every readiness call for the loading
+    /// model after the first takes that long.
+    struct LoadingModelBackend {
+        loading_model: &'static str,
+        loaded: AtomicBool,
+        later_probe_delay: Option<Duration>,
+        probes: std::sync::atomic::AtomicUsize,
+        encoded_models: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl LoadingModelBackend {
+        fn new(loading_model: &'static str) -> Arc<Self> {
+            Self::with_later_probe_delay(loading_model, None)
+        }
+
+        fn with_later_probe_delay(
+            loading_model: &'static str,
+            later_probe_delay: Option<Duration>,
+        ) -> Arc<Self> {
+            Arc::new(Self {
+                loading_model,
+                loaded: AtomicBool::new(false),
+                later_probe_delay,
+                probes: std::sync::atomic::AtomicUsize::new(0),
+                encoded_models: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+
+        fn encoded_models(&self) -> Vec<String> {
+            self.encoded_models.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::backend::InferenceBackend for LoadingModelBackend {
+        fn name(&self) -> &'static str {
+            "loading-model"
+        }
+
+        fn supports(&self, _model_id: &str) -> bool {
+            true
+        }
+
+        async fn ensure_model_ready(
+            &self,
+            model_id: &str,
+        ) -> Result<crate::ipc_types::EnsureModelReadyResponse, BackendError> {
+            if model_id == self.loading_model && self.probes.fetch_add(1, Ordering::SeqCst) > 0 {
+                if let Some(delay) = self.later_probe_delay {
+                    tokio::time::sleep(delay).await;
+                }
+            }
+            let state = if model_id == self.loading_model && !self.loaded.load(Ordering::SeqCst) {
+                ReadinessState::LoadingInProgress
+            } else {
+                ReadinessState::Ready
+            };
+            Ok(crate::ipc_types::EnsureModelReadyResponse {
+                state,
+                batch_budget: None,
+                descriptor: None,
+            })
+        }
+
+        async fn process_encode_batch(
+            &self,
+            req: ProcessEncodeBatchRequest,
+        ) -> Result<BatchOutcome, BackendError> {
+            self.encoded_models
+                .lock()
+                .unwrap()
+                .push(req.model_id.clone());
+            let outcomes = req
+                .items
+                .iter()
+                .map(|item| {
+                    outcome(
+                        &item.request_id,
+                        item.item_index,
+                        Disposition::NakRetry,
+                        None,
+                        None,
+                    )
+                })
+                .collect();
+            Ok(BatchOutcome {
+                outcomes,
+                batched_f16_multivectors: Vec::new(),
+            })
+        }
+
+        async fn process_score_batch(
+            &self,
+            _req: ProcessScoreBatchRequest,
+        ) -> Result<BatchOutcome, BackendError> {
+            Err(BackendError::UnsupportedModel("score".into()))
+        }
+
+        async fn process_extract_batch(
+            &self,
+            _req: ProcessExtractBatchRequest,
+        ) -> Result<BatchOutcome, BackendError> {
+            Err(BackendError::UnsupportedModel("extract".into()))
+        }
+    }
+
+    fn dispatcher_with_backend(backend: SharedBackend) -> Arc<Dispatcher> {
+        let runtime_state = Arc::new(RuntimeState::new());
+        Arc::new(Dispatcher::new(
+            backend,
+            adapter_pool_with_runtime_state(Arc::clone(&runtime_state)),
+            Arc::new(crate::payload_store::LocalPayloadStore::new(
+                None::<PathBuf>,
+            )),
+            None,
+            "worker-test".into(),
+            runtime_state,
+            Arc::new(Mutex::new(LatencyTracker::new(200, 10))),
+            TokenizerRegistry::empty(),
+            None,
+            None,
+            None,
+            None,
+            BatchCancelState::default(),
+            RequestCancelState::new(Duration::from_secs(60)),
+        ))
+    }
+
+    fn local_group(
+        request: &str,
+        model: &str,
+        slots: std::ops::Range<u32>,
+        tx: &tokio::sync::mpsc::UnboundedSender<crate::delivery::LocalDeliveryEvent>,
+    ) -> Vec<(WorkItem, Delivery)> {
+        slots
+            .map(|slot| {
+                (
+                    wi(request, slot, model, "encode"),
+                    Delivery::Local(LocalDelivery::new(slot as usize, 0, tx.clone())),
+                )
+            })
+            .collect()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn loading_model_group_is_parked_while_other_models_dispatch() {
+        let backend = LoadingModelBackend::new("cold");
+        let dispatcher = dispatcher_with_backend(backend.clone());
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        // Under the paused clock any wait for the load would run the
+        // timeout out; parking returns without waiting.
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            dispatcher.dispatch_decoded(
+                local_group("cold-req", "cold", 0..3, &tx),
+                3,
+                Instant::now(),
+            ),
+        )
+        .await
+        .expect("a loading model must not hold the dispatch call");
+        assert_eq!(
+            dispatcher.batch_semaphore.available_permits(),
+            default_max_concurrent_batches(),
+            "a parked group must not hold a batch permit"
+        );
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            dispatcher.dispatch_decoded(
+                local_group("warm-req", "warm", 3..4, &tx),
+                1,
+                Instant::now(),
+            ),
+        )
+        .await
+        .expect("a loaded model must dispatch while another model loads");
+        assert_eq!(backend.encoded_models(), vec!["warm".to_string()]);
+
+        backend.loaded.store(true, Ordering::SeqCst);
+        dispatcher.join_parked_groups(Duration::from_secs(60)).await;
+        assert_eq!(
+            backend.encoded_models(),
+            vec!["warm".to_string(), "cold".to_string()],
+            "the parked group dispatches once its model is ready"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn parked_group_is_naked_when_its_model_never_becomes_ready() {
+        let backend = LoadingModelBackend::new("cold");
+        let dispatcher = dispatcher_with_backend(backend.clone());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        dispatcher
+            .dispatch_decoded(
+                local_group("cold-req", "cold", 0..2, &tx),
+                2,
+                Instant::now(),
+            )
+            .await;
+        dispatcher
+            .join_parked_groups(crate::nats_consumer::redelivery_envelope() * 2)
+            .await;
+
+        let mut retried = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                crate::delivery::LocalDeliveryEvent::Retry { slot, delay_ms, .. } => {
+                    retried.push((slot, delay_ms));
+                }
+                crate::delivery::LocalDeliveryEvent::Result { slot, .. } => {
+                    panic!("slot {slot} settled with a result instead of a retry")
+                }
+            }
+        }
+        retried.sort_unstable();
+        assert_eq!(
+            retried,
+            vec![(0, base_nak_delay_ms()), (1, base_nak_delay_ms())]
+        );
+        assert!(backend.encoded_models().is_empty());
+    }
+
+    fn dispatcher_listing_unsupported(
+        backend: SharedBackend,
+        unsupported: &[&str],
+    ) -> (Arc<Dispatcher>, Arc<ConfigApplyState>) {
+        let state = Arc::new(ConfigApplyState::new(String::new()));
+        assert!(state.mark_export_reconciled(
+            1,
+            Some("hash-1".into()),
+            unsupported.iter().map(|m| (*m).to_string()).collect(),
+            false
+        ));
+        let runtime_state = Arc::new(RuntimeState::new());
+        let dispatcher = Arc::new(Dispatcher::new(
+            backend,
+            adapter_pool_with_runtime_state(Arc::clone(&runtime_state)),
+            Arc::new(crate::payload_store::LocalPayloadStore::new(
+                None::<PathBuf>,
+            )),
+            None,
+            "worker-test".into(),
+            runtime_state,
+            Arc::new(Mutex::new(LatencyTracker::new(200, 10))),
+            TokenizerRegistry::empty(),
+            None,
+            None,
+            Some(Arc::clone(&state)),
+            None,
+            BatchCancelState::default(),
+            RequestCancelState::new(Duration::from_secs(60)),
+        ));
+        (dispatcher, state)
+    }
+
+    #[tokio::test]
+    async fn readiness_rechecks_a_model_listed_after_intake() {
+        let backend = LoadingModelBackend::new("org/new-family");
+        let (dispatcher, state) = dispatcher_listing_unsupported(backend.clone(), &[]);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let items = local_group("new-req", "org/new-family", 0..2, &tx);
+
+        assert!(state.mark_export_reconciled(
+            2,
+            Some("hash-2".into()),
+            vec!["org/new-family".into()],
+            false
+        ));
+        let readiness = dispatcher
+            .ensure_model_ready_by("org/new-family", &items, None)
+            .await;
+
+        assert!(readiness.is_none());
+        assert_eq!(backend.probes.load(Ordering::SeqCst), 0);
+        assert_eq!(retried_slots(&mut rx), [0, 1]);
+    }
+
+    #[tokio::test]
+    async fn unsupported_model_group_is_naked_before_readiness_or_backend_ipc() {
+        let backend = LoadingModelBackend::new("org/new-family");
+        let state = Arc::new(ConfigApplyState::new(String::new()));
+        assert!(state.mark_export_reconciled(
+            1,
+            Some("hash-1".into()),
+            vec!["org/new-family".into()],
+            false
+        ));
+        let runtime_state = Arc::new(RuntimeState::new());
+        let dispatcher = Arc::new(Dispatcher::new(
+            backend.clone(),
+            adapter_pool_with_runtime_state(Arc::clone(&runtime_state)),
+            Arc::new(crate::payload_store::LocalPayloadStore::new(
+                None::<PathBuf>,
+            )),
+            None,
+            "worker-test".into(),
+            runtime_state,
+            Arc::new(Mutex::new(LatencyTracker::new(200, 10))),
+            TokenizerRegistry::empty(),
+            None,
+            None,
+            Some(state),
+            None,
+            BatchCancelState::default(),
+            RequestCancelState::new(Duration::from_secs(60)),
+        ));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut items = local_group("new-req", "org/new-family", 0..2, &tx);
+        items.extend(local_group("kept-req", "org/kept", 5..6, &tx));
+        for (wi, _) in &mut items {
+            wi.bundle_config_hash = "hash-1".into();
+        }
+
+        dispatcher.dispatch_decoded(items, 3, Instant::now()).await;
+        dispatcher
+            .join_parked_groups(crate::nats_consumer::redelivery_envelope() * 2)
+            .await;
+
+        let retried = retried_slots(&mut rx);
+        assert!(retried.contains(&0) && retried.contains(&1));
+        assert_eq!(backend.probes.load(Ordering::SeqCst), 0);
+        assert_eq!(backend.encoded_models(), ["org/kept"]);
+    }
+
+    fn retried_slots(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<crate::delivery::LocalDeliveryEvent>,
+    ) -> Vec<usize> {
+        let mut slots = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let crate::delivery::LocalDeliveryEvent::Retry { slot, .. } = event {
+                slots.push(slot);
+            }
+        }
+        slots.sort_unstable();
+        slots
+    }
+
+    /// Far longer than any readiness deadline the tests use.
+    const STALLED_PROBE: Duration = Duration::from_secs(1_000_000);
+
+    #[tokio::test]
+    async fn generation_publish_to_a_subject_other_than_the_work_item_reply_is_refused() {
+        let client = async_nats::ConnectOptions::new()
+            .retry_on_initial_connect()
+            .connect("nats://127.0.0.1:1")
+            .await
+            .expect("an offline client needs no server");
+        let telemetry = crate::observability::metrics::SidecarTelemetry::default();
+        let publisher = Arc::new(WorkPublisher::new(
+            client.clone(),
+            "worker-test",
+            telemetry.clone(),
+        ));
+        let message = Message {
+            message: async_nats::Message {
+                subject: "sie.work.test".into(),
+                reply: None,
+                payload: Default::default(),
+                headers: None,
+                status: None,
+                description: None,
+                length: 0,
+            },
+            context: async_nats::jetstream::new(client),
+        };
+        let delivery = DeliveryContext::from_message(&message);
+        let delivery_log = Arc::new(GenerateDeliveryLogContext {
+            work_item_id: "wi-1".to_string(),
+            request_id: "req-1".to_string(),
+            model_id: "model".to_string(),
+            reply_subject: "_INBOX.router.req-1".to_string(),
+            delivery,
+        });
+        for subject in ["$JS.API.STREAM.CREATE.X", "sie.config.models._all", ""] {
+            let result = handle_generate_event(
+                GenerateEvent {
+                    kind: "publish".to_string(),
+                    reply_subject: subject.to_string(),
+                    payload: Vec::new(),
+                    delay_ms: None,
+                    error: None,
+                },
+                Arc::clone(&publisher),
+                telemetry.clone(),
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(QueuedMessage::new(message.clone(), None)),
+                Arc::clone(&delivery_log),
+                "",
+            )
+            .await;
+            let error = result.expect_err(subject).to_string();
+            assert!(
+                error.contains("reply_subject mismatch"),
+                "{subject}: {error}"
+            );
+        }
+    }
+
+    /// A NATS delivery whose ACK, NAK and progress calls fail: it has no
+    /// reply subject and its client never reaches a server.
+    async fn unacknowledgeable_nats_delivery() -> Delivery {
+        let client = async_nats::ConnectOptions::new()
+            .retry_on_initial_connect()
+            .connect("nats://127.0.0.1:1")
+            .await
+            .expect("an offline client needs no server");
+        let message = Message {
+            message: async_nats::Message {
+                subject: "sie.work.test".into(),
+                reply: None,
+                payload: Default::default(),
+                headers: None,
+                status: None,
+                description: None,
+                length: 0,
+            },
+            context: async_nats::jetstream::new(client),
+        };
+        Delivery::Nats(message, None, None)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_progress_ack_ends_the_parked_wait() {
+        let slow_probe = Duration::from_secs(crate::nats_consumer::ACK_WAIT_SECS * 3);
+        let backend = LoadingModelBackend::with_later_probe_delay("cold", Some(slow_probe));
+        let dispatcher = dispatcher_with_backend(backend.clone());
+        let group = vec![(
+            wi("cold-req", 0, "cold", "encode"),
+            unacknowledgeable_nats_delivery().await,
+        )];
+
+        dispatcher.dispatch_decoded(group, 1, Instant::now()).await;
+        backend.loaded.store(true, Ordering::SeqCst);
+        let started = tokio::time::Instant::now();
+        dispatcher
+            .join_parked_groups(crate::nats_consumer::redelivery_envelope() * 2)
+            .await;
+
+        assert!(
+            started.elapsed() < slow_probe,
+            "the wait must end at the first failed progress ACK, not when readiness returns"
+        );
+        assert!(backend.encoded_models().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_parked_readiness_call_slower_than_the_ack_wait_still_dispatches() {
+        let slow_probe = Duration::from_secs(crate::nats_consumer::ACK_WAIT_SECS * 3);
+        let backend = LoadingModelBackend::with_later_probe_delay("cold", Some(slow_probe));
+        let dispatcher = dispatcher_with_backend(backend.clone());
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        dispatcher
+            .dispatch_decoded(
+                local_group("cold-req", "cold", 0..2, &tx),
+                2,
+                Instant::now(),
+            )
+            .await;
+        backend.loaded.store(true, Ordering::SeqCst);
+        dispatcher
+            .join_parked_groups(crate::nats_consumer::redelivery_envelope() * 2)
+            .await;
+
+        assert_eq!(backend.encoded_models(), vec!["cold".to_string()]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_readiness_call_does_not_outlive_the_parked_wait() {
+        let backend = LoadingModelBackend::with_later_probe_delay("cold", Some(STALLED_PROBE));
+        let dispatcher = dispatcher_with_backend(backend.clone());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        dispatcher
+            .dispatch_decoded(
+                local_group("cold-req", "cold", 0..2, &tx),
+                2,
+                Instant::now(),
+            )
+            .await;
+        dispatcher
+            .join_parked_groups(crate::nats_consumer::redelivery_envelope() * 2)
+            .await;
+
+        assert_eq!(retried_slots(&mut rx), vec![0, 1]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_settles_a_parked_group_during_stalled_readiness() {
+        let backend = LoadingModelBackend::with_later_probe_delay("cold", Some(STALLED_PROBE));
+        let shutdown = Arc::new(Shutdown::new());
+        let mut dispatcher = dispatcher_with_backend(backend.clone());
+        Arc::get_mut(&mut dispatcher).unwrap().shutdown = Some(Arc::clone(&shutdown));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        dispatcher
+            .dispatch_decoded(
+                local_group("cold-req", "cold", 0..2, &tx),
+                2,
+                Instant::now(),
+            )
+            .await;
+        for _ in 0..20 {
+            if backend.probes.load(Ordering::SeqCst) >= 2 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(backend.probes.load(Ordering::SeqCst) >= 2);
+
+        let started = tokio::time::Instant::now();
+        shutdown.fire();
+        dispatcher.join_parked_groups(Duration::from_secs(1)).await;
+
+        assert!(started.elapsed() < Duration::from_secs(1));
+        let mut retries = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                crate::delivery::LocalDeliveryEvent::Retry { slot, delay_ms, .. } => {
+                    retries.push((slot, delay_ms));
+                }
+                other => panic!("unexpected settlement: {other:?}"),
+            }
+        }
+        retries.sort_unstable();
+        assert_eq!(
+            retries,
+            vec![(0, NAK_DELAY_DRAINING_MS), (1, NAK_DELAY_DRAINING_MS)]
+        );
+        assert!(backend.encoded_models().is_empty());
+        assert_eq!(Arc::strong_count(&dispatcher), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_wins_when_parked_readiness_is_already_ready() {
+        // Exercise repeated ties so randomized select ordering cannot hide dispatch
+        // after shutdown. Neither signal yields before the parked task resumes.
+        for _ in 0..32 {
+            let backend = LoadingModelBackend::new("cold");
+            let shutdown = Arc::new(Shutdown::new());
+            let mut dispatcher = dispatcher_with_backend(backend.clone());
+            Arc::get_mut(&mut dispatcher).unwrap().shutdown = Some(Arc::clone(&shutdown));
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+            dispatcher
+                .dispatch_decoded(
+                    local_group("cold-req", "cold", 0..2, &tx),
+                    2,
+                    Instant::now(),
+                )
+                .await;
+            assert_eq!(backend.probes.load(Ordering::SeqCst), 1);
+            backend.loaded.store(true, Ordering::SeqCst);
+            shutdown.fire();
+            dispatcher.join_parked_groups(Duration::from_secs(1)).await;
+
+            assert!(backend.encoded_models().is_empty());
+            let mut retries = Vec::new();
+            while let Ok(event) = rx.try_recv() {
+                match event {
+                    crate::delivery::LocalDeliveryEvent::Retry { slot, delay_ms, .. } => {
+                        retries.push((slot, delay_ms));
+                    }
+                    other => panic!("unexpected settlement: {other:?}"),
+                }
+            }
+            retries.sort_unstable();
+            assert_eq!(
+                retries,
+                vec![(0, NAK_DELAY_DRAINING_MS), (1, NAK_DELAY_DRAINING_MS)]
+            );
+            assert_eq!(Arc::strong_count(&dispatcher), 1);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_aborts_a_parked_group_that_does_not_settle_in_time() {
+        let backend = LoadingModelBackend::with_later_probe_delay("cold", Some(STALLED_PROBE));
+        let dispatcher = dispatcher_with_backend(backend.clone());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        dispatcher
+            .dispatch_decoded(
+                local_group("cold-req", "cold", 0..2, &tx),
+                2,
+                Instant::now(),
+            )
+            .await;
+        dispatcher.join_parked_groups(Duration::from_secs(1)).await;
+
+        assert_eq!(
+            Arc::strong_count(&dispatcher),
+            1,
+            "the aborted parked task must have released the dispatcher"
+        );
+        assert!(retried_slots(&mut rx).is_empty());
     }
 
     #[test]
@@ -5526,20 +6747,24 @@ mod tests {
         }
 
         let work = wi("req-load", 0, "Qwen/Qwen3-4B-Instruct-2507", "generate");
-        let bytes =
-            encode_generate_terminal_error_chunk(&work, MODEL_LOADING_ERROR_CODE, "loading")
-                .expect("chunk encodes");
-        let decoded: DecodedChunk = rmp_serde::from_slice(&bytes).expect("chunk decodes");
+        for (code, message) in [
+            (MODEL_LOADING_ERROR_CODE, "loading"),
+            (MODEL_LOAD_FAILED_ERROR_CODE, "load failed"),
+        ] {
+            let bytes =
+                encode_generate_terminal_error_chunk(&work, code, message).expect("chunk encodes");
+            let decoded: DecodedChunk = rmp_serde::from_slice(&bytes).expect("chunk decodes");
 
-        assert_eq!(decoded.kind, "chunk");
-        assert_eq!(decoded.request_id, "req-load");
-        assert_eq!(decoded.attempt_id, "req-load.0:model-loading");
-        assert_eq!(decoded.seq, 0);
-        assert_eq!(decoded.text_delta, "");
-        assert!(decoded.done);
-        assert_eq!(decoded.finish_reason, "error");
-        assert_eq!(decoded.error.code, MODEL_LOADING_ERROR_CODE);
-        assert_eq!(decoded.error.message, "loading");
+            assert_eq!(decoded.kind, "chunk");
+            assert_eq!(decoded.request_id, "req-load");
+            assert_eq!(decoded.attempt_id, "req-load.0:model-loading");
+            assert_eq!(decoded.seq, 0);
+            assert_eq!(decoded.text_delta, "");
+            assert!(decoded.done);
+            assert_eq!(decoded.finish_reason, "error");
+            assert_eq!(decoded.error.code, code);
+            assert_eq!(decoded.error.message, message);
+        }
     }
 
     #[test]
@@ -5875,6 +7100,89 @@ mod tests {
     }
 
     #[test]
+    fn barrier_naks_count_unsupported_models_as_model_unsupported() {
+        let state = ConfigApplyState::new(String::new());
+        assert!(state.mark_export_reconciled(1, Some("hash-1".into()), vec!["B".into()], false));
+
+        assert_eq!(barrier_nak_reason(Some(&state), "B"), "model_unsupported");
+        assert_eq!(barrier_nak_reason(Some(&state), "b"), "model_unsupported");
+        // A supported model refused at the barrier carries an old bundle hash.
+        assert_eq!(barrier_nak_reason(Some(&state), "A"), "retry");
+        assert_eq!(barrier_nak_reason(None, "B"), "retry");
+    }
+
+    /// The architecture guide counts NAKs for a model in `unsupported_models`
+    /// as `model_unsupported` at intake, before readiness and at the config
+    /// execution barrier. A barrier that NAKs through the plain `retry`
+    /// helpers would count a model that turned unsupported after intake as a
+    /// retry. Checked structurally, like the barrier ordering above, so a
+    /// future barrier that NAKs the old way fails here.
+    #[test]
+    fn config_execution_barriers_nak_with_their_reason() {
+        let source = include_str!("dispatcher.rs");
+        let production = source
+            .split("\nmod tests {")
+            .next()
+            .expect("dispatcher.rs must have a production section");
+        let barrier = concat!("lock_execution", "().await");
+        let mut naking = 0;
+        for (site, _) in production.match_indices(barrier) {
+            let rest = &production[site..];
+            let refusal = &rest[..rest.find("Some(guard)").expect("a barrier keeps its guard")];
+            if !refusal.contains("nak") {
+                continue; // local-ingest generate answers with an error, not a NAK
+            }
+            naking += 1;
+            assert!(
+                !refusal.contains(concat!("nak_all", "("))
+                    && !refusal.contains(concat!("nak_msg", "(")),
+                "the barrier at byte {site} NAKs with the plain retry reason"
+            );
+            assert!(
+                refusal.contains("nak_all_at_barrier") || refusal.contains("barrier_nak_reason"),
+                "the barrier at byte {site} does not attribute its NAK reason"
+            );
+        }
+        // Generate, encode, score, extract and the scheduler batch.
+        assert_eq!(naking, 5, "expected five NAKing config execution barriers");
+    }
+
+    #[test]
+    fn unknown_bundle_config_hash_flags_models_the_worker_cannot_serve() {
+        let state = ConfigApplyState::new(String::new());
+        assert!(state.mark_export_reconciled(1, Some("hash-1".into()), vec!["B".into()], false));
+
+        let mut served = wi("r1", 0, "A", "encode");
+        served.bundle_config_hash = "hash-1".into();
+        assert!(unknown_bundle_config_hash([&served], Some(&state)).is_none());
+
+        let mut unsupported = wi("r1", 1, "B", "encode");
+        unsupported.bundle_config_hash = "hash-1".into();
+        assert_eq!(
+            unknown_bundle_config_hash([&served, &unsupported], Some(&state)),
+            Some(("hash-1", 1))
+        );
+    }
+
+    #[test]
+    fn unexpected_work_header_allows_only_the_gateway_message_id() {
+        assert_eq!(unexpected_work_header(None), None);
+        let mut gateway = async_nats::HeaderMap::new();
+        gateway.insert("Nats-Msg-Id", "req-1");
+        gateway.insert("traceparent", "00-abc-def-01");
+        assert_eq!(unexpected_work_header(Some(&gateway)), None);
+        for name in ["Nats-Stream", "Nats-Stream-Source", "nats-subject"] {
+            let mut copied = async_nats::HeaderMap::new();
+            copied.insert(name, "x");
+            assert_eq!(
+                unexpected_work_header(Some(&copied)).as_deref(),
+                Some(name),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
     fn reply_subject_is_safe_rules() {
         assert!(reply_subject_is_safe(""));
         assert!(reply_subject_is_safe("_INBOX.ab"));
@@ -5904,6 +7212,109 @@ mod tests {
         // 'é' is two bytes — truncate should not split it.
         assert_eq!(truncate("café", 3), "caf");
         assert_eq!(truncate("café", 4), "café");
+    }
+
+    /// Every point that hands work to the backend must record work-item age.
+    ///
+    /// This is a tripwire for a real defect, not a style rule: the first
+    /// version of `sie.worker.work_item.age` recorded only at the batch result
+    /// publish, so generation — which streams from its own task and never
+    /// reaches `apply_outcome` — was entirely absent from the distribution.
+    /// The metric exists to size how much work runs after its client gave up,
+    /// and generation is the most expensive case of exactly that, so the
+    /// omission biased the number toward zero precisely where it mattered.
+    ///
+    /// Only production code is counted — the test module below calls the
+    /// recorder too — and the needle is assembled at compile time so this test
+    /// does not match itself.
+    #[test]
+    fn every_execution_commit_point_records_work_item_age() {
+        let source = include_str!("dispatcher.rs");
+        let production = source
+            .split("\nmod tests {")
+            .next()
+            .expect("dispatcher.rs must have a production section");
+        let needle = concat!("record_work_item_ages", "(");
+        assert_eq!(
+            production.matches(needle).count(),
+            6,
+            "expected exactly six execution-commit call sites (encode, score, extract, \
+             scheduler drain, NATS generate, local-ingest generate). If you added a path that \
+             hands work to the backend, record the age there too and update this count — a \
+             missing path silently biases sie.worker.work_item.age toward zero for that \
+             operation."
+        );
+    }
+
+    /// Every recording site must sit AFTER its bundle-config execution
+    /// barrier, because a hash mismatch NAKs the batch without ever calling the
+    /// backend. Recording first would count redelivered work as executed, and
+    /// hash changes land during config rollouts — exactly when backlog builds
+    /// and the number has to be trustworthy.
+    ///
+    /// Checked structurally rather than by driving each handler: the ordering
+    /// is the invariant, and a positional assertion catches a future
+    /// reordering that a behavioural test on one handler would miss.
+    #[test]
+    fn work_item_age_is_recorded_after_every_config_execution_barrier() {
+        let source = include_str!("dispatcher.rs");
+        let production = source
+            .split("\nmod tests {")
+            .next()
+            .expect("dispatcher.rs must have a production section");
+        let record = concat!("record_work_item_ages", "(");
+        let barrier = concat!("unknown_bundle_config_hash", "(");
+        let accepts = concat!("accepts_work", "(");
+
+        // Pair each barrier with the next recording site and require that the
+        // barrier comes first. Five of the six sites sit behind a barrier; the
+        // sixth (local-ingest generate) uses the `accepts_` spelling.
+        let mut barriers: Vec<usize> = production.match_indices(barrier).map(|(i, _)| i).collect();
+        barriers.extend(production.match_indices(accepts).map(|(i, _)| i));
+        barriers.sort_unstable();
+        let records: Vec<usize> = production.match_indices(record).map(|(i, _)| i).collect();
+        assert_eq!(records.len(), 6, "expected six recording sites");
+
+        for &site in &records {
+            let preceding_barrier = barriers.iter().rev().find(|&&b| b < site);
+            assert!(
+                preceding_barrier.is_some(),
+                "a recording site at byte {site} has no config barrier before it — \
+                 a bundle-hash NAK would be counted as executed work"
+            );
+            // No recording site may be the first thing after a barrier's own
+            // NAK-and-return: require the barrier and the record to be in the
+            // same neighbourhood rather than separated by another record.
+            let intervening = records
+                .iter()
+                .filter(|&&r| r > *preceding_barrier.unwrap() && r < site)
+                .count();
+            assert_eq!(
+                intervening, 0,
+                "recording site at byte {site} does not pair 1:1 with its barrier"
+            );
+        }
+    }
+
+    /// Hostile envelope timestamps must cost a dropped observation, never a
+    /// panic on the execution path. A disabled facade must not even look.
+    #[test]
+    fn recording_work_item_ages_tolerates_absent_and_skewed_timestamps() {
+        let telemetry = crate::observability::metrics::SidecarTelemetry::default();
+        assert!(!telemetry.is_enabled());
+        let far_future = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64()
+            + 86_400.0;
+        let mut absent = wi("r", 0, "m", "encode");
+        absent.timestamp = 0.0;
+        let mut negative = wi("r", 1, "m", "generate");
+        negative.timestamp = -1.0;
+        let mut skewed = wi("r", 2, "m", "encode");
+        skewed.timestamp = far_future;
+        let items = [absent, negative, skewed];
+        record_work_item_ages(&telemetry, items.iter());
     }
 
     #[test]

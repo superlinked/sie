@@ -7,10 +7,10 @@ lists tools, and (optionally) calls docs_to_markdown on a local file.
 Run it in the sie-mcp package env so the `mcp` client is importable:
 
     mise exec -- uv run --package sie-mcp python packages/sie_mcp/docs/examples/mcp_smoke.py \
-        --url http://localhost:8088/mcp --secret <secret> --list
+        --url http://localhost:8088/mcp --secret 'replace-with-connector-secret' --list
 
     mise exec -- uv run --package sie-mcp python packages/sie_mcp/docs/examples/mcp_smoke.py \
-        --url http://localhost:8088/mcp --secret <secret> \
+        --url http://localhost:8088/mcp --secret 'replace-with-connector-secret' \
         --file packages/sie_mcp/docs/examples/sample.html --filename sample.html --engine docling
 """
 

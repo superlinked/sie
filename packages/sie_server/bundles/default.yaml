@@ -27,6 +27,8 @@ adapters:
 - sie_server.adapters.qwen2_flash_cross_encoder.adapter
 - sie_server.adapters.qwen3_vl_embedding
 - sie_server.adapters.qwen3_vl_reranker.adapter
+- sie_server.adapters.remote.openai
+- sie_server.adapters.remote.sie
 - sie_server.adapters.rope_flash
 - sie_server.adapters.sentence_transformer
 - sie_server.adapters.siglip.adapter
@@ -41,6 +43,8 @@ adapters:
 - sie_server.adapters.gliner_bi
 - sie_server.adapters.glirel
 - sie_server.adapters.gliclass
+- sie_server.adapters.laya.adapter
+- sie_server.adapters.gliformer.adapter
 - sie_server.adapters.donut
 - sie_server.adapters.florence2
 - sie_server.adapters.docling.adapter
@@ -59,18 +63,33 @@ deps:
   sentence-transformers: '>=5.0,<6'
   # bge_m3_flag
   FlagEmbedding: '>=1.3'
-  # grounding_dino
-  pillow: '>=11,<12'
+  # grounding_dino. EXACT, not a range. `uv run --with-requirements` resolves the
+  # overlay live from PyPI, and `--frozen`/`--no-sync` govern only the project
+  # env, so any unbounded range here is re-resolved on every eval. The old
+  # `>=11,<12` (94430893c) was accidentally stable because the 11.x line is
+  # closed, but it contradicted sie-server's own `pillow>=12.2.0` since the
+  # security bump (27fd2063d), so every default-bundle eval served the superseded
+  # major. A bare `>=12.2.0` would fix that while making the pin float, which
+  # trades a stale-but-stable closure for a moving one.
+  # Pinned to the version the project lock holds, so overlay and lock agree.
+  # Changing this re-measures 13 gating floors (naver/v-splade-quality, docling).
+  pillow: '==12.3.0'
   # grounding_dino
   requests: ''
-  # gliner, gliner_bi
-  gliner: '>=0.2,<1'
-  # gliner2
+  # gliner, gliner_bi (0.2.26: first release that loads the relex checkpoints)
+  gliner: '>=0.2.26,<1'
+  # gliner2. Held at 1.x: gliner2 2.0 changes gliner2-base/large-v1 outputs
+  # (every repeated NER mention is returned, and structured extraction is
+  # rescored). The GLiNER2.5-Decide models, which need 2.x, are served from
+  # the transformers5 bundle.
   gliner2: '>=1.3.1,<2'
   # glirel
   glirel: '>=1.0,<2'
-  # gliclass
-  gliclass: '>=0.1,<1'
+  # gliclass (0.1.17: cross-attention scorer for the multilingual checkpoints;
+  # 0.1.18+ needs transformers 5)
+  gliclass: '>=0.1.17,<1'
+  # gliformer: exact, the adapter uses package internals (see pyproject.toml)
+  gliformer: '==0.1.2'
   # gliner/glirel/gliclass shared dep
   loguru: '>=0.7,<1'
   # donut, florence2

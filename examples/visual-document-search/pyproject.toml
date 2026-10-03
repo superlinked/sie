@@ -1,0 +1,23 @@
+[project]
+name = "superlinked-sie-visual-document-search-example"
+version = "0.1.0"
+description = "Find the PDF page or slide that answers a question from its image, with no OCR: SIE against hosted multimodal APIs and parse-then-embed on ViDoRe v3"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "sie-sdk>=0.6.23,<0.10.0",
+  "numpy>=2.0",
+  "datasets>=3.6,<5",
+  "pillow>=10",
+]
+
+[tool.uv]
+package = false
+
+[dependency-groups]
+dev = [
+  "ruff>=0.14",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"

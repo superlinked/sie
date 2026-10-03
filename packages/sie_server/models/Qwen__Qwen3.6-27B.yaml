@@ -31,19 +31,18 @@ tasks:
       grammar: ["json_schema", "regex"]
       streaming: true
       tools: true
-      # Validated on code + text-to-SQL — MEASURED on Modal H100 (bf16 no-spec,
-      # greedy+min_tokens=10; accuracy is GPU-invariant + FP8≈BF16 per ADR
-      # 0001): HumanEval 0.933, MBPP 0.81 (beats the 4B code default 0.866/0.74),
-      # Spider exec-acc 0.693. See code_sql_tools/measured_baseline.json.
+      # Validated on code + text-to-SQL — measured on H100 (bf16 no-spec,
+      # greedy+min_tokens=10). BF16 benchmark: HumanEval 0.933, MBPP 0.81
+      # (beats the 4B code default 0.866/0.74), Spider exec-acc 0.693.
       # Informational (not request-gated); surfaces the high-end code/SQL option.
       code: true
       # CAVEAT: this flag is precision-agnostic, but FP8 weight quant regresses
       # SQL ~13pts (Spider 0.71 BF16 -> 0.58 FP8, same-subset control; see the
-      # ADR + baseline). Code/tools/MC are FP8-safe. The RTX FP8 profile below is
+      # same-subset measurements). Code/tools/MC are FP8-safe. The RTX FP8 profile below is
       # for code/tools/general. Route SQL-critical traffic to the BF16 profile
       # or a BF16 bundle-qualified alias, e.g.
       # SIE_GATEWAY_MODEL_ALIASES={"sql":"<bf16-bundle>:/Qwen/Qwen3.6-27B"}
-      # (gateway resolve_model_spec_with_aliases; see ADR 0001).
+      # (gateway resolve_model_spec_with_aliases).
       sql: true
     # Qwen3.6 emits ``<think>...</think>`` reasoning by default. We
     # disable it for the OpenAI-compat path so visible output is the
@@ -217,8 +216,8 @@ profiles:
   # over H100 plus the FP8 weight saving is what makes 3/4 fit here.
   #
   # ACCURACY CONTRACT: FP8 is lossy. This profile is validated to within the
-  # Wilson 95% CI of the *BF16* baseline on all four generation tasks (see
-  # docs/adr/0001). If FP8 misses parity after bounded tuning, fall back to
+  # Wilson 95% CI of the *BF16* baseline on all four generation tasks. If FP8
+  # misses parity after bounded tuning, fall back to
   # BF16 + NEXTN 3/4 (drop the ``--quantization fp8`` pair below; the 96 GB
   # still fits the 3/4 draft in BF16). KV cache stays BF16 here — add
   # ``--kv-cache-dtype fp8_e4m3`` only if memory/throughput needs it AND
@@ -338,7 +337,7 @@ profiles:
           - '{"image":{"min_pixels":65536,"max_pixels":1003520}}'
           - "--quantization"
           - "fp8"
-          - "--mamba-scheduler-strategy"
+          - "--mamba-radix-cache-strategy"
           - "extra_buffer"
           - "--page-size"
           - "64"
@@ -374,7 +373,7 @@ profiles:
           - '{"image":{"min_pixels":65536,"max_pixels":1003520}}'
           - "--quantization"
           - "fp8"
-          - "--mamba-scheduler-strategy"
+          - "--mamba-radix-cache-strategy"
           - "extra_buffer"
           - "--page-size"
           - "64"
@@ -411,7 +410,7 @@ profiles:
           - '{"image":{"min_pixels":65536,"max_pixels":1003520}}'
           - "--quantization"
           - "fp8"
-          - "--mamba-scheduler-strategy"
+          - "--mamba-radix-cache-strategy"
           - "extra_buffer"
           - "--page-size"
           - "64"

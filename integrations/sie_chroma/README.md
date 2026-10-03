@@ -112,7 +112,7 @@ from llama_index.vector_stores.chroma import ChromaVectorStore
 Start the SIE server before using this integration:
 
 ```bash
-mise run serve -d cpu -p 8080
+mise run serve -- -d cpu -p 8080
 ```
 
 ## Testing

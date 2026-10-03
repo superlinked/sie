@@ -45,12 +45,14 @@ async def test_returns_markdown_and_metadata() -> None:
     assert result["metadata"]["source_pages"] == 1
     assert result["metadata"]["markdown_tokens_estimated"] is True
     assert result["metadata"]["markdown_chars"] == len("# Title\n\nbody")
-    # Committed #1311 figures are wired in and trace back to the benchmark run.
+    # Committed figures are wired in and trace back to the benchmark run.
     reduction = result["metadata"]["token_reduction"]
+    assert reduction["source"] == "committed benchmark run 20260610T144234Z"
+    assert reduction["issue"] is None
     assert reduction["run"] == "20260610T144234Z"
     assert reduction["blended_reduction_pct"] == {"claude-opus-4-8": 82.9, "claude-sonnet-4-6": 86.5}
     assert reduction["per_file_type_reduction_pct"] == {"min": 63.3, "max": 94.8}
-    assert reduction["source"].endswith("latest.json")
+    assert "count_tokens" in reduction["method"]
 
 
 async def test_token_reduction_is_isolated_from_committed_figures() -> None:

@@ -29,7 +29,6 @@ See: https://huggingface.co/vidore/colSmol-256M
 
 from __future__ import annotations
 
-import io
 import logging
 import threading
 from pathlib import Path
@@ -45,7 +44,7 @@ from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ComputePrecision
 from sie_server.core.inference_output import EncodeOutput
 from sie_server.core.postprocessor import MuveraConfig, MuveraPostprocessor
-from sie_server.types.inputs import media_bytes
+from sie_server.types.inputs import decode_image
 
 if TYPE_CHECKING:
     from PIL import Image as PILImage
@@ -323,15 +322,9 @@ class ColSmolAdapter(BaseAdapter):
     # ------------------------------------------------------------------
 
     def _load_images(self, item: Any) -> list[PILImage.Image]:
-        from PIL import Image
-
-        pil_images: list[PILImage.Image] = []
-        for img_input in item.images or []:
-            pil_img = Image.open(io.BytesIO(media_bytes(img_input, kind="image")))
-            if pil_img.mode != "RGB":
-                pil_img = pil_img.convert("RGB")
-            pil_images.append(pil_img)
-        return pil_images
+        # decode_image raises InvalidMediaError (-> 400 INVALID_INPUT) on
+        # non-bytes or undecodable payloads, and converts to RGB.
+        return [decode_image(img_input, image_index=j) for j, img_input in enumerate(item.images or [])]
 
     def _encode_images(self, images: list[PILImage.Image]) -> list[np.ndarray]:
         """Encode a batch of images and return per-image multi-vectors."""
@@ -443,8 +436,13 @@ class ColSmolAdapter(BaseAdapter):
         config = MuveraConfig(**self._muvera_config) if self._muvera_config else MuveraConfig()
         return {"muvera": MuveraPostprocessor(token_dim=self._multivector_dim, config=config)}
 
-    def get_preprocessor(self) -> Any | None:
+    def get_preprocessor(self) -> Any:
         # ColSmol uses the Idefics3Processor, which requires the visual prompt
         # text alongside images; the generic ImagePreprocessor does not match
-        # that call pattern (same as colqwen2/colqwen3).
-        return None
+        # that call pattern (same as colqwen2/colqwen3), and image batches
+        # reach the worker through the pipeline's passthrough path.
+        # The base CharCountPreprocessor (cost-only; the adapter still owns its
+        # own tokenization) is required so TEXT queries route through
+        # ModelWorker batching instead of the unbatched direct-call path that
+        # serialized per-request threads on _forward_lock (#2874).
+        return super().get_preprocessor()

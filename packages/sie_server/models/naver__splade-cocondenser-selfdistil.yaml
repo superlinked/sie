@@ -1,5 +1,6 @@
 sie_id: naver/splade-cocondenser-selfdistil
 hf_id: naver/splade-cocondenser-selfdistil
+hf_revision: 31f3eb4b5aae648cde974db3b7b44bf2d095106b
 inputs:
   text: true
   image: false

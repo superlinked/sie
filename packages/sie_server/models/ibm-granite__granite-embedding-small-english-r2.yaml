@@ -1,5 +1,6 @@
 sie_id: ibm-granite/granite-embedding-small-english-r2
 hf_id: ibm-granite/granite-embedding-small-english-r2
+hf_revision: 2ab6fa8ea2d674564defd37171ae19079b864b33
 inputs:
   text: true
   image: false
@@ -20,7 +21,8 @@ profiles:
     compute_precision: bfloat16
     adapter_path: sie_server.adapters.modernbert_flash:ModernBERTFlashAdapter
     adapter_options:
-      loadtime: {}
+      loadtime:
+        cuda_graphs: bucketed
       runtime:
         pooling: cls
         normalize: true
@@ -28,6 +30,10 @@ profiles:
     extends: default
     adapter_path: sie_server_rust.adapters.candle:CandleEmbeddingAdapter
     adapter_options:
+      # Its own load-time options, so the default profile's cuda_graphs (a
+      # PyTorch setting) does not reach the Candle worker, which refuses it.
+      loadtime:
+        max_seq_length: 8192
       runtime:
         pooling: cls
         normalize: true

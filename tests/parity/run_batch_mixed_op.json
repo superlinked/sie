@@ -1,0 +1,56 @@
+{
+  "description": "RunBatch with mixed-op items (encode + score) — the sidecar scheduler MUST emit homogeneous-op batches; this fixture is defence-in-depth that pins Python adapter_call_loop._reject_all: (1) emit one publish_error_and_ack per input item, (2) tag each with error_code=\"run_batch_mixed_op\", (3) preserve the original payload item_index, and (4) extract (work_item_id, request_id) from whichever payload variant is populated.",
+  "input": {
+    "model_id": "test/parity-mixed",
+    "batch_id": 100,
+    "lora_key": "",
+    "total_cost": 30,
+    "items": [
+      {
+        "op": "encode",
+        "encode": {
+          "work_item_id": "w-enc",
+          "request_id": "r-enc",
+          "item_index": 5,
+          "total_items": 1,
+          "timestamp": 0.0,
+          "item": {"text": "should be rejected"},
+          "options": null
+        }
+      },
+      {
+        "op": "score",
+        "score": {
+          "work_item_id": "w-scr",
+          "request_id": "r-scr",
+          "item_index": 9,
+          "total_items": 1,
+          "timestamp": 0.0,
+          "query_item": {"text": "Q"},
+          "score_items": [{"text": "D"}],
+          "options": null
+        }
+      }
+    ]
+  },
+  "expected_canonical_outcomes": [
+    {
+      "work_item_id": "w-enc",
+      "request_id": "r-enc",
+      "item_index": 5,
+      "disposition": "publish_error_and_ack",
+      "error_code": "run_batch_mixed_op"
+    },
+    {
+      "work_item_id": "w-scr",
+      "request_id": "r-scr",
+      "item_index": 9,
+      "disposition": "publish_error_and_ack",
+      "error_code": "run_batch_mixed_op"
+    }
+  ],
+  "notes": {
+    "elided_fields": ["error", "nak_delay_ms", "result_msgpack", "raw_output", "inference_ms", "tokenization_ms", "postprocessing_ms"],
+    "rationale": "item_index for the rejection MUST preserve the payload's item_index (5, 9) so wholesale protocol rejections use the same per-request index contract as successful outcomes — see reject_all_outcomes in run_batch.rs and _reject_all in adapter_call_loop.py."
+  }
+}

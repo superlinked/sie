@@ -283,7 +283,7 @@ async def handle_run_batch(
             "sie.adapter": "run_batch",
             "sie.batch_size": len(req.items),
         },
-    ):
+    ) as span:
         if op == "encode":
             result = await _dispatch_encode(executor, req)
         elif op == "score":
@@ -299,6 +299,10 @@ async def handle_run_batch(
             )
             result = _reject_all(req, RUN_BATCH_UNKNOWN_OP, f"unknown op {op!r}")
 
+        if any(item.disposition != "publish_and_ack" for item in result.outcomes):
+            # Errors returned as values still need structural status; never
+            # copy the item's free-form message into status text.
+            span.set_status(trace.StatusCode.ERROR)
         if started is not None:
             _record_run_batch_metrics(req, result, time.perf_counter() - started)
         return result

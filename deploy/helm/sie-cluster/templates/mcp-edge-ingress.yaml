@@ -12,6 +12,7 @@
 {{- fail (printf "Invalid configuration: mcpEdge.ingress.host (%s) collides with a gateway ingress host; both Ingresses would serve path / on the same hostname. Give the MCP edge a distinct host (e.g. sie-mcp.example.com)." $host) }}
 {{- end }}
 {{- end }}
+{{- include "sie-cluster.validateMcpEdgeIngressTls" . }}
 {{- $tls := include "sie-cluster.ingressTlsConfig" . | fromYaml }}
 {{- $tlsSecret := printf "%s-tls" (include "sie-cluster.mcpEdge.serviceName" .) }}
 apiVersion: networking.k8s.io/v1
@@ -23,11 +24,14 @@ metadata:
     {{- include "sie-cluster.mcpEdge.labels" . | nindent 4 }}
   {{- $annotations := dict }}
   {{- /* base64 documents can be large; MCP streamable-HTTP needs unbuffered,
-         long-lived responses. */ -}}
+         long-lived responses. The edge fans out to the same workers, so its
+         read/send timeout is derived from workers.common.modelReadyTimeoutSec
+         too — see "sie-cluster.ingress.proxyTimeoutSeconds". */ -}}
+  {{- $proxyTimeoutS := include "sie-cluster.ingress.proxyTimeoutSeconds" . }}
   {{- $nginxDefaults := dict
         "nginx.ingress.kubernetes.io/proxy-body-size" "100m"
-        "nginx.ingress.kubernetes.io/proxy-read-timeout" "600"
-        "nginx.ingress.kubernetes.io/proxy-send-timeout" "600"
+        "nginx.ingress.kubernetes.io/proxy-read-timeout" $proxyTimeoutS
+        "nginx.ingress.kubernetes.io/proxy-send-timeout" $proxyTimeoutS
         "nginx.ingress.kubernetes.io/proxy-buffering" "off"
   }}
   {{- $annotations = merge $annotations $nginxDefaults }}

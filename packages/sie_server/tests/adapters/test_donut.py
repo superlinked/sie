@@ -168,3 +168,30 @@ class TestDonutAdapter:
         assert "menu[0].price" in labels
         assert "menu[1].nm" in labels
         assert "total.total_price" in labels
+
+
+def test_extract_single_rejects_undecodable_bytes_with_typed_error() -> None:
+    """Non-image bytes are a typed InvalidMediaError (-> 400), not a PIL OSError 500.
+
+    Representative of the OCR/document-extract adapter family (donut,
+    florence2, glm_ocr, lighton_ocr, mineru_vl, paddleocr_vl), which all
+    decode via the shared ``decode_image`` seam.
+    """
+    from sie_server.adapters.donut import DonutAdapter
+    from sie_server.types.inputs import InvalidMediaError
+
+    adapter = DonutAdapter("naver-clova-ix/donut-base-finetuned-cord-v2")
+
+    # extract() enumerates items and passes each one's request-local index, so
+    # a NON-first item's failure names that item, not `$.items[*]`.
+    with pytest.raises(
+        InvalidMediaError, match=r"image data is not a decodable image - at `\$\.items\[2\]\.images\[0\]\.data`"
+    ):
+        adapter._extract_single(
+            Item(images=[{"data": b"valid base64, not an image", "format": "png"}]),
+            task="cord",
+            instruction=None,
+            max_new_tokens=8,
+            num_beams=1,
+            item_index=2,
+        )

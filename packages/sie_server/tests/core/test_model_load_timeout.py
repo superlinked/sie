@@ -1,4 +1,4 @@
-"""Tests for the post-download model-load timeout introduced in sie-internal#846.
+"""Tests for the post-download model-load timeout.
 
 Covers:
 - ``_resolve_load_timeout`` precedence (kwarg > env > default).

@@ -1,7 +1,7 @@
 sie_id: google/gemma-4-31B-it
 hf_id: google/gemma-4-31B-it
 hf_revision: 842da3794eaa0b77d5f08bae87a17459d91ff475
-# Gemma 4 dense 31B is served by the dedicated ``gemma`` bundle
+# Gemma 4 dense 31B is served by the shared ``sglang-cu130`` bundle
 # (SGLang 0.5.13 / transformers 5.8 / CUDA 13). The BF16 checkpoint is
 # 58.25 GiB, so the requested single-H100-80GB shape uses SGLang online FP8
 # weight quantization while retaining the checkpoint's bfloat16 compute dtype.

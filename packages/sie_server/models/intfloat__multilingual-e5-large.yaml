@@ -1,5 +1,6 @@
 sie_id: intfloat/multilingual-e5-large
 hf_id: intfloat/multilingual-e5-large
+hf_revision: 3d7cfbdacd47fdda877c5cd8a79fbcc4f2a574f3
 inputs:
   text: true
   image: false

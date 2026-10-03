@@ -11,21 +11,69 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field
 
+from sie_server.core.extract_cost import MAX_EXTRACT_LABELS
 from sie_server.core.score_cost import MAX_SCORE_ITEMS
+from sie_server.types.inputs import DEFAULT_MAX_ITEM_TEXT_BYTES
+
+
+def _base64_media_bytes(schema: dict[str, Any]) -> None:
+    """Describe native media bytes as the base64 string the JSON path accepts.
+
+    Pydantic renders a bare ``bytes`` as ``format: binary``, which in OpenAPI
+    means raw octets — the shape a multipart file upload carries, not the one
+    this API takes. On the JSON path msgspec base64-decodes ``data`` (matching
+    the msgpack path's native binary), so a client that followed
+    ``format: binary`` and sent raw bytes inside a JSON string would fail
+    validation. ``contentEncoding`` is the OpenAPI 3.1 spelling for "this
+    string is base64", and it is what a generated client can actually produce.
+    """
+    schema.pop("format", None)
+    schema["contentEncoding"] = "base64"
+
+
+_MEDIA_BYTES_DESCRIPTION = "Base64-encoded on the JSON path; native binary on the msgpack path."
 
 
 # Request models
 class ImageInputModel(BaseModel):
     """Image input for multimodal models."""
 
-    data: bytes = Field(..., description="Image data as bytes")
+    data: bytes = Field(
+        ..., description=f"Image data. {_MEDIA_BYTES_DESCRIPTION}", json_schema_extra=_base64_media_bytes
+    )
     format: str | None = Field(default=None, description="Image format hint: 'jpeg', 'png', etc.")
+
+
+class AudioInputModel(BaseModel):
+    """Audio input for audio models."""
+
+    data: bytes = Field(
+        ..., description=f"Audio data. {_MEDIA_BYTES_DESCRIPTION}", json_schema_extra=_base64_media_bytes
+    )
+    format: str | None = Field(default=None, description="Audio format: 'wav', 'mp3', etc.")
+    # The audio preprocessor rejects a non-positive rate outright
+    # ("audio.sample_rate must be a positive integer or null"), so the bound
+    # belongs in the published contract rather than only in the error path.
+    sample_rate: int | None = Field(default=None, gt=0, description="Sample rate in Hz. Must be positive.")
+
+
+class VideoInputModel(BaseModel):
+    """Video input for video models."""
+
+    data: bytes = Field(
+        ..., description=f"Video data. {_MEDIA_BYTES_DESCRIPTION}", json_schema_extra=_base64_media_bytes
+    )
+    format: str | None = Field(default=None, description="Video format: 'mp4', 'webm', etc.")
 
 
 class DocumentInputModel(BaseModel):
     """Document input for composite-document extractors (PDF, DOCX, HTML, ...)."""
 
-    data: bytes = Field(..., description="Document bytes (raw file content)")
+    data: bytes = Field(
+        ...,
+        description=f"Document bytes (raw file content). {_MEDIA_BYTES_DESCRIPTION}",
+        json_schema_extra=_base64_media_bytes,
+    )
     format: str | None = Field(default=None, description="Document format hint: 'pdf', 'docx', 'html', etc.")
 
 
@@ -33,12 +81,24 @@ class ItemModel(BaseModel):
     """A single item to encode."""
 
     id: str | None = Field(default=None, description="Optional identifier for this item. Returned in response.")
-    text: str | None = Field(default=None, description="Text content to encode", examples=["Hello, world!"])
+    text: str | None = Field(
+        default=None,
+        description=(
+            "Text content to encode. An item's text and metadata may hold at most "
+            f"{DEFAULT_MAX_ITEM_TEXT_BYTES} bytes of UTF-8 together by default (SIE_MAX_ITEM_TEXT_BYTES)."
+        ),
+        examples=["Hello, world!"],
+    )
     images: list[ImageInputModel] | None = Field(default=None, description="Images for multimodal models")
+    audio: AudioInputModel | None = Field(default=None, description="Audio for audio models")
+    video: VideoInputModel | None = Field(default=None, description="Video for video models")
     document: DocumentInputModel | None = Field(
         default=None, description="Document for composite-document extractors (PDF, DOCX, HTML, ...)"
     )
-    metadata: dict[str, Any] | None = Field(default=None, description="Arbitrary metadata. Returned in response.")
+    metadata: dict[str, Any] | None = Field(
+        default=None,
+        description="Arbitrary metadata. Returned in response. Counts toward the item's text size limit.",
+    )
 
     model_config = {"extra": "allow"}
 
@@ -119,19 +179,34 @@ class TimingInfoModel(BaseModel):
     postprocessing_ms: float | None = Field(default=None, description="Postprocessing time")
 
 
+class UsageModel(BaseModel):
+    """Authoritative worker-emitted usage.
+
+    Post-tokenization counts, never a character estimate. A reported 0 is a
+    measurement (a video-only encode reads no text); an absent block means the
+    counts were unavailable on this path.
+    """
+
+    input_tokens: int = Field(..., ge=0, description="Post-truncation input tokens processed")
+    images: int | None = Field(default=None, ge=0, description="Images processed across the request's items")
+
+
 class EncodeResponseModel(BaseModel):
     """Response from encode endpoint."""
 
     model: str = Field(..., description="Model used for encoding")
     items: list[EncodeResultModel] = Field(..., description="Encoding results for each input item")
     timing: TimingInfoModel | None = Field(default=None, description="Request timing breakdown")
+    usage: UsageModel | None = Field(default=None, description="Authoritative usage when the worker reported counts")
 
 
 # Extract endpoint models
 class ExtractParamsModel(BaseModel):
     """Parameters for extract requests."""
 
-    labels: list[str] | None = Field(default=None, description="Entity labels to extract")
+    labels: list[str] | None = Field(
+        default=None, max_length=MAX_EXTRACT_LABELS, description="Entity labels to extract"
+    )
     output_schema: dict[str, Any] | None = Field(default=None, description="Schema for structured extraction")
     instruction: str | None = Field(default=None, description="Task instruction")
     options: dict[str, Any] | None = Field(
@@ -220,6 +295,7 @@ class ExtractResponseModel(BaseModel):
 
     model: str = Field(..., description="Model used for extraction")
     items: list[ExtractResultModel] = Field(..., description="Extraction results for each input item")
+    usage: UsageModel | None = Field(default=None, description="Authoritative usage when the worker reported counts")
 
 
 # Score endpoint models
@@ -253,11 +329,28 @@ class ScoreEntryModel(BaseModel):
     rank: int = Field(..., description="Rank (0 = most relevant)")
 
 
+class ScoreInputTokensDetailsModel(BaseModel):
+    """Breakdown of score input tokens."""
+
+    content_tokens: int = Field(
+        ...,
+        ge=0,
+        description=(
+            "Caller text inside the scored pairs (query, post-truncation document, supplied instruction), "
+            "each tokenized alone; the remainder of input_tokens is the reranker's prompt template"
+        ),
+    )
+
+
 class ScoreUsageModel(BaseModel):
     """Authoritative worker-emitted score usage."""
 
     input_tokens: int = Field(..., ge=0, description="Post-truncation input tokens processed")
     images: int | None = Field(default=None, ge=0, description="Images processed across query-document pairs")
+    input_tokens_details: ScoreInputTokensDetailsModel | None = Field(
+        default=None,
+        description="Content/template breakdown when the reranker reports it",
+    )
 
 
 class ScoreResponseModel(BaseModel):
@@ -293,7 +386,13 @@ class NativeJsonSchemaGrammarModel(BaseModel):
 
     json_schema: dict[str, Any]
     label: str | None = None
-    strict: bool | None = None
+    strict: bool | None = Field(
+        default=None,
+        description=(
+            "When true, the finished output must parse as JSON and validate against json_schema; "
+            "otherwise the request fails with MODEL_OUTPUT_PARSE_ERROR"
+        ),
+    )
     model_config = {"extra": "forbid"}
 
 
@@ -302,7 +401,13 @@ class NativeRegexGrammarModel(BaseModel):
 
     regex: str = Field(..., max_length=4 * 1024)
     label: str | None = None
-    strict: bool | None = None
+    strict: bool | None = Field(
+        default=None,
+        description=(
+            "When true, the finished output must match regex in full; "
+            "otherwise the request fails with MODEL_OUTPUT_PARSE_ERROR"
+        ),
+    )
     model_config = {"extra": "forbid"}
 
 
@@ -311,7 +416,10 @@ class NativeEbnfGrammarModel(BaseModel):
 
     ebnf: str = Field(..., max_length=8 * 1024)
     label: str | None = None
-    strict: bool | None = None
+    strict: bool | None = Field(
+        default=None,
+        description="EBNF output cannot be verified, so true is rejected with 400 unsupported_field",
+    )
     model_config = {"extra": "forbid"}
 
 
@@ -391,12 +499,32 @@ class GenerateRequestModel(BaseModel):
     }
 
 
+class PromptTokensDetailsModel(BaseModel):
+    """Breakdown of the prompt tokens in one generation request."""
+
+    cached_tokens: int = Field(
+        ...,
+        ge=0,
+        description="Prompt tokens served from the engine's prefix cache instead of being prefilled",
+    )
+
+
 class GenerateUsageModel(BaseModel):
     """Token usage for one generation request."""
 
     prompt_tokens: int = Field(..., ge=0, description="Number of prompt tokens")
     completion_tokens: int = Field(..., ge=0, description="Number of generated tokens")
     total_tokens: int = Field(..., ge=0, description="Total prompt and generated tokens")
+    prompt_tokens_details: PromptTokensDetailsModel | None = Field(
+        default=None,
+        description="Prompt-token breakdown; omitted when the engine does not report prefix-cache hits",
+    )
+    images: int | None = Field(
+        default=None,
+        ge=1,
+        le=(1 << 32) - 1,
+        description="Observed input images on successful image-conditioned generation; omitted for text-only requests",
+    )
 
 
 class GenerateResponseModel(BaseModel):
@@ -538,6 +666,7 @@ class OpenAIResponseUsageModel(BaseModel):
     input_tokens: int = Field(..., ge=0)
     output_tokens: int = Field(..., ge=0)
     total_tokens: int = Field(..., ge=0)
+    input_tokens_details: PromptTokensDetailsModel | None = None
 
 
 class OpenAIResponsesResponseModel(BaseModel):
@@ -582,11 +711,56 @@ class GenerateModelLoadFailedErrorResponse(BaseModel):
     detail: GenerateModelLoadFailedDetailModel
 
 
+class OpenAIEmbeddingsErrorModel(BaseModel):
+    """Inner object of the top-level OpenAI ``{"error": {...}}`` envelope that
+    ``/v1/embeddings`` route-generated errors emit (e.g. a retryable 503
+    ``MODEL_LOADING``). Matches the shape ``/v1/completions`` returns.
+    """
+
+    message: str = Field(..., description="Client-safe error message")
+    type: str = Field(..., description="OpenAI error type, e.g. 'server_error'")
+    param: str | None = Field(default=None, description="Offending request field, when known")
+    code: str = Field(..., description="Stable SIE error code, e.g. 'MODEL_LOADING'")
+
+
+class OpenAIEmbeddingsErrorResponse(BaseModel):
+    """Top-level OpenAI error envelope for a retryable ``/v1/embeddings`` error."""
+
+    error: OpenAIEmbeddingsErrorModel
+
+
+class OpenAIEmbeddingsModelLoadFailedErrorModel(BaseModel):
+    """Inner error object for a terminal ``/v1/embeddings`` model-load failure,
+    carrying the terminal-failure short-circuit fields alongside the OpenAI shape.
+    """
+
+    message: str = Field(..., description="Client-safe error message")
+    type: str = Field(..., description="OpenAI error type ('server_error')")
+    param: str | None = Field(default=None, description="Unused for this error; always null")
+    code: Literal["MODEL_LOAD_FAILED"] = Field(..., description="Stable error code")
+    error_class: str = Field(..., description="Classified model-load failure category")
+    permanent: bool = Field(..., description="Whether operator action is required before retrying")
+    attempts: int = Field(..., ge=1, description="Number of failed model-load attempts")
+
+
+class OpenAIEmbeddingsModelLoadFailedErrorResponse(BaseModel):
+    """Top-level OpenAI error envelope for a terminal ``/v1/embeddings`` model-load failure."""
+
+    error: OpenAIEmbeddingsModelLoadFailedErrorModel
+
+
 class GenerateChunkErrorModel(BaseModel):
     """Terminal error carried by a generation SSE event."""
 
     code: str = Field(..., description="Stable error code")
     message: str = Field(..., description="Client-safe error message")
+    param: str | None = Field(default=None, description="Exact unsupported request field, when applicable")
+    retry_after_s: int | None = Field(
+        default=None,
+        ge=1,
+        le=60,
+        description=("Authoritative retry hint in seconds for RESOURCE_EXHAUSTED only; null for other terminal errors"),
+    )
 
 
 class GenerateChunk(BaseModel):
@@ -604,3 +778,41 @@ class GenerateChunk(BaseModel):
         description="Per-token log probabilities aligned with text_delta",
     )
     error: GenerateChunkErrorModel | None = Field(default=None, description="Terminal generation error")
+    execution_identity_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+        description=(
+            "Optional worker-origin execution identity, only on a successful terminal event together with "
+            "execution_binding_sha256. Older or self-hosted deployments may omit both. "
+            "Distinct from the catalog weights revision and executed bundle/config hash."
+        ),
+    )
+    execution_binding_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+        description="Optional worker-origin execution binding, with the same successful-terminal complete-pair contract",
+    )
+
+    model_config = {
+        "json_schema_extra": {
+            "oneOf": [
+                {
+                    "required": ["execution_identity_sha256", "execution_binding_sha256"],
+                    "properties": {
+                        "done": {"const": True},
+                        "error": {"type": "null"},
+                        "execution_identity_sha256": {"type": "string"},
+                        "execution_binding_sha256": {"type": "string"},
+                    },
+                },
+                {
+                    "not": {
+                        "anyOf": [
+                            {"required": ["execution_identity_sha256"]},
+                            {"required": ["execution_binding_sha256"]},
+                        ]
+                    }
+                },
+            ]
+        }
+    }
