@@ -99,8 +99,9 @@ with SIEClient(base_url="http://localhost:8080") as client:
     print(result["request"].get("upstream"))   # team-sie
 ```
 
-The upstream must return usage for successful work. Missing or malformed usage
-fails the request instead of substituting an estimated count.
+SIE encode can succeed when upstream usage is absent. In that case the adapter
+omits `input_token_counts` instead of estimating them. Malformed usage fails
+the request. Native generation requires terminal usage for successful output.
 
 ## OpenAI-compatible embeddings and rerank
 
