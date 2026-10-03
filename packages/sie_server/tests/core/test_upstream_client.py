@@ -7,7 +7,7 @@ import logging
 import httpx
 import pytest
 from sie_server.config.upstreams import Upstream, UpstreamCredentialError
-from sie_server.core.upstream_client import UpstreamRedirectRefusedError, upstream_client
+from sie_server.core.upstream_client import UpstreamRedirectRefusedError, upstream_client, upstream_sync_client
 
 CANARY = "sk-canary-0b8e5d7c3a91f246"
 
@@ -133,3 +133,23 @@ def test_only_the_declared_proxy_is_used() -> None:
 
     proxies = [transport._pool._proxy_url for transport in client._mounts.values()]
     assert [(url.host, url.port) for url in proxies] == [(b"proxy.example.internal", 3128)]
+
+
+def test_explicit_sync_transport_cannot_be_bypassed_by_proxy_mount(monkeypatch) -> None:
+    monkeypatch.setenv("TEAM_SIE_KEY", CANARY)
+    recorder = Recorder(httpx.Response(200, json={}))
+    with upstream_sync_client(
+        make_upstream(proxy_url="http://proxy.example.internal:3128"), transport=httpx.MockTransport(recorder)
+    ) as client:
+        assert client.get("/v1/models").status_code == 200
+    assert len(recorder.requests) == 1
+
+
+async def test_explicit_async_transport_cannot_be_bypassed_by_proxy_mount(monkeypatch) -> None:
+    monkeypatch.setenv("TEAM_SIE_KEY", CANARY)
+    recorder = Recorder(httpx.Response(200, json={}))
+    async with upstream_client(
+        make_upstream(proxy_url="http://proxy.example.internal:3128"), transport=httpx.MockTransport(recorder)
+    ) as client:
+        assert (await client.get("/v1/models")).status_code == 200
+    assert len(recorder.requests) == 1

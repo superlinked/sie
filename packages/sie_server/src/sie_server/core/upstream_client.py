@@ -12,6 +12,7 @@ from collections.abc import Generator
 import httpx
 
 from sie_server.config.upstreams import Upstream
+from sie_server.core.upstream_deadline import DeadlineTransport
 
 DEFAULT_TIMEOUT = httpx.Timeout(30.0, connect=5.0)
 
@@ -52,13 +53,13 @@ def upstream_client(
     timeout: httpx.Timeout = DEFAULT_TIMEOUT,
     transport: httpx.AsyncBaseTransport | None = None,
 ) -> httpx.AsyncClient:
-    """Build the only async client that may call ``upstream``."""
+    """Build the async egress client; an explicit transport owns proxy/TLS policy."""
     return httpx.AsyncClient(
         base_url=upstream.base_url,
         auth=_EnvBearerAuth(upstream),
         follow_redirects=False,
         trust_env=False,
-        proxy=upstream.proxy_url,
+        proxy=upstream.proxy_url if transport is None else None,
         verify=True,
         timeout=timeout,
         transport=transport,
@@ -72,13 +73,13 @@ def upstream_sync_client(
     timeout: httpx.Timeout = DEFAULT_TIMEOUT,
     transport: httpx.BaseTransport | None = None,
 ) -> httpx.Client:
-    """Build the only synchronous client that may call ``upstream``. Same rules as :func:`upstream_client`."""
+    """Build the synchronous egress client; an explicit transport owns proxy/TLS policy."""
+    transport = transport if transport is not None else DeadlineTransport(proxy=upstream.proxy_url)
     return httpx.Client(
         base_url=upstream.base_url,
         auth=_EnvBearerAuth(upstream),
         follow_redirects=False,
         trust_env=False,
-        proxy=upstream.proxy_url,
         verify=True,
         timeout=timeout,
         transport=transport,

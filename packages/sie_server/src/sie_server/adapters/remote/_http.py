@@ -43,6 +43,7 @@ from sie_server.adapters.errors import (
 from sie_server.adapters.remote._limits import upstream_limiter
 from sie_server.config.upstreams import UpstreamCredentialError, upstream_for_serving
 from sie_server.core.upstream_client import UpstreamRedirectRefusedError
+from sie_server.core.upstream_deadline import DEADLINE_EXTENSION
 from sie_server.types.inputs import InvalidInputError
 
 DEFAULT_RETRY_AFTER_S = 5
@@ -101,6 +102,7 @@ def send_bounded(
 
 
 def _send(client: httpx.Client, request: httpx.Request, *, upstream: str, max_bytes: int, deadline: float) -> bytes:
+    request.extensions[DEADLINE_EXTENSION] = deadline
     try:
         response = client.send(request, stream=True)
     except UpstreamCredentialError:

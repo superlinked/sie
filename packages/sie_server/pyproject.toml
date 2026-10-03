@@ -117,6 +117,7 @@ dependencies = [
     "blake3>=0.4,<1",
     "python-multipart>=0.0.20,<1",
     "threadpoolctl>=3.6.0",
+    "httpcore>=1.0,<2",
 ]
 
 [project.optional-dependencies]
