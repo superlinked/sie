@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 from sie_server.adapters._base_adapter import BaseAdapter
 from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters.gliner2.adapter import GLiNER2Adapter
 from sie_server.adapters.laya.adapter import LayaAdapter
 from sie_server.config.model import EmbeddingDim, EncodeTask, ModelConfig, ProfileConfig, Tasks
 from sie_server.core.extract_cost import MAX_EXTRACT_LABELS
@@ -1450,6 +1451,51 @@ class TestProcessScoreBatch:
 
 
 class TestProcessExtractBatch:
+    @pytest.mark.asyncio
+    async def test_gliner2_invalid_request_does_not_fail_valid_sibling(self) -> None:
+        adapter = GLiNER2Adapter("test-model")
+        adapter._model = MagicMock()
+        adapter._model.extract_entities.return_value = {"entities": {}}
+        reg = _make_registry()
+        worker = AsyncMock()
+
+        async def submit(requests, *, lora):
+            futures: list[asyncio.Future[WorkerResult]] = []
+            for request in requests:
+                future: asyncio.Future[WorkerResult] = asyncio.Future()
+                try:
+                    output = adapter.extract(
+                        request.items,
+                        labels=request.labels,
+                        output_schema=request.output_schema,
+                        options=request.options,
+                    )
+                except ValueError as error:
+                    future.set_exception(error)
+                else:
+                    future.set_result(WorkerResult(output=output, timing=RequestTiming()))
+                futures.append(future)
+            return futures
+
+        worker.submit_extract_preformed_batch = AsyncMock(side_effect=submit)
+        reg.start_worker = AsyncMock(return_value=worker)
+        outcome = await QueueExecutor(reg).process_extract_batch(
+            ProcessExtractBatchRequest(
+                model_id="test/model",
+                items=[
+                    _extract_item(wiid="bad.0", options={"multi_label": "yes"}),
+                    _extract_item(wiid="good.0"),
+                ],
+            )
+        )
+
+        by_id = {item.work_item_id: item for item in outcome.outcomes}
+        assert by_id["bad.0"].disposition == "publish_error_and_ack"
+        assert by_id["bad.0"].error_code == "INVALID_INPUT"
+        assert by_id["good.0"].disposition == "publish_and_ack"
+        assert by_id["good.0"].error_code is None
+        adapter._model.extract_entities.assert_called_once()
+
     @pytest.mark.asyncio
     async def test_image_item_uses_registered_preprocessor_payload(self) -> None:
         reg = _make_registry()
