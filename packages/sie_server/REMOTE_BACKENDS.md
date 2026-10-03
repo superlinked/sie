@@ -47,8 +47,9 @@ with local and remote generation profiles whose remote profile produces every
 declared output (see [Single-node generation fallback](#single-node-generation-fallback)).
 A request that names a profile bypasses the bare-model policy, including an
 explicit `default`. Single-node OpenAI hybrid `encode` and `score` require the
-operator-owned equivalence admission described below. SIE hybrid identity
-comparison and `threshold` remain separate deliveries. Cluster remote profiles
+operator-owned equivalence admission described below. SIE hybrid encode and
+score require the fresh identity admission described below; `threshold` remains
+a separate delivery. Cluster remote profiles
 use the queue, but cluster fallback is still being built.
 
 ## Single-node embedding example

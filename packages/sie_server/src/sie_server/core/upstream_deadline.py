@@ -163,11 +163,7 @@ class DeadlineTransport(httpx.BaseTransport):
         ssl_context = httpx.create_ssl_context(verify=True, trust_env=False)
         self._pool = httpcore.ConnectionPool(
             ssl_context=ssl_context,
-            proxy=(
-                httpcore.Proxy(proxy, ssl_context=ssl_context if httpx.URL(proxy).scheme == "https" else None)
-                if proxy
-                else None
-            ),
+            proxy=httpcore.Proxy(proxy) if proxy else None,
             network_backend=_DeadlineBackend(),
             retries=0,
         )
