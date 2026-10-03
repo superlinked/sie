@@ -351,6 +351,10 @@ consumer. The stream retains the existing bounded age, message and delivery
 limits. Older six-token pool and seven-token direct filters cannot receive this
 work or change the authority consumer when reconciling their own streams.
 Redelivery preserves the subject and rechecks the live configuration hash.
+Verified subject and payload model ids must match exactly before any subject
+rewrite, readiness check or offloaded payload retrieval. This refuses lossy
+`__`/`_dot_` normalization collisions instead of retargeting another model
+covered by the same configuration hash.
 
 The sidecar derives the required contract from that subject. Before readiness
 or fetching offloaded inputs, it requires a nonempty matching hash, live config

@@ -26,6 +26,12 @@ pub fn requires_execution_authority_v1(subject: &str) -> bool {
         && parts.last() == Some(&EXECUTION_AUTHORITY_V1_TOKEN)
 }
 
+/// Verified subjects may not silently retarget a lossy-normalized model id.
+pub fn execution_authority_model_matches(subject: &str, model_id: &str) -> bool {
+    !requires_execution_authority_v1(subject)
+        || extract_model_id(subject).as_deref() == Some(model_id)
+}
+
 /// Inverse of [`normalize_model_id`]. Best-effort: `__` → `/`, `_dot_` → `.`.
 pub fn denormalize_model_id(normalized: &str) -> String {
     normalized.replace("__", "/").replace("_dot_", ".")
@@ -135,6 +141,29 @@ mod tests {
         ] {
             assert!(!requires_execution_authority_v1(invalid));
         }
+    }
+
+    #[test]
+    fn authority_subject_cannot_retarget_normalization_collisions() {
+        for (original, decoded) in [
+            ("Org__model", "Org/model"),
+            ("Org/model_dot_v1", "Org/model.v1"),
+        ] {
+            let subject = format!(
+                "sie.work.pool.machine.bundle.{}.worker.execution-authority-v1",
+                normalize_model_id(original)
+            );
+            assert!(!execution_authority_model_matches(&subject, original));
+            assert!(execution_authority_model_matches(&subject, decoded));
+            assert!(execution_authority_model_matches(
+                "sie.work.pool.machine.bundle.legacy.worker",
+                original
+            ));
+        }
+        assert!(execution_authority_model_matches(
+            "sie.work.pool.machine.bundle.Org__model.worker.execution-authority-v1",
+            "Org/model"
+        ));
     }
 
     #[test]

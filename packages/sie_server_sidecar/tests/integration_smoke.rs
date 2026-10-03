@@ -1283,6 +1283,19 @@ async fn smoke_generation_direct_dispatch_is_active_before_capability_reconcile(
 
     let pool = "smoke-gen-hot-add";
     let bundle = "default";
+    let client = async_nats::connect(&nats.url)
+        .await
+        .expect("client connect");
+    let js = async_nats::jetstream::new(client.clone());
+    js.create_stream(async_nats::jetstream::stream::Config {
+        name: "AUTHORITY_SETUP_BLOCKER".into(),
+        subjects: vec![format!(
+            "sie.work.{pool}.{pool}.{bundle}.*.smoke-worker.execution-authority-v1"
+        )],
+        ..Default::default()
+    })
+    .await
+    .expect("create temporary authority subject conflict");
     let probe_port = find_free_tcp_port();
     let _worker =
         WorkerHarness::spawn_with_env(&nats.url, &sock.path, pool, bundle, probe_port, None, &[]);
@@ -1364,6 +1377,27 @@ async fn smoke_generation_direct_dispatch_is_active_before_capability_reconcile(
     assert_eq!(body["smoke"], "generate");
     assert_eq!(body["model_id"], model_id);
     assert_eq!(body["request_id"], request_id);
+    assert!(js
+        .get_stream("WORK_AUTHORITY_V1_smoke-worker")
+        .await
+        .is_err());
+    js.delete_stream("AUTHORITY_SETUP_BLOCKER")
+        .await
+        .expect("remove temporary authority conflict");
+    timeout(Duration::from_secs(15), async {
+        loop {
+            if js
+                .get_stream("WORK_AUTHORITY_V1_smoke-worker")
+                .await
+                .is_ok()
+            {
+                break;
+            }
+            sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("authority setup retries and recovers");
 
     drop(_worker);
     drop(python);

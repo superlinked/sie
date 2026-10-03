@@ -1040,15 +1040,6 @@ impl GenerationDirectDispatch {
             }
         };
 
-        let authority_consumer =
-            match ensure_authority_stream_and_consumer(&self.jetstream, &self.config).await {
-                Ok(consumer) => consumer,
-                Err(e) => {
-                    self.active.store(false, Ordering::Release);
-                    return Err(e.into());
-                }
-            };
-
         let work_cancel = match spawn_work_cancel_subscriber(
             self.nats_client.clone(),
             self.request_cancel_state.clone(),
@@ -1111,7 +1102,27 @@ impl GenerationDirectDispatch {
         let authority_latency_tracker = Arc::clone(&self.latency_tracker);
         let authority_pool_admission = self.pool_admission.clone();
         let authority_active = Arc::clone(&self.authority_active);
+        let authority_jetstream = self.jetstream.clone();
+        let authority_config = self.config.clone();
         let authority_pull = tokio::spawn(async move {
+            // Authority setup is independent of the ordinary pull loops. Keep
+            // its capability closed and retry boundedly while legacy work runs.
+            let authority_consumer = loop {
+                let result = tokio::select! {
+                    _ = authority_shutdown.wait() => return,
+                    result = ensure_authority_stream_and_consumer(&authority_jetstream, &authority_config) => result,
+                };
+                match result {
+                    Ok(consumer) => break consumer,
+                    Err(error) => {
+                        warn!(%error, "authority consumer setup failed; retrying without blocking ordinary dispatch")
+                    }
+                }
+                tokio::select! {
+                    _ = authority_shutdown.wait() => return,
+                    _ = tokio::time::sleep(Duration::from_secs(5)) => {},
+                }
+            };
             let _ready = AuthorityConsumerReady(Arc::clone(&authority_active));
             authority_active.store(true, Ordering::Release);
             run_pull_loop(

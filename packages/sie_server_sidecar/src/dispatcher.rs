@@ -54,7 +54,8 @@ use crate::scheduler::{
 };
 use crate::shutdown::Shutdown;
 use crate::subject::{
-    extract_model_id, is_worker_direct_work_subject, requires_execution_authority_v1,
+    execution_authority_model_matches, extract_model_id, is_worker_direct_work_subject,
+    requires_execution_authority_v1,
 };
 use crate::tokenize::TokenizerRegistry;
 use crate::work_deadline::{
@@ -1286,7 +1287,9 @@ impl Dispatcher {
                     // subject, never an additive payload field an old worker
                     // could ignore. Refuse before readiness or payload fetch.
                     if requires_execution_authority_v1(&msg.subject)
-                        && !self.execution_authority_is_available(&wi, wi.operation != "generate")
+                        && (!execution_authority_model_matches(&msg.subject, &wi.model_id)
+                            || !self
+                                .execution_authority_is_available(&wi, wi.operation != "generate"))
                     {
                         nak_one_with_reason(
                             &Delivery::Nats(msg, admission_permit, None),
@@ -1496,7 +1499,8 @@ impl Dispatcher {
         let delivery = DeliveryContext::from_message(&msg);
         let base_delay_ms = base_nak_delay_ms();
         if requires_execution_authority_v1(&msg.subject)
-            && !self.execution_authority_is_available(&wi, false)
+            && (!execution_authority_model_matches(&msg.subject, &wi.model_id)
+                || !self.execution_authority_is_available(&wi, false))
         {
             nak_msg_with_reason(
                 &msg,
@@ -2250,7 +2254,8 @@ impl Dispatcher {
         let base_delay_ms = base_nak_delay_ms();
         if items.iter().any(|(wi, delivery)| {
             delivery.requires_execution_authority_v1()
-                && !self.execution_authority_is_available(wi, true)
+                && (!delivery.execution_authority_model_matches(&wi.model_id)
+                    || !self.execution_authority_is_available(wi, true))
         }) {
             nak_all(&items, base_delay_ms, &self.runtime_state.telemetry).await;
             return Ok(());
@@ -6885,6 +6890,29 @@ mod tests {
             .store(true, Ordering::Release);
         let mut work = wi("verified", 0, "cold", "generate");
         work.bundle_config_hash = "stale".into();
+        work.payload_ref = Some("must-not-fetch".into());
+        let Delivery::Nats(message, permit, _) = authority_test_delivery().await else {
+            unreachable!()
+        };
+        dispatcher
+            .handle_generate_item(work, QueuedMessage::new(message, permit))
+            .await;
+        assert_eq!(backend.probes.load(Ordering::SeqCst), 0);
+        assert!(backend.encoded_models().is_empty());
+    }
+
+    #[tokio::test]
+    async fn mismatched_authority_generation_refuses_before_readiness_or_payload_fetch() {
+        let backend = LoadingModelBackend::new("cold");
+        let mut dispatcher = dispatcher_with_backend(backend.clone());
+        Arc::get_mut(&mut dispatcher).unwrap().config_apply_state =
+            Some(Arc::new(ConfigApplyState::new("fresh".into())));
+        dispatcher
+            .worker_pool
+            .execution_authority_v1()
+            .store(true, Ordering::Release);
+        let mut work = wi("verified", 0, "another", "generate");
+        work.bundle_config_hash = "fresh".into();
         work.payload_ref = Some("must-not-fetch".into());
         let Delivery::Nats(message, permit, _) = authority_test_delivery().await else {
             unreachable!()

@@ -150,7 +150,6 @@ impl AdapterWorkerPool {
         &self,
         timestamp_ms: f64,
     ) -> Vec<(usize, Result<PingResponse, IpcError>)> {
-        self.execution_authority_v1.store(false, Ordering::Release);
         let results = join_all(self.children.iter().map(|child| async move {
             let result = child.ipc.ping(timestamp_ms).await;
             if result.as_ref().is_ok_and(|resp| resp.ready) {
@@ -989,9 +988,17 @@ mod tests {
         pool
     }
 
+    #[derive(Default)]
+    struct CapabilityProbeGate {
+        enabled: AtomicBool,
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+
     async fn spawn_capability_worker(
         path: PathBuf,
         supports: Arc<AtomicBool>,
+        gate: Option<Arc<CapabilityProbeGate>>,
     ) -> tokio::task::JoinHandle<()> {
         let listener = UnixListener::bind(path).unwrap();
         tokio::spawn(async move {
@@ -1000,6 +1007,7 @@ mod tests {
                     return;
                 };
                 let supports = Arc::clone(&supports);
+                let gate = gate.clone();
                 tokio::spawn(async move {
                     loop {
                         let mut length = [0_u8; 4];
@@ -1012,6 +1020,14 @@ mod tests {
                         }
                         let request: serde_json::Value = rmp_serde::from_slice(&bytes).unwrap();
                         let method = request["method"].as_str().unwrap();
+                        if method == "WorkerCapabilities" {
+                            if let Some(gate) = &gate {
+                                if gate.enabled.load(Ordering::Acquire) {
+                                    gate.entered.notify_one();
+                                    gate.release.notified().await;
+                                }
+                            }
+                        }
                         let capable = supports.load(Ordering::Acquire);
                         let body = match method {
                             "Ping" => Some(
@@ -1058,8 +1074,9 @@ mod tests {
         let old_path = dir.path().join("old.sock");
         let old_supports = Arc::new(AtomicBool::new(false));
         let new_server =
-            spawn_capability_worker(new_path.clone(), Arc::new(AtomicBool::new(true))).await;
-        let old_server = spawn_capability_worker(old_path.clone(), Arc::clone(&old_supports)).await;
+            spawn_capability_worker(new_path.clone(), Arc::new(AtomicBool::new(true)), None).await;
+        let old_server =
+            spawn_capability_worker(old_path.clone(), Arc::clone(&old_supports), None).await;
         let pool = pool_with_paths(&[new_path.clone(), old_path.clone()]);
         pool.ping_all(0.0).await;
         assert_eq!(pool.ready_child_count(), 2);
@@ -1108,6 +1125,36 @@ mod tests {
         );
         new_server.abort();
         old_server.abort();
+    }
+
+    #[tokio::test]
+    async fn successful_authority_heartbeat_does_not_temporarily_revoke_support() {
+        let dir = tempfile::Builder::new()
+            .prefix("ipc-cap-refresh-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let path = dir.path().join("child.sock");
+        let gate = Arc::new(CapabilityProbeGate::default());
+        let server = spawn_capability_worker(
+            path.clone(),
+            Arc::new(AtomicBool::new(true)),
+            Some(gate.clone()),
+        )
+        .await;
+        let pool = pool_with_paths(&[path]);
+        pool.ping_all(0.0).await;
+        assert!(pool.execution_authority_v1().load(Ordering::Acquire));
+        gate.enabled.store(true, Ordering::Release);
+        let task_pool = pool.clone();
+        let refresh = tokio::spawn(async move { task_pool.ping_all(0.0).await });
+        tokio::time::timeout(Duration::from_secs(1), gate.entered.notified())
+            .await
+            .unwrap();
+        assert!(pool.execution_authority_v1().load(Ordering::Acquire));
+        gate.release.notify_one();
+        refresh.await.unwrap();
+        assert!(pool.execution_authority_v1().load(Ordering::Acquire));
+        server.abort();
     }
 
     fn pool_with_paths(paths: &[PathBuf]) -> Arc<AdapterWorkerPool> {

@@ -120,6 +120,15 @@ pub enum Delivery {
 }
 
 impl Delivery {
+    pub fn execution_authority_model_matches(&self, model_id: &str) -> bool {
+        match self {
+            Self::Nats(message, ..) => {
+                crate::subject::execution_authority_model_matches(&message.subject, model_id)
+            }
+            Self::Local(..) => true,
+        }
+    }
+
     pub fn requires_execution_authority_v1(&self) -> bool {
         matches!(self, Self::Nats(msg, ..) if crate::subject::requires_execution_authority_v1(&msg.subject))
     }
