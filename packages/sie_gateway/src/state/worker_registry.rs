@@ -794,11 +794,16 @@ impl WorkerRegistry {
             return None;
         }
         let snap = self.snapshot.load();
-        snap.by_bundle
-            .get(&bundle.to_lowercase())?
-            .iter()
-            .find(|w| {
-                w.eligible_for_dispatch()
+        let candidates = snap.by_bundle.get(&bundle.to_lowercase())?;
+        let mut name_counts = HashMap::<&str, usize>::with_capacity(snap.all_healthy.len());
+        for worker in &snap.all_healthy {
+            *name_counts.entry(worker.name.as_str()).or_default() += 1;
+        }
+        let ring = RingSnapshot::from_entries(
+            candidates
+                .iter()
+                .filter(|w| {
+                    w.eligible_for_dispatch()
                 && w.supports_execution_authority_v1
                 && w.last_heartbeat.elapsed() <= self.heartbeat_timeout
                 && w.bundle_config_hash == expected_hash
@@ -809,9 +814,26 @@ impl WorkerRegistry {
                 // Avoid subject normalization collisions and ambiguous worker identities.
                 && !w.name.is_empty()
                 && w.name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-                && snap.all_healthy.iter().filter(|other| other.name == w.name).count() == 1
-            })
-            .map(|w| w.name.clone())
+                && name_counts.get(w.name.as_str()) == Some(&1)
+                })
+                .map(|w| {
+                    RingEntry::with_pressure(
+                        w.name.clone(),
+                        w.ready_gpu_slots,
+                        w.queue_depth,
+                        w.pending_cost,
+                        w.inflight_batches,
+                    )
+                }),
+        );
+        let seed = uuid::Uuid::now_v7().to_string();
+        let key = crate::routing::key::RoutingKeyResolved {
+            hash: Some(crate::routing::key::hash_bytes(&seed)),
+            source: crate::routing::key::KeySource::RoutingKey,
+            #[cfg(feature = "raw-routing-logs")]
+            raw_for_debug: None,
+        };
+        crate::routing::pick_worker(&ring, &key).map(str::to_owned)
     }
 
     pub async fn get_models(&self) -> HashMap<String, Vec<String>> {
@@ -1396,6 +1418,36 @@ mod tests {
         duplicate.pool_name = "another-tenant".into();
         reg.update_worker("w2", duplicate).await;
         assert!(pick("abc123", None).is_none(), "duplicate worker identity");
+    }
+
+    #[tokio::test]
+    async fn verified_selection_uses_pressure_and_distributes_equal_pressure() {
+        let reg = registry();
+        for (name, cost) in [("hot", 100), ("idle-a", 0), ("idle-b", 0)] {
+            let mut msg = make_msg(true);
+            msg.name = name.into();
+            msg.pool_name = "tenant".into();
+            msg.supports_execution_authority_v1 = true;
+            msg.pending_cost = Some(cost);
+            reg.update_worker(name, msg).await;
+        }
+        let selected: HashSet<_> = (0..128)
+            .map(|_| {
+                reg.execution_authority_worker(
+                    "BAAI/bge-m3",
+                    "tenant",
+                    "l4-spot",
+                    "default",
+                    "abc123",
+                    None,
+                )
+                .unwrap()
+            })
+            .collect();
+        assert_eq!(
+            selected,
+            HashSet::from(["idle-a".to_string(), "idle-b".to_string()])
+        );
     }
 
     #[tokio::test]

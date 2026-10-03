@@ -140,7 +140,8 @@ fn ceil_div_i64(value: i64, divisor: i64) -> i64 {
     if value <= 0 {
         0
     } else {
-        (value + divisor.max(1) - 1) / divisor.max(1)
+        let divisor = divisor.max(1);
+        value / divisor + i64::from(value % divisor != 0)
     }
 }
 

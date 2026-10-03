@@ -147,6 +147,21 @@ fn pick_normalizes_pressure_by_ready_gpu_slots() {
 }
 
 #[test]
+fn pick_normalizes_maximum_pressure_without_overflow() {
+    let key = resolve(Some("maximum-pressure"), None, None, None);
+    let snap = RingSnapshot::from_entries([
+        RingEntry::with_pressure("wide", 2, i32::MAX, i64::MAX, i32::MAX),
+        RingEntry::with_pressure("narrow", 1, i32::MAX, i64::MAX - 1, i32::MAX),
+    ]);
+    assert_eq!(pick_worker(&snap, &key), Some("wide"));
+    let snap = RingSnapshot::from_entries([
+        RingEntry::with_pressure("untrusted", 2, i32::MAX, i64::MAX, i32::MAX),
+        RingEntry::with_pressure("idle", 1, 0, 0, 0),
+    ]);
+    assert_eq!(pick_worker(&snap, &key), Some("idle"));
+}
+
+#[test]
 fn empty_snapshot_returns_none() {
     let snap = RingSnapshot::default();
     let key = resolve(Some("x"), None, None, None);
