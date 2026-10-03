@@ -2,10 +2,10 @@
 
 Short FAQ for gallery readers. Full guides (upstream may still call Model Studio
 “optional” — prefer [SIE integration](./sie-integration.md) for routing keys):
-[sie-setup.md](https://github.com/neomatrix369/tripwire/blob/main/docs/user-guide/sie-setup.md),
-[model-studio-setup.md](https://github.com/neomatrix369/tripwire/blob/main/docs/user-guide/model-studio-setup.md),
-[setup-commands — when it fails](https://github.com/neomatrix369/tripwire/blob/main/docs/user-guide/setup-commands.md#when-it-fails),
-[env-vars.md](https://github.com/neomatrix369/tripwire/blob/main/docs/user-guide/env-vars.md).
+[sie-setup.md](https://github.com/neomatrix369/AgentVetter/blob/main/docs/user-guide/sie-setup.md),
+[model-studio-setup.md](https://github.com/neomatrix369/AgentVetter/blob/main/docs/user-guide/model-studio-setup.md),
+[setup-commands — when it fails](https://github.com/neomatrix369/AgentVetter/blob/main/docs/user-guide/setup-commands.md#when-it-fails),
+[env-vars.md](https://github.com/neomatrix369/AgentVetter/blob/main/docs/user-guide/env-vars.md).
 
 ## Route warns and skips
 
@@ -22,9 +22,9 @@ routing still needs root `.env`.
 ## No pathway strips in the dashboard
 
 - You are on **Mock** — switch to **Live (Supabase)** after a real scan
-- Batch was never routed — run `tripwire route --batch-id …` or re-scan with
+- Batch was never routed — run `agentvetter route --batch-id …` or re-scan with
   router keys set (`SIE_*` and Model Studio)
-- Read filters: [reading-router-results.md](https://github.com/neomatrix369/tripwire/blob/main/docs/user-guide/reading-router-results.md)
+- Read filters: [reading-router-results.md](https://github.com/neomatrix369/AgentVetter/blob/main/docs/user-guide/reading-router-results.md)
 
 ## Live scan “all clear” but a scanner was missing
 
@@ -34,11 +34,11 @@ MVP Live only needs Supabase + Modal.
 ## Model Studio never runs (no Alibaba calls)
 
 Expected unless SIE escalates. Keys must still be present for route config; check
-`DASHSCOPE_*` / region endpoint in [model-studio-setup](https://github.com/neomatrix369/tripwire/blob/main/docs/user-guide/model-studio-setup.md).
+`DASHSCOPE_*` / region endpoint in [model-studio-setup](https://github.com/neomatrix369/AgentVetter/blob/main/docs/user-guide/model-studio-setup.md).
 
 ## Still stuck?
 
-1. [QUICKSTART](https://github.com/neomatrix369/tripwire/blob/main/QUICKSTART.md)  
-2. [docs hub](https://github.com/neomatrix369/tripwire/blob/main/docs/README.md)  
+1. [QUICKSTART](https://github.com/neomatrix369/AgentVetter/blob/main/QUICKSTART.md)  
+2. [docs hub](https://github.com/neomatrix369/AgentVetter/blob/main/docs/README.md)  
 3. Open an issue on
-   [neomatrix369/tripwire](https://github.com/neomatrix369/tripwire/issues)
+   [neomatrix369/AgentVetter](https://github.com/neomatrix369/AgentVetter/issues)

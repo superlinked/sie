@@ -1,18 +1,18 @@
 # Scan AI skills and MCP servers, then triage with SIE
 
-> Tripwire is a metal detector for AI tools — discover, scan in isolation, review
+> AgentVetter is a metal detector for AI tools — discover, scan in isolation, review
 > findings in one dashboard. Superlinked SIE can route findings after Live scans.
 
 This is an **external project guide**. The runnable app lives in
-[neomatrix369/tripwire](https://github.com/neomatrix369/tripwire).
+[neomatrix369/AgentVetter](https://github.com/neomatrix369/AgentVetter).
 This folder is the SIE-facing onboarding surface: short pages here, full detail
 in that repo.
 
 **SIE primitives used:** `generate` (chat completions via OpenAI-compatible
 `/v1/chat/completions` for post-scan triage). Mock demo and Live scans work
-without routing. Auto-route / `tripwire route` need **both** `SIE_*` and Model
+without routing. Auto-route / `agentvetter route` need **both** `SIE_*` and Model
 Studio keys today (see [SIE integration](./sie-integration.md)); upstream
-[tiered-router setup](https://github.com/neomatrix369/tripwire/blob/e0806ea01f62192346db67f4d45f745d7e7bde71/docs/user-guide/setup-commands.md#tiered-router-optional)
+[tiered-router setup](https://github.com/neomatrix369/AgentVetter/blob/e0806ea01f62192346db67f4d45f745d7e7bde71/docs/user-guide/setup-commands.md#tiered-router-optional)
 may still call Model Studio “optional.”
 
 ## Who this is for
@@ -20,10 +20,10 @@ may still call Model Studio “optional.”
 | You are… | Start here |
 |---|---|
 | New to SIE, found this in the gallery | [Getting started](./getting-started.md) → [SIE integration](./sie-integration.md) |
-| New to Tripwire, want SIE triage | Same path — then [What SIE does here](./what-sie-does.md) |
+| New to AgentVetter, want SIE triage | Same path — then [What SIE does here](./what-sie-does.md) |
 
 Happy path for SIE: Mock demo first → Live scan (Supabase + Modal) → enable
-hosted SIE → `tripwire route` (or auto-route after scan).
+hosted SIE → `agentvetter route` (or auto-route after scan).
 
 ## Start here
 
@@ -33,9 +33,9 @@ hosted SIE → `tripwire route` (or auto-route after scan).
 4. [Troubleshooting](./troubleshooting.md) — short FAQ + deep-links
 
 **Canonical docs in the project** (prefer gallery pages above for routing prereqs):
-[QUICKSTART](https://github.com/neomatrix369/tripwire/blob/main/QUICKSTART.md) ·
-[SIE setup](https://github.com/neomatrix369/tripwire/blob/main/docs/user-guide/sie-setup.md) ·
-[docs hub](https://github.com/neomatrix369/tripwire/blob/main/docs/README.md)
+[QUICKSTART](https://github.com/neomatrix369/AgentVetter/blob/main/QUICKSTART.md) ·
+[SIE setup](https://github.com/neomatrix369/AgentVetter/blob/main/docs/user-guide/sie-setup.md) ·
+[docs hub](https://github.com/neomatrix369/AgentVetter/blob/main/docs/README.md)
 
 ## Ports cheat sheet
 
@@ -47,6 +47,6 @@ hosted SIE → `tripwire route` (or auto-route after scan).
 ## Attribution
 
 Built and maintained in
-[neomatrix369/tripwire](https://github.com/neomatrix369/tripwire)
-([license](https://github.com/neomatrix369/tripwire/blob/main/LICENSE)).
+[neomatrix369/AgentVetter](https://github.com/neomatrix369/AgentVetter)
+([license](https://github.com/neomatrix369/AgentVetter/blob/main/LICENSE)).
 Architecture and deeper guides live in that repository.
