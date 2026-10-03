@@ -9,6 +9,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sie_server.adapters.remote._limits import upstream_limiter
+from sie_server.adapters.remote.openai import OpenAIUpstreamAdapter
 from sie_server.adapters.remote.sie import SieUpstreamAdapter
 from sie_server.api import openai_local
 from sie_server.api.openai_local import _remote_chat_response, router
@@ -63,17 +64,22 @@ def events() -> list[dict | str]:
     ]
 
 
-@pytest.fixture
-def remote_chat() -> Iterator[tuple[TestClient, SieUpstreamAdapter, ModelConfig, list[httpx.Request]]]:
+@pytest.fixture(params=["sie", "openai"])
+def remote_chat(
+    request: pytest.FixtureRequest,
+) -> Iterator[tuple[TestClient, SieUpstreamAdapter | OpenAIUpstreamAdapter, ModelConfig, list[httpx.Request]]]:
+    kind = request.param
+    adapter_class = SieUpstreamAdapter if kind == "sie" else OpenAIUpstreamAdapter
     upstream = Upstream.model_validate(
         {
-            "kind": "sie",
-            "base_url": "http://127.0.0.1:8088/prefix",
+            "kind": kind,
+            **({"endpoints": ["chat", "completions"]} if kind == "openai" else {}),
+            "base_url": "http://127.0.0.1:8088/prefix" + ("/v1" if kind == "openai" else ""),
             "rate_cap": {"requests_per_minute": 600, "max_concurrency": 8},
         }
     )
     install_upstreams({"chat-api": upstream})
-    adapter = SieUpstreamAdapter(upstream="chat-api", upstream_model="operator/model")
+    adapter = adapter_class(upstream="chat-api", upstream_model="operator/model")
     adapter.load("cpu")
     config = ModelConfig.model_validate(
         {
@@ -82,7 +88,7 @@ def remote_chat() -> Iterator[tuple[TestClient, SieUpstreamAdapter, ModelConfig,
             "tasks": {"generate": {"context_length": 4096, "max_output_tokens": 64}},
             "profiles": {
                 "default": {
-                    "adapter_path": "sie_server.adapters.remote.sie:SieUpstreamAdapter",
+                    "adapter_path": f"{adapter_class.__module__}:{adapter_class.__name__}",
                     "max_batch_tokens": 8192,
                     "adapter_options": {
                         "loadtime": {"upstream": "chat-api", "upstream_model": "operator/model"},
@@ -115,7 +121,7 @@ def remote_chat() -> Iterator[tuple[TestClient, SieUpstreamAdapter, ModelConfig,
 
 
 def answer_with(
-    remote_chat: tuple[TestClient, SieUpstreamAdapter, ModelConfig, list[httpx.Request]],
+    remote_chat: tuple[TestClient, SieUpstreamAdapter | OpenAIUpstreamAdapter, ModelConfig, list[httpx.Request]],
     response: httpx.Response | Callable[[], httpx.Response],
 ) -> None:
     _, adapter, _, requests = remote_chat

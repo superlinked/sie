@@ -4,11 +4,12 @@ The profile names an upstream from the server's startup configuration and the
 model id the upstream serves. ``encode`` sends text items to the upstream's
 ``/embeddings`` and returns its dense vectors. ``score`` sends a request's query
 and documents to the upstream's Cohere-shape ``/rerank`` and returns the scores
-in document order. Loading makes no outbound call, holds no weights and uses no
-accelerator.
+in document order. Generation sends a raw prompt to ``/completions`` or a
+validated message list to ``/chat/completions``. Loading makes no outbound call,
+holds no weights and uses no accelerator.
 
-This server builds every body it sends, so no field or header of the caller
-reaches the upstream. The upstream's operator-set fields are added and its
+This server builds every body it sends, so only validated contract fields
+reach the upstream and caller credentials never do. The upstream's operator-set fields are added and its
 operator-stripped fields removed, and the only credential sent is the
 upstream's own. A request the upstream cannot serve is refused before anything
 is sent: an output other than dense vectors, an item that is not plain text, an
@@ -25,9 +26,10 @@ by the rules in :mod:`sie_server.adapters.remote._http`.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import math
-from collections.abc import Mapping
+from collections.abc import AsyncGenerator, AsyncIterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -35,9 +37,18 @@ import httpx
 import numpy as np
 
 from sie_server.adapters._base_adapter import BaseAdapter
+from sie_server.adapters._generation_base import (
+    GenerationAdapter,
+    GenerationChunk,
+    GenerationInputTooLongError,
+    GenerationInvalidRequestError,
+    GenerationPreflightResult,
+    GenerationUnsupportedFieldError,
+)
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_NOT_LOADED
 from sie_server.adapters._utils import extract_texts
+from sie_server.adapters.errors import InputTooLongError, UpstreamUnavailableError
 from sie_server.adapters.remote._batching import (
     RequestScores,
     UpstreamUsage,
@@ -45,8 +56,10 @@ from sie_server.adapters.remote._batching import (
     requests_in_flight,
     score_each_request,
 )
-from sie_server.adapters.remote._http import RemoteUpstreamError, send_bounded
+from sie_server.adapters.remote._chat_transport import chat_completion, chat_completion_stream
+from sie_server.adapters.remote._http import RemoteUpstreamError, generation_error, open_stream, send_bounded, sse_data
 from sie_server.adapters.remote._limits import upstream_limiter
+from sie_server.adapters.remote._openai_completions import CompletionStreamParser
 from sie_server.config.upstreams import (
     Upstream,
     UpstreamConfigError,
@@ -55,12 +68,13 @@ from sie_server.config.upstreams import (
     upstream_for_serving,
 )
 from sie_server.core.inference_output import EncodeOutput, ScoreOutput
-from sie_server.core.upstream_client import upstream_sync_client
+from sie_server.core.upstream_client import upstream_client, upstream_sync_client
 from sie_server.types.inputs import InvalidInputError
 
 if TYPE_CHECKING:
     from sie_server.core.inference_output import ExtractOutput
-    from sie_server.types.inputs import Item
+    from sie_server.types.grammar import GrammarSpec
+    from sie_server.types.inputs import ImageInput, Item, VideoInput
 
 _JSON = "application/json"
 REQUEST_DEADLINE_S = 60.0
@@ -75,8 +89,8 @@ _MAX_REPORTED_COUNT = 1 << 32
 _USAGE_KEYS = ("prompt_tokens", "total_tokens")
 
 
-class OpenAIUpstreamAdapter(BaseAdapter):
-    """Serve ``encode`` and ``score`` for a remote profile from an OpenAI-compatible upstream.
+class OpenAIUpstreamAdapter(BaseAdapter, GenerationAdapter):
+    """Serve encode, score and generation from an OpenAI-compatible upstream.
 
     The outputs this adapter cannot produce are declared so that a model with
     them still loads; a request for one is refused when it arrives.
@@ -84,7 +98,7 @@ class OpenAIUpstreamAdapter(BaseAdapter):
 
     spec: ClassVar[AdapterSpec] = AdapterSpec(
         inputs=("text",),
-        outputs=("dense", "sparse", "multivector", "score", "json"),
+        outputs=("dense", "sparse", "multivector", "score", "json", "tokens"),
         unload_fields=(),
     )
 
@@ -105,6 +119,8 @@ class OpenAIUpstreamAdapter(BaseAdapter):
         self._dense_dim = dense_dim
         self._upstream: Upstream | None = None
         self._client: httpx.Client | None = None
+        self._async_client: httpx.AsyncClient | None = None
+        self._closing: asyncio.Task[None] | None = None
         self._executor: ThreadPoolExecutor | None = None
         self._device: str | None = None
 
@@ -124,10 +140,193 @@ class OpenAIUpstreamAdapter(BaseAdapter):
         if executor is not None:
             executor.shutdown(wait=False, cancel_futures=True)
         client, self._client = self._client, None
-        self._upstream = None
         if client is not None:
             client.close()
+        if self._async_client is not None:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                pass
+            else:
+                async_client, self._async_client = self._async_client, None
+                self._closing = loop.create_task(async_client.aclose())
+        self._upstream = None
         super().unload()
+
+    @property
+    def upstream_name(self) -> str:
+        return self._upstream_name
+
+    async def aclose_client(self) -> None:
+        """Close the loop-bound generation client during awaitable registry teardown."""
+        if self._closing is not None:
+            await self._closing
+            self._closing = None
+        client, self._async_client = self._async_client, None
+        if client is not None:
+            await client.aclose()
+
+    def _generation_upstream(self, endpoint: UpstreamEndpoint) -> Upstream:
+        if self._upstream is None:
+            raise RuntimeError(ERR_NOT_LOADED)
+        if endpoint not in self._upstream.endpoints:
+            raise GenerationUnsupportedFieldError(
+                "messages" if endpoint is UpstreamEndpoint.CHAT else "prompt",
+                "the upstream does not declare the required generation endpoint",
+            )
+        return self._upstream
+
+    def _generation_client(self) -> httpx.AsyncClient:
+        if self._upstream is None:
+            raise RuntimeError(ERR_NOT_LOADED)
+        if self._async_client is None:
+            self._async_client = upstream_client(self._upstream)
+        return self._async_client
+
+    def _generation_request(
+        self, body: dict[str, Any], *, chat: bool, stream: bool
+    ) -> tuple[httpx.AsyncClient, httpx.Request]:
+        upstream = self._generation_upstream(UpstreamEndpoint.CHAT if chat else UpstreamEndpoint.COMPLETIONS)
+        sent = upstream.apply_params({**body, "model": self._upstream_model, "stream": stream})
+        if not chat:
+            sent["echo"] = False
+            if sent.get("best_of", 1) != 1:
+                raise GenerationUnsupportedFieldError("best_of", "raw remote generation accepts one candidate only")
+        # Both aliases must obey the caller ceiling, even when an operator
+        # introduces the alias absent from the validated caller body.
+        limits = [body[field] for field in ("max_tokens", "max_completion_tokens") if field in body]
+        if limits:
+            ceiling = min(limits)
+            caps = {}
+            for field in ("max_tokens", "max_completion_tokens"):
+                if field in body or field in sent:
+                    cap = sent.get(field, body.get(field, ceiling))
+                    if isinstance(cap, bool) or not isinstance(cap, int) or cap <= 0:
+                        raise GenerationInvalidRequestError(field, "the upstream output limit is invalid")
+                    caps[field] = cap
+            effective = min(ceiling, *caps.values())
+            sent.update(dict.fromkeys(caps, effective))
+        if stream:
+            sent["stream_options"] = {"include_usage": True}
+        else:
+            sent.pop("stream_options", None)
+        client = self._generation_client()
+        return client, client.build_request(
+            "POST",
+            "/chat/completions" if chat else "/completions",
+            json=sent,
+            headers={"Accept": "text/event-stream" if stream else "application/json", "Accept-Encoding": "identity"},
+            timeout=httpx.Timeout(300.0, connect=_CONNECT_TIMEOUT_S, write=30.0),
+        )
+
+    async def chat_completion(
+        self, body: dict[str, Any], *, requested_model: str, max_response_bytes: int = 32 << 20
+    ) -> dict[str, Any]:
+        client, request = self._generation_request(body, chat=True, stream=False)
+        return await chat_completion(
+            client,
+            request,
+            upstream=self._upstream_name,
+            requested_model=requested_model,
+            choices=1 if body.get("n") is None else body["n"],
+            max_response_bytes=max_response_bytes,
+            error_body_timeout_s=REQUEST_DEADLINE_S,
+        )
+
+    def chat_completion_stream(
+        self, body: dict[str, Any], *, requested_model: str, max_response_bytes: int = 32 << 20
+    ) -> AsyncIterator[dict[str, Any]]:
+        client, request = self._generation_request(body, chat=True, stream=True)
+        return chat_completion_stream(
+            client,
+            request,
+            upstream=self._upstream_name,
+            requested_model=requested_model,
+            choices=1 if body.get("n") is None else body["n"],
+            max_response_bytes=max_response_bytes,
+            error_body_timeout_s=REQUEST_DEADLINE_S,
+        )
+
+    def preflight_generate(self, parameters: Mapping[str, Any], *, stream: bool) -> GenerationPreflightResult | None:
+        _ = stream
+        _refuse_unforwarded(parameters)
+        self._generation_upstream(UpstreamEndpoint.COMPLETIONS)
+        return None
+
+    async def generate(
+        self,
+        prompt: str,
+        *,
+        max_new_tokens: int,
+        temperature: float = 1.0,
+        top_p: float = 1.0,
+        stop: list[str] | None = None,
+        frequency_penalty: float | None = None,
+        presence_penalty: float | None = None,
+        top_k: int | None = None,
+        repetition_penalty: float | None = None,
+        min_new_tokens: int | None = None,
+        grammar: GrammarSpec | None = None,
+        seed: int | None = None,
+        logit_bias: dict[str, float] | None = None,
+        logprobs: bool = False,
+        top_logprobs: int | None = None,
+        images: list[ImageInput] | None = None,
+        videos: list[VideoInput] | None = None,
+    ) -> AsyncGenerator[GenerationChunk, None]:
+        """Send an already rendered raw prompt; never replay an accepted stream."""
+        _refuse_unforwarded(
+            {
+                "top_k": top_k,
+                "repetition_penalty": repetition_penalty,
+                "min_new_tokens": min_new_tokens,
+                "grammar": grammar,
+                "images": images,
+                "videos": videos,
+            }
+        )
+        body: dict[str, Any] = {
+            "prompt": prompt,
+            "max_tokens": max_new_tokens,
+            "temperature": temperature,
+            "top_p": top_p,
+            "n": 1,
+        }
+        optional = {
+            "stop": stop,
+            "frequency_penalty": frequency_penalty,
+            "presence_penalty": presence_penalty,
+            "seed": seed,
+            "logit_bias": logit_bias,
+        }
+        body.update({key: value for key, value in optional.items() if value is not None})
+        if logprobs:
+            body["logprobs"] = 1 if top_logprobs is None else top_logprobs
+        client, request = self._generation_request(body, chat=False, stream=True)
+        parser = CompletionStreamParser(logprobs=logprobs)
+        yielded = False
+        try:
+            async with open_stream(
+                client, request, upstream=self._upstream_name, error_body_timeout_s=REQUEST_DEADLINE_S
+            ) as response:
+                if response.headers.get("content-type", "").partition(";")[0].strip().lower() != "text/event-stream":
+                    raise RemoteUpstreamError("upstream did not stream its completion")
+                async for data in sse_data(response, max_event_bytes=1 << 20, max_total_bytes=64 << 20):
+                    chunk = parser.parse(data)
+                    if chunk is not None:
+                        yielded = True
+                        yield chunk
+                        if chunk.done:
+                            return
+                parser.finish()
+        except UpstreamUnavailableError as error:
+            if yielded:
+                raise RemoteUpstreamError("the upstream failed during generation") from None
+            raise generation_error(error) from None
+        except InputTooLongError:
+            raise GenerationInputTooLongError("the upstream refused the prompt as too long") from None
+        except InvalidInputError:
+            raise GenerationInvalidRequestError("prompt", "the upstream refused the request") from None
 
     def encode(
         self,
@@ -359,3 +558,10 @@ def _rerank_scores(answer: dict[str, Any], count: int) -> list[float]:
             raise RemoteUpstreamError("upstream returned a relevance score that is not a finite number")
         scores[index] = float(score)
     return [score for score in scores if score is not None]
+
+
+def _refuse_unforwarded(parameters: Mapping[str, Any]) -> None:
+    for field in ("top_k", "repetition_penalty", "min_new_tokens", "grammar", "images", "videos"):
+        value = parameters.get(field)
+        if value is not None and value != []:
+            raise GenerationUnsupportedFieldError(field, "the OpenAI completions endpoint cannot enforce this field")

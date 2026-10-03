@@ -62,6 +62,7 @@ from sie_server.adapters.remote._batching import (
     requests_in_flight,
     score_each_request,
 )
+from sie_server.adapters.remote._chat_transport import chat_completion, chat_completion_stream
 from sie_server.adapters.remote._http import (
     DEFAULT_RETRY_AFTER_S,
     RemoteUpstreamError,
@@ -71,7 +72,6 @@ from sie_server.adapters.remote._http import (
     sse_data,
 )
 from sie_server.adapters.remote._limits import upstream_limiter
-from sie_server.adapters.remote._openai_chat import ChatStreamParser
 from sie_server.config.upstreams import Upstream, UpstreamConfigError, UpstreamKind, upstream_for_serving
 from sie_server.core.inference_output import EncodeOutput, ExtractItemError, ExtractOutput, ScoreOutput, SparseVector
 from sie_server.core.postprocessor_registry import POSTPROCESSOR_OPTION_KEYS
@@ -360,49 +360,30 @@ class SieUpstreamAdapter(BaseAdapter, GenerationAdapter):
     async def chat_completion(
         self, body: dict[str, Any], *, requested_model: str, max_response_bytes: int = 32 << 20
     ) -> dict[str, Any]:
-        """Return one bounded, normalized chat answer with exact upstream usage."""
-        parser = ChatStreamParser(requested_model, choices=1 if body.get("n") is None else body["n"])
         client, request = self._chat_request(body, stream=False)
-        async with open_stream(
-            client, request, upstream=self._upstream_name, error_body_timeout_s=REQUEST_DEADLINE_S
-        ) as response:
-            if response.headers.get("content-type", "").partition(";")[0].strip().lower() != "application/json":
-                raise RemoteUpstreamError("upstream did not return a chat answer")
-            raw = bytearray()
-            async for chunk in response.aiter_raw():
-                if len(raw) + len(chunk) > min(max_response_bytes, _MAX_STREAM_BYTES):
-                    raise RemoteUpstreamError("upstream chat answer exceeds the size limit")
-                raw.extend(chunk)
-            return parser.completion(bytes(raw))
+        return await chat_completion(
+            client,
+            request,
+            upstream=self._upstream_name,
+            requested_model=requested_model,
+            choices=1 if body.get("n") is None else body["n"],
+            max_response_bytes=max_response_bytes,
+            error_body_timeout_s=REQUEST_DEADLINE_S,
+        )
 
-    async def chat_completion_stream(
+    def chat_completion_stream(
         self, body: dict[str, Any], *, requested_model: str, max_response_bytes: int = 32 << 20
     ) -> AsyncIterator[dict[str, Any]]:
-        """Yield normalized events; upstream failures after output are final."""
-        parser = ChatStreamParser(requested_model, choices=1 if body.get("n") is None else body["n"])
         client, request = self._chat_request(body, stream=True)
-        yielded = False
-        try:
-            async with open_stream(
-                client, request, upstream=self._upstream_name, error_body_timeout_s=REQUEST_DEADLINE_S
-            ) as response:
-                if response.headers.get("content-type", "").partition(";")[0].strip().lower() != "text/event-stream":
-                    raise RemoteUpstreamError("upstream did not stream its chat answer")
-                async for data in sse_data(
-                    response,
-                    max_event_bytes=min(_MAX_EVENT_BYTES, max_response_bytes),
-                    max_total_bytes=min(_MAX_STREAM_BYTES, max_response_bytes),
-                ):
-                    event = parser.parse(data)
-                    if event is None:
-                        return
-                    yielded = True
-                    yield event
-                parser.finish()
-        except UpstreamUnavailableError:
-            if yielded:
-                raise RemoteUpstreamError("the upstream failed during chat generation") from None
-            raise
+        return chat_completion_stream(
+            client,
+            request,
+            upstream=self._upstream_name,
+            requested_model=requested_model,
+            choices=1 if body.get("n") is None else body["n"],
+            max_response_bytes=max_response_bytes,
+            error_body_timeout_s=REQUEST_DEADLINE_S,
+        )
 
     def encode(
         self,

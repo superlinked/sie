@@ -15,13 +15,17 @@ remaining work.
 | Upstream | Operations on `main` |
 | --- | --- |
 | `sie` | Native `encode` (dense, sparse and multivector), `score`, `extract`, and buffered or streaming `generate`; supported image inputs for non-generation primitives |
-| `openai` | Dense text embeddings at `/embeddings` and Cohere-shape reranking at `/rerank` |
+| `openai` | Dense text embeddings at `/embeddings`, Cohere-shape reranking at `/rerank`, single-node chat at `/chat/completions`, and native prompt generation through `/completions` |
 
 Native SIE generation uses the upstream's `/v1/generate` endpoint, with exact
 terminal usage. Single-node `/v1/chat/completions` serving also forwards to the
-SIE upstream's chat endpoint. Queue-mode chat and OpenAI-provider chat and
-completions remain separate work; declaring an endpoint alone does not
-implement generation.
+SIE upstream's chat endpoint. OpenAI profiles require the corresponding
+`chat` or `completions` endpoint declaration. Both generation modes require
+exact final usage and bounded responses; streaming cancellation closes the
+upstream call. Queue-mode chat and selecting raw prompt rendering for
+onboarded chat models remain separate work. Native raw completions refuse
+media, grammar and nonstandard sampling fields they cannot enforce; strict
+JSON Schema output is supported through single-node chat and verified locally.
 
 A remote-backed model has only remote profiles. Its bare name serves remotely;
 `routing: {policy: remote_only}` makes that policy explicit. It needs no local
