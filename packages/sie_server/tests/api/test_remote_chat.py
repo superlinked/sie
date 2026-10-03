@@ -12,12 +12,14 @@ from sie_server.adapters.remote._limits import upstream_limiter
 from sie_server.adapters.remote.openai import OpenAIUpstreamAdapter
 from sie_server.adapters.remote.sie import SieUpstreamAdapter
 from sie_server.api import openai_local
+from sie_server.api.generate import router as generate_router
 from sie_server.api.openai_local import _remote_chat_response, router
 from sie_server.config.model import ModelConfig
 from sie_server.config.upstreams import Upstream, install_upstreams
 from sie_server.core.upstream_client import upstream_client
 
 MODEL = "caller/model"
+SAFE_MODEL = "caller__model"
 BODY = {"model": MODEL, "messages": [{"role": "user", "content": "question"}]}
 USAGE = {"prompt_tokens": 37, "completion_tokens": 2, "total_tokens": 39}
 
@@ -109,6 +111,7 @@ def remote_chat(
     registry.get.return_value = adapter
     app = FastAPI()
     app.include_router(router)
+    app.include_router(generate_router)
     app.state.registry = registry
     requests: list[httpx.Request] = []
     try:
@@ -399,3 +402,47 @@ def test_remote_reasoning_is_not_exposed_in_logprobs(remote_chat: tuple, streami
     response = client.post("/v1/chat/completions", json={**BODY, "stream": streaming, "logprobs": True})
     assert response.status_code == 200
     assert "PRIVATE_REASONING" not in response.text
+
+
+@pytest.mark.parametrize("status", [400, 503])
+def test_native_remote_stream_refusal_precedes_http_success(remote_chat: tuple, status: int) -> None:
+    client, _, config, requests = remote_chat
+    config.profiles["default"].adapter_options.runtime.clear()
+    answer_with(
+        remote_chat,
+        json_response(
+            status,
+            {"error": {"code": "INVALID_INPUT", "message": "private"}}
+            if status == 400
+            else {"error": {"message": "private"}},
+            headers={"retry-after": "19"},
+        ),
+    )
+    response = client.post(f"/v1/generate/{SAFE_MODEL}", json={"prompt": "question", "max_new_tokens": 8, "stream": True})
+    assert response.status_code == status, response.text
+    assert "text/event-stream" not in response.headers["content-type"]
+    assert "private" not in response.text
+    if status == 503:
+        assert response.headers["retry-after"] == "19"
+    assert len(requests) == 1
+    assert upstream_limiter("chat-api")._in_flight == 0
+
+
+def test_native_remote_failure_after_output_remains_a_stream_error(remote_chat: tuple) -> None:
+    client, adapter, config, requests = remote_chat
+    config.profiles["default"].adapter_options.runtime.clear()
+    first = (
+        {"choices": [{"index": 0, "text": "answer", "finish_reason": None}]}
+        if isinstance(adapter, OpenAIUpstreamAdapter)
+        else {"request_id": "upstream-id", "seq": 0, "text_delta": "answer", "done": False}
+    )
+    stream = ChatStream([first], disconnect=True)
+    answer_with(remote_chat, httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=stream))
+    response = client.post(f"/v1/generate/{SAFE_MODEL}", json={"prompt": "question", "max_new_tokens": 8, "stream": True})
+    assert response.status_code == 200, response.text
+    assert "answer" in response.text
+    assert '"finish_reason": "error"' in response.text
+    assert "private upstream detail" not in response.text
+    assert len(requests) == 1
+    assert stream.closed
+    assert upstream_limiter("chat-api")._in_flight == 0

@@ -37,7 +37,6 @@ import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from sie_sdk.queue_types import denormalize_model_id
-from starlette.types import Receive, Scope, Send
 
 from sie_server.adapters._generation_base import (
     GenerationAdapter,
@@ -61,6 +60,7 @@ from sie_server.api.helpers import (
 from sie_server.api.options import resolve_runtime_options
 from sie_server.api.routing import error_code, fallback_refusal, remote_routing, route_request
 from sie_server.api.score import score_usage_from_output
+from sie_server.api.streaming_response import prefetched_sse_response
 from sie_server.api.validation import validate_machine_profile_header, validate_signed_i64
 from sie_server.config.model import validate_chat_template_kwargs
 from sie_server.config.upstreams import RemoteServingDisabledError
@@ -996,28 +996,6 @@ async def _stream_strict_violation(
     return await _strict_output_violation(grammar, completed)
 
 
-class _RemoteChatStreamingResponse(StreamingResponse):
-    """Own the primed iterator even if ASGI disconnects before body delivery."""
-
-    def __init__(self, iterator: AsyncIterator[bytes], first: bytes, *, headers: dict[str, str]) -> None:
-        self._remote_iterator = iterator
-
-        async def body() -> AsyncIterator[bytes]:
-            yield first
-            async for event in iterator:
-                yield event
-
-        super().__init__(body(), media_type="text/event-stream", headers=headers)
-
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        try:
-            await super().__call__(scope, receive, send)
-        finally:
-            await aclose_with_error_precedence(
-                self._remote_iterator, outcome_selected=True, context="remote chat response"
-            )
-
-
 def _check_remote_chat_usage(payload: dict[str, Any], body: dict[str, Any], config: Any) -> None:
     usage = payload.get("usage")
     if usage is None:
@@ -1112,9 +1090,8 @@ async def _remote_chat_response(
                 strict_grammar=strict_grammar,
             )
             # Decide a pre-output refusal before committing the HTTP 200.
-            first = await anext(iterator)
-            return _RemoteChatStreamingResponse(
-                iterator, first, headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", **headers}
+            return await prefetched_sse_response(
+                iterator, headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", **headers}
             )
         payload = await adapter.chat_completion(
             body, requested_model=requested_model, max_response_bytes=_MAX_CHAT_RESPONSE_BYTES

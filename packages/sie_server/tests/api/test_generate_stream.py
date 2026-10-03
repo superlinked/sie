@@ -15,6 +15,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
+from fastapi import HTTPException
 from sie_server.adapters._generation_base import (
     GenerationCapacityError,
     GenerationChunk,
@@ -22,6 +23,7 @@ from sie_server.adapters._generation_base import (
     GenerationPreflightResult,
 )
 from sie_server.api.generate import _stream_generate_events
+from sie_server.api.streaming_response import prefetched_sse_response
 
 
 class _FakeAdapter:
@@ -152,6 +154,7 @@ def _events(
     suppress_thinking: bool = False,
     preflight_result: GenerationPreflightResult | None = None,
     images: list[dict[str, Any]] | None = None,
+    pre_output_errors: bool = False,
 ) -> AsyncIterator[str]:
     return _stream_generate_events(
         adapter,
@@ -172,6 +175,7 @@ def _events(
         suppress_thinking=suppress_thinking,
         preflight_result=preflight_result,
         images=images,
+        pre_output_errors=pre_output_errors,
     )
 
 
@@ -666,3 +670,46 @@ async def test_stream_image_usage_requires_success(finish_reason: str) -> None:
         assert events[-1]["usage"]["images"] == 1
     else:
         assert "images" not in events[-1]["usage"]
+
+
+@pytest.mark.parametrize(
+    ("chunks", "expected_status"),
+    [
+        ([], 500),
+        ([GenerationChunk(text_delta="private partial", done=True, finish_reason="error")], 500),
+        ([GenerationChunk(text_delta="private partial", done=True, finish_reason="cancelled")], 503),
+    ],
+)
+async def test_remote_pre_output_terminal_failures_are_http_refusals(
+    chunks: list[GenerationChunk], expected_status: int
+) -> None:
+    adapter = _FakeAdapter(chunks)
+    with pytest.raises(HTTPException) as raised:
+        await anext(_events(adapter, pre_output_errors=True))
+    assert raised.value.status_code == expected_status
+    assert "private partial" not in str(raised.value.detail)
+    assert adapter.closed == 1
+
+
+async def test_remote_pre_output_capacity_keeps_retry_delay_and_cleanup() -> None:
+    iterator = _FailingCloseIterator([], next_error=GenerationCapacityError("busy", retry_after_s=19))
+    with pytest.raises(HTTPException) as raised:
+        await anext(_events(_IteratorAdapter(iterator), pre_output_errors=True))
+    assert raised.value.status_code == 503
+    assert raised.value.headers == {"Retry-After": "19"}
+    assert iterator.close_calls == 1
+
+
+async def test_prefetched_response_closes_on_failure_before_body_delivery() -> None:
+    adapter = _FakeAdapter([GenerationChunk(text_delta="answer"), GenerationChunk(text_delta="", done=True)])
+    response = await prefetched_sse_response(_events(adapter, pre_output_errors=True), headers={})
+
+    async def receive() -> dict[str, Any]:
+        return {"type": "http.disconnect"}
+
+    async def send(message: dict[str, Any]) -> None:
+        raise RuntimeError("send failed before body")
+
+    with pytest.raises(RuntimeError, match="send failed"):
+        await response({"type": "http", "asgi": {"spec_version": "2.4"}}, receive, send)
+    assert adapter.closed == 1
