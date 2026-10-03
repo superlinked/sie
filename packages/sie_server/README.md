@@ -11,6 +11,14 @@ GPU inference server for embeddings, reranking, and entity extraction.
 - Prometheus metrics and OpenTelemetry tracing
 - Reactive GPU OOM recovery + proactive idle eviction
 
+## Remote backends
+
+Serve a model through another SIE deployment or an OpenAI-compatible upstream
+using [remote profiles](REMOTE_BACKENDS.md). The guide covers configuration,
+caller controls, current routing limits and cluster workers. See
+[Moving to self-hosted serving](MIGRATING_TO_SELF_HOSTED.md) to migrate one model
+at a time while keeping its application name.
+
 ## Installation
 
 ```bash
