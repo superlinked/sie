@@ -1700,7 +1700,7 @@ Args (dict): url, field, requireTls.
 {{- fail (printf "%s.record_files must map 1 to 256 model names to absolute file paths" $path) -}}
 {{- end -}}
 {{- range $name, $file := $records -}}
-{{- if not (and (kindIs "string" $name) (gt (len $name) 0) (le (len $name) 256) (kindIs "string" $file) (gt (len $file) 0) (le (len $file) 4096) (hasPrefix "/" $file)) -}}
+{{- if not (and (kindIs "string" $name) (gt (len $name) 0) (le (len (splitList "" $name)) 256) (kindIs "string" $file) (gt (len $file) 0) (le (len (splitList "" $file)) 4096) (hasPrefix "/" $file)) -}}
 {{- fail (printf "%s record names must be bounded; file paths must be bounded and absolute" $path) -}}
 {{- end -}}
 {{- end -}}
