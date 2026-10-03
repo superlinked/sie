@@ -1259,7 +1259,14 @@ async def generate(
 
         # Do not start a potentially expensive model load until the complete
         # request has passed validation.
-        route = await route_request(http_request, registry_key, span, serving_key=serving_key)
+        options = body.get("options")
+        route = await route_request(
+            http_request,
+            registry_key,
+            span,
+            serving_key=serving_key,
+            profile=options.get("profile") if isinstance(options, dict) else None,
+        )
         adapter = registry.get(route.key)
         registry.touch_lru(route.key)
         if not isinstance(adapter, GenerationAdapter):

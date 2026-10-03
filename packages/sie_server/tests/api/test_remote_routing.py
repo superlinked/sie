@@ -254,3 +254,25 @@ def test_a_failed_bridged_attempt_is_answered_with_the_local_refusal(
 def test_a_route_that_was_not_bridged_replaces_no_error() -> None:
     assert ServingRoute(key="acme/hybrid").refusal_after(500, "INFERENCE_ERROR") is None
     assert ServingRoute(key="acme/remote-only", upstream="team-sie").refusal_after(503, "QUEUE_FULL") is None
+
+
+@pytest.mark.parametrize("profile", ["default", "fast"])
+async def test_an_explicit_profile_keeps_the_local_loading_refusal(tmp_path: Path, profile: str) -> None:
+    latch = tmp_path / "release-local-load"
+    registry = registry_for(tmp_path, model_config("acme/hybrid", faults={"load_latch_file": str(latch)}))
+    try:
+        await registry.start_load_async("acme/hybrid", device="cpu")
+        await wait_until(lambda: registry.is_loading("acme/hybrid"))
+        request = request_for(registry)
+        with pytest.raises(HTTPException) as refused:
+            await route_request(request, "acme/hybrid", SPAN, profile=profile)
+        assert refused.value.status_code == 503
+        assert refused.value.detail["code"] == "MODEL_LOADING"
+        assert refused.value.headers == {"Retry-After": "5"}
+        assert not registry.is_loaded("acme/hybrid:remote")
+        assert not registry.is_loading("acme/hybrid:remote")
+        assert not hasattr(request.state, "serving_route")
+    finally:
+        latch.touch()
+        await wait_until(lambda: not registry.is_loading("acme/hybrid"))
+        await registry.unload_all_async()

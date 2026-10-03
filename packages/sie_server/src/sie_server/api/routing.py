@@ -159,8 +159,8 @@ async def route_request(
         span: Span for error attributes.
         serving_key: The entry that serves ``model`` locally when it is not
             ``model`` itself, such as a grammar-safe profile.
-        profile: The profile the request names in its options. A named
-            profile other than ``default`` is served as written.
+        profile: The profile the request explicitly names in its options.
+            Every named profile, including ``default``, is served as written.
         queued_items: Items the request adds to the model's queue. With it,
             the ``saturated`` trigger sees a full queue before submission.
 
@@ -170,7 +170,7 @@ async def route_request(
     registry: ModelRegistry = request.app.state.registry
     forbid = _remote_forbidden(request)
     ModelStateChecker(registry, model, span).check_exists()
-    routing = None if isinstance(profile, str) and profile != "default" else registry.get_config(model).routing
+    routing = None if isinstance(profile, str) else registry.get_config(model).routing
     key = serving_key or model
     config = registry.get_config(key)
     if serves_remotely(config):

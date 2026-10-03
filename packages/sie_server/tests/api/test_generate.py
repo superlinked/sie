@@ -31,6 +31,7 @@ from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters.base import ModelCapabilities, ModelDims
 from sie_server.adapters.mlx.generation import MLXGenerationAdapter
 from sie_server.api import generate as generate_api
+from sie_server.api import routing as routing_api
 from sie_server.api.generate import router as generate_router
 from sie_server.config.engine import EngineConfig
 from sie_server.config.model import (
@@ -40,6 +41,7 @@ from sie_server.config.model import (
     InputModalities,
     ModelConfig,
     ProfileConfig,
+    RoutingConfig,
     Tasks,
 )
 from sie_server.core.loader import expand_profile_variants
@@ -2027,3 +2029,23 @@ class TestGrammarProfileAdmission:
             "message": "structured-output grammars are not supported by the MLX generation backend",
             "param": "grammar",
         }
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_explicit_default_generation_profile_never_bridges(
+    client: TestClient, registry: MagicMock, monkeypatch: pytest.MonkeyPatch, stream: bool
+) -> None:
+    registry.get_config.return_value.routing = RoutingConfig(policy="fallback", fallback_profile="remote")
+    registry.is_loading.return_value = True
+    bridge = AsyncMock()
+    monkeypatch.setattr(routing_api, "_bridge", bridge)
+    response = client.post(
+        "/v1/generate/Qwen__Qwen3-4B-Instruct",
+        json={"prompt": "Hello", "max_new_tokens": 32, "stream": stream, "options": {"profile": "default"}},
+    )
+    assert response.status_code == 503, response.text
+    assert response.json()["detail"]["code"] == "MODEL_LOADING"
+    assert response.headers["retry-after"] == "5"
+    assert "X-SIE-Fallback-Reason" not in response.headers
+    bridge.assert_not_awaited()
+    registry.get.assert_not_called()
