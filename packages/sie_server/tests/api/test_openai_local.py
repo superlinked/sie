@@ -1211,8 +1211,72 @@ def test_cuda_chat_still_rejects_audio(monkeypatch: pytest.MonkeyPatch) -> None:
     registry.get.assert_not_called()
 
 
-def test_cuda_chat_preserves_visible_logprobs_when_reasoning_is_null(
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("reasoning_field", ["reasoning_content", "reasoning"])
+@pytest.mark.parametrize("enable_thinking", [None, False, True])
+def test_cuda_chat_drops_private_reasoning_logprobs_without_relying_on_thinking_policy(
     monkeypatch: pytest.MonkeyPatch,
+    stream: bool,
+    reasoning_field: str,
+    enable_thinking: bool | None,
+) -> None:
+    container_key = "delta" if stream else "message"
+    body = {
+        "id": "chatcmpl-private-logprobs",
+        "object": "chat.completion.chunk" if stream else "chat.completion",
+        "created": 1,
+        "model": "upstream-served-model",
+        "choices": [
+            {
+                "index": 0,
+                container_key: {"role": "assistant", "content": "Visible answer", reasoning_field: "private chain"},
+                "logprobs": {"content": [{"token": "PRIVATE_REASONING", "logprob": -0.1}]},
+                "finish_reason": "stop",
+            }
+        ],
+    }
+
+    def _handler(_request: httpx.Request) -> httpx.Response:
+        if stream:
+            wire = f"data: {json.dumps(body)}\n\ndata: [DONE]\n\n".encode()
+            return httpx.Response(
+                200,
+                stream=_ChunkedAsyncStream([wire[:41], wire[41:]]),
+                headers={"content-type": "text/event-stream"},
+            )
+        return httpx.Response(200, json=body)
+
+    client, _ = _cuda_chat_client(
+        monkeypatch,
+        _handler,
+        reasoning_parser="qwen3",
+        chat_template_kwargs=None if enable_thinking is None else {"enable_thinking": enable_thinking},
+    )
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "Qwen/Qwen3.5-4B",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "logprobs": True,
+            "stream": stream,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = json.loads(response.text.split("\n\n")[0].removeprefix("data: ")) if stream else response.json()
+    choice = payload["choices"][0]
+    assert choice[container_key] == {"role": "assistant", "content": "Visible answer"}
+    assert choice["logprobs"] is None
+    assert "PRIVATE_REASONING" not in response.text
+    assert "private chain" not in response.text
+
+
+@pytest.mark.parametrize("reasoning_field", ["reasoning_content", "reasoning"])
+@pytest.mark.parametrize("reasoning_value", [None, ""])
+def test_cuda_chat_preserves_visible_logprobs_when_reasoning_is_empty(
+    monkeypatch: pytest.MonkeyPatch,
+    reasoning_field: str,
+    reasoning_value: str | None,
 ) -> None:
     visible_logprobs = {"content": [{"token": "answer", "logprob": -0.1, "bytes": None, "top_logprobs": []}]}
 
@@ -1230,7 +1294,7 @@ def test_cuda_chat_preserves_visible_logprobs_when_reasoning_is_null(
                         "message": {
                             "role": "assistant",
                             "content": "Visible answer",
-                            "reasoning_content": None,
+                            reasoning_field: reasoning_value,
                         },
                         "logprobs": visible_logprobs,
                         "finish_reason": "stop",

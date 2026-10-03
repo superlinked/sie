@@ -817,6 +817,8 @@ def _sanitize_chat_payload(
         reasoning_was_present = (reasoning_content is not None and reasoning_content != "") or (
             reasoning is not None and reasoning != ""
         )
+        if reasoning_was_present and "logprobs" in choice_obj:
+            choice_obj["logprobs"] = None
 
         if not hide_thinking_blocks:
             continue
@@ -835,7 +837,7 @@ def _sanitize_chat_payload(
             visible += stripper.finish()
         if isinstance(raw_content, str) or visible:
             container["content"] = visible
-        if (reasoning_was_present or visible != content) and "logprobs" in choice_obj:
+        if visible != content and "logprobs" in choice_obj:
             choice_obj["logprobs"] = None
     return payload
 
