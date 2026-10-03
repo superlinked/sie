@@ -209,6 +209,6 @@ def local_profile_identity(
         encoded = json.dumps(
             descriptor, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
         ).encode()
-    except (OSError, TypeError, ValueError, HFValidationError, RecursionError):
+    except (OSError, TypeError, ValueError, HFValidationError, RecursionError, RuntimeError):
         return None
     return "v1:sha256:" + hashlib.sha256(encoded).hexdigest()

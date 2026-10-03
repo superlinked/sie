@@ -101,6 +101,14 @@ def test_runtime_settings_are_observed_again(monkeypatch: pytest.MonkeyPatch) ->
     assert identity(config()) != first
 
 
+def test_runtime_version_failure_does_not_break_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    def incompatible_cudnn() -> None:
+        raise RuntimeError("incompatible cuDNN")
+
+    monkeypatch.setattr(profile_identity.torch.backends.cudnn, "version", incompatible_cudnn)
+    assert identity(config()) is None
+
+
 @pytest.mark.parametrize("revision", [None, "main", "short"])
 def test_mutable_weights_have_no_identity(revision: str | None) -> None:
     assert identity(config(hf_revision=revision)) is None
