@@ -6,6 +6,8 @@
 //! monotonic clock, and consumers require its current broker lease revision.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
 use async_nats::jetstream::{self, kv, stream};
@@ -109,6 +111,9 @@ struct Counter {
     generation: u64,
     contract: String,
     total: u64,
+    incarnation: String,
+    #[serde(default)]
+    continuity: u64,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -117,16 +122,17 @@ struct Decision {
     generation: u64,
     contract: String,
     owner: String,
-    lease_revision: u64,
+    term: String,
     decision: ThresholdDecision,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct Lease {
     owner: String,
     generation: u64,
     contract: String,
+    term: String,
 }
 
 /// One process owns one sampler token. Replacement/expired ownership loses all
@@ -134,6 +140,7 @@ struct Lease {
 pub struct ThresholdSampler {
     owner: String,
     lease_revision: u64,
+    term: Option<String>,
     models: HashMap<String, SampleState>,
 }
 
@@ -142,7 +149,23 @@ impl Default for ThresholdSampler {
         Self {
             owner: Uuid::new_v4().to_string(),
             lease_revision: 0,
+            term: None,
             models: HashMap::new(),
+        }
+    }
+}
+
+struct SamplingAttempt<'a> {
+    sampler: &'a mut ThresholdSampler,
+    succeeded: bool,
+}
+
+impl Drop for SamplingAttempt<'_> {
+    fn drop(&mut self) {
+        if !self.succeeded {
+            self.sampler.lease_revision = 0;
+            self.sampler.term = None;
+            self.sampler.models.clear();
         }
     }
 }
@@ -151,6 +174,8 @@ struct SampleState {
     contract: String,
     generation: u64,
     total: u64,
+    continuity: u64,
+    incarnation: Option<String>,
     sampled_at: Instant,
     decision: ThresholdDecision,
     crossing_since: Option<Instant>,
@@ -163,6 +188,8 @@ impl SampleState {
             contract: target.contract.clone(),
             generation: target.generation,
             total,
+            continuity: 0,
+            incarnation: None,
             sampled_at: now,
             decision: ThresholdDecision::Undetermined,
             crossing_since: None,
@@ -224,6 +251,47 @@ impl SampleState {
     }
 }
 
+struct TargetState {
+    target: ThresholdTarget,
+    pending: AtomicU64,
+    interrupted: AtomicBool,
+    cached: RwLock<Option<CachedDecision>>,
+}
+
+struct DrainedDemand<'a> {
+    state: &'a TargetState,
+    delta: u64,
+    interrupted: bool,
+    committed: bool,
+}
+
+impl Drop for DrainedDemand<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            // Includes cancellation while a publish acknowledgement is in flight.
+            self.state.interrupted.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct CachedDecision {
+    decision: ThresholdDecision,
+    expires_at: Instant,
+}
+
+struct LeaseObservation {
+    revision: u64,
+    lease: Lease,
+    read_started: Instant,
+    expires_at: Option<Instant>,
+}
+
+struct TickState {
+    last_started: Instant,
+    observed: Option<LeaseObservation>,
+}
+
 /// Control-state connection for a separate NATS endpoint. Inference workers
 /// and configuration publishers must not have credentials for that endpoint.
 /// Do not pass the inference queue's JetStream context: subject ACLs cannot
@@ -232,9 +300,10 @@ pub struct ThresholdCoordinator {
     counters: kv::Store,
     decisions: kv::Store,
     leases: kv::Store,
-    targets: HashMap<String, ThresholdTarget>,
+    targets: HashMap<String, TargetState>,
     generation: u64,
     contract: String,
+    tick: tokio::sync::Mutex<TickState>,
 }
 
 impl ThresholdCoordinator {
@@ -251,8 +320,6 @@ impl ThresholdCoordinator {
         if targets.iter().any(|target| target.generation != generation) {
             return Err(ThresholdError::Configuration);
         }
-        // Every replica binds leadership to the same complete configuration,
-        // independent of the order in which the registry lists models.
         let mut contracts = targets
             .iter()
             .map(|target| (&target.key, &target.contract))
@@ -267,7 +334,17 @@ impl ThresholdCoordinator {
         let count = targets.len();
         let targets = targets
             .into_iter()
-            .map(|target| (target.key.clone(), target))
+            .map(|target| {
+                (
+                    target.key.clone(),
+                    TargetState {
+                        target,
+                        pending: AtomicU64::new(0),
+                        interrupted: AtomicBool::new(false),
+                        cached: RwLock::new(None),
+                    },
+                )
+            })
             .collect::<HashMap<_, _>>();
         if targets.len() != count {
             return Err(ThresholdError::Configuration);
@@ -281,32 +358,44 @@ impl ThresholdCoordinator {
                 targets,
                 generation,
                 contract,
+                tick: tokio::sync::Mutex::new(TickState {
+                    last_started: Instant::now(),
+                    observed: None,
+                }),
             })
         })
         .await
     }
 
     /// Count once after shared caller validation, before profile recursion.
-    pub async fn record_request(&self, model: &str) -> Result<(), ThresholdError> {
-        let key = digest_key(model);
-        let target = self
+    /// Request handling never waits for the control broker.
+    pub fn record_request(&self, model: &str) -> Result<(), ThresholdError> {
+        let state = self
             .targets
-            .get(&key)
+            .get(&digest_key(model))
             .ok_or(ThresholdError::Configuration)?;
-        timeout(self.counter_total(target, true)).await.map(|_| ())
+        state
+            .pending
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |total| {
+                total.checked_add(1)
+            })
+            .map_err(|_| {
+                state.interrupted.store(true, Ordering::Relaxed);
+                ThresholdError::Untrusted
+            })?;
+        Ok(())
     }
 
-    // Generation replacement also runs during sampling, so an idle model
-    // cannot stall the entire fleet waiting for another request to arrive.
     async fn counter_total(
         &self,
         target: &ThresholdTarget,
-        increment: bool,
-    ) -> Result<u64, ThresholdError> {
+        delta: u64,
+        interrupted: bool,
+    ) -> Result<Counter, ThresholdError> {
         for _ in 0..CAS_ATTEMPTS {
-            let existing = read::<Counter>(&self.counters, &target.key).await?;
-            let (revision, mut counter, current) = match existing {
-                Some((revision, counter)) => {
+            let (revision, existing) = read::<Counter>(&self.counters, &target.key).await?;
+            let (mut counter, current) = match existing {
+                Some(counter) => {
                     if counter.generation > target.generation
                         || (counter.generation == target.generation
                             && counter.contract != target.contract)
@@ -321,26 +410,36 @@ impl ThresholdCoordinator {
                             generation: target.generation,
                             contract: target.contract.clone(),
                             total: 0,
+                            incarnation: Uuid::new_v4().to_string(),
+                            continuity: 0,
                         }
                     };
-                    (revision, counter, current)
+                    (counter, current)
                 }
                 None => (
-                    0,
                     Counter {
                         generation: target.generation,
                         contract: target.contract.clone(),
                         total: 0,
+                        incarnation: Uuid::new_v4().to_string(),
+                        continuity: 0,
                     },
                     false,
                 ),
             };
-            if !increment && current {
-                return Ok(counter.total);
+            if Uuid::parse_str(&counter.incarnation).is_err() {
+                return Err(ThresholdError::Untrusted);
             }
-            if increment {
-                counter.total = counter
-                    .total
+            if delta == 0 && !interrupted && current {
+                return Ok(counter);
+            }
+            counter.total = counter
+                .total
+                .checked_add(delta)
+                .ok_or(ThresholdError::Untrusted)?;
+            if interrupted {
+                counter.continuity = counter
+                    .continuity
                     .checked_add(1)
                     .ok_or(ThresholdError::Untrusted)?;
             }
@@ -349,8 +448,10 @@ impl ThresholdCoordinator {
                 .update(&target.key, encode(&counter)?, revision)
                 .await
             {
-                Ok(_) => return Ok(counter.total),
+                Ok(_) => return Ok(counter),
                 Err(error) if error.kind() == kv::UpdateErrorKind::WrongLastRevision => {}
+                // An uncertain acknowledgement may follow a successful commit.
+                // Never restore or retry its already-drained demand delta.
                 Err(_) => return Err(ThresholdError::Unavailable),
             }
             tokio::task::yield_now().await;
@@ -358,123 +459,247 @@ impl ThresholdCoordinator {
         Err(ThresholdError::Contended)
     }
 
-    /// Sample all configured models. Call on the one-second cadence; standby
-    /// gateways return unavailable while another valid lease owns the sampler.
+    /// Every replica calls this once per second, including standby gateways.
+    /// It flushes local demand before election and refreshes local decisions.
     pub async fn sample(&self, sampler: &mut ThresholdSampler) -> Result<(), ThresholdError> {
+        let mut attempt = SamplingAttempt {
+            sampler,
+            succeeded: false,
+        };
+        let sampler = &mut *attempt.sampler;
+        let mut standby_refreshed = false;
         let result = timeout(async {
-            let lease = read::<Lease>(&self.leases, LEASE_KEY).await?;
-            let revision = match lease {
-                Some((_, lease))
+            let mut tick = self.tick.lock().await;
+            let now = Instant::now();
+            let gap = now.saturating_duration_since(tick.last_started) > MAX_SAMPLE_GAP;
+            tick.last_started = now;
+            // Drain atomically before I/O. Requests racing this swap stay in the
+            // next batch; a timed-out batch is never restored or counted twice.
+            let deltas = self
+                .targets
+                .values()
+                .map(|state| {
+                    let delta = state.pending.swap(0, Ordering::Relaxed);
+                    let interrupted = state.interrupted.swap(false, Ordering::Relaxed) || gap;
+                    DrainedDemand {
+                        state,
+                        delta: if gap { 0 } else { delta },
+                        interrupted,
+                        committed: false,
+                    }
+                })
+                .collect::<Vec<_>>();
+            for mut demand in deltas {
+                self.counter_total(&demand.state.target, demand.delta, demand.interrupted)
+                    .await?;
+                demand.committed = true;
+            }
+            let (previous_revision, previous) = read::<Lease>(&self.leases, LEASE_KEY).await?;
+            let mut renewal_started = None;
+            let term = match previous {
+                Some(lease) => {
+                    validate_lease(&lease)?;
                     if lease.generation > self.generation
-                        || (lease.generation == self.generation
-                            && lease.contract != self.contract) =>
-                {
-                    return Err(ThresholdError::Generation);
+                        || (lease.generation == self.generation && lease.contract != self.contract)
+                    {
+                        return Err(ThresholdError::Generation);
+                    }
+                    if lease.generation < self.generation {
+                        sampler.models.clear();
+                        Some(Uuid::new_v4().to_string())
+                    } else if lease.owner == sampler.owner
+                        && previous_revision == sampler.lease_revision
+                        && sampler.term.as_deref() == Some(lease.term.as_str())
+                    {
+                        Some(lease.term)
+                    } else {
+                        None
+                    }
                 }
-                Some((revision, lease)) if lease.generation < self.generation => {
-                    sampler.models.clear();
-                    revision
-                }
-                Some((revision, lease))
-                    if lease.owner == sampler.owner && revision == sampler.lease_revision =>
-                {
-                    revision
-                }
-                Some(_) => return Err(ThresholdError::Unavailable),
                 None => {
                     sampler.models.clear();
-                    0
+                    Some(Uuid::new_v4().to_string())
                 }
             };
-            let revision = self
-                .leases
-                .update(
-                    LEASE_KEY,
-                    encode(&Lease {
-                        owner: sampler.owner.clone(),
-                        generation: self.generation,
-                        contract: self.contract.clone(),
-                    })?,
-                    revision,
-                )
-                .await
-                .map_err(|_| ThresholdError::Unavailable)?;
-            sampler.lease_revision = revision;
-            sampler
-                .models
-                .retain(|key, _| self.targets.contains_key(key));
-            for target in self.targets.values() {
-                let total = self.counter_total(target, false).await?;
-                let now = Instant::now();
-                let state = sampler
-                    .models
-                    .entry(target.key.clone())
-                    .or_insert_with(|| SampleState::baseline(target, total, now));
-                let decision = state.sample(target, total, now);
-                self.decisions
-                    .put(
-                        &target.key,
-                        encode(&Decision {
-                            generation: target.generation,
-                            contract: target.contract.clone(),
+            if let Some(term) = term {
+                let started = Instant::now();
+                sampler.lease_revision = self
+                    .leases
+                    .update(
+                        LEASE_KEY,
+                        encode(&Lease {
                             owner: sampler.owner.clone(),
-                            lease_revision: revision,
-                            decision,
+                            generation: self.generation,
+                            contract: self.contract.clone(),
+                            term: term.clone(),
                         })?,
+                        previous_revision,
                     )
                     .await
                     .map_err(|_| ThresholdError::Unavailable)?;
+                sampler.term = Some(term.clone());
+                renewal_started = Some(started);
+                sampler
+                    .models
+                    .retain(|key, _| self.targets.contains_key(key));
+                for state in self.targets.values() {
+                    let target = &state.target;
+                    let counter = self.counter_total(target, 0, false).await?;
+                    let now = Instant::now();
+                    let sampled = sampler
+                        .models
+                        .entry(target.key.clone())
+                        .or_insert_with(|| SampleState::baseline(target, counter.total, now));
+                    if gap
+                        || sampled.continuity != counter.continuity
+                        || sampled.incarnation.as_deref() != Some(counter.incarnation.as_str())
+                    {
+                        *sampled = SampleState::baseline(target, counter.total, now);
+                        sampled.continuity = counter.continuity;
+                        sampled.incarnation = Some(counter.incarnation.clone());
+                    }
+                    let decision = sampled.sample(target, counter.total, now);
+                    self.decisions
+                        .put(
+                            &target.key,
+                            encode(&Decision {
+                                generation: target.generation,
+                                contract: target.contract.clone(),
+                                owner: sampler.owner.clone(),
+                                term: term.clone(),
+                                decision,
+                            })?,
+                        )
+                        .await
+                        .map_err(|_| ThresholdError::Unavailable)?;
+                }
             }
-            Ok(())
+            self.refresh_decisions(&mut tick, renewal_started).await?;
+            if renewal_started.is_none() {
+                standby_refreshed = true;
+                Err(ThresholdError::Unavailable)
+            } else {
+                Ok(())
+            }
         })
         .await;
-        if result.is_err() {
-            // Do not renew a partially sampled or incompatible lease again.
-            // Both ownership and sustained-window evidence must be re-established.
-            sampler.lease_revision = 0;
-            sampler.models.clear();
+        if result.is_err() && !standby_refreshed {
+            for state in self.targets.values() {
+                state.interrupted.store(true, Ordering::Relaxed);
+                if let Ok(mut cached) = state.cached.write() {
+                    *cached = None;
+                }
+            }
         }
+        attempt.succeeded = result.is_ok();
         result
     }
 
-    /// Renewal invalidates decisions from the previous lease revision;
-    /// stopped samplers lose authority after the broker's five-second TTL.
-    /// Neither case compares wall clocks or different stream leaders.
-    pub async fn decision(&self, model: &str) -> Result<ThresholdDecision, ThresholdError> {
-        let key = digest_key(model);
-        let target = self
-            .targets
-            .get(&key)
-            .ok_or(ThresholdError::Configuration)?;
-        timeout(async {
-            let (revision, lease) = read::<Lease>(&self.leases, LEASE_KEY)
-                .await?
-                .ok_or(ThresholdError::Unavailable)?;
-            if lease.generation != self.generation || lease.contract != self.contract {
-                return Err(ThresholdError::Generation);
+    async fn refresh_decisions(
+        &self,
+        tick: &mut TickState,
+        renewal_started: Option<Instant>,
+    ) -> Result<(), ThresholdError> {
+        let started = Instant::now();
+        let (revision, lease) = read::<Lease>(&self.leases, LEASE_KEY).await?;
+        let lease = lease.ok_or(ThresholdError::Unavailable)?;
+        validate_lease(&lease)?;
+        if lease.generation != self.generation || lease.contract != self.contract {
+            return Err(ThresholdError::Generation);
+        }
+        let mut verified = Vec::with_capacity(self.targets.len());
+        for state in self.targets.values() {
+            let (_, decision) = read::<Decision>(&self.decisions, &state.target.key).await?;
+            let decision = if let Some(decision) = decision {
+                if decision.generation != state.target.generation
+                    || decision.contract != state.target.contract
+                {
+                    return Err(ThresholdError::Generation);
+                }
+                if decision.owner != lease.owner || decision.term != lease.term {
+                    return Err(ThresholdError::Unavailable);
+                }
+                (decision.decision != ThresholdDecision::Undetermined).then_some(decision.decision)
+            } else {
+                None
+            };
+            verified.push((state, decision));
+        }
+        let latest_started = Instant::now();
+        let (latest_revision, latest) = read::<Lease>(&self.leases, LEASE_KEY).await?;
+        if latest.as_ref() != Some(&lease) {
+            return Err(ThresholdError::Unavailable);
+        }
+        // A reader cannot know a lease's age on first sight without shared
+        // clocks. A locally-started renewal or an observed revision advance
+        // proves a lower bound on its commit time on this monotonic clock.
+        let mut expires_at = renewal_started.map(|at| at + LEASE_TTL);
+        if latest_revision != revision {
+            expires_at = Some(started + LEASE_TTL);
+        }
+        if let Some(previous) = &tick.observed {
+            if previous.lease == lease {
+                let bound = if previous.revision != latest_revision {
+                    Some(previous.read_started + LEASE_TTL)
+                } else {
+                    previous.expires_at
+                };
+                expires_at = expires_at.max(bound);
             }
-            let (_, decision) = read::<Decision>(&self.decisions, &key)
-                .await?
-                .ok_or(ThresholdError::Unavailable)?;
-            if decision.generation != target.generation || decision.contract != target.contract {
-                return Err(ThresholdError::Generation);
-            }
-            if decision.owner != lease.owner || decision.lease_revision != revision {
-                return Err(ThresholdError::Unavailable);
-            }
-            let (latest_revision, latest) = read::<Lease>(&self.leases, LEASE_KEY)
-                .await?
-                .ok_or(ThresholdError::Unavailable)?;
-            if latest_revision != revision || latest.owner != lease.owner {
-                return Err(ThresholdError::Unavailable);
-            }
-            if decision.decision == ThresholdDecision::Undetermined {
-                return Err(ThresholdError::Unavailable);
-            }
-            Ok(decision.decision)
-        })
-        .await
+        }
+        tick.observed = Some(LeaseObservation {
+            revision: latest_revision,
+            lease,
+            read_started: latest_started,
+            expires_at,
+        });
+        let deadline = expires_at.map(|bound| bound.min(started + THRESHOLD_SAMPLE_INTERVAL));
+        for (state, decision) in verified {
+            *state
+                .cached
+                .write()
+                .map_err(|_| ThresholdError::Unavailable)? =
+                deadline
+                    .zip(decision)
+                    .map(|(expires_at, decision)| CachedDecision {
+                        decision,
+                        expires_at,
+                    });
+        }
+        Ok(())
     }
+
+    /// Return only a recently verified local value. Expired or unavailable
+    /// authority must preserve the ordinary local warm-up/fallback path.
+    pub fn decision(&self, model: &str) -> Result<ThresholdDecision, ThresholdError> {
+        let state = self
+            .targets
+            .get(&digest_key(model))
+            .ok_or(ThresholdError::Configuration)?;
+        let cached = state
+            .cached
+            .read()
+            .map_err(|_| ThresholdError::Unavailable)?;
+        match *cached {
+            Some(cached) if Instant::now() < cached.expires_at => Ok(cached.decision),
+            _ => Err(ThresholdError::Unavailable),
+        }
+    }
+}
+
+fn validate_lease(lease: &Lease) -> Result<(), ThresholdError> {
+    if lease.generation == 0
+        || lease.contract.len() != 64
+        || !lease
+            .contract
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        || Uuid::parse_str(&lease.owner).is_err()
+        || Uuid::parse_str(&lease.term).is_err()
+    {
+        return Err(ThresholdError::Untrusted);
+    }
+    Ok(())
 }
 
 async fn timeout<T>(
@@ -496,7 +721,7 @@ fn encode(value: &impl Serialize) -> Result<Bytes, ThresholdError> {
 async fn read<T: DeserializeOwned>(
     store: &kv::Store,
     key: &str,
-) -> Result<Option<(u64, T)>, ThresholdError> {
+) -> Result<(u64, Option<T>), ThresholdError> {
     let subject = format!("$KV.{}.{key}", store.name);
     // The leader API preserves stored headers. Direct-get and ordinary KV
     // helpers lose the distinction between a gateway publish and a worker's
@@ -504,7 +729,7 @@ async fn read<T: DeserializeOwned>(
     let message = match store.stream.get_last_raw_message_by_subject(&subject).await {
         Ok(message) => message,
         Err(error) if error.kind() == stream::RawMessageErrorKind::NoMessageFound => {
-            return Ok(None)
+            return Ok((0, None))
         }
         Err(_) => return Err(ThresholdError::Unavailable),
     };
@@ -513,6 +738,7 @@ async fn read<T: DeserializeOwned>(
     }
     let mut seen = HashSet::new();
     let mut operation = None;
+    let mut rollup = None;
     for (name, values) in message.headers.iter() {
         let name: &str = name.as_ref();
         if values.len() != 1 || !seen.insert(name.to_ascii_lowercase()) {
@@ -524,19 +750,24 @@ async fn read<T: DeserializeOwned>(
             }
         } else if name.eq_ignore_ascii_case("KV-Operation") {
             operation = Some(values[0].as_str());
+        } else if name.eq_ignore_ascii_case("Nats-Rollup") {
+            rollup = Some(values[0].as_str());
         } else {
             return Err(ThresholdError::Untrusted);
         }
     }
+    if rollup.is_some() && (rollup != Some("sub") || operation != Some("PURGE")) {
+        return Err(ThresholdError::Untrusted);
+    }
     if let Some(operation) = operation {
         return if matches!(operation, "DEL" | "PURGE") {
-            Ok(None)
+            Ok((message.sequence, None))
         } else {
             Err(ThresholdError::Untrusted)
         };
     }
     let value = serde_json::from_slice(&message.payload).map_err(|_| ThresholdError::Untrusted)?;
-    Ok(Some((message.sequence, value)))
+    Ok((message.sequence, Some(value)))
 }
 
 async fn bucket(

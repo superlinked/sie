@@ -21,10 +21,17 @@ this fixture independently from the unchanged inference-broker fixture.
 
 ## Shared demand and decisions
 
-Every gateway increments the same per-model counter with bounded compare-and-set
-retries. The caller must count once after shared validation and before profile
-recursion. A sampler elected by a five-second broker lease reads aggregate
-requests per second on a one-second cadence. `wake_above` and `sleep_below`
+Every gateway counts validated ingress locally with per-model atomic counters.
+`record_request` and `decision` are synchronous and perform no broker I/O. The
+caller must count once after shared validation and before profile recursion.
+Each gateway calls `sample` once per second; standby gateways flush their demand
+before checking sampler ownership. Drained deltas are added to the shared
+per-model counter with bounded compare-and-set retries. Requests racing a drain
+stay in the following batch. An uncertain acknowledgement never restores a delta,
+which could count a committed batch twice; the next successful flush breaks
+shared sampling continuity. Long publication gaps discard delayed demand and
+also reset evidence. A sampler elected by a five-second broker lease reads
+aggregate requests per second on that cadence. `wake_above` and `sleep_below`
 therefore use requests per second across all gateways, rather than per replica.
 Windows and cooldowns have at least one-second resolution and are capped at a
 day. Only consecutive samples beyond the relevant bound count; gaps longer than
@@ -45,15 +52,31 @@ generation can replace a lease by compare-and-set; an older generation or a
 conflicting target set at the same generation is refused. On replacement,
 old counters reset to zero without requiring traffic or adding demand.
 
-Decisions bind that generation, execution contract, sampler owner and exact
-lease revision. Reading verifies the lease again after the decision. Broker
-expiry or partial sampling invalidates old decisions. Failed sampling clears
-local ownership and timer evidence; a replacement sampler rebuilds evidence.
+Decisions bind that generation, execution contract, sampler owner and a UUID
+term minted for each lease acquisition. Renewals preserve the term so an earlier
+valid decision remains usable while the next sampling cycle publishes decisions.
+Expiry, a configuration takeover or tombstone recreation mints a new term and
+requires fresh timer evidence. DEL and PURGE retain their stream revision for
+subsequent compare-and-set recovery. Counter recreation also mints an incarnation
+UUID, so even a replacement total larger than the old total resets evidence.
+Failed sampling clears local ownership,
+term, cached decisions and timer evidence.
+
+Background refresh verifies the complete lease authority before and after
+reading decisions. A verified decision is cached for at most one sampling
+interval, measured from the verification's start on the local monotonic clock.
+Its deadline is also capped by a proven lower bound on the lease's expiry:
+owners know when their renewal began; standby readers establish that bound by
+observing a revision advance within one unchanged term. A newly attached standby
+uses the ordinary local path until it observes a renewal. This avoids shared
+wall clocks and prevents a nearly expired lease from gaining another cache
+interval. Malformed, missing or changed authority clears the cache; unavailable
+or expired cached decisions must allow ordinary local warm-up.
 Removed sampler model state is pruned; broker counters expire after one day
 without requests, so retired model keys are not retained forever. Expiry
 rebuilds a conservative baseline and cannot count as fresh demand. There are at most 256 current targets, 2 KiB per
 value, 1 MiB per bucket, 16 compare-and-set attempts and a two-second deadline
-per public broker operation. Counter overflow, malformed records, incompatible
+per background broker operation. Counter overflow, malformed records, incompatible
 stream configurations and unavailable storage all return typed errors.
 
 Coordination state uses memory streams. A broker restart loses decisions and
