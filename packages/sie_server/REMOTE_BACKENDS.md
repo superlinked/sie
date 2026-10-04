@@ -360,6 +360,39 @@ for a CUDA worker). Multiple devices or a model loaded outside that placement
 cannot report an admission identity or use the proof. It does not enable
 gateway fallback or a fleet-wide evidence rollout.
 
+## Collecting numerical fleet evidence
+
+Collect one version 2 proof from every reachable Python worker process, including
+children behind a sidecar and workers eligible for pool fallback. Each proof
+still requires two local runs and one explicit remote run against that process.
+The collector accepts repeated `--record` paths, writes a new `--output` file,
+and checks a `--max-age-s` window from 1 to 86400 seconds (default 3600):
+
+```bash
+mise exec -- uv run --frozen --project . python tools/remote_fleet_equivalence.py \
+  --record /absolute/path/worker-a.json \
+  --record /absolute/path/worker-b.json \
+  --output /absolute/path/fleet.json --max-age-s 3600
+```
+
+The version 1 inventory retains the original measurements, including misses.
+Exit status 0 means all records passed and are fresh, 1 means valid evidence
+contains a failure or expired/future measurement, and 2 means collection failed.
+Existing output files are never overwritten. Inputs are bounded regular files;
+the inventory contains at most 256 records and occupies at most 8 MiB.
+
+Every member must measure the same model, profiles, endpoint/model contract,
+runtime defaults, outputs and probe inputs. Processes may have different local
+execution identities, each bound to its own measurement. Canonical digests bind
+the entire record, including its process, timestamp and measured errors. Exact
+inventory matching rejects missing, additional or replaced processes, even when
+a replacement reports the same execution identity.
+
+This artifact grants no routing authority. Numerical gateway routing remains
+inactive until operator-owned evidence, complete live membership and execution
+fencing are connected. Restarts require new proofs; a collector result cannot
+authorize a new process or establish scale-to-zero equivalence.
+
 
 ## Single-node generation fallback
 

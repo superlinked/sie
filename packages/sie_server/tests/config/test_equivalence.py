@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import os
 import sys
 import threading
 from datetime import UTC, datetime, timedelta
@@ -20,7 +21,14 @@ from sie_server.config.equivalence import (
     ProbeCase,
     canonical_digest,
     measure_values,
+    read_equivalence_record,
     remote_profile_contract_digest,
+)
+from sie_server.config.fleet_equivalence import (
+    MAX_FLEET_BYTES,
+    FleetEquivalenceRecord,
+    equivalence_record_digest,
+    read_fleet_equivalence_record,
 )
 from sie_server.config.model import ModelConfig
 from sie_server.config.upstreams import load_upstreams
@@ -33,6 +41,13 @@ assert _PROBE_SPEC.loader is not None
 probe = importlib.util.module_from_spec(_PROBE_SPEC)
 sys.modules[_PROBE_SPEC.name] = probe
 _PROBE_SPEC.loader.exec_module(probe)
+_FLEET_SPEC = importlib.util.spec_from_file_location(
+    "remote_fleet_equivalence", _PROBE_PATH.with_name("remote_fleet_equivalence.py")
+)
+assert _FLEET_SPEC is not None
+assert _FLEET_SPEC.loader is not None
+fleet_probe = importlib.util.module_from_spec(_FLEET_SPEC)
+_FLEET_SPEC.loader.exec_module(fleet_probe)
 
 
 def record(*, outputs: frozenset[str] = frozenset({"dense"})) -> EquivalenceRecord:
@@ -410,3 +425,141 @@ def test_mixed_integer_scores_cannot_hide_conversion_error() -> None:
     values = [{"scores": [{"item_id": "a", "score": 2**53 + 1}, {"item_id": "b", "score": 0.0}]}] * 3
     with pytest.raises(ValueError, match="floating values"):
         probe._values(values, "score")
+
+
+def _fleet_record(**changes: Any) -> EquivalenceRecord:
+    data = record(outputs=frozenset({"dense", "sparse"})).model_dump(mode="json")
+    data.update(changes)
+    return EquivalenceRecord.model_validate_json(json.dumps(data))
+
+
+def test_fleet_inventory_requires_every_exact_process_including_replacements() -> None:
+    first = _fleet_record()
+    second = _fleet_record(local_instance_id="b" * 64, local_identity="v1:sha256:" + "e" * 64)
+    fleet = FleetEquivalenceRecord(records=(first, second))
+    roster = {first.local_instance_id: first.local_identity, second.local_instance_id: second.local_identity}
+    assert fleet.matches_inventory(roster)
+    assert not fleet.matches_inventory({})
+    assert not fleet.matches_inventory({first.local_instance_id: first.local_identity})
+    assert not fleet.matches_inventory({**roster, "c" * 64: first.local_identity})
+    assert not fleet.matches_inventory({first.local_instance_id: first.local_identity, "c" * 64: second.local_identity})
+    assert not fleet.matches_inventory({**roster, second.local_instance_id: first.local_identity})
+
+
+@pytest.mark.parametrize("count", [0, 257])
+def test_fleet_inventory_has_bounded_nonempty_membership(count: int) -> None:
+    with pytest.raises(ValidationError):
+        FleetEquivalenceRecord(records=(record(),) * count)
+
+
+def test_fleet_inventory_rejects_duplicate_processes() -> None:
+    with pytest.raises(ValidationError, match="repeat a process"):
+        FleetEquivalenceRecord(records=(record(), record()))
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"model": "other/model"},
+        {"remote_profile": "other"},
+        {"upstream_name": "other"},
+        {"upstream_model": "other/model"},
+        {"upstream_contract_sha256": "0" * 64},
+        {"model_contract_sha256": "0" * 64},
+        {"remote_contract_sha256": "0" * 64},
+        {"runtime_options_sha256": "0" * 64},
+        {"probe_sources_sha256": "0" * 64},
+        {"context_length": 513},
+    ],
+)
+def test_fleet_inventory_rejects_mixed_comparison_contracts(changes: dict[str, Any]) -> None:
+    # The before/after boundary also moves when the declared context changes.
+    if "context_length" in changes:
+        cases = record(outputs=frozenset({"dense", "sparse"})).model_dump(mode="json")["cases"]
+        for case in cases:
+            if case["category"] == "boundary_after":
+                case["token_counts"] = [514]
+        changes = {**changes, "cases": cases}
+    with pytest.raises(ValidationError, match="same comparison contract"):
+        FleetEquivalenceRecord(records=(_fleet_record(), _fleet_record(local_instance_id="b" * 64, **changes)))
+
+
+def test_fleet_inventory_cannot_mix_probe_inputs_or_token_counts() -> None:
+    first = _fleet_record()
+    for field, value in (("input_sha256", "0" * 64), ("token_counts", [1])):
+        cases = first.model_dump(mode="json")["cases"]
+        cases[0][field] = value
+        with pytest.raises(ValidationError, match="same comparison contract"):
+            FleetEquivalenceRecord(records=(first, _fleet_record(local_instance_id="b" * 64, cases=cases)))
+
+
+def test_fleet_digests_bind_all_measurements_but_ignore_record_case_and_output_order() -> None:
+    first = _fleet_record()
+    data = first.model_dump(mode="json")
+    data["outputs"].reverse()
+    data["cases"].reverse()
+    reordered = EquivalenceRecord.model_validate_json(json.dumps(data))
+    assert equivalence_record_digest(first) == equivalence_record_digest(reordered)
+    second = _fleet_record(local_instance_id="b" * 64)
+    fleet = FleetEquivalenceRecord(records=(first, second))
+    assert fleet.digest == FleetEquivalenceRecord(records=(second, reordered)).digest
+    data["cases"][0]["measurements"]["dense"]["remote_error"] = 0.1
+    failed = EquivalenceRecord.model_validate_json(json.dumps(data))
+    assert equivalence_record_digest(first) != equivalence_record_digest(failed)
+    assert fleet.digest != FleetEquivalenceRecord(records=(failed, second)).digest
+    assert not FleetEquivalenceRecord(records=(failed, second)).passed
+
+
+@pytest.mark.parametrize("offset", [-3601, 1])
+def test_one_expired_or_future_process_invalidates_fleet_freshness(offset: int) -> None:
+    fleet = FleetEquivalenceRecord(
+        records=(
+            _fleet_record(),
+            _fleet_record(local_instance_id="b" * 64, measured_at=(NOW + timedelta(seconds=offset)).isoformat()),
+        )
+    )
+    assert not fleet.is_fresh(max_age_s=3600, now=NOW)
+
+
+@pytest.mark.parametrize("age", [True, 0, 86401, 1.5])
+def test_fleet_age_is_strict_and_bounded(age: Any) -> None:
+    assert not FleetEquivalenceRecord(records=(record(),)).is_fresh(max_age_s=age, now=NOW)
+
+
+def test_fleet_cli_preserves_failed_evidence_and_never_overwrites(tmp_path: Path) -> None:
+    cases = record().model_dump(mode="json")["cases"]
+    cases[0]["measurements"]["dense"]["remote_error"] = 0.1
+    failed = _fleet_record(cases=cases, outputs=["dense"], measured_at=datetime.now(UTC).isoformat())
+    source, output = tmp_path / "worker.json", tmp_path / "fleet.json"
+    source.write_text(failed.model_dump_json())
+    args = ["--record", str(source), "--output", str(output)]
+    assert fleet_probe.main(args) == 1
+    inventory = read_fleet_equivalence_record(output)
+    assert not inventory.passed
+    assert inventory.record_digests == {failed.local_instance_id: equivalence_record_digest(failed)}
+    original = output.read_bytes()
+    assert fleet_probe.main(args) == 2
+    assert output.read_bytes() == original
+
+
+def test_fleet_cli_collects_fresh_records_and_records_expiry(tmp_path: Path) -> None:
+    source = tmp_path / "worker.json"
+    source.write_text(_fleet_record(measured_at=datetime.now(UTC).isoformat()).model_dump_json())
+    assert fleet_probe.main(["--record", str(source), "--output", str(tmp_path / "fresh.json")]) == 0
+    source.write_text(_fleet_record(measured_at=(datetime.now(UTC) - timedelta(days=2)).isoformat()).model_dump_json())
+    assert fleet_probe.main(["--record", str(source), "--output", str(tmp_path / "expired.json")]) == 1
+    assert read_fleet_equivalence_record(tmp_path / "expired.json").passed
+
+
+@pytest.mark.parametrize(
+    ("reader", "limit"), [(read_equivalence_record, 512 << 10), (read_fleet_equivalence_record, MAX_FLEET_BYTES)]
+)
+def test_evidence_readers_refuse_oversized_files_and_nonblocking_fifos(tmp_path: Path, reader: Any, limit: int) -> None:
+    source = tmp_path / "evidence.json"
+    source.write_bytes(b" " * (limit + 1))
+    with pytest.raises(ValueError, match="byte limit"):
+        reader(source)
+    source.unlink()
+    os.mkfifo(source)
+    with pytest.raises(ValueError, match="regular file"):
+        reader(source)

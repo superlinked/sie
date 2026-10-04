@@ -7,41 +7,23 @@ so replacing a record or letting it expire cannot keep an old admission alive.
 
 from __future__ import annotations
 
-import os
-import stat
 from collections.abc import Mapping
 from datetime import datetime
-from pathlib import Path
 
 from pydantic import ValidationError
 from sie_sdk.types import DEFAULT_OUTPUT_DTYPE
 
 from sie_server.config.engine import EngineConfig
 from sie_server.config.equivalence import (
-    EquivalenceRecord,
     canonical_digest,
     model_contract_digest,
+    read_equivalence_record,
     remote_profile_contract_digest,
     upstream_contract_digest,
 )
 from sie_server.config.model import ModelConfig
 from sie_server.config.upstreams import UpstreamKind, installed_upstreams
 from sie_server.core.profile_identity import local_profile_identity, runtime_instance_id
-
-_MAX_RECORD_BYTES = 512 << 10
-
-
-def _read_record(path: str) -> EquivalenceRecord:
-    # Startup configuration owns this path. Refuse devices/FIFOs and bound the
-    # actual read rather than trusting a prior stat or a changing file size.
-    descriptor = os.open(Path(path), os.O_RDONLY | os.O_NONBLOCK)
-    with os.fdopen(descriptor, "rb") as stream:
-        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
-            raise ValueError("equivalence record must be a regular file")
-        data = stream.read(_MAX_RECORD_BYTES + 1)
-    if len(data) > _MAX_RECORD_BYTES:
-        raise ValueError("equivalence record exceeds the byte limit")
-    return EquivalenceRecord.model_validate_json(data)
 
 
 def openai_equivalence_refusal(
@@ -78,7 +60,7 @@ def openai_equivalence_refusal(
     if identity is None:
         return "hybrid local execution cannot be identified"
     try:
-        record = _read_record(policy.record_files[config.sie_id])
+        record = read_equivalence_record(policy.record_files[config.sie_id])
     except (OSError, ValueError, ValidationError, RecursionError):
         return "hybrid equivalence record cannot be validated"
     if not record.passed or not record.is_fresh(max_age_s=policy.max_age_s, now=now):
