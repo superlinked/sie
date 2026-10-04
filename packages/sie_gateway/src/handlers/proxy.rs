@@ -2352,10 +2352,14 @@ fn local_spill_refusal(endpoint: &str, trigger: FallbackTrigger) -> Response {
         None,
         message,
     );
-    response.headers_mut().insert(
-        "retry-after",
-        HeaderValue::from_static(BACKPRESSURE_RETRY_AFTER),
-    );
+    let retry_after = if trigger == FallbackTrigger::Unhealthy {
+        PROVISIONING_RETRY_AFTER
+    } else {
+        BACKPRESSURE_RETRY_AFTER
+    };
+    response
+        .headers_mut()
+        .insert("retry-after", HeaderValue::from_static(retry_after));
     response
 }
 
@@ -15059,6 +15063,20 @@ mod tests {
         WorkResult,
     };
     use tokio::sync::{broadcast, oneshot, Notify};
+
+    #[test]
+    fn spill_refusal_retry_hint_matches_local_capacity_class() {
+        for (trigger, retry) in [
+            (FallbackTrigger::Unhealthy, PROVISIONING_RETRY_AFTER),
+            (FallbackTrigger::Saturated, BACKPRESSURE_RETRY_AFTER),
+        ] {
+            for endpoint in ["generate", "extract"] {
+                let response = local_spill_refusal(endpoint, trigger);
+                assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+                assert_eq!(response.headers()["retry-after"], retry);
+            }
+        }
+    }
 
     #[tokio::test]
     async fn cold_spill_trigger_ignores_unassigned_workers_and_unconfigured_bundle_lanes() {
