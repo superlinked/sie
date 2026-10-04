@@ -1876,17 +1876,19 @@ impl ModelRegistry {
         if binding.epoch != epoch || model.contains(':') {
             return None;
         }
-        // Local counting, decision lookup and plan construction share one
-        // fenced snapshot; no broker I/O runs while this lock is held.
-        self.with_current_generation(&binding.generation, || {
-            let snap = &binding.generation.snapshot;
-            let canonical = Self::canonical_model_name(snap, model)?;
-            binding.coordinator.record_request(&canonical).ok()?;
-            if binding.coordinator.decision(&canonical).ok()? != ThresholdDecision::Remote {
-                return None;
-            }
-            Self::remote_plan_from_snapshot(snap, snap.models.get(&canonical)?)
-        })?
+        // A snapshot writer must never block a request thread. Contention is
+        // unavailable authority and retains the ordinary local/fallback path.
+        let _fence = self.write_lock.try_lock().ok()?;
+        if !Arc::ptr_eq(&self.snapshot.load_full(), &binding.generation.snapshot) {
+            return None;
+        }
+        let snap = &binding.generation.snapshot;
+        let canonical = Self::canonical_model_name(snap, model)?;
+        binding.coordinator.record_request(&canonical).ok()?;
+        if binding.coordinator.decision(&canonical).ok()? != ThresholdDecision::Remote {
+            return None;
+        }
+        Self::remote_plan_from_snapshot(snap, snap.models.get(&canonical)?)
     }
 
     pub fn get_model_pool_name(&self, model: &str) -> Option<String> {
@@ -2985,7 +2987,11 @@ impl ModelRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::handlers::test_support::{TestGateway, ThresholdBroker, HYBRID_GENERATE_MODEL};
+    use crate::state::threshold_coordinator::ThresholdSampler;
     use std::fs;
+    use std::sync::mpsc;
+    use std::time::Duration;
     use tempfile::TempDir;
 
     fn create_test_dirs() -> (TempDir, PathBuf, PathBuf) {
@@ -3054,6 +3060,52 @@ mod tests {
             .unwrap_err()
             .contains("fleet equivalence"));
         assert_eq!(registry.threshold_targets(1).unwrap().1.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn threshold_request_refuses_contended_snapshot_without_blocking() {
+        let Some(broker) = ThresholdBroker::start().await else {
+            return;
+        };
+        let model = format!(
+            "{HYBRID_GENERATE_MODEL}\nrouting:\n  policy: threshold\n  fallback_profile: remote\n  wake_above: 1\n  sleep_below: 0.5\n  window_s: 1\n  cooldown_s: 1\n"
+        );
+        let gateway = TestGateway::with_threshold_routing(&[&model], true).await;
+        let binding = broker.bind(&gateway).await;
+        let mut sampler = ThresholdSampler::default();
+        binding.coordinator.sample(&mut sampler).await.unwrap();
+        for _ in 0..2 {
+            tokio::time::sleep(Duration::from_millis(1050)).await;
+            binding.coordinator.sample(&mut sampler).await.unwrap();
+        }
+        assert!(gateway
+            .state
+            .model_registry
+            .threshold_remote_route("acme/chat", 1)
+            .is_some());
+
+        let registry = Arc::clone(&gateway.state.model_registry);
+        let (held_tx, held_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            let _write = registry.write_lock.lock().unwrap();
+            held_tx.send(()).unwrap();
+            // Bound a regression's blocking wait so this test cannot hang.
+            release_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        });
+        held_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let route = gateway
+            .state
+            .model_registry
+            .threshold_remote_route("acme/chat", 1);
+        release_tx.send(()).unwrap();
+        writer.join().unwrap();
+        assert!(route.is_none());
+        assert!(gateway
+            .state
+            .model_registry
+            .threshold_remote_route("acme/chat", 1)
+            .is_some());
     }
 
     #[test]

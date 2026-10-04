@@ -1909,6 +1909,17 @@ mod tests {
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert!(gateway.dispatcher.dispatched().is_empty());
 
+        // Forbid constrains execution, while valid bare-model demand still
+        // contributes to the shared decision to wake local capacity.
+        binding.coordinator.sample(&mut sampler).await.unwrap();
+        let message = counts
+            .stream
+            .get_last_raw_message_by_subject(&format!("$KV.SIE_THRESHOLD_COUNTS.{key}"))
+            .await
+            .unwrap();
+        let counter: serde_json::Value = serde_json::from_slice(&message.payload).unwrap();
+        assert_eq!(counter["total"], 2);
+
         // Replace the registry while retaining the same epoch, and even the
         // same execution hashes: the old decision must still lose authority.
         gateway.state.model_registry.reload();

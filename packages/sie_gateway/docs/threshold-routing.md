@@ -97,6 +97,8 @@ runtime waits for a complete export bootstrap, then binds targets to the nonzero
 authoritative config epoch and the exact registry snapshot, and samples every second. Standby ownership errors do not
 prevent their demand flush or verified cached decisions. Snapshot or epoch
 replacement refuses previous authority even when execution hashes are equal.
+Requests also retain local/fallback routing while a registry writer holds the
+snapshot fence; request threads never wait on that writer.
 
 After shared caller validation, eligible bare-model generation/extraction
 requests count once. A `Remote` decision returns a plan from the same pinned
