@@ -612,6 +612,7 @@ async fn threshold_decisions_share_demand_and_require_current_sampler_authority(
         .update("sampler", old.payload, old.sequence)
         .await
         .unwrap();
+    let renewed_at = tokio::time::Instant::now();
     assert_eq!(
         second.sample(&mut standby).await,
         Err(ThresholdError::Unavailable)
@@ -627,7 +628,7 @@ async fn threshold_decisions_share_demand_and_require_current_sampler_authority(
         .unwrap();
     let renewed: serde_json::Value = serde_json::from_slice(&renewed.payload).unwrap();
     assert_eq!(old_lease["term"], renewed["term"]);
-    tokio::time::sleep(Duration::from_millis(1050)).await;
+    tokio::time::sleep_until(renewed_at + Duration::from_millis(1050)).await;
     assert_eq!(
         second.decision("acme/chat"),
         Err(ThresholdError::Unavailable)
@@ -638,12 +639,18 @@ async fn threshold_decisions_share_demand_and_require_current_sampler_authority(
         second.sample(&mut standby).await,
         Err(ThresholdError::Unavailable)
     );
-    tokio::time::sleep(Duration::from_millis(1900)).await;
+    tokio::time::sleep_until(renewed_at + Duration::from_millis(2500)).await;
     assert_eq!(
         second.sample(&mut standby).await,
         Err(ThresholdError::Unavailable)
     );
-    tokio::time::sleep(Duration::from_millis(1700)).await;
+    tokio::time::sleep_until(renewed_at + Duration::from_millis(4250)).await;
+    assert!(
+        (renewed_at + Duration::from_secs(5))
+            .saturating_duration_since(tokio::time::Instant::now())
+            > Duration::from_millis(500),
+        "near-expiry refresh requires a safe margin before broker lease expiry"
+    );
     assert_eq!(
         second.sample(&mut standby).await,
         Err(ThresholdError::Unavailable)
@@ -652,7 +659,7 @@ async fn threshold_decisions_share_demand_and_require_current_sampler_authority(
         second.decision("acme/chat").unwrap(),
         ThresholdDecision::Remote
     );
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    tokio::time::sleep_until(renewed_at + Duration::from_millis(5100)).await;
     assert_eq!(
         second.decision("acme/chat"),
         Err(ThresholdError::Unavailable)
