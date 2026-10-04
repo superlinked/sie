@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from sie_server.config.equivalence import read_equivalence_record
 from sie_server.config.fleet_equivalence import (
@@ -37,8 +39,12 @@ def main(argv: list[str] | None = None) -> int:
         encoded = fleet.model_dump_json(indent=2).encode() + b"\n"
         if len(encoded) > MAX_FLEET_BYTES:
             raise ValueError("fleet evidence exceeds the byte limit")
-        with args.output.open("xb") as stream:
-            stream.write(encoded)
+        # Publish only closed, complete bytes. A same-filesystem hard link
+        # atomically refuses an existing file or symlink; failure cleans staging.
+        with TemporaryDirectory(prefix=".sie-fleet-", dir=args.output.parent) as directory:
+            staged = Path(directory) / "inventory.json"
+            staged.write_bytes(encoded)
+            os.link(staged, args.output)
     except (OSError, ValueError, RecursionError):
         # Paths and parser errors can contain sensitive operator metadata.
         print("fleet evidence could not be collected", file=sys.stderr)

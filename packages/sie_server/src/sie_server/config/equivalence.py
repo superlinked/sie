@@ -40,6 +40,7 @@ _HASH_PATTERN = r"^[0-9a-f]{64}$"
 _MAX_VALUES = 100_000_000
 _MAX_TOKENS = 100_000
 _MAX_RECORD_BYTES = 512 << 10
+_MAX_EVIDENCE_BYTES = 8 << 20
 _CATEGORIES = frozenset(
     {
         "short",
@@ -59,16 +60,22 @@ def canonical_digest(value: Any) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def read_equivalence_record(path: str | Path) -> EquivalenceRecord:
+def read_equivalence_bytes(path: str | Path, *, max_bytes: int) -> bytes:
     """Read bounded operator evidence without blocking on a device or FIFO."""
+    if type(max_bytes) is not int or not 1 <= max_bytes <= _MAX_EVIDENCE_BYTES:
+        raise ValueError("equivalence read limit is out of range")
     descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
     with os.fdopen(descriptor, "rb") as stream:
         if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
             raise ValueError("equivalence record must be a regular file")
-        data = stream.read(_MAX_RECORD_BYTES + 1)
-    if len(data) > _MAX_RECORD_BYTES:
+        data = stream.read(max_bytes + 1)
+    if len(data) > max_bytes:
         raise ValueError("equivalence record exceeds the byte limit")
-    return EquivalenceRecord.model_validate_json(data)
+    return data
+
+
+def read_equivalence_record(path: str | Path) -> EquivalenceRecord:
+    return EquivalenceRecord.model_validate_json(read_equivalence_bytes(path, max_bytes=_MAX_RECORD_BYTES))
 
 
 def model_contract_digest(config: ModelConfig) -> str:

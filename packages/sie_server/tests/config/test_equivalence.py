@@ -551,6 +551,31 @@ def test_fleet_cli_collects_fresh_records_and_records_expiry(tmp_path: Path) -> 
     assert read_fleet_equivalence_record(tmp_path / "expired.json").passed
 
 
+def test_fleet_cli_failed_write_leaves_no_partial_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source, output = tmp_path / "worker.json", tmp_path / "fleet.json"
+    source.write_text(_fleet_record(measured_at=datetime.now(UTC).isoformat()).model_dump_json())
+
+    def failed_write(path: Path, data: bytes) -> None:
+        with path.open("wb") as stream:
+            stream.write(data[:10])
+        raise OSError("simulated write failure")
+
+    monkeypatch.setattr(Path, "write_bytes", failed_write)
+    assert fleet_probe.main(["--record", str(source), "--output", str(output)]) == 2
+    assert not output.exists()
+    assert list(tmp_path.iterdir()) == [source]
+
+
+def test_fleet_cli_never_replaces_a_symlink(tmp_path: Path) -> None:
+    source, output = tmp_path / "worker.json", tmp_path / "fleet.json"
+    source.write_text(_fleet_record(measured_at=datetime.now(UTC).isoformat()).model_dump_json())
+    output.symlink_to(source)
+    original = source.read_bytes()
+    assert fleet_probe.main(["--record", str(source), "--output", str(output)]) == 2
+    assert output.is_symlink()
+    assert source.read_bytes() == original
+
+
 @pytest.mark.parametrize(
     ("reader", "limit"), [(read_equivalence_record, 512 << 10), (read_fleet_equivalence_record, MAX_FLEET_BYTES)]
 )

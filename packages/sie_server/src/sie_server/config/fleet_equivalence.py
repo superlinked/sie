@@ -6,8 +6,6 @@ Failed and expired records remain diagnostic evidence, never admission proof.
 
 from __future__ import annotations
 
-import os
-import stat
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
@@ -15,7 +13,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from sie_server.config.equivalence import EquivalenceRecord, canonical_digest
+from sie_server.config.equivalence import EquivalenceRecord, canonical_digest, read_equivalence_bytes
 
 MAX_FLEET_RECORDS = 256
 MAX_FLEET_BYTES = 8 << 20
@@ -87,11 +85,4 @@ class FleetEquivalenceRecord(BaseModel):
 
 def read_fleet_equivalence_record(path: str | Path) -> FleetEquivalenceRecord:
     """Read a bounded regular operator artifact, including failed measurements."""
-    descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
-    with os.fdopen(descriptor, "rb") as stream:
-        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
-            raise ValueError("fleet evidence must be a regular file")
-        data = stream.read(MAX_FLEET_BYTES + 1)
-    if len(data) > MAX_FLEET_BYTES:
-        raise ValueError("fleet evidence exceeds the byte limit")
-    return FleetEquivalenceRecord.model_validate_json(data)
+    return FleetEquivalenceRecord.model_validate_json(read_equivalence_bytes(path, max_bytes=MAX_FLEET_BYTES))
