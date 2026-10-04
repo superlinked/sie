@@ -45,14 +45,15 @@ use tracing::{debug, info, warn};
 use crate::ipc_mux::{mux_enabled, MuxClient, MuxError};
 use crate::ipc_types::{
     ApplyModelConfigRequest, ApplyModelConfigResponse, BatchOutcome, DrainRequest, DrainResponse,
-    EnsureModelReadyRequest, EnsureModelReadyResponse, GenerateEvent, PingRequest, PingResponse,
+    EnsureModelReadyRequest, EnsureModelReadyResponse, GenerateEvent,
+    NumericalProfileSnapshotRequest, NumericalProfileSnapshotResponse, PingRequest, PingResponse,
     ProcessEncodeBatchRequest, ProcessExtractBatchRequest, ProcessGenerateRequest,
     ProcessScoreBatchRequest, ReplaceModelConfigsRequest, ReplaceModelConfigsResponse,
     RequestEnvelope, ResponseEnvelope, RunBatchRequest, SetPinnedModelsRequest,
     SetPinnedModelsResponse, SignalGenerateCancelRequest, SignalGenerateCancelResponse,
     WorkerCapabilitiesRequest, WorkerCapabilitiesResponse, IPC_VERSION, METHOD_APPLY_MODEL_CONFIG,
-    METHOD_DRAIN, METHOD_ENSURE_MODEL_READY, METHOD_PING, METHOD_PROCESS_ENCODE_BATCH,
-    METHOD_PROCESS_EXTRACT_BATCH, METHOD_PROCESS_GENERATE,
+    METHOD_DRAIN, METHOD_ENSURE_MODEL_READY, METHOD_NUMERICAL_PROFILE_SNAPSHOT, METHOD_PING,
+    METHOD_PROCESS_ENCODE_BATCH, METHOD_PROCESS_EXTRACT_BATCH, METHOD_PROCESS_GENERATE,
     METHOD_PROCESS_GENERATE_WITH_EXECUTION_AUTHORITY_V1, METHOD_PROCESS_SCORE_BATCH,
     METHOD_REPLACE_MODEL_CONFIGS, METHOD_RUN_BATCH, METHOD_RUN_BATCH_WITH_EXECUTION_AUTHORITY_V1,
     METHOD_SET_PINNED_MODELS, METHOD_SIGNAL_GENERATE_CANCEL, METHOD_WORKER_CAPABILITIES,
@@ -1036,6 +1037,16 @@ impl IpcClient {
     pub async fn worker_capabilities(&self) -> Result<WorkerCapabilitiesResponse, IpcError> {
         self.call(METHOD_WORKER_CAPABILITIES, WorkerCapabilitiesRequest {})
             .await
+    }
+
+    pub async fn numerical_profile_snapshot(
+        &self,
+    ) -> Result<NumericalProfileSnapshotResponse, IpcError> {
+        self.call(
+            METHOD_NUMERICAL_PROFILE_SNAPSHOT,
+            NumericalProfileSnapshotRequest {},
+        )
+        .await
     }
 
     pub async fn signal_generate_cancel(

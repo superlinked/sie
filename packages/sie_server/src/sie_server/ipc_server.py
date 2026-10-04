@@ -18,14 +18,18 @@ import msgpack
 import msgspec
 
 from sie_server.adapter_call_loop import handle_run_batch
+from sie_server.config.equivalence import model_contract_digest
+from sie_server.config.model import ModelConfig
 from sie_server.core.gpu_health import gpu_is_healthy_async
 from sie_server.core.grammar_routing import resolve_grammar_serving_model
+from sie_server.core.profile_identity import local_profile_identity, runtime_instance_id
 from sie_server.core.readiness import is_ready
 from sie_server.ipc_types import (
     IPC_VERSION,
     METHOD_APPLY_MODEL_CONFIG,
     METHOD_DRAIN,
     METHOD_ENSURE_MODEL_READY,
+    METHOD_NUMERICAL_PROFILE_SNAPSHOT,
     METHOD_PING,
     METHOD_PROCESS_ENCODE_BATCH,
     METHOD_PROCESS_EXTRACT_BATCH,
@@ -47,6 +51,9 @@ from sie_server.ipc_types import (
     GenerateEvent,
     IpcResponseChunkV1,
     ItemOutcome,
+    NumericalProfileObservation,
+    NumericalProfileSnapshotRequest,
+    NumericalProfileSnapshotResponse,
     PingRequest,
     PingResponse,
     ProcessEncodeBatchRequest,
@@ -79,6 +86,8 @@ _LEN_BYTES = _LEN_STRUCT.size
 # any decoded WorkItem batch we would send in-band — large payloads arrive
 # via the payload store, not via IPC.
 _MAX_FRAME_BYTES = 32 * 1024 * 1024
+_MAX_NUMERICAL_PROFILES = 1024
+_MAX_NUMERICAL_MODEL_ID_BYTES = 1024
 
 # A negotiated response may exceed one legacy IPC frame, but remains tightly
 # bounded so a malformed or unexpectedly large backend output cannot grow the
@@ -506,6 +515,10 @@ class IpcServer:
                 resp_body = await self._handle_ensure_ready(msgspec.convert(body, EnsureModelReadyRequest))
             elif method == METHOD_WORKER_CAPABILITIES:
                 resp_body = self._handle_worker_capabilities(msgspec.convert(body, WorkerCapabilitiesRequest))
+            elif method == METHOD_NUMERICAL_PROFILE_SNAPSHOT:
+                resp_body = await self._handle_numerical_profile_snapshot(
+                    msgspec.convert(body, NumericalProfileSnapshotRequest)
+                )
             elif method == METHOD_PROCESS_ENCODE_BATCH:
                 resp_body = await self._handle_process_encode(msgspec.convert(body, ProcessEncodeBatchRequest))
             elif method == METHOD_PROCESS_SCORE_BATCH:
@@ -754,6 +767,40 @@ class IpcServer:
 
     async def _handle_set_pinned_models(self, req: SetPinnedModelsRequest) -> SetPinnedModelsResponse:
         return await self._executor.set_pinned_models(req)
+
+    async def _handle_numerical_profile_snapshot(
+        self, _req: NumericalProfileSnapshotRequest
+    ) -> NumericalProfileSnapshotResponse:
+        try:
+            async with self._executor.registry.execution_lease():
+                return await asyncio.to_thread(self._numerical_profile_snapshot)
+        except Exception:  # noqa: BLE001
+            return NumericalProfileSnapshotResponse(runtime_instance_id=runtime_instance_id())
+
+    def _numerical_profile_snapshot(self) -> NumericalProfileSnapshotResponse:
+        registry = self._executor.registry
+        configs = registry.get_configs_snapshot()
+        complete = len(configs) <= _MAX_NUMERICAL_PROFILES
+        observations = []
+        for name in sorted(configs)[:_MAX_NUMERICAL_PROFILES]:
+            if not name or len(name.encode()) > _MAX_NUMERICAL_MODEL_ID_BYTES:
+                complete = False
+                continue
+            config = configs[name]
+            identity = None
+            contract = None
+            if isinstance(config, ModelConfig):
+                identity = local_profile_identity(
+                    config,
+                    "default",
+                    device=registry.profile_execution_device(name) or "",
+                    engine_config=registry.engine_config,
+                )
+                contract = model_contract_digest(config)
+            else:
+                complete = False
+            observations.append(NumericalProfileObservation(name, identity, contract))
+        return NumericalProfileSnapshotResponse(runtime_instance_id(), observations, complete)
 
     def _handle_worker_capabilities(self, _req: WorkerCapabilitiesRequest) -> WorkerCapabilitiesResponse:
         generation_models: list[str] = []

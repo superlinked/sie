@@ -54,6 +54,7 @@ METHOD_PROCESS_SCORE_BATCH = "ProcessScoreBatch"
 METHOD_PROCESS_EXTRACT_BATCH = "ProcessExtractBatch"
 METHOD_PROCESS_GENERATE = "ProcessGenerate"
 METHOD_WORKER_CAPABILITIES = "WorkerCapabilities"
+METHOD_NUMERICAL_PROFILE_SNAPSHOT = "NumericalProfileSnapshot"
 METHOD_SIGNAL_GENERATE_CANCEL = "SignalGenerateCancel"
 # RPC that accepts a whole pre-formed batch (single-op, mixed items)
 # and returns ``BatchOutcome`` unchanged.
@@ -264,6 +265,22 @@ class GenerateEvent(msgspec.Struct):
 
 class WorkerCapabilitiesRequest(msgspec.Struct):
     pass
+
+
+class NumericalProfileSnapshotRequest(msgspec.Struct):
+    pass
+
+
+class NumericalProfileObservation(msgspec.Struct):
+    model_id: str
+    local_identity: str | None = None
+    model_contract_sha256: str | None = None
+
+
+class NumericalProfileSnapshotResponse(msgspec.Struct):
+    runtime_instance_id: str | None = None
+    profiles: list[NumericalProfileObservation] = msgspec.field(default_factory=list)
+    complete: bool = False
 
 
 class WorkerCapabilitiesResponse(msgspec.Struct):

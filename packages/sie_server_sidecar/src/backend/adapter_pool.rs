@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures_util::future::join_all;
+use serde::Serialize;
 use tracing::{debug, info, warn};
 
 use crate::backend::python_ipc::map_ipc_error;
@@ -20,12 +21,59 @@ use crate::backend::{BackendError, InferenceBackend};
 use crate::ipc_client::{IpcClient, IpcError};
 use crate::ipc_types::{
     ApplyModelConfigRequest, ApplyModelConfigResponse, BatchOutcome, DrainResponse,
-    EnsureModelReadyResponse, GenerateEvent, PingResponse, ProcessEncodeBatchRequest,
-    ProcessExtractBatchRequest, ProcessGenerateRequest, ProcessScoreBatchRequest,
-    ReplaceModelConfigsRequest, ReplaceModelConfigsResponse, RunBatchRequest,
-    SetPinnedModelsResponse, SignalGenerateCancelResponse, WorkerCapabilitiesResponse,
+    EnsureModelReadyResponse, GenerateEvent, NumericalProfileSnapshotResponse, PingResponse,
+    ProcessEncodeBatchRequest, ProcessExtractBatchRequest, ProcessGenerateRequest,
+    ProcessScoreBatchRequest, ReplaceModelConfigsRequest, ReplaceModelConfigsResponse,
+    RunBatchRequest, SetPinnedModelsResponse, SignalGenerateCancelResponse,
+    WorkerCapabilitiesResponse,
 };
 use crate::runtime_state::RuntimeState;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NumericalSnapshotStatus {
+    Observed,
+    Incomplete,
+    Unavailable,
+    Invalid,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct NumericalProcessObservation {
+    pub child_index: usize,
+    pub status: NumericalSnapshotStatus,
+    pub snapshot: Option<NumericalProfileSnapshotResponse>,
+}
+
+fn sha256_digest(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|value| value.is_ascii_digit() || (b'a'..=b'f').contains(&value))
+}
+
+fn valid_numerical_snapshot(snapshot: &NumericalProfileSnapshotResponse) -> bool {
+    let mut models = HashSet::new();
+    snapshot
+        .runtime_instance_id
+        .as_deref()
+        .is_none_or(sha256_digest)
+        && snapshot.profiles.len() <= 1024
+        && snapshot.profiles.iter().all(|profile| {
+            !profile.model_id.is_empty()
+                && profile.model_id.len() <= 1024
+                && models.insert(&profile.model_id)
+                && profile
+                    .model_contract_sha256
+                    .as_deref()
+                    .is_none_or(sha256_digest)
+                && profile.local_identity.as_deref().is_none_or(|identity| {
+                    identity
+                        .strip_prefix("v1:sha256:")
+                        .is_some_and(sha256_digest)
+                })
+        })
+}
 
 struct AdapterWorkerChild {
     index: usize,
@@ -218,6 +266,63 @@ impl AdapterWorkerPool {
         } else {
             Err(last_err.expect("last_err set when every capabilities probe failed"))
         }
+    }
+
+    /// Diagnostic snapshots grant no routing authority or readiness capability.
+    pub async fn numerical_process_inventory(&self) -> Vec<NumericalProcessObservation> {
+        let mut observations = join_all(self.children.iter().map(|child| async move {
+            match child.ipc.numerical_profile_snapshot().await {
+                Ok(snapshot) if valid_numerical_snapshot(&snapshot) => {
+                    NumericalProcessObservation {
+                        child_index: child.index,
+                        status: if snapshot.complete
+                            && snapshot.runtime_instance_id.is_some()
+                            && snapshot
+                                .profiles
+                                .iter()
+                                .all(|profile| profile.model_contract_sha256.is_some())
+                        {
+                            NumericalSnapshotStatus::Observed
+                        } else {
+                            NumericalSnapshotStatus::Incomplete
+                        },
+                        snapshot: Some(snapshot),
+                    }
+                }
+                Ok(_) => NumericalProcessObservation {
+                    child_index: child.index,
+                    status: NumericalSnapshotStatus::Invalid,
+                    snapshot: None,
+                },
+                Err(_) => NumericalProcessObservation {
+                    child_index: child.index,
+                    status: NumericalSnapshotStatus::Unavailable,
+                    snapshot: None,
+                },
+            }
+        }))
+        .await;
+        let mut counts = HashMap::new();
+        for observation in &observations {
+            if let Some(instance) = observation
+                .snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.runtime_instance_id.as_ref())
+            {
+                *counts.entry(instance.clone()).or_insert(0usize) += 1;
+            }
+        }
+        for observation in &mut observations {
+            if observation
+                .snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.runtime_instance_id.as_ref())
+                .is_some_and(|instance| counts[instance] > 1)
+            {
+                observation.status = NumericalSnapshotStatus::Invalid;
+            }
+        }
+        observations
     }
 
     pub async fn apply_model_config(
@@ -1062,6 +1167,132 @@ mod tests {
                 });
             }
         })
+    }
+
+    #[tokio::test]
+    async fn numerical_inventory_preserves_missing_legacy_and_replaced_processes() {
+        async fn spawn_snapshot_worker(
+            path: PathBuf,
+            snapshot: Arc<Mutex<serde_json::Value>>,
+        ) -> tokio::task::JoinHandle<()> {
+            let listener = UnixListener::bind(path).unwrap();
+            tokio::spawn(async move {
+                loop {
+                    let Ok((mut socket, _)) = listener.accept().await else {
+                        return;
+                    };
+                    let snapshot = Arc::clone(&snapshot);
+                    tokio::spawn(async move {
+                        loop {
+                            let mut length = [0_u8; 4];
+                            if socket.read_exact(&mut length).await.is_err() {
+                                return;
+                            }
+                            let mut bytes = vec![0; u32::from_be_bytes(length) as usize];
+                            if socket.read_exact(&mut bytes).await.is_err() {
+                                return;
+                            }
+                            let request: serde_json::Value = rmp_serde::from_slice(&bytes).unwrap();
+                            assert_eq!(request["method"], "NumericalProfileSnapshot");
+                            let body = snapshot.lock().unwrap().clone();
+                            let response = rmp_serde::to_vec_named(&serde_json::json!({"version": crate::ipc_types::IPC_VERSION, "request_id": request["request_id"], "ok": true, "body": body})).unwrap();
+                            if socket
+                                .write_all(&(response.len() as u32).to_be_bytes())
+                                .await
+                                .is_err()
+                                || socket.write_all(&response).await.is_err()
+                            {
+                                return;
+                            }
+                        }
+                    });
+                }
+            })
+        }
+        let dir = tempfile::Builder::new()
+            .prefix("sie-num-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let first_path = dir.path().join("first.sock");
+        let legacy_path = dir.path().join("legacy.sock");
+        let first = Arc::new(Mutex::new(
+            serde_json::json!({"runtime_instance_id": "a".repeat(64), "complete": true, "profiles": [{"model_id": "m", "local_identity": format!("v1:sha256:{}", "c".repeat(64)), "model_contract_sha256": "d".repeat(64)}]}),
+        ));
+        let legacy = Arc::new(Mutex::new(serde_json::json!({})));
+        let first_server = spawn_snapshot_worker(first_path.clone(), Arc::clone(&first)).await;
+        let legacy_server = spawn_snapshot_worker(legacy_path.clone(), Arc::clone(&legacy)).await;
+        let pool = pool_with_paths(&[first_path, legacy_path, dir.path().join("missing.sock")]);
+        let initial_ready = pool.ready_child_count();
+        let observations = pool.numerical_process_inventory().await;
+        assert_eq!(
+            observations
+                .iter()
+                .map(|observation| observation.child_index)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        assert_eq!(
+            observations
+                .iter()
+                .map(|observation| observation.status)
+                .collect::<Vec<_>>(),
+            vec![
+                NumericalSnapshotStatus::Observed,
+                NumericalSnapshotStatus::Incomplete,
+                NumericalSnapshotStatus::Unavailable
+            ]
+        );
+        assert_eq!(observations[0].snapshot.as_ref().unwrap().profiles.len(), 1);
+        assert!(!pool.execution_authority_v1().load(Ordering::Acquire));
+        assert_eq!(pool.ready_child_count(), initial_ready);
+        first.lock().unwrap()["profiles"][0]["model_contract_sha256"] = serde_json::Value::Null;
+        let missing_contract = pool.numerical_process_inventory().await;
+        assert_eq!(
+            missing_contract[0].status,
+            NumericalSnapshotStatus::Incomplete
+        );
+        first.lock().unwrap()["profiles"][0]["model_contract_sha256"] =
+            serde_json::json!("d".repeat(64));
+        first.lock().unwrap()["profiles"][0]["model_id"] = serde_json::json!("é".repeat(513));
+        let oversized = pool.numerical_process_inventory().await;
+        assert_eq!(oversized[0].status, NumericalSnapshotStatus::Invalid);
+        assert!(oversized[0].snapshot.is_none());
+        first.lock().unwrap()["profiles"][0]["model_id"] = serde_json::json!("m");
+        let profile = first.lock().unwrap()["profiles"][0].clone();
+        first.lock().unwrap()["profiles"] = serde_json::json!([profile.clone(), profile.clone()]);
+        let duplicate_model = pool.numerical_process_inventory().await;
+        assert_eq!(duplicate_model[0].status, NumericalSnapshotStatus::Invalid);
+        assert!(duplicate_model[0].snapshot.is_none());
+        first.lock().unwrap()["profiles"] = serde_json::json!([profile]);
+        first.lock().unwrap()["runtime_instance_id"] = serde_json::json!("b".repeat(64));
+        let replaced = pool.numerical_process_inventory().await;
+        assert_eq!(
+            replaced[0]
+                .snapshot
+                .as_ref()
+                .unwrap()
+                .runtime_instance_id
+                .as_deref(),
+            Some("b".repeat(64).as_str())
+        );
+        *legacy.lock().unwrap() = first.lock().unwrap().clone();
+        let duplicated = pool.numerical_process_inventory().await;
+        assert_eq!(duplicated[0].status, NumericalSnapshotStatus::Invalid);
+        assert_eq!(duplicated[1].status, NumericalSnapshotStatus::Invalid);
+        first.lock().unwrap()["profiles"][0]["local_identity"] =
+            serde_json::json!("private-invalid-identity");
+        let invalid = pool.numerical_process_inventory().await;
+        assert_eq!(invalid[0].status, NumericalSnapshotStatus::Invalid);
+        assert!(invalid[0].snapshot.is_none());
+        assert!(!serde_json::to_string(&invalid)
+            .unwrap()
+            .contains("private-invalid"));
+        let unavailable = pool_with_paths(&[dir.path().join("none.sock")]);
+        let unavailable = unavailable.numerical_process_inventory().await;
+        assert_eq!(unavailable.len(), 1);
+        assert_eq!(unavailable[0].status, NumericalSnapshotStatus::Unavailable);
+        first_server.abort();
+        legacy_server.abort();
     }
 
     #[tokio::test]

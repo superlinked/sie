@@ -6,6 +6,7 @@ import hashlib
 import os
 import struct
 import tempfile
+import threading
 import time
 import uuid
 from collections.abc import Iterator
@@ -23,8 +24,10 @@ import yaml
 from sie_config.model_registry import ModelRegistry as ConfigModelRegistry
 from sie_sdk.bundle_utils import match_bundle_models
 from sie_server.api.ws import BundleConfigView, compute_bundle_config_hash_cached
+from sie_server.config.equivalence import model_contract_digest
 from sie_server.config.model import ModelConfig
 from sie_server.core.inference_output import ExtractOutput, ScoreOutput
+from sie_server.core.profile_identity import runtime_instance_id
 from sie_server.core.readiness import mark_not_ready, mark_ready, register_liveness_probe
 from sie_server.core.registry import ModelRegistry
 from sie_server.core.timing import RequestTiming
@@ -37,6 +40,7 @@ from sie_server.ipc_types import (
     ApplyModelConfigRequest,
     BatchOutcome,
     IpcResponseChunkV1,
+    NumericalProfileSnapshotRequest,
     ProcessEncodeBatchRequest,
     ProcessExtractBatchRequest,
     ProcessGenerateRequest,
@@ -2673,6 +2677,91 @@ class TestHeartbeat:
 
 
 class TestGenerationSidecarIpc:
+    @pytest.mark.asyncio
+    async def test_numerical_snapshot_reports_current_process_and_profile_contract(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        server, registry, _ = _pinned_execution_server(monkeypatch)
+        observed = []
+
+        def identity(config: ModelConfig, profile: str, **kwargs: object) -> str:
+            observed.append((config.sie_id, profile, kwargs))
+            return "v1:sha256:" + "a" * 64
+
+        monkeypatch.setattr(ipc_server_module, "local_profile_identity", identity)
+        config = registry.get_config("Qwen/Qwen3.6-27B")
+        response = await server._handle_numerical_profile_snapshot(NumericalProfileSnapshotRequest())
+        assert response.runtime_instance_id == runtime_instance_id()
+        assert response.complete
+        assert msgspec.to_builtins(response.profiles) == [
+            {
+                "model_id": config.sie_id,
+                "local_identity": "v1:sha256:" + "a" * 64,
+                "model_contract_sha256": model_contract_digest(config),
+            }
+        ]
+        assert observed == [
+            (
+                config.sie_id,
+                "default",
+                {
+                    "device": registry.profile_execution_device(config.sie_id) or "",
+                    "engine_config": registry.engine_config,
+                },
+            )
+        ]
+        assert not registry.loaded_model_names
+
+    @pytest.mark.asyncio
+    async def test_numerical_snapshot_failure_is_incomplete_and_exposes_no_exception(self) -> None:
+        executor, registry = _make_executor()
+        registry.get_configs_snapshot.side_effect = RuntimeError("private upstream credential")
+        async with IpcServer(_short_sock_path(), executor, worker_id="w") as server:
+            client = await _Client.connect(server._socket_path)
+            try:
+                response = await client.rpc("NumericalProfileSnapshot", {})
+            finally:
+                await client.close()
+        assert response["ok"]
+        assert response["body"] == {"runtime_instance_id": runtime_instance_id(), "profiles": [], "complete": False}
+        assert "private" not in str(response)
+
+    @pytest.mark.asyncio
+    async def test_numerical_snapshot_pins_config_and_reports_a_bounded_roster(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        server, registry, _ = _pinned_execution_server(monkeypatch)
+        before = registry.get_config("Qwen/Qwen3.6-27B")
+        data = before.model_dump(mode="json")
+        data["profiles"]["default"]["max_batch_tokens"] += 1
+        after = ModelConfig.model_validate(data)
+        started, finish = threading.Event(), threading.Event()
+
+        def identity(_config: ModelConfig, _profile: str, **_kwargs: object) -> None:
+            started.set()
+            assert finish.wait(2)
+
+        monkeypatch.setattr(ipc_server_module, "local_profile_identity", identity)
+        snapshot = asyncio.create_task(server._handle_numerical_profile_snapshot(NumericalProfileSnapshotRequest()))
+        try:
+            assert await asyncio.to_thread(started.wait, 1)
+            reload = asyncio.create_task(registry.add_config_async(after))
+            await asyncio.sleep(0)
+            assert not reload.done()
+        finally:
+            finish.set()
+        response, _ = await asyncio.wait_for(asyncio.gather(snapshot, reload), 2)
+        assert response.complete
+        assert response.profiles[0].local_identity is None
+        assert response.profiles[0].model_contract_sha256 == model_contract_digest(before)
+        current = await server._handle_numerical_profile_snapshot(NumericalProfileSnapshotRequest())
+        assert current.profiles[0].model_contract_sha256 == model_contract_digest(after)
+        assert current.profiles[0].model_contract_sha256 != response.profiles[0].model_contract_sha256
+        monkeypatch.setattr(ipc_server_module, "_MAX_NUMERICAL_PROFILES", 0)
+        bounded = await server._handle_numerical_profile_snapshot(NumericalProfileSnapshotRequest())
+        assert not bounded.complete
+        assert bounded.profiles == []
+
     @pytest.mark.asyncio
     async def test_worker_capabilities_reports_generation_models(self) -> None:
         executor, reg = _make_executor()

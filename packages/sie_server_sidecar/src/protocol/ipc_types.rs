@@ -34,6 +34,7 @@ pub const METHOD_PROCESS_SCORE_BATCH: &str = "ProcessScoreBatch";
 pub const METHOD_PROCESS_EXTRACT_BATCH: &str = "ProcessExtractBatch";
 pub const METHOD_PROCESS_GENERATE: &str = "ProcessGenerate";
 pub const METHOD_WORKER_CAPABILITIES: &str = "WorkerCapabilities";
+pub const METHOD_NUMERICAL_PROFILE_SNAPSHOT: &str = "NumericalProfileSnapshot";
 pub const METHOD_SIGNAL_GENERATE_CANCEL: &str = "SignalGenerateCancel";
 /// RPC that accepts a whole pre-formed batch (mixed op kinds illegal —
 /// one `RunBatchRequest` is a single op) and returns today's
@@ -433,6 +434,30 @@ pub struct GenerateEvent {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct WorkerCapabilitiesRequest {
     // No fields: the method asks the backend to describe its local registry.
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct NumericalProfileSnapshotRequest {
+    // No caller-supplied process or profile identity.
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NumericalProfileObservation {
+    pub model_id: String,
+    #[serde(default)]
+    pub local_identity: Option<String>,
+    #[serde(default)]
+    pub model_contract_sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct NumericalProfileSnapshotResponse {
+    #[serde(default)]
+    pub runtime_instance_id: Option<String>,
+    #[serde(default)]
+    pub profiles: Vec<NumericalProfileObservation>,
+    #[serde(default)]
+    pub complete: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

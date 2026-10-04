@@ -322,6 +322,7 @@ The Rust and Python protocol copies define the same method names:
 - `ProcessExtractBatch`
 - `ProcessGenerate`
 - `WorkerCapabilities`
+- `NumericalProfileSnapshot`
 - `SignalGenerateCancel`
 - `RunBatch`
 - `RunBatchWithExecutionAuthorityV1`
@@ -332,6 +333,28 @@ The Rust and Python protocol copies define the same method names:
 
 `tools/check_ipc_types_parity.py` checks the Rust protocol schema against
 `packages/sie_server/src/sie_server/ipc_types.py`.
+
+### Numerical process observations (#415)
+
+`NumericalProfileSnapshot` is an optional, on-demand diagnostic RPC. The Python
+backend returns its process incarnation, registered model contract digests, and
+available local numerical profile identities under one configuration execution
+lease. It does not load model weights or run inference. Unsupported profiles
+retain an absent identity; failures return an incomplete snapshot without error
+details. A roster contains at most 1,024 models, with each model ID limited to
+1,024 UTF-8 bytes. Truncation or an invalid configuration makes it incomplete.
+
+The adapter pool retains one observation for every configured child, including
+unavailable and legacy backends. Missing fields are incomplete, malformed
+digests are invalid, and a duplicated process incarnation invalidates both
+children. Each call refreshes the observations so a replacement process does
+not inherit the previous incarnation. The Candle backend does not implement
+this optional method and is reported as unavailable.
+
+These observations do not change readiness, execution authority, or routing.
+They provide inputs for collecting process-bound numerical evidence; accepting
+that evidence still requires the entire reachable fleet and a queue execution
+fence that pins the proof, configuration, and process incarnation.
 
 ### Execution authority protocol amendment (#415)
 
