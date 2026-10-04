@@ -81,22 +81,34 @@ def payload(receiver):
             add(rs.resource.attributes, key, SENTINEL)
             add(rs.resource.attributes, key, None)
         scope = rs.scope_metrics.add()
-        for suffix, kind in [("requests", "sum"), ("request.duration", "histogram")]:
-            metric = scope.metrics.add(name=f"{prefix}.{suffix}")
+        specs = [(f"{prefix}.requests", "sum"), (f"{prefix}.request.duration", "histogram")]
+        # Gateway-only diagnostics are also sent to the application receiver:
+        # its allowlist must drop them rather than authorize their service.
+        specs.extend(
+            [
+                ("sie.gateway.remote.fallbacks", "sum"),
+                ("sie.gateway.remote.serving.duration", "gauge"),
+            ]
+        )
+        for name, kind in specs:
+            metric = scope.metrics.add(name=name)
             data = getattr(metric, kind)
-            data.aggregation_temporality = AGGREGATION_TEMPORALITY_DELTA
+            if kind != "gauge":
+                data.aggregation_temporality = AGGREGATION_TEMPORALITY_DELTA
             if kind == "sum":
                 data.is_monotonic = True
             for case in range(3):
                 point = data.data_points.add(start_time_unix_nano=1_000, time_unix_nano=2_000 + case)
                 if kind == "sum":
                     point.as_int = 10 + case
+                elif kind == "gauge":
+                    point.as_double = 10.0 + case
                 else:
                     point.count = 2
                     point.sum = 0.5 + case
                     point.explicit_bounds.extend([1.0])
                     point.bucket_counts.extend([1, 1])
-                add(point.attributes, "outcome", "success")
+                add(point.attributes, "outcome", "committed" if name == "sie.gateway.remote.fallbacks" else "success")
                 add(point.attributes, "outcome", None)
                 if case == 0:
                     add(point.attributes, "operation", "encode")
@@ -109,6 +121,12 @@ def payload(receiver):
                     add(point.attributes, "http.status_code", 200)
                     add(point.attributes, "http.status_code", None)
                 add(point.attributes, "cloud.region", SENTINEL)
+                if name.startswith("sie.gateway.remote."):
+                    add(point.attributes, "model", "acme/model")
+                    add(point.attributes, "model", SENTINEL)
+                    add(point.attributes, "model", None)
+                    add(point.attributes, "fallback.reason", "provisioning")
+                    add(point.attributes, "fallback.reason", None)
     return wire.SerializeToString()
 
 
@@ -191,9 +209,10 @@ def test_remote_metric_maps_have_one_scalar_per_retained_key(tmp_path, receiver)
                 }
                 for scope in rs["scopeMetrics"]:
                     for metric in scope["metrics"]:
-                        kind = "sum" if "sum" in metric else "histogram"
+                        kind = next(kind for kind in ["sum", "histogram", "gauge"] if kind in metric)
                         data = metric[kind]
-                        assert data["aggregationTemporality"] == 1
+                        if kind != "gauge":
+                            assert data["aggregationTemporality"] == 1
                         for point in data["dataPoints"]:
                             seen.append(point)
                             case = int(point["timeUnixNano"]) - 2_000
@@ -202,17 +221,27 @@ def test_remote_metric_maps_have_one_scalar_per_retained_key(tmp_path, receiver)
                                 expected["operation"] = {"stringValue": "encode"}
                             if receiver == "gateway":
                                 expected["http.status_code"] = {"intValue": "200"}
+                            if metric["name"].startswith("sie.gateway.remote."):
+                                expected.pop("http.status_code", None)
+                                expected["model"] = {"stringValue": "acme/model"}
+                                if kind == "gauge":
+                                    expected = {"model": expected["model"]}
+                                else:
+                                    expected["outcome"] = {"stringValue": "committed"}
+                                    expected["fallback.reason"] = {"stringValue": "provisioning"}
                             assert len(point["attributes"]) == len(expected)
                             assert {a["key"]: a["value"] for a in point["attributes"]} == expected
                             assert int(point["startTimeUnixNano"]) == 1_000
                             if kind == "sum":
                                 assert int(point["asInt"]) == 10 + case
+                            elif kind == "gauge":
+                                assert point["asDouble"] == 10.0 + case
                             else:
                                 assert int(point["count"]) == 2
                                 assert point["sum"] == 0.5 + case
                                 assert point["bucketCounts"] == ["1", "1"]
                                 assert point["explicitBounds"] == [1]
-        assert len(seen) == 6
+        assert len(seen) == (12 if receiver == "gateway" else 6)
     finally:
         try:
             run("docker", "stop", "--time", "10", container)
