@@ -1,4 +1,8 @@
 {{- if or (index .Values "kube-prometheus-stack" "install") .Values.alertRules.enabled }}
+{{- $remoteSeconds := .Values.alertRules.remoteFallbackPersistenceSeconds -}}
+{{- if not (and (or (kindIs "int" $remoteSeconds) (kindIs "int64" $remoteSeconds) (kindIs "float64" $remoteSeconds)) (eq (float64 $remoteSeconds) (floor (float64 $remoteSeconds))) (gt (float64 $remoteSeconds) 0.0) (le (float64 $remoteSeconds) 86400.0)) -}}
+{{- fail "alertRules.remoteFallbackPersistenceSeconds must be an integer from 1 to 86400" -}}
+{{- end -}}
 {{- $fullname := include "sie-cluster.fullname" . -}}
 # Application rules below read the collector's Prometheus compatibility
 # exporter. The shared applicationPrometheusEnabled gate therefore also
@@ -13,5 +17,5 @@ metadata:
     app.kubernetes.io/component: alert
     prometheus: kube-prometheus
 spec:
-{{ .Files.Get "files/alerts/sie-rules.yaml" | replace "__NAMESPACE__" (include "sie-cluster.namespace" .) | replace "__FULLNAME__" $fullname | replace "__COLLECTOR_SERVICE__" (printf "%s-otel-collector" $fullname) | indent 2 }}
+{{ .Files.Get "files/alerts/sie-rules.yaml" | replace "__NAMESPACE__" (include "sie-cluster.namespace" .) | replace "__FULLNAME__" $fullname | replace "__COLLECTOR_SERVICE__" (printf "%s-otel-collector" $fullname) | replace "__REMOTE_FALLBACK_PERSISTENCE_SECONDS__" (printf "%d" (int64 $remoteSeconds)) | indent 2 }}
 {{- end }}

@@ -1,6 +1,6 @@
 use axum::body::{to_bytes, Body};
 use axum::extract::{Request, State};
-use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
+use axum::http::{Extensions, HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use base64::Engine;
@@ -2714,6 +2714,7 @@ async fn proxy_request_inner(
         .model_registry
         .serving_execution_evidence(&bundle, &hash_pool, &dispatch_model);
     ServingDisclosure::record_evidence(req.extensions(), served_by.clone());
+    FallbackAttempt::record_model(req.extensions(), &dispatch_model, endpoint);
     if let Some(RemoteFallbackOverride(plan)) = req.extensions().get::<RemoteFallbackOverride>() {
         if plan.config_hash != bundle_config_hash
             || served_by.as_ref() != Some(&plan.served_by)
@@ -3104,6 +3105,7 @@ async fn proxy_request_inner(
     // (encode / score) get the same text-appropriate 16 MiB cap as the
     // chat / embeddings paths. Extract accepts bounded binary media, so
     // its cap covers the maximum legal audio after JSON base64 expansion.
+    let request_extensions = req.extensions().clone();
     let body_limit = native_request_body_limit(endpoint);
     let body_bytes = if let Some(body) = prepared_native_body {
         body
@@ -3148,6 +3150,7 @@ async fn proxy_request_inner(
         batch_target,
         require_execution_authority_v1,
         prefetch_first_output,
+        &request_extensions,
         &physical_lane,
     );
     // Scope an OTel context over the publish so the work-item envelope
@@ -3613,6 +3616,7 @@ async fn queue_mode_proxy(
     batch_target: Option<publisher::PublishTarget>,
     require_execution_authority_v1: bool,
     prefetch_first_output: bool,
+    request_extensions: &Extensions,
     physical_lane: &PhysicalLane,
 ) -> Response {
     // Parse body once, extract items + params (avoids double parse)
@@ -3670,6 +3674,7 @@ async fn queue_mode_proxy(
         if params.generate.as_ref().is_some_and(|params| params.stream) {
             return super::sse::build_sse_response(super::sse::SseParams {
                 prefetch_first_output,
+                local_serving_model: FallbackAttempt::defer_local_stream(request_extensions),
                 state,
                 work_publisher: work_publisher_arc,
                 physical_lane: physical_lane.clone(),
@@ -7845,6 +7850,7 @@ async fn resolve_generation_route(
         .model_registry
         .serving_execution_evidence(&bundle, &hash_pool, dispatch_model);
     ServingDisclosure::record_evidence(ext, served_by.clone());
+    FallbackAttempt::record_model(ext, dispatch_model, "generate");
     if let Some(RemoteFallbackOverride(plan)) = bridge {
         if plan.config_hash != bundle_config_hash
             || served_by.as_ref() != Some(&plan.served_by)
@@ -8659,6 +8665,7 @@ async fn proxy_chat_inner(
                 .extensions
                 .get::<FallbackAttempt>()
                 .is_some_and(FallbackAttempt::active),
+            local_serving_model: FallbackAttempt::defer_local_stream(&parts.extensions),
             state: state.as_ref(),
             work_publisher: work_publisher_arc,
             physical_lane: physical_lane.clone(),
@@ -9327,6 +9334,7 @@ async fn proxy_completions_inner(state: Arc<AppState>, req: Request) -> Response
                 .extensions
                 .get::<FallbackAttempt>()
                 .is_some_and(FallbackAttempt::active),
+            local_serving_model: FallbackAttempt::defer_local_stream(&parts.extensions),
             state: state.as_ref(),
             work_publisher: work_publisher_arc,
             physical_lane: physical_lane.clone(),

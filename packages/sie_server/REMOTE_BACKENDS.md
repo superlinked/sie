@@ -440,3 +440,14 @@ remain in the stream. Explicit selectors and `X-SIE-Remote: forbid` retain
 their existing authority.
 
 Numerical fleet equivalence and coordinated threshold routing remain inactive.
+
+### Observing cluster fallback
+
+The queue-routing dashboard shows gateway fallback response rates by model,
+operation, reason and commitment outcome, plus observed remote-serving duration.
+Enable the chart's existing alert rules to receive `SIERemoteFallbackPersistent`;
+set `alertRules.remoteFallbackPersistenceSeconds` to the desired threshold
+(default 600 seconds). The rule requires recent committed remote activity from
+the same gateway replica. Successful local serving clears that replica's
+observed duration. See [the telemetry contract](../../telemetry/README.md#remote-fallback-observations)
+for bounded-label and replica semantics.

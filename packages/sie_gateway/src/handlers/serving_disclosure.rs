@@ -12,6 +12,7 @@ use axum::extract::Request;
 use axum::http::{Extensions, HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::Response;
 
+use crate::observability::metrics as telemetry;
 use crate::server::AppState;
 use crate::types::model::{FallbackTrigger, ServedBy};
 
@@ -95,7 +96,18 @@ impl ServingDisclosure {
 /// One request's original pre-acceptance refusal, retained through its bridge.
 /// It is not a retry counter: a request may install exactly one remote attempt.
 #[derive(Clone, Default)]
-pub(crate) struct FallbackAttempt(Arc<Mutex<Option<LocalRefusal>>>);
+pub(crate) struct FallbackAttempt(Arc<Mutex<FallbackState>>);
+
+#[derive(Default)]
+struct FallbackState {
+    original: Option<LocalRefusal>,
+    observation: Option<ServingObservation>,
+}
+
+struct ServingObservation {
+    model: String,
+    operation: &'static str,
+}
 
 /// A compatibility facade owns response validation before a bridge commits.
 /// This extension is gateway-created and cannot be supplied by a caller.
@@ -104,7 +116,7 @@ pub(crate) struct DeferredFallbackFinish;
 
 struct LocalRefusal {
     response: Response,
-    reason: &'static str,
+    trigger: FallbackTrigger,
 }
 
 impl FallbackAttempt {
@@ -117,19 +129,56 @@ impl FallbackAttempt {
         attempt
     }
 
+    /// Only a resolved catalog route can name a telemetry model. Preserve the
+    /// original route while recursion selects a remote physical profile.
+    pub(crate) fn record_model(extensions: &Extensions, model: &str, operation: &str) {
+        let Some(attempt) = extensions.get::<Self>() else {
+            return;
+        };
+        let operation = match operation {
+            "encode" => "encode",
+            "score" => "score",
+            "extract" => "extract",
+            "generate" => "generate",
+            _ => return,
+        };
+        let mut state = attempt.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.original.is_none() && state.observation.is_none() {
+            state.observation = Some(ServingObservation {
+                model: model.split(':').next().unwrap_or(model).to_string(),
+                operation,
+            });
+        }
+    }
+
+    /// Transfer local streaming observation to the output driver. HTTP 200
+    /// alone does not prove a stream served any valid local output.
+    pub(crate) fn defer_local_stream(extensions: &Extensions) -> Option<String> {
+        let disclosure = extensions.get::<ServingDisclosure>()?;
+        if !matches!(
+            *disclosure.0.lock().unwrap_or_else(PoisonError::into_inner),
+            Some(ServedBy::Local)
+        ) {
+            return None;
+        }
+        let attempt = extensions.get::<Self>()?;
+        let mut state = attempt.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.original.is_some() {
+            return None;
+        }
+        state
+            .observation
+            .take()
+            .map(|observation| observation.model)
+    }
+
     /// Retain the response before any local work has been accepted.
     pub(crate) fn begin(&self, response: Response, trigger: FallbackTrigger) -> bool {
-        let mut original = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        if original.is_some() {
+        let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.original.is_some() {
             return false;
         }
-        let reason = match trigger {
-            FallbackTrigger::Provisioning => "provisioning",
-            FallbackTrigger::ModelLoading => "model_loading",
-            FallbackTrigger::Saturated => "saturated",
-            FallbackTrigger::Unhealthy => "unhealthy",
-        };
-        *original = Some(LocalRefusal { response, reason });
+        state.original = Some(LocalRefusal { response, trigger });
         true
     }
 
@@ -137,17 +186,39 @@ impl FallbackAttempt {
         self.0
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
+            .original
             .is_some()
     }
 
     /// Called after normal disclosure stamping and before HTTP success/output.
     /// A failed bridge preserves the original body and Retry-After verbatim.
     pub(crate) fn finish(&self, mut response: Response) -> Response {
-        let Some(mut original) = self.0.lock().unwrap_or_else(PoisonError::into_inner).take()
-        else {
+        let (original, observation) = {
+            let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+            (state.original.take(), state.observation.take())
+        };
+        let Some(mut original) = original else {
+            if response.status().is_success()
+                && response
+                    .headers()
+                    .get(SERVED_BY_HEADER)
+                    .is_some_and(|value| value == "local")
+            {
+                if let Some(observation) = observation {
+                    telemetry::record_local_serving_success(&observation.model);
+                }
+            }
             return response;
         };
-        let reason = HeaderValue::from_static(original.reason);
+        if let Some(observation) = observation {
+            telemetry::record_remote_fallback(
+                &observation.model,
+                observation.operation,
+                original.trigger,
+                response.status().is_success(),
+            );
+        }
+        let reason = HeaderValue::from_static(original.trigger.as_str());
         if response.status().is_success() {
             response
                 .headers_mut()
@@ -179,6 +250,38 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn local_stream_observation_transfers_once_and_excludes_remote_routes_and_bridges() {
+        for (served_by, bridge, expected) in [
+            (Some(ServedBy::Local), false, Some("acme/chat")),
+            (Some(ServedBy::Remote { upstream: None }), false, None),
+            (None, false, None),
+            (Some(ServedBy::Local), true, None),
+        ] {
+            let mut req = Request::new(Body::empty());
+            ServingDisclosure::install(&mut req);
+            let attempt = FallbackAttempt::install(&mut req);
+            ServingDisclosure::record_evidence(req.extensions(), served_by);
+            FallbackAttempt::record_model(req.extensions(), "acme/chat:default", "generate");
+            if bridge {
+                assert!(attempt.begin(
+                    StatusCode::SERVICE_UNAVAILABLE.into_response(),
+                    FallbackTrigger::Provisioning,
+                ));
+            }
+            assert_eq!(
+                FallbackAttempt::defer_local_stream(req.extensions()).as_deref(),
+                expected,
+            );
+            if expected.is_some() {
+                assert!(FallbackAttempt::defer_local_stream(req.extensions()).is_none());
+                assert!(attempt.0.lock().unwrap().observation.is_none());
+            } else {
+                assert!(attempt.0.lock().unwrap().observation.is_some());
+            }
+        }
+    }
 
     async fn buffered_surface(
         gateway: &TestGateway,

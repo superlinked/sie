@@ -399,6 +399,42 @@ cardinality_budgets:
   # Per-lane queue admission reuses the same deployment-owned lane tuple and
   # the same fail-closed rules as the KEDA control domain, but is not itself a
   # KEDA control signal: its Prometheus spelling is not a scaler API.
+  gateway_remote_fallback:
+    scope: per_process_per_instrument
+    source: canonical_catalog_route_before_bridge
+    admitted_exact_models_process_lifetime: 256
+    counter_overflow_model: other
+    duration_overflow_models: omitted
+    model_label_maximum_length: 256
+    total_counter_model_series: 257
+    counter_series_limit: 14392 # 257 models * 7 operations * 4 reasons * 2 outcomes.
+    fixed_domains:
+      models: 257
+      exact_models: 256
+      operation: operation
+      reason: remote_fallback_reason
+      outcome: remote_fallback_outcome
+    instrument_limits:
+      fallback_responses:
+        metrics: [sie.gateway.remote.fallbacks]
+        formula: models * operation * reason * outcome
+        limit: 14392
+      remote_duration:
+        metrics: [sie.gateway.remote.serving.duration]
+        formula: exact_models
+        limit: 256
+    duration_series_limit: 256
+    state_entries_limit: 256
+    success_boundary: response_committed_before_first_output
+    duration_semantics: seconds_between_first_and_latest_committed_bridge_since_local_success_or_idle_reset
+    maximum_gap_between_committed_bridges_s: 300
+    local_success_reset: true
+    stale_series_policy: alert_requires_recent_committed_bridge_activity
+    replicas: independent_observations_max_duration_and_sum_counter_rates
+    applies_to:
+      - sie.gateway.remote.fallbacks
+      - sie.gateway.remote.serving.duration
+
   gateway_lane_admission_domain:
     source: SIE_GATEWAY_CONFIGURED_PHYSICAL_LANES
     tuple: [pool, machine_profile, bundle]
@@ -788,6 +824,8 @@ enums:
   # `skipped` is the no-reservation branch, which issues no control-plane call
   # and therefore contributes no duration observation.
   settlement_confirm_outcome: [success, error, skipped]
+  remote_fallback_reason: [provisioning, model_loading, saturated, unhealthy]
+  remote_fallback_outcome: [committed, refused]
   gateway_dispatch_path: [i6pn, modal, other]
   dispatcher_path: [modal_remote, modal_stream, modal_spawn, generation_ws, other]
   dispatch_outcome: [success, error, timeout, cancelled, not_found, other]
@@ -1062,6 +1100,13 @@ attribute_sets:
     outcome: dispatch_outcome
     fallback.reason: fallback_reason
     lane: lane
+  gateway_remote_fallback:
+    operation: operation
+    model: model
+    fallback.reason: remote_fallback_reason
+    outcome: remote_fallback_outcome
+  gateway_remote_serving:
+    model: model
   gateway_config_operation:
     operation: gateway_config_operation
     outcome: gateway_config_outcome
@@ -1540,6 +1585,22 @@ metrics:
     attributes: gateway_dispatch
     buckets: gateway_request_seconds
     prometheus_name: sie_gateway_dispatch_duration_seconds
+    export: [prometheus, otlp]
+  - name: sie.gateway.remote.fallbacks
+    owner: gateway
+    facade_event: gateway.remote_fallback_completed
+    type: counter
+    unit: "{request}"
+    attributes: gateway_remote_fallback
+    prometheus_name: sie_gateway_remote_fallbacks_total
+    export: [prometheus, otlp]
+  - name: sie.gateway.remote.serving.duration
+    owner: gateway
+    facade_event: gateway.remote_fallback_completed_or_local_response_committed
+    type: gauge
+    unit: s
+    attributes: gateway_remote_serving
+    prometheus_name: sie_gateway_remote_serving_duration_seconds
     export: [prometheus, otlp]
   - name: sie.gateway.config.applied_epoch
     owner: gateway

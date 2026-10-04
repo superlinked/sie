@@ -94,6 +94,8 @@ pub enum SseEndpoint {
 pub struct SseParams<'a> {
     /// A bridge retains HTTP refusal authority until a valid event is ready.
     pub prefetch_first_output: bool,
+    /// A resolved local route resets remote persistence only on valid output.
+    pub local_serving_model: Option<String>,
     pub state: &'a AppState,
     pub work_publisher: Arc<dyn WorkDispatcher>,
     pub physical_lane: PhysicalLane,
@@ -128,6 +130,7 @@ pub struct SseParams<'a> {
 pub async fn build_sse_response(params: SseParams<'_>) -> Response {
     let SseParams {
         prefetch_first_output,
+        local_serving_model,
         state,
         work_publisher,
         physical_lane,
@@ -333,6 +336,7 @@ pub async fn build_sse_response(params: SseParams<'_>) -> Response {
         async move {
             run_sse_driver(SseDriverArgs {
                 first_output,
+                local_serving_model,
                 event_tx,
                 chunk_rx,
                 outcome_rx,
@@ -418,6 +422,7 @@ type FirstOutputGate = Option<tokio::sync::oneshot::Sender<Result<(), StatusCode
 
 struct SseDriverArgs {
     first_output: FirstOutputGate,
+    local_serving_model: Option<String>,
     event_tx: tokio::sync::mpsc::Sender<Result<Event, Infallible>>,
     chunk_rx: broadcast::Receiver<ChunkEnvelope>,
     outcome_rx: tokio::sync::oneshot::Receiver<StreamOutcome>,
@@ -564,12 +569,17 @@ async fn wait_for_terminal_durability(
 async fn run_sse_driver(args: SseDriverArgs) {
     let lifecycle = crate::observability::tracing::request_telemetry_enabled()
         .then(|| Lifecycle::generation_stream(opentelemetry::Context::current()));
-    run_sse_driver_with_lifecycle(args, lifecycle).await;
+    run_sse_driver_with_lifecycle(args, lifecycle, telemetry::record_local_serving_success).await;
 }
 
-async fn run_sse_driver_with_lifecycle(args: SseDriverArgs, mut lifecycle: Option<Lifecycle>) {
+async fn run_sse_driver_with_lifecycle(
+    args: SseDriverArgs,
+    mut lifecycle: Option<Lifecycle>,
+    record_local_success: impl Fn(&str),
+) {
     let SseDriverArgs {
         mut first_output,
+        mut local_serving_model,
         event_tx,
         mut chunk_rx,
         outcome_rx,
@@ -1257,6 +1267,14 @@ async fn run_sse_driver_with_lifecycle(args: SseDriverArgs, mut lifecycle: Optio
                 )
                 .await;
                 return;
+            }
+            if chunk.error.is_none()
+                && !(chunk.done
+                    && matches!(chunk.finish_reason.as_deref(), Some("cancelled" | "error")))
+            {
+                if let Some(model) = local_serving_model.take() {
+                    record_local_success(&model);
+                }
             }
         }
 
@@ -2099,6 +2117,7 @@ mod tests {
 
     #[derive(Clone, Copy)]
     enum WorkerTerminalDelivery {
+        BeforeAnyDelta,
         BackloggedBeforeFirstPoll,
         AfterFirstDelta,
     }
@@ -2151,7 +2170,9 @@ mod tests {
         endpoint: SseEndpoint,
         delivery: WorkerTerminalDelivery,
         error: ChunkError,
-    ) -> Vec<String> {
+    ) -> (Vec<String>, usize) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
         use crate::queue::streaming::StreamCollector;
         use crate::state::demand_tracker::PhysicalLaneCatalog;
 
@@ -2182,8 +2203,15 @@ mod tests {
             .expect("durability receiver is live");
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(8);
 
+        let local_successes = Arc::new(AtomicUsize::new(0));
+        let recorded_successes = Arc::clone(&local_successes);
+        let record_local_success = move |model: &str| {
+            assert_eq!(model, "test/model");
+            recorded_successes.fetch_add(1, Ordering::SeqCst);
+        };
         let args = SseDriverArgs {
             first_output: None,
+            local_serving_model: Some("test/model".to_string()),
             event_tx,
             chunk_rx,
             outcome_rx,
@@ -2215,6 +2243,7 @@ mod tests {
                     Some(Lifecycle::generation_stream(
                         opentelemetry::Context::current(),
                     )),
+                    record_local_success,
                 )
                 .with_current_subscriber(),
             );
@@ -2249,10 +2278,12 @@ mod tests {
                 .expect("outcome receiver is live");
             driver.await.expect("driver task");
         } else {
-            assert!(matches!(
-                collector.apply(_delta_chunk(41, "partial")),
-                ChunkApplied::Delta
-            ));
+            if !matches!(delivery, WorkerTerminalDelivery::BeforeAnyDelta) {
+                assert!(matches!(
+                    collector.apply(_delta_chunk(41, "partial")),
+                    ChunkApplied::Delta
+                ));
+            }
             let mut terminal = _terminal_chunk("error", None);
             terminal.seq = 42;
             terminal.usage = Some(UsageBlock {
@@ -2276,6 +2307,7 @@ mod tests {
                 Some(Lifecycle::generation_stream(
                     opentelemetry::Context::current(),
                 )),
+                record_local_success,
             )
             .await;
         }
@@ -2289,7 +2321,7 @@ mod tests {
             };
             payloads.push(_event_data(event.expect("infallible event")).await);
         }
-        payloads
+        (payloads, local_successes.load(Ordering::SeqCst))
     }
 
     #[tokio::test]
@@ -2307,7 +2339,7 @@ mod tests {
                 },
                 SseEndpoint::Generate,
             ] {
-                let payloads = run_driver_worker_error_race(
+                let (payloads, local_successes) = run_driver_worker_error_race(
                     endpoint,
                     delivery,
                     ChunkError {
@@ -2318,6 +2350,10 @@ mod tests {
                     },
                 )
                 .await;
+                assert_eq!(
+                    local_successes, 1,
+                    "only valid delivered local output resets remote persistence",
+                );
                 assert_eq!(
                     payloads
                         .iter()
@@ -2381,6 +2417,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn live_driver_worker_error_before_any_output_preserves_remote_period() {
+        for endpoint in [
+            SseEndpoint::Chat {
+                include_usage: false,
+            },
+            SseEndpoint::Completion {
+                include_usage: false,
+            },
+            SseEndpoint::Generate,
+        ] {
+            let (payloads, local_successes) = run_driver_worker_error_race(
+                endpoint,
+                WorkerTerminalDelivery::BeforeAnyDelta,
+                ChunkError {
+                    code: "RESOURCE_EXHAUSTED".to_string(),
+                    message: "scheduler full".to_string(),
+                    param: None,
+                    retry_after_s: None,
+                },
+            )
+            .await;
+            assert_eq!(local_successes, 0);
+            assert!(payloads
+                .iter()
+                .any(|payload| payload.contains("RESOURCE_EXHAUSTED")));
+            assert_eq!(payloads.last().unwrap(), "[DONE]");
+        }
+    }
+
+    #[tokio::test]
     async fn live_driver_surfaces_synthetic_only_outcome_when_tap_closes() {
         use crate::state::demand_tracker::PhysicalLaneCatalog;
 
@@ -2439,6 +2505,7 @@ mod tests {
 
             run_sse_driver(SseDriverArgs {
                 first_output: None,
+                local_serving_model: None,
                 event_tx,
                 chunk_rx,
                 outcome_rx,
@@ -2497,7 +2564,7 @@ mod tests {
             },
             SseEndpoint::Generate,
         ] {
-            let payloads = run_driver_worker_error_race(
+            let (payloads, local_successes) = run_driver_worker_error_race(
                 endpoint,
                 WorkerTerminalDelivery::BackloggedBeforeFirstPoll,
                 ChunkError {
@@ -2508,6 +2575,7 @@ mod tests {
                 },
             )
             .await;
+            assert_eq!(local_successes, 1);
             let error_payload = payloads
                 .iter()
                 .filter_map(|payload| serde_json::from_str::<Value>(payload).ok())

@@ -8,7 +8,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use opentelemetry::metrics::{Counter, Gauge, Histogram, ObservableGauge};
 use opentelemetry::trace::SpanContext;
@@ -16,12 +16,18 @@ use opentelemetry::{global, Context, KeyValue};
 
 use crate::queue::lane_admission::LaneAdmissionOutcome;
 use crate::state::demand_tracker::{DemandTracker, PhysicalLane};
+use crate::types::model::FallbackTrigger;
 
 pub const REQUESTS_METRIC_NAME: &str = "sie.gateway.requests";
 pub const REQUEST_DURATION_METRIC_NAME: &str = "sie.gateway.request.duration";
 pub const ADMISSION_DECISIONS_METRIC_NAME: &str = "sie.gateway.admission.decisions";
 pub const DISPATCHES_METRIC_NAME: &str = "sie.gateway.dispatches";
 pub const DISPATCH_DURATION_METRIC_NAME: &str = "sie.gateway.dispatch.duration";
+pub const REMOTE_FALLBACKS_METRIC_NAME: &str = "sie.gateway.remote.fallbacks";
+pub const REMOTE_SERVING_DURATION_METRIC_NAME: &str = "sie.gateway.remote.serving.duration";
+pub const REMOTE_FALLBACK_MODEL_LIMIT: usize = 256;
+const REMOTE_SERVING_MAX_IDLE: Duration = Duration::from_secs(300);
+pub const REMOTE_FALLBACK_COUNTER_LIMIT: usize = (REMOTE_FALLBACK_MODEL_LIMIT + 1) * 7 * 4 * 2;
 pub const PENDING_DEMAND_METRIC_NAME: &str = "sie.gateway.pending_demand";
 pub const LANE_QUEUE_DEPTH_METRIC_NAME: &str = "sie.gateway.lane.queue.depth";
 pub const LANE_QUEUE_SNAPSHOT_TIMESTAMP_METRIC_NAME: &str =
@@ -788,6 +794,52 @@ pub fn sanitize_label(value: &str) -> String {
     value.to_string()
 }
 
+/// Retain only the first finite set of canonical catalog model labels. A
+/// duration belongs to one exact model; overflow is counted but never tracked.
+#[derive(Default)]
+struct RemoteServingState {
+    models: HashMap<String, Option<RemoteServingPeriod>>,
+}
+
+struct RemoteServingPeriod {
+    first: Instant,
+    latest: Instant,
+}
+
+impl RemoteServingState {
+    fn fallback(&mut self, model: &str, committed: bool, now: Instant) -> (String, Option<f64>) {
+        let model = sanitize_model_label(model);
+        if model == "other"
+            || (!self.models.contains_key(&model)
+                && self.models.len() >= REMOTE_FALLBACK_MODEL_LIMIT)
+        {
+            return ("other".to_string(), None);
+        }
+        let since = self.models.entry(model.clone()).or_default();
+        let duration = committed.then(|| {
+            if since.as_ref().is_some_and(|period| {
+                now.saturating_duration_since(period.latest) > REMOTE_SERVING_MAX_IDLE
+            }) {
+                *since = None;
+            }
+            let period = since.get_or_insert(RemoteServingPeriod {
+                first: now,
+                latest: now,
+            });
+            period.latest = now;
+            now.saturating_duration_since(period.first).as_secs_f64()
+        });
+        (model, duration)
+    }
+
+    fn local_success(&mut self, model: &str) -> Option<String> {
+        let model = sanitize_model_label(model);
+        let since = self.models.get_mut(&model)?;
+        *since = None;
+        Some(model)
+    }
+}
+
 struct GatewayTelemetry {
     requests: Counter<u64>,
     request_duration: Histogram<f64>,
@@ -796,6 +848,9 @@ struct GatewayTelemetry {
     dispatches: Counter<u64>,
     #[allow(dead_code)] // Managed composition API.
     dispatch_duration: Histogram<f64>,
+    remote_fallbacks: Counter<u64>,
+    remote_serving_duration: Gauge<f64>,
+    remote_serving_state: Mutex<RemoteServingState>,
     pending_demand: Gauge<f64>,
     lane_queue_depth: Gauge<f64>,
     lane_queue_snapshot_timestamp: Gauge<f64>,
@@ -888,6 +943,17 @@ impl GatewayTelemetry {
                 .with_unit("s")
                 .with_boundaries(REQUEST_LATENCY_BUCKETS.to_vec())
                 .build(),
+            remote_fallbacks: meter
+                .u64_counter(REMOTE_FALLBACKS_METRIC_NAME)
+                .with_description("Remote bridge responses committed or refused before output.")
+                .with_unit("{request}")
+                .build(),
+            remote_serving_duration: meter
+                .f64_gauge(REMOTE_SERVING_DURATION_METRIC_NAME)
+                .with_description("Seconds between committed bridges since the last local success.")
+                .with_unit("s")
+                .build(),
+            remote_serving_state: Mutex::new(RemoteServingState::default()),
             pending_demand: meter
                 .f64_gauge(PENDING_DEMAND_METRIC_NAME)
                 .with_description("Whether a physical worker lane has refreshable unmet demand.")
@@ -1546,6 +1612,75 @@ fn telemetry() -> Option<&'static GatewayTelemetry> {
     }
     static TELEMETRY: OnceLock<GatewayTelemetry> = OnceLock::new();
     Some(TELEMETRY.get_or_init(|| GatewayTelemetry::new(&global::meter("sie-gateway"))))
+}
+
+/// One semantic observation at the response/first-output commitment boundary.
+pub(crate) fn record_remote_fallback(
+    model: &str,
+    operation: &str,
+    reason: FallbackTrigger,
+    committed: bool,
+) {
+    record_remote_fallback_to(
+        telemetry(),
+        model,
+        operation,
+        reason,
+        committed,
+        Instant::now(),
+    );
+}
+
+fn record_remote_fallback_to(
+    telemetry: Option<&GatewayTelemetry>,
+    model: &str,
+    operation: &str,
+    reason: FallbackTrigger,
+    committed: bool,
+    now: Instant,
+) {
+    let Some(telemetry) = telemetry else {
+        return;
+    };
+    let mut state = telemetry
+        .remote_serving_state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (model, duration) = state.fallback(model, committed, now);
+    telemetry.remote_fallbacks.add(
+        1,
+        &[
+            KeyValue::new("model", model.clone()),
+            KeyValue::new("operation", bounded_operation(operation)),
+            KeyValue::new("fallback.reason", reason.as_str()),
+            KeyValue::new("outcome", if committed { "committed" } else { "refused" }),
+        ],
+    );
+    if let Some(duration) = duration {
+        telemetry
+            .remote_serving_duration
+            .record(duration, &[KeyValue::new("model", model)]);
+    }
+}
+
+pub(crate) fn record_local_serving_success(model: &str) {
+    record_local_serving_success_to(telemetry(), model);
+}
+
+fn record_local_serving_success_to(telemetry: Option<&GatewayTelemetry>, model: &str) {
+    let Some(telemetry) = telemetry else {
+        return;
+    };
+    if let Some(model) = telemetry
+        .remote_serving_state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .local_success(model)
+    {
+        telemetry
+            .remote_serving_duration
+            .record(0.0, &[KeyValue::new("model", model)]);
+    }
 }
 
 fn bounded_operation(operation: &str) -> &'static str {
@@ -2296,6 +2431,119 @@ mod tests {
             KeySpendLimitExceeded,
             RateLimited,
         ]
+    }
+
+    #[test]
+    fn remote_fallback_duration_tracks_commits_and_resets_on_local_success() {
+        let mut state = RemoteServingState::default();
+        let now = Instant::now();
+        assert_eq!(
+            state.fallback("acme/model", true, now),
+            ("acme/model".into(), Some(0.0))
+        );
+        assert_eq!(
+            state.fallback("acme/model", false, now + Duration::from_secs(20)),
+            ("acme/model".into(), None)
+        );
+        assert_eq!(
+            state.fallback("acme/model", true, now + Duration::from_secs(42)),
+            ("acme/model".into(), Some(42.0))
+        );
+        assert_eq!(state.local_success("acme/model"), Some("acme/model".into()));
+        assert_eq!(
+            state.fallback("acme/model", true, now + Duration::from_secs(50)),
+            ("acme/model".into(), Some(0.0))
+        );
+        assert_eq!(
+            state.fallback("acme/model", false, now + Duration::from_secs(390)),
+            ("acme/model".into(), None)
+        );
+        assert_eq!(
+            state.fallback("acme/model", true, now + Duration::from_secs(400)),
+            ("acme/model".into(), Some(0.0))
+        );
+        assert_eq!(
+            state.fallback("acme/model", true, now + Duration::from_secs(410)),
+            ("acme/model".into(), Some(10.0))
+        );
+        assert_eq!(state.local_success("unobserved/model"), None);
+        assert_eq!(
+            state.fallback("private invalid\nlabel", true, now),
+            ("other".into(), None)
+        );
+    }
+
+    #[test]
+    fn remote_fallback_full_declared_domain_exports_without_sdk_overflow() {
+        let (telemetry, exporter, provider) = metric_points();
+        let now = Instant::now();
+        for model in 0..=REMOTE_FALLBACK_MODEL_LIMIT {
+            for operation in [
+                "encode",
+                "score",
+                "extract",
+                "embeddings",
+                "moderations",
+                "generate",
+                "other",
+            ] {
+                for reason in [
+                    FallbackTrigger::Provisioning,
+                    FallbackTrigger::ModelLoading,
+                    FallbackTrigger::Saturated,
+                    FallbackTrigger::Unhealthy,
+                ] {
+                    for committed in [false, true] {
+                        record_remote_fallback_to(
+                            Some(&telemetry),
+                            &format!("acme/model-{model}"),
+                            operation,
+                            reason,
+                            committed,
+                            now,
+                        );
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            telemetry.remote_serving_state.lock().unwrap().models.len(),
+            REMOTE_FALLBACK_MODEL_LIMIT
+        );
+        record_local_serving_success_to(Some(&telemetry), "acme/model-0");
+        provider.force_flush().unwrap();
+        let resources = exporter.get_finished_metrics().unwrap();
+        let metrics = resources
+            .iter()
+            .flat_map(|resource| resource.scope_metrics())
+            .flat_map(|scope| scope.metrics())
+            .collect::<Vec<_>>();
+        let counter = metrics
+            .iter()
+            .find(|metric| metric.name() == REMOTE_FALLBACKS_METRIC_NAME)
+            .unwrap();
+        assert_eq!(counter.unit(), "{request}");
+        let AggregatedMetrics::U64(MetricData::Sum(counter)) = counter.data() else {
+            panic!("expected fallback counter");
+        };
+        assert_eq!(counter.data_points().count(), REMOTE_FALLBACK_COUNTER_LIMIT);
+        assert!(counter.data_points().all(|point| point
+            .attributes()
+            .all(|attribute| attribute.key.as_str() != "otel.metric.overflow")));
+        let gauge = metrics
+            .iter()
+            .find(|metric| metric.name() == REMOTE_SERVING_DURATION_METRIC_NAME)
+            .unwrap();
+        assert_eq!(gauge.unit(), "s");
+        let AggregatedMetrics::F64(MetricData::Gauge(gauge)) = gauge.data() else {
+            panic!("expected remote duration gauge");
+        };
+        assert_eq!(gauge.data_points().count(), REMOTE_FALLBACK_MODEL_LIMIT);
+        assert!(gauge
+            .data_points()
+            .all(|point| point.attributes().count() == 1));
+        assert!(gauge.data_points().all(|point| point.value() == 0.0));
+        provider.shutdown().unwrap();
     }
 
     #[test]

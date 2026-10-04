@@ -446,6 +446,17 @@ pub enum FallbackTrigger {
     Unhealthy,
 }
 
+impl FallbackTrigger {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Provisioning => "provisioning",
+            Self::ModelLoading => "model_loading",
+            Self::Saturated => "saturated",
+            Self::Unhealthy => "unhealthy",
+        }
+    }
+}
+
 impl TryFrom<RoutingFields> for RoutingConfig {
     type Error = String;
     fn try_from(fields: RoutingFields) -> Result<Self, Self::Error> {

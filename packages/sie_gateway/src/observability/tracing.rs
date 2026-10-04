@@ -59,7 +59,9 @@ use crate::observability::metrics::{
     RequestCompletionObservation, ACTIVE_LEASE_GPUS_METRIC_NAME,
     KEDA_SCALE_UP_REJECTION_REASON_CARDINALITY, LANE_QUEUE_DEPTH_METRIC_NAME,
     LANE_QUEUE_SNAPSHOT_TIMESTAMP_METRIC_NAME, PENDING_DEMAND_METRIC_NAME,
-    POOL_WARM_FLOOR_METRIC_NAME, REJECTED_REQUESTS_METRIC_NAME,
+    POOL_WARM_FLOOR_METRIC_NAME, REJECTED_REQUESTS_METRIC_NAME, REMOTE_FALLBACKS_METRIC_NAME,
+    REMOTE_FALLBACK_COUNTER_LIMIT, REMOTE_FALLBACK_MODEL_LIMIT,
+    REMOTE_SERVING_DURATION_METRIC_NAME,
 };
 use crate::state::demand_tracker::MAX_CONFIGURED_PHYSICAL_LANES;
 
@@ -504,8 +506,8 @@ fn init_metrics(endpoint: &str) -> bool {
     true
 }
 
-/// Override the SDK's default 2,000-series ceiling for every KEDA-filtered
-/// stream. Lane snapshots have one point per catalog member; the rejection
+/// Override the SDK's default ceiling for declared KEDA and remote fallback
+/// streams. Lane snapshots have one point per catalog member; the rejection
 /// counter has four scale-worthy reasons per member. These limits are exact,
 /// finite, and prevent a valid high-index lane from collapsing into the OTel
 /// overflow series (which PromQL's exact lane filters cannot see).
@@ -517,13 +519,15 @@ pub(crate) fn keda_metric_cardinality_view(instrument: &Instrument) -> Option<St
         | ACTIVE_LEASE_GPUS_METRIC_NAME
         | POOL_WARM_FLOOR_METRIC_NAME => MAX_CONFIGURED_PHYSICAL_LANES,
         REJECTED_REQUESTS_METRIC_NAME => KEDA_REJECTED_REQUESTS_CARDINALITY_LIMIT,
+        REMOTE_FALLBACKS_METRIC_NAME => REMOTE_FALLBACK_COUNTER_LIMIT,
+        REMOTE_SERVING_DURATION_METRIC_NAME => REMOTE_FALLBACK_MODEL_LIMIT,
         _ => return None,
     };
     Some(
         Stream::builder()
             .with_cardinality_limit(limit)
             .build()
-            .expect("constant KEDA cardinality limits must be valid"),
+            .expect("constant telemetry cardinality limits must be valid"),
     )
 }
 

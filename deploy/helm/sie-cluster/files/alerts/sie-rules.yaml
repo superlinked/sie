@@ -77,6 +77,24 @@ groups:
           summary: "SIE Gateway is down"
           description: "Gateway pod {{ $labels.pod }} is unreachable. Traffic cannot be routed."
 
+      - alert: SIERemoteFallbackPersistent
+        expr: |
+          max by (model) (
+            sie_gateway_remote_serving_duration_seconds{namespace="__NAMESPACE__",service="__COLLECTOR_SERVICE__",endpoint="prometheus",producer_service="sie-gateway"}
+            and on (producer_instance, collector_generation, model)
+            (
+              sum by (producer_instance, collector_generation, model) (
+                increase(sie_gateway_remote_fallbacks_total{namespace="__NAMESPACE__",service="__COLLECTOR_SERVICE__",endpoint="prometheus",producer_service="sie-gateway",outcome="committed"}[5m])
+              ) > 0
+            )
+          ) > __REMOTE_FALLBACK_PERSISTENCE_SECONDS__
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "SIE model {{ $labels.model }} continues to serve remotely"
+          description: "Committed fallback bridges for {{ $labels.model }} span more than __REMOTE_FALLBACK_PERSISTENCE_SECONDS__ seconds without observed local success. Check local worker readiness, model loading and admission pressure."
+
       - alert: SIEHighErrorRate
         expr: |
           sum(rate(sie_gateway_requests_total{namespace="__NAMESPACE__",service="__COLLECTOR_SERVICE__",endpoint="prometheus",producer_service="sie-gateway",http_status_code=~"5.."}[5m]))

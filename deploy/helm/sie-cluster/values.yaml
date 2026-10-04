@@ -1490,6 +1490,9 @@ serviceMonitor:
 # using an external Prometheus Operator.
 alertRules:
   enabled: false
+  # -- Alert after committed remote bridges span this many seconds without
+  # observed local success. Requires recent activity from that gateway replica.
+  remoteFallbackPersistenceSeconds: 600
 
 # -- Grafana dashboard ConfigMaps
 dashboards:

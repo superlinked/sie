@@ -2547,3 +2547,41 @@ def test_without_a_remote_lane_sie_config_receives_no_upstream_names(tmp_path: P
     docs = rendered_documents(tmp_path, {"upstreams": upstreams_fixture()["values"], **L4_POOL})
 
     assert container_env(docs, *CONFIG_SERVICE.split("/"))["SIE_UPSTREAM_NAMES"]["value"] == ""
+
+
+@pytest.mark.parametrize("seconds", [1, 600, 86400])
+def test_remote_fallback_persistence_alert_uses_configured_threshold_and_replica_freshness(
+    tmp_path: Path, seconds: int
+) -> None:
+    values = {
+        "alertRules": {"enabled": True, "remoteFallbackPersistenceSeconds": seconds},
+        "observability": AUTOSCALING_VALUES["observability"],
+    }
+    result = render_template(tmp_path, values, "templates/prometheusrule.yaml")
+    assert result.returncode == 0, result.stderr
+    document = yaml.safe_load(result.stdout)
+    rule = next(
+        rule
+        for group in document["spec"]["groups"]
+        for rule in group["rules"]
+        if rule["alert"] == "SIERemoteFallbackPersistent"
+    )
+    assert rule["expr"].strip().endswith(f"> {seconds}")
+    assert "and on (producer_instance, collector_generation, model)" in rule["expr"]
+    assert 'outcome="committed"' in rule["expr"]
+    assert "[5m]" in rule["expr"]
+    assert "__REMOTE_FALLBACK" not in result.stdout
+
+
+@pytest.mark.parametrize("seconds", [0, -1, 86401, 1.5, "600", True])
+def test_remote_fallback_persistence_alert_refuses_invalid_thresholds(tmp_path: Path, seconds: object) -> None:
+    result = render_template(
+        tmp_path,
+        {
+            "alertRules": {"enabled": True, "remoteFallbackPersistenceSeconds": seconds},
+            "observability": AUTOSCALING_VALUES["observability"],
+        },
+        "templates/prometheusrule.yaml",
+    )
+    assert result.returncode != 0
+    assert "alertRules.remoteFallbackPersistenceSeconds" in result.stderr
