@@ -207,6 +207,30 @@ class TestExtractEndpoint:
         assert response.status_code == 400
         mock_adapter.extract.assert_not_called()
 
+    def test_overlong_item_error_and_zero_tokens_are_preserved_in_a_mixed_response(
+        self, client: TestClient, mock_adapter: MagicMock
+    ) -> None:
+        mock_adapter.extract.side_effect = None
+        mock_adapter.extract.return_value = ExtractOutput(
+            entities=[[], [Entity(text="Alice", label="person", score=0.9, start=0, end=5)]],
+            errors=[ExtractItemError(code="INPUT_TOO_LONG", message="Split the text into smaller items."), None],
+            input_token_counts=[0, 5],
+        )
+
+        response = client.post(
+            "/v1/extract/test-extractor",
+            json={"items": [{"text": "word " * 513}, {"text": "Alice"}], "params": {"labels": ["person"]}},
+            headers=JSON_HEADERS,
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["items"][0]["error"]["code"] == "INPUT_TOO_LONG"
+        assert data["items"][0]["entities"] == []
+        assert "error" not in data["items"][1]
+        assert data["items"][1]["entities"][0]["text"] == "Alice"
+        assert data["usage"]["input_tokens"] == 5
+
     def test_extract_item_error_is_preserved_in_local_response(
         self,
         client: TestClient,

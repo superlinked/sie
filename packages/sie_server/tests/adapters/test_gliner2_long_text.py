@@ -306,7 +306,7 @@ def test_long_words_keep_the_encoder_input_within_the_subword_budget(cls: type[G
     entities = adapter.extract(
         [Item(text=text), Item(text="Priya Raman works at Novartis")],
         labels=["person"],
-        options={"classification_task": None},  # entity extraction, which reads the first window
+        options={"classification_task": None},  # entity extraction rejects an incomplete item
     )
     extract_seconds = time.perf_counter() - started
 
@@ -316,26 +316,32 @@ def test_long_words_keep_the_encoder_input_within_the_subword_budget(cls: type[G
         for batch in model.inputs
         for words, starts, ends in zip(batch.text_tokens, batch.start_mappings, batch.end_mappings, strict=True)
     ]
-    assert len(rows) == 2
+    assert len(rows) == 1
     for words, starts, ends in rows:
         assert sum(len(tokenize(word)) for word in words) <= budget
         assert all(end - start <= MAX_WORD_CHARS for start, end in zip(starts, ends, strict=True))
     assert all(batch.input_ids.shape[1] <= budget + 64 for batch in model.inputs)  # the task prompt and specials
     assert ["priya", "raman", "works", "at", "novartis", "."] in [words for words, _, _ in rows]
-    # Billing is unchanged: the document tokens up to max_seq_length.
+    # The rejected item is not inferred or billed; the short item is still metered.
     assert entities.input_token_counts is not None
-    assert entities.input_token_counts[0] == 512
+    assert entities.input_token_counts[0] == 0
+    assert entities.input_token_counts[1] > 0
+    assert entities.errors is not None
+    assert entities.errors[0] is not None
+    assert entities.errors[0].code == "INPUT_TOO_LONG"
+    assert entities.errors[1] is None
     assert classify_seconds < 1.0
     assert extract_seconds < 1.0
 
 
 def test_a_batch_of_long_rows_runs_in_passes_within_the_attention_budget() -> None:
     adapter, model = make_adapter(encoder_config={"model_type": "deberta-v2"})
-    texts = [("w" * 200 + " ") * 400 for _ in range(6)] + ["Priya Raman works at Novartis"] * 6
+    texts = [("w" * 12 + " ") * 400 for _ in range(6)] + ["Priya Raman works at Novartis"] * 6
 
     output = adapter.extract([Item(text=text) for text in texts], labels=["person"])
 
     assert len(output.entities) == len(texts)
+    assert output.errors is None
     assert len(model.inputs) > 1
     for batch in model.inputs:
         rows, width = batch.input_ids.shape
@@ -346,7 +352,7 @@ def test_a_batch_of_long_rows_runs_in_passes_within_the_attention_budget() -> No
 
 def test_an_ordinary_batch_runs_in_one_pass() -> None:
     adapter, model = make_adapter(encoder_config={"model_type": "deberta-v2"})
-    texts = [" ".join(f"Sentence {i} mentions Dr. Priya Raman of Novartis." for i in range(60))] * 8
+    texts = [" ".join(f"Sentence {i} mentions Dr. Priya Raman of Novartis." for i in range(50))] * 8
 
     adapter.extract([Item(text=text) for text in texts], labels=["person"])
 
@@ -466,13 +472,18 @@ def test_pathological_documents_run_in_bounded_time(cls: type[GLiNER2Adapter], t
     entities = adapter.extract(
         [Item(text=text), Item(text="Priya Raman works at Novartis")],
         labels=["person"],
-        options={"classification_task": None},  # entity extraction, which reads the first window
+        options={"classification_task": None},  # entity extraction rejects an incomplete item
     )
     extract_seconds = time.perf_counter() - started
 
     assert entities.input_token_counts is not None
-    assert entities.input_token_counts[0] == 512
-    assert len(model.inputs[-1].text_tokens[0]) == 512
+    assert entities.input_token_counts[0] == 0
+    assert entities.input_token_counts[1] > 0
+    assert entities.errors is not None
+    assert entities.errors[0] is not None
+    assert entities.errors[0].code == "INPUT_TOO_LONG"
+    assert entities.errors[1] is None
+    assert model.inputs[-1].text_tokens == [["priya", "raman", "works", "at", "novartis", "."]]
     # gliner2's own splitter takes minutes to hours on these texts.
     assert classify_seconds < 1.0
     assert extract_seconds < 1.0
@@ -781,3 +792,24 @@ def test_positive_label_is_validated() -> None:
     assert adapter._effective_positive_label({"positive_label": "block"}, ["allow", "block"]) == "block"
     with pytest.raises(ValueError, match="positive_label must be one of the labels"):
         adapter._effective_positive_label({"positive_label": "unsafe"}, ["allow", "block"])
+
+
+@pytest.mark.parametrize("task", ["entities", "relations", "structured"])
+def test_long_item_rejection_uses_the_pinned_package_processor(task: str) -> None:
+    adapter, model = make_adapter()
+    text = " ".join(["word"] * 512 + ["Alice"])
+    kwargs: dict[str, Any] = {"labels": ["person"]}
+    item = Item(text=text)
+    if task == "structured":
+        kwargs = {"output_schema": {"type": "object", "properties": {"name": {"type": "string"}}}}
+    elif task == "relations":
+        kwargs = {"labels": ["knows"]}
+        item = Item(text=text, metadata={"entities": [{"text": "Alice", "start": len(text) - 5, "end": len(text)}]})
+
+    output = adapter.extract([item], **kwargs)
+
+    assert output.errors is not None
+    assert output.errors[0] is not None
+    assert output.errors[0].code == "INPUT_TOO_LONG"
+    assert output.input_token_counts == [0]
+    assert not model.inputs

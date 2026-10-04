@@ -26,7 +26,7 @@ from sie_server.adapters._word_window import (
     subword_budget,
 )
 from sie_server.adapters.gliner2.words import linear_equivalent
-from sie_server.core.inference_output import ExtractOutput
+from sie_server.core.inference_output import ExtractItemError, ExtractOutput
 from sie_server.types.inputs import InvalidInputError, Item
 from sie_server.types.responses import Classification, Entity, Relation
 
@@ -280,7 +280,6 @@ class GLiNER2Adapter(BaseAdapter):
         # gliner2 reads a bounded window of words: pass it only the prefix holding them.
         reads = [self._read(text) for text in texts]
         windows = [(model_text, subwords) for model_text, subwords, _ in reads]
-        model_texts = [model_text for model_text, _ in windows]
         opts = options or {}
         effective_threshold = self._validate_threshold(opts.get("threshold", self._threshold))
         classification_task = opts.get("classification_task", self._classification_task)
@@ -305,8 +304,9 @@ class GLiNER2Adapter(BaseAdapter):
             prompt = self._prompt_tokens(specs, key=("json", tuple(specs)), extra=len(choices))
             rows = self._row_tokens(windows, prompt)
             with torch.inference_mode():
-                raw_results = self._run_planned(
-                    model_texts,
+                raw_results, errors, input_token_counts = self._run_complete(
+                    texts,
+                    reads,
                     rows,
                     lambda batch: self._model.batch_extract_json(
                         batch,
@@ -317,11 +317,18 @@ class GLiNER2Adapter(BaseAdapter):
                         include_spans=False,
                         max_len=self._max_seq_length,
                     ),
+                    input_token_counts=input_token_counts,
                     rows_per_pass=len(texts),
                 )
             return ExtractOutput(
                 entities=[[] for _ in texts],
-                data=[self._flatten_structured_result(result, output_schema=output_schema) for result in raw_results],
+                data=[
+                    {}
+                    if errors is not None and errors[index] is not None
+                    else self._flatten_structured_result(result, output_schema=output_schema)
+                    for index, result in enumerate(raw_results)
+                ],
+                errors=errors,
                 input_token_counts=input_token_counts,
             )
 
@@ -342,8 +349,9 @@ class GLiNER2Adapter(BaseAdapter):
             )
             rows = self._row_tokens(windows, prompt)
             with torch.inference_mode():
-                raw_results = self._run_planned(
-                    model_texts,
+                raw_results, errors, input_token_counts = self._run_complete(
+                    texts,
+                    reads,
                     rows,
                     lambda batch: self._model.batch_extract_relations(
                         batch,
@@ -354,10 +362,15 @@ class GLiNER2Adapter(BaseAdapter):
                         include_spans=True,
                         max_len=self._max_seq_length,
                     ),
+                    input_token_counts=input_token_counts,
                     rows_per_pass=len(texts),
                 )
             return ExtractOutput(
-                entities=normalized_entities,
+                entities=[
+                    [] if errors is not None and errors[index] is not None else entities
+                    for index, entities in enumerate(normalized_entities)
+                ],
+                errors=errors,
                 relations=[
                     self._flatten_relations(result, entities=entities)
                     for result, entities in zip(raw_results, normalized_entities)
@@ -413,15 +426,72 @@ class GLiNER2Adapter(BaseAdapter):
         check_label_chars("GLiNER2", "labels", normalized_labels)
         prompt = self._prompt_tokens(normalized_labels, key=("entities", tuple(normalized_labels)))
         with torch.inference_mode():
-            raw_results = self._run_planned(
-                model_texts,
+            raw_results, errors, input_token_counts = self._run_complete(
+                texts,
+                reads,
                 self._row_tokens(windows, prompt),
                 extract_entities,
+                input_token_counts=input_token_counts,
                 rows_per_pass=1 if len(texts) == 1 else _PACKAGE_BATCH_SIZE,
             )
 
         all_entities = [self._flatten_entities(result, text=text) for text, result in zip(texts, raw_results)]
-        return ExtractOutput(entities=all_entities, input_token_counts=input_token_counts)
+        return ExtractOutput(entities=all_entities, errors=errors, input_token_counts=input_token_counts)
+
+    def _run_complete(
+        self,
+        texts: list[str],
+        reads: list[tuple[str, int | None, Window | None]],
+        rows: list[int] | None,
+        run: Callable[[list[str]], list[Any]],
+        *,
+        input_token_counts: list[int] | None,
+        rows_per_pass: int,
+    ) -> tuple[list[Any], list[ExtractItemError | None] | None, list[int] | None]:
+        """Run extraction only for items whose entire text fits the model's word/subword window.
+
+        Classification has its own whole-document windowing. Entity, relation,
+        and structured extraction must fail an overlong item rather than return
+        a successful partial prediction. Inspect the last piece actually read:
+        a long word's ``cut`` can be beyond that piece, and lowercase offsets
+        need not index the original text. The package's synthetic sentence end
+        and trailing whitespace are not unread user content.
+        """
+        errors: list[ExtractItemError | None] = []
+        for text, (_, _, window) in zip(texts, reads, strict=True):
+            source = text.lower() if self._lower_text_first else text
+            incomplete = (
+                window is not None
+                and window.cut is not None
+                and bool(window.words)
+                and _NON_SPACE.search(source, window.words[-1][2]) is not None
+            )
+            errors.append(
+                ExtractItemError(
+                    code="INPUT_TOO_LONG",
+                    message="GLiNER2 extraction requires the entire text to fit one word/subword window. "
+                    "Split the text into smaller items.",
+                )
+                if incomplete
+                else None
+            )
+        accepted = [index for index, error in enumerate(errors) if error is None]
+        results: list[Any] = [{} for _ in texts]
+        if accepted:
+            raw = self._run_planned(
+                [reads[index][0] for index in accepted],
+                [rows[index] for index in accepted] if rows is not None else None,
+                run,
+                rows_per_pass=rows_per_pass,
+            )
+            for index, result in zip(accepted, raw, strict=True):
+                results[index] = result
+        counts = (
+            [count if error is None else 0 for count, error in zip(input_token_counts, errors, strict=True)]
+            if input_token_counts is not None
+            else ([0] * len(texts) if not accepted else None)
+        )
+        return results, errors if len(accepted) != len(texts) else None, counts
 
     def _classify(
         self,
