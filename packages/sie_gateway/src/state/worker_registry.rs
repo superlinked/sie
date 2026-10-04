@@ -8,6 +8,7 @@ use tokio::sync::RwLock;
 
 use crate::routing::hrw::{RingEntry, RingSnapshot};
 use crate::state::pool_manager::normalize_pool_name;
+use crate::types::model::FallbackTrigger;
 use crate::types::worker::MAX_UNSUPPORTED_MODELS;
 use crate::types::{
     ClusterStatus, ModelInfo, WorkerHealth, WorkerInfo, WorkerState, WorkerStatusMessage,
@@ -779,6 +780,63 @@ impl WorkerRegistry {
         }
     }
 
+    /// Classify a refusal before dispatch, using only this execution scope.
+    /// A starting worker keeps the lane provisioning; a usable worker wins over
+    /// degraded peers. This is refusal evidence, never permission to dispatch.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn unavailable_lane_trigger(
+        &self,
+        model: &str,
+        pool: &str,
+        machine_profile: &str,
+        bundle: &str,
+        expected_hash: &str,
+        admitted_worker_names: Option<&HashSet<String>>,
+    ) -> Option<FallbackTrigger> {
+        if expected_hash.is_empty() {
+            return None;
+        }
+        let workers = self.workers.read().await;
+        let mut saturated = false;
+        let mut unhealthy = false;
+        let mut starting = false;
+        for worker in workers.values().filter(|worker| {
+            worker.bundle.eq_ignore_ascii_case(bundle)
+                && worker.pool_name.eq_ignore_ascii_case(pool)
+                && (machine_profile.is_empty()
+                    || worker.machine_profile.eq_ignore_ascii_case(machine_profile))
+                && !worker.machine_profile.is_empty()
+                && worker.bundle_config_hash == expected_hash
+                && worker.supports_model(model)
+                && worker_allowed_by_admission(worker, admitted_worker_names)
+                && worker.last_heartbeat.elapsed() <= self.stale_evict_after
+        }) {
+            match worker.health {
+                WorkerHealth::Healthy if worker.ready_gpu_slots > 0 => {
+                    if !worker.saturated
+                        && worker.last_heartbeat.elapsed() <= self.heartbeat_timeout
+                    {
+                        return None;
+                    }
+                    if worker.last_heartbeat.elapsed() > self.heartbeat_timeout {
+                        unhealthy = true;
+                    } else {
+                        saturated = true;
+                    }
+                }
+                WorkerHealth::Unhealthy => unhealthy = true,
+                _ => starting = true,
+            }
+        }
+        if saturated {
+            Some(FallbackTrigger::Saturated)
+        } else if unhealthy && !starting {
+            Some(FallbackTrigger::Unhealthy)
+        } else {
+            None
+        }
+    }
+
     /// Select only a fresh, positively capable worker for verified direct dispatch.
     /// The versioned subject keeps the execution fence even after a worker rollback.
     pub fn execution_authority_worker(
@@ -1017,6 +1075,173 @@ mod tests {
 
     fn registry() -> WorkerRegistry {
         WorkerRegistry::new(Duration::from_secs(30), None)
+    }
+
+    #[tokio::test]
+    async fn unavailable_lane_trigger_is_scoped_and_usable_workers_win() {
+        let reg = registry();
+        let mut message = make_msg(true);
+        message.pool_name = "default".into();
+        message.saturated = true;
+        reg.update_worker("http://w1", message.clone()).await;
+        assert_eq!(
+            reg.unavailable_lane_trigger(
+                "BAAI/bge-m3",
+                "default",
+                "l4-spot",
+                "default",
+                "abc123",
+                None
+            )
+            .await,
+            Some(FallbackTrigger::Saturated)
+        );
+        for (pool, gpu, bundle, hash) in [
+            ("other", "l4-spot", "default", "abc123"),
+            ("default", "h100", "default", "abc123"),
+            ("default", "l4-spot", "other", "abc123"),
+            ("default", "l4-spot", "default", "old"),
+        ] {
+            assert_eq!(
+                reg.unavailable_lane_trigger("BAAI/bge-m3", pool, gpu, bundle, hash, None)
+                    .await,
+                None
+            );
+        }
+        let admitted = HashSet::from(["other-worker".to_string()]);
+        assert_eq!(
+            reg.unavailable_lane_trigger(
+                "BAAI/bge-m3",
+                "default",
+                "l4-spot",
+                "default",
+                "abc123",
+                Some(&admitted)
+            )
+            .await,
+            None
+        );
+        message.name = "worker-2".into();
+        message.saturated = false;
+        reg.update_worker("http://w2", message).await;
+        assert_eq!(
+            reg.unavailable_lane_trigger(
+                "BAAI/bge-m3",
+                "default",
+                "l4-spot",
+                "default",
+                "abc123",
+                None
+            )
+            .await,
+            None
+        );
+        reg.mark_unhealthy("http://w1").await;
+        assert_eq!(
+            reg.unavailable_lane_trigger(
+                "BAAI/bge-m3",
+                "default",
+                "l4-spot",
+                "default",
+                "abc123",
+                None
+            )
+            .await,
+            None
+        );
+        reg.mark_unhealthy("http://w2").await;
+        assert_eq!(
+            reg.unavailable_lane_trigger(
+                "BAAI/bge-m3",
+                "default",
+                "l4-spot",
+                "default",
+                "abc123",
+                None
+            )
+            .await,
+            Some(FallbackTrigger::Unhealthy)
+        );
+    }
+
+    #[tokio::test]
+    async fn unavailable_lane_trigger_keeps_startup_provisioning_and_excludes_unsupported() {
+        let reg = registry();
+        let mut message = make_msg(false);
+        message.pool_name = "default".into();
+        reg.update_worker("http://w1", message.clone()).await;
+        assert_eq!(
+            reg.unavailable_lane_trigger(
+                "BAAI/bge-m3",
+                "default",
+                "l4-spot",
+                "default",
+                "abc123",
+                None
+            )
+            .await,
+            None
+        );
+        message.ready = true;
+        message.saturated = true;
+        message.unsupported_models = vec!["BAAI/bge-m3".into()];
+        reg.update_worker("http://w1", message).await;
+        assert_eq!(
+            reg.unavailable_lane_trigger(
+                "BAAI/bge-m3",
+                "default",
+                "l4-spot",
+                "default",
+                "abc123",
+                None
+            )
+            .await,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn unavailable_lane_trigger_treats_stale_health_as_unhealthy_until_eviction() {
+        let reg = registry();
+        let mut message = make_msg(true);
+        message.pool_name = "default".into();
+        reg.update_worker("http://w1", message).await;
+        reg.workers
+            .write()
+            .await
+            .get_mut("http://w1")
+            .unwrap()
+            .last_heartbeat = Instant::now() - reg.heartbeat_timeout - Duration::from_secs(1);
+        assert_eq!(
+            reg.unavailable_lane_trigger(
+                "BAAI/bge-m3",
+                "default",
+                "l4-spot",
+                "default",
+                "abc123",
+                None
+            )
+            .await,
+            Some(FallbackTrigger::Unhealthy)
+        );
+        reg.workers
+            .write()
+            .await
+            .get_mut("http://w1")
+            .unwrap()
+            .last_heartbeat = Instant::now() - reg.stale_evict_after - Duration::from_secs(1);
+        assert_eq!(
+            reg.unavailable_lane_trigger(
+                "BAAI/bge-m3",
+                "default",
+                "l4-spot",
+                "default",
+                "abc123",
+                None
+            )
+            .await,
+            None
+        );
     }
 
     // ── update_worker ──────────────────────────────────────────────

@@ -50,8 +50,9 @@ explicit `default`. Single-node OpenAI hybrid `encode` and `score` require the
 operator-owned equivalence admission described below. SIE hybrid encode and
 score require the fresh identity admission described below; `threshold` remains
 a separate delivery. Cluster remote profiles use the queue. Cluster
-generation fallback is described below; other cluster bridge surfaces remain
-separate deliveries.
+generation and extraction fallback are described below. Cluster saturation and
+unhealthy-worker spill require explicit triggers. Numeric fleet bridges and
+coordinated threshold routing remain separate deliveries.
 
 ## Single-node embedding example
 
@@ -419,5 +420,23 @@ fields, restores that refusal before any response is returned. The compatibility
 response preserves fallback reason/error and retry headers. Native extraction
 preserves its existing successful partial-result contract.
 
-Numerical fleet equivalence and opt-in saturation or unhealthy spill remain
-inactive.
+### Opt-in spill before local acceptance
+
+Set `routing.triggers` to include `saturated` or `unhealthy` to enable those
+classes. Omitting `triggers` enables only `provisioning` and `model_loading`.
+A usable worker takes precedence over degraded peers in the exact local bundle,
+pool, machine profile and configuration hash. A worker still starting remains
+a provisioning case. Confirmed unhealthy workers do not become a default-enabled
+provisioning bridge.
+
+Saturation checks include the worker saturation signal, cached pool queue
+pressure, and an enforced lane in-flight ceiling. Shadow lane admission does
+not cause remote spill. The pressure check accepts no local work and reserves
+no capacity; the publisher still checks actual admission. A later publish
+failure stays local and cannot trigger a remote replay. Each admitted spill
+records local pending demand. A failed remote attempt restores the original
+local refusal and retry interval; streaming failures after the first output
+remain in the stream. Explicit selectors and `X-SIE-Remote: forbid` retain
+their existing authority.
+
+Numerical fleet equivalence and coordinated threshold routing remain inactive.

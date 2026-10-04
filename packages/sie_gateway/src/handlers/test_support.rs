@@ -11,9 +11,11 @@ use tokio::sync::{broadcast, oneshot, Notify};
 
 use crate::config::{Config, StreamStorage};
 use crate::queue::dispatch::{
-    ChunkEnvelope, DispatchDurability, DispatchError, PendingGenerationSnapshot, PublishTarget,
-    StreamOutcome, WorkDispatcher, WorkParams, WorkResult,
+    ChunkEnvelope, DispatchBackpressure, DispatchDurability, DispatchError,
+    PendingGenerationSnapshot, PublishTarget, StreamOutcome, WorkDispatcher, WorkParams,
+    WorkResult,
 };
+use crate::queue::lane_admission::LaneKey;
 use crate::queue::streaming::{ChunkApplied, StreamCollector};
 use crate::server::AppState;
 use crate::state::config_epoch::ConfigEpoch;
@@ -129,6 +131,7 @@ impl Dispatched {
 /// A dispatcher that records every publish and answers it at once.
 #[derive(Default)]
 pub(crate) struct RecordingDispatcher {
+    local_backpressure: AtomicBool,
     load_refused: AtomicBool,
     generate_refused: AtomicBool,
     work_refused: AtomicBool,
@@ -142,6 +145,10 @@ pub(crate) struct RecordingDispatcher {
 impl RecordingDispatcher {
     pub(crate) fn dispatched(&self) -> Vec<Dispatched> {
         self.dispatched.lock().unwrap().clone()
+    }
+
+    pub(crate) fn saturate_local_queue(&self) {
+        self.local_backpressure.store(true, Ordering::SeqCst);
     }
 
     pub(crate) fn refuse_model_loads(&self) {
@@ -235,6 +242,14 @@ fn stream_chunk_collector(
 impl WorkDispatcher for RecordingDispatcher {
     fn supports_execution_authority_v1(&self) -> bool {
         true
+    }
+
+    fn pre_dispatch_backpressure(&self, lane: &LaneKey) -> Result<(), DispatchBackpressure> {
+        if lane.bundle == LOCAL_LANE.2 && self.local_backpressure.load(Ordering::SeqCst) {
+            Err("backpressure: local lane is full".into())
+        } else {
+            Ok(())
+        }
     }
 
     async fn publish_model_load(
@@ -475,7 +490,7 @@ impl TestGateway {
 
     /// Register a healthy worker on `lane` that reports `loaded` as loaded.
     pub(crate) async fn add_worker(&self, name: &str, lane: (&str, &str, &str), loaded: &[&str]) {
-        self.add_worker_with_authority(name, lane, loaded, false)
+        self.add_worker_with_authority(name, lane, loaded, false, false)
             .await;
     }
 
@@ -485,7 +500,17 @@ impl TestGateway {
         lane: (&str, &str, &str),
         loaded: &[&str],
     ) {
-        self.add_worker_with_authority(name, lane, loaded, true)
+        self.add_worker_with_authority(name, lane, loaded, true, false)
+            .await;
+    }
+
+    pub(crate) async fn add_saturated_worker(
+        &self,
+        name: &str,
+        lane: (&str, &str, &str),
+        loaded: &[&str],
+    ) {
+        self.add_worker_with_authority(name, lane, loaded, true, true)
             .await;
     }
 
@@ -495,10 +520,12 @@ impl TestGateway {
         lane: (&str, &str, &str),
         loaded: &[&str],
         authority: bool,
+        saturated: bool,
     ) {
         let (pool, machine_profile, bundle) = lane;
         let status = WorkerStatusMessage {
             supports_execution_authority_v1: authority,
+            saturated,
             name: name.to_string(),
             ready: true,
             gpu_count: 1,

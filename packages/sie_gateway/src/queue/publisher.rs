@@ -2914,6 +2914,16 @@ impl WorkPublisher {
         pool_backpressure_error(&info, self.max_stream_pending).map_or(Ok(()), Err)
     }
 
+    /// Read current admission pressure without allocating a collector,
+    /// reserving capacity, publishing inputs, or accepting local work.
+    pub fn pre_dispatch_backpressure(&self, lane: &LaneKey) -> Result<(), String> {
+        self.check_backpressure(&lane.pool)?;
+        if self.lane_admission.would_reject(lane) {
+            return Err("backpressure: lane in-flight ceiling exceeded".to_string());
+        }
+        Ok(())
+    }
+
     /// Evaluate this publish against its lane's own in-flight ceiling, on top
     /// of the pool-wide [`Self::check_backpressure`].
     fn check_lane_backpressure(

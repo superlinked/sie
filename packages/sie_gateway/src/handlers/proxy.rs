@@ -22,6 +22,7 @@ use crate::observability::metrics as telemetry;
 use crate::queue::dispatch::{
     DispatchDurability, DispatchError, PendingDispatchKind, WorkDispatcher, WorkDispatcherExt,
 };
+use crate::queue::lane_admission::LaneKey;
 use crate::queue::publisher;
 use crate::queue::streaming::{
     client_safe_worker_error_code, client_safe_worker_error_message,
@@ -2252,6 +2253,112 @@ fn fallback_plan_for_request(
     state.model_registry.remote_fallback_plan(model, trigger)
 }
 
+/// Refusal classification is scoped to the local route and admitted workers.
+/// It carries no dispatch authority and never accepts inference work.
+#[allow(clippy::too_many_arguments)]
+async fn local_spill_trigger(
+    state: &AppState,
+    model: &str,
+    pool: &str,
+    machine_profile: &str,
+    bundle: &str,
+    hash: &str,
+    admission_pool: &str,
+) -> Option<FallbackTrigger> {
+    let admitted = state
+        .pool_manager
+        .admitted_worker_names_for_capped_lane(admission_pool, machine_profile, bundle)
+        .await;
+    if let Some(trigger) = state
+        .registry
+        .unavailable_lane_trigger(
+            model,
+            pool,
+            machine_profile,
+            bundle,
+            hash,
+            admitted.as_ref(),
+        )
+        .await
+    {
+        return Some(trigger);
+    }
+    state.work_publisher.as_ref().and_then(|publisher| {
+        publisher
+            .pre_dispatch_backpressure(&LaneKey::new(pool, machine_profile, bundle))
+            .err()
+            .map(|_| FallbackTrigger::Saturated)
+    })
+}
+
+/// A cold lookup may fan out over configured machine profiles. Classify each
+/// concrete admitted lane; an unassigned worker cannot choose its trigger.
+#[allow(clippy::too_many_arguments)]
+async fn cold_fallback_trigger(
+    state: &AppState,
+    model: &str,
+    pool: &str,
+    profiles: &[String],
+    bundle: &str,
+    hash: &str,
+    admission_pool: &str,
+) -> FallbackTrigger {
+    let mut all_unhealthy = true;
+    let mut configured_lane = false;
+    let mut saturated = false;
+    for profile in profiles {
+        if state
+            .demand_tracker
+            .resolve_lane(pool, profile, bundle)
+            .is_none()
+        {
+            continue;
+        }
+        configured_lane = true;
+        let admitted = state
+            .pool_manager
+            .admitted_worker_names_for_capped_lane(admission_pool, profile, bundle)
+            .await;
+        match state
+            .registry
+            .unavailable_lane_trigger(model, pool, profile, bundle, hash, admitted.as_ref())
+            .await
+        {
+            Some(FallbackTrigger::Saturated) => saturated = true,
+            Some(FallbackTrigger::Unhealthy) => {}
+            _ => all_unhealthy = false,
+        }
+    }
+    if saturated {
+        FallbackTrigger::Saturated
+    } else if configured_lane && all_unhealthy {
+        FallbackTrigger::Unhealthy
+    } else {
+        FallbackTrigger::Provisioning
+    }
+}
+
+fn local_spill_refusal(endpoint: &str, trigger: FallbackTrigger) -> Response {
+    let message = match trigger {
+        FallbackTrigger::Unhealthy => "Local workers are unhealthy",
+        _ => "backpressure: local capacity is saturated",
+    };
+    let mut response = endpoint_error_response(
+        endpoint,
+        StatusCode::SERVICE_UNAVAILABLE,
+        err_code::QUEUE_UNAVAILABLE,
+        oai_type::SERVER_ERROR,
+        oai_code::TRANSPORT_FAILURE,
+        None,
+        message,
+    );
+    response.headers_mut().insert(
+        "retry-after",
+        HeaderValue::from_static(BACKPRESSURE_RETRY_AFTER),
+    );
+    response
+}
+
 /// Broker acceptance of load-only work is required before model-loading
 /// fallback; the pending marker remains until real local traffic takes over.
 async fn warm_local_model(
@@ -2675,6 +2782,16 @@ async fn proxy_request_inner(
             return build_pool_not_found_response_for_surface(&pool, provisioning_surface);
         }
         PoolResolution::Provisioning => {
+            let trigger = cold_fallback_trigger(
+                &state,
+                &dispatch_model,
+                &demand_pool,
+                &pending_demand_profiles,
+                &bundle,
+                &bundle_config_hash,
+                &admission_pool,
+            )
+            .await;
             let refusal =
                 build_provisioning_response_for_surface(&gpu, &bundle, provisioning_surface);
             match begin_native_fallback(
@@ -2684,7 +2801,7 @@ async fn proxy_request_inner(
                 &model_name,
                 prepared_native_parsed.as_ref(),
                 refusal,
-                FallbackTrigger::Provisioning,
+                trigger,
             ) {
                 Err(refusal) => return refusal,
                 Ok(()) => {
@@ -2738,6 +2855,76 @@ async fn proxy_request_inner(
     .await
     {
         return resp;
+    }
+
+    if native_fallback_plan(
+        &state,
+        &req,
+        endpoint,
+        &model_name,
+        prepared_native_parsed.as_ref(),
+        FallbackTrigger::Saturated,
+    )
+    .is_some()
+        || native_fallback_plan(
+            &state,
+            &req,
+            endpoint,
+            &model_name,
+            prepared_native_parsed.as_ref(),
+            FallbackTrigger::Unhealthy,
+        )
+        .is_some()
+    {
+        if let Some(trigger) = local_spill_trigger(
+            &state,
+            &dispatch_model,
+            effective_pool,
+            effective_machine_profile,
+            &bundle,
+            &bundle_config_hash,
+            &admission_pool,
+        )
+        .await
+        {
+            if native_fallback_plan(
+                &state,
+                &req,
+                endpoint,
+                &model_name,
+                prepared_native_parsed.as_ref(),
+                trigger,
+            )
+            .is_some()
+            {
+                state.demand_tracker.record(&physical_lane);
+                let refusal = local_spill_refusal(endpoint, trigger);
+                match begin_native_fallback(
+                    &state,
+                    &mut req,
+                    endpoint,
+                    &model_name,
+                    prepared_native_parsed.as_ref(),
+                    refusal,
+                    trigger,
+                ) {
+                    Err(refusal) => return refusal,
+                    Ok(()) => {
+                        if let Some(body) = prepared_native_body {
+                            *req.body_mut() = Body::from(body);
+                        }
+                        return Box::pin(proxy_request_inner(
+                            state,
+                            req,
+                            endpoint,
+                            provisioning_surface,
+                            inbound_publish_cx,
+                        ))
+                        .await;
+                    }
+                }
+            }
+        }
     }
 
     if native_fallback_plan(
@@ -7727,6 +7914,16 @@ async fn resolve_generation_route(
             ));
         }
         PoolResolution::Provisioning => {
+            let trigger = cold_fallback_trigger(
+                state,
+                dispatch_model,
+                &demand_pool,
+                &pending_demand_profiles,
+                &bundle,
+                &bundle_config_hash,
+                &admission_pool,
+            )
+            .await;
             let refusal = build_openai_provisioning_response(&gpu, &bundle);
             let attempt = ext.get::<FallbackAttempt>();
             let plan = fallback_plan_for_request(
@@ -7736,13 +7933,13 @@ async fn resolve_generation_route(
                 customer_model,
                 bridge_allowed,
                 explicit_bundle_override,
-                FallbackTrigger::Provisioning,
+                trigger,
             );
             let Some(plan) = plan else {
                 return Err(refusal);
             };
             let attempt = attempt.expect("bridge requires request record");
-            assert!(attempt.begin(refusal, FallbackTrigger::Provisioning));
+            assert!(attempt.begin(refusal, trigger));
             let mut remote_ext = ext.clone();
             remote_ext.insert(RemoteFallbackOverride(plan.clone()));
             return Box::pin(resolve_generation_route(
@@ -7808,6 +8005,72 @@ async fn resolve_generation_route(
     .await
     {
         return Err(resp);
+    }
+
+    if fallback_plan_for_request(
+        state,
+        hdr,
+        ext,
+        customer_model,
+        bridge_allowed,
+        explicit_bundle_override,
+        FallbackTrigger::Saturated,
+    )
+    .is_some()
+        || fallback_plan_for_request(
+            state,
+            hdr,
+            ext,
+            customer_model,
+            bridge_allowed,
+            explicit_bundle_override,
+            FallbackTrigger::Unhealthy,
+        )
+        .is_some()
+    {
+        if let Some(trigger) = local_spill_trigger(
+            state,
+            dispatch_model,
+            &effective_pool,
+            &effective_machine_profile,
+            &bundle,
+            &bundle_config_hash,
+            &admission_pool,
+        )
+        .await
+        {
+            if let Some(plan) = fallback_plan_for_request(
+                state,
+                hdr,
+                ext,
+                customer_model,
+                bridge_allowed,
+                explicit_bundle_override,
+                trigger,
+            ) {
+                state.demand_tracker.record(&physical_lane);
+                let attempt = ext
+                    .get::<FallbackAttempt>()
+                    .expect("plan requires a request record");
+                assert!(attempt.begin(local_spill_refusal("generate", trigger), trigger));
+                let mut remote_ext = ext.clone();
+                remote_ext.insert(RemoteFallbackOverride(plan.clone()));
+                return Box::pin(resolve_generation_route(
+                    state,
+                    hdr,
+                    &plan.bundle,
+                    customer_model,
+                    &plan.model,
+                    request_intent,
+                    "",
+                    &remote_ext,
+                    false,
+                    token_limit,
+                    metric_labels_slot,
+                ))
+                .await;
+            }
+        }
     }
 
     if let Some(plan) = fallback_plan_for_request(
@@ -14785,6 +15048,10 @@ pub async fn proxy_moderations() -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::handlers::test_support::{
+        TestGateway, HYBRID_GENERATE_MODEL, LOCAL_LANE, REMOTE_LANE,
+    };
+
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use crate::queue::dispatch::{
@@ -14792,6 +15059,65 @@ mod tests {
         WorkResult,
     };
     use tokio::sync::{broadcast, oneshot, Notify};
+
+    #[tokio::test]
+    async fn cold_spill_trigger_ignores_unassigned_workers_and_unconfigured_bundle_lanes() {
+        let gateway = TestGateway::new(&[HYBRID_GENERATE_MODEL]).await;
+        gateway
+            .add_verified_worker("local-1", LOCAL_LANE, &["acme/chat"])
+            .await;
+        gateway
+            .state
+            .registry
+            .mark_unhealthy("http://local-1:8080")
+            .await;
+        let hash = gateway
+            .state
+            .model_registry
+            .compute_bundle_config_hash_for_pool(LOCAL_LANE.2, LOCAL_LANE.0);
+        let profiles = vec![LOCAL_LANE.1.to_string(), REMOTE_LANE.1.to_string()];
+        assert_eq!(
+            cold_fallback_trigger(
+                &gateway.state,
+                "acme/chat",
+                LOCAL_LANE.0,
+                &profiles,
+                LOCAL_LANE.2,
+                &hash,
+                LOCAL_LANE.0
+            )
+            .await,
+            FallbackTrigger::Unhealthy
+        );
+        gateway
+            .state
+            .pool_manager
+            .sync_static_pools(&[crate::types::pool::PoolSpec {
+                name: "bounded".to_string(),
+                queue_pool: LOCAL_LANE.0.to_string(),
+                bundle: None,
+                gpus: std::collections::HashMap::from([(LOCAL_LANE.1.to_string(), 0)]),
+                gpu_caps: std::collections::HashMap::from([(LOCAL_LANE.1.to_string(), 1)]),
+                ttl_seconds: None,
+                minimum_worker_count: 0,
+                pinned_models: Vec::new(),
+            }])
+            .await
+            .unwrap();
+        assert_eq!(
+            cold_fallback_trigger(
+                &gateway.state,
+                "acme/chat",
+                LOCAL_LANE.0,
+                &profiles,
+                LOCAL_LANE.2,
+                &hash,
+                "bounded"
+            )
+            .await,
+            FallbackTrigger::Provisioning
+        );
+    }
 
     #[derive(Default)]
     struct AbandonmentProbe {

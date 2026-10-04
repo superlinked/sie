@@ -19,6 +19,7 @@ use thiserror::Error;
 use tokio::sync::{broadcast, oneshot};
 use tracing::warn;
 
+use super::lane_admission::LaneKey;
 use super::publisher::WorkPublisher;
 // Re-exports for future consumers of the dispatch seam (also serve as
 // this module's own imports for the trait signatures below).
@@ -179,6 +180,12 @@ pub trait WorkDispatcher: Send + Sync {
     /// Custom transports and wrappers remain closed until they implement it.
     fn supports_execution_authority_v1(&self) -> bool {
         false
+    }
+
+    /// Non-publishing pressure hint. Actual dispatch must recheck admission;
+    /// errors after dispatch starts cannot be used to retry through a bridge.
+    fn pre_dispatch_backpressure(&self, _lane: &LaneKey) -> Result<(), DispatchBackpressure> {
+        Ok(())
     }
 
     /// Request readiness without inference. Only transports whose worker
@@ -368,6 +375,10 @@ pub trait WorkDispatcher: Send + Sync {
 impl WorkDispatcher for WorkPublisher {
     fn supports_execution_authority_v1(&self) -> bool {
         true
+    }
+
+    fn pre_dispatch_backpressure(&self, lane: &LaneKey) -> Result<(), DispatchBackpressure> {
+        WorkPublisher::pre_dispatch_backpressure(self, lane).map_err(DispatchBackpressure::from)
     }
 
     async fn publish_model_load(

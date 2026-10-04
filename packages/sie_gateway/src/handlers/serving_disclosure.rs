@@ -234,6 +234,233 @@ mod tests {
         }
     }
 
+    async fn degraded_gateway(config: &str, degradation: &str, model: &str) -> TestGateway {
+        let gateway = TestGateway::new(&[config]).await;
+        gateway
+            .add_verified_worker("remote-1", REMOTE_LANE, &[])
+            .await;
+        if degradation == "saturated" {
+            gateway
+                .add_saturated_worker("local-1", LOCAL_LANE, &[model])
+                .await;
+        } else {
+            gateway
+                .add_verified_worker("local-1", LOCAL_LANE, &[model])
+                .await;
+            if degradation == "unhealthy" {
+                gateway
+                    .state
+                    .registry
+                    .mark_unhealthy("http://local-1:8080")
+                    .await;
+            } else {
+                gateway.dispatcher.saturate_local_queue();
+            }
+        }
+        gateway
+    }
+
+    #[tokio::test]
+    async fn spill_fallback_bridges_all_buffered_generation_surfaces_before_local_acceptance() {
+        for degradation in ["saturated", "unhealthy", "queue_full"] {
+            let trigger = if degradation == "unhealthy" {
+                "unhealthy"
+            } else {
+                "saturated"
+            };
+            let config = format!("{HYBRID_GENERATE_MODEL}\nrouting:\n  policy: fallback\n  fallback_profile: remote\n  triggers: [{trigger}]\n");
+            for surface in ["native", "chat", "completions", "responses"] {
+                for fail in [false, true] {
+                    let gateway = degraded_gateway(&config, degradation, "acme/chat").await;
+                    if fail {
+                        gateway.dispatcher.refuse_generation();
+                    }
+                    let response = buffered_surface(&gateway, surface, json!({})).await;
+                    assert_eq!(
+                        response.status(),
+                        if fail {
+                            StatusCode::SERVICE_UNAVAILABLE
+                        } else {
+                            StatusCode::OK
+                        },
+                        "{surface}/{degradation}"
+                    );
+                    assert_eq!(response.headers()["x-sie-fallback-reason"], trigger);
+                    assert_eq!(
+                        stamped(&response),
+                        if fail {
+                            (Some("local"), None)
+                        } else {
+                            (Some("remote"), Some("team-sie"))
+                        }
+                    );
+                    if fail {
+                        assert_eq!(
+                            response.headers()["retry-after"],
+                            if trigger == "unhealthy" { "60" } else { "5" }
+                        );
+                        assert_eq!(
+                            response.headers()["x-sie-fallback-error"],
+                            "INFERENCE_ERROR"
+                        );
+                    }
+                    assert_eq!(
+                        gateway.dispatcher.dispatched(),
+                        if fail {
+                            Vec::new()
+                        } else {
+                            vec![dispatched("generate", REMOTE_LANE, "acme/chat:remote")]
+                        }
+                    );
+                    assert!(gateway
+                        .state
+                        .demand_tracker
+                        .active_lanes()
+                        .iter()
+                        .any(|lane| lane.bundle() == LOCAL_LANE.2));
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn spill_fallback_streams_preserve_the_before_and_after_output_boundary() {
+        for degradation in ["saturated", "unhealthy", "queue_full"] {
+            let trigger = if degradation == "unhealthy" {
+                "unhealthy"
+            } else {
+                "saturated"
+            };
+            let config = format!("{HYBRID_GENERATE_MODEL}\nrouting:\n  policy: fallback\n  fallback_profile: remote\n  triggers: [{trigger}]\n");
+            for surface in ["native", "chat", "completions"] {
+                for failure in [None, Some(false), Some(true)] {
+                    let gateway = degraded_gateway(&config, degradation, "acme/chat").await;
+                    if let Some(after_output) = failure {
+                        gateway.dispatcher.fail_stream(after_output);
+                    }
+                    let state = State(Arc::clone(&gateway.state));
+                    let response = match surface {
+                        "native" => proxy_request(state, json_request("/v1/generate/acme/chat", json!({"prompt":"hello","max_new_tokens":4,"stream":true})), "generate").await,
+                        "chat" => proxy_chat(state, json_request("/v1/chat/completions", json!({"model":"acme/chat","messages":[{"role":"user","content":"hello"}],"stream":true}))).await,
+                        "completions" => proxy_completions(state, json_request("/v1/completions", json!({"model":"acme/chat","prompt":"hello","max_tokens":4,"stream":true}))).await,
+                        _ => unreachable!(),
+                    };
+                    assert_eq!(response.headers()["x-sie-fallback-reason"], trigger);
+                    if failure == Some(false) {
+                        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+                        assert_eq!(
+                            response.headers()["retry-after"],
+                            if trigger == "unhealthy" { "60" } else { "5" }
+                        );
+                        assert_eq!(stamped(&response), (Some("local"), None));
+                    } else {
+                        assert_eq!(response.status(), StatusCode::OK);
+                        assert_eq!(stamped(&response), (Some("remote"), Some("team-sie")));
+                    }
+                    let body = axum::body::to_bytes(response.into_body(), 8192)
+                        .await
+                        .unwrap();
+                    let body = String::from_utf8_lossy(&body);
+                    assert!(!body.contains("private upstream failure"));
+                    if failure == Some(true) {
+                        assert!(body.contains("ok"));
+                        assert!(body.contains("inference_error"));
+                        assert!(body.contains("[DONE]"));
+                    }
+                    assert_eq!(
+                        gateway.dispatcher.dispatched(),
+                        vec![dispatched("generate", REMOTE_LANE, "acme/chat:remote")]
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn spill_fallback_requires_opt_in_and_preserves_explicit_default() {
+        for degradation in ["saturated", "unhealthy", "queue_full"] {
+            for opt_in in [false, true] {
+                let triggers = if opt_in {
+                    "  triggers: [saturated, unhealthy]\n"
+                } else {
+                    ""
+                };
+                let config = format!("{HYBRID_GENERATE_MODEL}\nrouting:\n  policy: fallback\n  fallback_profile: remote\n{triggers}");
+                for surface in ["native", "chat", "completions", "responses"] {
+                    let gateway = degraded_gateway(&config, degradation, "acme/chat").await;
+                    let response = buffered_surface(
+                        &gateway,
+                        surface,
+                        if opt_in {
+                            json!({"profile":"default"})
+                        } else {
+                            json!({})
+                        },
+                    )
+                    .await;
+                    assert!(
+                        !response.headers().contains_key("x-sie-fallback-reason"),
+                        "{surface}/{degradation}/{opt_in}"
+                    );
+                    assert!(!gateway
+                        .dispatcher
+                        .dispatched()
+                        .iter()
+                        .any(|work| work.bundle == REMOTE_LANE.2));
+                    if degradation == "unhealthy" {
+                        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+                        assert!(gateway.dispatcher.dispatched().is_empty());
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn spill_fallback_covers_extraction_json_and_msgpack() {
+        for degradation in ["saturated", "unhealthy", "queue_full"] {
+            let trigger = if degradation == "unhealthy" {
+                "unhealthy"
+            } else {
+                "saturated"
+            };
+            let config = format!("{HYBRID_EXTRACT_MODEL}\nrouting:\n  policy: fallback\n  fallback_profile: remote\n  triggers: [{trigger}]\n");
+            for msgpack in [false, true] {
+                for fail in [false, true] {
+                    let gateway = degraded_gateway(&config, degradation, "acme/extract").await;
+                    if fail {
+                        gateway.dispatcher.refuse_work();
+                    }
+                    let response = proxy_request(
+                        State(Arc::clone(&gateway.state)),
+                        extraction_request(msgpack, json!({})),
+                        "extract",
+                    )
+                    .await;
+                    assert_eq!(
+                        response.status(),
+                        if fail {
+                            StatusCode::SERVICE_UNAVAILABLE
+                        } else {
+                            StatusCode::OK
+                        }
+                    );
+                    assert_eq!(response.headers()["x-sie-fallback-reason"], trigger);
+                    assert_eq!(
+                        gateway.dispatcher.dispatched(),
+                        vec![dispatched("extract", REMOTE_LANE, "acme/extract:remote")]
+                    );
+                    if fail {
+                        assert_eq!(
+                            response.headers()["retry-after"],
+                            if trigger == "unhealthy" { "60" } else { "5" }
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     #[tokio::test]
     async fn all_buffered_cluster_fallback_surfaces_warm_before_bridging_and_leave_loaded_models_local(
     ) {

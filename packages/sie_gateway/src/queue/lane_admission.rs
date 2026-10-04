@@ -246,6 +246,16 @@ impl LaneAdmissionControl {
         }
     }
 
+    /// Non-reserving hint before local dispatch. Publishing still performs
+    /// the atomic admission check; a race there remains a local refusal.
+    pub fn would_reject(&self, lane: &LaneKey) -> bool {
+        self.enforce
+            && self
+                .lanes
+                .get(lane)
+                .is_some_and(|counter| counter.load(Ordering::Relaxed) > self.max_in_flight_items)
+    }
+
     /// In-flight items currently reserved on `lane`.
     #[cfg(test)]
     pub fn in_flight(&self, lane: &LaneKey) -> u64 {
@@ -278,6 +288,25 @@ mod tests {
 
     fn lane(pool: &str) -> LaneKey {
         LaneKey::new(pool, "a10g", "default")
+    }
+
+    #[test]
+    fn pressure_hint_matches_enforcement_without_reserving_or_touching_other_lanes() {
+        for enforce in [false, true] {
+            let control = control(enforce);
+            let hot = lane("hot");
+            assert!(!control.would_reject(&hot));
+            let exact = control.admit(&hot, 10).reservation;
+            assert!(!control.would_reject(&hot));
+            let extra = control.admit(&hot, 1).reservation;
+            assert_eq!(control.would_reject(&hot), enforce);
+            assert_eq!(control.in_flight(&hot), 11);
+            assert!(!control.would_reject(&lane("cold")));
+            drop(extra);
+            assert!(!control.would_reject(&hot));
+            drop(exact);
+            assert_eq!(control.in_flight(&hot), 0);
+        }
     }
 
     #[test]
