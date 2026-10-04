@@ -204,3 +204,39 @@ def test_queue_outcome_preserves_length_error_and_zero_billing(index: int) -> No
         assert "error" not in result
         assert result["entities"][0]["text"] == "Alice"
         assert outcome.units.input_tokens == 4
+
+
+def test_queue_length_error_keeps_zero_billing_when_sibling_metering_fails() -> None:
+    from types import SimpleNamespace
+
+    import msgpack
+    from sie_server.ipc_types import ExtractBatchItem
+    from sie_server.queue_executor import _extract_success_outcome
+
+    adapter, _ = _adapter()
+    adapter._doc_input_token_counts = lambda _texts: None
+    items = [Item(text="word " * 20), Item(text="Alice Acme")]
+    output = adapter.extract(items, labels=["person"])
+    assert output.input_token_counts is None
+    assert output.errors is not None
+    assert output.errors[0] is not None
+
+    batch_item = ExtractBatchItem(
+        work_item_id="req.0",
+        request_id="req",
+        item_index=0,
+        total_items=2,
+        timestamp=0,
+        item={"text": items[0].text},
+        labels=["person"],
+    )
+    worker_result = SimpleNamespace(
+        output=ExtractHandler().slice_output(output, 0),
+        timing=SimpleNamespace(inference_ms=0, tokenization_ms=0, postprocessing_ms=0),
+    )
+    outcome = _extract_success_outcome(adapter, batch_item, items[0], worker_result)
+    result = msgpack.unpackb(outcome.result_msgpack, raw=False)
+
+    assert result["error"]["code"] == "INPUT_TOO_LONG"
+    assert outcome.units is not None
+    assert outcome.units.input_tokens == 0
