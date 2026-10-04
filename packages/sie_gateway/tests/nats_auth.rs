@@ -111,6 +111,30 @@ async fn start_nats_fixture(fixture: &str) -> Option<NatsServer> {
     panic!("nats-server did not start:\n{log}");
 }
 
+// Broker expiry is asynchronous; elapsed gateway time alone does not prove
+// that its leader API has stopped exposing the five-second lease.
+async fn wait_for_threshold_lease_expiry(leases: &jetstream::kv::Store) {
+    tokio::time::timeout(Duration::from_secs(7), async {
+        loop {
+            match leases
+                .stream
+                .get_last_raw_message_by_subject("$KV.SIE_THRESHOLD_LEASE.sampler")
+                .await
+            {
+                Err(error)
+                    if error.kind() == jetstream::stream::RawMessageErrorKind::NoMessageFound =>
+                {
+                    return;
+                }
+                Ok(_) => tokio::time::sleep(Duration::from_millis(50)).await,
+                Err(error) => panic!("failed to observe threshold lease expiry: {error}"),
+            }
+        }
+    })
+    .await
+    .expect("threshold broker must expire the lease within five seconds plus scheduling margin");
+}
+
 /// The client URL from the `*.ports` file nats-server writes once it listens.
 fn listening_url(dir: &Path) -> Option<String> {
     let ports = std::fs::read_dir(dir)
@@ -639,6 +663,7 @@ async fn threshold_decisions_share_demand_and_require_current_sampler_authority(
         first.decision("acme/chat"),
         Err(ThresholdError::Unavailable)
     );
+    wait_for_threshold_lease_expiry(&leases).await;
     second.sample(&mut standby).await.unwrap();
     assert_eq!(
         first.sample(&mut owner).await,
@@ -717,13 +742,35 @@ async fn threshold_decisions_share_demand_and_require_current_sampler_authority(
         newest.sample(&mut standby).await,
         Err(ThresholdError::Untrusted)
     );
-    tokio::time::sleep(Duration::from_millis(5200)).await;
+    let failed_lease = leases
+        .stream
+        .get_last_raw_message_by_subject("$KV.SIE_THRESHOLD_LEASE.sampler")
+        .await
+        .unwrap();
     let restored = serde_json::json!({"generation":2,"contract":"obsolete","total":0,
         "incarnation":uuid::Uuid::new_v4().to_string()});
     counts
         .put(&key, serde_json::to_vec(&restored).unwrap().into())
         .await
         .unwrap();
+    // Repairing storage cannot restore the failed sampler's old ownership.
+    // Until actual broker expiry it must refuse to renew, even with valid data.
+    assert_eq!(
+        newest.sample(&mut standby).await,
+        Err(ThresholdError::Unavailable)
+    );
+    let refused_lease = leases
+        .stream
+        .get_last_raw_message_by_subject("$KV.SIE_THRESHOLD_LEASE.sampler")
+        .await
+        .unwrap();
+    assert_eq!(
+        refused_lease.sequence, failed_lease.sequence,
+        "failed sampler must leave the existing lease revision unchanged"
+    );
+    wait_for_threshold_lease_expiry(&leases).await;
+    // A single recovery call must succeed once the leader confirms expiry;
+    // timeouts or unavailable storage remain test failures, not retry cases.
     newest.sample(&mut standby).await.unwrap();
     assert_eq!(
         newest.decision("acme/chat"),
