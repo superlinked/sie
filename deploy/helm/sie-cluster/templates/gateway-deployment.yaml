@@ -36,6 +36,9 @@
         "SIE_CONFIG_SERVICE_TOKEN"
         "SIE_NATS_PASSWORD"
         "SIE_NATS_USER"
+        "SIE_THRESHOLD_ROUTING_ENABLED"
+        "SIE_THRESHOLD_NATS_URL"
+        "SIE_THRESHOLD_NATS_REPLICAS"
         "SIE_STREAM_MAX_AGE_S"
         "SIE_STREAM_REPLICAS"
         "SIE_STREAM_STORAGE") -}}
@@ -277,6 +280,14 @@ spec:
                 secretKeyRef:
                   name: {{ . }}
                   key: {{ include "sie-cluster.gateway.adminTokenSecretKey" $ }}
+            {{- end }}
+            - name: SIE_THRESHOLD_ROUTING_ENABLED
+              value: {{ dig "thresholdRouting" "enabled" false .Values.gateway | quote }}
+            {{- if dig "thresholdRouting" "enabled" false .Values.gateway }}
+            - name: SIE_THRESHOLD_NATS_URL
+              value: "nats://{{ include "sie-cluster.fullname" . }}-threshold:4222"
+            - name: SIE_THRESHOLD_NATS_REPLICAS
+              value: "1"
             {{- end }}
             {{- if .Values.nats.enabled }}
             - name: SIE_NATS_URL

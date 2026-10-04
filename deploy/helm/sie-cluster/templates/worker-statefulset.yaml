@@ -33,7 +33,7 @@ fast at render time.
 {{- fail (printf "workers.common.modelReadyTimeoutSec=%d must be lower than the adapter worker liveness budget (%d * %d = %ds); increase workers.common.probes.liveness.failureThreshold/periodSeconds or lower modelReadyTimeoutSec" $modelReadyTimeoutS $workerLivenessFailures $workerLivenessPeriodS $workerLivenessBudgetS) }}
 {{- end }}
 {{- $reservedOtelEnv := include "sie-cluster.otel.reservedEnvNames" $root | fromJsonArray -}}
-{{- $reservedWorkerEnv := concat $reservedOtelEnv (list "SIE_BUNDLE" "SIE_GPU_TYPE" "SIE_MACHINE_PROFILE" "SIE_POOL" "SIE_REMOTE_SERVING" "SIE_SGLANG_KERNEL_CACHE_ROOT" "SIE_UPSTREAMS_FILE" "SIE_WORKER_ID") -}}
+{{- $reservedWorkerEnv := concat $reservedOtelEnv (list "SIE_BUNDLE" "SIE_GPU_TYPE" "SIE_MACHINE_PROFILE" "SIE_POOL" "SIE_REMOTE_SERVING" "SIE_SGLANG_KERNEL_CACHE_ROOT" "SIE_UPSTREAMS_FILE" "SIE_WORKER_ID" "SIE_THRESHOLD_ROUTING_ENABLED") -}}
 {{- range $upstreamName, $_ := (default dict $root.Values.upstreams) -}}
 {{- $reservedWorkerEnv = append $reservedWorkerEnv (include "sie-cluster.upstream.keyEnvName" $upstreamName) -}}
 {{- end -}}
@@ -450,6 +450,8 @@ spec:
             - name: SIE_REMOTE_SERVING
               value: "0"
             {{- end }}
+            - name: SIE_THRESHOLD_ROUTING_ENABLED
+              value: {{ dig "thresholdRouting" "enabled" false $root.Values.gateway | quote }}
             {{- if $root.Values.workers.common.workerSidecar.enabled }}
             # worker-sidecar owns the NATS loop; the adapter process
             # exposes the IPC server over a shared Unix socket. The chart fails render

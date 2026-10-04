@@ -1,9 +1,11 @@
 # Threshold demand coordinator
 
-This is the shared-state prerequisite for the `threshold` policy in issue
-[#415](https://github.com/superlinked/sie/issues/415). Request routing still
-refuses `threshold`: the deployment flag, coordinator lifecycle, shared caller
-validation and request-path integration are separate delivery steps.
+This implements the shared-state contract for the experimental `threshold`
+policy in issue [#415](https://github.com/superlinked/sie/issues/415). The cluster
+integration is disabled by default. `gateway.thresholdRouting.enabled` creates
+an isolated control broker and propagates the opt-in to gateway, configuration
+service and queue workers. Numerical models and managed deployment routes stay
+gated. See [the remote-backend guide](../../sie_server/REMOTE_BACKENDS.md#experimental-cluster-threshold-routing).
 
 `ThresholdCoordinator` accepts a JetStream context for an **isolated control
 broker endpoint**. Do not pass the inference queue connection. The coordinator
@@ -84,3 +86,29 @@ restarts the evidence window; it does not move or consume inference work.
 One or three JetStream replicas are accepted, and the external endpoint must
 supply the corresponding topology. These bounds are implementation limits,
 not measured throughput or latency claims.
+
+
+## Request integration
+
+`SIE_THRESHOLD_ROUTING_ENABLED=true` requires `SIE_THRESHOLD_NATS_URL`, gateway
+NATS authentication and `SIE_THRESHOLD_NATS_REPLICAS` (1 or 3; the chart uses 1).
+The URL must name a separate NATS endpoint without embedded credentials. The
+runtime waits for a complete export bootstrap, then binds targets to the nonzero
+authoritative config epoch and the exact registry snapshot, and samples every second. Standby ownership errors do not
+prevent their demand flush or verified cached decisions. Snapshot or epoch
+replacement refuses previous authority even when execution hashes are equal.
+
+After shared caller validation, eligible bare-model generation/extraction
+requests count once. A `Remote` decision returns a plan from the same pinned
+snapshot and rewrites before any local demand, model-load work or inference
+publish. The remote override requires execution-authority-capable transport and
+current verified workers. Overrides cannot self-bridge. `WakeLocal` and missing
+fresh authority preserve local routing and the provisioning/loading bridge.
+Explicit caller selectors and remote-forbid controls keep their existing
+behavior; a valid remote-forbid request still contributes bare-model demand.
+
+The Helm opt-in requires persistent sie-config storage and a real configuration
+mutation establishing a nonzero persisted epoch. If config-store recovery
+rewinds that epoch, wait for all gateway replicas to apply the recovered export,
+then restart only the isolated threshold broker to discard the superseded
+generation. Requests retain local/fallback behavior until fresh evidence forms.

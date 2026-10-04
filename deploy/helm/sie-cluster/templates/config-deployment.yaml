@@ -74,6 +74,8 @@ spec:
               containerPort: 8080
               protocol: TCP
           env:
+            - name: SIE_THRESHOLD_ROUTING_ENABLED
+              value: {{ dig "thresholdRouting" "enabled" false .Values.gateway | quote }}
             - name: POD_NAME
               valueFrom:
                 fieldRef:

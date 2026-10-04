@@ -2138,3 +2138,25 @@ around those identities. When tracing is enabled, configure
 Tempo, otherwise the chart fails fast.
 
 Local / non-Helm note: the gateway, Python worker, and Rust worker-sidecar all require `SIE_TRACING_ENABLED=true` and an OTLP endpoint (`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, or `OTEL_EXPORTER_OTLP_ENDPOINT`) before exporting traces. Setting only one yields no traces rather than a partial trace. In-cluster, the Helm chart sets both for you.
+
+
+### Experimental threshold routing
+
+`gateway.thresholdRouting.enabled` defaults to `false`. Enabling it creates a
+separate authenticated control broker and admits generation/extraction model
+configs with `routing.policy: threshold`. It requires sie-config with `config.configStore.enabled: true`, authenticated
+NATS and worker sidecars. Apply a configuration mutation through sie-config so
+its persisted epoch is nonzero; gateways wait for a complete export bootstrap
+before acquiring coordination authority. The chart propagates the same opt-in to configuration
+validation and queue workers. Only the gateway password is mounted into the
+control broker, and its NetworkPolicy permits only gateway client traffic.
+
+The shipped control broker has one replica and ephemeral memory streams.
+Gateway replicas share counts and one elected sampler; a control-broker restart
+rebuilds evidence while requests retain ordinary local/fallback behavior. If
+config-store recovery rewinds the epoch, restart the isolated threshold broker
+after all gateways have applied the recovered export. This discards the old
+generation and rebuilds evidence; never reset the inference broker for this. This
+flag does not enable managed Cloud or numerical hybrid routing. See
+[the remote-backend guide](../../../packages/sie_server/REMOTE_BACKENDS.md#experimental-cluster-threshold-routing)
+for the policy, limits and caller controls.

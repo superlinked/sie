@@ -1,0 +1,118 @@
+{{- if dig "thresholdRouting" "enabled" false .Values.gateway }}
+{{- if not (and .Values.nats.enabled .Values.nats.auth.enabled .Values.config.enabled .Values.config.configStore.enabled .Values.workers.common.workerSidecar.enabled) }}
+{{- fail "gateway.thresholdRouting.enabled requires authenticated NATS, persistent sie-config storage, and queue worker sidecars" }}
+{{- end }}
+{{- $gatewaySecret := include "sie-cluster.nats.authSecretName" (dict "auth" .Values.nats.auth "release" .Release.Name "component" "gateway") }}
+{{- range $component := list "config" "worker" }}
+{{- if eq $gatewaySecret (include "sie-cluster.nats.authSecretName" (dict "auth" $.Values.nats.auth "release" $.Release.Name "component" $component)) }}
+{{- fail "threshold control requires a gateway NATS Secret distinct from config and worker credentials" }}
+{{- end }}
+{{- end }}
+{{- $name := printf "%s-threshold" (include "sie-cluster.fullname" .) }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}
+  namespace: {{ include "sie-cluster.namespace" . }}
+data:
+  nats.conf: |
+    {{- include "sie-cluster.threshold.config" . | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  namespace: {{ include "sie-cluster.namespace" . }}
+spec:
+  replicas: 1
+  # Ephemeral state must have one broker authority during replacement.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: threshold-control
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: threshold-control
+      annotations:
+        checksum/config: {{ include "sie-cluster.threshold.config" . | sha256sum | quote }}
+    spec:
+      automountServiceAccountToken: false
+      {{- include "sie-cluster.imagePullSecrets" . | nindent 6 }}
+      containers:
+        - name: threshold-control
+          image: {{ .Values.gateway.thresholdRouting.image | quote }}
+          imagePullPolicy: IfNotPresent
+          args: ["-c", "/etc/nats/nats.conf"]
+          env:
+            - name: SIE_NATS_AUTH_GATEWAY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "sie-cluster.nats.authSecretName" (dict "auth" .Values.nats.auth "release" .Release.Name "component" "gateway") }}
+                  key: password
+          ports:
+            - name: client
+              containerPort: 4222
+            - name: monitor
+              containerPort: 8222
+          readinessProbe:
+            httpGet:
+              path: /healthz?js-enabled-only=true
+              port: monitor
+          livenessProbe:
+            tcpSocket:
+              port: client
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: "1"
+              memory: 128Mi
+          volumeMounts:
+            - name: config
+              mountPath: /etc/nats
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: {{ $name }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  namespace: {{ include "sie-cluster.namespace" . }}
+spec:
+  selector:
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: threshold-control
+  ports:
+    - name: client
+      port: 4222
+      targetPort: client
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $name }}
+  namespace: {{ include "sie-cluster.namespace" . }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: threshold-control
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "sie-cluster.gateway.selectorLabels" . | nindent 14 }}
+      ports:
+        - port: 4222
+          protocol: TCP
+  egress: []
+{{- end }}

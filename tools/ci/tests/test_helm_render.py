@@ -1555,7 +1555,9 @@ def bound_rules(docs: list[dict], service_account: str) -> list[dict]:
 def test_no_role_of_the_gateway_reaches_secrets_and_the_remote_lane_has_none(tmp_path: Path) -> None:
     docs = rendered_documents(tmp_path, remote_pool_values())
     (gateway,) = [
-        doc for doc in docs if doc["kind"] == "Deployment" and doc["metadata"]["name"] == GATEWAY.split("/")[0]
+        doc
+        for doc in docs
+        if doc["kind"] == "Deployment" and doc["metadata"]["name"] == GATEWAY.split("/", maxsplit=1)[0]
     ]
     gateway_account = gateway["spec"]["template"]["spec"]["serviceAccountName"]
 
@@ -1575,7 +1577,9 @@ def test_the_remote_lane_runs_as_its_own_account_without_identity_or_hugging_fac
 
     lanes = lane_pod_specs(docs)
     (gateway,) = [
-        doc for doc in docs if doc["kind"] == "Deployment" and doc["metadata"]["name"] == GATEWAY.split("/")[0]
+        doc
+        for doc in docs
+        if doc["kind"] == "Deployment" and doc["metadata"]["name"] == GATEWAY.split("/", maxsplit=1)[0]
     ]
     assert lanes[REMOTE_WORKER[1]]["serviceAccountName"] == REMOTE_SERVICE_ACCOUNT
     assert lanes[REMOTE_WORKER[1]]["automountServiceAccountToken"] is False
@@ -2585,3 +2589,90 @@ def test_remote_fallback_persistence_alert_refuses_invalid_thresholds(tmp_path: 
     )
     assert result.returncode != 0
     assert "alertRules.remoteFallbackPersistenceSeconds" in result.stderr
+
+
+THRESHOLD_VALUES = {
+    "gateway": {"thresholdRouting": {"enabled": True}},
+    "config": {"configStore": {"enabled": True}},
+}
+
+
+def test_threshold_control_is_isolated_and_gateway_only(tmp_path: Path) -> None:
+    result = render_template(tmp_path, THRESHOLD_VALUES, "templates/threshold-control.yaml")
+    assert result.returncode == 0, result.stderr
+    docs = {doc["kind"]: doc for doc in yaml.safe_load_all(result.stdout) if doc}
+    assert set(docs) == {"ConfigMap", "Deployment", "Service", "NetworkPolicy"}
+    config = docs["ConfigMap"]["data"]["nats.conf"]
+    fixture = (ROOT / "tools/ci/fixtures/sie-threshold-nats.conf").read_text()
+
+    def strip_comments(text: str) -> str:
+        return "\n".join(line for line in text.splitlines() if not line.startswith("#")).strip()
+
+    assert strip_comments(config) == strip_comments(fixture)
+    deployment = docs["Deployment"]["spec"]
+    assert deployment["replicas"] == 1
+    assert deployment["strategy"]["type"] == "Recreate"
+    pod = deployment["template"]["spec"]
+    assert pod["automountServiceAccountToken"] is False
+    (container,) = pod["containers"]
+    assert container["env"] == [
+        {
+            "name": "SIE_NATS_AUTH_GATEWAY_PASSWORD",
+            "valueFrom": {"secretKeyRef": {"name": "sie-nats-auth-gateway", "key": "password"}},
+        }
+    ]
+    policy = docs["NetworkPolicy"]["spec"]
+    assert policy["policyTypes"] == ["Ingress", "Egress"]
+    assert policy["egress"] == []
+    assert policy["ingress"][0]["from"][0]["podSelector"]["matchLabels"]["app.kubernetes.io/component"] == "gateway"
+    assert docs["Service"]["spec"]["ports"] == [{"name": "client", "port": 4222, "targetPort": "client"}]
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"nats": {"auth": {"enabled": False}}},
+        {"config": {"enabled": False}},
+        {"config": {"configStore": {"enabled": False}}},
+        {"workers": {"common": {"workerSidecar": {"enabled": False}}}},
+    ],
+)
+def test_threshold_rejects_incomplete_queue_authority(tmp_path: Path, override: dict) -> None:
+    values = {**THRESHOLD_VALUES, **override}
+    result = render_template(tmp_path, values, "templates/threshold-control.yaml")
+    assert result.returncode != 0
+
+
+def test_threshold_flag_is_owned_by_chart_and_propagates(tmp_path: Path) -> None:
+    for template, container_name in [
+        ("templates/gateway-deployment.yaml", "gateway"),
+        ("templates/config-deployment.yaml", "config"),
+    ]:
+        result = render_template(tmp_path, THRESHOLD_VALUES, template)
+        assert result.returncode == 0, result.stderr
+        deployment = next(doc for doc in yaml.safe_load_all(result.stdout) if doc and doc["kind"] == "Deployment")
+        container = next(c for c in deployment["spec"]["template"]["spec"]["containers"] if c["name"] == container_name)
+        env = {item["name"]: item for item in container["env"]}
+        assert env["SIE_THRESHOLD_ROUTING_ENABLED"]["value"] == "true"
+        if container_name == "gateway":
+            assert env["SIE_THRESHOLD_NATS_URL"]["value"] == "nats://sie-sie-cluster-threshold:4222"
+    values = {"gateway": {"extraEnv": [{"name": "SIE_THRESHOLD_ROUTING_ENABLED", "value": "true"}]}}
+    result = render_template(tmp_path, values, "templates/gateway-deployment.yaml")
+    assert result.returncode != 0
+
+
+def test_threshold_flag_reaches_workers_and_refuses_shared_gateway_secret(tmp_path: Path) -> None:
+    docs = worker_statefulsets(tmp_path, {**THRESHOLD_VALUES, **L4_POOL})
+    assert docs
+    for doc in docs:
+        containers = doc["spec"]["template"]["spec"]["containers"]
+        for container in containers:
+            env = {item["name"]: item for item in container.get("env", [])}
+            if container["name"] != "worker-sidecar":
+                assert env["SIE_THRESHOLD_ROUTING_ENABLED"]["value"] == "true"
+                assert "SIE_THRESHOLD_NATS_URL" not in env
+                assert "SIE_NATS_AUTH_GATEWAY_PASSWORD" not in env
+    values = {**THRESHOLD_VALUES, "nats": {"auth": {"existingSecrets": {"gateway": "shared", "worker": "shared"}}}}
+    result = render_template(tmp_path, values, "templates/threshold-control.yaml")
+    assert result.returncode != 0
+    assert "distinct from config and worker" in result.stderr

@@ -242,6 +242,7 @@ impl FallbackAttempt {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::time::Duration;
 
     use axum::body::Body;
     use axum::extract::State;
@@ -1715,5 +1716,215 @@ mod tests {
             .unwrap()
             .eq_ignore_ascii_case(UPSTREAM_HEADER.as_str()));
         assert_eq!(served_by["values"], json!(["local", "remote"]));
+    }
+    #[tokio::test]
+    async fn threshold_shared_decision_routes_remote_without_local_demand_then_wakes_and_bridges() {
+        use crate::handlers::test_support::ThresholdBroker;
+        use crate::state::threshold_coordinator::{ThresholdDecision, ThresholdSampler};
+        let Some(broker) = ThresholdBroker::start().await else {
+            return;
+        };
+        let policy = "\nrouting:\n  policy: threshold\n  fallback_profile: remote\n  wake_above: 1\n  sleep_below: 0.5\n  window_s: 1\n  cooldown_s: 1\n";
+        let generate = format!("{HYBRID_GENERATE_MODEL}{policy}");
+        let extract = format!("{HYBRID_EXTRACT_MODEL}{policy}");
+        let gateway = TestGateway::with_threshold_routing(&[&generate, &extract], true).await;
+        gateway
+            .add_verified_worker("remote-1", REMOTE_LANE, &[])
+            .await;
+        let binding = broker.bind(&gateway).await;
+        let mut sampler = ThresholdSampler::default();
+        binding.coordinator.sample(&mut sampler).await.unwrap();
+        for _ in 0..2 {
+            tokio::time::sleep(Duration::from_millis(1050)).await;
+            binding.coordinator.sample(&mut sampler).await.unwrap();
+        }
+        assert_eq!(
+            binding.coordinator.decision("acme/chat").unwrap(),
+            ThresholdDecision::Remote
+        );
+        for surface in ["native", "chat", "completions", "responses"] {
+            let response = buffered_surface(&gateway, surface, json!({})).await;
+            assert_eq!(response.status(), StatusCode::OK, "{surface}");
+            assert_eq!(stamped(&response), (Some("remote"), Some("team-sie")));
+            assert!(!response.headers().contains_key("x-sie-fallback-reason"));
+        }
+        for msgpack in [false, true] {
+            let response = proxy_request(
+                State(Arc::clone(&gateway.state)),
+                extraction_request(msgpack, json!({})),
+                "extract",
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        assert!(gateway.state.demand_tracker.active_lanes().is_empty());
+        assert!(gateway
+            .dispatcher
+            .dispatched()
+            .iter()
+            .all(|work| work.bundle == "remote"
+                && work.model.ends_with(":remote")
+                && work.endpoint != "load"));
+        assert_eq!(gateway.dispatcher.execution_authority(), vec![true; 6]);
+
+        for surface in ["native", "chat", "completions"] {
+            let state = State(Arc::clone(&gateway.state));
+            let response = match surface {
+                "native" => proxy_request(state, json_request("/v1/generate/acme/chat", json!({"prompt":"hello", "max_new_tokens":4, "stream":true})), "generate").await,
+                "chat" => proxy_chat(state, json_request("/v1/chat/completions", json!({"model":"acme/chat", "messages":[{"role":"user", "content":"hello"}], "stream":true}))).await,
+                "completions" => proxy_completions(state, json_request("/v1/completions", json!({"model":"acme/chat", "prompt":"hello", "max_tokens":4, "stream":true}))).await,
+                _ => unreachable!(),
+            };
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(stamped(&response), (Some("remote"), Some("team-sie")));
+            let body = axum::body::to_bytes(response.into_body(), 8192)
+                .await
+                .unwrap();
+            assert!(String::from_utf8_lossy(&body).contains("[DONE]"));
+        }
+        assert!(gateway.state.demand_tracker.active_lanes().is_empty());
+        assert_eq!(gateway.dispatcher.execution_authority(), vec![true; 9]);
+
+        // Demand from two gateways reaches one decision, rather than dividing
+        // the configured rate independently at each gateway.
+        let replica = TestGateway::with_threshold_routing(&[&generate, &extract], true).await;
+        replica
+            .add_verified_worker("remote-2", REMOTE_LANE, &[])
+            .await;
+        let second = broker.bind(&replica).await;
+        let mut standby = ThresholdSampler::default();
+        let _ = second.coordinator.sample(&mut standby).await;
+        tokio::time::sleep(Duration::from_millis(1050)).await;
+        binding.coordinator.sample(&mut sampler).await.unwrap();
+        for _ in 0..3 {
+            second.coordinator.record_request("acme/chat").unwrap();
+        }
+        let _ = second.coordinator.sample(&mut standby).await;
+        tokio::time::sleep(Duration::from_millis(1050)).await;
+        binding.coordinator.sample(&mut sampler).await.unwrap();
+        assert_eq!(
+            binding.coordinator.decision("acme/chat").unwrap(),
+            ThresholdDecision::WakeLocal
+        );
+        gateway
+            .add_verified_worker("local-1", LOCAL_LANE, &[])
+            .await;
+        let before = gateway.dispatcher.dispatched().len();
+        let response = buffered_surface(&gateway, "native", json!({})).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["x-sie-fallback-reason"], "model_loading");
+        assert_eq!(
+            &gateway.dispatcher.dispatched()[before..],
+            &[
+                dispatched("load", LOCAL_LANE, "acme/chat"),
+                dispatched("generate", REMOTE_LANE, "acme/chat:remote"),
+            ]
+        );
+        gateway
+            .add_verified_worker("local-1", LOCAL_LANE, &["acme/chat"])
+            .await;
+        let response = buffered_surface(&gateway, "chat", json!({})).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(stamped(&response), (Some("local"), None));
+        assert_eq!(
+            gateway.dispatcher.dispatched().last().unwrap().model,
+            "acme/chat"
+        );
+    }
+    #[tokio::test]
+    async fn threshold_authority_preserves_selectors_validation_and_configuration_fences() {
+        use crate::handlers::test_support::ThresholdBroker;
+        use crate::state::threshold_coordinator::ThresholdSampler;
+        use sha2::{Digest, Sha256};
+        let Some(broker) = ThresholdBroker::start().await else {
+            return;
+        };
+        let policy = "\nrouting:\n  policy: threshold\n  fallback_profile: remote\n  wake_above: 1\n  sleep_below: 0.5\n  window_s: 1\n  cooldown_s: 1\n";
+        let config = format!("{HYBRID_GENERATE_MODEL}{policy}");
+        let gateway = TestGateway::with_threshold_routing(&[&config], true).await;
+        // A legacy worker may not become the authority of a threshold rewrite.
+        gateway.add_worker("remote-1", REMOTE_LANE, &[]).await;
+        let binding = broker.bind(&gateway).await;
+        let mut sampler = ThresholdSampler::default();
+        binding.coordinator.sample(&mut sampler).await.unwrap();
+        for _ in 0..2 {
+            tokio::time::sleep(Duration::from_millis(1050)).await;
+            binding.coordinator.sample(&mut sampler).await.unwrap();
+        }
+        let response = proxy_request(
+            State(Arc::clone(&gateway.state)),
+            json_request(
+                "/v1/generate/acme/chat",
+                json!({"prompt":"", "max_new_tokens":0}),
+            ),
+            "generate",
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let response = buffered_surface(&gateway, "native", json!({"profile":"default"})).await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        binding.coordinator.sample(&mut sampler).await.unwrap();
+        let key = Sha256::digest(b"acme/chat")
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let counts = broker
+            .context
+            .get_key_value("SIE_THRESHOLD_COUNTS")
+            .await
+            .unwrap();
+        let message = counts
+            .stream
+            .get_last_raw_message_by_subject(&format!("$KV.SIE_THRESHOLD_COUNTS.{key}"))
+            .await
+            .unwrap();
+        let counter: serde_json::Value = serde_json::from_slice(&message.payload).unwrap();
+        assert_eq!(counter["total"], 0);
+        assert!(gateway.dispatcher.dispatched().is_empty());
+
+        for lane in gateway.state.demand_tracker.active_lanes() {
+            gateway.state.demand_tracker.clear(&lane);
+        }
+        let before = gateway.dispatcher.dispatched().len();
+        let response = buffered_surface(&gateway, "native", json!({})).await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(gateway.dispatcher.dispatched().len(), before);
+        assert!(gateway
+            .state
+            .demand_tracker
+            .active_lanes()
+            .iter()
+            .all(|lane| lane.bundle() != "default"));
+        gateway
+            .add_verified_worker("remote-1", REMOTE_LANE, &[])
+            .await;
+        let mut request = json_request(
+            "/v1/generate/acme/chat",
+            json!({"prompt":"hello", "max_new_tokens":4}),
+        );
+        request
+            .headers_mut()
+            .insert("x-sie-remote", HeaderValue::from_static("forbid"));
+        let response = proxy_request(State(Arc::clone(&gateway.state)), request, "generate").await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(gateway.dispatcher.dispatched().is_empty());
+
+        // Replace the registry while retaining the same epoch, and even the
+        // same execution hashes: the old decision must still lose authority.
+        gateway.state.model_registry.reload();
+        assert!(gateway
+            .state
+            .model_registry
+            .threshold_remote_route("acme/chat", 1)
+            .is_none());
+        assert!(gateway
+            .state
+            .model_registry
+            .threshold_remote_route("acme/chat", 2)
+            .is_none());
+        gateway.state.model_registry.clear_threshold_binding();
+        let response = buffered_surface(&gateway, "chat", json!({})).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["x-sie-fallback-reason"], "provisioning");
     }
 }

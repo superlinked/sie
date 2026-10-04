@@ -182,6 +182,13 @@ config:
 # config deltas. It does not own config persistence or writes;
 # POST /v1/configs/models is not registered on the gateway (axum returns 405).
 gateway:
+  # -- Experimental shared-demand routing. Creates an isolated authenticated
+  # control broker; disabled deployments continue to refuse threshold policies.
+  thresholdRouting:
+    enabled: false
+    # -- Same pinned broker image used by gateway integration tests.
+    image: nats:2.12-alpine@sha256:b270f5e2428354c0335612694d7dd2fb588148e567a5757fdff325ef9c9332e6
+
   # -- Job/friendly model aliases → canonical model id, optionally bundle-
   # qualified. Maps a request like `model: "sql"` to a real model, and a
   # `bundle:/org/model` target pins a precision/profile bundle (e.g. route SQL

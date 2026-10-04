@@ -4,6 +4,8 @@ import copy
 import hashlib
 import json
 import logging
+import math
+import os
 import re
 import threading
 from collections.abc import Iterable
@@ -135,7 +137,7 @@ def validate_routing_config(config: dict[str, Any]) -> None:
     policy = routing.get("policy")
     if not isinstance(policy, str) or policy not in {"remote_only", "fallback", "threshold"}:
         raise ValueError("routing must set a recognized policy")
-    if policy == "threshold":
+    if policy == "threshold" and os.environ.get("SIE_THRESHOLD_ROUTING_ENABLED") != "true":
         raise ValueError("routing policy 'threshold' is not available yet")
 
     threshold_fields = ("wake_above", "sleep_below", "window_s", "cooldown_s")
@@ -151,23 +153,42 @@ def validate_routing_config(config: dict[str, Any]) -> None:
     else:
         if config.get("remote_backed"):
             raise ValueError("a 'remote_backed' model cannot use routing policy 'fallback'")
-        if any(routing.get(key) is not None for key in threshold_fields):
-            raise ValueError("routing policy 'fallback' takes no threshold field")
-        triggers = routing.get("triggers")
-        if triggers is not None:
-            allowed = {"provisioning", "model_loading", "saturated", "unhealthy"}
-            if not isinstance(triggers, list | tuple) or not triggers:
-                raise ValueError("routing.triggers must name at least one trigger; omit it for the default")
-            if any(not isinstance(trigger, str) or trigger not in allowed for trigger in triggers):
-                raise ValueError("routing.triggers contains an unsupported trigger")
-            if len(set(triggers)) != len(triggers):
-                raise ValueError("routing.triggers must not repeat a trigger")
+        if policy == "threshold":
+            if routing.get("triggers") is not None:
+                raise ValueError("routing policy 'threshold' does not use triggers")
+            for key in threshold_fields:
+                value = routing.get(key)
+                error = f"routing.{key} must be a finite positive number"
+                if isinstance(value, bool) or not isinstance(value, int | float):
+                    raise ValueError(error)
+                try:
+                    finite = math.isfinite(value)
+                except OverflowError:
+                    finite = False
+                if not finite or value <= 0:
+                    raise ValueError(error)
+            if routing["sleep_below"] >= routing["wake_above"]:
+                raise ValueError("routing.sleep_below must be lower than routing.wake_above")
+            if routing["window_s"] > 86400 or routing["cooldown_s"] > 86400:
+                raise ValueError("threshold windows must not exceed 86400 seconds")
+        else:
+            if any(routing.get(key) is not None for key in threshold_fields):
+                raise ValueError("routing policy 'fallback' takes no threshold field")
+            triggers = routing.get("triggers")
+            if triggers is not None:
+                allowed = {"provisioning", "model_loading", "saturated", "unhealthy"}
+                if not isinstance(triggers, list | tuple) or not triggers:
+                    raise ValueError("routing.triggers must name at least one trigger; omit it for the default")
+                if any(not isinstance(trigger, str) or trigger not in allowed for trigger in triggers):
+                    raise ValueError("routing.triggers contains an unsupported trigger")
+                if len(set(triggers)) != len(triggers):
+                    raise ValueError("routing.triggers must not repeat a trigger")
         tasks = config.get("tasks") or {}
         if not isinstance(tasks, dict):
             raise ValueError("routing tasks must be a mapping")
         if any(tasks.get(task) is not None for task in ("encode", "score")):
             raise ValueError(
-                "routing policy 'fallback' cannot serve encode or score until remote equivalence is proven"
+                f"routing policy '{policy}' cannot serve encode or score until remote equivalence is proven"
             )
 
     profiles = config.get("profiles") or {}

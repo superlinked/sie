@@ -4,9 +4,12 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use arc_swap::ArcSwap;
+use arc_swap::{ArcSwap, ArcSwapOption};
 use sha2::{Digest, Sha256};
 use tracing::{debug, error, info, warn};
+
+use crate::state::threshold_coordinator::{ThresholdDecision, ThresholdError, ThresholdTarget};
+use crate::state::threshold_runtime::ThresholdBinding;
 
 use crate::types::bundle::{engine_adapter_prefixes, BundleInfo, DEFAULT_ENGINE, KNOWN_ENGINES};
 use crate::types::model::{
@@ -237,6 +240,8 @@ pub struct ModelRegistry {
     /// installed is protected by the retention guard, so a config service
     /// that later restarts empty cannot take it down.
     authoritative_surface: AtomicBool,
+    threshold_enabled: bool,
+    threshold_binding: ArcSwapOption<ThresholdBinding>,
 }
 
 impl ModelRegistry {
@@ -245,12 +250,23 @@ impl ModelRegistry {
         models_dir: impl AsRef<Path>,
         auto_load: bool,
     ) -> Self {
+        Self::with_threshold_routing(bundles_dir, models_dir, auto_load, false)
+    }
+
+    pub fn with_threshold_routing(
+        bundles_dir: impl AsRef<Path>,
+        models_dir: impl AsRef<Path>,
+        auto_load: bool,
+        threshold_enabled: bool,
+    ) -> Self {
         let registry = Self {
             bundles_dir: bundles_dir.as_ref().to_path_buf(),
             models_dir: models_dir.as_ref().to_path_buf(),
             snapshot: ArcSwap::from_pointee(RegistrySnapshot::default()),
             write_lock: Mutex::new(()),
             authoritative_surface: AtomicBool::new(false),
+            threshold_enabled,
+            threshold_binding: ArcSwapOption::empty(),
         };
         if auto_load {
             registry.reload();
@@ -366,7 +382,7 @@ impl ModelRegistry {
                         if path.extension().and_then(|e| e.to_str()) != Some("yaml") {
                             continue;
                         }
-                        match Self::load_model_file(&path) {
+                        match Self::load_model_file(&path, self.threshold_enabled) {
                             Ok(model_entries) => {
                                 for model_entry in model_entries {
                                     debug!(
@@ -504,11 +520,14 @@ impl ModelRegistry {
         })
     }
 
-    fn load_model_file(path: &Path) -> Result<Vec<ModelEntry>, Box<dyn std::error::Error>> {
+    fn load_model_file(
+        path: &Path,
+        threshold_enabled: bool,
+    ) -> Result<Vec<ModelEntry>, Box<dyn std::error::Error>> {
         let content = std::fs::read_to_string(path)?;
         let config: ModelConfig = serde_yaml::from_str(&content)?;
 
-        Self::expand_model_config_into_profile_variants(&config).map_err(|message| {
+        Self::expand_model_config_with_threshold(&config, threshold_enabled).map_err(|message| {
             Box::new(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 message,
@@ -538,10 +557,18 @@ impl ModelRegistry {
         Ok(())
     }
 
+    #[cfg(test)]
     fn expand_model_config_into_profile_variants(
         config: &ModelConfig,
     ) -> Result<Vec<ModelEntry>, String> {
-        let base_entry = Self::model_entry_from_config(config)?;
+        Self::expand_model_config_with_threshold(config, false)
+    }
+
+    fn expand_model_config_with_threshold(
+        config: &ModelConfig,
+        threshold_enabled: bool,
+    ) -> Result<Vec<ModelEntry>, String> {
+        let base_entry = Self::model_entry_with_threshold(config, threshold_enabled)?;
         let mut entries = if base_entry.profile_names.contains("default") {
             vec![base_entry.clone()]
         } else {
@@ -694,7 +721,15 @@ impl ModelRegistry {
             .retain(|name, _| Some(name.as_str()) == native_encode_output);
     }
 
+    #[cfg(test)]
     fn model_entry_from_config(config: &ModelConfig) -> Result<ModelEntry, String> {
+        Self::model_entry_with_threshold(config, false)
+    }
+
+    fn model_entry_with_threshold(
+        config: &ModelConfig,
+        threshold_enabled: bool,
+    ) -> Result<ModelEntry, String> {
         let info_extras = crate::types::model::ModelInfoExtras::from_model_config(config);
         let model_name = config.name.clone();
         let pool = Self::normalize_model_pool(config.pool.as_deref())?;
@@ -722,17 +757,29 @@ impl ModelRegistry {
             info_extras,
         };
         Self::validate_profile_grammar_fallbacks(&entry)?;
-        Self::validate_remote_routing(&entry)?;
+        Self::validate_remote_routing(&entry, threshold_enabled)?;
         Ok(entry)
     }
 
-    fn validate_remote_routing(entry: &ModelEntry) -> Result<(), String> {
+    fn validate_remote_routing(entry: &ModelEntry, threshold_enabled: bool) -> Result<(), String> {
         let Some(routing) = &entry.info_extras.routing else {
             return Ok(());
         };
         routing.validate()?;
-        if matches!(routing.policy, RoutingPolicy::Threshold) {
+        if matches!(routing.policy, RoutingPolicy::Threshold) && !threshold_enabled {
             return Err("routing policy threshold is not available yet".into());
+        }
+        if routing.policy == RoutingPolicy::Threshold
+            && entry.info_extras.outputs.iter().any(|output| {
+                matches!(
+                    output.as_str(),
+                    "dense" | "sparse" | "multivector" | "score"
+                )
+            })
+        {
+            return Err(
+                "threshold routing requires fleet equivalence for numerical outputs".into(),
+            );
         }
         let profile_kind = |name: &str| {
             entry
@@ -1716,6 +1763,25 @@ impl ModelRegistry {
         {
             return None;
         }
+        Self::remote_plan_from_snapshot(&snap, local)
+    }
+
+    fn remote_plan_from_snapshot(
+        snap: &RegistrySnapshot,
+        local: &ModelEntry,
+    ) -> Option<RemoteFallbackPlan> {
+        if local.canonical_profile != "default"
+            || !matches!(local.served_by(), ServedBy::Local)
+            || local.info_extras.outputs.iter().any(|output| {
+                matches!(
+                    output.as_str(),
+                    "dense" | "sparse" | "multivector" | "score"
+                )
+            })
+        {
+            return None;
+        }
+        let routing = local.info_extras.routing.as_ref()?;
         let remote_name = format!(
             "{}:{}",
             local.canonical_base_model,
@@ -1744,6 +1810,83 @@ impl ModelRegistry {
             revision: Self::immutable_model_revision(remote),
             served_by,
         })
+    }
+
+    pub(crate) fn threshold_targets(
+        &self,
+        epoch: u64,
+    ) -> Result<(ModelRegistryGeneration, Vec<ThresholdTarget>), ThresholdError> {
+        let generation = self.capture_generation();
+        let snap = &generation.snapshot;
+        let mut targets = Vec::new();
+        for local in snap.models.values() {
+            let Some(routing) = local.info_extras.routing.as_ref() else {
+                continue;
+            };
+            if routing.policy != RoutingPolicy::Threshold || local.canonical_profile != "default" {
+                continue;
+            }
+            let plan = Self::remote_plan_from_snapshot(snap, local)
+                .ok_or(ThresholdError::Configuration)?;
+            let local_bundle = local.bundles.first().ok_or(ThresholdError::Configuration)?;
+            let local_hash = snap
+                .bundle_pool_config_hashes
+                .get(&(
+                    local_bundle.clone(),
+                    Self::entry_pool_name(local).to_string(),
+                ))
+                .ok_or(ThresholdError::Configuration)?;
+            if local_hash.is_empty() {
+                return Err(ThresholdError::Configuration);
+            }
+            let mut fingerprint = Sha256::new();
+            fingerprint.update(local_hash.as_bytes());
+            fingerprint.update(plan.config_hash.as_bytes());
+            let fingerprint = fingerprint
+                .finalize()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            targets.push(ThresholdTarget::new(
+                &local.name,
+                epoch,
+                &fingerprint,
+                routing,
+            )?);
+        }
+        Ok((generation, targets))
+    }
+
+    pub(crate) fn install_threshold_binding(&self, binding: Arc<ThresholdBinding>) {
+        self.with_current_generation(&binding.generation, || {
+            self.threshold_binding.store(Some(binding.clone()))
+        });
+    }
+
+    pub(crate) fn clear_threshold_binding(&self) {
+        self.threshold_binding.store(None);
+    }
+
+    pub(crate) fn threshold_remote_route(
+        &self,
+        model: &str,
+        epoch: u64,
+    ) -> Option<RemoteFallbackPlan> {
+        let binding = self.threshold_binding.load_full()?;
+        if binding.epoch != epoch || model.contains(':') {
+            return None;
+        }
+        // Local counting, decision lookup and plan construction share one
+        // fenced snapshot; no broker I/O runs while this lock is held.
+        self.with_current_generation(&binding.generation, || {
+            let snap = &binding.generation.snapshot;
+            let canonical = Self::canonical_model_name(snap, model)?;
+            binding.coordinator.record_request(&canonical).ok()?;
+            if binding.coordinator.decision(&canonical).ok()? != ThresholdDecision::Remote {
+                return None;
+            }
+            Self::remote_plan_from_snapshot(snap, snap.models.get(&canonical)?)
+        })?
     }
 
     pub fn get_model_pool_name(&self, model: &str) -> Option<String> {
@@ -2357,7 +2500,7 @@ impl ModelRegistry {
         };
         let applied = configs.len();
         let (new_models, new_model_names_lower) =
-            Self::build_authoritative_models(configs, &new_bundles)?;
+            Self::build_authoritative_models(configs, &new_bundles, self.threshold_enabled)?;
 
         let mut bundle_config_hashes =
             Self::rebuild_bundle_config_hashes(&new_bundles, &new_models);
@@ -2438,6 +2581,7 @@ impl ModelRegistry {
     fn build_authoritative_models(
         configs: Vec<ModelConfig>,
         bundles: &HashMap<String, BundleInfo>,
+        threshold_enabled: bool,
     ) -> Result<AuthoritativeModels, String> {
         let mut new_models: HashMap<String, ModelEntry> = HashMap::new();
         let mut new_model_names_lower: HashMap<String, String> = HashMap::new();
@@ -2489,7 +2633,7 @@ impl ModelRegistry {
                 ));
             }
 
-            for mut entry in Self::expand_model_config_into_profile_variants(&config)? {
+            for mut entry in Self::expand_model_config_with_threshold(&config, threshold_enabled)? {
                 Self::assign_bundles(&mut entry, bundles);
                 new_model_names_lower.insert(entry.name.to_lowercase(), entry.name.clone());
                 new_models.insert(entry.name.clone(), entry);
@@ -2710,7 +2854,7 @@ impl ModelRegistry {
         let mut affected_model_names = vec![sie_id.clone()];
         if let Some(base_entry) = snap.models.get(sie_id).cloned() {
             Self::validate_profile_grammar_fallbacks(&base_entry)?;
-            Self::validate_remote_routing(&base_entry)?;
+            Self::validate_remote_routing(&base_entry, self.threshold_enabled)?;
             let old_variants: Vec<String> = snap
                 .models
                 .keys()
@@ -2885,6 +3029,31 @@ mod tests {
             }
         })).unwrap();
         (dir, registry, config)
+    }
+
+    #[test]
+    fn threshold_flag_admits_generation_but_keeps_numerical_and_zero_epoch_gates() {
+        let (_dir, mut registry, mut config) = remote_routing_fixture();
+        registry.threshold_enabled = true;
+        config.routing = Some(
+            serde_json::from_value(serde_json::json!({
+                "policy":"threshold", "fallback_profile":"remote", "wake_above":2,
+                "sleep_below":1, "window_s":1, "cooldown_s":1
+            }))
+            .unwrap(),
+        );
+        config.tasks = Some(serde_yaml::from_str("generate: {}\n").unwrap());
+        registry
+            .replace_model_configs_authoritative(vec![config.clone()])
+            .unwrap();
+        assert_eq!(registry.threshold_targets(1).unwrap().1.len(), 1);
+        assert!(registry.threshold_targets(0).is_err());
+        config.tasks = Some(serde_yaml::from_str("encode:\n  dense:\n    dim: 2\n").unwrap());
+        assert!(registry
+            .replace_model_configs_authoritative(vec![config])
+            .unwrap_err()
+            .contains("fleet equivalence"));
+        assert_eq!(registry.threshold_targets(1).unwrap().1.len(), 1);
     }
 
     #[test]

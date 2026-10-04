@@ -1182,4 +1182,42 @@ mod tests {
         let body = to_bytes(srt.into_body(), 4096).await.unwrap();
         assert_eq!(body, "1\n00:00:00,000 --> 00:00:01,000\nhello world\n");
     }
+    #[tokio::test]
+    async fn audio_threshold_remote_creates_no_local_demand_or_warmup() {
+        use crate::handlers::test_support::ThresholdBroker;
+        use crate::state::threshold_coordinator::ThresholdSampler;
+        let Some(broker) = ThresholdBroker::start().await else {
+            return;
+        };
+        let config = format!("{HYBRID_EXTRACT_MODEL}\nrouting:\n  policy: threshold\n  fallback_profile: remote\n  wake_above: 1\n  sleep_below: 0.5\n  window_s: 1\n  cooldown_s: 1\n");
+        let gateway = TestGateway::with_threshold_routing(&[&config], true).await;
+        gateway
+            .add_verified_worker("remote-1", REMOTE_LANE, &[])
+            .await;
+        let binding = broker.bind(&gateway).await;
+        let mut sampler = ThresholdSampler::default();
+        binding.coordinator.sample(&mut sampler).await.unwrap();
+        for _ in 0..2 {
+            tokio::time::sleep(std::time::Duration::from_millis(1050)).await;
+            binding.coordinator.sample(&mut sampler).await.unwrap();
+        }
+        let (content_type, body) =
+            multipart_body(&[("model", "acme/extract")], "clip.wav", b"RIFFtest");
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/audio/transcriptions")
+            .header(header::CONTENT_TYPE, content_type)
+            .body(Body::from(body))
+            .unwrap();
+        let response = proxy_openai_transcription(State(Arc::clone(&gateway.state)), request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["x-sie-served-by"], "remote");
+        assert!(!response.headers().contains_key("x-sie-fallback-reason"));
+        assert!(gateway.state.demand_tracker.active_lanes().is_empty());
+        let work = gateway.dispatcher.dispatched();
+        assert_eq!(work.len(), 1);
+        assert_eq!(work[0].model, "acme/extract:remote");
+        assert_eq!(work[0].bundle, "remote");
+        assert_eq!(gateway.dispatcher.execution_authority(), vec![true]);
+    }
 }

@@ -259,12 +259,13 @@ async fn run_server(cfg: Config) -> Result<(), Box<dyn std::error::Error>> {
     // Set up discovery
     let discovery = StaticDiscovery::new(config.worker_urls.clone());
 
+    let threshold_settings = state::threshold_runtime::ThresholdSettings::from_env(&config)?;
     // Set up model registry (before NATS — NatsManager depends on it)
-    let model_registry = Arc::new(ModelRegistry::new(
-        &config.bundles_dir,
-        &config.models_dir,
-        true,
-    ));
+    let model_registry = Arc::new(if threshold_settings.is_some() {
+        ModelRegistry::with_threshold_routing(&config.bundles_dir, &config.models_dir, true, true)
+    } else {
+        ModelRegistry::new(&config.bundles_dir, &config.models_dir, true)
+    });
 
     // Monotonic epoch counter shared between bootstrap, NATS delta handler,
     // epoch poller, and the /v1/configs/models/{id}/status endpoint. Starts
@@ -741,6 +742,10 @@ async fn run_server(cfg: Config) -> Result<(), Box<dyn std::error::Error>> {
         Arc::clone(&state),
         server::LaneBacklogMode::JetStreamRequired,
     );
+
+    let _threshold_task = threshold_settings.map(|settings| {
+        state::threshold_runtime::spawn_threshold_runtime(Arc::clone(&state), settings)
+    });
 
     let app = server::create_router(Arc::clone(&state), Arc::clone(&config));
 

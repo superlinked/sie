@@ -7,6 +7,7 @@ config: the models directory, a config added at runtime, and a config snapshot.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from sie_server.adapters._generation_base import GenerationAdapter
@@ -19,6 +20,7 @@ from sie_server.core.loader import expand_profile_variants, resolve_adapter_clas
 
 _HYBRID_POLICIES = frozenset({"fallback", "threshold"})
 _EQUIVALENCE_TASKS = ("encode", "score")
+_MAX_THRESHOLD_WINDOW_S = 86400
 
 
 def hybrid_equivalence_refusal(config: ModelConfig) -> str | None:
@@ -79,8 +81,15 @@ def validate_model_routing(
     if routing is None:
         return
     if routing.policy == "threshold":
-        msg = f"Model '{config.sie_id}': routing policy 'threshold' is not available yet"
-        raise ValueError(msg)
+        if os.environ.get("SIE_THRESHOLD_ROUTING_ENABLED") != "true":
+            msg = f"Model '{config.sie_id}': routing policy 'threshold' is not available yet"
+            raise ValueError(msg)
+        if not os.environ.get("SIE_IPC_SOCKET_PATH"):
+            raise ValueError("threshold routing requires a queue worker behind a threshold-enabled gateway")
+        if config.tasks.encode is not None or config.tasks.score is not None:
+            raise ValueError("threshold routing cannot serve encode or score until fleet equivalence is proven")
+        if (routing.window_s or 0) > _MAX_THRESHOLD_WINDOW_S or (routing.cooldown_s or 0) > _MAX_THRESHOLD_WINDOW_S:
+            raise ValueError("threshold windows must not exceed 86400 seconds")
     refusal = hybrid_equivalence_refusal(config)
     if refusal is not None and routing.fallback_profile is not None:
         # Dispatch expands live fields. A reused mutable Python config must

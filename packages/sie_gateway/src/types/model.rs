@@ -489,14 +489,16 @@ impl RoutingConfig {
 
     #[allow(dead_code)] // Consumed by subsequent cluster fallback dispatch.
     pub fn permits(&self, trigger: FallbackTrigger) -> bool {
-        self.policy == RoutingPolicy::Fallback
-            && self.triggers.as_ref().map_or(
-                matches!(
-                    trigger,
-                    FallbackTrigger::Provisioning | FallbackTrigger::ModelLoading
-                ),
-                |triggers| triggers.contains(&trigger),
-            )
+        matches!(
+            self.policy,
+            RoutingPolicy::Fallback | RoutingPolicy::Threshold
+        ) && self.triggers.as_ref().map_or(
+            matches!(
+                trigger,
+                FallbackTrigger::Provisioning | FallbackTrigger::ModelLoading
+            ),
+            |triggers| triggers.contains(&trigger),
+        )
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -512,6 +514,13 @@ impl RoutingConfig {
             .any(|value| !value.is_finite() || *value <= 0.0)
         {
             return Err("routing threshold bounds must be finite and positive".into());
+        }
+        if [self.window_s, self.cooldown_s]
+            .iter()
+            .flatten()
+            .any(|value| *value > 86400.0)
+        {
+            return Err("threshold windows must not exceed 86400 seconds".into());
         }
         match self.policy {
             RoutingPolicy::RemoteOnly => {
@@ -1127,6 +1136,8 @@ pool: customer-a
             json!({"policy":"threshold", "fallback_profile":"remote", "wake_above":2,
                 "sleep_below":1, "window_s":0, "cooldown_s":1}),
             json!({"policy":"threshold", "fallback_profile":"remote", "wake_above":2,
+                "sleep_below":1, "window_s":86401, "cooldown_s":1}),
+            json!({"policy":"threshold", "fallback_profile":"remote", "wake_above":2,
                 "sleep_below":1, "window_s":1, "cooldown_s":1, "triggers":["provisioning"]}),
         ] {
             assert!(
@@ -1141,7 +1152,7 @@ pool: customer-a
             "fallback_profile":"remote", "wake_above":2, "sleep_below":1,
             "window_s":1, "cooldown_s":1}))
         .unwrap();
-        assert!(!threshold.permits(FallbackTrigger::Provisioning));
+        assert!(threshold.permits(FallbackTrigger::Provisioning));
     }
 
     #[test]

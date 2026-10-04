@@ -2237,6 +2237,7 @@ fn fallback_plan_for_request(
     if !allowed
         || !explicit_bundle.is_empty()
         || attempt.active()
+        || ext.get::<RemoteFallbackOverride>().is_some()
         || ext.get::<ExplicitProfileSelector>().is_some()
         || remote_forbidden(headers).unwrap_or(true)
         || state.model_access_policy.is_some()
@@ -2251,6 +2252,40 @@ fn fallback_plan_for_request(
         return None;
     }
     state.model_registry.remote_fallback_plan(model, trigger)
+}
+
+/// Threshold decisions are counted only after caller validation and before
+/// any local demand or work is published. Caller selectors retain authority.
+#[allow(clippy::too_many_arguments)]
+fn threshold_remote_plan_for_request(
+    state: &AppState,
+    headers: &HeaderMap,
+    ext: &axum::http::Extensions,
+    model: &str,
+    allowed: bool,
+    explicit_bundle: &str,
+) -> Option<crate::state::model_registry::RemoteFallbackPlan> {
+    if !allowed
+        || !explicit_bundle.is_empty()
+        || ext.get::<RemoteFallbackOverride>().is_some()
+        || ext.get::<ExplicitProfileSelector>().is_some()
+        || state.model_access_policy.is_some()
+        || ["x-sie-machine-profile", "x-sie-pool", "x-sie-engine"]
+            .iter()
+            .any(|name| headers.contains_key(*name))
+        || !state
+            .work_publisher
+            .as_ref()
+            .is_some_and(|publisher| publisher.supports_execution_authority_v1())
+    {
+        return None;
+    }
+    let epoch = state.config_epoch.get();
+    let plan = state.model_registry.threshold_remote_route(model, epoch)?;
+    if state.config_epoch.get() != epoch || remote_forbidden(headers).unwrap_or(true) {
+        return None;
+    }
+    Some(plan)
 }
 
 /// Refusal classification is scoped to the local route and admitted workers.
@@ -2401,6 +2436,25 @@ fn model_loading_refusal(endpoint: &str) -> Response {
     refusal
 }
 
+fn native_bridge_eligible(
+    endpoint: &str,
+    parsed: Option<&(Vec<rmpv::Value>, publisher::WorkParams)>,
+) -> bool {
+    parsed.is_some_and(|(items, params)| match endpoint {
+        "generate" => params.generate.is_some(),
+        "extract" => {
+            !items.is_empty()
+                && items.iter().all(|item| {
+                    item.as_map()
+                        .and_then(|fields| rmpv_map_get(fields, "metadata"))
+                        .filter(|value| !value.is_nil())
+                        .is_none_or(|value| worker_metadata_encoded_size(value).is_some())
+                })
+        }
+        _ => false,
+    })
+}
+
 /// Begin one non-numerical bridge only at a typed pre-dispatch refusal.
 /// Fleet numerical admission remains separately gated; no failure
 /// after a work item was published reaches this helper.
@@ -2413,19 +2467,7 @@ fn native_fallback_plan(
     parsed: Option<&(Vec<rmpv::Value>, publisher::WorkParams)>,
     trigger: FallbackTrigger,
 ) -> Option<crate::state::model_registry::RemoteFallbackPlan> {
-    let eligible = parsed.is_some_and(|(items, params)| match endpoint {
-        "generate" => params.generate.is_some(),
-        "extract" => {
-            !items.is_empty()
-                && items.iter().all(|item| {
-                    item.as_map()
-                        .and_then(|fields| rmpv_map_get(fields, "metadata"))
-                        .filter(|value| !value.is_nil())
-                        .is_none_or(|value| worker_metadata_encoded_size(value).is_some())
-                })
-        }
-        _ => false,
-    });
+    let eligible = native_bridge_eligible(endpoint, parsed);
     fallback_plan_for_request(
         state,
         req.headers(),
@@ -2751,6 +2793,28 @@ async fn proxy_request_inner(
         );
     }
 
+    if let Some(plan) = threshold_remote_plan_for_request(
+        &state,
+        req.headers(),
+        req.extensions(),
+        &model_name,
+        native_bridge_eligible(endpoint, prepared_native_parsed.as_ref()),
+        "",
+    ) {
+        req.extensions_mut().insert(RemoteFallbackOverride(plan));
+        if let Some(body) = prepared_native_body {
+            *req.body_mut() = Body::from(body);
+        }
+        return Box::pin(proxy_request_inner(
+            state,
+            req,
+            endpoint,
+            provisioning_surface,
+            inbound_publish_cx,
+        ))
+        .await;
+    }
+
     // Resolve the effective pool in one shot. `resolve_effective_pool`
     // folds the demand-tracking probe ("was there an exact
     // (bundle, machine_profile) match?") into the same registry load it uses to pick a
@@ -3014,10 +3078,7 @@ async fn proxy_request_inner(
     let batch_target = if endpoint == "generate" {
         None
     } else if remote_forbidden(req.headers()).unwrap_or(false)
-        || req
-            .extensions()
-            .get::<FallbackAttempt>()
-            .is_some_and(FallbackAttempt::active)
+        || req.extensions().get::<RemoteFallbackOverride>().is_some()
     {
         match execution_authority_target(
             &state,
@@ -3072,10 +3133,7 @@ async fn proxy_request_inner(
     };
 
     let require_execution_authority_v1 = remote_forbidden(req.headers()).unwrap_or(false)
-        || req
-            .extensions()
-            .get::<FallbackAttempt>()
-            .is_some_and(FallbackAttempt::active);
+        || req.extensions().get::<RemoteFallbackOverride>().is_some();
     let token_id = extract_bearer_token(req.headers())
         .map(|t| mask_token(&t))
         .unwrap_or_default();
@@ -7894,6 +7952,32 @@ async fn resolve_generation_route(
             .map(|info| info.engine)
             .unwrap_or_else(|| crate::types::bundle::DEFAULT_ENGINE.to_string()),
     };
+    if let Some(plan) = threshold_remote_plan_for_request(
+        state,
+        hdr,
+        ext,
+        customer_model,
+        bridge_allowed,
+        explicit_bundle_override,
+    ) {
+        let mut remote_ext = ext.clone();
+        remote_ext.insert(RemoteFallbackOverride(plan));
+        return Box::pin(resolve_generation_route(
+            state,
+            hdr,
+            &bundle,
+            customer_model,
+            dispatch_model,
+            request_intent,
+            explicit_bundle_override,
+            &remote_ext,
+            bridge_allowed,
+            token_limit,
+            metric_labels_slot,
+        ))
+        .await;
+    }
+
     let lookup = resolve_effective_pool_for_model(
         &state.registry,
         Some(&state.pool_manager),

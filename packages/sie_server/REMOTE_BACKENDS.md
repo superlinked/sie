@@ -48,11 +48,12 @@ declared output (see [Single-node generation fallback](#single-node-generation-f
 A request that names a profile bypasses the bare-model policy, including an
 explicit `default`. Single-node OpenAI hybrid `encode` and `score` require the
 operator-owned equivalence admission described below. SIE hybrid encode and
-score require the fresh identity admission described below; `threshold` remains
-a separate delivery. Cluster remote profiles use the queue. Cluster
-generation and extraction fallback are described below. Cluster saturation and
-unhealthy-worker spill require explicit triggers. Numeric fleet bridges and
-coordinated threshold routing remain separate deliveries.
+score require the fresh identity admission described below. Cluster remote
+profiles use the queue. Cluster generation and extraction fallback are described
+below. Cluster saturation and unhealthy-worker spill require explicit triggers.
+Numeric fleet bridges remain separately gated. Experimental cluster threshold
+routing is opt-in as described below; single-node threshold routing remains
+refused.
 
 ## Single-node embedding example
 
@@ -439,7 +440,7 @@ local refusal and retry interval; streaming failures after the first output
 remain in the stream. Explicit selectors and `X-SIE-Remote: forbid` retain
 their existing authority.
 
-Numerical fleet equivalence and coordinated threshold routing remain inactive.
+Numerical fleet equivalence remains inactive. Threshold routing requires its separate deployment opt-in.
 
 ### Observing cluster fallback
 
@@ -451,3 +452,51 @@ set `alertRules.remoteFallbackPersistenceSeconds` to the desired threshold
 the same gateway replica. Successful local serving clears that replica's
 observed duration. See [the telemetry contract](../../telemetry/README.md#remote-fallback-observations)
 for bounded-label and replica semantics.
+
+
+## Experimental cluster threshold routing
+
+Set `gateway.thresholdRouting.enabled: true` in the `sie-cluster` chart only
+when opting into shared demand routing for generation or extraction. It is off
+by default. The chart requires authenticated inference NATS, sie-config and
+queue worker sidecars, and starts a separate ephemeral control broker that
+accepts only gateway credentials. Workers retain their existing queue
+connection and upstream secrets. The control broker has a gateway-only ingress
+NetworkPolicy; the inference broker and its persisted work are unchanged.
+
+A local model with an existing remote profile can use:
+
+```yaml
+routing:
+  policy: threshold
+  fallback_profile: remote
+  wake_above: 2
+  sleep_below: 0.5
+  window_s: 10
+  cooldown_s: 60
+```
+
+Rates count validated bare-model requests per second across all gateway
+replicas. Once low demand is established, requests use the remote profile and
+create no local demand or load-only work. Sustained high demand resumes local
+routing: a cold local lane receives demand and load-only work while the remote
+profile bridges provisioning and model loading. Once local capacity is ready,
+requests stay local. Sustained low demand returns requests to remote; existing
+worker idle eviction and autoscaling govern when the local lane sleeps.
+
+Explicit profiles, bundle/pool/machine/engine selectors and `X-SIE-Remote:
+forbid` retain caller authority. Managed deployment routes and numerical
+encode/score models remain outside this flag. Invalid requests do not add
+threshold demand. A remote-selected request still requires the current exact
+worker execution contract; it cannot select a legacy worker or retry into
+another backend after output has started. An unavailable remote lane returns
+the ordinary remote provisioning/refusal response, without waking the local
+lane or recursively bridging to itself.
+
+A newly started, disconnected or configuration-skewed coordinator retains the
+ordinary local warm-up/fallback behavior until it has fresh sustained evidence.
+Windows have at least one-second resolution and a maximum of 86400 seconds.
+The isolated broker is memory-backed and single-replica in the chart: a restart
+rebuilds evidence conservatively. This is an experimental routing control,
+without a measured throughput, cold-start or cost acceptance claim.
+See the [coordinator contract](../sie_gateway/docs/threshold-routing.md).

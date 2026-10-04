@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 import yaml
-from sie_config.model_registry import ModelRegistry
+from sie_config.model_registry import ModelRegistry, validate_routing_config
 from sie_server.config.upstreams import Upstream, install_upstreams
 from sie_server.core.registry import ModelRegistry as WorkerModelRegistry
 from sie_server.ipc_types import ReplaceModelConfigEntry, ReplaceModelConfigsRequest
@@ -98,3 +98,53 @@ async def test_a_remote_lane_worker_reports_the_control_plane_hash(registry: Mod
     assert response.unsupported_models == []
     assert response.bundle_config_hash
     assert response.bundle_config_hash == registry.compute_bundle_config_hash("remote")
+
+
+THRESHOLD = {
+    "policy": "threshold",
+    "fallback_profile": "remote",
+    "wake_above": 2,
+    "sleep_below": 1,
+    "window_s": 1,
+    "cooldown_s": 1,
+}
+
+
+def test_threshold_config_is_flagged_and_routes_to_existing_bundles(
+    registry: ModelRegistry, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = {**copy.deepcopy(HYBRID), "tasks": {"generate": {}}, "routing": THRESHOLD}
+    with pytest.raises(ValueError, match="not available yet"):
+        validate_routing_config(config)
+    monkeypatch.setenv("SIE_THRESHOLD_ROUTING_ENABLED", "true")
+    validate_routing_config(config)
+    registry.add_model_config(config)
+    assert registry.resolve_bundle("acme/hybrid") == "default"
+    assert registry.resolve_bundle("acme/hybrid:remote") == "remote"
+    with pytest.raises(ValueError, match="remote equivalence"):
+        validate_routing_config({**HYBRID, "routing": THRESHOLD})
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"wake_above": True},
+        {"sleep_below": 2},
+        {"window_s": float("inf")},
+        {"cooldown_s": 0},
+        {"window_s": 86401},
+        {"cooldown_s": None},
+        {"triggers": ["saturated"]},
+    ],
+)
+def test_enabled_threshold_keeps_policy_bounds(change: dict[str, object], monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SIE_THRESHOLD_ROUTING_ENABLED", "true")
+    with pytest.raises(ValueError, match=r"routing|threshold"):
+        validate_routing_config({**HYBRID, "tasks": {"generate": {}}, "routing": {**THRESHOLD, **change}})
+
+
+@pytest.mark.parametrize("field", ["wake_above", "sleep_below", "window_s", "cooldown_s"])
+def test_threshold_rejects_unrepresentable_integer_bounds(field: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SIE_THRESHOLD_ROUTING_ENABLED", "true")
+    with pytest.raises(ValueError, match="finite positive number"):
+        validate_routing_config({**HYBRID, "tasks": {"generate": {}}, "routing": {**THRESHOLD, field: 10**400}})
