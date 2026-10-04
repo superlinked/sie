@@ -630,6 +630,7 @@ pub(crate) struct ThresholdBroker {
     pub context: async_nats::jetstream::Context,
     _process: tokio::process::Child,
     _config: tempfile::NamedTempFile,
+    _store_dir: tempfile::TempDir,
 }
 
 impl ThresholdBroker {
@@ -640,10 +641,13 @@ impl ThresholdBroker {
         let fixture = include_str!("../../../../tools/ci/fixtures/sie-threshold-nats.conf")
             .replace("port: 4222", &format!("listen: 127.0.0.1:{port}"))
             .replace("http_port: 8222", "http_port: -1");
+        let store_dir = tempfile::tempdir().unwrap();
         let config = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(config.path(), fixture).unwrap();
         let process = tokio::process::Command::new("nats-server")
             .args(["-c", config.path().to_str().unwrap()])
+            .arg("-sd")
+            .arg(store_dir.path())
             .env(
                 "SIE_NATS_AUTH_GATEWAY_PASSWORD",
                 "GatewayThresholdTestPassword0123456789",
@@ -652,7 +656,7 @@ impl ThresholdBroker {
             .stderr(std::process::Stdio::null())
             .kill_on_drop(true)
             .spawn();
-        let process = match process {
+        let mut process = match process {
             Ok(process) => process,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 assert!(
@@ -663,19 +667,27 @@ impl ThresholdBroker {
             }
             Err(error) => panic!("control fixture start failed: {error}"),
         };
-        for _ in 0..100 {
-            if let Ok(client) = async_nats::ConnectOptions::new()
-                .user_and_password(
-                    "sie-gateway".into(),
-                    "GatewayThresholdTestPassword0123456789".into(),
-                )
-                .connect(format!("nats://127.0.0.1:{port}"))
-                .await
+        let ready_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while tokio::time::Instant::now() < ready_deadline {
+            if let Some(status) = process.try_wait().expect("control fixture status") {
+                panic!("control fixture exited before readiness: {status}");
+            }
+            if let Ok(Ok(client)) = tokio::time::timeout(
+                Duration::from_millis(250),
+                async_nats::ConnectOptions::new()
+                    .user_and_password(
+                        "sie-gateway".into(),
+                        "GatewayThresholdTestPassword0123456789".into(),
+                    )
+                    .connect(format!("nats://127.0.0.1:{port}")),
+            )
+            .await
             {
                 return Some(Self {
                     context: async_nats::jetstream::new(client),
                     _process: process,
                     _config: config,
+                    _store_dir: store_dir,
                 });
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
