@@ -97,6 +97,11 @@ impl ServingDisclosure {
 #[derive(Clone, Default)]
 pub(crate) struct FallbackAttempt(Arc<Mutex<Option<LocalRefusal>>>);
 
+/// A compatibility facade owns response validation before a bridge commits.
+/// This extension is gateway-created and cannot be supplied by a caller.
+#[derive(Clone)]
+pub(crate) struct DeferredFallbackFinish;
+
 struct LocalRefusal {
     response: Response,
     reason: &'static str,
@@ -772,8 +777,8 @@ mod tests {
         proxy_chat, proxy_completions, proxy_openai_embeddings, proxy_request, proxy_responses,
     };
     use crate::handlers::test_support::{
-        Dispatched, TestGateway, HYBRID_GENERATE_MODEL, LOCAL_ENCODE_MODEL, LOCAL_LANE,
-        REMOTE_ENCODE_MODEL, REMOTE_LANE,
+        Dispatched, TestGateway, HYBRID_EXTRACT_MODEL, HYBRID_GENERATE_MODEL, LOCAL_ENCODE_MODEL,
+        LOCAL_LANE, REMOTE_ENCODE_MODEL, REMOTE_LANE,
     };
 
     fn json_request(uri: &str, body: serde_json::Value) -> Request {
@@ -783,6 +788,326 @@ mod tests {
             .header("content-type", "application/json")
             .body(Body::from(body.to_string()))
             .unwrap()
+    }
+
+    fn extraction_request(msgpack: bool, params: serde_json::Value) -> Request {
+        let body =
+            json!({"items":[{"audio":{"data":"UklGRnRlc3Q=", "format":"wav"}}], "params":params});
+        if !msgpack {
+            return json_request("/v1/extract/acme/extract", body);
+        }
+        let mut value: rmpv::Value =
+            rmp_serde::from_slice(&rmp_serde::to_vec_named(&body).unwrap()).unwrap();
+        let rmpv::Value::Map(fields) = &mut value else {
+            unreachable!()
+        };
+        let rmpv::Value::Array(items) = &mut fields
+            .iter_mut()
+            .find(|(key, _)| key.as_str() == Some("items"))
+            .unwrap()
+            .1
+        else {
+            unreachable!()
+        };
+        let rmpv::Value::Map(fields) = &mut items[0] else {
+            unreachable!()
+        };
+        let rmpv::Value::Map(audio) = &mut fields
+            .iter_mut()
+            .find(|(key, _)| key.as_str() == Some("audio"))
+            .unwrap()
+            .1
+        else {
+            unreachable!()
+        };
+        audio
+            .iter_mut()
+            .find(|(key, _)| key.as_str() == Some("data"))
+            .unwrap()
+            .1 = rmpv::Value::Binary(b"RIFFtest".to_vec());
+        Request::builder()
+            .method(Method::POST)
+            .uri("/v1/extract/acme/extract")
+            .header("content-type", "application/msgpack")
+            .body(Body::from(rmp_serde::to_vec_named(&value).unwrap()))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn extraction_cluster_fallback_warms_before_remote_and_restores_failed_attempts() {
+        let config = format!(
+            "{HYBRID_EXTRACT_MODEL}\nrouting:\n  policy: fallback\n  fallback_profile: remote\n"
+        );
+        for msgpack in [false, true] {
+            for local in ["cold", "loading", "loaded"] {
+                for fail in [false, true] {
+                    let gateway = TestGateway::new(&[&config]).await;
+                    gateway
+                        .add_verified_worker("remote-1", REMOTE_LANE, &[])
+                        .await;
+                    if local != "cold" {
+                        gateway
+                            .add_verified_worker(
+                                "local-1",
+                                LOCAL_LANE,
+                                if local == "loaded" {
+                                    &["acme/extract"]
+                                } else {
+                                    &[]
+                                },
+                            )
+                            .await;
+                    }
+                    if fail {
+                        gateway.dispatcher.refuse_work();
+                    }
+                    let response = proxy_request(
+                        State(Arc::clone(&gateway.state)),
+                        extraction_request(msgpack, json!({})),
+                        "extract",
+                    )
+                    .await;
+                    if fail && local != "loaded" {
+                        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+                        assert_eq!(
+                            response.headers()["retry-after"],
+                            if local == "cold" { "60" } else { "5" }
+                        );
+                        assert_eq!(
+                            response.headers()["x-sie-fallback-error"],
+                            "INFERENCE_ERROR"
+                        );
+                        assert_eq!(stamped(&response), (Some("local"), None));
+                    } else if !fail {
+                        assert_eq!(
+                            response.status(),
+                            StatusCode::OK,
+                            "{local}, msgpack={msgpack}"
+                        );
+                        assert_eq!(
+                            stamped(&response),
+                            if local == "loaded" {
+                                (Some("local"), None)
+                            } else {
+                                (Some("remote"), Some("team-sie"))
+                            }
+                        );
+                        let body = axum::body::to_bytes(response.into_body(), 8192)
+                            .await
+                            .unwrap();
+                        if !msgpack {
+                            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                            assert_eq!(body["model"], "acme/extract");
+                            assert_eq!(body["items"][0]["data"]["text"], "hello world");
+                        }
+                    }
+                    let mut expected = Vec::new();
+                    if local == "loading" {
+                        expected.push(dispatched("load", LOCAL_LANE, "acme/extract"));
+                    }
+                    expected.push(if local == "loaded" {
+                        dispatched("extract", LOCAL_LANE, "acme/extract")
+                    } else {
+                        dispatched("extract", REMOTE_LANE, "acme/extract:remote")
+                    });
+                    assert_eq!(gateway.dispatcher.dispatched(), expected);
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn extraction_cluster_fallback_rejects_invalid_requests_and_honors_selectors() {
+        let config = format!(
+            "{HYBRID_EXTRACT_MODEL}\nrouting:\n  policy: fallback\n  fallback_profile: remote\n"
+        );
+        let gateway = TestGateway::new(&[&config]).await;
+        gateway
+            .add_verified_worker("remote-1", REMOTE_LANE, &[])
+            .await;
+        for msgpack in [false, true] {
+            let mut forbid = extraction_request(msgpack, json!({}));
+            forbid
+                .headers_mut()
+                .insert("x-sie-remote", HeaderValue::from_static("forbid"));
+            for request in [
+                forbid,
+                extraction_request(msgpack, json!({"options":{"profile":"default"}})),
+            ] {
+                let response =
+                    proxy_request(State(Arc::clone(&gateway.state)), request, "extract").await;
+                assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+                assert!(!response.headers().contains_key("x-sie-fallback-reason"));
+            }
+            for params in [
+                json!({"labels":[3]}),
+                json!({"instruction":4}),
+                json!({"options":false}),
+                json!({"output_schema":[]}),
+            ] {
+                let response = proxy_request(
+                    State(Arc::clone(&gateway.state)),
+                    extraction_request(msgpack, params),
+                    "extract",
+                )
+                .await;
+                assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            }
+        }
+        for body in [
+            json!({"items":[]}),
+            json!({"items":[{"text":"unsupported"}]}),
+            json!({"items":[{"audio":{"data":4}}]}),
+            json!({"items":[{"audio":{"data":"UklGRg==", "sample_rate":"invalid"}}]}),
+        ] {
+            let response = proxy_request(
+                State(Arc::clone(&gateway.state)),
+                json_request("/v1/extract/acme/extract", body),
+                "extract",
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+        assert!(gateway.dispatcher.dispatched().is_empty());
+    }
+
+    #[tokio::test]
+    async fn extraction_cluster_fallback_bounds_invalid_inputs_before_demand_or_work() {
+        let config = format!(
+            "{HYBRID_EXTRACT_MODEL}\nrouting:\n  policy: fallback\n  fallback_profile: remote\n"
+        );
+        for loading in [false, true] {
+            let gateway = TestGateway::new(&[&config]).await;
+            gateway
+                .add_verified_worker("remote-1", REMOTE_LANE, &[])
+                .await;
+            if loading {
+                gateway
+                    .add_verified_worker("local-1", LOCAL_LANE, &[])
+                    .await;
+            }
+            for msgpack in [false, true] {
+                let mut large_schema = json!({});
+                for _ in 0..130 {
+                    large_schema = json!({"nested":large_schema});
+                }
+                for params in [
+                    json!({"output_schema":{"values":vec![0;100_001]}}),
+                    json!({"output_schema":large_schema}),
+                ] {
+                    let response = proxy_request(
+                        State(Arc::clone(&gateway.state)),
+                        extraction_request(msgpack, params),
+                        "extract",
+                    )
+                    .await;
+                    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+                }
+            }
+            for sample_rate in [0, -1] {
+                let body =
+                    json!({"items":[{"audio":{"data":"UklGRg==", "sample_rate":sample_rate}}]});
+                let response = proxy_request(
+                    State(Arc::clone(&gateway.state)),
+                    json_request("/v1/extract/acme/extract", body),
+                    "extract",
+                )
+                .await;
+                assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            }
+            let body = json!({"items":[{"audio":{"data":"UklGRg=="}, "metadata":{"large":"x".repeat(2 * 1024 * 1024)}}]});
+            let response = proxy_request(
+                State(Arc::clone(&gateway.state)),
+                json_request("/v1/extract/acme/extract", body),
+                "extract",
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert!(gateway.dispatcher.dispatched().is_empty());
+            assert!(gateway.state.demand_tracker.active_lanes().is_empty());
+        }
+    }
+
+    async fn msgpack_extraction_with_metadata(metadata: rmpv::Value) -> Request {
+        let request = extraction_request(true, json!({}));
+        let (parts, body) = request.into_parts();
+        let bytes = axum::body::to_bytes(body, 8192).await.unwrap();
+        let mut root: rmpv::Value = rmp_serde::from_slice(&bytes).unwrap();
+        let rmpv::Value::Map(fields) = &mut root else {
+            unreachable!()
+        };
+        let rmpv::Value::Array(items) = &mut fields
+            .iter_mut()
+            .find(|(key, _)| key.as_str() == Some("items"))
+            .unwrap()
+            .1
+        else {
+            unreachable!()
+        };
+        let rmpv::Value::Map(item) = &mut items[0] else {
+            unreachable!()
+        };
+        item.push((rmpv::Value::from("metadata"), metadata));
+        Request::from_parts(parts, Body::from(rmp_serde::to_vec_named(&root).unwrap()))
+    }
+
+    #[tokio::test]
+    async fn extraction_cluster_fallback_uses_worker_decoded_metadata_contract() {
+        let config = format!(
+            "{HYBRID_EXTRACT_MODEL}\nrouting:\n  policy: fallback\n  fallback_profile: remote\n"
+        );
+        for loading in [false, true] {
+            let mut gateway = TestGateway::new(&[&config]).await;
+            let state = Arc::get_mut(&mut gateway.state).unwrap();
+            Arc::get_mut(&mut state.config).unwrap().max_item_text_bytes = 16;
+            gateway
+                .add_verified_worker("remote-1", REMOTE_LANE, &[])
+                .await;
+            if loading {
+                gateway
+                    .add_verified_worker("local-1", LOCAL_LANE, &[])
+                    .await;
+            }
+            for metadata in [
+                rmpv::Value::Map(vec![(1.into(), "invalid-key".into())]),
+                rmpv::Value::Map(vec![(
+                    "x".into(),
+                    rmpv::Value::Array(vec![rmpv::Value::F32(1.5); 2]),
+                )]),
+            ] {
+                let response = proxy_request(
+                    State(Arc::clone(&gateway.state)),
+                    msgpack_extraction_with_metadata(metadata).await,
+                    "extract",
+                )
+                .await;
+                assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            }
+            assert!(gateway.dispatcher.dispatched().is_empty());
+            assert!(gateway.state.demand_tracker.active_lanes().is_empty());
+            let valid = rmpv::Value::Map(vec![("x".into(), rmpv::Value::F32(1.5))]);
+            let response = proxy_request(
+                State(Arc::clone(&gateway.state)),
+                msgpack_extraction_with_metadata(valid).await,
+                "extract",
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        let gateway = TestGateway::new(&[&config]).await;
+        gateway
+            .add_verified_worker("remote-1", REMOTE_LANE, &[])
+            .await;
+        let opaque = rmpv::Value::Map(vec![("x".into(), rmpv::Value::Ext(1, vec![1]))]);
+        let response = proxy_request(
+            State(Arc::clone(&gateway.state)),
+            msgpack_extraction_with_metadata(opaque).await,
+            "extract",
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(!response.headers().contains_key("x-sie-fallback-reason"));
+        assert!(gateway.dispatcher.dispatched().is_empty());
     }
 
     fn stamped(response: &Response) -> (Option<&str>, Option<&str>) {

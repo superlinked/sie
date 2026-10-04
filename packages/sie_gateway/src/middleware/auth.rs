@@ -476,6 +476,7 @@ mod tests {
             watch_polling: false,
             multi_router: false,
             request_timeout: 0.0,
+            max_item_text_bytes: 2 * 1024 * 1024,
             max_stream_pending: 0,
             max_lane_in_flight_items: 0,
             lane_backpressure_enforce: false,

@@ -41,7 +41,9 @@ use crate::types::AuditEntry;
 
 use crate::middleware::auth::{extract_bearer_token, mask_token};
 
-use super::serving_disclosure::{remote_forbidden, FallbackAttempt, ServingDisclosure};
+use super::serving_disclosure::{
+    remote_forbidden, DeferredFallbackFinish, FallbackAttempt, ServingDisclosure,
+};
 
 const GATEWAY_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -1833,18 +1835,29 @@ fn native_request_has_profile_selector(body: &[u8], msgpack: bool) -> bool {
             .ok()
             .and_then(|value| {
                 let map = value.as_map()?;
-                let options = rmpv_map_get(map, "options")?.as_map()?;
-                Some(rmpv_map_get(options, "profile").is_some())
+                let nested = rmpv_map_get(map, "params")
+                    .and_then(rmpv::Value::as_map)
+                    .and_then(|params| rmpv_map_get(params, "options"));
+                Some(
+                    [rmpv_map_get(map, "options"), nested]
+                        .into_iter()
+                        .flatten()
+                        .filter_map(rmpv::Value::as_map)
+                        .any(|options| rmpv_map_get(options, "profile").is_some()),
+                )
             })
             .unwrap_or(false)
     } else {
         serde_json::from_slice::<serde_json::Value>(body)
             .ok()
             .is_some_and(|value| {
-                value
-                    .get("options")
-                    .and_then(|options| options.get("profile"))
-                    .is_some()
+                [
+                    value.get("options"),
+                    value.get("params").and_then(|params| params.get("options")),
+                ]
+                .into_iter()
+                .flatten()
+                .any(|options| options.get("profile").is_some())
             })
     }
 }
@@ -2277,7 +2290,7 @@ fn model_loading_refusal(endpoint: &str) -> Response {
     refusal
 }
 
-/// Begin one generation bridge only at a typed pre-dispatch refusal.
+/// Begin one non-numerical bridge only at a typed pre-dispatch refusal.
 /// Fleet numerical admission remains separately gated; no failure
 /// after a work item was published reaches this helper.
 #[allow(clippy::result_large_err, clippy::too_many_arguments)]
@@ -2289,14 +2302,25 @@ fn native_fallback_plan(
     parsed: Option<&(Vec<rmpv::Value>, publisher::WorkParams)>,
     trigger: FallbackTrigger,
 ) -> Option<crate::state::model_registry::RemoteFallbackPlan> {
-    let generation =
-        endpoint == "generate" && parsed.is_some_and(|(_, params)| params.generate.is_some());
+    let eligible = parsed.is_some_and(|(items, params)| match endpoint {
+        "generate" => params.generate.is_some(),
+        "extract" => {
+            !items.is_empty()
+                && items.iter().all(|item| {
+                    item.as_map()
+                        .and_then(|fields| rmpv_map_get(fields, "metadata"))
+                        .filter(|value| !value.is_nil())
+                        .is_none_or(|value| worker_metadata_encoded_size(value).is_some())
+                })
+        }
+        _ => false,
+    });
     fallback_plan_for_request(
         state,
         req.headers(),
         req.extensions(),
         model,
-        generation,
+        eligible,
         "",
         trigger,
     )
@@ -2339,6 +2363,7 @@ pub(crate) async fn proxy_request(
     }
     let disclosure = ServingDisclosure::install(&mut req);
     let fallback = FallbackAttempt::install(&mut req);
+    let defer_fallback = req.extensions().get::<DeferredFallbackFinish>().is_some();
     let provisioning_surface = provisioning_surface_for_endpoint(endpoint);
 
     // Keep the pre-generation queue hot path untouched for encode /
@@ -2394,7 +2419,11 @@ pub(crate) async fn proxy_request(
         )
         .await;
         disclosure.stamp(response.status(), response.headers_mut());
-        fallback.finish(response)
+        if defer_fallback {
+            response
+        } else {
+            fallback.finish(response)
+        }
     }
     .instrument(proxy_span)
     .await
@@ -2411,23 +2440,23 @@ async fn proxy_request_inner(
         .extensions()
         .get::<FallbackAttempt>()
         .is_some_and(FallbackAttempt::active);
-    // Native generation routing depends on request intent (default vs grammar),
-    // including in the no-policy OSS composition where grammar selects a
-    // profile-qualified model. Inspect the bounded body once before worker
-    // lookup and preserve the typed parse for the dispatch driver.
-    let mut governed_generate_body = None;
-    let mut governed_generate_parsed = None;
-    let generation_intent = if endpoint == "generate" {
+    // Inspect bridge-capable requests before worker lookup. Generation also
+    // needs default/grammar intent for routing. Preserve the bounded body and
+    // typed parse for dispatch and for the single remote attempt.
+    let mut prepared_native_body = None;
+    let mut prepared_native_parsed = None;
+    let generation_intent = if matches!(endpoint, "generate" | "extract") {
+        let body_limit = native_request_body_limit(endpoint);
         let is_msgpack = req
             .headers()
             .get("content-type")
             .and_then(|value| value.to_str().ok())
             .is_some_and(|content_type| content_type.contains("msgpack"));
         let (parts, body) = req.into_parts();
-        let body_bytes = match axum::body::to_bytes(body, MAX_GENERATE_BODY).await {
+        let body_bytes = match axum::body::to_bytes(body, body_limit).await {
             Ok(body) => body,
             Err(error) => {
-                let (status, code, message) = request_body_error(&error, MAX_GENERATE_BODY);
+                let (status, code, message) = request_body_error(&error, body_limit);
                 return endpoint_error_response(
                     endpoint,
                     status,
@@ -2457,9 +2486,9 @@ async fn proxy_request_inner(
         } else {
             GenerationRequestIntent::Default
         };
-        governed_generate_body = Some(body_bytes);
-        governed_generate_parsed = Some((items, params));
-        Some(intent)
+        prepared_native_body = Some(body_bytes);
+        prepared_native_parsed = Some((items, params));
+        (endpoint == "generate").then_some(intent)
     } else {
         None
     };
@@ -2491,14 +2520,19 @@ async fn proxy_request_inner(
     }
     ServingDisclosure::record(&state, req.extensions(), &dispatch_model);
 
-    if let Some((items, params)) = governed_generate_parsed.as_ref() {
-        if let Some(response) = validate_native_generate_pre_admission(
-            &state,
-            &model_name,
-            &dispatch_model,
-            items,
-            params,
-        ) {
+    if let Some((items, params)) = prepared_native_parsed.as_ref() {
+        let response = if endpoint == "generate" {
+            validate_native_generate_pre_admission(
+                &state,
+                &model_name,
+                &dispatch_model,
+                items,
+                params,
+            )
+        } else {
+            validate_native_extract_pre_admission(&state, &dispatch_model, items)
+        };
+        if let Some(response) = response {
             return response;
         }
     }
@@ -2648,13 +2682,13 @@ async fn proxy_request_inner(
                 &mut req,
                 endpoint,
                 &model_name,
-                governed_generate_parsed.as_ref(),
+                prepared_native_parsed.as_ref(),
                 refusal,
                 FallbackTrigger::Provisioning,
             ) {
                 Err(refusal) => return refusal,
                 Ok(()) => {
-                    if let Some(body) = governed_generate_body {
+                    if let Some(body) = prepared_native_body {
                         *req.body_mut() = Body::from(body);
                     }
                     return Box::pin(proxy_request_inner(
@@ -2711,7 +2745,7 @@ async fn proxy_request_inner(
         &req,
         endpoint,
         &model_name,
-        governed_generate_parsed.as_ref(),
+        prepared_native_parsed.as_ref(),
         FallbackTrigger::ModelLoading,
     )
     .is_some()
@@ -2762,13 +2796,13 @@ async fn proxy_request_inner(
                     &mut req,
                     endpoint,
                     &model_name,
-                    governed_generate_parsed.as_ref(),
+                    prepared_native_parsed.as_ref(),
                     refusal,
                     FallbackTrigger::ModelLoading,
                 ) {
                     Err(refusal) => return refusal,
                     Ok(()) => {
-                        if let Some(body) = governed_generate_body {
+                        if let Some(body) = prepared_native_body {
                             *req.body_mut() = Body::from(body);
                         }
                         return Box::pin(proxy_request_inner(
@@ -2880,7 +2914,7 @@ async fn proxy_request_inner(
     // chat / embeddings paths. Extract accepts bounded binary media, so
     // its cap covers the maximum legal audio after JSON base64 expansion.
     let body_limit = native_request_body_limit(endpoint);
-    let body_bytes = if let Some(body) = governed_generate_body {
+    let body_bytes = if let Some(body) = prepared_native_body {
         body
     } else {
         match axum::body::to_bytes(req.into_body(), body_limit).await {
@@ -2912,7 +2946,7 @@ async fn proxy_request_inner(
         effective_pool,
         &admission_pool,
         &body_bytes,
-        governed_generate_parsed,
+        prepared_native_parsed,
         is_msgpack_in,
         use_msgpack_out,
         &token_id,
@@ -3067,6 +3101,164 @@ fn generation_token_cap_response(
         )
             .into_response(),
     )
+}
+
+/// Measure decoded worker metadata, not the original MessagePack encoding.
+/// Python unpacking widens F32 to float/F64. Extensions have no stable encoded
+/// size under the worker's repr hook, so they retain local-only behavior.
+fn worker_metadata_encoded_size(metadata: &rmpv::Value) -> Option<usize> {
+    let mut stack = vec![metadata];
+    let mut size = 0usize;
+    let container_header = |len: usize| {
+        if len <= 15 {
+            1
+        } else if len <= 65535 {
+            3
+        } else {
+            5
+        }
+    };
+    while let Some(value) = stack.pop() {
+        let bytes = match value {
+            rmpv::Value::Nil | rmpv::Value::Boolean(_) => 1,
+            rmpv::Value::Integer(value) => {
+                if let Some(value) = value.as_u64() {
+                    if value <= 127 {
+                        1
+                    } else if value <= 255 {
+                        2
+                    } else if value <= 65535 {
+                        3
+                    } else if value <= u32::MAX.into() {
+                        5
+                    } else {
+                        9
+                    }
+                } else {
+                    let value = value.as_i64()?;
+                    if value >= -32 {
+                        1
+                    } else if value >= i8::MIN.into() {
+                        2
+                    } else if value >= i16::MIN.into() {
+                        3
+                    } else if value >= i32::MIN.into() {
+                        5
+                    } else {
+                        9
+                    }
+                }
+            }
+            rmpv::Value::F32(_) | rmpv::Value::F64(_) => 9,
+            rmpv::Value::String(value) => {
+                let len = value.as_str()?.len();
+                len.saturating_add(if len <= 31 {
+                    1
+                } else if len <= 255 {
+                    2
+                } else if len <= 65535 {
+                    3
+                } else {
+                    5
+                })
+            }
+            rmpv::Value::Binary(value) => value.len().saturating_add(if value.len() <= 255 {
+                2
+            } else if value.len() <= 65535 {
+                3
+            } else {
+                5
+            }),
+            rmpv::Value::Array(items) => {
+                stack.extend(items);
+                container_header(items.len())
+            }
+            rmpv::Value::Map(fields) => {
+                for (key, value) in fields {
+                    stack.push(key);
+                    stack.push(value);
+                }
+                container_header(fields.len())
+            }
+            rmpv::Value::Ext(_, _) => return None,
+        };
+        size = size.checked_add(bytes)?;
+    }
+    Some(size)
+}
+
+fn validate_native_extract_pre_admission(
+    state: &AppState,
+    model: &str,
+    items: &[rmpv::Value],
+) -> Option<Response> {
+    let invalid = |message: String| {
+        endpoint_error_response(
+            "extract",
+            StatusCode::BAD_REQUEST,
+            err_code::INVALID_REQUEST,
+            oai_type::INVALID_REQUEST,
+            oai_code::INVALID_REQUEST,
+            None,
+            message,
+        )
+    };
+    if items.is_empty() {
+        return Some(invalid("No items found in request body".into()));
+    }
+    if let Err(message) = publisher::validate_queue_request_item_count(items.len()) {
+        return Some(invalid(message));
+    }
+    let entry = state.model_registry.get_model_info(model)?;
+    if !entry
+        .info_extras
+        .outputs
+        .iter()
+        .any(|output| output == "json")
+    {
+        return Some(invalid("Model does not support extraction".into()));
+    }
+    for (index, item) in items.iter().enumerate() {
+        let fields = item.as_map().expect("queue parser validates item maps");
+        let text_bytes = rmpv_map_get(fields, "text")
+            .and_then(rmpv::Value::as_str)
+            .map_or(0, str::len);
+        let metadata_bytes = rmpv_map_get(fields, "metadata")
+            .filter(|value| value.as_map().is_some_and(|map| !map.is_empty()))
+            .map(worker_metadata_encoded_size)
+            .unwrap_or(Some(0));
+        if text_bytes > state.config.max_item_text_bytes
+            || metadata_bytes.is_some_and(|size| {
+                text_bytes.saturating_add(size) > state.config.max_item_text_bytes
+            })
+        {
+            return Some(invalid(format!(
+                "items[{index}] text and metadata exceeds the configured byte limit"
+            )));
+        }
+        for (field, capability) in [
+            ("text", "text"),
+            ("images", "image"),
+            ("audio", "audio"),
+            ("video", "video"),
+            ("document", "document"),
+        ] {
+            if rmpv_map_get(fields, field).is_some_and(|value| {
+                !value.is_nil()
+                    && !(field == "images" && value.as_array().is_some_and(Vec::is_empty))
+            }) && !entry
+                .info_extras
+                .inputs
+                .iter()
+                .any(|input| input == capability)
+            {
+                return Some(invalid(format!(
+                    "item at index {index}: model does not support {capability} input"
+                )));
+            }
+        }
+    }
+    None
 }
 
 fn validate_native_generate_pre_admission(
@@ -3678,7 +3870,7 @@ async fn queue_mode_proxy(
 
     let status: u16 = 200;
 
-    let resp_body = build_queue_success_body(endpoint, model, &successful, use_msgpack);
+    let resp_body = build_queue_success_body(endpoint, display_model, &successful, use_msgpack);
 
     // §10 spine: emit at INFO so there is ONE greppable per-request success line
     // (carrying request_id) at the prod default RUST_LOG=info — the log anchor
@@ -10541,6 +10733,8 @@ pub(crate) fn is_openai_compat_forwarded_header(name: &str) -> bool {
         "x-sie-request-id",
         "x-sie-served-by",
         "x-sie-upstream",
+        "x-sie-fallback-reason",
+        "x-sie-fallback-error",
         "x-sie-version",
         "x-sie-server-version",
         "x-sie-worker",
@@ -10601,9 +10795,10 @@ pub(crate) async fn translate_inner_compat_error(resp: Response) -> Response {
     // it by symmetry would only widen the buffer an unhealthy upstream can make
     // the gateway hold.
     const MAX: usize = 16 * 1024 * 1024;
-    let status = resp.status();
-    let headers = resp.headers().clone();
-    let parsed: Value = match to_bytes(resp.into_body(), MAX).await {
+    let (parts, body) = resp.into_parts();
+    let status = parts.status;
+    let headers = parts.headers;
+    let parsed: Value = match to_bytes(body, MAX).await {
         Ok(b) => serde_json::from_slice(&b).unwrap_or(Value::Null),
         Err(_) => Value::Null,
     };
@@ -10626,6 +10821,8 @@ pub(crate) async fn translate_inner_compat_error(resp: Response) -> Response {
         .unwrap_or("internal server error")
         .to_string();
     let mut out = (status, Json(embeddings_error(&sie_code, None, message))).into_response();
+    // Keep gateway-owned translation faults visible to metered compositions.
+    *out.extensions_mut() = parts.extensions;
     for (k, v) in headers.iter() {
         let n = k.as_str();
         if is_openai_compat_forwarded_header(n) || n.eq_ignore_ascii_case("retry-after") {
@@ -11092,8 +11289,123 @@ fn validate_queue_item_shapes(
         if !matches!(item, rmpv::Value::Map(_)) {
             return Err(format!("item at index {index} must be an object").into());
         }
+        if endpoint == "extract" {
+            validate_extract_item(item, index)?;
+        }
     }
 
+    Ok(())
+}
+
+/// Validate caller types before a cold local route can acquire bridge authority.
+/// Both wire formats converge here; media remains binary, never JSON-expanded.
+fn validate_extract_item(item: &rmpv::Value, index: usize) -> Result<(), String> {
+    let fields = item.as_map().expect("caller checked item map");
+    for field in ["id", "text"] {
+        if rmpv_map_get(fields, field).is_some_and(|v| !v.is_nil() && v.as_str().is_none()) {
+            return Err(format!("items[{index}].{field} must be a string or null"));
+        }
+    }
+    if rmpv_map_get(fields, "metadata").is_some_and(|v| !v.is_nil() && v.as_map().is_none()) {
+        return Err(format!("items[{index}].metadata must be an object or null"));
+    }
+    if rmpv_map_get(fields, "metadata")
+        .and_then(rmpv::Value::as_map)
+        .is_some_and(|map| map.iter().any(|(key, _)| key.as_str().is_none()))
+    {
+        return Err(format!("items[{index}].metadata keys must be strings"));
+    }
+    for field in ["audio", "video", "document", "images"] {
+        let Some(value) = rmpv_map_get(fields, field).filter(|v| !v.is_nil()) else {
+            continue;
+        };
+        let media = if field == "images" {
+            value
+                .as_array()
+                .ok_or_else(|| format!("items[{index}].images must be an array"))?
+                .iter()
+                .collect::<Vec<_>>()
+        } else {
+            vec![value]
+        };
+        for value in media {
+            let map = value
+                .as_map()
+                .ok_or_else(|| format!("items[{index}].{field} must contain media objects"))?;
+            if !matches!(rmpv_map_get(map, "data"), Some(rmpv::Value::Binary(_))) {
+                return Err(format!("items[{index}].{field}.data must be binary media"));
+            }
+            if rmpv_map_get(map, "format").is_some_and(|v| !v.is_nil() && v.as_str().is_none()) {
+                return Err(format!(
+                    "items[{index}].{field}.format must be a string or null"
+                ));
+            }
+            if field == "audio"
+                && (map.iter().any(|(key, _)| {
+                    !matches!(rmpv_key_str(key), Some("data" | "format" | "sample_rate"))
+                }) || rmpv_map_get(map, "sample_rate")
+                    .is_some_and(|v| !v.is_nil() && !v.as_i64().is_some_and(|rate| rate > 0)))
+            {
+                return Err(format!("items[{index}].audio has invalid fields"));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_extract_params(params: Option<&rmpv::Value>) -> Result<(), String> {
+    let Some(params) = params.filter(|v| !v.is_nil()) else {
+        return Ok(());
+    };
+    let fields = params.as_map().ok_or("params must be an object or null")?;
+    if rmpv_map_get(fields, "instruction").is_some_and(|v| !v.is_nil() && v.as_str().is_none()) {
+        return Err("params.instruction must be a string or null".into());
+    }
+    if let Some(labels) = rmpv_map_get(fields, "labels").filter(|v| !v.is_nil()) {
+        if !labels
+            .as_array()
+            .is_some_and(|labels| labels.iter().all(|v| v.as_str().is_some()))
+        {
+            return Err("params.labels must be an array of strings or null".into());
+        }
+    }
+    for field in ["options", "output_schema"] {
+        if rmpv_map_get(fields, field).is_some_and(|v| !v.is_nil() && v.as_map().is_none()) {
+            return Err(format!("params.{field} must be an object or null"));
+        }
+    }
+    if let Some(schema) = rmpv_map_get(fields, "output_schema").filter(|v| !v.is_nil()) {
+        // Mirror sie_server.core.extract_cost without recursive traversal.
+        let mut stack = vec![(schema, 1usize)];
+        let mut values = 0usize;
+        while let Some((value, depth)) = stack.pop() {
+            values += 1;
+            if values > 100_000 {
+                return Err("params.output_schema exceeds 100000 values".into());
+            }
+            match value {
+                rmpv::Value::Map(fields) => {
+                    if depth > 128 {
+                        return Err("params.output_schema exceeds 128 container levels".into());
+                    }
+                    stack.extend(fields.iter().map(|(_, value)| (value, depth + 1)));
+                }
+                rmpv::Value::Array(items) => {
+                    if depth > 128 {
+                        return Err("params.output_schema exceeds 128 container levels".into());
+                    }
+                    stack.extend(items.iter().map(|value| (value, depth + 1)));
+                }
+                _ => {}
+            }
+        }
+    }
+    if let Some(options) = rmpv_map_get(fields, "options").and_then(rmpv::Value::as_map) {
+        if rmpv_map_get(options, "instruction").is_some_and(|v| !v.is_nil() && v.as_str().is_none())
+        {
+            return Err("params.options.instruction must be a string or null".into());
+        }
+    }
     Ok(())
 }
 
@@ -11586,6 +11898,9 @@ fn work_params_from_json(
     }
 
     let nested_params = parsed.get("params");
+    if endpoint == "extract" {
+        validate_extract_params(nested_params.cloned().map(json_to_rmpv).as_ref())?;
+    }
     let field = |key: &str| nested_params.and_then(|params| params.get(key));
     let options = if endpoint == "encode" {
         encode_options_with_output_dtype(field("options").cloned(), field("output_dtype").cloned())
@@ -12488,6 +12803,9 @@ fn work_params_from_rmpv(
 
     // For `encode`/`extract`, match ``sie_server`` / msgspec: tuning fields live
     // only under the ``params`` object (no top-level merge).
+    if endpoint == "extract" {
+        validate_extract_params(rmpv_map_get(parsed, "params"))?;
+    }
     let nested = rmpv_map_get(parsed, "params").and_then(|v| match v {
         rmpv::Value::Map(m) => Some(m.as_slice()),
         _ => None,
@@ -15532,6 +15850,7 @@ mod tests {
             watch_polling: false,
             multi_router: false,
             request_timeout: 30.0,
+            max_item_text_bytes: 2 * 1024 * 1024,
             max_stream_pending: 1024,
             max_lane_in_flight_items:
                 crate::queue::lane_admission::DEFAULT_MAX_LANE_IN_FLIGHT_ITEMS,
@@ -16572,6 +16891,15 @@ mod tests {
             "rerank-v2",
         ] {
             let (mut state, _bundles, _models) = embeddings_dimensions_state();
+            if surface == "extract" {
+                // This transport authority test needs a valid extraction task.
+                let path = _models.path().join("embedder.yaml");
+                let raw = std::fs::read_to_string(&path)
+                    .unwrap()
+                    .replace("tasks:\n", "tasks:\n  extract: {}\n");
+                std::fs::write(path, raw).unwrap();
+                state.model_registry.reload();
+            }
             state.pool_manager.create_default_pool().await;
             let probe = Arc::new(GenerationTargetProbe::default());
             state.work_publisher = Some(probe.clone());

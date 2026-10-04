@@ -376,7 +376,7 @@ error. After the first event the stream reports failure without replaying work.
 An explicitly named remote profile is served directly.
 
 
-## Cluster generation fallback
+## Cluster fallback
 
 A bare generation model with `routing: {policy: fallback, fallback_profile: remote}`
 can bridge `provisioning` and `model_loading` refusals on native generation,
@@ -403,5 +403,21 @@ before output restores the local refusal. Once an event is ready, subsequent
 errors remain in the stream, with cleanup and no replay of inference. Explicit
 profiles keep ordinary streaming behavior.
 
-Extraction, numerical fleet equivalence, and opt-in saturation or unhealthy
-spill are not activated by this generation path.
+Extraction-only models can use the same cold/loading bridge on native extraction
+and OpenAI audio transcription. JSON and MessagePack extraction are validated
+before local demand or remote dispatch. Text plus metadata is bounded by
+`SIE_MAX_ITEM_TEXT_BYTES` (2 MiB by default); set this existing worker setting
+consistently on gateways and workers. Extraction labels, schema size/depth and
+media field types are checked before admission. Metadata size reflects decoded
+worker values, including MessagePack float widening; metadata extensions with
+unknown decoded size keep local-only behavior. The selected model must accept
+the input kind and support extraction.
+
+Audio bridges retain the local refusal until the requested transcription format
+is ready. A malformed upstream extraction result, or missing subtitle/timestamp
+fields, restores that refusal before any response is returned. The compatibility
+response preserves fallback reason/error and retry headers. Native extraction
+preserves its existing successful partial-result contract.
+
+Numerical fleet equivalence and opt-in saturation or unhealthy spill remain
+inactive.

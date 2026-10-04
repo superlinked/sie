@@ -490,6 +490,7 @@ mod tests {
             watch_polling: false,
             multi_router: false,
             request_timeout: 30.0,
+            max_item_text_bytes: 2 * 1024 * 1024,
             max_stream_pending: 50_000,
             max_lane_in_flight_items:
                 crate::queue::lane_admission::DEFAULT_MAX_LANE_IN_FLIGHT_ITEMS,

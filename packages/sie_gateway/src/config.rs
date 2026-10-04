@@ -148,6 +148,9 @@ pub struct Config {
 
     // Tuning
     pub request_timeout: f64,
+    /// Match the worker's bound on one item's UTF-8 text plus msgpack metadata.
+    /// Set `SIE_MAX_ITEM_TEXT_BYTES` consistently on gateway and workers.
+    pub max_item_text_bytes: usize,
     pub max_stream_pending: u64,
     /// Per-lane in-flight work-item ceiling
     /// (`SIE_GATEWAY_MAX_LANE_IN_FLIGHT_ITEMS`). The per-lane decision is
@@ -333,6 +336,7 @@ impl std::fmt::Debug for Config {
             .field("watch_polling", &self.watch_polling)
             .field("multi_router", &self.multi_router)
             .field("request_timeout", &self.request_timeout)
+            .field("max_item_text_bytes", &self.max_item_text_bytes)
             .field("max_stream_pending", &self.max_stream_pending)
             .field("max_lane_in_flight_items", &self.max_lane_in_flight_items)
             .field("lane_backpressure_enforce", &self.lane_backpressure_enforce)
@@ -526,6 +530,19 @@ fn env_u64(key: &str, fallback: u64) -> u64 {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(fallback)
+}
+
+fn item_text_byte_limit_from_env() -> usize {
+    match env::var("SIE_MAX_ITEM_TEXT_BYTES") {
+        Err(env::VarError::NotPresent) => 2 * 1024 * 1024,
+        Ok(raw) => raw
+            .trim()
+            .parse::<usize>()
+            .ok()
+            .filter(|limit| *limit > 0)
+            .expect("SIE_MAX_ITEM_TEXT_BYTES must be a positive integer"),
+        Err(_) => panic!("SIE_MAX_ITEM_TEXT_BYTES must be a positive integer"),
+    }
 }
 
 /// Read the pool API bounds from `SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT`,
@@ -840,6 +857,7 @@ impl Config {
             multi_router: env_bool("SIE_MULTI_ROUTER"),
 
             request_timeout: env_finite_float("SIE_GATEWAY_REQUEST_TIMEOUT", 120.0),
+            max_item_text_bytes: item_text_byte_limit_from_env(),
             max_stream_pending: env_u64("SIE_GATEWAY_MAX_STREAM_PENDING", 50_000),
             max_lane_in_flight_items: env_u64(
                 "SIE_GATEWAY_MAX_LANE_IN_FLIGHT_ITEMS",
@@ -1514,6 +1532,21 @@ mod tests {
     }
 
     #[test]
+    fn extraction_item_text_limit_matches_worker_configuration() {
+        without_env(&["SIE_MAX_ITEM_TEXT_BYTES"], || {
+            assert_eq!(Config::load().max_item_text_bytes, 2 * 1024 * 1024)
+        });
+        with_env(&[("SIE_MAX_ITEM_TEXT_BYTES", " 4096 ")], || {
+            assert_eq!(Config::load().max_item_text_bytes, 4096)
+        });
+        for invalid in ["0", "-1", "invalid", ""] {
+            with_env(&[("SIE_MAX_ITEM_TEXT_BYTES", invalid)], || {
+                assert!(std::panic::catch_unwind(Config::load).is_err());
+            });
+        }
+    }
+
+    #[test]
     fn test_request_timeout_default_is_120_seconds() {
         without_env(&["SIE_GATEWAY_REQUEST_TIMEOUT"], || {
             let cfg = Config::load();
@@ -2137,6 +2170,7 @@ mod tests {
             watch_polling: false,
             multi_router: false,
             request_timeout: 0.0,
+            max_item_text_bytes: 0,
             max_stream_pending: 0,
             max_lane_in_flight_items: 0,
             lane_backpressure_enforce: false,

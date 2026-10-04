@@ -28,7 +28,7 @@ pub(crate) const LOCAL_LANE: (&str, &str, &str) = ("default", "l4", "default");
 /// The remote lane's `(pool, machine_profile, bundle)`.
 pub(crate) const REMOTE_LANE: (&str, &str, &str) = ("default", "cpu", "remote");
 
-const DEFAULT_BUNDLE: &str = "name: default\ndefault: true\nadapters:\n  - sie_server.adapters.bert_flash\n  - sie_server.adapters.sglang\n  - sie_server.adapters.remote.sie\n";
+const DEFAULT_BUNDLE: &str = "name: default\ndefault: true\nadapters:\n  - sie_server.adapters.bert_flash\n  - sie_server.adapters.sglang\n  - sie_server.adapters.whisper.adapter\n  - sie_server.adapters.remote.sie\n";
 const REMOTE_BUNDLE: &str =
     "name: remote\npriority: 1\ndefault: false\nadapters:\n  - sie_server.adapters.remote.sie\n";
 
@@ -83,6 +83,27 @@ profiles:
         upstream_model: acme/chat
 ";
 
+/// An extraction model with local audio weights and a native SIE bridge.
+pub(crate) const HYBRID_EXTRACT_MODEL: &str = "\
+sie_id: acme/extract
+hf_id: acme/extract
+inputs:
+  audio: true
+tasks:
+  extract: {}
+profiles:
+  default:
+    adapter_path: sie_server.adapters.whisper.adapter:WhisperAdapter
+    max_batch_tokens: 8192
+  remote:
+    adapter_path: sie_server.adapters.remote.sie:SieUpstreamAdapter
+    max_batch_tokens: 8192
+    adapter_options:
+      loadtime:
+        upstream: team-sie
+        upstream_model: acme/extract
+";
+
 /// One request as the transport received it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Dispatched {
@@ -110,6 +131,8 @@ impl Dispatched {
 pub(crate) struct RecordingDispatcher {
     load_refused: AtomicBool,
     generate_refused: AtomicBool,
+    work_refused: AtomicBool,
+    extract_data: Mutex<Option<serde_json::Value>>,
     stream_error: AtomicBool,
     stream_mid_error: AtomicBool,
     stream_terminal_failure: Mutex<Option<&'static str>>,
@@ -126,6 +149,14 @@ impl RecordingDispatcher {
     }
     pub(crate) fn refuse_generation(&self) {
         self.generate_refused.store(true, Ordering::SeqCst);
+    }
+
+    pub(crate) fn refuse_work(&self) {
+        self.work_refused.store(true, Ordering::SeqCst);
+    }
+
+    pub(crate) fn return_extract_data(&self, data: serde_json::Value) {
+        *self.extract_data.lock().unwrap() = Some(data);
     }
 
     pub(crate) fn fail_stream(&self, after_output: bool) {
@@ -241,6 +272,9 @@ impl WorkDispatcher for RecordingDispatcher {
         DispatchError,
     > {
         self.record(Dispatched::new(endpoint, &target));
+        if self.work_refused.load(Ordering::SeqCst) {
+            return Err(DispatchError::Other("private upstream failure".into()));
+        }
         let request_id = "request-1".to_string();
         let results = if endpoint == "score" {
             vec![successful_result(
@@ -248,6 +282,22 @@ impl WorkDispatcher for RecordingDispatcher {
                 0,
                 json!([{"item_id": "0", "score": 0.5, "rank": 0}]),
             )]
+        } else if endpoint == "extract" {
+            let data = self
+                .extract_data
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_else(|| json!({"text":"hello world", "duration_ms":1234}));
+            (0..items.len() as u32)
+                .map(|index| {
+                    successful_result(
+                        &request_id,
+                        index,
+                        json!({"id":index.to_string(), "data":data}),
+                    )
+                })
+                .collect()
         } else {
             (0..items.len() as u32)
                 .map(|index| successful_result(&request_id, index, json!({"dense": [0.5, 0.25]})))
@@ -499,6 +549,7 @@ fn test_config(
         watch_polling: false,
         multi_router: false,
         request_timeout: 30.0,
+        max_item_text_bytes: 2 * 1024 * 1024,
         max_stream_pending: 1024,
         max_lane_in_flight_items: crate::queue::lane_admission::DEFAULT_MAX_LANE_IN_FLIGHT_ITEMS,
         lane_backpressure_enforce: false,
