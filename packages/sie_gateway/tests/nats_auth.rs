@@ -54,6 +54,10 @@ fn nats_server_binary() -> Option<PathBuf> {
 }
 
 async fn start_nats() -> Option<NatsServer> {
+    start_nats_fixture("sie-cluster-nats.conf").await
+}
+
+async fn start_nats_fixture(fixture: &str) -> Option<NatsServer> {
     let Some(binary) = nats_server_binary() else {
         assert!(
             std::env::var_os("NATS_URL").is_none(),
@@ -62,8 +66,9 @@ async fn start_nats() -> Option<NatsServer> {
         eprintln!("skipping: nats-server not on PATH");
         return None;
     };
-    let config =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/ci/fixtures/sie-cluster-nats.conf");
+    let config = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tools/ci/fixtures")
+        .join(fixture);
     let dir = tempfile::tempdir().expect("tempdir");
     let log = std::fs::File::create(dir.path().join("nats.log")).expect("log file");
     let passwords = Passwords {
@@ -430,4 +435,254 @@ async fn dlq_forwards_only_advisories_the_server_emits() {
         1,
         "the republished advisory is not forwarded"
     );
+}
+
+#[tokio::test]
+async fn threshold_decisions_share_demand_and_require_current_sampler_authority() {
+    use sha2::{Digest, Sha256};
+    use sie_gateway::state::threshold_coordinator::{
+        ThresholdCoordinator, ThresholdDecision, ThresholdError, ThresholdSampler, ThresholdTarget,
+    };
+
+    let Some(nats) = start_nats_fixture("sie-threshold-nats.conf").await else {
+        return;
+    };
+    let gateway = connect_as(&nats.url, "sie-gateway", &nats.passwords.gateway).await;
+    let context = jetstream::new(gateway.clone());
+    let policy = serde_json::from_value(serde_json::json!({
+        "policy":"threshold", "fallback_profile":"remote", "wake_above":1,
+        "sleep_below":0.5, "window_s":1, "cooldown_s":1
+    }))
+    .unwrap();
+    let target = ThresholdTarget::new("acme/chat", 1, &"a".repeat(64), &policy).unwrap();
+    let first = Arc::new(
+        ThresholdCoordinator::connect(&context, 1, vec![target.clone()])
+            .await
+            .unwrap(),
+    );
+    let second = Arc::new(
+        ThresholdCoordinator::connect(&context, 1, vec![target])
+            .await
+            .unwrap(),
+    );
+    let mut owner = ThresholdSampler::default();
+    let mut standby = ThresholdSampler::default();
+    first.sample(&mut owner).await.unwrap();
+    assert_eq!(
+        second.decision("acme/chat").await,
+        Err(ThresholdError::Unavailable)
+    );
+    assert_eq!(
+        second.sample(&mut standby).await,
+        Err(ThresholdError::Unavailable)
+    );
+
+    let mut tasks = Vec::new();
+    for replica in [first.clone(), second.clone()] {
+        for _ in 0..4 {
+            let replica = replica.clone();
+            tasks.push(tokio::spawn(async move {
+                replica.record_request("acme/chat").await
+            }));
+        }
+    }
+    for task in tasks {
+        task.await.unwrap().unwrap();
+    }
+    let key = Sha256::digest(b"acme/chat")
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let subject = format!("$KV.SIE_THRESHOLD_COUNTS.{key}");
+    let stream = context.get_stream("KV_SIE_THRESHOLD_COUNTS").await.unwrap();
+    let counter = stream
+        .get_last_raw_message_by_subject(&subject)
+        .await
+        .unwrap();
+    let counter: serde_json::Value = serde_json::from_slice(&counter.payload).unwrap();
+    assert_eq!(
+        counter["total"], 8,
+        "each successful ingress CAS counts once across replicas"
+    );
+    tokio::time::sleep(Duration::from_millis(1050)).await;
+    first.sample(&mut owner).await.unwrap();
+    assert_eq!(
+        second.decision("acme/chat").await,
+        Err(ThresholdError::Unavailable)
+    );
+    for replica in [&first, &second] {
+        replica.record_request("acme/chat").await.unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(1050)).await;
+    first.sample(&mut owner).await.unwrap();
+    assert_eq!(
+        first.decision("acme/chat").await.unwrap(),
+        ThresholdDecision::WakeLocal
+    );
+    assert_eq!(
+        second.decision("acme/chat").await.unwrap(),
+        ThresholdDecision::WakeLocal
+    );
+    for _ in 0..2 {
+        tokio::time::sleep(Duration::from_millis(1050)).await;
+        first.sample(&mut owner).await.unwrap();
+    }
+    assert_eq!(
+        second.decision("acme/chat").await.unwrap(),
+        ThresholdDecision::Remote
+    );
+
+    // The broker, rather than either replica's wall clock, expires ownership.
+    tokio::time::sleep(Duration::from_millis(5200)).await;
+    assert_eq!(
+        first.decision("acme/chat").await,
+        Err(ThresholdError::Unavailable)
+    );
+    second.sample(&mut standby).await.unwrap();
+    assert_eq!(
+        first.sample(&mut owner).await,
+        Err(ThresholdError::Unavailable)
+    );
+    assert_eq!(
+        first.decision("acme/chat").await,
+        Err(ThresholdError::Unavailable)
+    );
+
+    let next = ThresholdTarget::new("acme/chat", 2, &"b".repeat(64), &policy).unwrap();
+    let changed = ThresholdCoordinator::connect(&context, 1, vec![next])
+        .await
+        .unwrap();
+    // A new generation takes over even when the model receives no request.
+    changed.sample(&mut standby).await.unwrap();
+    assert_eq!(
+        first.sample(&mut owner).await,
+        Err(ThresholdError::Generation)
+    );
+    assert_eq!(
+        first.sample(&mut owner).await,
+        Err(ThresholdError::Generation)
+    );
+    assert_eq!(
+        first.record_request("acme/chat").await,
+        Err(ThresholdError::Generation)
+    );
+    assert_eq!(
+        first.decision("acme/chat").await,
+        Err(ThresholdError::Generation)
+    );
+    let reset = stream
+        .get_last_raw_message_by_subject(&subject)
+        .await
+        .unwrap();
+    let reset: serde_json::Value = serde_json::from_slice(&reset.payload).unwrap();
+    assert_eq!(reset["generation"], 2);
+    assert_eq!(
+        reset["total"], 0,
+        "sampling does not manufacture ingress demand"
+    );
+    for _ in 0..2 {
+        tokio::time::sleep(Duration::from_millis(1050)).await;
+        changed.sample(&mut standby).await.unwrap();
+    }
+    assert_eq!(
+        changed.decision("acme/chat").await.unwrap(),
+        ThresholdDecision::Remote
+    );
+
+    // Broker errors discard sustained-window evidence and prevent renewal.
+    let mut newest_target = ThresholdTarget::new("acme/chat", 3, &"c".repeat(64), &policy).unwrap();
+    let newest = ThresholdCoordinator::connect(&context, 1, vec![newest_target.clone()])
+        .await
+        .unwrap();
+    newest.sample(&mut standby).await.unwrap();
+    for _ in 0..4 {
+        newest.record_request("acme/chat").await.unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(1050)).await;
+    newest.sample(&mut standby).await.unwrap();
+    let counts = context.get_key_value("SIE_THRESHOLD_COUNTS").await.unwrap();
+    counts
+        .put(&key, bytes::Bytes::from_static(b"invalid"))
+        .await
+        .unwrap();
+    assert_eq!(
+        newest.sample(&mut standby).await,
+        Err(ThresholdError::Untrusted)
+    );
+    assert_eq!(
+        newest.sample(&mut standby).await,
+        Err(ThresholdError::Unavailable)
+    );
+    tokio::time::sleep(Duration::from_millis(5200)).await;
+    let restored = serde_json::json!({"generation":2,"contract":"obsolete","total":0});
+    counts
+        .put(&key, serde_json::to_vec(&restored).unwrap().into())
+        .await
+        .unwrap();
+    newest.sample(&mut standby).await.unwrap();
+    assert_eq!(
+        newest.decision("acme/chat").await,
+        Err(ThresholdError::Unavailable)
+    );
+    for tick in 0..2 {
+        for _ in 0..4 {
+            newest.record_request("acme/chat").await.unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(1050)).await;
+        newest.sample(&mut standby).await.unwrap();
+        if tick == 0 {
+            assert_eq!(
+                newest.decision("acme/chat").await,
+                Err(ThresholdError::Unavailable)
+            );
+        }
+    }
+    assert_eq!(
+        newest.decision("acme/chat").await.unwrap(),
+        ThresholdDecision::WakeLocal
+    );
+
+    // Duplicate, oversized or mixed-generation configurations never reach I/O.
+    assert!(matches!(
+        ThresholdCoordinator::connect(&context, 1, vec![]).await,
+        Err(ThresholdError::Configuration)
+    ));
+    assert!(matches!(
+        ThresholdCoordinator::connect(
+            &context,
+            1,
+            vec![newest_target.clone(), newest_target.clone()]
+        )
+        .await,
+        Err(ThresholdError::Configuration)
+    ));
+    assert!(matches!(
+        ThresholdCoordinator::connect(&context, 1, vec![newest_target.clone(); 257]).await,
+        Err(ThresholdError::Configuration)
+    ));
+    newest_target = ThresholdTarget::new("acme/other", 4, &"c".repeat(64), &policy).unwrap();
+    assert!(matches!(
+        ThresholdCoordinator::connect(
+            &context,
+            1,
+            vec![
+                ThresholdTarget::new("acme/chat", 3, &"c".repeat(64), &policy).unwrap(),
+                newest_target
+            ]
+        )
+        .await,
+        Err(ThresholdError::Configuration)
+    ));
+
+    // Inference-component credentials have no authority on this endpoint.
+    for (user, password) in [
+        ("sie-worker", &nats.passwords.worker),
+        ("sie-config", &nats.passwords.config),
+    ] {
+        assert!(async_nats::ConnectOptions::new()
+            .user_and_password(user.into(), password.clone())
+            .connect(&nats.url)
+            .await
+            .is_err());
+    }
 }
