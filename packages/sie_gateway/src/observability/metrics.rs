@@ -1627,7 +1627,7 @@ pub(crate) fn record_remote_fallback(
         operation,
         reason,
         committed,
-        Instant::now(),
+        Instant::now,
     );
 }
 
@@ -1637,7 +1637,7 @@ fn record_remote_fallback_to(
     operation: &str,
     reason: FallbackTrigger,
     committed: bool,
-    now: Instant,
+    now: impl FnOnce() -> Instant,
 ) {
     let Some(telemetry) = telemetry else {
         return;
@@ -1646,7 +1646,7 @@ fn record_remote_fallback_to(
         .remote_serving_state
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let (model, duration) = state.fallback(model, committed, now);
+    let (model, duration) = state.fallback(model, committed, now());
     telemetry.remote_fallbacks.add(
         1,
         &[
@@ -2500,7 +2500,7 @@ mod tests {
                             operation,
                             reason,
                             committed,
-                            now,
+                            || now,
                         );
                     }
                 }
