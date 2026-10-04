@@ -8,7 +8,7 @@
 {{- fail "threshold control requires a gateway NATS Secret distinct from config and worker credentials" }}
 {{- end }}
 {{- end }}
-{{- $name := printf "%s-threshold" (include "sie-cluster.fullname" .) }}
+{{- $name := include "sie-cluster.threshold.serviceName" . }}
 apiVersion: v1
 kind: ConfigMap
 metadata:

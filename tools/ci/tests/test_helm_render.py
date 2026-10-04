@@ -2676,3 +2676,23 @@ def test_threshold_flag_reaches_workers_and_refuses_shared_gateway_secret(tmp_pa
     result = render_template(tmp_path, values, "templates/threshold-control.yaml")
     assert result.returncode != 0
     assert "distinct from config and worker" in result.stderr
+
+
+@pytest.mark.parametrize("fullname", ["a" * 90, "a" * 52 + "-" + "b" * 10])
+def test_threshold_long_name_keeps_control_resources_and_gateway_url_aligned(tmp_path: Path, fullname: str) -> None:
+    values = {**THRESHOLD_VALUES, "fullnameOverride": fullname}
+    result = render_template(tmp_path, values, "templates/threshold-control.yaml")
+    assert result.returncode == 0, result.stderr
+    docs = [doc for doc in yaml.safe_load_all(result.stdout) if doc]
+    names = {doc["metadata"]["name"] for doc in docs}
+    assert len(names) == 1
+    (name,) = names
+    assert len(name) <= 63
+    assert name == fullname[:53].rstrip("-") + "-threshold"
+    deployment = next(doc for doc in docs if doc["kind"] == "Deployment")
+    assert deployment["spec"]["template"]["spec"]["volumes"][0]["configMap"]["name"] == name
+    gateway_result = render_template(tmp_path, values, "templates/gateway-deployment.yaml")
+    assert gateway_result.returncode == 0, gateway_result.stderr
+    gateway = next(doc for doc in yaml.safe_load_all(gateway_result.stdout) if doc and doc["kind"] == "Deployment")
+    env = {item["name"]: item for item in gateway["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert env["SIE_THRESHOLD_NATS_URL"]["value"] == f"nats://{name}:4222"

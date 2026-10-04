@@ -285,7 +285,7 @@ spec:
               value: {{ dig "thresholdRouting" "enabled" false .Values.gateway | quote }}
             {{- if dig "thresholdRouting" "enabled" false .Values.gateway }}
             - name: SIE_THRESHOLD_NATS_URL
-              value: "nats://{{ include "sie-cluster.fullname" . }}-threshold:4222"
+              value: "nats://{{ include "sie-cluster.threshold.serviceName" . }}:4222"
             - name: SIE_THRESHOLD_NATS_REPLICAS
               value: "1"
             {{- end }}

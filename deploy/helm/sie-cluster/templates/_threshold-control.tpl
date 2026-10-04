@@ -1,3 +1,8 @@
+{{- define "sie-cluster.threshold.serviceName" -}}
+{{- $fullname := include "sie-cluster.fullname" . | trunc 53 | trimSuffix "-" -}}
+{{- printf "%s-threshold" $fullname -}}
+{{- end }}
+
 {{- define "sie-cluster.threshold.config" -}}
 # Isolated control broker; only gateways have credentials.
 port: 4222
