@@ -2587,6 +2587,112 @@
         ],
         "type": "object"
       },
+      "NumericalProcessInventory": {
+        "additionalProperties": false,
+        "properties": {
+          "children": {
+            "items": {
+              "$ref": "#/components/schemas/NumericalProcessObservation"
+            },
+            "type": "array"
+          },
+          "observed_at_unix_ms": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "observed_at_unix_ms",
+          "children"
+        ],
+        "type": "object"
+      },
+      "NumericalProcessObservation": {
+        "additionalProperties": false,
+        "properties": {
+          "child_index": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "snapshot": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/NumericalProfileSnapshot"
+              }
+            ]
+          },
+          "status": {
+            "$ref": "#/components/schemas/NumericalSnapshotStatus"
+          }
+        },
+        "required": [
+          "child_index",
+          "status"
+        ],
+        "type": "object"
+      },
+      "NumericalProfileObservation": {
+        "additionalProperties": false,
+        "properties": {
+          "local_identity": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "model_contract_sha256": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "model_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "model_id"
+        ],
+        "type": "object"
+      },
+      "NumericalProfileSnapshot": {
+        "additionalProperties": false,
+        "properties": {
+          "complete": {
+            "type": "boolean"
+          },
+          "profiles": {
+            "items": {
+              "$ref": "#/components/schemas/NumericalProfileObservation"
+            },
+            "type": "array"
+          },
+          "runtime_instance_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "complete",
+          "profiles"
+        ],
+        "type": "object"
+      },
+      "NumericalSnapshotStatus": {
+        "enum": [
+          "observed",
+          "incomplete",
+          "unavailable",
+          "invalid"
+        ],
+        "type": "string"
+      },
       "OpenAIEmbeddingDataEntry": {
         "properties": {
           "embedding": {
@@ -3994,6 +4100,17 @@
           },
           "name": {
             "type": "string"
+          },
+          "numerical_process_inventory": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/NumericalProcessInventory",
+                "description": "Most recent process diagnostics, including unavailable children.\nHealth and observation time must be checked independently."
+              }
+            ]
           },
           "pending_cost": {
             "format": "int64",

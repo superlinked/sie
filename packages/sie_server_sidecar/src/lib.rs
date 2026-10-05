@@ -552,6 +552,14 @@ pub async fn run(config: WorkerConfig) -> anyhow::Result<()> {
     // ignore. Default is enabled because the sidecar pod has no
     // `/ws/status` endpoint (that endpoint lives on the Python
     // container) and therefore forces the gateway into `health_mode=nats`.
+    let numerical_process_inventory = Arc::new(std::sync::RwLock::new(None));
+    let numerical_inventory_handle = health_publish_enabled().then(|| {
+        crate::health_publisher::spawn_numerical_inventory(
+            Arc::clone(&worker_pool),
+            Arc::clone(&numerical_process_inventory),
+            shutdown.clone(),
+        )
+    });
     let health_publisher_config = if health_publish_enabled() {
         Some(crate::health_publisher::HealthPublisherConfig {
             worker_id: config.worker_id.clone(),
@@ -562,6 +570,7 @@ pub async fn run(config: WorkerConfig) -> anyhow::Result<()> {
             bundle_config_hash: config_apply_state.bundle_config_hash(),
             unsupported_models: config_apply_state.unsupported_models(),
             loaded_models: Arc::clone(&loaded_models),
+            numerical_process_inventory,
             execution_authority_v1: worker_pool.execution_authority_v1(),
             authority_consumer_ready: Arc::clone(&generation_direct_dispatch.authority_active),
             runtime_state: Arc::clone(&runtime_state),
@@ -606,6 +615,10 @@ pub async fn run(config: WorkerConfig) -> anyhow::Result<()> {
     readiness.mark_draining();
     heartbeat_handle.abort();
     let _ = heartbeat_handle.await; // best-effort join
+    if let Some(handle) = numerical_inventory_handle {
+        handle.abort();
+        let _ = handle.await;
+    }
 
     // Let the periodic NATS health publisher observe shutdown and emit
     // its tombstone before we move on. Aborting it immediately here can

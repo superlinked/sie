@@ -41,10 +41,11 @@
 //! [`WorkerStatusMessage`]: https://github.com/superlinked/sie/blob/main/packages/sie_gateway/src/types/worker.rs
 //! [`resolve_queue_route`]: https://github.com/superlinked/sie/blob/main/packages/sie_gateway/src/state/worker_registry.rs
 
+use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::RwLock;
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_nats::Client;
 use serde::Serialize;
@@ -52,6 +53,7 @@ use tokio::task::JoinHandle;
 use tokio::time::interval;
 use tracing::{debug, info, warn};
 
+use crate::backend::adapter_pool::{AdapterWorkerPool, NumericalProcessObservation};
 use crate::readiness::Readiness;
 use crate::runtime_state::RuntimeState;
 use crate::shutdown::Shutdown;
@@ -59,6 +61,95 @@ use crate::shutdown::Shutdown;
 pub type SharedBundleConfigHash = Arc<RwLock<String>>;
 pub type SharedLoadedModels = Arc<RwLock<Vec<String>>>;
 pub type SharedUnsupportedModels = Arc<RwLock<Vec<String>>>;
+pub type SharedNumericalInventory = Arc<RwLock<Option<(Instant, serde_json::Value)>>>;
+
+// Same wire budget as gateway types/worker.rs. Drop the whole observation;
+// truncation would hide children that remain reachable through pool fallback.
+const MAX_NUMERICAL_INVENTORY_BYTES: usize = 64 * 1024;
+const MAX_NUMERICAL_CHILDREN: usize = 256;
+
+struct InventoryWriter(Vec<u8>);
+
+impl Write for InventoryWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if bytes.len() > MAX_NUMERICAL_INVENTORY_BYTES.saturating_sub(self.0.len()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "numerical inventory exceeds wire budget",
+            ));
+        }
+        self.0.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn bounded_inventory(
+    children: &[NumericalProcessObservation],
+    observed_at_unix_ms: u64,
+) -> Option<serde_json::Value> {
+    if children.is_empty() || children.len() > MAX_NUMERICAL_CHILDREN {
+        return None;
+    }
+    #[derive(Serialize)]
+    struct Inventory<'a> {
+        observed_at_unix_ms: u64,
+        children: &'a [NumericalProcessObservation],
+    }
+    let mut writer = InventoryWriter(Vec::new());
+    serde_json::to_writer(
+        &mut writer,
+        &Inventory {
+            observed_at_unix_ms,
+            children,
+        },
+    )
+    .ok()?;
+    serde_json::from_slice(&writer.0).ok()
+}
+
+/// Poll independently of normal IPC pings and NATS health publication. A slow
+/// or unsupported diagnostic RPC must never consume the readiness budget.
+pub fn spawn_numerical_inventory(
+    pool: Arc<AdapterWorkerPool>,
+    inventory: SharedNumericalInventory,
+    shutdown: Arc<Shutdown>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut tick = interval(DEFAULT_PUBLISH_INTERVAL);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                biased;
+                _ = shutdown.wait() => break,
+                _ = tick.tick() => {}
+            }
+            let started = Instant::now();
+            let observed_at_unix_ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .ok()
+                .and_then(|duration| u64::try_from(duration.as_millis()).ok())
+                .unwrap_or(0);
+            let value = if pool.child_count() <= MAX_NUMERICAL_CHILDREN && observed_at_unix_ms > 0 {
+                tokio::select! {
+                    biased;
+                    _ = shutdown.wait() => break,
+                    result = tokio::time::timeout(DEFAULT_PUBLISH_INTERVAL, pool.numerical_process_inventory()) => {
+                        result.ok().and_then(|children| bounded_inventory(&children, observed_at_unix_ms))
+                    }
+                }
+            } else {
+                None
+            };
+            if let Ok(mut guard) = inventory.write() {
+                *guard = value.map(|value| (started, value));
+            }
+        }
+    })
+}
 
 /// Default subject prefix used by the gateway. Workers always
 /// publish to `sie.health.<worker_id>` because the gateway's
@@ -114,6 +205,8 @@ pub struct HealthPublisherConfig {
     /// Models the colocated backend reports as loaded. Updated by the IPC
     /// heartbeat, not by config apply.
     pub loaded_models: SharedLoadedModels,
+    /// Independently polled process diagnostics; never grants routing authority.
+    pub numerical_process_inventory: SharedNumericalInventory,
     /// Positive only when every backend child supports the method fence.
     pub execution_authority_v1: Arc<AtomicBool>,
     /// The versioned pull consumer must also be running.
@@ -164,6 +257,8 @@ struct WorkerStatusPayload<'a> {
     saturated: bool,
     #[serde(skip_serializing_if = "<[String]>::is_empty")]
     unsupported_models: &'a [String],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    numerical_process_inventory: Option<&'a serde_json::Value>,
 }
 
 fn encode_payload(
@@ -224,6 +319,18 @@ fn encode_payload(
     let inflight_batches = clamp_i64_to_i32(config.runtime_state.inflight_batches.get().max(0));
     refresh_worker_saturation(&config.runtime_state);
     let saturated = config.runtime_state.worker_saturated.get() > 0;
+    let inventory_guard = config.numerical_process_inventory.read().ok();
+    let numerical_process_inventory = inventory_guard.as_deref().and_then(|inventory| {
+        inventory
+            .as_ref()
+            .filter(|(observed, value)| {
+                !terminated
+                    && observed.elapsed() <= DEFAULT_PUBLISH_INTERVAL * 2
+                    && serde_json::to_vec(value)
+                        .is_ok_and(|bytes| bytes.len() <= MAX_NUMERICAL_INVENTORY_BYTES)
+            })
+            .map(|(_, value)| value)
+    });
     let payload = WorkerStatusPayload {
         name: &config.worker_id,
         ready,
@@ -246,6 +353,7 @@ fn encode_payload(
         inflight_batches,
         saturated,
         unsupported_models: unsupported_models.as_slice(),
+        numerical_process_inventory,
     };
     serde_json::to_vec(&payload)
 }
@@ -415,6 +523,12 @@ pub fn spawn(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::adapter_pool::NumericalSnapshotStatus;
+    use crate::protocol::ipc_types::{
+        NumericalProfileObservation, NumericalProfileSnapshotResponse,
+    };
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::UnixListener;
 
     fn cfg() -> HealthPublisherConfig {
         HealthPublisherConfig {
@@ -426,10 +540,160 @@ mod tests {
             bundle_config_hash: Arc::new(RwLock::new("hash-abc".into())),
             unsupported_models: Arc::new(RwLock::new(Vec::new())),
             loaded_models: Arc::new(RwLock::new(Vec::new())),
+            numerical_process_inventory: Arc::new(RwLock::new(None)),
             execution_authority_v1: Arc::new(AtomicBool::new(false)),
             authority_consumer_ready: Arc::new(AtomicBool::new(false)),
             runtime_state: Arc::new(RuntimeState::new()),
             interval: DEFAULT_PUBLISH_INTERVAL,
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_diagnostic_rpc_does_not_block_health_or_shutdown() {
+        let dir = tempfile::Builder::new()
+            .prefix("sie-diag-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let path = dir.path().join("worker.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let requested = Arc::new(tokio::sync::Notify::new());
+        let request_signal = Arc::clone(&requested);
+        let worker = tokio::spawn(async move {
+            let mut connections = tokio::task::JoinSet::new();
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let request_signal = Arc::clone(&request_signal);
+                connections.spawn(async move {
+                    loop {
+                        let mut length = [0; 4];
+                        if socket.read_exact(&mut length).await.is_err() {
+                            return;
+                        }
+                        let mut bytes = vec![0; u32::from_be_bytes(length) as usize];
+                        socket.read_exact(&mut bytes).await.unwrap();
+                        let request: serde_json::Value = rmp_serde::from_slice(&bytes).unwrap();
+                        if request["method"] == "NumericalProfileSnapshot" {
+                            request_signal.notify_one();
+                            // Keep the diagnostic request pending while normal
+                            // health continues on its separate connection.
+                            std::future::pending::<()>().await;
+                        }
+                        assert_eq!(request["method"], "Ping");
+                        let response = rmp_serde::to_vec_named(&serde_json::json!({
+                            "version": crate::ipc_types::IPC_VERSION,
+                            "request_id": request["request_id"], "ok": true,
+                            "body": {"ready": true}
+                        }))
+                        .unwrap();
+                        socket
+                            .write_all(&(response.len() as u32).to_be_bytes())
+                            .await
+                            .unwrap();
+                        socket.write_all(&response).await.unwrap();
+                    }
+                });
+            }
+        });
+        let c = cfg();
+        let pool = AdapterWorkerPool::new(&[path], 1, 30, 30, Arc::clone(&c.runtime_state));
+        let shutdown = Arc::new(Shutdown::new());
+        let poller = spawn_numerical_inventory(
+            Arc::clone(&pool),
+            Arc::clone(&c.numerical_process_inventory),
+            Arc::clone(&shutdown),
+        );
+        tokio::time::timeout(Duration::from_secs(2), requested.notified())
+            .await
+            .unwrap();
+        let ping = tokio::time::timeout(Duration::from_secs(1), pool.primary_ipc().ping(0.0))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(ping.ready);
+        let payload: serde_json::Value =
+            serde_json::from_slice(&encode_payload(&c, true, false).unwrap()).unwrap();
+        assert_eq!(payload["ready"], true);
+        assert!(payload.get("numerical_process_inventory").is_none());
+        shutdown.fire();
+        tokio::time::timeout(Duration::from_secs(1), poller)
+            .await
+            .unwrap()
+            .unwrap();
+        worker.abort();
+        let _ = worker.await;
+    }
+
+    #[test]
+    fn diagnostic_inventory_keeps_unavailable_children_and_never_grants_authority() {
+        let children = vec![NumericalProcessObservation {
+            child_index: 0,
+            status: NumericalSnapshotStatus::Unavailable,
+            snapshot: None,
+        }];
+        let c = cfg();
+        let value = bounded_inventory(&children, 123).unwrap();
+        *c.numerical_process_inventory.write().unwrap() = Some((Instant::now(), value.clone()));
+        let payload: serde_json::Value =
+            serde_json::from_slice(&encode_payload(&c, true, false).unwrap()).unwrap();
+        assert_eq!(payload["numerical_process_inventory"], value);
+        assert_eq!(payload["ready"], true);
+        assert_eq!(payload["supports_execution_authority_v1"], false);
+    }
+
+    #[test]
+    fn oversized_inventory_is_dropped_whole_while_health_survives() {
+        let mut children = vec![NumericalProcessObservation {
+            child_index: 0,
+            status: NumericalSnapshotStatus::Observed,
+            snapshot: Some(NumericalProfileSnapshotResponse {
+                runtime_instance_id: Some("a".repeat(64)),
+                complete: true,
+                profiles: (0..100)
+                    .map(|index| NumericalProfileObservation {
+                        model_id: format!("{index}{}", "x".repeat(1020)),
+                        model_contract_sha256: Some("b".repeat(64)),
+                        local_identity: None,
+                    })
+                    .collect(),
+            }),
+        }];
+        assert!(bounded_inventory(&children, 1).is_none());
+        children = (0..=MAX_NUMERICAL_CHILDREN)
+            .map(|index| NumericalProcessObservation {
+                child_index: index,
+                status: NumericalSnapshotStatus::Unavailable,
+                snapshot: None,
+            })
+            .collect();
+        assert!(bounded_inventory(&children, 1).is_none());
+        let c = cfg();
+        *c.numerical_process_inventory.write().unwrap() = Some((
+            Instant::now(),
+            serde_json::json!({
+                "padding": "x".repeat(MAX_NUMERICAL_INVENTORY_BYTES)
+            }),
+        ));
+        let payload: serde_json::Value =
+            serde_json::from_slice(&encode_payload(&c, true, false).unwrap()).unwrap();
+        assert!(payload.get("numerical_process_inventory").is_none());
+        assert_eq!(payload["ready"], true);
+        assert_eq!(payload["bundle_config_hash"], "hash-abc");
+    }
+
+    #[test]
+    fn stale_and_shutdown_observations_are_not_republished() {
+        let c = cfg();
+        for (observed, terminated) in [
+            (Instant::now() - DEFAULT_PUBLISH_INTERVAL * 3, false),
+            (Instant::now(), true),
+        ] {
+            *c.numerical_process_inventory.write().unwrap() =
+                Some((observed, serde_json::json!({"children": []})));
+            let payload: serde_json::Value =
+                serde_json::from_slice(&encode_payload(&c, !terminated, terminated).unwrap())
+                    .unwrap();
+            assert!(payload.get("numerical_process_inventory").is_none());
+            assert_eq!(payload["terminated"], terminated);
         }
     }
 
@@ -491,6 +755,7 @@ mod tests {
                 saturated: false,
                 loaded_models: &[],
                 unsupported_models: &[],
+                numerical_process_inventory: None,
             };
             serde_json::to_value(&payload).unwrap()
         };
@@ -538,6 +803,7 @@ mod tests {
                 saturated: false,
                 loaded_models: &[],
                 unsupported_models: &[],
+                numerical_process_inventory: None,
             };
             serde_json::to_value(&payload).unwrap()
         };

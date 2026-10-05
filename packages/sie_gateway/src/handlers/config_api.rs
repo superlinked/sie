@@ -872,6 +872,7 @@ mod tests {
             pool_name: "default".into(),
             saturated: false,
             terminated: false,
+            numerical_process_inventory: None,
             unsupported_models: Vec::new(),
         }
     }

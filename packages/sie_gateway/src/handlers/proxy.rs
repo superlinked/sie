@@ -18950,6 +18950,7 @@ mod tests {
                     memory_total_bytes: None,
                     saturated: false,
                     terminated: false,
+                    numerical_process_inventory: None,
                     unsupported_models: Vec::new(),
                 },
             )
@@ -23105,6 +23106,7 @@ mod tests {
             memory_total_bytes: None,
             saturated: false,
             terminated: false,
+            numerical_process_inventory: None,
             unsupported_models: Vec::new(),
         }
     }

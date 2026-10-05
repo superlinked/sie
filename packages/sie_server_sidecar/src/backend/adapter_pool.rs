@@ -79,6 +79,8 @@ struct AdapterWorkerChild {
     index: usize,
     socket_path: PathBuf,
     ipc: Arc<IpcClient>,
+    // Diagnostics must not check out a serving/readiness IPC slot.
+    numerical_ipc: IpcClient,
     ready: AtomicBool,
     inflight_batches: AtomicI64,
     pending_items: AtomicI64,
@@ -143,6 +145,9 @@ impl AdapterWorkerPool {
                 index,
                 socket_path: socket_path.clone(),
                 ipc,
+                numerical_ipc: IpcClient::new(socket_path)
+                    .with_timeout(Duration::from_secs(ipc_request_timeout_s))
+                    .with_telemetry(runtime_state.telemetry.clone()),
                 ready: AtomicBool::new(false),
                 inflight_batches: AtomicI64::new(0),
                 pending_items: AtomicI64::new(0),
@@ -271,7 +276,7 @@ impl AdapterWorkerPool {
     /// Diagnostic snapshots grant no routing authority or readiness capability.
     pub async fn numerical_process_inventory(&self) -> Vec<NumericalProcessObservation> {
         let mut observations = join_all(self.children.iter().map(|child| async move {
-            match child.ipc.numerical_profile_snapshot().await {
+            match child.numerical_ipc.numerical_profile_snapshot().await {
                 Ok(snapshot) if valid_numerical_snapshot(&snapshot) => {
                     NumericalProcessObservation {
                         child_index: child.index,

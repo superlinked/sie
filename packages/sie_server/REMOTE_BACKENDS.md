@@ -388,7 +388,18 @@ the entire record, including its process, timestamp and measured errors. Exact
 inventory matching rejects missing, additional or replaced processes, even when
 a replacement reports the same execution identity.
 
-This artifact grants no routing authority. Numerical gateway routing remains
+Sidecars independently poll every adapter child and attach optional
+`numerical_process_inventory` diagnostics to NATS health messages. Cluster
+status exposes each worker's observation timestamp and all child statuses
+(`observed`, `incomplete`, `unavailable`, or `invalid`), including saturated
+workers. The metadata is limited to 256 children and 64 KiB; an oversized
+inventory is omitted whole. Failed probes, legacy heartbeats and observations
+older than ten seconds do not retain a previous process's inventory. Normal
+health publication does not wait for these probes, and diagnostics use dedicated
+IPC connections so they do not occupy serving or readiness connection slots.
+
+These observations and the proof artifact grant no routing authority. An
+`observed` child can still lack a local identity. Numerical gateway routing remains
 inactive until operator-owned evidence, complete live membership and execution
 fencing are connected. Restarts require new proofs; a collector result cannot
 authorize a new process or establish scale-to-zero equivalence.

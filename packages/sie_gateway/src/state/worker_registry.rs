@@ -208,6 +208,7 @@ impl WorkerRegistry {
                     bundle: "default".to_string(),
                     bundle_config_hash: String::new(),
                     supports_execution_authority_v1: false,
+                    numerical_process_inventory: None,
                     models: Vec::new(),
                     queue_depth: 0,
                     pending_cost: 0,
@@ -238,6 +239,12 @@ impl WorkerRegistry {
             };
             w.bundle_config_hash = msg.bundle_config_hash.clone();
             w.supports_execution_authority_v1 = msg.supports_execution_authority_v1;
+            // Replace on every heartbeat: legacy or invalid observations clear
+            // the previous process inventory rather than retaining stale IDs.
+            w.numerical_process_inventory = msg
+                .numerical_process_inventory
+                .filter(|inventory| inventory.valid())
+                .map(Arc::new);
             let overflow = msg.unsupported_models.len() > MAX_UNSUPPORTED_MODELS;
             if overflow && !w.unsupported_overflow {
                 tracing::warn!(
@@ -975,6 +982,7 @@ impl WorkerRegistry {
                 bundle_config_hash: w.bundle_config_hash.clone(),
                 unsupported_models: w.unsupported_models.to_vec(),
                 unsupported_models_overflow: w.unsupported_overflow,
+                numerical_process_inventory: w.numerical_process_inventory.as_deref().cloned(),
             });
 
             if w.healthy() {
@@ -1070,12 +1078,73 @@ mod tests {
             memory_total_bytes: None,
             saturated: false,
             terminated: false,
+            numerical_process_inventory: None,
             unsupported_models: Vec::new(),
         }
     }
 
     fn registry() -> WorkerRegistry {
         WorkerRegistry::new(Duration::from_secs(30), None)
+    }
+
+    #[tokio::test]
+    async fn numerical_inventory_includes_saturated_workers_and_replaces_processes() {
+        let reg = registry();
+        let mut message = make_msg(true);
+        message.saturated = true;
+        message.numerical_process_inventory = serde_json::from_value(serde_json::json!({
+            "observed_at_unix_ms": 1,
+            "children": [{"child_index": 0, "status": "observed", "snapshot": {
+                "runtime_instance_id": "a".repeat(64), "complete": true, "profiles": []
+            }}]
+        }))
+        .unwrap();
+        reg.update_worker("http://w1", message.clone()).await;
+        let status = reg.get_cluster_status().await;
+        assert!(status.workers[0].healthy);
+        let inventory = status.workers[0]
+            .numerical_process_inventory
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            inventory.children[0]
+                .snapshot
+                .as_ref()
+                .unwrap()
+                .runtime_instance_id
+                .as_deref(),
+            Some("a".repeat(64).as_str())
+        );
+        assert!(!reg.workers.read().await["http://w1"].eligible_for_dispatch());
+        message
+            .numerical_process_inventory
+            .as_mut()
+            .unwrap()
+            .children[0]
+            .snapshot
+            .as_mut()
+            .unwrap()
+            .runtime_instance_id = Some("b".repeat(64));
+        reg.update_worker("http://w1", message).await;
+        let status = reg.get_cluster_status().await;
+        assert_eq!(
+            status.workers[0]
+                .numerical_process_inventory
+                .as_ref()
+                .unwrap()
+                .children[0]
+                .snapshot
+                .as_ref()
+                .unwrap()
+                .runtime_instance_id
+                .as_deref(),
+            Some("b".repeat(64).as_str())
+        );
+        // A legacy heartbeat must not keep a previous process's proof metadata.
+        reg.update_worker("http://w1", make_msg(true)).await;
+        let status = reg.get_cluster_status().await;
+        assert!(status.workers[0].healthy);
+        assert!(status.workers[0].numerical_process_inventory.is_none());
     }
 
     #[tokio::test]
@@ -1512,6 +1581,7 @@ mod tests {
             memory_total_bytes: Some(8000),
             saturated: false,
             terminated: false,
+            numerical_process_inventory: None,
             unsupported_models: Vec::new(),
         };
         reg.update_worker("http://w1:8080", msg).await;
@@ -1549,6 +1619,7 @@ mod tests {
             memory_total_bytes: None,
             saturated: false,
             terminated: false,
+            numerical_process_inventory: None,
             unsupported_models: Vec::new(),
         };
         reg.update_worker("http://w1:8080", msg).await;
@@ -2221,6 +2292,7 @@ mod tests {
             memory_total_bytes: None,
             saturated,
             terminated: false,
+            numerical_process_inventory: None,
             unsupported_models: Vec::new(),
         }
     }
