@@ -1302,7 +1302,8 @@ mod tests {
         }))
         .unwrap();
         let encoded = serde_json::to_value(&snapshot.profiles[0]).unwrap();
-        let keys: Vec<_> = encoded.as_object().unwrap().keys().cloned().collect();
+        let mut keys: Vec<_> = encoded.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
         assert_eq!(
             keys,
             ["local_identity", "model_contract_sha256", "model_id"]
