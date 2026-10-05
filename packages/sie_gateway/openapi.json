@@ -2587,6 +2587,46 @@
         ],
         "type": "object"
       },
+      "NumericalAdmissionObservation": {
+        "additionalProperties": false,
+        "properties": {
+          "expires_at_unix_ms": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "local_identities": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "model_contract_sha256": {
+            "type": "string"
+          },
+          "outputs": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "sha256": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "sha256",
+          "kind",
+          "local_identities",
+          "model_contract_sha256",
+          "outputs",
+          "expires_at_unix_ms"
+        ],
+        "type": "object"
+      },
       "NumericalProcessInventory": {
         "additionalProperties": false,
         "properties": {
@@ -2638,6 +2678,17 @@
       "NumericalProfileObservation": {
         "additionalProperties": false,
         "properties": {
+          "admission": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/NumericalAdmissionObservation",
+                "description": "The local execution identities current evidence covers for the remote profile."
+              }
+            ]
+          },
           "local_identity": {
             "type": [
               "string",
@@ -2652,6 +2703,20 @@
           },
           "model_id": {
             "type": "string"
+          },
+          "remote_contract_sha256": {
+            "description": "The contract of the model's remote profile on this process's upstream.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "remote_execution_sha256": {
+            "description": "The serving code that runs the remote profile in this process.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [

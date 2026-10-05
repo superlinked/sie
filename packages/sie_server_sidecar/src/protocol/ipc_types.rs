@@ -442,12 +442,28 @@ pub struct NumericalProfileSnapshotRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NumericalAdmissionObservation {
+    pub sha256: String,
+    pub kind: String,
+    pub local_identities: Vec<String>,
+    pub model_contract_sha256: String,
+    pub outputs: Vec<String>,
+    pub expires_at_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NumericalProfileObservation {
     pub model_id: String,
     #[serde(default)]
     pub local_identity: Option<String>,
     #[serde(default)]
     pub model_contract_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_contract_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_execution_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission: Option<NumericalAdmissionObservation>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

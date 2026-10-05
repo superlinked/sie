@@ -24,6 +24,7 @@ from sie_server.config.equivalence import (
 )
 from sie_server.config.fleet_equivalence import equivalence_record_digest, read_equivalence_evidence
 from sie_server.config.model import ModelConfig
+from sie_server.config.sie_identity import sie_upstream_identity
 from sie_server.config.upstreams import UpstreamKind, installed_upstreams
 from sie_server.core.profile_identity import local_profile_identity, serving_code_digest
 
@@ -35,6 +36,7 @@ class NumericalAdmission:
     """The local execution identities that a remote profile's current evidence covers."""
 
     sha256: str
+    kind: str
     local_identities: frozenset[str]
     model_contract_sha256: str
     outputs: frozenset[str]
@@ -115,11 +117,63 @@ def openai_admission(config: ModelConfig, *, now: datetime | None = None) -> Num
                 "records": sorted(equivalence_record_digest(record) for record in admitted),
             }
         ),
+        kind=UpstreamKind.OPENAI.value,
         local_identities=frozenset(record.local_identity for record in admitted),
         model_contract_sha256=contract["model_contract_sha256"],
         outputs=contract["outputs"],
         expires_at=min(record.measured_at for record in admitted) + timedelta(seconds=policy.max_age_s),
     )
+
+
+def sie_admission(config: ModelConfig, *, wait: bool = True, now: datetime | None = None) -> NumericalAdmission | str:
+    """Return the admission an SIE upstream's fresh identity grants, or a fixed refusal reason.
+
+    The upstream's execution identity is the one identity admitted. Without
+    ``wait`` the upstream is never contacted on the caller's thread.
+    """
+    observed = sie_upstream_identity(config, wait=wait)
+    if isinstance(observed, str):
+        return observed
+    revision, identity, remaining_s = observed
+    if revision != config.hf_revision:
+        return "hybrid upstream weights differ from local"
+    profile_name = config.routing.fallback_profile if config.routing is not None else None
+    if profile_name is None:
+        return "model does not declare a hybrid remote profile"
+    return NumericalAdmission(
+        sha256=canonical_digest(
+            {
+                "version": 1,
+                "kind": UpstreamKind.SIE.value,
+                "model": config.sie_id,
+                "remote_profile": profile_name,
+                "remote_contract_sha256": remote_profile_contract_digest(config, profile_name, installed_upstreams()),
+                "revision": revision,
+                "identity": identity,
+            }
+        ),
+        kind=UpstreamKind.SIE.value,
+        local_identities=frozenset({identity}),
+        model_contract_sha256=model_contract_digest(config),
+        outputs=frozenset(set(config.outputs) & _NUMERICAL_OUTPUTS),
+        expires_at=(now or datetime.now(UTC)) + timedelta(seconds=remaining_s),
+    )
+
+
+def remote_admission(
+    config: ModelConfig, *, wait: bool = True, now: datetime | None = None
+) -> NumericalAdmission | str:
+    """Return the admission of the model's remote profile on this process's upstream, or a refusal reason."""
+    routing = config.routing
+    if routing is None or routing.policy not in {"fallback", "threshold"} or routing.fallback_profile is None:
+        return "model does not declare a hybrid remote profile"
+    upstream_name = config.resolve_profile(routing.fallback_profile).loadtime.get("upstream")
+    upstream = installed_upstreams().get(upstream_name) if isinstance(upstream_name, str) else None
+    if upstream is None:
+        return "hybrid remote profile names no installed upstream"
+    if upstream.kind is UpstreamKind.SIE:
+        return sie_admission(config, wait=wait, now=now)
+    return openai_admission(config, now=now)
 
 
 def openai_equivalence_refusal(

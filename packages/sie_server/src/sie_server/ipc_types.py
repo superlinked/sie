@@ -271,10 +271,22 @@ class NumericalProfileSnapshotRequest(msgspec.Struct):
     pass
 
 
-class NumericalProfileObservation(msgspec.Struct):
+class NumericalAdmissionObservation(msgspec.Struct):
+    sha256: str
+    kind: str
+    local_identities: list[str]
+    model_contract_sha256: str
+    outputs: list[str]
+    expires_at_unix_ms: int
+
+
+class NumericalProfileObservation(msgspec.Struct, omit_defaults=True):
     model_id: str
     local_identity: str | None = None
     model_contract_sha256: str | None = None
+    remote_contract_sha256: str | None = None
+    remote_execution_sha256: str | None = None
+    admission: NumericalAdmissionObservation | None = None
 
 
 class NumericalProfileSnapshotResponse(msgspec.Struct):

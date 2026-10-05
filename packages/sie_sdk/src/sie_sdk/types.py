@@ -925,10 +925,24 @@ class ResponseResult(TypedDict, total=False):
     request: RequestMetadata
 
 
+class NumericalAdmissionObservation(TypedDict):
+    """Local execution identities that current evidence covers for a model's remote profile."""
+
+    sha256: str
+    kind: Literal["openai", "sie"]
+    local_identities: list[str]
+    model_contract_sha256: str
+    outputs: list[str]
+    expires_at_unix_ms: int
+
+
 class NumericalProfileObservation(TypedDict):
     model_id: str
     model_contract_sha256: str | None
     local_identity: str | None
+    remote_contract_sha256: NotRequired[str | None]
+    remote_execution_sha256: NotRequired[str | None]
+    admission: NotRequired[NumericalAdmissionObservation | None]
 
 
 class NumericalProfileSnapshot(TypedDict):

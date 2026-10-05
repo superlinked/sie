@@ -2,6 +2,7 @@
 
 import json
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -12,12 +13,16 @@ import yaml
 from fastapi import HTTPException, Request
 from opentelemetry import trace
 from sie_server.api.routing import route_request
-from sie_server.config import sie_identity
+from sie_server.config import hybrid_admission, sie_identity
+from sie_server.config.equivalence import model_contract_digest, remote_profile_contract_digest
 from sie_server.config.model import ModelConfig
 from sie_server.config.routing import validate_model_routing
 from sie_server.config.upstreams import Upstream, install_upstreams
 from sie_server.core.loader import expand_profile_variants
 from sie_server.core.registry import ModelRegistry
+from sie_server.ipc_server import IpcServer
+from sie_server.ipc_types import NumericalProfileSnapshotRequest
+from sie_server.queue_executor import QueueExecutor
 
 IDENTITY = "v1:sha256:" + "b" * 64
 REVISION = "a" * 40
@@ -384,3 +389,85 @@ def test_reused_mutated_config_cannot_admit_stale_profile_metadata(remote, secti
     with pytest.raises(ValueError, match="settings changed after resolution"):
         validate_model_routing(config, device="cpu")
     assert len(remote[1]) == 1
+
+
+def test_sie_admission_admits_the_upstream_identity_for_matching_weights(remote) -> None:
+    admitted = hybrid_admission.sie_admission(model())
+    assert isinstance(admitted, hybrid_admission.NumericalAdmission)
+    assert admitted.kind == "sie"
+    assert admitted.local_identities == {IDENTITY}
+    assert admitted.outputs == {"dense"}
+    assert admitted.model_contract_sha256 == model_contract_digest(model())
+    dispatched = hybrid_admission.remote_admission(model())
+    assert isinstance(dispatched, hybrid_admission.NumericalAdmission)
+    assert dispatched.sha256 == admitted.sha256
+    _upstream, _requests, _constructions, payload = remote
+    payload[0] = httpx.Response(200, json=metadata(revision="c" * 40))
+    sie_identity._OBSERVATIONS.clear()
+    assert hybrid_admission.sie_admission(model()) == "hybrid upstream weights differ from local"
+
+
+def test_admission_without_waiting_never_reads_the_upstream_on_the_callers_thread(remote, monkeypatch) -> None:
+    _upstream, requests, _constructions, _payload = remote
+    entered, release = threading.Event(), threading.Event()
+    read = sie_identity._read_identity
+
+    def slow(*args):
+        entered.set()
+        assert release.wait(5)
+        return read(*args)
+
+    monkeypatch.setattr(sie_identity, "_read_identity", slow)
+    assert (
+        hybrid_admission.sie_admission(model(), wait=False)
+        == "hybrid upstream identity is unavailable or outside its age"
+    )
+    assert entered.wait(5)
+    assert (
+        hybrid_admission.sie_admission(model(), wait=False)
+        == "hybrid upstream identity is unavailable or outside its age"
+    )
+    release.set()
+    deadline = time.monotonic() + 5
+    while isinstance(hybrid_admission.sie_admission(model(), wait=False), str):
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    assert len(requests) == 1
+
+
+def test_admission_refreshes_ahead_of_expiry_without_losing_the_current_identity(remote, monkeypatch) -> None:
+    _upstream, requests, _constructions, _payload = remote
+    clock = [1000.0]
+    monkeypatch.setattr(sie_identity.time, "monotonic", lambda: clock[0])
+    first = hybrid_admission.sie_admission(model())
+    assert isinstance(first, hybrid_admission.NumericalAdmission)
+    clock[0] += 25.0
+    refreshed = threading.Event()
+    original = sie_identity._refresh
+
+    def tracked(*args):
+        original(*args)
+        refreshed.set()
+
+    monkeypatch.setattr(sie_identity, "_refresh", tracked)
+    current = hybrid_admission.sie_admission(model(), wait=False)
+    assert isinstance(current, hybrid_admission.NumericalAdmission)
+    assert refreshed.wait(5)
+    assert len(requests) == 2
+
+
+async def test_remote_lane_snapshot_reports_the_sie_admission(remote, tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("SIE_IPC_SOCKET_PATH", str(tmp_path / "ipc.sock"))
+    registry = ModelRegistry(device="cpu", enable_hot_reload=False)
+    registry.add_config(model())
+    assert isinstance(hybrid_admission.sie_admission(model()), hybrid_admission.NumericalAdmission)
+    server = IpcServer(str(tmp_path / "w.sock"), QueueExecutor(registry), worker_id="w")
+    response = await server._handle_numerical_profile_snapshot(NumericalProfileSnapshotRequest())
+    observed = {profile.model_id: profile for profile in response.profiles}
+    bare = observed["local/model"]
+    assert bare.admission is not None
+    assert bare.admission.kind == "sie"
+    assert bare.admission.local_identities == [IDENTITY]
+    assert bare.admission.sha256 == hybrid_admission.sie_admission(model()).sha256
+    assert bare.remote_contract_sha256 == remote_profile_contract_digest(model(), "remote", {"team": remote[0]})
+    assert observed["local/model:remote"].admission is None

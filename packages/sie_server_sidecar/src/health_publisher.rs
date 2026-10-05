@@ -653,6 +653,9 @@ mod tests {
                         model_id: format!("{index}{}", "x".repeat(1020)),
                         model_contract_sha256: Some("b".repeat(64)),
                         local_identity: None,
+                        remote_contract_sha256: None,
+                        remote_execution_sha256: None,
+                        admission: None,
                     })
                     .collect(),
             }),

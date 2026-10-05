@@ -345,17 +345,26 @@ retain an absent identity; failures return an incomplete snapshot without error
 details. A roster contains at most 1,024 models, with each model ID limited to
 1,024 UTF-8 bytes. Truncation or an invalid configuration makes it incomplete.
 
+A process that holds the upstream of a model's remote profile also reports, on
+the bare model, that profile's `remote_contract_sha256` and the
+`remote_execution_sha256` of its serving code. For a model with `encode` or
+`score` tasks and a hybrid routing policy it adds the current `admission`: the
+local execution identities that passing, fresh evidence covers (at most eight),
+the model contract, the admitted outputs, the expiry and an admission digest.
+An SIE upstream's identity is refreshed in the background, so a snapshot never
+waits on the upstream. Empty fields are omitted, so a process without a remote
+profile reports the same shape as before.
+
 The adapter pool retains one observation for every configured child, including
 unavailable and legacy backends. Missing fields are incomplete, malformed
-digests are invalid, and a duplicated process incarnation invalidates both
+digests or admissions are invalid, and a duplicated process incarnation invalidates both
 children. Each call refreshes the observations so a replacement process does
 not inherit the previous incarnation. The Candle backend does not implement
 this optional method and is reported as unavailable.
 
 These observations do not change readiness, execution authority, or routing.
-They provide inputs for collecting process-bound numerical evidence; accepting
-that evidence still requires the entire reachable fleet and a queue execution
-fence that pins the proof, configuration, and process incarnation.
+Admitting a numerical bridge from them also requires the identity of every live
+local process and an execution fence at the remote process.
 
 ### Execution authority protocol amendment (#415)
 

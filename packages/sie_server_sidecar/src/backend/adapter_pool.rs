@@ -21,11 +21,11 @@ use crate::backend::{BackendError, InferenceBackend};
 use crate::ipc_client::{IpcClient, IpcError};
 use crate::ipc_types::{
     ApplyModelConfigRequest, ApplyModelConfigResponse, BatchOutcome, DrainResponse,
-    EnsureModelReadyResponse, GenerateEvent, NumericalProfileSnapshotResponse, PingResponse,
-    ProcessEncodeBatchRequest, ProcessExtractBatchRequest, ProcessGenerateRequest,
-    ProcessScoreBatchRequest, ReplaceModelConfigsRequest, ReplaceModelConfigsResponse,
-    RunBatchRequest, SetPinnedModelsResponse, SignalGenerateCancelResponse,
-    WorkerCapabilitiesResponse,
+    EnsureModelReadyResponse, GenerateEvent, NumericalAdmissionObservation,
+    NumericalProfileSnapshotResponse, PingResponse, ProcessEncodeBatchRequest,
+    ProcessExtractBatchRequest, ProcessGenerateRequest, ProcessScoreBatchRequest,
+    ReplaceModelConfigsRequest, ReplaceModelConfigsResponse, RunBatchRequest,
+    SetPinnedModelsResponse, SignalGenerateCancelResponse, WorkerCapabilitiesResponse,
 };
 use crate::runtime_state::RuntimeState;
 
@@ -58,6 +58,29 @@ fn local_identity_digest(identity: &str) -> bool {
         .any(|prefix| identity.strip_prefix(prefix).is_some_and(sha256_digest))
 }
 
+const MAX_ADMITTED_IDENTITIES: usize = 8;
+const NUMERICAL_OUTPUTS: [&str; 4] = ["dense", "multivector", "score", "sparse"];
+
+fn valid_admission(admission: &NumericalAdmissionObservation) -> bool {
+    let mut identities = HashSet::new();
+    let mut outputs = HashSet::new();
+    sha256_digest(&admission.sha256)
+        && matches!(admission.kind.as_str(), "openai" | "sie")
+        && !admission.local_identities.is_empty()
+        && admission.local_identities.len() <= MAX_ADMITTED_IDENTITIES
+        && admission
+            .local_identities
+            .iter()
+            .all(|identity| local_identity_digest(identity) && identities.insert(identity))
+        && sha256_digest(&admission.model_contract_sha256)
+        && !admission.outputs.is_empty()
+        && admission
+            .outputs
+            .iter()
+            .all(|output| NUMERICAL_OUTPUTS.contains(&output.as_str()) && outputs.insert(output))
+        && admission.expires_at_unix_ms > 0
+}
+
 fn valid_numerical_snapshot(snapshot: &NumericalProfileSnapshotResponse) -> bool {
     let mut models = HashSet::new();
     snapshot
@@ -77,6 +100,15 @@ fn valid_numerical_snapshot(snapshot: &NumericalProfileSnapshotResponse) -> bool
                     .local_identity
                     .as_deref()
                     .is_none_or(local_identity_digest)
+                && profile
+                    .remote_contract_sha256
+                    .as_deref()
+                    .is_none_or(sha256_digest)
+                && profile
+                    .remote_execution_sha256
+                    .as_deref()
+                    .is_none_or(sha256_digest)
+                && profile.admission.as_ref().is_none_or(valid_admission)
         })
 }
 
@@ -1194,6 +1226,87 @@ mod tests {
             .unwrap();
             assert_eq!(valid_numerical_snapshot(&snapshot), accepted, "{identity}");
         }
+    }
+
+    fn snapshot_with_admission(admission: serde_json::Value) -> NumericalProfileSnapshotResponse {
+        serde_json::from_value(serde_json::json!({
+            "runtime_instance_id": "a".repeat(64),
+            "complete": true,
+            "profiles": [{
+                "model_id": "m",
+                "local_identity": null,
+                "model_contract_sha256": "d".repeat(64),
+                "remote_contract_sha256": "e".repeat(64),
+                "remote_execution_sha256": "f".repeat(64),
+                "admission": admission,
+            }],
+        }))
+        .unwrap()
+    }
+
+    fn admission() -> serde_json::Value {
+        serde_json::json!({
+            "sha256": "1".repeat(64),
+            "kind": "openai",
+            "local_identities": [format!("v2:sha256:{}", "2".repeat(64))],
+            "model_contract_sha256": "d".repeat(64),
+            "outputs": ["dense", "sparse"],
+            "expires_at_unix_ms": 1,
+        })
+    }
+
+    #[test]
+    fn numerical_snapshots_validate_remote_admissions() {
+        assert!(valid_numerical_snapshot(&snapshot_with_admission(
+            admission()
+        )));
+        assert!(valid_numerical_snapshot(&snapshot_with_admission(
+            serde_json::Value::Null
+        )));
+        let identity = format!("v2:sha256:{}", "2".repeat(64));
+        for (field, value) in [
+            ("sha256", serde_json::json!("x")),
+            ("kind", serde_json::json!("other")),
+            ("local_identities", serde_json::json!([])),
+            ("local_identities", serde_json::json!([identity, identity])),
+            ("local_identities", serde_json::json!(["v2:sha256:short"])),
+            (
+                "local_identities",
+                serde_json::json!((0..=MAX_ADMITTED_IDENTITIES)
+                    .map(|index| format!("v2:sha256:{index:064x}"))
+                    .collect::<Vec<_>>()),
+            ),
+            ("model_contract_sha256", serde_json::json!("x")),
+            ("outputs", serde_json::json!([])),
+            ("outputs", serde_json::json!(["tokens"])),
+            ("outputs", serde_json::json!(["dense", "dense"])),
+            ("expires_at_unix_ms", serde_json::json!(0)),
+        ] {
+            let mut invalid = admission();
+            invalid[field] = value;
+            assert!(
+                !valid_numerical_snapshot(&snapshot_with_admission(invalid)),
+                "{field}"
+            );
+        }
+        let mut contract = snapshot_with_admission(serde_json::Value::Null);
+        contract.profiles[0].remote_contract_sha256 = Some("x".into());
+        assert!(!valid_numerical_snapshot(&contract));
+    }
+
+    #[test]
+    fn an_observation_without_remote_facts_keeps_its_wire_shape() {
+        let snapshot: NumericalProfileSnapshotResponse = serde_json::from_value(serde_json::json!({
+            "runtime_instance_id": "a".repeat(64), "complete": true,
+            "profiles": [{"model_id": "m", "local_identity": null, "model_contract_sha256": "d".repeat(64)}],
+        }))
+        .unwrap();
+        let encoded = serde_json::to_value(&snapshot.profiles[0]).unwrap();
+        let keys: Vec<_> = encoded.as_object().unwrap().keys().cloned().collect();
+        assert_eq!(
+            keys,
+            ["local_identity", "model_contract_sha256", "model_id"]
+        );
     }
 
     #[tokio::test]

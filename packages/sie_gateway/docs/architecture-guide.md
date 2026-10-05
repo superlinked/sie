@@ -939,6 +939,16 @@ Missing, malformed or oversized metadata clears the previous inventory without
 discarding the heartbeat. The wire budget is 64 KiB and 256 children; unknown
 fields and duplicate positive process IDs are rejected.
 
+A process that holds a model's remote profile also reports that profile's
+`remote_contract_sha256`, the `remote_execution_sha256` of its serving code and,
+for a hybrid `encode` or `score` model, an `admission`: the local execution
+identities its current evidence covers, the model contract, the outputs, the
+expiry and a digest. The gateway checks the digests and identity formats, at most
+eight identities, outputs from `dense`, `sparse`, `multivector` and `score`, and a
+positive expiry, and drops a malformed inventory. The fields are absent when empty.
+A gateway that predates them still accepts inventories from processes without a
+remote profile and drops those that carry one.
+
 Sidecars probe on dedicated IPC connections independently of readiness pings
 and health publication, with a
 five-second timeout and a ten-second observation lifetime. Shutdown tombstones

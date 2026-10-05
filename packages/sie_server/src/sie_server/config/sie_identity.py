@@ -32,6 +32,7 @@ _MAX_METADATA_BYTES = 64 << 10
 _METADATA_DEADLINE_S = 5.0
 _IDENTITY_AGE_S = 30.0
 _REFUSAL_AGE_S = 2.0
+_REFRESH_AHEAD = 2 / 3
 _MAX_CACHE_ENTRIES = 128
 _IDENTITY = re.compile(r"^v[12]:sha256:[0-9a-f]{64}$")
 _REVISION = re.compile(r"[0-9a-f]{40}")
@@ -114,31 +115,14 @@ class _Observation:
     upstream: Upstream
     value: tuple[str, str] | None = None
     checked_at: float = 0.0
-    loading: bool = True
+    loading: bool = False
 
 
 _LOCK = threading.Lock()
 _OBSERVATIONS: OrderedDict[tuple[int, str, str], _Observation] = OrderedDict()
 
 
-def _fresh_identity(upstream_name: str, upstream: Upstream, remote_model: str) -> tuple[str, str] | None:
-    key = id(upstream), upstream_name, remote_model
-    with _LOCK:
-        existing = _OBSERVATIONS.get(key)
-        if existing is not None:
-            _OBSERVATIONS.move_to_end(key)
-            age = time.monotonic() - existing.checked_at
-            if existing.loading:
-                return None
-            if 0 <= age < (_IDENTITY_AGE_S if existing.value is not None else _REFUSAL_AGE_S):
-                return existing.value
-        elif len(_OBSERVATIONS) >= _MAX_CACHE_ENTRIES:
-            candidate = next((candidate for candidate, entry in _OBSERVATIONS.items() if not entry.loading), None)
-            if candidate is None:
-                return None
-            del _OBSERVATIONS[candidate]
-        observation = _Observation(upstream)
-        _OBSERVATIONS[key] = observation
+def _refresh(observation: _Observation, upstream_name: str, upstream: Upstream, remote_model: str) -> None:
     value = None
     try:
         value = _read_identity(upstream_name, upstream, remote_model)
@@ -149,26 +133,58 @@ def _fresh_identity(upstream_name: str, upstream: Upstream, remote_model: str) -
             observation.value = value
             observation.checked_at = time.monotonic()
             observation.loading = False
-    return value
 
 
-def _shown(value: object, pattern: re.Pattern[str]) -> str:
-    return value if isinstance(value, str) and pattern.fullmatch(value) else "<invalid>"
+def _identity_observation(
+    upstream_name: str, upstream: Upstream, remote_model: str, *, wait: bool = True
+) -> tuple[tuple[str, str] | None, float]:
+    """Return the current observation and its age in seconds.
+
+    With ``wait`` an expired observation is refreshed before returning. Without
+    it the refresh runs in the background, starting before expiry, and the
+    caller never waits on the upstream. A refresh already in flight is never
+    started twice.
+    """
+    key = id(upstream), upstream_name, remote_model
+    with _LOCK:
+        observation = _OBSERVATIONS.get(key)
+        if observation is None:
+            if len(_OBSERVATIONS) >= _MAX_CACHE_ENTRIES:
+                candidate = next((candidate for candidate, entry in _OBSERVATIONS.items() if not entry.loading), None)
+                if candidate is None:
+                    return None, 0.0
+                del _OBSERVATIONS[candidate]
+            observation = _Observation(upstream)
+            _OBSERVATIONS[key] = observation
+        _OBSERVATIONS.move_to_end(key)
+        age = time.monotonic() - observation.checked_at
+        limit = _IDENTITY_AGE_S if observation.value is not None else _REFUSAL_AGE_S
+        fresh = observation.checked_at > 0 and 0 <= age < limit
+        current = (observation.value, age) if fresh else (None, 0.0)
+        if observation.loading or (fresh and (wait or age < limit * _REFRESH_AHEAD)):
+            return current
+        observation.loading = True
+    if not wait:
+        threading.Thread(
+            target=_refresh, args=(observation, upstream_name, upstream, remote_model), daemon=True
+        ).start()
+        return current
+    _refresh(observation, upstream_name, upstream, remote_model)
+    with _LOCK:
+        return observation.value, 0.0
 
 
-def _shown_identity(revision: object, identity: object) -> str:
-    return f"(hf_revision={_shown(revision, _REVISION)}, identity={_shown(identity, _IDENTITY)})"
+def _fresh_identity(upstream_name: str, upstream: Upstream, remote_model: str) -> tuple[str, str] | None:
+    return _identity_observation(upstream_name, upstream, remote_model)[0]
 
 
-def sie_identity_refusal(config: ModelConfig, *, device: str, engine_config: EngineConfig | None = None) -> str | None:
-    """Admit only fresh matching weights and a known local execution identity."""
+def _sie_contract(config: ModelConfig) -> tuple[str, Upstream, str] | str:
+    """The upstream name, upstream and upstream model of a hybrid SIE profile, or a refusal reason."""
     if not remote_serving_enabled():
         return "remote serving is disabled"
     routing = config.routing
     if routing is None or routing.policy not in {"fallback", "threshold"} or routing.fallback_profile is None:
         return "model does not declare a hybrid remote profile"
-    if not device or device == "cuda" or (device.startswith("cuda:") and not device.partition(":")[2].isdigit()):
-        return "hybrid execution device is ambiguous"
     remote = config.resolve_profile(routing.fallback_profile)
     upstream_name, remote_model = remote.loadtime.get("upstream"), remote.loadtime.get("upstream_model")
     upstream = installed_upstreams().get(upstream_name) if isinstance(upstream_name, str) else None
@@ -193,10 +209,44 @@ def sie_identity_refusal(config: ModelConfig, *, device: str, engine_config: Eng
             return "hybrid remote profile differs from local runtime defaults"
     except (TypeError, ValueError, RecursionError):
         return "hybrid runtime defaults cannot be identified"
+    return upstream_name, upstream, remote_model
+
+
+def sie_upstream_identity(config: ModelConfig, *, wait: bool = True) -> tuple[str, str, float] | str:
+    """The upstream's weights revision, identity and remaining validity in seconds, or a refusal reason."""
+    contract = _sie_contract(config)
+    if isinstance(contract, str):
+        return contract
+    observed, age = _identity_observation(*contract, wait=wait)
+    if observed is None:
+        return "hybrid upstream identity is unavailable or outside its age"
+    return observed[0], observed[1], max(0.0, _IDENTITY_AGE_S - age)
+
+
+def _shown(value: object, pattern: re.Pattern[str]) -> str:
+    return value if isinstance(value, str) and pattern.fullmatch(value) else "<invalid>"
+
+
+def _shown_identity(revision: object, identity: object) -> str:
+    return f"(hf_revision={_shown(revision, _REVISION)}, identity={_shown(identity, _IDENTITY)})"
+
+
+def sie_identity_refusal(config: ModelConfig, *, device: str, engine_config: EngineConfig | None = None) -> str | None:
+    """Admit only fresh matching weights and a known local execution identity."""
+    if not remote_serving_enabled():
+        return "remote serving is disabled"
+    routing = config.routing
+    if routing is None or routing.policy not in {"fallback", "threshold"} or routing.fallback_profile is None:
+        return "model does not declare a hybrid remote profile"
+    if not device or device == "cuda" or (device.startswith("cuda:") and not device.partition(":")[2].isdigit()):
+        return "hybrid execution device is ambiguous"
+    contract = _sie_contract(config)
+    if isinstance(contract, str):
+        return contract
     identity = local_profile_identity(config, "default", device=device, engine_config=engine_config)
     if identity is None:
         return "hybrid local execution cannot be identified"
-    observed = _fresh_identity(upstream_name, upstream, remote_model)
+    observed = _fresh_identity(*contract)
     if observed is None:
         return "hybrid upstream identity is unavailable or outside its age"
     if observed != (config.hf_revision, identity):

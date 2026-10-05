@@ -305,6 +305,50 @@ pub struct NumericalProfileObservation {
     pub model_id: String,
     pub model_contract_sha256: Option<String>,
     pub local_identity: Option<String>,
+    /// The contract of the model's remote profile on this process's upstream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_contract_sha256: Option<String>,
+    /// The serving code that runs the remote profile in this process.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_execution_sha256: Option<String>,
+    /// The local execution identities current evidence covers for the remote profile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission: Option<NumericalAdmissionObservation>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NumericalAdmissionObservation {
+    pub sha256: String,
+    pub kind: String,
+    pub local_identities: Vec<String>,
+    pub model_contract_sha256: String,
+    pub outputs: Vec<String>,
+    pub expires_at_unix_ms: u64,
+}
+
+pub const MAX_ADMITTED_IDENTITIES: usize = 8;
+const NUMERICAL_OUTPUTS: [&str; 4] = ["dense", "multivector", "score", "sparse"];
+
+impl NumericalAdmissionObservation {
+    fn valid(&self) -> bool {
+        let mut identities = HashSet::new();
+        let mut outputs = HashSet::new();
+        sha256_digest(&self.sha256)
+            && matches!(self.kind.as_str(), "openai" | "sie")
+            && !self.local_identities.is_empty()
+            && self.local_identities.len() <= MAX_ADMITTED_IDENTITIES
+            && self
+                .local_identities
+                .iter()
+                .all(|identity| local_identity_digest(identity) && identities.insert(identity))
+            && sha256_digest(&self.model_contract_sha256)
+            && !self.outputs.is_empty()
+            && self.outputs.iter().all(|output| {
+                NUMERICAL_OUTPUTS.contains(&output.as_str()) && outputs.insert(output)
+            })
+            && self.expires_at_unix_ms > 0
+    }
 }
 
 fn sha256_digest(value: &str) -> bool {
@@ -388,6 +432,18 @@ impl NumericalProcessInventory {
                         .local_identity
                         .as_deref()
                         .is_some_and(|id| !local_identity_digest(id))
+                    || profile
+                        .remote_contract_sha256
+                        .as_deref()
+                        .is_some_and(|id| !sha256_digest(id))
+                    || profile
+                        .remote_execution_sha256
+                        .as_deref()
+                        .is_some_and(|id| !sha256_digest(id))
+                    || profile
+                        .admission
+                        .as_ref()
+                        .is_some_and(|admission| !admission.valid())
                 {
                     return false;
                 }
@@ -594,6 +650,90 @@ mod tests {
                 "{identity}"
             );
         }
+    }
+
+    fn inventory_with_admission(admission: serde_json::Value) -> serde_json::Value {
+        let mut value = inventory();
+        let profile = &mut value["children"][0]["snapshot"]["profiles"][0];
+        profile["remote_contract_sha256"] = serde_json::json!("e".repeat(64));
+        profile["remote_execution_sha256"] = serde_json::json!("f".repeat(64));
+        profile["admission"] = admission;
+        value
+    }
+
+    fn admission() -> serde_json::Value {
+        serde_json::json!({
+            "sha256": "1".repeat(64),
+            "kind": "sie",
+            "local_identities": [format!("v2:sha256:{}", "2".repeat(64))],
+            "model_contract_sha256": "b".repeat(64),
+            "outputs": ["score"],
+            "expires_at_unix_ms": 1,
+        })
+    }
+
+    fn parsed(value: serde_json::Value) -> Option<NumericalProcessInventory> {
+        serde_json::from_value::<WorkerStatusMessage>(serde_json::json!({
+            "numerical_process_inventory": value
+        }))
+        .unwrap()
+        .numerical_process_inventory
+    }
+
+    #[test]
+    fn remote_admissions_are_carried_and_malformed_ones_drop_the_inventory() {
+        let inventory = parsed(inventory_with_admission(admission())).unwrap();
+        let profile = &inventory.children[0].snapshot.as_ref().unwrap().profiles[0];
+        let carried = profile.admission.as_ref().unwrap();
+        assert_eq!(carried.kind, "sie");
+        assert_eq!(carried.local_identities.len(), 1);
+        assert_eq!(
+            profile.remote_execution_sha256.as_deref(),
+            Some("f".repeat(64).as_str())
+        );
+        let identity = format!("v2:sha256:{}", "2".repeat(64));
+        for (field, value) in [
+            ("sha256", serde_json::json!("x")),
+            ("kind", serde_json::json!("vendor")),
+            ("local_identities", serde_json::json!([])),
+            ("local_identities", serde_json::json!([identity, identity])),
+            (
+                "local_identities",
+                serde_json::json!((0..=MAX_ADMITTED_IDENTITIES)
+                    .map(|index| format!("v2:sha256:{index:064x}"))
+                    .collect::<Vec<_>>()),
+            ),
+            ("model_contract_sha256", serde_json::json!("x")),
+            ("outputs", serde_json::json!(["tokens"])),
+            ("outputs", serde_json::json!(["score", "score"])),
+            ("expires_at_unix_ms", serde_json::json!(0)),
+            ("unexpected", serde_json::json!(true)),
+        ] {
+            let mut invalid = admission();
+            invalid[field] = value;
+            assert!(
+                parsed(inventory_with_admission(invalid)).is_none(),
+                "{field}"
+            );
+        }
+        let mut contract = inventory_with_admission(serde_json::Value::Null);
+        contract["children"][0]["snapshot"]["profiles"][0]["remote_contract_sha256"] =
+            serde_json::json!("x");
+        assert!(parsed(contract).is_none());
+    }
+
+    #[test]
+    fn an_observation_without_remote_facts_serializes_as_before() {
+        let inventory = parsed(inventory()).unwrap();
+        let encoded =
+            serde_json::to_value(&inventory.children[0].snapshot.as_ref().unwrap().profiles[0])
+                .unwrap();
+        let mut keys: Vec<_> = encoded.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            ["local_identity", "model_contract_sha256", "model_id"]
+        );
     }
 
     fn make_worker(health: WorkerHealth, mem_used: i64, mem_total: i64) -> WorkerState {

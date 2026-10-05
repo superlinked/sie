@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import msgspec
 import pytest
 import yaml
 from fastapi import FastAPI, HTTPException, Request
@@ -33,7 +34,8 @@ from sie_server.config.routing import validate_model_routing
 from sie_server.config.upstreams import EquivalencePolicy, Upstream, install_upstreams
 from sie_server.core.loader import expand_profile_variants
 from sie_server.core.registry import ModelRegistry
-from sie_server.ipc_types import ReplaceModelConfigEntry, ReplaceModelConfigsRequest
+from sie_server.ipc_server import IpcServer
+from sie_server.ipc_types import NumericalProfileSnapshotRequest, ReplaceModelConfigEntry, ReplaceModelConfigsRequest
 from sie_server.queue_executor import QueueExecutor
 
 NOW = datetime(2026, 10, 3, tzinfo=UTC)
@@ -618,3 +620,74 @@ async def test_queue_worker_bridge_still_requires_current_evidence(
     assert refused.value.headers["X-SIE-Fallback-Error"] == "INFERENCE_ERROR"
     assert not hasattr(request.state, "serving_route")
     registry.start_load_async.assert_awaited_once_with(config.sie_id, "cpu")
+
+
+def _remote_lane_server(config: ModelConfig, tmp_path: Path) -> IpcServer:
+    registry = ModelRegistry(device="cpu", enable_hot_reload=False)
+    registry.add_config(config)
+    return IpcServer(str(tmp_path / "w.sock"), QueueExecutor(registry), worker_id="w")
+
+
+async def _snapshot(server: IpcServer) -> dict[str, Any]:
+    response = await server._handle_numerical_profile_snapshot(NumericalProfileSnapshotRequest())
+    return {profile.model_id: profile for profile in response.profiles}
+
+
+async def test_remote_lane_snapshot_advertises_the_current_admission(admission: tuple, tmp_path: Path) -> None:
+    config, upstream, path, data = admission
+    _refresh_record(path, data)
+    server = _remote_lane_server(config, tmp_path)
+    observed = await _snapshot(server)
+    bare = observed[config.sie_id]
+    current = hybrid_admission.openai_admission(config)
+    assert isinstance(current, hybrid_admission.NumericalAdmission)
+    assert bare.remote_contract_sha256 == remote_profile_contract_digest(config, "remote", {"vendor": upstream})
+    assert bare.remote_execution_sha256 == hybrid_admission.serving_code_digest()
+    assert bare.admission is not None
+    assert bare.admission.sha256 == current.sha256
+    assert bare.admission.kind == "openai"
+    assert bare.admission.local_identities == [IDENTITY]
+    assert bare.admission.outputs == ["dense"]
+    assert bare.admission.model_contract_sha256 == model_contract_digest(config)
+    assert bare.admission.expires_at_unix_ms == int(current.expires_at.timestamp() * 1000)
+    variant = observed[config.sie_id + ":remote"]
+    assert (variant.admission, variant.remote_contract_sha256) == (None, None)
+    data["measured_at"] = (datetime.now(UTC) - timedelta(minutes=5)).isoformat()
+    path.write_text(json.dumps(data))
+    expired = (await _snapshot(server))[config.sie_id]
+    assert expired.admission is None
+    assert expired.remote_contract_sha256 == bare.remote_contract_sha256
+    path.unlink()
+    assert (await _snapshot(server))[config.sie_id].admission is None
+
+
+async def test_snapshot_omits_an_admission_naming_more_identities_than_the_bound(
+    admission: tuple, tmp_path: Path
+) -> None:
+    config, _, path, data = admission
+    now = datetime.now(UTC).isoformat()
+    identities = [IDENTITY, *(f"v1:sha256:{index:064x}" for index in range(8))]
+    path.write_text(
+        _bundle(*(_identity_record(data, identity, config, measured_at=now) for identity in identities[:8]))
+    )
+    server = _remote_lane_server(config, tmp_path)
+    assert len((await _snapshot(server))[config.sie_id].admission.local_identities) == 8
+    path.write_text(_bundle(*(_identity_record(data, identity, config, measured_at=now) for identity in identities)))
+    assert len(hybrid_admission.openai_admission(config).local_identities) == 9
+    assert (await _snapshot(server))[config.sie_id].admission is None
+
+
+async def test_process_without_the_upstream_reports_no_remote_contract_or_admission(
+    admission: tuple, tmp_path: Path
+) -> None:
+    config, _, path, data = admission
+    _refresh_record(path, data)
+    server = _remote_lane_server(config, tmp_path)
+    install_upstreams({}, remote_serving=False)
+    observation = (await _snapshot(server))[config.sie_id]
+    assert (observation.remote_contract_sha256, observation.remote_execution_sha256, observation.admission) == (
+        None,
+        None,
+        None,
+    )
+    assert set(msgspec.to_builtins(observation)) <= {"model_id", "local_identity", "model_contract_sha256"}

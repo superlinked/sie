@@ -96,6 +96,7 @@ export type {
   NumericalProcessObservation,
   NumericalProfileSnapshot,
   NumericalProfileObservation,
+  NumericalAdmissionObservation,
   ModelSummary,
   ServerInfo,
   GPUMetrics,

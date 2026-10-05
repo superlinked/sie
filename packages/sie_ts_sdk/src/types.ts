@@ -744,6 +744,19 @@ export interface NumericalProfileObservation {
   model_id: string;
   model_contract_sha256: string | null;
   local_identity: string | null;
+  remote_contract_sha256?: string | null;
+  remote_execution_sha256?: string | null;
+  admission?: NumericalAdmissionObservation | null;
+}
+
+/** Local execution identities that current evidence covers for a model's remote profile. */
+export interface NumericalAdmissionObservation {
+  sha256: string;
+  kind: "openai" | "sie";
+  local_identities: string[];
+  model_contract_sha256: string;
+  outputs: string[];
+  expires_at_unix_ms: number;
 }
 
 export interface ClusterWorkerInfo {
