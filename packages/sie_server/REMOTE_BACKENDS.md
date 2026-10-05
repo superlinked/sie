@@ -123,9 +123,9 @@ with SIEClient(base_url="http://localhost:8080") as client:
 
 Usage counts come from the upstream. When an upstream reports no usage, a
 native `encode`, `score` or `extract` request still succeeds, and the response
-omits `usage` instead of estimating it. This holds for every operation an
-upstream kind supports, on a single node and in a cluster, and the
-OpenAI-compatible `/v1/rerank` route omits `usage` the same way. The
+omits `usage` instead of estimating it. This holds for the `encode`, `score`
+and `extract` operations each upstream kind supports, on a single node and in a
+cluster. The OpenAI-compatible `/v1/rerank` route also omits `usage`. The
 OpenAI-compatible `/v1/embeddings` route always returns a `usage` object, so it
 reports a character-based estimate instead, which the gateway marks with
 `sie_token_source: character_estimate`. For an OpenAI-compatible
