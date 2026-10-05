@@ -126,7 +126,8 @@ native `encode`, `score` or `extract` request still succeeds, and the response
 omits `usage` instead of estimating it. This holds for both upstream kinds, on
 a single node and in a cluster. The OpenAI-compatible `/v1/embeddings` route
 always returns a `usage` object, so it reports a character-based estimate
-instead. The gateway marks that estimate with `sie_token_source: estimate`.
+instead. The gateway marks that estimate with
+`sie_token_source: character_estimate`.
 Malformed usage fails the request. Generation fails closed: a generation, chat
 or completion response without exact final usage is an error, never a success.
 
