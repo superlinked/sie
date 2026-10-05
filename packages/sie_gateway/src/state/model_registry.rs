@@ -231,8 +231,9 @@ pub(crate) struct NumericalRoute {
     /// The bare model, as worker inventories name it.
     pub model: String,
     pub local_bundles: Vec<String>,
-    /// The model's own pool. A model without one can be served from any pool.
-    pub local_pool: Option<String>,
+    /// The model's own pool, `default` when it names none. Workers load only
+    /// the models of their own pool.
+    pub local_pool: String,
     pub admitted: Option<Arc<crate::state::worker_registry::AdmittedWorkers>>,
 }
 
@@ -1829,11 +1830,7 @@ impl ModelRegistry {
             .then(|| NumericalRoute {
                 model: local.canonical_base_model.clone(),
                 local_bundles: local.bundles.clone(),
-                local_pool: local
-                    .pool
-                    .as_deref()
-                    .map(Self::normalize_pool_name)
-                    .filter(|pool| pool != DEFAULT_MODEL_POOL),
+                local_pool: Self::normalize_pool_name(Self::entry_pool_name(local)),
                 admitted: None,
             });
         Some(RemoteFallbackPlan {
@@ -3361,14 +3358,14 @@ mod tests {
         assert_eq!(route.model, "acme/hybrid");
         assert_eq!(route.local_bundles, ["default"]);
         assert_eq!(
-            route.local_pool, None,
-            "a model without a pool can be served from any pool"
+            route.local_pool, DEFAULT_MODEL_POOL,
+            "a model without a pool is served from the default pool"
         );
         assert!(route.admitted.is_none());
         assert!(registry.has_numerical_bridge("acme/hybrid"));
         assert!(!registry.has_numerical_bridge("acme/hybrid:remote"));
 
-        for (pool, expected) in [("default", None), (" Tenant ", Some("tenant"))] {
+        for (pool, expected) in [("default", DEFAULT_MODEL_POOL), (" Tenant ", "tenant")] {
             let mut pooled = config.clone();
             pooled.pool = Some(pool.to_string());
             registry
@@ -3377,11 +3374,7 @@ mod tests {
             let plan = registry
                 .remote_fallback_plan("acme/hybrid", FallbackTrigger::Provisioning)
                 .unwrap();
-            assert_eq!(
-                plan.numerical.unwrap().local_pool.as_deref(),
-                expected,
-                "{pool}"
-            );
+            assert_eq!(plan.numerical.unwrap().local_pool, expected, "{pool}");
         }
     }
 

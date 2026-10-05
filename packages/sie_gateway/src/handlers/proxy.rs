@@ -2412,7 +2412,7 @@ fn admit_numerical(
                 &crate::state::worker_registry::NumericalLanes {
                     model: &route.model,
                     local_bundles: &route.local_bundles,
-                    local_pool: route.local_pool.as_deref(),
+                    local_pool: &route.local_pool,
                     remote_model: &plan.model,
                     remote_bundle: &plan.bundle,
                     remote_pool: &plan.pool,
@@ -2691,7 +2691,9 @@ fn native_fallback_plan(
         "",
         trigger,
     )
-    .filter(|plan| plan.numerical.is_none() || matches!(endpoint, "encode" | "score"))
+    .filter(|plan| {
+        plan.numerical.is_none() || numerical_request_outputs(endpoint, parsed).is_some()
+    })
 }
 
 #[allow(clippy::result_large_err, clippy::too_many_arguments)]

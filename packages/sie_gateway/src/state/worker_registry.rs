@@ -25,8 +25,9 @@ pub(crate) struct NumericalLanes<'a> {
     /// The bare model, as worker inventories name it.
     pub model: &'a str,
     pub local_bundles: &'a [String],
-    /// The model's own pool. Without one, any pool can serve the model.
-    pub local_pool: Option<&'a str>,
+    /// The model's own pool, `default` when it names none. Workers load only
+    /// the models of their own pool.
+    pub local_pool: &'a str,
     /// The remote profile's routable id and its exact lane contract.
     pub remote_model: &'a str,
     pub remote_bundle: &'a str,
@@ -1079,10 +1080,9 @@ impl WorkerRegistry {
     /// exact remote hash, and every one of its children reports the same
     /// current admission, which must list every requested output. Its
     /// admission must then cover every local process that could serve the
-    /// model: each child of each worker on the model's local bundles, in the
-    /// model's pool or in any pool when the model names none, starting
-    /// workers included, must report an admitted identity and the admission's
-    /// model contract. A local worker past the heartbeat timeout that has not
+    /// model: each child of each worker on the model's local bundles and pool,
+    /// starting workers included, must report an admitted identity and the
+    /// admission's model contract. A local worker past the heartbeat timeout that has not
     /// been evicted cannot be vouched for, and neither can any worker until
     /// this gateway has heard worker health for one heartbeat timeout. With
     /// no local worker the remote admission decides alone.
@@ -1142,9 +1142,7 @@ impl WorkerRegistry {
                 .local_bundles
                 .iter()
                 .any(|bundle| w.bundle.eq_ignore_ascii_case(bundle))
-                && lanes
-                    .local_pool
-                    .is_none_or(|pool| w.pool_name.eq_ignore_ascii_case(pool))
+                && w.pool_name.eq_ignore_ascii_case(lanes.local_pool)
                 && w.supports_model(lanes.model)
         }) {
             if worker.last_heartbeat.elapsed() > self.heartbeat_timeout {
@@ -1553,7 +1551,7 @@ mod tests {
 
     fn decide(
         reg: &WorkerRegistry,
-        local_pool: Option<&str>,
+        local_pool: &str,
         outputs: &[&str],
     ) -> Result<AdmittedWorkers, NumericalRefusal> {
         let local_bundles = ["default".to_string()];
@@ -1575,7 +1573,7 @@ mod tests {
 
     fn numerical_decision(reg: &WorkerRegistry) -> Result<AdmittedWorkers, NumericalRefusal> {
         reg.settle_health_view_for_tests();
-        decide(reg, None, &["dense"])
+        decide(reg, "default", &["dense"])
     }
 
     #[tokio::test]
@@ -1666,7 +1664,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn numerical_admission_covers_starting_stale_and_every_pool_that_serves_the_model() {
+    async fn numerical_admission_covers_starting_and_stale_workers_of_the_models_pool() {
         let reg = registry();
         reg.update_worker(
             "http://r1",
@@ -1685,22 +1683,11 @@ mod tests {
         let mut elsewhere = local_worker("local-1", 2, std::slice::from_ref(&uncovered));
         elsewhere.pool_name = "other-pool".into();
         reg.update_worker("http://l1", elsewhere).await;
-        assert_eq!(
-            numerical_decision(&reg),
-            Err(NumericalRefusal::UncoveredIdentity),
-            "a model without a pool can be served from any pool"
-        );
         assert!(
-            decide(&reg, Some("default"), &["dense"]).is_ok(),
-            "a model with its own pool is served only there"
+            numerical_decision(&reg).is_ok(),
+            "a worker loads only the models of its own pool"
         );
 
-        reg.update_worker("http://l1", local_worker("local-1", 2, &[uncovered]))
-            .await;
-        assert_eq!(
-            numerical_decision(&reg),
-            Err(NumericalRefusal::UncoveredIdentity)
-        );
         reg.update_worker(
             "http://l1",
             local_worker("local-1", 2, &[local_profile(Some(COVERED), CONTRACT)]),
@@ -1721,6 +1708,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_worker_of_another_pool_on_the_same_bundle_leaves_the_bridge_open() {
+        let reg = registry();
+        reg.update_worker(
+            "http://r1",
+            remote_worker("remote-1", 1, &[admission('a', NOW_MS + 60_000)]),
+        )
+        .await;
+        reg.update_worker(
+            "http://l1",
+            local_worker("local-1", 2, &[local_profile(Some(COVERED), CONTRACT)]),
+        )
+        .await;
+        assert!(numerical_decision(&reg).is_ok());
+
+        let mut batch = local_worker(
+            "batch-1",
+            3,
+            &[
+                serde_json::json!({"model_id": "acme/batch-only", "model_contract_sha256": CONTRACT, "local_identity": OTHER}),
+            ],
+        );
+        batch.pool_name = "batch".into();
+        reg.update_worker("http://b1", batch).await;
+        assert!(
+            numerical_decision(&reg).is_ok(),
+            "a batch-pool worker never serves a model of the default pool"
+        );
+    }
+
+    #[tokio::test]
     async fn numerical_admission_waits_one_heartbeat_timeout_after_health_resumes() {
         let reg = registry();
         reg.update_worker(
@@ -1729,16 +1746,16 @@ mod tests {
         )
         .await;
         assert_eq!(
-            decide(&reg, None, &["dense"]),
+            decide(&reg, "default", &["dense"]),
             Err(NumericalRefusal::LocalUnobserved),
             "the first status starts the view"
         );
         reg.settle_health_view_for_tests();
-        assert!(decide(&reg, None, &["dense"]).is_ok());
+        assert!(decide(&reg, "default", &["dense"]).is_ok());
 
         reg.health_subscription_started();
         assert_eq!(
-            decide(&reg, None, &["dense"]),
+            decide(&reg, "default", &["dense"]),
             Err(NumericalRefusal::LocalUnobserved),
             "a resumed subscription missed statuses"
         );
@@ -1753,7 +1770,7 @@ mod tests {
         )
         .await;
         assert_eq!(
-            decide(&reg, None, &["dense"]),
+            decide(&reg, "default", &["dense"]),
             Err(NumericalRefusal::LocalUnobserved),
             "a status after a long silence follows an outage"
         );
@@ -1768,10 +1785,10 @@ mod tests {
         )
         .await;
         reg.settle_health_view_for_tests();
-        assert!(decide(&reg, None, &["dense"]).is_ok());
+        assert!(decide(&reg, "default", &["dense"]).is_ok());
         for outputs in [&["sparse"][..], &["dense", "multivector"], &[]] {
             assert_eq!(
-                decide(&reg, None, outputs),
+                decide(&reg, "default", outputs),
                 Err(NumericalRefusal::UnmeasuredRequest),
                 "{outputs:?}"
             );

@@ -3411,7 +3411,6 @@ mod tests {
     async fn numerical_work_stays_local_unless_a_current_admission_covers_every_local_process() {
         for case in [
             "uncovered local identity",
-            "uncovered local identity in another pool",
             "local worker without inventory",
             "admission about to expire",
             "remote worker without the fence",
@@ -3460,17 +3459,6 @@ mod tests {
                             &[],
                             false,
                             remote_admission(60_000),
-                        )
-                        .await;
-                }
-                "uncovered local identity in another pool" => {
-                    gateway
-                        .add_numerical_worker(
-                            "local-1",
-                            ("other-pool", LOCAL_LANE.1, LOCAL_LANE.2),
-                            &[],
-                            true,
-                            local_identity(UNADMITTED_IDENTITY),
                         )
                         .await;
                 }
@@ -3586,6 +3574,68 @@ mod tests {
             gateway.dispatcher.numerical_admissions(),
             vec![Some("a".repeat(64))]
         );
+    }
+
+    #[tokio::test]
+    async fn a_worker_of_another_pool_does_not_close_the_bridge() {
+        let gateway = numerical_gateway(NUMERICAL_FALLBACK, false).await;
+        gateway
+            .add_numerical_worker(
+                "batch-1",
+                ("batch", LOCAL_LANE.1, LOCAL_LANE.2),
+                &[],
+                true,
+                inventory(json!({
+                    "model_id": "acme/batch-only",
+                    "model_contract_sha256": MODEL_CONTRACT,
+                    "local_identity": UNADMITTED_IDENTITY,
+                })),
+            )
+            .await;
+        let response = encode(&gateway, json!({"items":[{"text":"hello"}]})).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            gateway.dispatcher.numerical_admissions(),
+            vec![Some("a".repeat(64))]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_request_that_can_never_bridge_keeps_its_ordinary_local_path() {
+        let gateway = numerical_gateway(NUMERICAL_FALLBACK, false).await;
+        gateway
+            .add_numerical_worker(
+                "local-1",
+                LOCAL_LANE,
+                &[],
+                true,
+                local_identity(ADMITTED_IDENTITY),
+            )
+            .await;
+        let response = encode(
+            &gateway,
+            json!({"items":[{"text":"hello"}], "params":{"output_dtype":"int8"}}),
+        )
+        .await;
+        assert!(
+            !response.headers().contains_key("x-sie-fallback-reason"),
+            "a request outside the admission is not a bridge candidate"
+        );
+        assert!(gateway
+            .dispatcher
+            .dispatched()
+            .iter()
+            .all(|work| work.endpoint != "load" && work.bundle != REMOTE_LANE.2));
+        assert!(gateway
+            .dispatcher
+            .dispatched()
+            .iter()
+            .any(|work| work.bundle == LOCAL_LANE.2));
+        assert!(gateway
+            .dispatcher
+            .numerical_admissions()
+            .iter()
+            .all(Option::is_none));
     }
 
     #[tokio::test]

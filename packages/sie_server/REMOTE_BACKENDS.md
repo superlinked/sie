@@ -526,9 +526,9 @@ attempt:
   the same admission for the model with the model contract it reports itself.
   That admission must expire at least five seconds later.
 - Its admission must cover every local process that could serve the model.
-  Each child of every worker on the model's local bundles, in the model's pool
-  or in any pool when the model names none, starting and degraded workers
-  included, must report an admitted identity and the admission's model contract.
+  Each child of every worker on the model's local bundles and in the model's
+  pool (`default` when it names none), starting and degraded workers included,
+  must report an admitted identity and the admission's model contract.
   A worker without a complete inventory, a worker past the heartbeat timeout
   that has not been evicted, or a child without an identity or without the
   model keeps the request local. So does every request until the gateway has
@@ -554,9 +554,11 @@ stops numerical bridging: its older sidecar never consumes admitted work, so
 queued attempts time out instead of running unchecked, and a fenced sidecar
 that later consumes them drops those past their deadline. Configuring a numerical
 bridge also changes local behavior while no admission holds: a trigger that
-would bridge commits to its local refusal, so a cold model answers
+would bridge a request commits to its local refusal, so a cold model answers
 `MODEL_LOADING` instead of waiting for its load, and an opted-in `saturated` or
-`unhealthy` trigger refuses instead of queueing.
+`unhealthy` trigger refuses instead of queueing. A request that could never
+bridge, because it sets a runtime option other than `is_query`, keeps its
+ordinary local path.
 
 
 ## Single-node generation fallback

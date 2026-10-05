@@ -973,7 +973,9 @@ when the gateway is about to commit to the remote attempt:
 - The request sets no runtime option other than `is_query`, and every output it
   asks for (`dense` when an encode names none, `score` for score) is listed in
   the admission. Otherwise the remote process would refuse it, so it stays local
-  with the reason `unmeasured_request`.
+  with the reason `unmeasured_request`. A request with another runtime option is
+  not a bridge candidate at all: a fallback trigger leaves it on its ordinary
+  local path instead of committing to the local refusal.
 - An eligible remote worker is fresh and eligible for dispatch, reports
   `supports_execution_authority_v1`, `supports_numerical_admission_v1` and
   `supports_numerical_admission_subject_v1` (which builds that predate the
@@ -983,9 +985,9 @@ when the gateway is about to commit to the remote attempt:
   admission for the bare model, together with the admission's own model
   contract, expiring at least five seconds after the decision.
 - Every local process that could serve the model must be covered. That means
-  each child of every worker on the model's local bundles, in the model's pool,
-  or in any pool when the model names none (a pool-less model accepts any
-  `X-SIE-Pool`), starting and degraded workers included, unless the worker lists
+  each child of every worker on the model's local bundles and in the model's
+  pool (`default` when it names none, because a worker loads only the models of
+  its own pool), starting and degraded workers included, unless the worker lists
   the model as unsupported. Each such child must report an identity the
   admission lists and the admission's model contract. A worker without a
   complete inventory, a worker past the heartbeat timeout that has not been
