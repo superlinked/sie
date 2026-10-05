@@ -33,8 +33,8 @@ Use the same weights revision and the intended pooling, normalization,
 truncation and instruction behavior. Load it on a separate test deployment
 before changing the serving deployment's default profile.
 
-Compare two local runs to measure their noise, then compare the remote
-baseline against them. Check short and long inputs, the truncation boundary
+Compare repeated local runs, including runs inside larger batches, to measure
+their noise, then compare the remote baseline against them. Check short and long inputs, the truncation boundary
 and instruction prefixes. For reranking, compare score scale as well as
 ordering. For extraction, compare schemas and extracted results. A shared
 model name or matching vector dimension alone does not prove equivalence.

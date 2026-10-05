@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Measure a configured remote profile against two local SIE runs.
+"""Measure a configured remote profile against the local serving envelope.
+
+Each case is observed locally several times, alone and inside the batch
+compositions a worker forms, and once remotely. The remote output must stay
+within the largest difference between the local observations.
 
 Run from the locked public workspace. Credential arguments name environment
 variables; no credential, request body or vector is written to the evidence.
@@ -54,6 +58,9 @@ _MATRIX_NDIM = 2
 _PREFIX = "Represent this text for retrieval:"
 _SCORE_QUERY = "relevant documents for search"
 _IDENTITY = re.compile(r"v[12]:sha256:[0-9a-f]{64}")
+# Repeated runs alone, beside a longer item and inside a full request batch.
+_LOCAL_COMPOSITIONS = ("alone", "alone", "companion", "full")
+_FULL_BATCH_COMPANIONS = 15
 
 
 @dataclass(frozen=True)
@@ -332,6 +339,16 @@ def _cluster_provenance(
     return _Provenance(identity, cast("str", config.hf_revision), cast("str", remote_execution), None, processes)
 
 
+def _companions(suite: list[_Case], composition: str) -> tuple[str, ...]:
+    """Items sent beside a case's own inputs to vary the batch a worker forms."""
+    short, long_text = (next(case.texts[0] for case in suite if case.category == name) for name in ("short", "long"))
+    if composition == "companion":
+        return (long_text,)
+    if composition == "full":
+        return tuple(long_text if index % 2 else short for index in range(_FULL_BATCH_COMPANIONS))
+    return ()
+
+
 def _request(
     client: SIEClient,
     config: ModelConfig,
@@ -343,6 +360,7 @@ def _request(
     upstream: str,
     local_instance: str | None,
     machine_profile: str | None = None,
+    companions: tuple[str, ...] = (),
 ) -> tuple[str, Any]:
     common: dict[str, Any] = {
         "options": {**config.resolve_profile("default").runtime, "profile": profile},
@@ -355,6 +373,7 @@ def _request(
         common["gpu"] = machine_profile
     try:
         items: list[Item] = [{"id": f"probe-{index}", "text": text} for index, text in enumerate(case.texts)]
+        items += [{"id": f"probe-companion-{index}", "text": text} for index, text in enumerate(companions)]
         if operation == "score":
             result = client.score(config.sie_id, {"text": _SCORE_QUERY}, items, **common)
             if {value["item_id"] for value in result["scores"]} != {value["id"] for value in items} or len(
@@ -381,7 +400,11 @@ def _request(
                 raise ValueError("probe serving provenance is missing or differs")
             if local_instance is not None and evidence.get("runtime_instance_id") != local_instance:
                 raise ValueError("probe serving runtime instance differs")
-        return "ok", result
+        targets = len(case.texts)
+        if operation == "score":
+            own = {f"probe-{index}" for index in range(targets)}
+            return "ok", {**result, "scores": [value for value in result["scores"] if value["item_id"] in own]}
+        return "ok", rows[:targets]
     except RequestError as error:
         if local_instance is not None and (error.request or {}).get("runtime_instance_id") != local_instance:
             raise ValueError("probe refusal runtime instance differs") from None
@@ -436,9 +459,8 @@ def run_probe(
         selected_outputs = {output for output in outputs if (output == "score") == (operation == "score")}
         if not selected_outputs:
             continue
-        for case in _cases(
-            tokenizer, config.max_sequence_length, default_instruction=default_runtime.get("instruction")
-        ):
+        suite = _cases(tokenizer, config.max_sequence_length, default_instruction=default_runtime.get("instruction"))
+        for case in suite:
             if operation == "encode" and case.category == "score_scale":
                 continue
             observations = [
@@ -452,27 +474,30 @@ def run_probe(
                     upstream=upstream_name,
                     local_instance=before.local_instance,
                     machine_profile=machine_profile,
+                    companions=_companions(suite, composition),
                 )
-                for client, selected in ((local, "default"), (local, "default"), (remote, profile))
+                for client, selected, composition in (
+                    *((local, "default", composition) for composition in _LOCAL_COMPOSITIONS),
+                    (remote, profile, "alone"),
+                )
             ]
             outcomes = tuple(observation[0] for observation in observations)
             measurements = {}
-            if outcomes == ("ok", "ok", "ok"):
+            if all(outcome == "ok" for outcome in outcomes):
                 results = [observation[1] for observation in observations]
                 try:
-                    measurements = {
-                        output: measure_values(
-                            *_values(
-                                results,
-                                output,
-                                dimension=getattr(getattr(config.tasks.encode, output, None), "dim", None),
-                                context_length=config.max_sequence_length,
-                            )
+                    measurements = {}
+                    for output in sorted(selected_outputs):
+                        *measured, observed = _values(
+                            results,
+                            output,
+                            dimension=getattr(getattr(config.tasks.encode, output, None), "dim", None),
+                            context_length=config.max_sequence_length,
                         )
-                        for output in sorted(selected_outputs)
-                    }
+                        measurements[output] = measure_values(measured, observed)
                 except (KeyError, TypeError, ValueError):
-                    outcomes = ("shape_mismatch",) * 3
+                    measurements = {}
+                    outcomes = ("shape_mismatch",) * len(observations)
             cases.append(
                 ProbeCase(
                     operation=cast("Any", operation),
@@ -487,6 +512,7 @@ def run_probe(
                     ),
                     token_counts=case.token_counts,
                     outcomes=cast("Any", outcomes),
+                    local_compositions=cast("Any", _LOCAL_COMPOSITIONS),
                     measurements=cast("Any", measurements),
                 )
             )

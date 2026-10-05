@@ -1,4 +1,4 @@
-"""Bounded, versioned evidence from two local runs and one remote run.
+"""Bounded, versioned evidence from several local observations and one remote run.
 
 Records are operator artifacts, never caller assertions. They contain hashes
 and measured errors, not request bodies, vectors or credentials. A record binds
@@ -13,7 +13,7 @@ import hashlib
 import json
 import os
 import stat
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
@@ -38,9 +38,12 @@ ProbeCategory = Literal[
 ProbeOperation = Literal["encode", "score"]
 ProbeOutput = Literal["dense", "sparse", "multivector", "score"]
 ProbeOutcome = Literal["ok", "invalid_input", "input_too_long", "shape_mismatch"]
+ProbeComposition = Literal["alone", "companion", "full"]
 _HASH_PATTERN = r"^[0-9a-f]{64}$"
 _MAX_VALUES = 100_000_000
 _MAX_TOKENS = 100_000
+_MIN_LOCAL_OBSERVATIONS = 2
+_MAX_LOCAL_OBSERVATIONS = 16
 _MAX_RECORD_BYTES = 512 << 10
 _MAX_EVIDENCE_BYTES = 8 << 20
 _CATEGORIES = frozenset(
@@ -130,27 +133,38 @@ class ErrorMeasurement(BaseModel):
         return self.remote_error <= self.noise_floor
 
 
-def measure_values(first: np.ndarray, second: np.ndarray, remote: np.ndarray) -> ErrorMeasurement:
-    """Compare absolute error to the actual two-run local noise floor.
+def measure_values(local: Sequence[np.ndarray], remote: np.ndarray) -> ErrorMeasurement:
+    """Compare absolute error to the measured local serving envelope.
 
-    There is no caller-selected tolerance. The remote run must be within the
-    measured floor of both local observations. Layout changes fail separately.
+    The envelope is the largest difference between any two local observations
+    of one input, across repeated runs and the batch compositions a worker
+    forms. The remote output must lie within it of every local observation.
+    There is no caller-selected tolerance. Layout changes fail separately.
     """
-    if first.shape != second.shape or first.shape != remote.shape or first.size == 0 or first.size > _MAX_VALUES:
+    observations = (*local, remote)
+    if (
+        not _MIN_LOCAL_OBSERVATIONS <= len(local) <= _MAX_LOCAL_OBSERVATIONS
+        or any(value.shape != remote.shape for value in local)
+        or remote.size == 0
+        or remote.size > _MAX_VALUES
+    ):
         raise ValueError("probe output layout differs or exceeds the limit")
     if any(
-        value.dtype not in (np.dtype("float16"), np.dtype("float32"), np.dtype("float64"))
-        for value in (first, second, remote)
+        value.dtype not in (np.dtype("float16"), np.dtype("float32"), np.dtype("float64")) for value in observations
     ):
         raise ValueError("probe output must use a supported floating precision")
-    arrays = [np.asarray(value, dtype=np.float64) for value in (first, second, remote)]
+    arrays = [np.asarray(value, dtype=np.float64) for value in observations]
     if any(not np.isfinite(value).all() for value in arrays):
         raise ValueError("probe output is not finite")
-    a, b, r = arrays
+    *measured, observed = arrays
+    high, low = measured[0].copy(), measured[0].copy()
+    for value in measured[1:]:
+        np.maximum(high, value, out=high)
+        np.minimum(low, value, out=low)
     return ErrorMeasurement(
-        noise_floor=float(np.max(np.abs(a - b))),
-        remote_error=float(max(np.max(np.abs(a - r)), np.max(np.abs(b - r)))),
-        values=int(a.size),
+        noise_floor=float(np.max(high - low)),
+        remote_error=float(max(np.max(high - observed), np.max(observed - low))),
+        values=int(observed.size),
     )
 
 
@@ -161,22 +175,34 @@ class ProbeCase(BaseModel):
     category: ProbeCategory
     input_sha256: str = Field(pattern=_HASH_PATTERN)
     token_counts: tuple[int, ...] = Field(min_length=1, max_length=32)
-    outcomes: tuple[ProbeOutcome, ProbeOutcome, ProbeOutcome]
+    # The local observations in order, then the remote observation.
+    outcomes: tuple[ProbeOutcome, ...] = Field(
+        min_length=_MIN_LOCAL_OBSERVATIONS + 1, max_length=_MAX_LOCAL_OBSERVATIONS + 1
+    )
+    # The batch composition of each local observation; absent in records that
+    # measured repeated single-request runs only.
+    local_compositions: tuple[ProbeComposition, ...] | None = None
     measurements: dict[ProbeOutput, ErrorMeasurement] = Field(max_length=4)
 
     @model_validator(mode="after")
     def coherent(self) -> ProbeCase:
         if any(value < 0 or value > _MAX_TOKENS for value in self.token_counts):
             raise ValueError("probe token count is out of range")
-        if self.outcomes == ("ok", "ok", "ok") and not self.measurements:
+        if self.local_compositions is not None and len(self.local_compositions) != len(self.outcomes) - 1:
+            raise ValueError("every local observation needs one batch composition")
+        if self.succeeded and not self.measurements:
             raise ValueError("successful runs require measured evidence")
-        if self.outcomes != ("ok", "ok", "ok") and self.measurements:
+        if not self.succeeded and self.measurements:
             raise ValueError("refused or incompatible outputs cannot report measured errors")
         return self
 
     @property
+    def succeeded(self) -> bool:
+        return all(outcome == "ok" for outcome in self.outcomes)
+
+    @property
     def passed(self) -> bool:
-        if self.outcomes == ("ok", "ok", "ok"):
+        if self.succeeded:
             return all(value.passed for value in self.measurements.values())
         return len(set(self.outcomes)) == 1 and self.outcomes[0] in ("invalid_input", "input_too_long")
 
@@ -220,7 +246,7 @@ class EquivalenceRecord(BaseModel):
                 raise ValueError("probe suite must cover lengths, truncation and both instruction prefixes")
             expected = {output for output in self.outputs if (output == "score") == (operation == "score")}
             for case in selected:
-                if case.outcomes == ("ok", "ok", "ok") and set(case.measurements) != expected:
+                if case.succeeded and set(case.measurements) != expected:
                     raise ValueError("every successful probe must measure every declared output")
                 if case.category == "boundary_before" and max(case.token_counts) > self.context_length:
                     raise ValueError("before-boundary probe must fit the context")
@@ -232,7 +258,7 @@ class EquivalenceRecord(BaseModel):
     def passed(self) -> bool:
         # A set of matching refusals does not establish numerical equivalence.
         return all(case.passed for case in self.cases) and all(
-            case.outcomes == ("ok", "ok", "ok")
+            case.succeeded
             for case in self.cases
             if case.category in ("short", "long", "score_scale", "query_default", "empty_prefix")
         )

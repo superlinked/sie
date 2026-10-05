@@ -301,8 +301,10 @@ mise exec -- uv run --frozen --project . python tools/remote_equivalence.py \
 
 The API key argument names an environment variable; omit it for a server that
 does not require authentication. The output path must be new. Each case makes
-two local calls with remote serving forbidden, followed by one explicit remote
-call. Cases cover short and long inputs, both sides of the pinned tokenizer's
+four local calls with remote serving forbidden, followed by one explicit remote
+call. Two local calls send the case alone, one sends it beside a longer item and
+one sends it inside a batch of sixteen items, because the batch a worker forms
+changes its numerical output. Cases cover short and long inputs, both sides of the pinned tokenizer's
 truncation boundary including the local instruction prefix, query and document
 instruction prefixes, default query instructions, empty prefixes, and score scale
 when scoring is declared. All declared encode/score outputs must be measured.
@@ -315,8 +317,11 @@ profiles receive those same local runtime options; remote-only runtime defaults
 are refused because a fallback would not apply them. Older records must be remeasured.
 
 A pass requires matching layouts and finite values whose maximum absolute
-error against both local runs does not exceed the difference measured between
-those local runs. Identical local runs require identical remote values. Matching
+error against every local observation does not exceed the local serving
+envelope: the largest difference measured between any two local observations.
+Identical local observations require identical remote values. There is no
+tolerance setting. Each case records the batch composition of every local
+observation; records that list none measured two single-request runs. Matching
 boundary input refusals are recorded; a suite of refusals cannot establish
 numerical equivalence. Endpoint/model contracts and local identity must remain
 unchanged throughout the probe. Every local and remote observation, including
@@ -451,8 +456,8 @@ fallback.
 
 Servers with different hardware, drivers, inference libraries or settings
 report different local identities, and each identity needs its own
-measurement: two local runs and one explicit remote run on a server with that
-identity. The bundle tool collects one version 3 record per identity into one
+measurement: the local observations and one explicit remote run on a server
+with that identity. The bundle tool collects one version 3 record per identity into one
 evidence file, which an upstream's `record_files` entry can name in place of a
 single record. It accepts repeated `--record` paths, writes a new `--output`
 file, and checks a `--max-age-s` window from 1 to 604800 seconds (default 3600):

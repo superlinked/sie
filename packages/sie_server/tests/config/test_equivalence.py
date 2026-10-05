@@ -113,28 +113,51 @@ def record(*, outputs: frozenset[str] = frozenset({"dense"})) -> EquivalenceReco
 
 
 def test_noise_floor_is_measured_and_remote_must_match_both_local_runs() -> None:
-    result = measure_values(np.array([1.0, 2.0]), np.array([1.25, 2.0]), np.array([1.125, 2.0]))
+    result = measure_values([np.array([1.0, 2.0]), np.array([1.25, 2.0])], np.array([1.125, 2.0]))
     assert result.noise_floor == 0.25
     assert result.remote_error == 0.125
     assert result.passed
-    assert not measure_values(np.array([1.0]), np.array([1.25]), np.array([1.5])).passed
+    assert not measure_values([np.array([1.0]), np.array([1.25])], np.array([1.5])).passed
 
 
 def test_deterministic_local_runs_require_identical_remote_values() -> None:
-    assert measure_values(np.array([1.0]), np.array([1.0]), np.array([1.0])).passed
-    assert not measure_values(np.array([1.0]), np.array([1.0]), np.array([1.000001])).passed
+    assert measure_values([np.array([1.0]), np.array([1.0])], np.array([1.0])).passed
+    assert not measure_values([np.array([1.0]), np.array([1.0])], np.array([1.000001])).passed
+
+
+def test_the_envelope_spans_every_local_observation() -> None:
+    local = [np.array([1.0, 2.0]), np.array([1.0, 2.0]), np.array([1.25, 2.0]), np.array([1.0, 1.75])]
+    result = measure_values(local, np.array([1.125, 1.875]))
+    assert (result.noise_floor, result.remote_error) == (0.25, 0.125)
+    assert result.passed
+    assert measure_values(local, np.array([1.25, 1.75])).passed
+    outside = measure_values(local, np.array([1.3, 2.0]))
+    assert (outside.noise_floor, outside.remote_error) == (0.25, 0.30000000000000004)
+    assert not outside.passed
+    assert not measure_values(local, np.array([1.0, 1.7])).passed
+    near_first_only = measure_values([np.array([1.0]), np.array([1.25])], np.array([0.9375]))
+    assert near_first_only.remote_error == 0.3125
+    assert not near_first_only.passed
+
+
+@pytest.mark.parametrize("count", [1, 17])
+def test_the_envelope_needs_a_bounded_number_of_local_observations(count: int) -> None:
+    with pytest.raises(ValueError, match="probe output layout"):
+        measure_values([np.array([1.0])] * count, np.array([1.0]))
 
 
 @pytest.mark.parametrize("remote", [np.array([np.nan]), np.array([np.inf]), np.array([1 + 1j]), np.array(["1"])])
 def test_invalid_output_cannot_be_measured(remote: np.ndarray) -> None:
     with pytest.raises(ValueError, match="probe output"):
-        measure_values(np.array([1.0]), np.array([1.0]), remote)
+        measure_values([np.array([1.0]), np.array([1.0])], remote)
 
 
 def test_output_shape_changes_and_empty_values_are_refused() -> None:
     for remote in (np.array([[1.0]]), np.array([])):
         with pytest.raises(ValueError, match="probe output layout"):
-            measure_values(np.array([1.0]), np.array([1.0]), remote)
+            measure_values([np.array([1.0]), np.array([1.0])], remote)
+    with pytest.raises(ValueError, match="probe output layout"):
+        measure_values([np.array([1.0]), np.array([1.0, 2.0])], np.array([1.0]))
 
 
 @pytest.mark.parametrize("value", [-1.0, float("inf"), float("nan")])
@@ -207,20 +230,53 @@ def test_rejected_or_malformed_outputs_cannot_claim_measurements() -> None:
         )
 
 
+def _case(outcomes: tuple[str, ...], compositions: tuple[str, ...] | None) -> ProbeCase:
+    return ProbeCase.model_validate_json(
+        json.dumps(
+            {
+                "operation": "encode",
+                "category": "short",
+                "input_sha256": "a" * 64,
+                "token_counts": [5],
+                "outcomes": list(outcomes),
+                "local_compositions": None if compositions is None else list(compositions),
+                "measurements": {"dense": {"noise_floor": 0.0, "remote_error": 0.0, "values": 384}}
+                if all(outcome == "ok" for outcome in outcomes)
+                else {},
+            }
+        )
+    )
+
+
+def test_a_case_names_the_batch_composition_of_each_local_observation() -> None:
+    compositions = ("alone", "alone", "companion", "full")
+    assert _case(("ok",) * 5, compositions).passed
+    assert _case(("ok",) * 3, None).passed
+    assert _case(("input_too_long",) * 5, compositions).passed
+    assert not _case(("ok", "ok", "ok", "ok", "input_too_long"), compositions).passed
+    for outcomes, labels in [(("ok",) * 5, ("alone", "alone")), (("ok",) * 2, None), (("ok",) * 18, None)]:
+        with pytest.raises(ValidationError):
+            _case(outcomes, labels)
+    with pytest.raises(ValidationError):
+        _case(("ok",) * 3, ("alone", "batched"))
+
+
 class _Tokenizer:
     def encode(self, text: str, *, add_special_tokens: bool) -> list[int]:
         return [1] * (len(text.split()) + (2 if add_special_tokens else 0))
 
 
 @pytest.mark.parametrize(
-    ("remote_offset", "contract_mismatch", "instance_mismatch", "remote_execution"),
+    ("remote_offset", "contract_mismatch", "instance_mismatch", "remote_execution", "batch_offset"),
     [
-        (0.0, False, None, "8" * 64),
-        (0.01, False, None, "8" * 64),
-        (0.0, True, None, "8" * 64),
-        (0.0, False, "local", "8" * 64),
-        (0.0, False, "remote", "8" * 64),
-        (0.0, False, None, None),
+        (0.0, False, None, "8" * 64, 0.0),
+        (0.01, False, None, "8" * 64, 0.0),
+        (0.0, True, None, "8" * 64, 0.0),
+        (0.0, False, "local", "8" * 64, 0.0),
+        (0.0, False, "remote", "8" * 64, 0.0),
+        (0.0, False, None, None, 0.0),
+        (0.0625, False, None, "8" * 64, 0.125),
+        (0.25, False, None, "8" * 64, 0.125),
     ],
 )
 def test_full_cli_runs_real_sdk_transport_and_only_writes_evidence(
@@ -230,6 +286,7 @@ def test_full_cli_runs_real_sdk_transport_and_only_writes_evidence(
     contract_mismatch: bool,
     instance_mismatch: str | None,
     remote_execution: str | None,
+    batch_offset: float,
 ) -> None:
     requests: list[tuple[dict[str, Any], bool]] = []
     remote_contract: str | None = None
@@ -258,7 +315,8 @@ def test_full_cli_runs_real_sdk_transport_and_only_writes_evidence(
             body = unpackb(self.rfile.read(int(self.headers["Content-Length"])), numeric_arrays=False)
             forbid = self.headers.get("X-SIE-Remote") == "forbid"
             requests.append((body, forbid))
-            offset = 0.0 if forbid else remote_offset
+            # A local worker's output shifts with the batch it forms.
+            offset = (batch_offset if len(body["items"]) > 1 else 0.0) if forbid else remote_offset
             rows = [
                 {"id": item["id"], "dense": {"dims": 2, "values": np.asarray([1.0 + offset, 2.0], dtype=np.float32)}}
                 for item in body["items"]
@@ -348,21 +406,25 @@ profiles:
         return
     if instance_mismatch:
         assert result == 2
-        assert len(requests) == (3 if instance_mismatch == "remote" else 1)
+        assert len(requests) == (5 if instance_mismatch == "remote" else 1)
         assert not output.exists()
         return
-    assert result == (0 if remote_offset == 0 else 1)
+    assert result == (0 if remote_offset <= batch_offset else 1)
     evidence = EquivalenceRecord.model_validate_json(output.read_bytes())
-    assert evidence.passed == (remote_offset == 0)
+    assert evidence.passed == (remote_offset <= batch_offset)
+    short = next(case for case in evidence.cases if case.category == "short")
+    assert short.measurements["dense"].noise_floor == pytest.approx(batch_offset)
     assert evidence.version == 3
     assert evidence.remote_execution_sha256 == remote_execution
     assert "local_instance_id" not in evidence.model_dump()
     assert evidence.runtime_options_sha256 == canonical_digest({"normalize": True})
     assert all(body["params"]["options"]["normalize"] is True for body, _ in requests)
     assert all(body["params"]["output_dtype"] == "float32" for body, _ in requests)
-    assert len(requests) == 24
-    assert [forbid for _, forbid in requests] == [True, True, False] * 8
-    assert [body["params"]["options"]["profile"] for body, _ in requests] == ["default", "default", "remote"] * 8
+    assert len(requests) == 40
+    assert [forbid for _, forbid in requests] == [True, True, True, True, False] * 8
+    assert [body["params"]["options"]["profile"] for body, _ in requests] == (["default"] * 4 + ["remote"]) * 8
+    assert [len(body["items"]) for body, _ in requests] == [1, 1, 2, 16, 1] * 8
+    assert all(case.local_compositions == ("alone", "alone", "companion", "full") for case in evidence.cases)
     serialized = output.read_text()
     assert "retrieval " not in serialized
     assert "Represent this text" not in serialized
@@ -391,7 +453,7 @@ def test_sparse_layout_and_score_order_are_compared_by_identity() -> None:
         "sparse",
         dimension=4,
     )
-    assert not measure_values(*sparse).passed
+    assert not measure_values(sparse[:-1], sparse[-1]).passed
     scores = probe._values(
         [
             {"scores": [{"item_id": "b", "score": 0.2}, {"item_id": "a", "score": 0.1}]},
@@ -400,7 +462,7 @@ def test_sparse_layout_and_score_order_are_compared_by_identity() -> None:
         ],
         "score",
     )
-    assert measure_values(*scores).passed
+    assert measure_values(scores[:-1], scores[-1]).passed
 
 
 @pytest.mark.parametrize("index", [-1, 1.5, True, "not-an-index", 4])
@@ -418,7 +480,7 @@ def test_consistently_wrong_dimensions_are_not_equivalence() -> None:
 
 def test_integer_conversion_cannot_hide_numerical_differences() -> None:
     with pytest.raises(ValueError, match="floating precision"):
-        measure_values(np.array([2**53]), np.array([2**53]), np.array([2**53 + 1]))
+        measure_values([np.array([2**53]), np.array([2**53])], np.array([2**53 + 1]))
 
 
 @pytest.mark.parametrize("shape", [(1, 1), (0, 4), (33, 4), (4,)])
@@ -833,8 +895,8 @@ def test_cluster_probe_attributes_observations_to_one_identity_from_cluster_stat
     assert evidence.remote_execution_sha256 == _REMOTE_EXECUTION
     assert evidence.remote_contract_sha256 == remote_contract
     assert evidence.local_observation_sha256 == canonical_digest({"identity": _IDENTITY_L4, "revision": "a" * 40})
-    assert events == ["wake", "wake", "status", *["probe"] * 24, "status"]
-    assert [headers.get("x-sie-remote") for _, headers in requests] == ["forbid", None] + ["forbid", "forbid", None] * 8
+    assert events == ["wake", "wake", "status", *["probe"] * 40, "status"]
+    assert [headers.get("x-sie-remote") for _, headers in requests] == ["forbid", None] + (["forbid"] * 4 + [None]) * 8
     assert all("x-sie-machine-profile" not in headers for _, headers in requests)
     assert all(body["params"]["options"]["profile"] in ("default", "remote") for body, _ in requests)
 
@@ -864,7 +926,7 @@ def test_cluster_probe_refuses_a_fleet_that_changes_during_the_run(
     after[0]["numerical_process_inventory"]["children"][0]["snapshot"]["runtime_instance_id"] = "d" * 64
     result, _, output = _run_cluster_probe(tmp_path, monkeypatch, [before, after], [])
     assert result == 2
-    assert events == ["wake", "wake", "status", *["probe"] * 24, "status"]
+    assert events == ["wake", "wake", "status", *["probe"] * 40, "status"]
     assert not output.exists()
 
 
