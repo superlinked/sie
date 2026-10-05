@@ -2203,14 +2203,9 @@ def _extract_success_outcome(
         # error instead of publishing an object the client reads as success.
         return _error_outcome(bi, _INFERENCE_ERROR_CODE, "adapter returned no extraction results")
     error = extraction_results[0].get("error")
-    if (
-        isinstance(error, dict)
-        and error.get("code") == ErrorCode.INPUT_TOO_LONG.value
-        and (units is None or units.input_tokens is None)
-    ):
-        # The adapter may be unable to meter valid siblings as a group. The
-        # rejected item itself still has an authoritative zero-token result;
-        # preserve that witness instead of falling back to a reserve estimate.
+    if isinstance(error, dict) and error.get("code") == ErrorCode.INPUT_TOO_LONG.value:
+        # Length-rejected items have zero billable input tokens, even when an
+        # adapter reports a count or cannot meter the valid siblings.
         units = _with_input_tokens(units, 0)
     item_id = server_item.id if server_item.id is not None else f"item-{bi.item_index}"
     result_msgpack = pack_msgpack({**extraction_results[0], "id": item_id}, use_bin_type=True)

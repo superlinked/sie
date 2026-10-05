@@ -242,7 +242,8 @@ def test_queue_length_error_keeps_zero_billing_when_sibling_metering_fails() -> 
     assert outcome.units.input_tokens == 0
 
 
-def test_queue_length_error_preserves_reported_positive_billing() -> None:
+@pytest.mark.parametrize(("error_code", "expected_input_tokens"), [("INPUT_TOO_LONG", 0), ("INFERENCE_ERROR", 7)])
+def test_queue_length_error_overrides_reported_positive_billing(error_code: str, expected_input_tokens: int) -> None:
     from types import SimpleNamespace
 
     import msgpack
@@ -253,6 +254,9 @@ def test_queue_length_error_preserves_reported_positive_billing() -> None:
     items = [Item(text="word " * 20), Item(text="Alice Acme")]
     output = adapter.extract(items, labels=["person"])
     output.input_token_counts = [7, 4]
+    assert output.errors is not None
+    assert output.errors[0] is not None
+    output.errors[0].code = error_code
 
     batch_item = ExtractBatchItem(
         work_item_id="req.0",
@@ -270,6 +274,6 @@ def test_queue_length_error_preserves_reported_positive_billing() -> None:
     outcome = _extract_success_outcome(adapter, batch_item, items[0], worker_result)
     result = msgpack.unpackb(outcome.result_msgpack, raw=False)
 
-    assert result["error"]["code"] == "INPUT_TOO_LONG"
+    assert result["error"]["code"] == error_code
     assert outcome.units is not None
-    assert outcome.units.input_tokens == 7
+    assert outcome.units.input_tokens == expected_input_tokens

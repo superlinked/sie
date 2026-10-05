@@ -410,21 +410,6 @@ over the seven models, the gliclass forward's top label differs from float32
 in 128 answers, the flash path's in 126. To run a model on the other path, set
 `modernbert_flash` in its profile.
 
-### GLiNER2 extraction limits
-
-GLiNER2 entity, relation, and structured extraction require an item's entire
-text to fit the configured word window (512 words by default) and the encoder's
-subword budget. An item that does not fit returns an `INPUT_TOO_LONG` item error,
-empty extraction output, and zero input tokens; other items in the batch still
-run normally. Earlier versions silently returned predictions from only the
-first window. Split longer documents into smaller items before requesting these
-tasks, preserving any relation entity offsets within each new item. Trailing
-whitespace and the sentence end added internally by GLiNER2 do not make an item
-too long.
-
-Classification continues to read the whole document in overlapping windows
-and pool its predictions, subject to its existing 128-window limit.
-
 ### GLiNER2.5-Decide usage and limits
 
 The GLiNER2.5-Decide models (`fastino/GLiNER2.5-Decide`, `GLiNER2.5-multi-Decide`,
