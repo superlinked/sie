@@ -339,8 +339,10 @@ resolved profile settings. Unknown identities remain refused.
 
 Configuration load and each bridge compare bounded metadata obtained through
 `SIEClient` with the deployment's configured credential, TLS and proxy policy.
-A successful observation lasts at most 30 seconds; a failed observation lasts
-2 seconds. The next check after expiry refreshes metadata. A concurrent refresh
+A successful observation lasts at most 30 seconds. A read that completes
+replaces it, including with a refusal; a read that fails leaves it to expire on
+its own and holds off the next read for 2 seconds. The next check after expiry
+refreshes metadata. A concurrent refresh
 refuses another bridge instead of waiting or starting a second metadata request.
 Changes to the installed upstream discard the previous observation.
 

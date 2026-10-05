@@ -115,7 +115,17 @@ class _Observation:
     upstream: Upstream
     value: tuple[str, str] | None = None
     checked_at: float = 0.0
+    failed_at: float | None = None
     loading: bool = False
+
+    def lifetime(self) -> float:
+        return _IDENTITY_AGE_S if self.value is not None else _REFUSAL_AGE_S
+
+    def fresh(self, now: float) -> bool:
+        return self.checked_at > 0 and 0 <= now - self.checked_at < self.lifetime()
+
+    def current(self, now: float) -> tuple[tuple[str, str] | None, float]:
+        return (self.value, now - self.checked_at) if self.fresh(now) else (None, 0.0)
 
 
 _LOCK = threading.Lock()
@@ -123,15 +133,24 @@ _OBSERVATIONS: OrderedDict[tuple[int, str, str], _Observation] = OrderedDict()
 
 
 def _refresh(observation: _Observation, upstream_name: str, upstream: Upstream, remote_model: str) -> None:
-    value = None
+    """Replace the observation with a completed read.
+
+    A read that fails keeps the previous observation until its own expiry and
+    holds off the next read for the refusal age.
+    """
+    completed, value = False, None
     try:
         value = _read_identity(upstream_name, upstream, remote_model)
+        completed = True
     except (UpstreamUnavailableError, UpstreamCredentialError, httpx.HTTPError, OSError, ValueError, RecursionError):
         pass
     finally:
         with _LOCK:
-            observation.value = value
-            observation.checked_at = time.monotonic()
+            now = time.monotonic()
+            if completed:
+                observation.value, observation.checked_at, observation.failed_at = value, now, None
+            else:
+                observation.failed_at = now
             observation.loading = False
 
 
@@ -157,11 +176,11 @@ def _identity_observation(
             observation = _Observation(upstream)
             _OBSERVATIONS[key] = observation
         _OBSERVATIONS.move_to_end(key)
-        age = time.monotonic() - observation.checked_at
-        limit = _IDENTITY_AGE_S if observation.value is not None else _REFUSAL_AGE_S
-        fresh = observation.checked_at > 0 and 0 <= age < limit
-        current = (observation.value, age) if fresh else (None, 0.0)
-        if observation.loading or (fresh and (wait or age < limit * _REFRESH_AHEAD)):
+        now = time.monotonic()
+        current = observation.current(now)
+        backing_off = observation.failed_at is not None and 0 <= now - observation.failed_at < _REFUSAL_AGE_S
+        early = current[1] < observation.lifetime() * _REFRESH_AHEAD
+        if observation.loading or backing_off or (observation.fresh(now) and (wait or early)):
             return current
         observation.loading = True
     if not wait:
@@ -171,7 +190,7 @@ def _identity_observation(
         return current
     _refresh(observation, upstream_name, upstream, remote_model)
     with _LOCK:
-        return observation.value, 0.0
+        return observation.current(time.monotonic())
 
 
 def _fresh_identity(upstream_name: str, upstream: Upstream, remote_model: str) -> tuple[str, str] | None:

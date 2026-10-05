@@ -456,6 +456,66 @@ def test_admission_refreshes_ahead_of_expiry_without_losing_the_current_identity
     assert len(requests) == 2
 
 
+def _tracked_refresh(monkeypatch) -> threading.Event:
+    refreshed = threading.Event()
+    original = sie_identity._refresh
+
+    def tracked(*args):
+        original(*args)
+        refreshed.set()
+
+    monkeypatch.setattr(sie_identity, "_refresh", tracked)
+    return refreshed
+
+
+def test_a_failed_refresh_keeps_the_current_identity_until_it_expires(remote, monkeypatch) -> None:
+    _upstream, requests, _constructions, payload = remote
+    clock = [1000.0]
+    monkeypatch.setattr(sie_identity.time, "monotonic", lambda: clock[0])
+    first = hybrid_admission.sie_admission(model())
+    assert isinstance(first, hybrid_admission.NumericalAdmission)
+    payload[0] = httpx.Response(503)
+    refreshed = _tracked_refresh(monkeypatch)
+    clock[0] += 25.0
+
+    assert isinstance(hybrid_admission.sie_admission(model(), wait=False), hybrid_admission.NumericalAdmission)
+    assert refreshed.wait(5)
+    kept = sie_identity.sie_upstream_identity(model(), wait=False)
+    assert kept == (REVISION, IDENTITY, 5.0)
+    assert len(requests) == 2
+
+    clock[0] += 6.0
+    refreshed.clear()
+    assert (
+        hybrid_admission.sie_admission(model(), wait=False)
+        == "hybrid upstream identity is unavailable or outside its age"
+    )
+    assert refreshed.wait(5)
+    assert len(requests) == 3
+    clock[0] += 3.0
+    assert sie_identity.sie_upstream_identity(model()) == "hybrid upstream identity is unavailable or outside its age"
+    assert len(requests) == 4
+
+
+def test_a_completed_refusal_replaces_the_identity_at_once(remote, monkeypatch) -> None:
+    _upstream, requests, _constructions, payload = remote
+    clock = [1000.0]
+    monkeypatch.setattr(sie_identity.time, "monotonic", lambda: clock[0])
+    assert isinstance(hybrid_admission.sie_admission(model()), hybrid_admission.NumericalAdmission)
+    payload[0] = httpx.Response(404, json={"detail": {"code": "MODEL_NOT_FOUND", "message": "gone"}})
+    refreshed = _tracked_refresh(monkeypatch)
+    clock[0] += 25.0
+
+    hybrid_admission.sie_admission(model(), wait=False)
+    assert refreshed.wait(5)
+
+    assert (
+        hybrid_admission.sie_admission(model(), wait=False)
+        == "hybrid upstream identity is unavailable or outside its age"
+    )
+    assert len(requests) == 2
+
+
 async def test_remote_lane_snapshot_reports_the_sie_admission(remote, tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("SIE_IPC_SOCKET_PATH", str(tmp_path / "ipc.sock"))
     registry = ModelRegistry(device="cpu", enable_hot_reload=False)
