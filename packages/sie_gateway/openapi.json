@@ -3498,13 +3498,20 @@
             "type": "array"
           },
           "usage": {
-            "$ref": "#/components/schemas/ScoreUsage"
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ScoreUsage",
+                "description": "Omitted when the serving path could not count, as on `/v1/score`."
+              }
+            ]
           }
         },
         "required": [
           "model",
-          "results",
-          "usage"
+          "results"
         ],
         "type": "object"
       },

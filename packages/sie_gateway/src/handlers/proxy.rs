@@ -14848,24 +14848,27 @@ fn rerank_response_from_score(
         ranked.truncate(limit);
     }
 
-    let usage = native
-        .get("usage")
-        .and_then(Value::as_object)
-        .ok_or_else(|| "score response missing authoritative usage".to_string())?;
-    let input_tokens = usage
-        .get("input_tokens")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| "score response usage missing input_tokens".to_string())?;
-    let images = usage.get("images").map(|value| {
-        value
-            .as_u64()
-            .ok_or_else(|| "score response usage has an invalid images count".to_string())
-    });
-    let mut output_usage = Map::new();
-    output_usage.insert("input_tokens".to_string(), json!(input_tokens));
-    if let Some(images) = images {
-        output_usage.insert("images".to_string(), json!(images?));
-    }
+    let output_usage = match native.get("usage") {
+        None | Some(Value::Null) => None,
+        Some(usage) => {
+            let usage = usage
+                .as_object()
+                .ok_or_else(|| "score response usage is not an object".to_string())?;
+            let input_tokens = usage
+                .get("input_tokens")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| "score response usage missing input_tokens".to_string())?;
+            let mut output_usage = Map::new();
+            output_usage.insert("input_tokens".to_string(), json!(input_tokens));
+            if let Some(images) = usage.get("images") {
+                let images = images.as_u64().ok_or_else(|| {
+                    "score response usage has an invalid images count".to_string()
+                })?;
+                output_usage.insert("images".to_string(), json!(images));
+            }
+            Some(output_usage)
+        }
+    };
 
     let results = ranked
         .into_iter()
@@ -14880,11 +14883,13 @@ fn rerank_response_from_score(
         })
         .collect::<Vec<_>>();
 
-    Ok(json!({
-        "model": model,
-        "results": results,
-        "usage": output_usage,
-    }))
+    let mut response = Map::new();
+    response.insert("model".to_string(), json!(model));
+    response.insert("results".to_string(), Value::Array(results));
+    if let Some(usage) = output_usage {
+        response.insert("usage".to_string(), Value::Object(usage));
+    }
+    Ok(Value::Object(response))
 }
 
 fn rerank_error(status: StatusCode, message: impl Into<String>) -> Response {
@@ -27862,10 +27867,38 @@ mod tests {
     }
 
     #[test]
-    fn test_rerank_response_rejects_missing_or_malformed_usage() {
+    fn test_rerank_response_omits_usage_when_the_score_reports_none() {
+        let scores = json!([
+            {"item_id": "1", "score": 0.9, "rank": 0},
+            {"item_id": "0", "score": 0.2, "rank": 1}
+        ]);
+        for native in [
+            json!({"model": "m", "scores": scores.clone()}),
+            json!({"model": "m", "scores": scores.clone(), "usage": null}),
+        ] {
+            let response = rerank_response_from_score(
+                &native,
+                &["first".to_string(), "second".to_string()],
+                None,
+                false,
+            )
+            .unwrap();
+            assert!(response.get("usage").is_none(), "{response}");
+            let indexes = response["results"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|result| result["index"].as_u64().unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(indexes, vec![1, 0]);
+        }
+    }
+
+    #[test]
+    fn test_rerank_response_rejects_malformed_usage() {
         let scores = json!([{"item_id": "0", "score": 0.5, "rank": 0}]);
         for (usage, expected) in [
-            (Value::Null, "missing authoritative usage"),
+            (json!([4]), "usage is not an object"),
             (json!({"images": 1}), "missing input_tokens"),
             (
                 json!({"input_tokens": 4, "images": -1}),
