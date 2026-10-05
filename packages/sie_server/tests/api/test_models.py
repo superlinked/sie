@@ -413,8 +413,8 @@ def test_pinned_builtin_profile_exposes_same_identity_in_list_and_detail(
     detail = client.get("/v1/models/model-a").json()
     listed = client.get("/v1/models").json()["models"][0]
     value = detail["profiles"]["default"]["identity"]
-    assert value.startswith("v1:sha256:")
-    assert len(value) == len("v1:sha256:") + 64
+    assert value.startswith("v2:sha256:")
+    assert len(value) == len("v2:sha256:") + 64
     assert listed["profiles"]["default"]["identity"] == value
     instance = detail["profiles"]["default"]["runtime_instance_id"]
     assert len(instance) == 64

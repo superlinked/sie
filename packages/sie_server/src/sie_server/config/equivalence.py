@@ -196,7 +196,7 @@ class EquivalenceRecord(BaseModel):
     local_observation_sha256: str = Field(pattern=_HASH_PATTERN)
     runtime_options_sha256: str = Field(pattern=_HASH_PATTERN)
     output_dtype: Literal["float32"]
-    local_identity: str = Field(pattern=r"^v1:sha256:[0-9a-f]{64}$")
+    local_identity: str = Field(pattern=r"^v[12]:sha256:[0-9a-f]{64}$")
     model: str = Field(min_length=1, max_length=256)
     local_profile: str = "default"
     remote_profile: str = Field(min_length=1, max_length=128)

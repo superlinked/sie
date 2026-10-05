@@ -52,6 +52,12 @@ fn sha256_digest(value: &str) -> bool {
             .all(|value| value.is_ascii_digit() || (b'a'..=b'f').contains(&value))
 }
 
+fn local_identity_digest(identity: &str) -> bool {
+    ["v1:sha256:", "v2:sha256:"]
+        .iter()
+        .any(|prefix| identity.strip_prefix(prefix).is_some_and(sha256_digest))
+}
+
 fn valid_numerical_snapshot(snapshot: &NumericalProfileSnapshotResponse) -> bool {
     let mut models = HashSet::new();
     snapshot
@@ -67,11 +73,10 @@ fn valid_numerical_snapshot(snapshot: &NumericalProfileSnapshotResponse) -> bool
                     .model_contract_sha256
                     .as_deref()
                     .is_none_or(sha256_digest)
-                && profile.local_identity.as_deref().is_none_or(|identity| {
-                    identity
-                        .strip_prefix("v1:sha256:")
-                        .is_some_and(sha256_digest)
-                })
+                && profile
+                    .local_identity
+                    .as_deref()
+                    .is_none_or(local_identity_digest)
         })
 }
 
@@ -1172,6 +1177,23 @@ mod tests {
                 });
             }
         })
+    }
+
+    #[test]
+    fn numerical_snapshots_accept_both_identity_versions_only() {
+        for (identity, accepted) in [
+            (format!("v1:sha256:{}", "c".repeat(64)), true),
+            (format!("v2:sha256:{}", "c".repeat(64)), true),
+            (format!("v3:sha256:{}", "c".repeat(64)), false),
+            (format!("v2:sha256:{}", "C".repeat(64)), false),
+            ("v2:sha256:".to_string(), false),
+        ] {
+            let snapshot: NumericalProfileSnapshotResponse = serde_json::from_value(
+                serde_json::json!({"runtime_instance_id": "a".repeat(64), "complete": true, "profiles": [{"model_id": "m", "local_identity": identity, "model_contract_sha256": "d".repeat(64)}]}),
+            )
+            .unwrap();
+            assert_eq!(valid_numerical_snapshot(&snapshot), accepted, "{identity}");
+        }
     }
 
     #[tokio::test]

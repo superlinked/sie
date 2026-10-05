@@ -16,7 +16,7 @@ import subprocess
 import sys
 from collections.abc import Mapping
 from functools import lru_cache
-from importlib.metadata import PackageNotFoundError, version
+from importlib.metadata import PackageNotFoundError, distribution
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -29,7 +29,7 @@ from threadpoolctl import threadpool_info
 
 import sie_server
 from sie_server.config.engine import EngineConfig
-from sie_server.config.model import ModelConfig, is_immutable_revision, is_remote_adapter_path
+from sie_server.config.model import ModelConfig, ResolvedProfile, is_immutable_revision, is_remote_adapter_path
 
 _INFERENCE_DISTRIBUTIONS = (
     "torch",
@@ -44,6 +44,9 @@ _INFERENCE_DISTRIBUTIONS = (
     "mlx",
     "sglang",
     "tensorrt-llm",
+    "flash-attn",
+    "triton",
+    "peft",
 )
 
 _RUNTIME_NONCE = uuid4().hex
@@ -60,6 +63,16 @@ def runtime_instance_id() -> str:
 _PINNED_PROCESS_ADAPTERS = frozenset(
     {
         "sie_server.adapters.bge_m3:BGEM3Adapter",
+        "sie_server.adapters.bge_m3_flash:BGEM3FlashAdapter",
+    }
+)
+
+# These adapters apply LoRA per request through PEFT and disable the adapter
+# layers for base requests, so a sibling profile's LoRA never changes the
+# output of a profile that uses none.
+_UNMERGED_LORA_ADAPTERS = frozenset(
+    {
+        "sie_server.adapters.bge_m3_flash:BGEM3FlashAdapter",
     }
 )
 
@@ -95,6 +108,12 @@ _NUMERICAL_ENVIRONMENT = (
     "MKL_NUM_THREADS",
     "OPENBLAS_NUM_THREADS",
     "VECLIB_MAXIMUM_THREADS",
+    "TORCH_BLAS_PREFER_CUBLASLT",
+    "CUBLASLT_WORKSPACE_SIZE",
+    "DISABLE_ADDMM_CUDA_LT",
+    "TORCH_ALLOW_TF32_CUBLAS_OVERRIDE",
+    "PYTORCH_TUNABLEOP_ENABLED",
+    "PYTORCH_TUNABLEOP_TUNING",
 )
 
 
@@ -203,12 +222,20 @@ def _execution_code() -> dict[str, Any]:
             digest.update(name)
             digest.update(len(content).to_bytes(8, "big"))
             digest.update(content)
-    dependencies: dict[str, str | None] = {}
-    for distribution in _INFERENCE_DISTRIBUTIONS:
+    dependencies: dict[str, dict[str, str] | None] = {}
+    for name in _INFERENCE_DISTRIBUTIONS:
         try:
-            dependencies[distribution] = version(distribution)
+            installed = distribution(name)
         except PackageNotFoundError:
-            dependencies[distribution] = None
+            dependencies[name] = None
+            continue
+        record = installed.read_text("RECORD")
+        if not record:
+            raise ValueError("inference library builds cannot be identified")
+        dependencies[name] = {
+            "version": installed.version,
+            "record_sha256": hashlib.sha256(record.encode()).hexdigest(),
+        }
     return {
         "sources": digest.hexdigest(),
         "dependencies": dependencies,
@@ -217,13 +244,18 @@ def _execution_code() -> dict[str, Any]:
     }
 
 
+@lru_cache(maxsize=1)
+def _serving_code_digest() -> str:
+    encoded = json.dumps(_execution_code(), sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def serving_code_digest() -> str | None:
     """Digest of this process's serving sources and inference libraries, or ``None``."""
     try:
-        encoded = json.dumps(_execution_code(), sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+        return _serving_code_digest()
     except (OSError, TypeError, ValueError):
         return None
-    return hashlib.sha256(encoded).hexdigest()
 
 
 @lru_cache(maxsize=256)
@@ -328,11 +360,23 @@ def _execution_runtime() -> dict[str, Any]:
         "mkldnn_enabled": torch.backends.mkldnn.enabled,
         "cuda_version": torch.version.cuda,
         "cudnn_version": torch.backends.cudnn.version(),
+        "attention_backends": {
+            "flash": torch.backends.cuda.flash_sdp_enabled(),
+            "mem_efficient": torch.backends.cuda.mem_efficient_sdp_enabled(),
+            "math": torch.backends.cuda.math_sdp_enabled(),
+            "cudnn": torch.backends.cuda.cudnn_sdp_enabled(),
+        },
+        "preferred_blas": str(torch.backends.cuda.preferred_blas_library()),
+        "preferred_linalg": str(torch.backends.cuda.preferred_linalg_library()),
         "torch_build": torch.__config__.show(),
         "numpy_build": np.show_config(mode="dicts"),
         "numerical_libraries": _numerical_libraries(),
         "numerical_environment": {name: os.environ.get(name) for name in _NUMERICAL_ENVIRONMENT},
     }
+
+
+def _profile_uses_lora(profile: ResolvedProfile) -> bool:
+    return bool(profile.runtime.get("lora_id")) or bool(profile.loadtime.get("lora_paths"))
 
 
 def local_profile_identity(
@@ -371,7 +415,9 @@ def local_profile_identity(
             or not _adapter_source_available(profile.adapter_path)
         ):
             return None
-        if config.lora_revisions():
+        if _profile_uses_lora(profile) or (
+            config.lora_revisions() and profile.adapter_path not in _UNMERGED_LORA_ADAPTERS
+        ):
             return None
         # The loader applies loadtime options after its model/revision kwargs.
         # Nested HF config kwargs can override the library's revision and trust
@@ -387,7 +433,7 @@ def local_profile_identity(
         if profile.compute_precision is None and engine_config is None:
             return None
         descriptor = {
-            "version": 1,
+            "version": 2,
             "hf_id": config.hf_id,
             "hf_revision": config.hf_revision,
             "tokenizer_dependencies": config.hf_tokenizer_dependencies,
@@ -415,4 +461,4 @@ def local_profile_identity(
         AttributeError,
     ):
         return None
-    return "v1:sha256:" + hashlib.sha256(encoded).hexdigest()
+    return "v2:sha256:" + hashlib.sha256(encoded).hexdigest()

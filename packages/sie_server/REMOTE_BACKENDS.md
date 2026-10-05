@@ -202,11 +202,13 @@ that keeps the application model name stable.
 ## Local profile identity
 
 The single-node model detail and catalog responses include
-`profiles.<name>.identity`, a versioned digest or `null`. Version 1 conservatively
-identifies revision-pinned native BGE-M3 profiles. It includes model/tokenizer pins,
-resolved profile settings, engine configuration, device/platform, serving
-Python sources, installed inference-library versions and current Torch
-precision/determinism settings. Hardware observations include the kernel,
+`profiles.<name>.identity`, a versioned digest or `null`. Version 2 conservatively
+identifies revision-pinned BGE-M3 profiles on the native and the flash adapter. It
+includes model/tokenizer pins, resolved profile settings, engine configuration,
+device/platform, serving Python sources, the exact builds of installed inference
+libraries (each library's version and installed-file record, including
+flash-attn, Triton and PEFT), current Torch precision/determinism settings and
+the selected attention and BLAS backends. Hardware observations include the kernel,
 CPU model/features and selected instruction capability, plus the observed CUDA
 device properties and installed NVIDIA driver revision for CUDA execution.
 Numerical library builds, the kernel and thread selection observed for
@@ -222,11 +224,14 @@ configured device labels are insufficient. Alias names and
 inheritance do not change a profile with identical resolved settings.
 
 Local weight paths, mutable revisions, custom/checkpoint code, child engines,
-unidentified precision and LoRA-bearing models report `null`. SentenceTransformers
-and CrossEncoder require verified checkpoint module metadata: disabling
-`trust_remote_code` alone does not identify installed checkpoint-selected code. FlagEmbedding
-BGE-M3 cannot identify its effective revision; flash/LoRA and other engines need
-additional runtime evidence. An identity is a descriptor, not a numerical
+unidentified precision and profiles that use a LoRA report `null`. A profile that
+uses no LoRA keeps its identity when a sibling profile declares one only on the
+flash BGE-M3 adapter, which applies LoRA per request and disables the adapter
+layers for base requests; on other adapters any declared LoRA reports `null`.
+SentenceTransformers and CrossEncoder require verified checkpoint module metadata:
+disabling `trust_remote_code` alone does not identify installed checkpoint-selected
+code. FlagEmbedding BGE-M3 cannot identify its effective revision; other engines
+need additional runtime evidence. An identity is a descriptor, not a numerical
 measurement. This field alone does not activate hybrid routing: OpenAI profiles
 need passing numerical evidence; SIE profiles require the fresh comparison below.
 
@@ -242,8 +247,8 @@ local identity, `profiles.default.runtime_instance_id`,
 its installed endpoint, model serving configuration, credential reference and request
 transforms to the operator files supplied to the probe. The remote execution
 digest identifies the serving code and inference libraries that run the remote
-profile. Credential values are never included. Version 1 local identities
-currently support native BGE-M3 only.
+profile. Credential values are never included. Version 2 local identities
+support BGE-M3 on the native and the flash adapter.
 
 From the locked public workspace, run:
 
@@ -299,8 +304,8 @@ report the same immutable weights revision and non-null local execution identity
 The remote profile must name an explicit upstream profile, for example
 `upstream_model: BAAI/bge-m3:default`, so the upstream's bare-model routing policy
 cannot change where the request runs. Both deployments must use the same pinned
-native BGE-M3 execution contract, including hardware, libraries and resolved
-profile settings. Unknown identities remain refused.
+BGE-M3 execution contract on the same adapter, including hardware, libraries and
+resolved profile settings. Unknown identities remain refused.
 
 Configuration load and each bridge compare bounded metadata obtained through
 `SIEClient` with the deployment's configured credential, TLS and proxy policy.
