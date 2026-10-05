@@ -73,21 +73,45 @@ def remote_output_refusal(config: ModelConfig) -> str | None:
     )
 
 
+def numerical_evidence_refusal(
+    config: ModelConfig, *, device: str | None, engine_config: EngineConfig | None = None
+) -> str | None:
+    """Why current evidence does not admit this process's numerical bridge, or ``None``."""
+    if hybrid_equivalence_refusal(config) is None:
+        return None
+    if device is None:
+        return "hybrid execution device is ambiguous"
+    routing = config.routing
+    profile = config.resolve_profile((routing.fallback_profile if routing is not None else None) or "default")
+    upstream_name = profile.loadtime.get("upstream")
+    upstream = installed_upstreams().get(upstream_name) if isinstance(upstream_name, str) else None
+    check = (
+        sie_identity_refusal
+        if upstream is not None and upstream.kind is UpstreamKind.SIE
+        else openai_equivalence_refusal
+    )
+    return check(config, device=device, engine_config=engine_config)
+
+
 def validate_model_routing(
     config: ModelConfig, *, device: str | None = None, engine_config: EngineConfig | None = None
 ) -> None:
-    """Refuse a routing block this server cannot honour. Raises ``ValueError``."""
+    """Refuse a routing block this server cannot honour. Raises ``ValueError``.
+
+    A queue worker accepts hybrid ``encode`` and ``score`` without evidence:
+    it never decides a bridge itself, and each bridged request is admitted
+    and verified per request instead.
+    """
     routing = config.routing
     if routing is None:
         return
+    queued = bool(os.environ.get("SIE_IPC_SOCKET_PATH"))
     if routing.policy == "threshold":
         if os.environ.get("SIE_THRESHOLD_ROUTING_ENABLED") != "true":
             msg = f"Model '{config.sie_id}': routing policy 'threshold' is not available yet"
             raise ValueError(msg)
-        if not os.environ.get("SIE_IPC_SOCKET_PATH"):
+        if not queued:
             raise ValueError("threshold routing requires a queue worker behind a threshold-enabled gateway")
-        if config.tasks.encode is not None or config.tasks.score is not None:
-            raise ValueError("threshold routing cannot serve encode or score until fleet equivalence is proven")
         if (routing.window_s or 0) > _MAX_THRESHOLD_WINDOW_S or (routing.cooldown_s or 0) > _MAX_THRESHOLD_WINDOW_S:
             raise ValueError("threshold windows must not exceed 86400 seconds")
     refusal = hybrid_equivalence_refusal(config)
@@ -97,16 +121,10 @@ def validate_model_routing(
         for name in ("default", routing.fallback_profile):
             if config.resolve_profile(name) != config._resolve_profile_uncached(name):
                 raise ValueError("hybrid profile settings changed after resolution; reconstruct the model config")
-    if refusal is not None and device is not None:
-        profile = config.resolve_profile(routing.fallback_profile or "default")
-        upstream_name = profile.loadtime.get("upstream")
-        upstream = installed_upstreams().get(upstream_name) if isinstance(upstream_name, str) else None
-        check = (
-            sie_identity_refusal
-            if upstream is not None and upstream.kind is UpstreamKind.SIE
-            else openai_equivalence_refusal
-        )
-        reason = check(config, device=device, engine_config=engine_config)
+    if refusal is not None and queued:
+        refusal = None
+    elif refusal is not None and device is not None:
+        reason = numerical_evidence_refusal(config, device=device, engine_config=engine_config)
         refusal = f"{refusal}: {reason}" if reason is not None else None
     refusal = refusal or remote_output_refusal(config)
     if refusal is not None:

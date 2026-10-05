@@ -121,8 +121,15 @@ def test_threshold_config_is_flagged_and_routes_to_existing_bundles(
     registry.add_model_config(config)
     assert registry.resolve_bundle("acme/hybrid") == "default"
     assert registry.resolve_bundle("acme/hybrid:remote") == "remote"
-    with pytest.raises(ValueError, match="remote equivalence"):
-        validate_routing_config({**HYBRID, "routing": THRESHOLD})
+
+
+@pytest.mark.parametrize("routing", [{"policy": "fallback", "fallback_profile": "remote"}, THRESHOLD])
+def test_hybrid_encode_and_score_configs_are_accepted_without_granting_a_bridge(
+    routing: dict[str, object], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SIE_THRESHOLD_ROUTING_ENABLED", "true")
+    validate_routing_config({**HYBRID, "routing": routing})
+    validate_routing_config({**HYBRID, "tasks": {"score": {}}, "routing": routing})
 
 
 @pytest.mark.parametrize(

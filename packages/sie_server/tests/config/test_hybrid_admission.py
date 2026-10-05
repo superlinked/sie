@@ -437,3 +437,38 @@ def test_hybrid_device_authority_requires_stable_placement(
 def test_family_level_cuda_cannot_admit_hybrid(admission) -> None:
     config, _, _, _ = admission
     assert hybrid_admission.openai_equivalence_refusal(config, device="cuda") == "hybrid execution device is ambiguous"
+
+
+async def test_queue_worker_bridge_still_requires_current_evidence(
+    admission: tuple, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config, _, path, _ = admission
+    monkeypatch.setenv("SIE_IPC_SOCKET_PATH", str(tmp_path / "ipc.sock"))
+    validate_model_routing(config, device="cpu")
+    path.unlink()
+    validate_model_routing(config, device="cpu")
+    registry = MagicMock(spec=ModelRegistry)
+    registry.device = "cpu"
+    registry.engine_config = None
+    registry.profile_execution_device.return_value = "cpu"
+    registry.get_config.side_effect = expand_profile_variants([config]).__getitem__
+    registry.has_model.return_value = True
+    registry.is_unloading.return_value = False
+    registry.is_loading.side_effect = lambda name: name == config.sie_id
+    registry.is_loaded.side_effect = lambda name: name != config.sie_id
+    registry.start_load_async = AsyncMock(return_value=True)
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/",
+            "headers": [],
+            "app": SimpleNamespace(state=SimpleNamespace(registry=registry)),
+        }
+    )
+    with pytest.raises(HTTPException) as refused:
+        await route_request(request, config.sie_id, trace.INVALID_SPAN)
+    assert refused.value.status_code == 503
+    assert refused.value.headers["X-SIE-Fallback-Error"] == "INFERENCE_ERROR"
+    assert not hasattr(request.state, "serving_route")
+    registry.start_load_async.assert_awaited_once_with(config.sie_id, "cpu")

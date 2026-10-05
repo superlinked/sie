@@ -17,7 +17,12 @@ from sie_server.adapters._base_adapter import BaseAdapter
 from sie_server.adapters._generation_base import GenerationAdapter, GenerationChunk
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.config.model import ModelConfig
-from sie_server.config.routing import hybrid_equivalence_refusal, remote_output_refusal, validate_model_routing
+from sie_server.config.routing import (
+    hybrid_equivalence_refusal,
+    numerical_evidence_refusal,
+    remote_output_refusal,
+    validate_model_routing,
+)
 from sie_server.config.upstreams import Upstream, install_upstreams
 from sie_server.core.loader import expand_profile_variants
 from sie_server.core.registry import ModelRegistry
@@ -435,9 +440,7 @@ async def test_authoritative_replacement_refuses_unsupported_remote_outputs_with
     assert not registry.has_model("acme/hybrid:remote")
 
 
-def test_threshold_requires_flag_and_queue_worker_and_keeps_numerical_gate(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_threshold_requires_flag_and_queue_worker(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     config = ModelConfig.model_validate(hybrid(routing=THRESHOLD))
     monkeypatch.setenv("SIE_THRESHOLD_ROUTING_ENABLED", "true")
     monkeypatch.delenv("SIE_IPC_SOCKET_PATH", raising=False)
@@ -445,10 +448,24 @@ def test_threshold_requires_flag_and_queue_worker_and_keeps_numerical_gate(
         validate_model_routing(config)
     monkeypatch.setenv("SIE_IPC_SOCKET_PATH", str(tmp_path / "ipc.sock"))
     validate_model_routing(config)
-    with pytest.raises(ValueError, match="fleet equivalence"):
-        validate_model_routing(ModelConfig.model_validate(hybrid(tasks=ENCODE, routing=THRESHOLD)))
+    validate_model_routing(ModelConfig.model_validate(hybrid(tasks=ENCODE, routing=THRESHOLD)))
     with pytest.raises(ValueError, match="86400"):
         validate_model_routing(ModelConfig.model_validate(hybrid(routing={**THRESHOLD, "window_s": 86401})))
     monkeypatch.setenv("SIE_THRESHOLD_ROUTING_ENABLED", "false")
     with pytest.raises(ValueError, match="not available yet"):
         validate_model_routing(config)
+
+
+@pytest.mark.parametrize("tasks", [ENCODE, {"score": {}}])
+def test_queue_worker_accepts_hybrid_numerical_routing_without_evidence(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tasks: dict[str, Any]
+) -> None:
+    config = ModelConfig.model_validate(hybrid(tasks=tasks))
+    monkeypatch.delenv("SIE_IPC_SOCKET_PATH", raising=False)
+    with pytest.raises(ValueError, match="refused until"):
+        validate_model_routing(config, device="cpu")
+    monkeypatch.setenv("SIE_IPC_SOCKET_PATH", str(tmp_path / "ipc.sock"))
+    validate_model_routing(config, device="cpu")
+    validate_model_routing(config)
+    assert numerical_evidence_refusal(config, device="cpu") is not None
+    assert numerical_evidence_refusal(config, device=None) == "hybrid execution device is ambiguous"

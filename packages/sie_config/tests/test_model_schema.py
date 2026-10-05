@@ -109,7 +109,8 @@ def test_partial_append_body_passes() -> None:
         "cyclic_parent",
     ],
 )
-def test_routing_guard_agrees_with_worker(case: str) -> None:
+def test_routing_guard_agrees_with_worker(case: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("SIE_IPC_SOCKET_PATH", str(tmp_path / "ipc.sock"))
     remote = {
         "adapter_path": "sie_server.adapters.remote.sie:SieUpstreamAdapter",
         "max_batch_tokens": 8192,
