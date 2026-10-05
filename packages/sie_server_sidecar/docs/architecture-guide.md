@@ -467,7 +467,10 @@ heartbeat reports `supports_numerical_admission_v1` only when it reports
 the admission pull consumer runs. After a rollback below this version, admitted
 work still queued for that worker never runs and its callers time out. The
 gateway stops selecting the worker once its heartbeat no longer reports the
-capability. No gateway produces these items yet.
+capability. The gateway produces these items only for an `encode` or `score`
+bridge or threshold route whose numerical admission it has checked, and only
+toward a worker that reports this capability. The gateway architecture guide's
+"Numerical bridges" section describes that decision.
 
 Non-streaming backend responses use one physical frame while the serialized
 response is at most 32 MiB. For a larger response, the sidecar explicitly sets
