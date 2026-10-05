@@ -18,6 +18,7 @@ from sie_server.config.model import (
 )
 from sie_server.config.upstreams import Upstream
 from sie_server.core.load_errors import LoadErrorClass, LoadFailure
+from sie_server.core.profile_identity import serving_code_digest
 from sie_server.core.registry import ModelRegistry
 
 
@@ -453,6 +454,9 @@ def test_remote_contract_metadata_binds_the_installed_upstream(
     for value in (detail, listed):
         assert value["profiles"]["remote"]["remote_contract_sha256"] == expected
         assert value["profiles"]["default"]["remote_contract_sha256"] is None
+        assert value["profiles"]["remote"]["remote_execution_sha256"] == serving_code_digest() is not None
+        assert value["profiles"]["default"]["remote_execution_sha256"] is None
+        assert value["profiles"]["remote"]["runtime_instance_id"] is None
         assert base_url not in str(value)
         assert "SECRET_ENV_REFERENCE" not in str(value)
     different = upstream.model_copy(update={"base_url": "https://other.example/v1"})

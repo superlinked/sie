@@ -254,7 +254,7 @@ class EquivalencePolicy(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
 
-    max_age_s: int = Field(gt=0, le=86400, strict=True)
+    max_age_s: int = Field(gt=0, le=604_800, strict=True)
     record_files: dict[str, str] = Field(min_length=1, max_length=256)
 
     @field_validator("record_files")

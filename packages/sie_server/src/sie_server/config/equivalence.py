@@ -1,8 +1,10 @@
 """Bounded, versioned evidence from two local runs and one remote run.
 
 Records are operator artifacts, never caller assertions. They contain hashes
-and measured errors, not request bodies, vectors or credentials. This module
-does not admit hybrid routing; the deployment/runtime gate consumes the record.
+and measured errors, not request bodies, vectors or credentials. A record binds
+one local execution identity, not the process that was measured, so every
+process reporting that identity is covered. This module does not admit hybrid
+routing; the deployment/runtime gate consumes the record.
 """
 
 from __future__ import annotations
@@ -182,7 +184,7 @@ class ProbeCase(BaseModel):
 class EquivalenceRecord(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
-    version: Literal[2] = 2
+    version: Literal[3] = 3
     measured_at: AwareDatetime
     upstream_name: str = Field(min_length=1, max_length=128)
     upstream_model: str = Field(min_length=1, max_length=256)
@@ -190,10 +192,10 @@ class EquivalenceRecord(BaseModel):
     model_contract_sha256: str = Field(pattern=_HASH_PATTERN)
     probe_sources_sha256: str = Field(pattern=_HASH_PATTERN)
     remote_contract_sha256: str = Field(pattern=_HASH_PATTERN)
+    remote_execution_sha256: str = Field(pattern=_HASH_PATTERN)
     local_observation_sha256: str = Field(pattern=_HASH_PATTERN)
     runtime_options_sha256: str = Field(pattern=_HASH_PATTERN)
     output_dtype: Literal["float32"]
-    local_instance_id: str = Field(pattern=_HASH_PATTERN)
     local_identity: str = Field(pattern=r"^v1:sha256:[0-9a-f]{64}$")
     model: str = Field(min_length=1, max_length=256)
     local_profile: str = "default"

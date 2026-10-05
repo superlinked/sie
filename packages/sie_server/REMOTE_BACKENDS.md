@@ -227,10 +227,14 @@ Python sources, installed inference-library versions and current Torch
 precision/determinism settings. Hardware observations include the kernel,
 CPU model/features and selected instruction capability, plus the observed CUDA
 device properties and installed NVIDIA driver revision for CUDA execution.
-Numerical library builds, observed BLAS kernel/thread selection and environment
-settings also participate. Apple Accelerate is bound to the installed OS
-version/build. Observed BLAS kernels are limited to OpenBLAS/BLIS; wrapper
-backends and libraries without kernel facts report `null`, including MKL.
+Numerical library builds, the kernel and thread selection observed for
+NumPy's own BLAS and environment settings also participate. Libraries that
+other packages load later are not observed, so a server reports the same
+identity before and after it loads a model. Apple Accelerate is bound to the
+installed OS version/build. Otherwise NumPy's BLAS must be OpenBLAS or BLIS,
+loaded from NumPy's own installation with observable kernel facts; wrapper
+backends, system libraries and libraries without kernel facts report `null`,
+including MKL.
 Unknown hardware or numerical libraries report `null`;
 configured device labels are insufficient. Alias names and
 inheritance do not change a profile with identical resolved settings.
@@ -250,11 +254,14 @@ need passing numerical evidence; SIE profiles require the fresh comparison below
 An encode/score comparison runs through the Python SDK against one direct SIE worker
 that has both the local default profile and an explicit remote profile. Keep
 hybrid routing disabled while measuring. The server must expose a non-null
-local identity, `profiles.default.runtime_instance_id` and
-`profiles.<remote>.remote_contract_sha256`; the latter binds
+local identity, `profiles.default.runtime_instance_id`,
+`profiles.<remote>.remote_contract_sha256` and
+`profiles.<remote>.remote_execution_sha256`. The remote contract binds
 its installed endpoint, model serving configuration, credential reference and request
-transforms to the operator files supplied to the probe. Credential values are
-never included. Version 1 local identities currently support native BGE-M3 only.
+transforms to the operator files supplied to the probe. The remote execution
+digest identifies the serving code and inference libraries that run the remote
+profile. Credential values are never included. Version 1 local identities
+currently support native BGE-M3 only.
 
 From the locked public workspace, run:
 
@@ -277,8 +284,9 @@ instruction prefixes, default query instructions, empty prefixes, and score scal
 when scoring is declared. All declared encode/score outputs must be measured.
 Generation is outside this numerical probe. The routing policy is excluded from
 the model digest, so evidence can be measured before enabling hybrid routing;
-all local and remote profile settings remain bound. Version 2 records bind the
-local profile's runtime options and float32 output explicitly. Both measured
+all local and remote profile settings remain bound. Version 3 records bind the
+local profile's runtime options, float32 output and remote execution digest
+explicitly. Both measured
 profiles receive those same local runtime options; remote-only runtime defaults
 are refused because a fallback would not apply them. Older records must be remeasured.
 
@@ -290,6 +298,8 @@ numerical equivalence. Endpoint/model contracts and local identity must remain
 unchanged throughout the probe. Every local and remote observation, including
 input refusals, must come from the same worker process identified by the initial
 metadata. A load balancer mixing workers cannot produce admissible evidence.
+The record names the local execution identity it measured, not the process, so
+it also covers other processes that report the same identity.
 
 Exit status is `0` for passing evidence, `1` for a measured failure, or `2` when
 valid evidence could not be produced. Records contain input hashes, token
@@ -356,10 +366,13 @@ upstreams:
         BAAI/bge-m3: /absolute/path/bge-m3-equivalence.json
 ```
 
-The map keys are local catalog model IDs. The referenced file must contain a
-passing version 2 record for that exact model, local identity, worker process,
-remote profile, endpoint/model contract and all declared numerical outputs.
-The age is a strict integer from 1 to 86400 seconds. Paths and proof authority
+The map keys are local catalog model IDs. The referenced file holds one
+version 3 record, or a bundle of records for several local identities (see
+[Collecting numerical fleet evidence](#collecting-numerical-fleet-evidence)).
+A passing record admits only the exact model, remote profile, endpoint/model
+contract, remote execution digest and declared numerical outputs it measured,
+and only for the local identity it names.
+The age is a strict integer from 1 to 604800 seconds. Paths and proof authority
 come only from startup upstream configuration; model API requests cannot supply
 or install records. SIE upstreams refuse this policy and require their own
 immutable identity comparison instead.
@@ -380,42 +393,45 @@ with unmeasured runtime overrides or non-float32 output also remain local;
 explicit profiles still serve as requested. Rejection of one exported model
 retains its current local configuration without blocking unrelated updates.
 
-Records are bound to the measured worker process. After a worker restart,
-disable hybrid routing before startup, re-probe and activate through hot reload
-again. Starting directly from a hybrid YAML with an old process-bound record is
-refused. This conservative first admission path requires one record per worker
-process with one configured concrete device (`cuda:0`, rather than `cuda`,
-for a CUDA worker). Multiple devices or a model loaded outside that placement
-cannot report an admission identity or use the proof. It does not enable
-gateway fallback or a fleet-wide evidence rollout.
+A record is bound to the local execution identity it measured, not to the
+measured process. A restarted server, or another server with the same software,
+inference libraries, hardware and settings, reports the same identity and is
+admitted by the same record, also when it starts from a hybrid YAML. A change
+to any of them changes the identity and needs a new measurement. Admission
+requires one configured concrete device (`cuda:0`, rather than `cuda`, for a
+CUDA worker). Multiple devices or a model loaded outside that placement cannot
+report an admission identity or use the proof. This does not enable gateway
+fallback.
 
 ## Collecting numerical fleet evidence
 
-Collect one version 2 proof from every reachable Python worker process, including
-children behind a sidecar and workers eligible for pool fallback. Each proof
-still requires two local runs and one explicit remote run against that process.
-The collector accepts repeated `--record` paths, writes a new `--output` file,
-and checks a `--max-age-s` window from 1 to 86400 seconds (default 3600):
+Servers with different hardware, drivers, inference libraries or settings
+report different local identities, and each identity needs its own
+measurement: two local runs and one explicit remote run on a server with that
+identity. The bundle tool collects one version 3 record per identity into one
+evidence file, which an upstream's `record_files` entry can name in place of a
+single record. It accepts repeated `--record` paths, writes a new `--output`
+file, and checks a `--max-age-s` window from 1 to 604800 seconds (default 3600):
 
 ```bash
 mise exec -- uv run --frozen --project . python tools/remote_fleet_equivalence.py \
-  --record /absolute/path/worker-a.json \
-  --record /absolute/path/worker-b.json \
-  --output /absolute/path/fleet.json --max-age-s 3600
+  --record /absolute/path/identity-a.json \
+  --record /absolute/path/identity-b.json \
+  --output /absolute/path/bundle.json --max-age-s 3600
 ```
 
-The version 1 inventory retains the original measurements, including misses.
+The version 2 bundle retains the original measurements, including misses.
 Exit status 0 means all records passed and are fresh, 1 means valid evidence
 contains a failure or expired/future measurement, and 2 means collection failed.
 Existing output files are never overwritten. Inputs are bounded regular files;
-the inventory contains at most 256 records and occupies at most 8 MiB.
+the bundle contains at most 256 records and occupies at most 8 MiB.
 
-Every member must measure the same model, profiles, endpoint/model contract,
-runtime defaults, outputs and probe inputs. Processes may have different local
-execution identities, each bound to its own measurement. Canonical digests bind
-the entire record, including its process, timestamp and measured errors. Exact
-inventory matching rejects missing, additional or replaced processes, even when
-a replacement reports the same execution identity.
+Every record must measure the same model, profiles, endpoint/model contract,
+remote execution digest, runtime defaults, outputs and probe inputs, and no
+identity may appear twice. Canonical digests bind the entire record, including
+its identity, timestamp and measured errors. A server is admitted only by a
+passing, fresh record for its own identity, so a failed or expired record for
+one identity leaves the other identities admitted.
 
 Sidecars independently poll every adapter child and attach optional
 `numerical_process_inventory` diagnostics to NATS health messages. Cluster
@@ -427,11 +443,10 @@ older than ten seconds do not retain a previous process's inventory. Normal
 health publication does not wait for these probes, and diagnostics use dedicated
 IPC connections so they do not occupy serving or readiness connection slots.
 
-These observations and the proof artifact grant no routing authority. An
-`observed` child can still lack a local identity. Numerical gateway routing remains
-inactive until operator-owned evidence, complete live membership and execution
-fencing are connected. Restarts require new proofs; a collector result cannot
-authorize a new process or establish scale-to-zero equivalence.
+These observations and the evidence file grant no gateway routing authority.
+An `observed` child can still lack a local identity. Numerical gateway routing
+remains inactive until operator-owned evidence, complete live membership and
+execution fencing are connected.
 
 
 ## Single-node generation fallback

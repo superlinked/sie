@@ -270,6 +270,8 @@ export interface ProfileInfo {
   identity?: string | null;
   /** Operator-bound upstream/model/profile contract digest. */
   remote_contract_sha256?: string | null;
+  /** Digest of the serving code that runs this remote profile. */
+  remote_execution_sha256?: string | null;
   runtime_instance_id?: string | null;
 }
 
