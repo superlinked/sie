@@ -33,7 +33,7 @@ _METADATA_DEADLINE_S = 5.0
 _IDENTITY_AGE_S = 30.0
 _REFUSAL_AGE_S = 2.0
 _MAX_CACHE_ENTRIES = 128
-_IDENTITY = re.compile(r"^v1:sha256:[0-9a-f]{64}$")
+_IDENTITY = re.compile(r"^v[12]:sha256:[0-9a-f]{64}$")
 _REVISION = re.compile(r"[0-9a-f]{40}")
 
 

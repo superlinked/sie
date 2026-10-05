@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
+import re
 import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -47,6 +48,7 @@ _HASH_LENGTH = 64
 _MATRIX_NDIM = 2
 _PREFIX = "Represent this text for retrieval:"
 _SCORE_QUERY = "relevant documents for search"
+_IDENTITY = re.compile(r"v[12]:sha256:[0-9a-f]{64}")
 
 
 @dataclass(frozen=True)
@@ -264,7 +266,7 @@ def run_probe(
         or any(char not in "0123456789abcdef" for char in remote_execution)
     ):
         raise ValueError("serving remote execution cannot be identified")
-    if not isinstance(identity, str) or not identity.startswith("v1:sha256:"):
+    if not isinstance(identity, str) or not _IDENTITY.fullmatch(identity):
         raise ValueError("local execution cannot be identified; no equivalence record can authorize it")
     if before.get("revision") != config.hf_revision or before.get("max_sequence_length") != config.max_sequence_length:
         raise ValueError("local model metadata differs from the supplied model contract")

@@ -186,10 +186,6 @@ def validate_routing_config(config: dict[str, Any]) -> None:
         tasks = config.get("tasks") or {}
         if not isinstance(tasks, dict):
             raise ValueError("routing tasks must be a mapping")
-        if any(tasks.get(task) is not None for task in ("encode", "score")):
-            raise ValueError(
-                f"routing policy '{policy}' cannot serve encode or score until remote equivalence is proven"
-            )
 
     profiles = config.get("profiles") or {}
     if not isinstance(profiles, dict):

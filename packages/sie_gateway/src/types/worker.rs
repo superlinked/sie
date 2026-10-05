@@ -314,6 +314,12 @@ fn sha256_digest(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+fn local_identity_digest(identity: &str) -> bool {
+    ["v1:sha256:", "v2:sha256:"]
+        .iter()
+        .any(|prefix| identity.strip_prefix(prefix).is_some_and(sha256_digest))
+}
+
 struct InventoryBudget(usize);
 
 impl Write for InventoryBudget {
@@ -381,7 +387,7 @@ impl NumericalProcessInventory {
                     || profile
                         .local_identity
                         .as_deref()
-                        .is_some_and(|id| !id.strip_prefix("v1:sha256:").is_some_and(sha256_digest))
+                        .is_some_and(|id| !local_identity_digest(id))
                 {
                     return false;
                 }
@@ -564,6 +570,30 @@ mod tests {
             message.numerical_process_inventory.unwrap().children.len(),
             2
         );
+    }
+
+    #[test]
+    fn local_identities_of_both_versions_are_accepted_and_others_refused() {
+        for (identity, accepted) in [
+            (format!("v1:sha256:{}", "c".repeat(64)), true),
+            (format!("v2:sha256:{}", "c".repeat(64)), true),
+            (format!("v3:sha256:{}", "c".repeat(64)), false),
+            (format!("v2:sha256:{}", "C".repeat(64)), false),
+            ("v2:sha256:".to_string(), false),
+        ] {
+            let mut value = inventory();
+            value["children"][0]["snapshot"]["profiles"][0]["local_identity"] =
+                serde_json::json!(identity);
+            let message: WorkerStatusMessage = serde_json::from_value(serde_json::json!({
+                "numerical_process_inventory": value
+            }))
+            .unwrap();
+            assert_eq!(
+                message.numerical_process_inventory.is_some(),
+                accepted,
+                "{identity}"
+            );
+        }
     }
 
     fn make_worker(health: WorkerHealth, mem_used: i64, mem_total: i64) -> WorkerState {

@@ -2,6 +2,7 @@ import json
 import subprocess
 import sys
 from copy import deepcopy
+from importlib.metadata import PackageNotFoundError
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,6 +13,8 @@ from sie_server.config.model import ModelConfig
 from sie_server.core import profile_identity
 
 PIN = "a" * 40
+FLASH = "sie_server.adapters.bge_m3_flash:BGEM3FlashAdapter"
+EXECUTION_CODE = profile_identity._execution_code
 NUMPY_LIBRARY = str(Path(np.__file__).resolve().parent.with_name("numpy.libs") / "libscipy_openblas64_.so")
 OTHER_LIBRARY = str(Path(np.__file__).resolve().parent.with_name("scipy.libs") / "libscipy_openblas.so")
 
@@ -59,7 +62,7 @@ def test_alias_and_inheritance_preserve_resolved_identity() -> None:
     assert identity(original) == identity(inherited, "other")
     result = identity(original)
     assert result is not None
-    assert result.startswith("v1:sha256:")
+    assert result.startswith("v2:sha256:")
 
 
 @pytest.mark.parametrize(
@@ -180,7 +183,6 @@ def test_repo_shaped_local_directory_has_no_identity(tmp_path, monkeypatch: pyte
         "sie_server.adapters.sglang:SGLangGenerationAdapter",
         "sie_server.adapters.mlx:MLXGenerationAdapter",
         "sie_server.adapters.bge_m3_flag:BGEM3FlagAdapter",
-        "sie_server.adapters.bge_m3_flash:BGEM3FlashAdapter",
         "sie_server.adapters.sentence_transformer:SentenceTransformerDenseAdapter",
         "sie_server.adapters.sentence_transformer:SentenceTransformerSparseAdapter",
         "sie_server.adapters.cross_encoder:CrossEncoderAdapter",
@@ -540,3 +542,67 @@ def test_identity_is_the_same_before_and_after_the_model_stack_is_imported() -> 
     before, after = json.loads(result.stdout.strip().splitlines()[-1])
     assert before is not None
     assert before == after
+
+
+def flash_config(**profiles: object) -> ModelConfig:
+    data = config().model_dump()
+    data["profiles"]["default"]["adapter_path"] = FLASH
+    data["profiles"].update(profiles)
+    return ModelConfig.model_validate(data)
+
+
+def test_flash_bge_m3_profile_has_its_own_identity() -> None:
+    flash = identity(flash_config())
+    assert flash is not None
+    assert flash.startswith("v2:sha256:")
+    assert flash != identity(config())
+
+
+def test_sibling_lora_leaves_an_unmerged_lora_family_identified() -> None:
+    lora = {"banking": {"extends": "default", "adapter_options": {"runtime": {"lora_id": "mutable/adapter"}}}}
+    model = flash_config(**lora)
+    assert identity(model) is not None
+    assert identity(model) == identity(flash_config())
+    assert identity(model, "banking") is None
+
+
+def test_sibling_lora_still_refuses_other_families() -> None:
+    data = config().model_dump()
+    data["profiles"]["banking"] = {"extends": "default", "adapter_options": {"runtime": {"lora_id": "mutable/adapter"}}}
+    assert identity(ModelConfig.model_validate(data)) is None
+
+
+class _Installed:
+    def __init__(self, record: str | None) -> None:
+        self.version = "1.0"
+        self._record = record
+
+    def read_text(self, name: str) -> str | None:
+        return self._record if name == "RECORD" else None
+
+
+def test_inference_library_builds_are_bound_exactly(monkeypatch: pytest.MonkeyPatch) -> None:
+    records: dict[str, str | None] = {"flash-attn": "flash_attn/__init__.py,sha256=a,1\n"}
+
+    def installed(name: str) -> _Installed:
+        if name not in records:
+            raise PackageNotFoundError(name)
+        return _Installed(records[name])
+
+    monkeypatch.setattr(profile_identity, "distribution", installed)
+    first = EXECUTION_CODE.__wrapped__()
+    assert first["dependencies"]["torch"] is None
+    assert first["dependencies"]["flash-attn"]["version"] == "1.0"
+    records["flash-attn"] = "flash_attn/__init__.py,sha256=b,1\n"
+    assert EXECUTION_CODE.__wrapped__()["dependencies"]["flash-attn"] != first["dependencies"]["flash-attn"]
+    records["flash-attn"] = None
+    with pytest.raises(ValueError, match="builds cannot be identified"):
+        EXECUTION_CODE.__wrapped__()
+
+
+def test_attention_backend_selection_changes_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    first = identity(config())
+    assert first is not None
+    enabled = profile_identity.torch.backends.cuda.flash_sdp_enabled()
+    monkeypatch.setattr(profile_identity.torch.backends.cuda, "flash_sdp_enabled", lambda: not enabled)
+    assert identity(config()) != first

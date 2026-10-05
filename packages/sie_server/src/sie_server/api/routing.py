@@ -19,7 +19,7 @@ from fastapi import Header, HTTPException, Request, status
 
 from sie_server.api.helpers import SERVED_BY_HEADER, UPSTREAM_HEADER, ModelStateChecker, queue_full_exception
 from sie_server.config.hybrid_admission import hybrid_request_refusal
-from sie_server.config.routing import validate_model_routing
+from sie_server.config.routing import numerical_evidence_refusal
 from sie_server.config.upstreams import remote_serving_enabled
 from sie_server.core.loader import serves_remotely
 from sie_server.core.profile_identity import runtime_instance_id
@@ -278,12 +278,14 @@ async def _bridge(
         try:
             if hybrid_request_refusal(config, request_options) is not None:
                 raise ValueError("hybrid request differs from its measured contract")
-            await asyncio.to_thread(
-                validate_model_routing,
+            reason = await asyncio.to_thread(
+                numerical_evidence_refusal,
                 config,
                 device=registry.profile_execution_device(config.sie_id),
                 engine_config=registry.engine_config,
             )
+            if reason is not None:
+                raise ValueError(reason)
         except ValueError:
             replacement = route.refusal_after(status.HTTP_503_SERVICE_UNAVAILABLE, ErrorCode.INFERENCE_ERROR.value)
             if replacement is not None:
