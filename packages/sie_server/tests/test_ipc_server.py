@@ -2713,11 +2713,14 @@ class TestGenerationSidecarIpc:
         assert not registry.loaded_model_names
 
     @pytest.mark.asyncio
-    async def test_numerical_snapshot_failure_is_incomplete_and_exposes_no_exception(self) -> None:
+    async def test_numerical_snapshot_failure_is_incomplete_and_exposes_no_exception(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        caplog.set_level("DEBUG", logger="sie_server.ipc_server")
         executor, registry = _make_executor()
         registry.get_configs_snapshot.side_effect = RuntimeError("private upstream credential")
         async with IpcServer(_short_sock_path(), executor, worker_id="w") as server:
-            client = await _Client.connect(server._socket_path)
+            client = await _Client.connect(server.socket_path)
             try:
                 response = await client.rpc("NumericalProfileSnapshot", {})
             finally:
@@ -2725,6 +2728,8 @@ class TestGenerationSidecarIpc:
         assert response["ok"]
         assert response["body"] == {"runtime_instance_id": runtime_instance_id(), "profiles": [], "complete": False}
         assert "private" not in str(response)
+        assert "Could not collect numerical profile snapshot (error_class=internal)" in caplog.text
+        assert "private upstream credential" not in caplog.text
 
     @pytest.mark.asyncio
     async def test_numerical_snapshot_pins_config_and_reports_a_bounded_roster(

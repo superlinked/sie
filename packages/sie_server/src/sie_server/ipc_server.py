@@ -774,7 +774,15 @@ class IpcServer:
         try:
             async with self._executor.registry.execution_lease():
                 return await asyncio.to_thread(self._numerical_profile_snapshot)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            error_class = (
+                "io"
+                if isinstance(exc, OSError)
+                else "invalid"
+                if isinstance(exc, TypeError | ValueError)
+                else "internal"
+            )
+            logger.debug("Could not collect numerical profile snapshot (error_class=%s)", error_class)
             return NumericalProfileSnapshotResponse(runtime_instance_id=runtime_instance_id())
 
     def _numerical_profile_snapshot(self) -> NumericalProfileSnapshotResponse:
