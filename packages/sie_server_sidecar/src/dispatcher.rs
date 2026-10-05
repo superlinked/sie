@@ -2322,6 +2322,7 @@ impl Dispatcher {
         }
         let readiness_resp = loop {
             items = self.retain_uncancelled(items, "model_readiness").await;
+            items = self.answer_stale_admissions(items).await;
             if items.is_empty() {
                 return Ok(());
             }
@@ -7333,6 +7334,43 @@ mod tests {
             "a current admission and ordinary work are kept"
         );
         assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_admission_that_goes_stale_while_its_model_loads_is_answered() {
+        let backend = LoadingModelBackend::new("cold");
+        let mut dispatcher = dispatcher_with_backend(backend.clone());
+        let state = Arc::new(ConfigApplyState::new("fresh".into()));
+        Arc::get_mut(&mut dispatcher).unwrap().config_apply_state = Some(Arc::clone(&state));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let admitted = WorkItem {
+            numerical_admission_sha256: Some("a".repeat(64)),
+            bundle_config_hash: "fresh".into(),
+            ..wi("admitted", 0, "cold", "encode")
+        };
+
+        dispatcher
+            .dispatch_decoded(
+                vec![(admitted, Delivery::Local(LocalDelivery::new(0, 0, tx)))],
+                1,
+                Instant::now(),
+            )
+            .await;
+        // The second probe comes from the parked group's readiness loop.
+        while backend.probes.load(Ordering::SeqCst) < 2 {
+            tokio::task::yield_now().await;
+        }
+        state.set_bundle_hash("next".into());
+        dispatcher
+            .join_parked_groups(crate::nats_consumer::redelivery_envelope() * 2)
+            .await;
+
+        let Ok(crate::delivery::LocalDeliveryEvent::Result { slot: 0, result }) = rx.try_recv()
+        else {
+            panic!("an admission that went stale must settle with a result");
+        };
+        assert_eq!(result.error_code.as_deref(), Some(INFERENCE_ERROR_CODE));
+        assert!(backend.encoded_models().is_empty());
     }
 
     #[tokio::test]
