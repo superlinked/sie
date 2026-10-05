@@ -733,12 +733,16 @@ def _fleet(contract: str, remote_contract: str, *, identities: tuple[str, str]) 
     ]
 
 
+events: list[str] = []
+
+
 def _run_cluster_probe(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, statuses: list[list[dict[str, Any]]], extra: list[str]
 ) -> tuple[int, list[tuple[dict[str, Any], dict[str, str]]], Path]:
     config_file, upstream_file = tmp_path / "model.yaml", tmp_path / "upstreams.yaml"
     requests: list[tuple[dict[str, Any], dict[str, str]]] = []
     connections: list[int] = []
+    events.clear()
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -759,6 +763,7 @@ def _run_cluster_probe(
             self.end_headers()
             workers = statuses[min(len(connections), len(statuses) - 1)]
             connections.append(1)
+            events.append("status")
             self.wfile.write(_websocket_frame(json.dumps({"timestamp": 1.0, "workers": workers}).encode(), 0x1))
             self.wfile.write(_websocket_frame(b"\x03\xe8", 0x8))
             self.wfile.flush()
@@ -768,6 +773,7 @@ def _run_cluster_probe(
             body = unpackb(self.rfile.read(int(self.headers["Content-Length"])), numeric_arrays=False)
             headers = {key.lower(): value for key, value in self.headers.items() if key.lower().startswith("x-sie")}
             requests.append((body, headers))
+            events.append("wake" if body["items"][0]["id"] == "probe-wake" else "probe")
             remote = self.headers.get("X-SIE-Remote") != "forbid"
             rows = [
                 {"id": item["id"], "dense": {"dims": 2, "values": np.asarray([1.0, 2.0], dtype=np.float32)}}
@@ -827,7 +833,8 @@ def test_cluster_probe_attributes_observations_to_one_identity_from_cluster_stat
     assert evidence.remote_execution_sha256 == _REMOTE_EXECUTION
     assert evidence.remote_contract_sha256 == remote_contract
     assert evidence.local_observation_sha256 == canonical_digest({"identity": _IDENTITY_L4, "revision": "a" * 40})
-    assert [headers.get("x-sie-remote") for _, headers in requests] == ["forbid", "forbid", None] * 8
+    assert events == ["wake", "wake", "status", *["probe"] * 24, "status"]
+    assert [headers.get("x-sie-remote") for _, headers in requests] == ["forbid", None] + ["forbid", "forbid", None] * 8
     assert all("x-sie-machine-profile" not in headers for _, headers in requests)
     assert all(body["params"]["options"]["profile"] in ("default", "remote") for body, _ in requests)
 
@@ -837,8 +844,8 @@ def test_cluster_probe_refuses_two_identities_unless_one_machine_profile_is_sele
 ) -> None:
     _, _, _, contract, remote_contract = _cluster_fixture(tmp_path)
     fleet = _fleet(contract, remote_contract, identities=(_IDENTITY_L4, _IDENTITY_A100))
-    result, requests, output = _run_cluster_probe(tmp_path, monkeypatch, [fleet], [])
-    assert (result, requests, output.exists()) == (2, [], False)
+    result, _, output = _run_cluster_probe(tmp_path, monkeypatch, [fleet], [])
+    assert (result, events, output.exists()) == (2, ["wake", "wake", "status"], False)
     result, requests, output = _run_cluster_probe(tmp_path, monkeypatch, [fleet], ["--gpu", "a100-80gb"])
     assert result == 0
     assert EquivalenceRecord.model_validate_json(output.read_bytes()).local_identity == _IDENTITY_A100
@@ -855,9 +862,9 @@ def test_cluster_probe_refuses_a_fleet_that_changes_during_the_run(
     before = _fleet(contract, remote_contract, identities=(_IDENTITY_L4, _IDENTITY_L4))
     after = json.loads(json.dumps(before))
     after[0]["numerical_process_inventory"]["children"][0]["snapshot"]["runtime_instance_id"] = "d" * 64
-    result, requests, output = _run_cluster_probe(tmp_path, monkeypatch, [before, after], [])
+    result, _, output = _run_cluster_probe(tmp_path, monkeypatch, [before, after], [])
     assert result == 2
-    assert len(requests) == 24
+    assert events == ["wake", "wake", "status", *["probe"] * 24, "status"]
     assert not output.exists()
 
 
@@ -881,8 +888,32 @@ def test_cluster_probe_refuses_incomplete_or_mismatched_provenance(
         fleet[-1]["numerical_process_inventory"] = None
     else:
         fleet[1]["numerical_process_inventory"]["children"][0]["status"] = "incomplete"
-    result, requests, output = _run_cluster_probe(tmp_path, monkeypatch, [fleet], [])
-    assert (result, requests, output.exists()) == (2, [], False)
+    result, _, output = _run_cluster_probe(tmp_path, monkeypatch, [fleet], [])
+    assert (result, events, output.exists()) == (2, ["wake", "wake", "status"], False)
+
+
+@pytest.mark.parametrize("malformed", ["inventory", "children", "child", "snapshot", "profiles", "profile"])
+def test_cluster_probe_refuses_malformed_status_without_a_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], malformed: str
+) -> None:
+    _, _, _, contract, remote_contract = _cluster_fixture(tmp_path)
+    fleet = _fleet(contract, remote_contract, identities=(_IDENTITY_L4, _IDENTITY_L4))
+    inventory = fleet[0]["numerical_process_inventory"]
+    if malformed == "inventory":
+        fleet[0]["numerical_process_inventory"] = ["not", "a", "map"]
+    elif malformed == "children":
+        inventory["children"] = {"0": inventory["children"][0]}
+    elif malformed == "child":
+        inventory["children"] = ["not a child"]
+    elif malformed == "snapshot":
+        inventory["children"][0]["snapshot"] = ["not", "a", "snapshot"]
+    elif malformed == "profiles":
+        inventory["children"][0]["snapshot"]["profiles"] = {"model_id": "local/model"}
+    else:
+        inventory["children"][0]["snapshot"]["profiles"] = ["not a profile"]
+    result, _, output = _run_cluster_probe(tmp_path, monkeypatch, [fleet], [])
+    assert (result, events, output.exists()) == (2, ["wake", "wake", "status"], False)
+    assert "Traceback" not in capsys.readouterr().err
 
 
 def test_machine_profile_selection_requires_cluster_mode(tmp_path: Path) -> None:

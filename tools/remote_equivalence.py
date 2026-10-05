@@ -224,15 +224,53 @@ def _cluster_workers(client: SIEClient) -> list[Mapping[str, Any]]:
 
 def _model_observations(worker: Mapping[str, Any], model: str) -> list[tuple[object, object, Mapping[str, Any]]]:
     inventory = worker.get("numerical_process_inventory") or {}
+    if not isinstance(inventory, dict):
+        raise ValueError("cluster status is malformed")
+    children = inventory.get("children") or []
+    if not isinstance(children, list):
+        raise ValueError("cluster status is malformed")
     found = []
-    for child in inventory.get("children") or []:
+    for child in children:
+        if not isinstance(child, dict):
+            raise ValueError("cluster status is malformed")
         snapshot = child.get("snapshot") or {}
+        if not isinstance(snapshot, dict):
+            raise ValueError("cluster status is malformed")
+        profiles = snapshot.get("profiles") or []
+        if not isinstance(profiles, list) or not all(isinstance(observation, dict) for observation in profiles):
+            raise ValueError("cluster status is malformed")
         found.extend(
             (child.get("status"), snapshot.get("runtime_instance_id"), observation)
-            for observation in snapshot.get("profiles") or []
+            for observation in profiles
             if observation.get("model_id") == model
         )
     return found
+
+
+def _wake_lanes(
+    local: SIEClient, remote: SIEClient, config: ModelConfig, profile: str, machine_profile: str | None
+) -> None:
+    """Send one local and one remote call that wait for capacity, so cold lanes start before provenance."""
+    encode_outputs = sorted(set(config.outputs) & {"dense", "sparse", "multivector"})
+    items: list[Item] = [{"id": "probe-wake", "text": "wake"}]
+    for client, selected in ((local, "default"), (remote, profile)):
+        common: dict[str, Any] = {
+            "options": {**config.resolve_profile("default").runtime, "profile": selected},
+            "wait_for_capacity": True,
+            "max_oom_retries": 0,
+        }
+        if machine_profile is not None and selected == "default":
+            common["gpu"] = machine_profile
+        if encode_outputs:
+            client.encode(
+                config.sie_id,
+                items,
+                output_types=cast("Any", encode_outputs),
+                output_dtype=DEFAULT_OUTPUT_DTYPE,
+                **common,
+            )
+        else:
+            client.score(config.sie_id, {"text": _SCORE_QUERY}, items, **common)
 
 
 def _cluster_provenance(
@@ -386,6 +424,8 @@ def run_probe(
             return _cluster_provenance(local, config, expected_remote, machine_profile)
         return _server_provenance(local, config, profile, expected_remote)
 
+    if cluster:
+        _wake_lanes(local, remote, config, profile, machine_profile)
     before = provenance()
     outputs = set(config.outputs) & {"dense", "sparse", "multivector", "score"}
     if not outputs:

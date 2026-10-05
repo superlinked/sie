@@ -320,10 +320,12 @@ the model loaded but reports no diagnostics refuses the run. The remote
 processes are those of remote workers that report the model's remote contract,
 and they must agree with the supplied files. When the model runs on several
 machine profiles with different identities, measure each one with `--gpu
-<machine profile>`, which pins the local calls to that profile. Cluster status
-is read before and after the run, and any change in the processes, identities
-or contracts refuses the result. Local calls wait for capacity, so a cold lane
-starts through ordinary demand.
+<machine profile>`, which pins the local calls to that profile. The probe first
+sends one local and one remote call that wait for capacity, so a cold lane
+starts through ordinary demand before cluster status is read. Cluster status is
+read again after the run, and any change in the processes, identities or
+contracts refuses the result, including a lane that scales up or down during
+the run.
 
 Exit status is `0` for passing evidence, `1` for a measured failure, or `2` when
 valid evidence could not be produced. Records contain input hashes, token
