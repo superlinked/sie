@@ -920,6 +920,14 @@ workers:
     # iam.gke.io/gcp-service-account).
     serviceAccount:
       annotations: {}
+    # -- Equivalence evidence for hybrid encode and score routing. Name an
+    # existing ConfigMap whose keys are the evidence files that the upstreams'
+    # equivalence.record_files name. It is mounted read-only at
+    # /etc/sie/equivalence in remote lanes only, and every record_files path
+    # must then be /etc/sie/equivalence/<key>. Remote lanes re-read the files on
+    # use, so replacing the ConfigMap's data needs no restart.
+    equivalence:
+      configMap: ""
     # -- NetworkPolicy for the remote lanes' pods, rendered whenever a remote
     # lane is enabled. Ingress: only this release's gateway pods, on the worker
     # ports; the generic workers.networkPolicy then excludes the remote lanes.

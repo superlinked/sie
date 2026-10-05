@@ -188,6 +188,13 @@ returns the original local refusal and `X-SIE-Fallback-Error`. The SDK exposes
 these fields in response request metadata. `/v1/models` reports routing and
 upstream kind.
 
+`X-SIE-Fallback-Error` is the SIE error code the remote attempt answered with,
+for example `RESOURCE_EXHAUSTED` from a capped or breaker-open generation
+upstream, or `QUEUE_FULL` and `MODEL_LOADING` from an encode or extraction
+upstream that cannot serve now. The OpenAI codes `server_overloaded` and
+`invalid_request` become `QUEUE_FULL` and `INVALID_INPUT`. Any other failure is
+`INFERENCE_ERROR` for a server error and `INVALID_INPUT` for a client error.
+
 Each upstream has a required rate cap and a circuit breaker. The limits are
 shared by that worker process's adapters, not across replicas: adding remote
 worker replicas increases the aggregate permitted traffic. Under
@@ -500,16 +507,28 @@ caller receives the local loading refusal. A loaded local model serves locally.
 
 The remote attempt pins a fresh worker with the exact current configuration
 hash and positive versioned execution capability. It cannot retry on the ordinary
-pool subject. Remote failure restores the original local refusal body and
-`Retry-After`, with `X-SIE-Fallback-Reason` and a bounded
+pool subject. Its work item names the trigger in `fallback_reason`, so the remote
+worker answers it at once whenever it cannot serve it now, rather than
+redelivering it until the gateway's request timeout. Remote failure restores the
+original local refusal body and `Retry-After`, with `X-SIE-Fallback-Reason` and
 `X-SIE-Fallback-Error`; success discloses the remote profile's upstream. The
 customer model name remains the requested model.
 
+The gateway derives `X-SIE-Fallback-Error` from the remote worker's error code
+as a single node derives it from its remote attempt, with one difference. When
+a gateway deadline passes before the remote attempt answers anything (the
+queued-result deadline, or a generation's first-chunk or overall deadline before
+its first output), the gateway reports `QUEUE_FULL`: the remote lane never
+answered. On a single node the same generation deadlines end the remote attempt
+itself, with `first_chunk_timeout` or `overall_timeout`, and are reported as
+`INFERENCE_ERROR`.
+
 A streaming bridge waits for its first valid event before returning HTTP success.
 A worker error, cancelled/failed terminal, transport failure or durability failure
-before output restores the local refusal. Once an event is ready, subsequent
-errors remain in the stream, with cleanup and no replay of inference. Explicit
-profiles keep ordinary streaming behavior.
+before output restores the local refusal, and `X-SIE-Fallback-Error` carries the
+worker's error code. Once an event is ready, subsequent errors remain in the
+stream, with cleanup and no replay of inference. Explicit profiles keep ordinary
+streaming behavior.
 
 Extraction-only models can use the same cold/loading bridge on native extraction
 and OpenAI audio transcription. JSON and MessagePack extraction are validated

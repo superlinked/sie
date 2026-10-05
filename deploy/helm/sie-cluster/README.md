@@ -794,6 +794,16 @@ Below, `<fullname>` is the chart's full name: `<release>-sie-cluster`, or
   into values. The chart checks these fields as the server does when it
   renders, and a test sends the same URLs and definitions through the chart
   and the server's own parser.
+- An upstream of kind `openai` may also declare `equivalence` (`max_age_s`, at
+  most 604800, and `record_files`): the evidence that lets a model serve
+  `encode` or `score` from both its local and its remote profile. Put the
+  evidence files in a ConfigMap you create, for example
+  `kubectl create configmap remote-equivalence --from-file=bge-m3.json`, and set
+  `workers.remote.equivalence.configMap` to its name. Remote lanes mount it
+  read-only at `/etc/sie/equivalence`, and every `record_files` path must then
+  be `/etc/sie/equivalence/<key>`. No other lane receives it. Remote lanes read
+  the files when they use them, so replacing the ConfigMap's data takes effect
+  without a restart, once the kubelet has synced the volume.
 - Only the `worker` container of a `remote` lane receives the upstreams file
   (the `<fullname>-upstreams` Secret, mounted read-only) and the credentials
   (environment variables read from the Secrets you name). The file is a

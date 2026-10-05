@@ -17,6 +17,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+import msgpack
 import msgspec
 import numpy as np
 import pytest
@@ -29,10 +30,12 @@ from sie_server.app.app_factory import AppFactory
 from sie_server.app.app_state_config import AppStateConfig
 from sie_server.config.upstreams import Upstream, install_upstreams
 from sie_server.core.registry import ModelRegistry
+from sie_server.ipc_server import IpcServer
 from sie_server.ipc_types import (
     EncodeBatchItem,
     ItemOutcome,
     ProcessEncodeBatchRequest,
+    ProcessGenerateRequest,
     ReplaceModelConfigEntry,
     ReplaceModelConfigsRequest,
 )
@@ -60,6 +63,25 @@ profiles:
         upstream: fake-sie
         upstream_model: sie-fake
 """
+GENERATION_MODEL_ID = "acme/remote-generate"
+REMOTE_GENERATION_MODEL = f"""\
+sie_id: {GENERATION_MODEL_ID}
+remote_backed: true
+inputs:
+  text: true
+tasks:
+  generate:
+    context_length: 4096
+    max_output_tokens: 64
+profiles:
+  default:
+    adapter_path: sie_server.adapters.remote.sie:SieUpstreamAdapter
+    max_batch_tokens: 8192
+    adapter_options:
+      loadtime:
+        upstream: fake-sie
+        upstream_model: sie-fake
+"""
 
 
 @contextmanager
@@ -69,7 +91,7 @@ def sie_upstream() -> Iterator[tuple[str, list[str | None]]]:
 
     @app.middleware("http")
     async def record_authorization(request: Request, call_next: Any) -> Any:
-        if request.url.path.startswith("/v1/encode/"):
+        if request.url.path.startswith(("/v1/encode/", "/v1/generate/")):
             seen_authorization.append(request.headers.get("authorization"))
         return await call_next(request)
 
@@ -164,6 +186,94 @@ async def test_a_remote_lane_worker_serves_a_remote_backed_model_through_the_que
     (outcome,) = batch.outcomes
     assert outcome.disposition == "publish_and_ack", outcome.error
     np.testing.assert_allclose(dense_values(outcome), expected, rtol=1e-6)
+    assert seen_authorization == [f"Bearer {CANARY}"]
+
+
+class _Frames:
+    """The IPC stream the worker sidecar reads, captured in memory."""
+
+    def __init__(self) -> None:
+        self.buf = bytearray()
+
+    def write(self, payload: bytes) -> None:
+        self.buf.extend(payload)
+
+    async def drain(self) -> None:
+        return None
+
+    def bodies(self) -> list[dict[str, Any]]:
+        frames: list[dict[str, Any]] = []
+        data, offset = bytes(self.buf), 0
+        while offset < len(data):
+            length = int.from_bytes(data[offset : offset + 4], "big")
+            frames.append(msgpack.unpackb(data[offset + 4 : offset + 4 + length], raw=False)["body"])
+            offset += 4 + length
+        return frames
+
+
+async def test_a_remote_lane_worker_generates_a_native_prompt_through_the_queue_path(tmp_path: Path) -> None:
+    with sie_upstream() as (upstream_url, seen_authorization):
+        with SIEClient(upstream_url) as upstream:
+            expected = upstream.generate("sie-fake", "remote lane", max_new_tokens=4)
+        seen_authorization.clear()
+        install_upstreams(
+            {
+                "fake-sie": Upstream.model_validate(
+                    {
+                        "kind": "sie",
+                        "base_url": upstream_url,
+                        "api_key_secret": KEY_ENV,
+                        "rate_cap": {"requests_per_minute": 600, "max_concurrency": 8},
+                    }
+                )
+            }
+        )
+        executor = QueueExecutor(ModelRegistry(models_dir=None))
+        applied = await executor.replace_model_configs(
+            ReplaceModelConfigsRequest(
+                bundle_id="remote",
+                epoch=1,
+                bundle_config_hash="",
+                models=[ReplaceModelConfigEntry(model_id=GENERATION_MODEL_ID, model_config=REMOTE_GENERATION_MODEL)],
+            )
+        )
+        await wait_until_ready(executor, GENERATION_MODEL_ID)
+        server = IpcServer(tmp_path / "ipc.sock", executor, worker_id="remote-1", bundle_id="remote")
+        frames = _Frames()
+        work_item = {
+            "work_item_id": "req-1.0",
+            "request_id": "req-1",
+            "item_index": 0,
+            "total_items": 1,
+            "operation": "generate",
+            "model_id": GENERATION_MODEL_ID,
+            "profile_id": "default",
+            "reply_subject": "_INBOX.gateway.req-1",
+            "bundle_config_hash": applied.bundle_config_hash,
+            "timestamp": time.time(),
+            "generate": {"prompt": "remote lane", "max_new_tokens": 4},
+        }
+        await server._handle_process_generate(
+            ProcessGenerateRequest(model_id=GENERATION_MODEL_ID, work_item_msgpack=msgpack.packb(work_item)),
+            request_id="ipc-1",
+            writer=frames,  # type: ignore[arg-type]
+            require_authority=True,
+        )
+
+    events = frames.bodies()
+    kinds = [event["kind"] for event in events]
+    chunks = [msgpack.unpackb(event["payload"], raw=False) for event in events if event["kind"] == "publish"]
+    assert applied.applied_models == [GENERATION_MODEL_ID]
+    assert "nak" not in kinds
+    assert kinds[-2:] == ["ack", "done"], kinds
+    assert chunks, kinds
+    assert all(chunk["request_id"] == "req-1" for chunk in chunks)
+    assert expected["text"]
+    assert "".join(chunk.get("text_delta", "") for chunk in chunks) == expected["text"]
+    terminal = chunks[-1]
+    assert terminal["done"], terminal
+    assert terminal.get("error") is None, terminal
+    assert terminal["usage"]["completion_tokens"] > 0
     assert seen_authorization == [f"Bearer {CANARY}"]
 
 

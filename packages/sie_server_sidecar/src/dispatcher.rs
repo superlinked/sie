@@ -6653,6 +6653,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_gateway_bridge_whose_upstream_refuses_is_answered_with_the_upstreams_wait() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../wire-fixtures/serving_disclosure.json"))
+                .unwrap();
+        let dispatcher = dispatcher_with_backend(naking_backend(
+            Some(QUEUE_FULL_ERROR_CODE),
+            Some(7),
+            Some(base_nak_delay_ms()),
+        ));
+        for trigger in fixture["response_headers"]["fallback_reason"]["values"]
+            .as_array()
+            .unwrap()
+        {
+            let mut wire: rmpv::Value = rmp_serde::from_slice(
+                &rmp_serde::to_vec_named(&wi("bridge", 0, "acme/model:remote", "encode")).unwrap(),
+            )
+            .unwrap();
+            let rmpv::Value::Map(fields) = &mut wire else {
+                unreachable!("a work item is a msgpack map")
+            };
+            fields.push(("fallback_reason".into(), trigger.as_str().unwrap().into()));
+            let work: WorkItem =
+                rmp_serde::from_slice(&rmp_serde::to_vec_named(&wire).unwrap()).unwrap();
+
+            let events = settle_one(&dispatcher, work).await;
+
+            let [crate::delivery::LocalDeliveryEvent::Result { result, .. }] = events.as_slice()
+            else {
+                panic!("{trigger}: a bridged item must settle with a result: {events:?}");
+            };
+            assert!(!result.success);
+            assert_eq!(result.error_code.as_deref(), Some(QUEUE_FULL_ERROR_CODE));
+            assert_eq!(result.retry_after_s, Some(7), "{trigger}");
+        }
+    }
+
+    #[tokio::test]
     async fn a_load_only_work_item_settles_once_its_model_is_ready_without_running() {
         let backend = naking_backend(None, None, None);
         let dispatcher = dispatcher_with_backend(backend.clone());
