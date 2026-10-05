@@ -526,10 +526,13 @@ for bounded-label and replica semantics.
 
 ## Experimental cluster threshold routing
 
-Threshold routing is available only in a cluster, because the gateways count
-the demand it acts on. A single node refuses a `threshold` routing block at
-configuration load, even when `SIE_THRESHOLD_ROUTING_ENABLED` is set; use
-`fallback` on a single node.
+Threshold routing is available only in a cluster: the gateways count the
+demand and make the decision. A server admits a `threshold` block only as a
+queue worker behind a threshold-enabled gateway, which requires
+`SIE_THRESHOLD_ROUTING_ENABLED=true` and the `SIE_IPC_SOCKET_PATH` that the
+chart sets for queue workers. A single node runs without that socket path, so
+it refuses the block at configuration load, and its own request path never
+applies `threshold`. Use `fallback` on a single node.
 
 Set `gateway.thresholdRouting.enabled: true` in the `sie-cluster` chart only
 when opting into shared demand routing for generation or extraction. It is off
