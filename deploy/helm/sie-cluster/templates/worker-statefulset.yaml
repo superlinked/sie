@@ -162,6 +162,7 @@ fast at render time.
 {{- end }}
 {{- end }}
 {{- $deliverUpstreams := and $remoteLane (dig "remote" "serving" true $root.Values.workers) }}
+{{- $evidenceConfigMap := include "sie-cluster.upstreams.evidenceConfigMap" $root }}
 {{- $poolSidecar := default dict $pool.sidecar }}
 {{- $emulatedChildCount := int (dig "emulatedChildCount" 0 $poolSidecar) }}
 {{- if and (gt $emulatedChildCount 0) (gt $gpuCount 0) }}
@@ -533,6 +534,11 @@ spec:
             - name: upstreams
               mountPath: /etc/sie/upstreams
               readOnly: true
+            {{- if $evidenceConfigMap }}
+            - name: equivalence
+              mountPath: /etc/sie/equivalence
+              readOnly: true
+            {{- end }}
             {{- end }}
         {{- end }}
         {{- if $root.Values.workers.common.workerSidecar.enabled }}
@@ -833,6 +839,13 @@ spec:
         - name: upstreams
           secret:
             secretName: {{ include "sie-cluster.upstreams.secretName" $root }}
+        {{- if $evidenceConfigMap }}
+        # Equivalence evidence the upstreams' record_files name. Remote lanes
+        # re-read it on use, so a replaced ConfigMap needs no restart.
+        - name: equivalence
+          configMap:
+            name: {{ $evidenceConfigMap | quote }}
+        {{- end }}
         {{- end }}
 {{- end }}
 {{- end }}

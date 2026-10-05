@@ -24,6 +24,7 @@ use crate::state::demand_tracker::{DemandTracker, PhysicalLane, PhysicalLaneCata
 use crate::state::model_registry::ModelRegistry;
 use crate::state::pool_manager::PoolManager;
 use crate::state::worker_registry::WorkerRegistry;
+use crate::types::model::FallbackTrigger;
 use crate::types::WorkerStatusMessage;
 
 /// The local lane's `(pool, machine_profile, bundle)`.
@@ -167,8 +168,11 @@ pub(crate) struct RecordingDispatcher {
     remote_silence: Mutex<Option<bool>>,
     unanswered: Mutex<Vec<Box<dyn Any + Send>>>,
     first_chunk_republish: AtomicBool,
+    bridged_refusal: Mutex<Option<(&'static str, u32)>>,
+    redelivered: Mutex<Vec<oneshot::Sender<Vec<WorkResult>>>>,
     dispatched: Mutex<Vec<Dispatched>>,
     execution_authority: Mutex<Vec<bool>>,
+    fallback_reasons: Mutex<Vec<Option<FallbackTrigger>>>,
 }
 
 impl RecordingDispatcher {
@@ -214,6 +218,19 @@ impl RecordingDispatcher {
 
     pub(crate) fn execution_authority(&self) -> Vec<bool> {
         self.execution_authority.lock().unwrap().clone()
+    }
+
+    /// The fallback reason each published work request carried, in order.
+    pub(crate) fn fallback_reasons(&self) -> Vec<Option<FallbackTrigger>> {
+        self.fallback_reasons.lock().unwrap().clone()
+    }
+
+    /// Answer remote-lane work the way a remote worker whose backend asks for
+    /// redelivery does: a remote attempt that carries a fallback reason gets a
+    /// retryable `code` result with the upstream's hint at once, while other
+    /// work is redelivered, so its result never arrives.
+    pub(crate) fn answer_only_bridged_remote_work(&self, code: &'static str, retry_after_s: u32) {
+        *self.bridged_refusal.lock().unwrap() = Some((code, retry_after_s));
     }
 
     /// Behave as a transport that cannot keep the execution-authority fence.
@@ -407,10 +424,29 @@ impl WorkDispatcher for RecordingDispatcher {
     > {
         self.record_authority(&target, params);
         self.record(Dispatched::new(endpoint, &target));
+        self.fallback_reasons
+            .lock()
+            .unwrap()
+            .push(params.fallback_reason);
         if self.work_refused.load(Ordering::SeqCst) {
             return Err(DispatchError::Other("private upstream failure".into()));
         }
         let request_id = "request-1".to_string();
+        let bridged_refusal = *self.bridged_refusal.lock().unwrap();
+        if let Some((code, retry_after_s)) =
+            bridged_refusal.filter(|_| target.bundle() == REMOTE_LANE.2)
+        {
+            let (tx, rx) = oneshot::channel();
+            if params.fallback_reason.is_some() {
+                let refused = (0..items.len().max(1) as u32)
+                    .map(|index| refused_result(&request_id, index, (code, Some(retry_after_s))))
+                    .collect();
+                tx.send(refused).unwrap();
+            } else {
+                self.redelivered.lock().unwrap().push(tx);
+            }
+            return Ok((request_id, rx, DispatchDurability::accepted()));
+        }
         let answer = self.remote_answer(&target);
         if matches!(answer, RemoteAnswer::Withheld) {
             let (tx, rx) = oneshot::channel::<Vec<WorkResult>>();
@@ -475,6 +511,10 @@ impl WorkDispatcher for RecordingDispatcher {
         }
         self.record_authority(&target, params);
         self.record(Dispatched::new("generate", &target));
+        self.fallback_reasons
+            .lock()
+            .unwrap()
+            .push(params.fallback_reason);
         let (rx, _tap) = match self.remote_answer(&target) {
             RemoteAnswer::Served => terminal_chunk_collector(display_model, bundle_config_hash),
             RemoteAnswer::Refused(refusal) => stream_chunk_collector(
@@ -517,6 +557,10 @@ impl WorkDispatcher for RecordingDispatcher {
     > {
         self.record_authority(&target, params);
         self.record(Dispatched::new("generate", &target));
+        self.fallback_reasons
+            .lock()
+            .unwrap()
+            .push(params.fallback_reason);
         if self.generate_refused.load(Ordering::SeqCst) {
             return Err("private upstream failure".into());
         }
@@ -619,6 +663,16 @@ impl TestGateway {
     }
 
     pub(crate) async fn with_threshold_routing(models: &[&str], threshold: bool) -> Self {
+        Self::build(models, threshold, None).await
+    }
+
+    /// A gateway that also has the remote lane in the static queue pool
+    /// `pool`, so a test owns that pool's queue stream.
+    pub(crate) async fn with_remote_queue_pool(models: &[&str], pool: &str) -> Self {
+        Self::build(models, false, Some(pool)).await
+    }
+
+    async fn build(models: &[&str], threshold: bool, remote_pool: Option<&str>) -> Self {
         let bundles_dir = tempfile::TempDir::new().unwrap();
         let models_dir = tempfile::TempDir::new().unwrap();
         std::fs::write(bundles_dir.path().join("default.yaml"), DEFAULT_BUNDLE).unwrap();
@@ -627,13 +681,28 @@ impl TestGateway {
             std::fs::write(models_dir.path().join(format!("model-{index}.yaml")), model).unwrap();
         }
         let profiles = vec![LOCAL_LANE.1.to_string(), REMOTE_LANE.1.to_string()];
+        let mut lane_tuples: Vec<(&str, &str, &str)> = vec![LOCAL_LANE, REMOTE_LANE];
+        if let Some(pool) = remote_pool {
+            lane_tuples.push((pool, REMOTE_LANE.1, REMOTE_LANE.2));
+        }
         let lanes =
-            PhysicalLaneCatalog::try_new([LOCAL_LANE, REMOTE_LANE].into_iter().map(
-                |(pool, profile, bundle)| PhysicalLane::try_new(pool, profile, bundle).unwrap(),
-            ))
+            PhysicalLaneCatalog::try_new(lane_tuples.into_iter().map(|(pool, profile, bundle)| {
+                PhysicalLane::try_new(pool, profile, bundle).unwrap()
+            }))
             .unwrap();
         let pool_manager = Arc::new(PoolManager::new(profiles.clone()));
         pool_manager.create_default_pool().await;
+        if let Some(pool) = remote_pool {
+            let gpus = serde_json::Map::from_iter([(REMOTE_LANE.1.to_string(), json!(1))]);
+            let spec = serde_json::from_value(json!({
+                "name": pool,
+                "queue_pool": pool,
+                "bundle": REMOTE_LANE.2,
+                "gpus": gpus,
+            }))
+            .unwrap();
+            pool_manager.sync_static_pools(&[spec]).await.unwrap();
+        }
         let dispatcher = Arc::new(RecordingDispatcher::default());
         let state = AppState {
             registry: Arc::new(WorkerRegistry::new(Duration::from_secs(30), None)),

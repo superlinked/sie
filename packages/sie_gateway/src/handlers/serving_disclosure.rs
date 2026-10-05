@@ -259,6 +259,17 @@ impl FallbackAttempt {
             .is_some()
     }
 
+    /// The trigger of the local refusal this request's remote attempt stands
+    /// in for, while that refusal is held.
+    pub(crate) fn trigger(&self) -> Option<FallbackTrigger> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .original
+            .as_ref()
+            .map(|original| original.trigger)
+    }
+
     /// Called after normal disclosure stamping and before HTTP success/output.
     /// A failed bridge preserves the original body and Retry-After verbatim.
     pub(crate) fn finish(&self, mut response: Response) -> Response {
@@ -1987,6 +1998,169 @@ mod tests {
         assert!(gateway.dispatcher.dispatched().is_empty());
     }
 
+    #[tokio::test]
+    async fn every_bridged_work_item_carries_the_trigger_of_the_refusal_it_stands_in_for() {
+        for trigger in [
+            FallbackTrigger::Provisioning,
+            FallbackTrigger::ModelLoading,
+            FallbackTrigger::Saturated,
+            FallbackTrigger::Unhealthy,
+        ] {
+            let routing = format!(
+                "\nrouting:\n  policy: fallback\n  fallback_profile: remote\n  triggers: [{}]\n",
+                trigger.as_str()
+            );
+            let generate = format!("{HYBRID_GENERATE_MODEL}{routing}");
+            let extract = format!("{HYBRID_EXTRACT_MODEL}{routing}");
+            let gateway = TestGateway::new(&[&generate, &extract]).await;
+            gateway
+                .add_verified_worker("remote-1", REMOTE_LANE, &[])
+                .await;
+            let loaded = ["acme/chat", "acme/extract"];
+            match trigger {
+                FallbackTrigger::Provisioning => {}
+                FallbackTrigger::ModelLoading => {
+                    gateway
+                        .add_verified_worker("local-1", LOCAL_LANE, &[])
+                        .await;
+                }
+                FallbackTrigger::Saturated => {
+                    gateway
+                        .add_saturated_worker("local-1", LOCAL_LANE, &loaded)
+                        .await;
+                }
+                FallbackTrigger::Unhealthy => {
+                    gateway
+                        .add_verified_worker("local-1", LOCAL_LANE, &loaded)
+                        .await;
+                    gateway
+                        .state
+                        .registry
+                        .mark_unhealthy("http://local-1:8080")
+                        .await;
+                }
+            }
+            let mut responses = Vec::new();
+            for surface in ["native", "chat", "completions", "responses"] {
+                responses.push(buffered_surface(&gateway, surface, json!({})).await);
+            }
+            for (uri, body) in [
+                (
+                    "/v1/generate/acme/chat",
+                    json!({"prompt":"hello", "max_new_tokens":4, "stream":true}),
+                ),
+                (
+                    "/v1/chat/completions",
+                    json!({"model":"acme/chat", "messages":[{"role":"user", "content":"hello"}], "stream":true}),
+                ),
+                (
+                    "/v1/completions",
+                    json!({"model":"acme/chat", "prompt":"hello", "max_tokens":4, "stream":true}),
+                ),
+            ] {
+                let state = State(Arc::clone(&gateway.state));
+                let request = json_request(uri, body);
+                responses.push(match uri {
+                    "/v1/generate/acme/chat" => proxy_request(state, request, "generate").await,
+                    "/v1/chat/completions" => proxy_chat(state, request).await,
+                    _ => proxy_completions(state, request).await,
+                });
+            }
+            responses.push(
+                proxy_request(
+                    State(Arc::clone(&gateway.state)),
+                    extraction_request(false, json!({})),
+                    "extract",
+                )
+                .await,
+            );
+            let bridged = responses.len();
+            for response in responses {
+                assert_eq!(response.status(), StatusCode::OK, "{trigger:?}");
+                assert_eq!(
+                    response.headers()["x-sie-fallback-reason"],
+                    trigger.as_str()
+                );
+                let _ = axum::body::to_bytes(response.into_body(), 16384)
+                    .await
+                    .unwrap();
+            }
+            assert!(gateway
+                .dispatcher
+                .dispatched()
+                .iter()
+                .filter(|work| work.endpoint != "load")
+                .all(|work| work.bundle == REMOTE_LANE.2));
+            assert_eq!(
+                gateway.dispatcher.fallback_reasons(),
+                vec![Some(trigger); bridged],
+                "{trigger:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_remote_attempt_refused_by_its_upstream_restores_the_local_refusal_at_once() {
+        let config = format!(
+            "{HYBRID_EXTRACT_MODEL}\nrouting:\n  policy: fallback\n  fallback_profile: remote\n"
+        );
+        for (refusal, remote_code, retry_after_s) in [
+            ("capped", "QUEUE_FULL", 1),
+            ("breaker_open", "QUEUE_FULL", 60),
+            ("not_ready", "QUEUE_FULL", 5),
+            ("not_ready", "MODEL_LOADING", 5),
+        ] {
+            for local in ["cold", "loading"] {
+                let gateway = TestGateway::new(&[&config]).await;
+                gateway
+                    .add_verified_worker("remote-1", REMOTE_LANE, &[])
+                    .await;
+                if local == "loading" {
+                    gateway
+                        .add_verified_worker("local-1", LOCAL_LANE, &[])
+                        .await;
+                }
+                gateway
+                    .dispatcher
+                    .answer_only_bridged_remote_work(remote_code, retry_after_s);
+                let response = tokio::time::timeout(
+                    Duration::from_secs(5),
+                    proxy_request(
+                        State(Arc::clone(&gateway.state)),
+                        extraction_request(false, json!({})),
+                        "extract",
+                    ),
+                )
+                .await
+                .unwrap_or_else(|_| {
+                    panic!("{refusal}/{remote_code}/{local}: the local refusal waited")
+                });
+                let (trigger, retry_after, code) = if local == "cold" {
+                    ("provisioning", "60", "PROVISIONING")
+                } else {
+                    ("model_loading", "5", "MODEL_LOADING")
+                };
+                assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+                assert_eq!(response.headers()["retry-after"], retry_after);
+                assert_eq!(response.headers()["x-sie-fallback-reason"], trigger);
+                assert_eq!(response.headers()["x-sie-fallback-error"], remote_code);
+                assert_eq!(stamped(&response), (Some("local"), None));
+                let body: serde_json::Value = serde_json::from_slice(
+                    &axum::body::to_bytes(response.into_body(), 8192)
+                        .await
+                        .unwrap(),
+                )
+                .unwrap();
+                let detail = body.get("detail").unwrap_or(&body["error"]);
+                assert_eq!(detail["code"], code, "{refusal}/{local}");
+                assert_eq!(
+                    gateway.dispatcher.dispatched().last().unwrap(),
+                    &dispatched("extract", REMOTE_LANE, "acme/extract:remote")
+                );
+            }
+        }
+    }
+
     fn stamped(response: &Response) -> (Option<&str>, Option<&str>) {
         let header = |name: &HeaderName| {
             response
@@ -2085,6 +2259,175 @@ mod tests {
         assert_eq!(stamped(&invalid), (None, None));
         assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
         assert_eq!(stamped(&unknown), (None, None));
+    }
+
+    /// JetStream-gated: the gateway knows a remote-only model's upstream by name
+    /// only. It publishes the request without that name and opens no upstream
+    /// connection; a test consumer stands in for the remote worker.
+    #[tokio::test]
+    async fn the_gateway_publishes_a_remote_only_request_and_never_calls_its_upstream() {
+        use futures_util::StreamExt;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        use crate::queue::dispatch::WorkResult;
+        use crate::queue::publisher::{WorkPublisher, WorkStreamConfig};
+
+        let Ok(url) = std::env::var("NATS_URL") else {
+            assert_ne!(
+                std::env::var("SIE_RUN_NATS_PUBLISHER_TEST").as_deref(),
+                Ok("1"),
+                "mandatory publisher tests require NATS_URL"
+            );
+            return;
+        };
+        let pool = format!("egress{}", uuid::Uuid::now_v7().simple());
+        let stream_name = format!("WORK_POOL_{pool}");
+        let client = async_nats::connect(url)
+            .await
+            .expect("test NATS connection");
+        let jetstream = async_nats::jetstream::new(client.clone());
+        let stream = jetstream
+            .create_stream(async_nats::jetstream::stream::Config {
+                name: stream_name.clone(),
+                subjects: vec![format!("sie.work.{pool}.*.*.*")],
+                retention: async_nats::jetstream::stream::RetentionPolicy::WorkQueue,
+                storage: async_nats::jetstream::stream::StorageType::Memory,
+                max_age: Duration::from_secs(300),
+                discard: async_nats::jetstream::stream::DiscardPolicy::New,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        stream
+            .create_consumer(async_nats::jetstream::consumer::pull::Config {
+                durable_name: Some("remote-1".into()),
+                filter_subject: format!("sie.work.{pool}.cpu.remote.*"),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream.local_addr().unwrap();
+        let connections = Arc::new(AtomicUsize::new(0));
+        let upstream_task = tokio::spawn({
+            let connections = Arc::clone(&connections);
+            async move {
+                while let Ok((mut socket, _)) = upstream.accept().await {
+                    connections.fetch_add(1, Ordering::SeqCst);
+                    let _ = socket.read(&mut [0u8; 1024]).await;
+                    let _ = socket
+                        .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n")
+                        .await;
+                }
+            }
+        });
+
+        let model = format!("{REMOTE_ENCODE_MODEL}pool: {pool}\n");
+        let mut gateway = TestGateway::with_remote_queue_pool(&[&model], &pool).await;
+        gateway
+            .add_worker(
+                "remote-1",
+                (pool.as_str(), REMOTE_LANE.1, REMOTE_LANE.2),
+                &[],
+            )
+            .await;
+        let publisher = Arc::new(WorkPublisher::new(
+            jetstream.clone(),
+            "egress-gateway".into(),
+            Arc::new(crate::queue::payload_store::DisabledPayloadStore),
+            Duration::from_secs(10),
+            1024,
+            WorkStreamConfig {
+                max_age: Duration::from_secs(300),
+                storage: async_nats::jetstream::stream::StorageType::Memory,
+                num_replicas: 1,
+            },
+        ));
+        publisher.start_inbox_subscription(&client).await.unwrap();
+        Arc::get_mut(&mut gateway.state).unwrap().work_publisher = Some(publisher);
+
+        let mut work = client
+            .subscribe(format!("sie.work.{pool}.cpu.remote.>"))
+            .await
+            .unwrap();
+        client.flush().await.unwrap();
+        let consumer = tokio::spawn({
+            let client = client.clone();
+            async move {
+                let message = work.next().await.expect("a published work item");
+                let item: rmpv::Value = rmp_serde::from_slice(&message.payload).unwrap();
+                let field = |name: &str| {
+                    item.as_map()
+                        .and_then(|fields| {
+                            fields.iter().find(|(key, _)| key.as_str() == Some(name))
+                        })
+                        .and_then(|(_, value)| value.as_str())
+                        .unwrap()
+                        .to_string()
+                };
+                let mut call = tokio::net::TcpStream::connect(upstream_addr).await.unwrap();
+                call.write_all(b"POST /v1/encode/acme/remote HTTP/1.1\r\n\r\n")
+                    .await
+                    .unwrap();
+                let _ = call.read(&mut [0u8; 64]).await;
+                let mut result: WorkResult = serde_json::from_value(json!({
+                    "work_item_id": field("work_item_id"),
+                    "request_id": field("request_id"),
+                    "item_index": 0,
+                    "success": true,
+                }))
+                .unwrap();
+                result.result_msgpack =
+                    rmp_serde::to_vec_named(&json!({"dense": [0.5, 0.25]})).unwrap();
+                client
+                    .publish(
+                        field("reply_subject"),
+                        rmp_serde::to_vec_named(&result).unwrap().into(),
+                    )
+                    .await
+                    .unwrap();
+                client.flush().await.unwrap();
+                (field("model_id"), message.payload)
+            }
+        });
+
+        let response = tokio::time::timeout(
+            Duration::from_secs(10),
+            proxy_request(
+                State(Arc::clone(&gateway.state)),
+                json_request(
+                    "/v1/encode/acme/remote",
+                    json!({"items": [{"text": "hello"}]}),
+                ),
+                "encode",
+            ),
+        )
+        .await;
+        if !matches!(&response, Ok(served) if served.status().is_success()) {
+            consumer.abort();
+        }
+        let consumer = tokio::time::timeout(Duration::from_secs(10), consumer).await;
+        upstream_task.abort();
+        let _ = jetstream.delete_stream(&stream_name).await;
+
+        let response = response.expect("served through the queue");
+        assert_eq!(response.status(), StatusCode::OK);
+        let (model_id, published) = consumer
+            .expect("the test consumer finished")
+            .expect("the test consumer answered");
+        assert_eq!(stamped(&response), (Some("remote"), Some("team-sie")));
+        assert_eq!(model_id, "acme/remote");
+        assert_eq!(
+            connections.load(Ordering::SeqCst),
+            1,
+            "the test consumer's call is the only upstream connection"
+        );
+        assert!(
+            !String::from_utf8_lossy(&published).contains("team-sie"),
+            "the work item names the upstream"
+        );
     }
 
     #[tokio::test]
@@ -2360,6 +2703,7 @@ mod tests {
                 && work.model.ends_with(":remote")
                 && work.endpoint != "load"));
         assert_eq!(gateway.dispatcher.execution_authority(), vec![true; 6]);
+        assert_eq!(gateway.dispatcher.fallback_reasons(), vec![None; 6]);
 
         for surface in ["native", "chat", "completions"] {
             let state = State(Arc::clone(&gateway.state));
@@ -2378,6 +2722,7 @@ mod tests {
         }
         assert!(gateway.state.demand_tracker.active_lanes().is_empty());
         assert_eq!(gateway.dispatcher.execution_authority(), vec![true; 9]);
+        assert_eq!(gateway.dispatcher.fallback_reasons(), vec![None; 9]);
 
         // Demand from two gateways reaches one decision, rather than dividing
         // the configured rate independently at each gateway.
@@ -2414,6 +2759,10 @@ mod tests {
                 dispatched("generate", REMOTE_LANE, "acme/chat:remote"),
             ]
         );
+        assert_eq!(
+            gateway.dispatcher.fallback_reasons().last(),
+            Some(&Some(FallbackTrigger::ModelLoading))
+        );
         gateway
             .add_verified_worker("local-1", LOCAL_LANE, &["acme/chat"])
             .await;
@@ -2424,6 +2773,7 @@ mod tests {
             gateway.dispatcher.dispatched().last().unwrap().model,
             "acme/chat"
         );
+        assert_eq!(gateway.dispatcher.fallback_reasons().last(), Some(&None));
     }
     #[tokio::test]
     async fn threshold_authority_preserves_selectors_validation_and_configuration_fences() {
