@@ -30,7 +30,7 @@ const REMOTE_SERVING_MAX_IDLE: Duration = Duration::from_secs(300);
 pub const REMOTE_FALLBACK_COUNTER_LIMIT: usize = (REMOTE_FALLBACK_MODEL_LIMIT + 1) * 7 * 4 * 2;
 pub const REMOTE_NUMERICAL_ADMISSIONS_METRIC_NAME: &str = "sie.gateway.remote.numerical_admissions";
 pub const REMOTE_NUMERICAL_ADMISSION_COUNTER_LIMIT: usize =
-    (REMOTE_FALLBACK_MODEL_LIMIT + 1) * 7 * 2 * 4;
+    (REMOTE_FALLBACK_MODEL_LIMIT + 1) * 7 * 2 * 5;
 pub const PENDING_DEMAND_METRIC_NAME: &str = "sie.gateway.pending_demand";
 pub const LANE_QUEUE_DEPTH_METRIC_NAME: &str = "sie.gateway.lane.queue.depth";
 pub const LANE_QUEUE_SNAPSHOT_TIMESTAMP_METRIC_NAME: &str =
@@ -2617,6 +2617,7 @@ mod tests {
             Some(NumericalRefusal::NoAdmission),
             Some(NumericalRefusal::LocalUnobserved),
             Some(NumericalRefusal::UncoveredIdentity),
+            Some(NumericalRefusal::UnmeasuredRequest),
         ];
         for model in 0..=REMOTE_FALLBACK_MODEL_LIMIT {
             for operation in [
