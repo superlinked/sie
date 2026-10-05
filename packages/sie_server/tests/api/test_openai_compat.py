@@ -132,6 +132,8 @@ class TestOpenAIEmbeddings:
             ([3], 1, "character_estimate"),
             ([3, 7, 4], 1, "character_estimate"),
             ([-1, -2], 1, "character_estimate"),
+            ([-1, 3], 1, "character_estimate"),
+            ([-3, 3], 1, "character_estimate"),
             ([True, 2], 1, "character_estimate"),
         ],
     )

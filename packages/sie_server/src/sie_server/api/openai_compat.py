@@ -307,8 +307,9 @@ def _build_embeddings_response(
             )
         )
 
-    measured_tokens = validated_total(timing.input_token_counts, len(texts)) if timing is not None else None
-    if measured_tokens is not None and measured_tokens < 0:
+    token_counts = timing.input_token_counts if timing is not None else None
+    measured_tokens = validated_total(token_counts, len(texts))
+    if measured_tokens is not None and token_counts is not None and any(count < 0 for count in token_counts):
         measured_tokens = None
     token_count = measured_tokens if measured_tokens is not None else _estimate_tokens(texts)
 
