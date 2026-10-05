@@ -1,6 +1,7 @@
 //! Handler test fixtures: a gateway with a local lane and a remote lane, and a
 //! dispatcher that records what it publishes and answers every request.
 
+use std::any::Any;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -150,7 +151,8 @@ impl Dispatched {
     }
 }
 
-/// A dispatcher that records every publish and answers it at once.
+/// A dispatcher that records every publish and answers it at once, unless a
+/// test withholds remote answers.
 #[derive(Default)]
 pub(crate) struct RecordingDispatcher {
     without_execution_authority: AtomicBool,
@@ -163,6 +165,9 @@ pub(crate) struct RecordingDispatcher {
     stream_mid_error: AtomicBool,
     stream_terminal_failure: Mutex<Option<&'static str>>,
     remote_refusal: Mutex<Option<(&'static str, Option<u32>)>>,
+    remote_silence: Mutex<Option<bool>>,
+    unanswered: Mutex<Vec<Box<dyn Any + Send>>>,
+    first_chunk_republish: AtomicBool,
     bridged_refusal: Mutex<Option<(&'static str, u32)>>,
     redelivered: Mutex<Vec<oneshot::Sender<Vec<WorkResult>>>>,
     dispatched: Mutex<Vec<Dispatched>>,
@@ -175,6 +180,36 @@ impl RecordingDispatcher {
     /// serve now: a published `code` error with the upstream's wait, if any.
     pub(crate) fn refuse_remote_work(&self, code: &'static str, retry_after_s: Option<u32>) {
         *self.remote_refusal.lock().unwrap() = Some((code, retry_after_s));
+    }
+
+    /// Leave remote-lane work unanswered. With `after_output`, a generation
+    /// reports that its first chunk has arrived.
+    pub(crate) fn withhold_remote_answers(&self, after_output: bool) {
+        *self.remote_silence.lock().unwrap() = Some(after_output);
+    }
+
+    /// Behave as a transport that supports republishing generation work at
+    /// its first-chunk deadline, so a generation that is not republished ends
+    /// at that deadline.
+    pub(crate) fn enable_first_chunk_deadline(&self) {
+        self.first_chunk_republish.store(true, Ordering::SeqCst);
+    }
+
+    fn remote_answer(&self, target: &PublishTarget) -> RemoteAnswer {
+        if target.bundle() != REMOTE_LANE.2 {
+            return RemoteAnswer::Served;
+        }
+        if let Some(refusal) = *self.remote_refusal.lock().unwrap() {
+            return RemoteAnswer::Refused(refusal);
+        }
+        if self.remote_silence.lock().unwrap().is_some() {
+            return RemoteAnswer::Withheld;
+        }
+        RemoteAnswer::Served
+    }
+
+    fn keep_unanswered(&self, pending: impl Any + Send) {
+        self.unanswered.lock().unwrap().push(Box::new(pending));
     }
 
     pub(crate) fn dispatched(&self) -> Vec<Dispatched> {
@@ -249,6 +284,20 @@ impl RecordingDispatcher {
     }
 }
 
+enum RemoteAnswer {
+    Served,
+    Refused((&'static str, Option<u32>)),
+    Withheld,
+}
+
+fn refusal_error((code, retry_after_s): (&str, Option<u32>)) -> serde_json::Value {
+    json!({
+        "code": code,
+        "message": "The upstream serving the model is busy, please retry",
+        "retry_after_s": retry_after_s,
+    })
+}
+
 fn successful_result(request_id: &str, item_index: u32, payload: serde_json::Value) -> WorkResult {
     let mut result: WorkResult = serde_json::from_value(json!({
         "work_item_id": format!("{request_id}.{item_index}"),
@@ -285,19 +334,20 @@ fn terminal_chunk_collector(
     oneshot::Receiver<StreamOutcome>,
     broadcast::Receiver<ChunkEnvelope>,
 ) {
-    stream_chunk_collector(display_model, bundle_config_hash, false, false, None)
+    stream_chunk_collector(display_model, bundle_config_hash, None, false, None)
 }
 
 fn stream_chunk_collector(
     display_model: &str,
     bundle_config_hash: &str,
-    fail: bool,
+    error: Option<serde_json::Value>,
     after_output: bool,
     terminal_failure: Option<&str>,
 ) -> (
     oneshot::Receiver<StreamOutcome>,
     broadcast::Receiver<ChunkEnvelope>,
 ) {
+    let fail = error.is_some();
     let (tx, rx) = oneshot::channel();
     let mut collector = StreamCollector::new(tx, display_model.to_string(), "default".to_string());
     let tap = collector.install_chunk_tap();
@@ -313,7 +363,7 @@ fn stream_chunk_collector(
         "kind": "chunk", "request_id": "request-1", "attempt_id": "attempt-1",
         "seq": u64::from(fail && after_output), "text_delta": if fail || terminal_failure.is_some() {""} else {"ok"}, "done": true, "is_first": !(fail && after_output),
         "finish_reason": terminal_failure.unwrap_or(if fail {"error"} else {"stop"}),
-        "error": if fail {json!({"code":"inference_error","message":"private upstream failure"})} else {json!(null)},
+        "error": error.unwrap_or(serde_json::Value::Null),
         "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
         "executed_bundle_config_hash": bundle_config_hash,
     }))
@@ -397,10 +447,13 @@ impl WorkDispatcher for RecordingDispatcher {
             }
             return Ok((request_id, rx, DispatchDurability::accepted()));
         }
-        let remote_refusal = *self.remote_refusal.lock().unwrap();
-        let results = if let Some(refusal) =
-            remote_refusal.filter(|_| target.bundle() == REMOTE_LANE.2)
-        {
+        let answer = self.remote_answer(&target);
+        if matches!(answer, RemoteAnswer::Withheld) {
+            let (tx, rx) = oneshot::channel::<Vec<WorkResult>>();
+            self.keep_unanswered(tx);
+            return Ok((request_id, rx, DispatchDurability::accepted()));
+        }
+        let results = if let RemoteAnswer::Refused(refusal) = answer {
             (0..items.len().max(1) as u32)
                 .map(|index| refused_result(&request_id, index, refusal))
                 .collect()
@@ -462,7 +515,21 @@ impl WorkDispatcher for RecordingDispatcher {
             .lock()
             .unwrap()
             .push(params.fallback_reason);
-        let (rx, _tap) = terminal_chunk_collector(display_model, bundle_config_hash);
+        let (rx, _tap) = match self.remote_answer(&target) {
+            RemoteAnswer::Served => terminal_chunk_collector(display_model, bundle_config_hash),
+            RemoteAnswer::Refused(refusal) => stream_chunk_collector(
+                display_model,
+                bundle_config_hash,
+                Some(refusal_error(refusal)),
+                false,
+                None,
+            ),
+            RemoteAnswer::Withheld => {
+                let (tx, rx) = oneshot::channel();
+                self.keep_unanswered(tx);
+                (rx, broadcast::channel(1).1)
+            }
+        };
         Ok((
             "request-1".to_string(),
             rx,
@@ -497,10 +564,30 @@ impl WorkDispatcher for RecordingDispatcher {
         if self.generate_refused.load(Ordering::SeqCst) {
             return Err("private upstream failure".into());
         }
+        let error = match self.remote_answer(&target) {
+            RemoteAnswer::Refused(refusal) => Some(refusal_error(refusal)),
+            RemoteAnswer::Withheld => {
+                let (tx, rx) = oneshot::channel();
+                let mut collector =
+                    StreamCollector::new(tx, display_model.to_string(), "default".to_string());
+                let tap = collector.install_chunk_tap();
+                self.keep_unanswered(collector);
+                return Ok((
+                    "request-1".to_string(),
+                    rx,
+                    tap,
+                    DispatchDurability::accepted(),
+                ));
+            }
+            RemoteAnswer::Served => self
+                .stream_error
+                .load(Ordering::SeqCst)
+                .then(|| json!({"code":"inference_error","message":"private upstream failure"})),
+        };
         let (rx, tap) = stream_chunk_collector(
             display_model,
             bundle_config_hash,
-            self.stream_error.load(Ordering::SeqCst),
+            error,
             self.stream_mid_error.load(Ordering::SeqCst),
             *self.stream_terminal_failure.lock().unwrap(),
         );
@@ -550,8 +637,13 @@ impl WorkDispatcher for RecordingDispatcher {
         false
     }
 
+    fn supports_first_chunk_pool_republish(&self) -> bool {
+        self.first_chunk_republish.load(Ordering::SeqCst)
+    }
+
     fn stream_chunk_timing(&self, _request_id: &str) -> Option<(Option<Instant>, Option<Instant>)> {
-        None
+        let now = Instant::now();
+        (*self.remote_silence.lock().unwrap() == Some(true)).then_some((Some(now), Some(now)))
     }
 }
 
@@ -639,6 +731,14 @@ impl TestGateway {
             _bundles_dir: bundles_dir,
             _models_dir: models_dir,
         }
+    }
+
+    /// Wait at most `seconds` for queued results.
+    pub(crate) fn set_request_timeout(&mut self, seconds: f64) {
+        let state = Arc::get_mut(&mut self.state).expect("the gateway state is not shared yet");
+        Arc::get_mut(&mut state.config)
+            .expect("the gateway config is not shared yet")
+            .request_timeout = seconds;
     }
 
     /// Register a healthy worker on `lane` that reports `loaded` as loaded.

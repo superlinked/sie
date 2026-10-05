@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use axum::extract::Request;
 use axum::http::{Extensions, HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::Response;
+use futures_util::FutureExt;
 
 use crate::observability::metrics as telemetry;
 use crate::server::AppState;
@@ -117,6 +118,74 @@ pub(crate) struct DeferredFallbackFinish;
 struct LocalRefusal {
     response: Response,
     trigger: FallbackTrigger,
+}
+
+/// Marks a failed response whose gateway deadline passed before the
+/// dispatched work answered.
+#[derive(Clone)]
+pub(crate) struct UnansweredBeforeDeadline;
+
+/// The single server's error codes (`ErrorCode` in `sie_server.types.responses`).
+const SIE_ERROR_CODES: [&str; 11] = [
+    "INVALID_INPUT",
+    "MODEL_NOT_FOUND",
+    "MODEL_NOT_LOADED",
+    "LORA_LOADING",
+    "MODEL_LOADING",
+    "MODEL_LOAD_FAILED",
+    "INFERENCE_ERROR",
+    "QUEUE_FULL",
+    "INTERNAL_ERROR",
+    "RESOURCE_EXHAUSTED",
+    "INPUT_TOO_LONG",
+];
+
+/// `X-SIE-Fallback-Error` for a failed remote attempt that answered with
+/// `status` and error `code`, as the single server's `_fallback_error`
+/// (`sie_server.api.routing`) derives it.
+fn fallback_error(status: StatusCode, code: Option<&str>) -> &'static str {
+    if let Some(code) = code {
+        let upper = code.to_uppercase();
+        if let Some(known) = SIE_ERROR_CODES.iter().find(|known| **known == upper) {
+            return known;
+        }
+        match code {
+            "server_overloaded" => return "QUEUE_FULL",
+            "invalid_request" => return "INVALID_INPUT",
+            _ => {}
+        }
+    }
+    if status.as_u16() >= 500 {
+        "INFERENCE_ERROR"
+    } else {
+        "INVALID_INPUT"
+    }
+}
+
+const ATTEMPT_ERROR_BODY_LIMIT: usize = 64 * 1024;
+
+/// A failed attempt's error code: its `X-SIE-Error-Code`, or else the `code`
+/// of its JSON `error` or `detail` object. Only a body that is complete
+/// without waiting is read.
+fn attempt_error_code(response: &mut Response) -> Option<String> {
+    if let Some(code) = response
+        .headers()
+        .get("x-sie-error-code")
+        .and_then(|value| value.to_str().ok())
+    {
+        return Some(code.to_string());
+    }
+    let body = std::mem::take(response.body_mut());
+    let bytes = axum::body::to_bytes(body, ATTEMPT_ERROR_BODY_LIMIT)
+        .now_or_never()?
+        .ok()?;
+    let body: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    body.get("error")
+        .filter(|error| error.is_object())
+        .or_else(|| body.get("detail"))?
+        .get("code")?
+        .as_str()
+        .map(str::to_string)
 }
 
 impl FallbackAttempt {
@@ -236,10 +305,15 @@ impl FallbackAttempt {
                 .insert("x-sie-fallback-reason", reason);
             return response;
         }
-        let failure = if response.status().is_client_error() {
-            "INVALID_INPUT"
+        let failure = if response
+            .extensions()
+            .get::<UnansweredBeforeDeadline>()
+            .is_some()
+        {
+            "QUEUE_FULL"
         } else {
-            "INFERENCE_ERROR"
+            let status = response.status();
+            fallback_error(status, attempt_error_code(&mut response).as_deref())
         };
         let headers = original.response.headers_mut();
         headers.insert(SERVED_BY_HEADER, HeaderValue::from_static("local"));
@@ -1253,6 +1327,152 @@ mod tests {
     }
 
     #[test]
+    fn the_fallback_error_is_the_code_the_single_server_derives_from_the_failed_attempt() {
+        for code in SIE_ERROR_CODES {
+            for spelling in [code.to_string(), code.to_lowercase()] {
+                for status in [StatusCode::BAD_REQUEST, StatusCode::SERVICE_UNAVAILABLE] {
+                    assert_eq!(fallback_error(status, Some(&spelling)), code, "{spelling}");
+                }
+            }
+        }
+        for (status, code, expected) in [
+            (503, Some("server_overloaded"), "QUEUE_FULL"),
+            (400, Some("invalid_request"), "INVALID_INPUT"),
+            (503, Some("SERVER_OVERLOADED"), "INFERENCE_ERROR"),
+            (503, Some("PROVISIONING"), "INFERENCE_ERROR"),
+            (504, Some("GATEWAY_TIMEOUT"), "INFERENCE_ERROR"),
+            (504, Some("first_chunk_timeout"), "INFERENCE_ERROR"),
+            (503, Some("transport_failure"), "INFERENCE_ERROR"),
+            (413, Some("PAYLOAD_TOO_LARGE"), "INVALID_INPUT"),
+            (429, Some("rate_limit_exceeded"), "INVALID_INPUT"),
+            (400, Some("context_exceeded"), "INVALID_INPUT"),
+            (502, None, "INFERENCE_ERROR"),
+            (500, None, "INFERENCE_ERROR"),
+            (499, None, "INVALID_INPUT"),
+            (404, None, "INVALID_INPUT"),
+        ] {
+            assert_eq!(
+                fallback_error(StatusCode::from_u16(status).unwrap(), code),
+                expected,
+                "{status} {code:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_attempt_names_its_code_in_its_header_or_body_and_a_deadline_wins() {
+        let json = |status: StatusCode, body: serde_json::Value| {
+            (status, axum::Json(body)).into_response()
+        };
+        let with_header = |mut response: Response, code: &'static str| {
+            response
+                .headers_mut()
+                .insert("x-sie-error-code", HeaderValue::from_static(code));
+            response
+        };
+        let unanswered = |mut response: Response| {
+            response.extensions_mut().insert(UnansweredBeforeDeadline);
+            response
+        };
+        let pending = Body::from_stream(futures_util::stream::pending::<
+            Result<bytes::Bytes, std::io::Error>,
+        >());
+        let cases = [
+            (
+                with_header(
+                    json(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        json!({"error": {"code": "RESOURCE_EXHAUSTED"}}),
+                    ),
+                    "RESOURCE_EXHAUSTED",
+                ),
+                "RESOURCE_EXHAUSTED",
+            ),
+            (
+                with_header(
+                    json(
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        json!({"error": {"code": "invalid_request"}}),
+                    ),
+                    "PAYLOAD_TOO_LARGE",
+                ),
+                "INVALID_INPUT",
+            ),
+            (
+                json(
+                    StatusCode::BAD_REQUEST,
+                    json!({"error": {"code": "INPUT_TOO_LONG", "type": "context_length_exceeded"}}),
+                ),
+                "INPUT_TOO_LONG",
+            ),
+            (
+                json(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    json!({"detail": {"code": "MODEL_LOADING", "message": "loading"}}),
+                ),
+                "MODEL_LOADING",
+            ),
+            (
+                json(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    json!({"error": "all_items_failed", "details": [{"code": "INTERNAL_ERROR"}]}),
+                ),
+                "INFERENCE_ERROR",
+            ),
+            (
+                (StatusCode::BAD_REQUEST, "not json").into_response(),
+                "INVALID_INPUT",
+            ),
+            (
+                (StatusCode::SERVICE_UNAVAILABLE, pending).into_response(),
+                "INFERENCE_ERROR",
+            ),
+            (
+                unanswered(with_header(
+                    json(
+                        StatusCode::GATEWAY_TIMEOUT,
+                        json!({"detail": {"code": "GATEWAY_TIMEOUT"}}),
+                    ),
+                    "GATEWAY_TIMEOUT",
+                )),
+                "QUEUE_FULL",
+            ),
+            (
+                unanswered(json(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    json!({"error": {"code": "RESOURCE_EXHAUSTED"}}),
+                )),
+                "QUEUE_FULL",
+            ),
+        ];
+        for (index, (failed, expected)) in cases.into_iter().enumerate() {
+            let attempt = FallbackAttempt::default();
+            let mut original =
+                (StatusCode::SERVICE_UNAVAILABLE, "original local refusal").into_response();
+            original
+                .headers_mut()
+                .insert("retry-after", HeaderValue::from_static("60"));
+            assert!(attempt.begin(original, FallbackTrigger::ModelLoading));
+            let restored = attempt.finish(failed);
+            assert_eq!(restored.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(restored.headers()["retry-after"], "60");
+            assert_eq!(restored.headers()[SERVED_BY_HEADER], "local");
+            assert_eq!(restored.headers()["x-sie-fallback-reason"], "model_loading");
+            assert_eq!(
+                restored.headers()["x-sie-fallback-error"],
+                expected,
+                "case {index}"
+            );
+            assert_eq!(
+                axum::body::to_bytes(restored.into_body(), 1024)
+                    .await
+                    .unwrap(),
+                "original local refusal"
+            );
+        }
+    }
+
+    #[test]
     fn remote_control_rejects_ambiguous_and_unrecognized_header_bytes() {
         let mut headers = HeaderMap::new();
         assert_eq!(remote_forbidden(&headers), Ok(false));
@@ -1413,6 +1633,174 @@ mod tests {
                     assert_eq!(gateway.dispatcher.dispatched(), expected);
                 }
             }
+        }
+    }
+
+    async fn streaming_surface(
+        gateway: &TestGateway,
+        surface: &str,
+        options: serde_json::Value,
+    ) -> Response {
+        let state = State(Arc::clone(&gateway.state));
+        match surface {
+            "native" => proxy_request(state, json_request("/v1/generate/acme/chat", json!({"prompt":"hello","max_new_tokens":4,"stream":true,"options":options})), "generate").await,
+            "chat" => proxy_chat(state, json_request("/v1/chat/completions", json!({"model":"acme/chat","messages":[{"role":"user","content":"hello"}],"stream":true}))).await,
+            "completions" => proxy_completions(state, json_request("/v1/completions", json!({"model":"acme/chat","prompt":"hello","max_tokens":4,"stream":true}))).await,
+            _ => unreachable!(),
+        }
+    }
+
+    fn assert_restored_cold_refusal(response: &Response, fallback_error: &str, case: &str) {
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "{case}");
+        assert_eq!(response.headers()["retry-after"], "60", "{case}");
+        assert_eq!(stamped(response), (Some("local"), None), "{case}");
+        assert_eq!(
+            response.headers()["x-sie-fallback-reason"],
+            "provisioning",
+            "{case}"
+        );
+        assert_eq!(
+            response.headers()["x-sie-fallback-error"],
+            fallback_error,
+            "{case}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_bridge_reports_the_code_its_remote_attempt_answered_with() {
+        let generation = format!(
+            "{HYBRID_GENERATE_MODEL}\nrouting:\n  policy: fallback\n  fallback_profile: remote\n"
+        );
+        for (code, retry_after_s, expected) in [
+            ("RESOURCE_EXHAUSTED", Some(7), "RESOURCE_EXHAUSTED"),
+            ("MODEL_LOADING", Some(7), "MODEL_LOADING"),
+            ("INPUT_TOO_LONG", None, "INPUT_TOO_LONG"),
+            ("inference_error", None, "INFERENCE_ERROR"),
+        ] {
+            for (surface, stream) in [
+                ("native", false),
+                ("chat", false),
+                ("completions", false),
+                ("responses", false),
+                ("native", true),
+                ("chat", true),
+                ("completions", true),
+            ] {
+                let gateway = TestGateway::new(&[&generation]).await;
+                gateway
+                    .add_verified_worker("remote-1", REMOTE_LANE, &[])
+                    .await;
+                gateway.dispatcher.refuse_remote_work(code, retry_after_s);
+                let response = if stream {
+                    streaming_surface(&gateway, surface, json!({})).await
+                } else {
+                    buffered_surface(&gateway, surface, json!({})).await
+                };
+                assert_restored_cold_refusal(
+                    &response,
+                    expected,
+                    &format!("{code} {surface} stream={stream}"),
+                );
+                assert_eq!(
+                    gateway.dispatcher.dispatched(),
+                    vec![dispatched("generate", REMOTE_LANE, "acme/chat:remote")]
+                );
+            }
+        }
+        let extraction = format!(
+            "{HYBRID_EXTRACT_MODEL}\nrouting:\n  policy: fallback\n  fallback_profile: remote\n"
+        );
+        for (code, retry_after_s, expected) in [
+            ("QUEUE_FULL", Some(9), "QUEUE_FULL"),
+            ("MODEL_LOADING", Some(9), "MODEL_LOADING"),
+            ("RESOURCE_EXHAUSTED", Some(9), "RESOURCE_EXHAUSTED"),
+            ("INPUT_TOO_LONG", None, "INPUT_TOO_LONG"),
+            ("INVALID_INPUT", None, "INVALID_INPUT"),
+            ("INFERENCE_ERROR", None, "INFERENCE_ERROR"),
+        ] {
+            for msgpack in [false, true] {
+                let gateway = TestGateway::new(&[&extraction]).await;
+                gateway
+                    .add_verified_worker("remote-1", REMOTE_LANE, &[])
+                    .await;
+                gateway.dispatcher.refuse_remote_work(code, retry_after_s);
+                let response = proxy_request(
+                    State(Arc::clone(&gateway.state)),
+                    extraction_request(msgpack, json!({})),
+                    "extract",
+                )
+                .await;
+                assert_restored_cold_refusal(
+                    &response,
+                    expected,
+                    &format!("{code} extract msgpack={msgpack}"),
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_bridge_whose_remote_attempt_never_answers_reports_queue_full() {
+        let generation = format!(
+            "{HYBRID_GENERATE_MODEL}\nrouting:\n  policy: fallback\n  fallback_profile: remote\n"
+        );
+        let deadlines = json!({"first_chunk_timeout_s": 0.2, "overall_timeout_s": 0.4});
+        for (first_chunk_deadline, output_arrived, stream, expected) in [
+            (false, false, false, "QUEUE_FULL"),
+            (true, false, false, "QUEUE_FULL"),
+            (false, false, true, "QUEUE_FULL"),
+            (true, false, true, "QUEUE_FULL"),
+            (false, true, false, "INFERENCE_ERROR"),
+        ] {
+            let gateway = TestGateway::new(&[&generation]).await;
+            gateway
+                .add_verified_worker("remote-1", REMOTE_LANE, &[])
+                .await;
+            gateway.dispatcher.withhold_remote_answers(output_arrived);
+            if first_chunk_deadline {
+                gateway.dispatcher.enable_first_chunk_deadline();
+            }
+            let request = async {
+                if stream {
+                    streaming_surface(&gateway, "native", deadlines.clone()).await
+                } else {
+                    buffered_surface(&gateway, "native", deadlines.clone()).await
+                }
+            };
+            let response = tokio::time::timeout(Duration::from_secs(5), request)
+                .await
+                .expect("a generation deadline ends the remote attempt");
+            assert_restored_cold_refusal(
+                &response,
+                expected,
+                &format!(
+                    "first_chunk_deadline={first_chunk_deadline} output_arrived={output_arrived} stream={stream}"
+                ),
+            );
+        }
+        let extraction = format!(
+            "{HYBRID_EXTRACT_MODEL}\nrouting:\n  policy: fallback\n  fallback_profile: remote\n"
+        );
+        for msgpack in [false, true] {
+            let mut gateway = TestGateway::new(&[&extraction]).await;
+            gateway.set_request_timeout(0.2);
+            gateway
+                .add_verified_worker("remote-1", REMOTE_LANE, &[])
+                .await;
+            gateway.dispatcher.withhold_remote_answers(false);
+            let request = proxy_request(
+                State(Arc::clone(&gateway.state)),
+                extraction_request(msgpack, json!({})),
+                "extract",
+            );
+            let response = tokio::time::timeout(Duration::from_secs(5), request)
+                .await
+                .expect("the queued-result deadline ends the remote attempt");
+            assert_restored_cold_refusal(
+                &response,
+                "QUEUE_FULL",
+                &format!("extract msgpack={msgpack}"),
+            );
         }
     }
 
@@ -1755,7 +2143,7 @@ mod tests {
                 assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
                 assert_eq!(response.headers()["retry-after"], retry_after);
                 assert_eq!(response.headers()["x-sie-fallback-reason"], trigger);
-                assert!(response.headers().contains_key("x-sie-fallback-error"));
+                assert_eq!(response.headers()["x-sie-fallback-error"], remote_code);
                 assert_eq!(stamped(&response), (Some("local"), None));
                 let body: serde_json::Value = serde_json::from_slice(
                     &axum::body::to_bytes(response.into_body(), 8192)

@@ -62,6 +62,7 @@ use tokio::sync::broadcast;
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{debug, info, warn};
 
+use crate::handlers::serving_disclosure::UnansweredBeforeDeadline;
 use crate::observability::metrics as telemetry;
 use crate::queue::dispatch::{PendingDispatchKind, WorkDispatcher};
 use crate::queue::publisher;
@@ -367,19 +368,24 @@ pub async fn build_sse_response(params: SseParams<'_>) -> Response {
         match first_output_rx.await {
             Ok(Ok(())) => {}
             outcome => {
-                let status = match outcome {
-                    Ok(Err(status)) => status,
-                    _ => StatusCode::SERVICE_UNAVAILABLE,
+                let failure = match outcome {
+                    Ok(Err(failure)) => failure,
+                    _ => PreOutputFailure::new(StatusCode::SERVICE_UNAVAILABLE, None),
                 };
                 // Only a request-owned bridge enables this gate. Its outer
                 // handler restores the original local refusal and retry hint.
-                return (
-                    status,
+                let mut response = (
+                    failure.status,
                     axum::Json(json!({"error": {
-                        "code": "transport_failure", "message": "Bridge failed before output"
+                        "code": failure.code.as_deref().unwrap_or("transport_failure"),
+                        "message": "Bridge failed before output"
                     }})),
                 )
                     .into_response();
+                if failure.unanswered {
+                    response.extensions_mut().insert(UnansweredBeforeDeadline);
+                }
+                return response;
             }
         }
     }
@@ -418,7 +424,26 @@ pub async fn build_sse_response(params: SseParams<'_>) -> Response {
     response
 }
 
-type FirstOutputGate = Option<tokio::sync::oneshot::Sender<Result<(), StatusCode>>>;
+/// What ended a stream before its first output event: the status and error
+/// code it would have answered with, and whether a deadline passed before
+/// any output arrived.
+struct PreOutputFailure {
+    status: StatusCode,
+    code: Option<String>,
+    unanswered: bool,
+}
+
+impl PreOutputFailure {
+    fn new(status: StatusCode, code: Option<&str>) -> Self {
+        Self {
+            status,
+            code: code.map(str::to_string),
+            unanswered: false,
+        }
+    }
+}
+
+type FirstOutputGate = Option<tokio::sync::oneshot::Sender<Result<(), PreOutputFailure>>>;
 
 struct SseDriverArgs {
     first_output: FirstOutputGate,
@@ -694,6 +719,7 @@ async fn run_sse_driver_with_lifecycle(
         if now >= overall_deadline {
             send_error_chunk_before_output(
                 &mut first_output,
+                !first_seen,
                 &event_tx,
                 &endpoint,
                 &stream_chat_id,
@@ -779,6 +805,7 @@ async fn run_sse_driver_with_lifecycle(
             }
             send_error_chunk_before_output(
                 &mut first_output,
+                !first_seen,
                 &event_tx,
                 &endpoint,
                 &stream_chat_id,
@@ -800,6 +827,7 @@ async fn run_sse_driver_with_lifecycle(
             if la.elapsed() >= inter_chunk_timeout {
                 send_error_chunk_before_output(
                     &mut first_output,
+                    false,
                     &event_tx,
                     &endpoint,
                     &stream_chat_id,
@@ -837,6 +865,7 @@ async fn run_sse_driver_with_lifecycle(
                     Ok(Err(error)) => {
                         send_error_chunk_before_output(
                     &mut first_output,
+                    false,
                             &event_tx,
                             &endpoint,
                             &stream_chat_id,
@@ -855,6 +884,7 @@ async fn run_sse_driver_with_lifecycle(
                     Err(_) => {
                         send_error_chunk_before_output(
                     &mut first_output,
+                    false,
                             &event_tx,
                             &endpoint,
                             &stream_chat_id,
@@ -993,6 +1023,7 @@ async fn run_sse_driver_with_lifecycle(
                 );
                 send_error_chunk_before_output(
                     &mut first_output,
+                    false,
                     &event_tx,
                     &endpoint,
                     &stream_chat_id,
@@ -1027,6 +1058,7 @@ async fn run_sse_driver_with_lifecycle(
                 if !first_seen {
                     send_error_chunk_before_output(
                         &mut first_output,
+                        false,
                         &event_tx,
                         &endpoint,
                         &stream_chat_id,
@@ -1085,6 +1117,7 @@ async fn run_sse_driver_with_lifecycle(
                 TerminalDurabilityWait::Failed(error) => {
                     send_error_chunk_before_output(
                         &mut first_output,
+                        false,
                         &event_tx,
                         &endpoint,
                         &stream_chat_id,
@@ -1111,6 +1144,7 @@ async fn run_sse_driver_with_lifecycle(
                 TerminalDurabilityWait::MonitorStopped => {
                     send_error_chunk_before_output(
                         &mut first_output,
+                        false,
                         &event_tx,
                         &endpoint,
                         &stream_chat_id,
@@ -1149,6 +1183,7 @@ async fn run_sse_driver_with_lifecycle(
                 TerminalDurabilityWait::OverallTimeout => {
                     send_error_chunk_before_output(
                         &mut first_output,
+                        false,
                         &event_tx,
                         &endpoint,
                         &stream_chat_id,
@@ -1226,8 +1261,9 @@ async fn run_sse_driver_with_lifecycle(
         if !skip_forward {
             if let Some(gate) = first_output.take() {
                 let ready = match chunk.error.as_ref() {
-                    Some(error) => Err(crate::handlers::proxy::worker_error_http_status(
-                        error.client_safe_code(),
+                    Some(error) => Err(PreOutputFailure::new(
+                        crate::handlers::proxy::worker_error_http_status(error.client_safe_code()),
+                        Some(error.client_safe_code()),
                     )),
                     None if chunk.done
                         && matches!(
@@ -1235,7 +1271,7 @@ async fn run_sse_driver_with_lifecycle(
                             Some("cancelled" | "error")
                         ) =>
                     {
-                        Err(StatusCode::SERVICE_UNAVAILABLE)
+                        Err(PreOutputFailure::new(StatusCode::SERVICE_UNAVAILABLE, None))
                     }
                     None => Ok(()),
                 };
@@ -1605,9 +1641,11 @@ fn worker_error_value(error: &ChunkError, include_openai_type: bool) -> Value {
 }
 
 /// Preserve the bridge's pre-output HTTP refusal before enqueuing an error event.
+/// `unanswered` says that a deadline passed before any output arrived.
 #[allow(clippy::too_many_arguments)]
 async fn send_error_chunk_before_output(
     first_output: &mut FirstOutputGate,
+    unanswered: bool,
     tx: &tokio::sync::mpsc::Sender<Result<Event, Infallible>>,
     endpoint: &SseEndpoint,
     chat_id: &str,
@@ -1618,7 +1656,10 @@ async fn send_error_chunk_before_output(
     message: &str,
 ) {
     if let Some(gate) = first_output.take() {
-        let _ = gate.send(Err(StatusCode::SERVICE_UNAVAILABLE));
+        let _ = gate.send(Err(PreOutputFailure {
+            unanswered,
+            ..PreOutputFailure::new(StatusCode::SERVICE_UNAVAILABLE, Some(code))
+        }));
     }
     send_error_chunk(
         tx, endpoint, chat_id, created, model, request_id, code, message,
@@ -1638,8 +1679,9 @@ async fn send_synthetic_error_chunk_before_output(
     error: &ChunkError,
 ) {
     if let Some(gate) = first_output.take() {
-        let _ = gate.send(Err(crate::handlers::proxy::worker_error_http_status(
-            error.client_safe_code(),
+        let _ = gate.send(Err(PreOutputFailure::new(
+            crate::handlers::proxy::worker_error_http_status(error.client_safe_code()),
+            Some(error.client_safe_code()),
         )));
     }
     send_synthetic_error_chunk(tx, endpoint, chat_id, created, model, request_id, error).await;
