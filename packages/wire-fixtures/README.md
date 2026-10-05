@@ -24,6 +24,12 @@ executable.
   The gateway writes `prefix/plain_key`, the queue retains `plain_key`, and the
   sidecar accepts that key or the exact `full_reference`; Python and both Rust
   binaries load the same fixture to prevent prefix drift.
+- `remote_routing.json` — remote routing of a model with a local and a remote
+  profile, checked by the single server and the gateway: which abstract local
+  states send a request for the bare model name to the remote profile, what
+  `X-SIE-Remote` accepts and refuses, how a named profile is served, the
+  `X-SIE-Fallback-Error` each failed attempt's status and error code yields,
+  and the local refusal that answers a failed remote attempt.
 - `retry_classification.json` — how the SDKs classify a non-2xx response to a
   buffered call: `retry` or `terminal` for the idempotent operations (encode,
   score, extract) and for generation, keyed by status, error code, and whether
@@ -80,11 +86,16 @@ fixture set. Current consumers:
   client).
 - Gateway — `packages/sie_gateway/src/handlers/serving_disclosure.rs`
   (asserts that the `X-SIE-Served-By` and `X-SIE-Upstream` names and the
-  served-by values it emits are the ones `serving_disclosure.json` declares).
+  served-by values it emits are the ones `serving_disclosure.json` declares,
+  and checks every gateway vector of `remote_routing.json` through its
+  handlers and its fallback refusal).
 - Server — `packages/sie_server/tests/adapters/test_remote_fallback.py` (each
   disclosure header the single server sends on a response served locally,
   remotely or through a bridge, and on the local refusal that answers a failed
-  remote attempt, has a value or pattern `serving_disclosure.json` declares).
+  remote attempt, has a value or pattern `serving_disclosure.json` declares),
+  and `packages/sie_server/tests/api/test_remote_routing.py` (checks every
+  single-server vector of `remote_routing.json` through the routing decision
+  and the refusal that answers a failed remote attempt).
 - Worker sidecar — `packages/sie_server_sidecar/src/health_publisher.rs`
   (the published key set equals `fields`, minus `omitted_when_empty` when those
   are empty) and gateway — `packages/sie_gateway/src/types/worker.rs` (the

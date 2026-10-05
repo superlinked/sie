@@ -163,9 +163,9 @@ is on unless disabled. Start with `--no-remote-serving` or set
 values also disable it.
 
 A caller can narrow that permission with `X-SIE-Remote: forbid`, or
-`SIEClient(..., remote="forbid")`. Other header values are rejected. A
-remote-backed model has no local alternative, so forbidding remote serving
-returns a client error.
+`SIEClient(..., remote="forbid")`. Other header values, and more than one
+`X-SIE-Remote` field, are rejected. A remote-backed model has no local
+alternative, so forbidding remote serving returns a client error.
 
 On the gateway, `forbid` for a model with a `fallback` or `threshold` policy
 selects only a fresh worker that advertises the versioned execution fence for

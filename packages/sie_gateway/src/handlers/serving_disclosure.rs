@@ -2654,6 +2654,372 @@ mod tests {
             .eq_ignore_ascii_case(UPSTREAM_HEADER.as_str()));
         assert_eq!(served_by["values"], json!(["local", "remote"]));
     }
+
+    fn remote_routing_vectors() -> serde_json::Value {
+        serde_json::from_str(include_str!("../../../wire-fixtures/remote_routing.json")).unwrap()
+    }
+
+    /// The vectors of one section of `wire-fixtures/remote_routing.json` that
+    /// apply to a gateway.
+    fn gateway_vectors(section: &str) -> Vec<serde_json::Value> {
+        remote_routing_vectors()[section]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|vector| {
+                vector.get("topologies").is_none_or(|topologies| {
+                    topologies.as_array().unwrap().contains(&json!("gateway"))
+                })
+            })
+            .cloned()
+            .collect()
+    }
+
+    fn vector_status(value: &serde_json::Value) -> StatusCode {
+        StatusCode::from_u16(u16::try_from(value.as_u64().unwrap()).unwrap()).unwrap()
+    }
+
+    fn header_values(values: &serde_json::Value) -> Vec<&str> {
+        values
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap())
+            .collect()
+    }
+
+    /// A gateway whose `acme/chat` and `acme/hybrid-encode` local profiles are
+    /// in the abstract local `state` of the shared vectors, with a verified
+    /// remote worker and `triggers` declared on both models.
+    async fn gateway_in_local_state(state: &str, triggers: &serde_json::Value) -> TestGateway {
+        let mut routing =
+            "\nrouting:\n  policy: fallback\n  fallback_profile: remote\n".to_string();
+        if !triggers.is_null() {
+            routing.push_str(&format!(
+                "  triggers: [{}]\n",
+                header_values(triggers).join(", ")
+            ));
+        }
+        let generate = format!("{HYBRID_GENERATE_MODEL}{routing}");
+        let encode = format!("{HYBRID_ENCODE_MODEL}{routing}");
+        let gateway = TestGateway::new(&[&generate, &encode, REMOTE_ENCODE_MODEL]).await;
+        gateway
+            .add_verified_worker("remote-1", REMOTE_LANE, &[])
+            .await;
+        let loaded = ["acme/chat", "acme/hybrid-encode"];
+        match state {
+            "ready" | "unhealthy" => {
+                gateway
+                    .add_verified_worker("local-1", LOCAL_LANE, &loaded)
+                    .await;
+            }
+            "loading" => {
+                gateway
+                    .add_verified_worker("local-1", LOCAL_LANE, &[])
+                    .await;
+            }
+            "saturated" => {
+                gateway
+                    .add_saturated_worker("local-1", LOCAL_LANE, &loaded)
+                    .await;
+            }
+            "no_worker" => {}
+            _ => unreachable!("{state}"),
+        }
+        if state == "unhealthy" {
+            gateway
+                .state
+                .registry
+                .mark_unhealthy("http://local-1:8080")
+                .await;
+        }
+        gateway
+    }
+
+    fn assert_kept_off_remote(gateway: &TestGateway, response: &Response, case: &str) {
+        assert!(
+            !response.headers().contains_key("x-sie-fallback-reason"),
+            "{case}"
+        );
+        assert!(
+            !response.headers().contains_key("x-sie-fallback-error"),
+            "{case}"
+        );
+        assert_ne!(stamped(response).0, Some("remote"), "{case}");
+        assert!(
+            !gateway
+                .dispatcher
+                .dispatched()
+                .iter()
+                .any(|work| work.bundle == REMOTE_LANE.2),
+            "{case}"
+        );
+    }
+
+    async fn detail_code(response: Response) -> serde_json::Value {
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), 16384)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        body["detail"]["code"].clone()
+    }
+
+    fn encode_request(model: &str, remote: &[&str]) -> Request {
+        let mut request = json_request(
+            &format!("/v1/encode/{model}"),
+            json!({"items": [{"text": "hello"}]}),
+        );
+        for value in remote {
+            request
+                .headers_mut()
+                .append(REMOTE_HEADER, HeaderValue::from_str(value).unwrap());
+        }
+        request
+    }
+
+    #[tokio::test]
+    async fn the_local_state_decides_the_bridge_as_the_shared_vectors_say() {
+        for vector in gateway_vectors("bridge") {
+            let case = vector.to_string();
+            let gateway =
+                gateway_in_local_state(vector["local"].as_str().unwrap(), &vector["triggers"])
+                    .await;
+            let response = buffered_surface(&gateway, "native", json!({})).await;
+            if vector["remote"].as_bool().unwrap() {
+                assert_eq!(response.status(), StatusCode::OK, "{case}");
+                assert_eq!(
+                    stamped(&response),
+                    (Some("remote"), Some("team-sie")),
+                    "{case}"
+                );
+                assert_eq!(
+                    response.headers()["x-sie-fallback-reason"],
+                    vector["fallback_reason"].as_str().unwrap(),
+                    "{case}"
+                );
+                assert!(
+                    gateway.dispatcher.dispatched().contains(&dispatched(
+                        "generate",
+                        REMOTE_LANE,
+                        "acme/chat:remote"
+                    )),
+                    "{case}"
+                );
+            } else {
+                assert_kept_off_remote(&gateway, &response, &case);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_remote_header_other_than_one_exact_forbid_is_refused_as_the_shared_vectors_say() {
+        let header = remote_routing_vectors()["remote_header"].clone();
+        let gateway = gateway_in_local_state("ready", &serde_json::Value::Null).await;
+        for remote in header["refused"].as_array().unwrap() {
+            let remote = header_values(remote);
+            let response = proxy_request(
+                State(Arc::clone(&gateway.state)),
+                encode_request("acme/hybrid-encode", &remote),
+                "encode",
+            )
+            .await;
+            assert_eq!(
+                response.status(),
+                vector_status(&header["refusal"]["status"]),
+                "{remote:?}"
+            );
+            assert_eq!(
+                detail_code(response).await,
+                header["refusal"]["code"],
+                "{remote:?}"
+            );
+        }
+        assert!(gateway.dispatcher.dispatched().is_empty());
+        for remote in header["accepted"].as_array().unwrap() {
+            let remote = header_values(remote);
+            let response = proxy_request(
+                State(Arc::clone(&gateway.state)),
+                encode_request("acme/hybrid-encode", &remote),
+                "encode",
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK, "{remote:?}");
+            assert_eq!(stamped(&response), (Some("local"), None), "{remote:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn forbid_follows_the_shared_vectors() {
+        for vector in gateway_vectors("forbid") {
+            let case = vector.to_string();
+            let state = vector["local"].as_str().unwrap_or("ready");
+            let gateway = gateway_in_local_state(state, &serde_json::Value::Null).await;
+            let model = match vector["model"].as_str().unwrap() {
+                "bare" => "acme/hybrid-encode",
+                "remote_profile" => "acme/hybrid-encode:remote",
+                "remote_only" => "acme/remote",
+                other => unreachable!("{other}"),
+            };
+            let response = proxy_request(
+                State(Arc::clone(&gateway.state)),
+                encode_request(model, &["forbid"]),
+                "encode",
+            )
+            .await;
+            assert_kept_off_remote(&gateway, &response, &case);
+            if let Some(refusal) = vector.get("refusal") {
+                assert_eq!(
+                    response.status(),
+                    vector_status(&refusal["status"]),
+                    "{case}"
+                );
+                assert_eq!(detail_code(response).await, refusal["code"], "{case}");
+                assert!(gateway.dispatcher.dispatched().is_empty(), "{case}");
+            } else {
+                assert!(!vector["remote"].as_bool().unwrap(), "{case}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_named_profile_is_served_as_written_as_the_shared_vectors_say() {
+        for vector in gateway_vectors("named_profile") {
+            let case = vector.to_string();
+            let gateway =
+                gateway_in_local_state(vector["local"].as_str().unwrap(), &serde_json::Value::Null)
+                    .await;
+            let response = match vector["model"].as_str().unwrap() {
+                "local_profile" => {
+                    buffered_surface(&gateway, "native", json!({"profile": "default"})).await
+                }
+                "remote_profile" => {
+                    proxy_chat(
+                        State(Arc::clone(&gateway.state)),
+                        json_request(
+                            "/v1/chat/completions",
+                            json!({"model": "acme/chat:remote", "messages": [{"role": "user", "content": "hello"}]}),
+                        ),
+                    )
+                    .await
+                }
+                other => unreachable!("{other}"),
+            };
+            if vector["remote"].as_bool().unwrap() {
+                assert_eq!(response.status(), StatusCode::OK, "{case}");
+                assert_eq!(
+                    stamped(&response),
+                    (Some("remote"), Some("team-sie")),
+                    "{case}"
+                );
+                assert!(
+                    !response.headers().contains_key("x-sie-fallback-reason"),
+                    "{case}"
+                );
+            } else {
+                assert_kept_off_remote(&gateway, &response, &case);
+            }
+        }
+    }
+
+    #[test]
+    fn the_fallback_error_is_derived_as_the_shared_vectors_say() {
+        for vector in gateway_vectors("fallback_error") {
+            let status = vector_status(&vector["status"]);
+            let code = vector["code"].as_str();
+            let expected = vector["fallback_error"].as_str().unwrap();
+            assert_eq!(fallback_error(status, code), expected, "{vector}");
+            for in_header in [false, true] {
+                let attempt = FallbackAttempt::default();
+                assert!(attempt.begin(
+                    StatusCode::SERVICE_UNAVAILABLE.into_response(),
+                    FallbackTrigger::ModelLoading
+                ));
+                let failed = match code {
+                    Some(code) if in_header => {
+                        let mut failed = status.into_response();
+                        failed
+                            .headers_mut()
+                            .insert("x-sie-error-code", HeaderValue::from_str(code).unwrap());
+                        failed
+                    }
+                    _ => (status, axum::Json(json!({"error": {"code": code}}))).into_response(),
+                };
+                let restored = attempt.finish(failed);
+                assert_eq!(
+                    restored.headers()["x-sie-fallback-error"],
+                    expected,
+                    "{vector} in_header={in_header}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn the_restored_refusal_keeps_the_local_answer_as_the_shared_vectors_say() {
+        for vector in gateway_vectors("restored_refusal") {
+            let local = &vector["local"];
+            let mut original = (
+                vector_status(&local["status"]),
+                axum::Json(json!({"detail": {"code": local["code"], "message": "local refusal"}})),
+            )
+                .into_response();
+            if let Some(retry_after) = local["retry_after"].as_str() {
+                original
+                    .headers_mut()
+                    .insert("retry-after", HeaderValue::from_str(retry_after).unwrap());
+            }
+            let trigger: FallbackTrigger =
+                serde_json::from_value(vector["fallback_reason"].clone()).unwrap();
+            let attempt = FallbackAttempt::default();
+            assert!(attempt.begin(original, trigger));
+            let failed = match &vector["attempt"] {
+                serde_json::Value::String(kind) => {
+                    assert_eq!(kind, "unanswered_before_deadline");
+                    let mut failed = StatusCode::GATEWAY_TIMEOUT.into_response();
+                    failed.extensions_mut().insert(UnansweredBeforeDeadline);
+                    failed
+                }
+                attempt => {
+                    let mut failed = vector_status(&attempt["status"]).into_response();
+                    if let Some(code) = attempt["code"].as_str() {
+                        failed
+                            .headers_mut()
+                            .insert("x-sie-error-code", HeaderValue::from_str(code).unwrap());
+                    }
+                    failed
+                }
+            };
+            let restored = attempt.finish(failed);
+            assert_eq!(
+                restored.status(),
+                vector_status(&local["status"]),
+                "{vector}"
+            );
+            assert_eq!(
+                restored
+                    .headers()
+                    .get("retry-after")
+                    .map(|value| value.to_str().unwrap()),
+                local["retry_after"].as_str(),
+                "{vector}"
+            );
+            assert_eq!(stamped(&restored), (Some("local"), None), "{vector}");
+            assert_eq!(
+                restored.headers()["x-sie-fallback-reason"],
+                vector["fallback_reason"].as_str().unwrap(),
+                "{vector}"
+            );
+            assert_eq!(
+                restored.headers()["x-sie-fallback-error"],
+                vector["fallback_error"].as_str().unwrap(),
+                "{vector}"
+            );
+            assert_eq!(detail_code(restored).await, local["code"], "{vector}");
+        }
+    }
+
     #[tokio::test]
     async fn threshold_shared_decision_routes_remote_without_local_demand_then_wakes_and_bridges() {
         use crate::handlers::test_support::ThresholdBroker;
