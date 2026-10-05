@@ -1832,7 +1832,7 @@ credential pasted as a key would otherwise be printed.
 {{- if not (kindIs "string" $evidenceConfigMap) -}}
 {{- fail "workers.remote.equivalence.configMap must be a ConfigMap name" -}}
 {{- end -}}
-{{- if and $evidenceConfigMap (not (and (le (len $evidenceConfigMap) 253) (regexMatch "^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$" $evidenceConfigMap))) -}}
+{{- if and $evidenceConfigMap (not (and (le (len $evidenceConfigMap) 253) (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" $evidenceConfigMap))) -}}
 {{- fail "workers.remote.equivalence.configMap must be a valid ConfigMap name" -}}
 {{- end -}}
 {{- $chartSecretKeys := list -}}

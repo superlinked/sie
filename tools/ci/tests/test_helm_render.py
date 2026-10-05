@@ -1783,6 +1783,10 @@ def test_mounted_evidence_requires_each_record_file_to_be_one_of_its_keys(tmp_pa
         {"configMap": "Upper"},
         {"configMap": "-leading"},
         {"configMap": "has_underscore"},
+        {"configMap": "proofs..remote"},
+        {"configMap": "proofs.-remote"},
+        {"configMap": "proofs-.remote"},
+        {"configMap": "proofs."},
         {"configMap": "a" * 254},
         {"configMap": 5},
         {"configMap": "evidence", "secret": "evidence"},
@@ -1794,6 +1798,19 @@ def test_the_evidence_setting_names_one_valid_config_map(tmp_path: Path, evidenc
     values["workers"]["remote"]["equivalence"] = evidence
 
     assert "workers.remote.equivalence" in render_error(tmp_path, values)
+
+
+@pytest.mark.parametrize("name", ["evidence", "remote.equivalence-evidence", "a" * 63 + "." + "b" * 63])
+def test_dotted_config_map_names_are_accepted(tmp_path: Path, name: str) -> None:
+    values = evidence_values()
+    values["workers"]["remote"]["equivalence"]["configMap"] = name
+    docs = rendered_documents(tmp_path, values)
+
+    (statefulset,) = [
+        doc for doc in docs if doc["kind"] == "StatefulSet" and doc["metadata"]["name"] == REMOTE_WORKER[1]
+    ]
+    volumes = {volume["name"]: volume for volume in statefulset["spec"]["template"]["spec"]["volumes"]}
+    assert volumes["equivalence"]["configMap"]["name"] == name
 
 
 def test_without_mounted_evidence_record_paths_are_only_checked_for_shape(tmp_path: Path) -> None:
