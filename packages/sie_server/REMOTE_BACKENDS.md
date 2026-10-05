@@ -438,7 +438,10 @@ caller receives the local loading refusal. A loaded local model serves locally.
 
 The remote attempt pins a fresh worker with the exact current configuration
 hash and positive versioned execution capability. It cannot retry on the ordinary
-pool subject. Remote failure restores the original local refusal body and
+pool subject. Its work item names the trigger in `fallback_reason`, so a remote
+worker whose upstream is rate capped, has its circuit breaker open, is not ready
+or cannot be reached answers at once rather than redelivering the item until the
+gateway's request timeout. Remote failure restores the original local refusal body and
 `Retry-After`, with `X-SIE-Fallback-Reason` and a bounded
 `X-SIE-Fallback-Error`; success discloses the remote profile's upstream. The
 customer model name remains the requested model.

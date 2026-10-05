@@ -72,16 +72,18 @@ Message settlement:
 - A `load` work item carries no input. It goes through the same admission,
   config and readiness checks as other work for that model. Once
   `EnsureModelReady` reports ready, it is ACKed without inference or a result.
-  This is the NATS worker-side warm-up primitive; the gateway does not yet
-  produce these items. Local-ingest `publish_work` rejects `load` before
+  This is the NATS worker-side warm-up primitive; the gateway publishes one
+  before a `model_loading` bridge. Local-ingest `publish_work` rejects `load` before
   dispatch because that request/response lane requires a result.
-- A work item may carry `fallback_reason` for a future gateway remote fallback
-  attempt. If the backend returns `nak_retry`, the sidecar publishes an error
-  result with the outcome's `error_code` (`QUEUE_FULL` when absent) and
-  `retry_after_s` (the NAK delay rounded up to seconds when absent), then ACKs
-  after successful publication. Ordinary items retain NAK behavior. Admission,
-  config/readiness barriers and failed result publication retain their existing
-  retry behavior; this does not yet provide the full cluster fallback contract.
+- The gateway sets `fallback_reason` on a remote attempt that stands in for a
+  local refusal it holds: every fallback bridge, and a threshold bridge while
+  local capacity wakes. If the backend returns `nak_retry` for such an item,
+  the sidecar publishes an error result with the outcome's `error_code`
+  (`QUEUE_FULL` when absent) and `retry_after_s` (the NAK delay rounded up to
+  seconds when absent), then ACKs after successful publication, so the gateway
+  restores its local refusal at once. Ordinary items retain NAK behavior.
+  Admission, config/readiness barriers and failed result publication retain
+  their existing retry behavior.
 - An outcome's optional `retry_after_s` is published on the `WorkResult`
   unchanged; the gateway uses it as `Retry-After` for a `QUEUE_FULL` or
   `RESOURCE_EXHAUSTED` answer.

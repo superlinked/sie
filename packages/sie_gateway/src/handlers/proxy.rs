@@ -1867,6 +1867,13 @@ fn native_request_has_profile_selector(body: &[u8], msgpack: bool) -> bool {
 #[derive(Clone)]
 struct RemoteFallbackOverride(crate::state::model_registry::RemoteFallbackPlan);
 
+/// The trigger a bridged remote attempt carries to its worker. A remote route
+/// with no held local refusal, such as a low-demand threshold route, has none.
+fn bridged_fallback_reason(ext: &axum::http::Extensions) -> Option<FallbackTrigger> {
+    ext.get::<RemoteFallbackOverride>()?;
+    ext.get::<FallbackAttempt>()?.trigger()
+}
+
 /// The routing decision for a request: canonical model name, serving bundle,
 /// and engine. Produced by [`resolve_routing`].
 struct RoutingResult {
@@ -3687,6 +3694,7 @@ async fn queue_mode_proxy(
     };
 
     params.require_execution_authority_v1 = require_execution_authority_v1;
+    params.fallback_reason = bridged_fallback_reason(request_extensions);
 
     if items.is_empty() && endpoint != "score" && endpoint != "generate" {
         return endpoint_error_response(
@@ -7717,6 +7725,7 @@ pub(crate) fn resolve_model_and_bundle(
 struct ResolvedRoute {
     dispatch_model: String,
     require_execution_authority_v1: bool,
+    fallback_reason: Option<FallbackTrigger>,
     physical_lane: PhysicalLane,
     bundle: String,
     gpu: String,
@@ -8253,6 +8262,7 @@ async fn resolve_generation_route(
     Ok(ResolvedRoute {
         dispatch_model: dispatch_model.to_string(),
         require_execution_authority_v1: remote_forbidden(hdr).unwrap_or(false) || bridge.is_some(),
+        fallback_reason: bridged_fallback_reason(ext),
         physical_lane,
         bundle,
         gpu,
@@ -8693,6 +8703,7 @@ async fn proxy_chat_inner(
     let ResolvedRoute {
         dispatch_model,
         require_execution_authority_v1,
+        fallback_reason,
         physical_lane,
         bundle,
         gpu,
@@ -8734,6 +8745,7 @@ async fn proxy_chat_inner(
     let stream_include_usage = params.stream_include_usage;
     let mut work_params = params.into_work_params();
     work_params.require_execution_authority_v1 = require_execution_authority_v1;
+    work_params.fallback_reason = fallback_reason;
 
     // SSE branch — when `stream: true` we hand off to the SSE
     // response builder. The non-streaming aggregating path below is
@@ -9372,6 +9384,7 @@ async fn proxy_completions_inner(state: Arc<AppState>, req: Request) -> Response
     let ResolvedRoute {
         dispatch_model,
         require_execution_authority_v1,
+        fallback_reason,
         physical_lane,
         bundle,
         gpu,
@@ -9409,6 +9422,7 @@ async fn proxy_completions_inner(state: Arc<AppState>, req: Request) -> Response
     let stream_include_usage = params.stream_include_usage;
     let mut work_params = params.into_work_params();
     work_params.require_execution_authority_v1 = require_execution_authority_v1;
+    work_params.fallback_reason = fallback_reason;
 
     // SSE streaming → emit `text_completion` chunks. Single-candidate
     // (completions rejects n>1), so no per-candidate interleave.
@@ -10036,6 +10050,7 @@ async fn proxy_responses_inner(state: Arc<AppState>, req: Request) -> Response {
     let ResolvedRoute {
         dispatch_model,
         require_execution_authority_v1,
+        fallback_reason,
         physical_lane,
         bundle,
         gpu,
@@ -10070,6 +10085,7 @@ async fn proxy_responses_inner(state: Arc<AppState>, req: Request) -> Response {
 
     let mut work_params = params.into_work_params();
     work_params.require_execution_authority_v1 = require_execution_authority_v1;
+    work_params.fallback_reason = fallback_reason;
 
     let driver = run_streaming_generate(
         &state,
@@ -12243,6 +12259,7 @@ fn work_params_from_json(
             generate: None,
             routing_key: None,
             prompt_cache_key: None,
+            fallback_reason: None,
         });
     }
 
@@ -12297,6 +12314,7 @@ fn work_params_from_json(
         generate: None,
         routing_key: None,
         prompt_cache_key: None,
+        fallback_reason: None,
     })
 }
 
@@ -13143,6 +13161,7 @@ fn work_params_from_rmpv(
             generate: None,
             routing_key: None,
             prompt_cache_key: None,
+            fallback_reason: None,
         });
     }
 
@@ -13203,6 +13222,7 @@ fn work_params_from_rmpv(
         generate: None,
         routing_key: None,
         prompt_cache_key: None,
+        fallback_reason: None,
     })
 }
 

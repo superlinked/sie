@@ -190,6 +190,17 @@ impl FallbackAttempt {
             .is_some()
     }
 
+    /// The trigger of the local refusal this request's remote attempt stands
+    /// in for, while that refusal is held.
+    pub(crate) fn trigger(&self) -> Option<FallbackTrigger> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .original
+            .as_ref()
+            .map(|original| original.trigger)
+    }
+
     /// Called after normal disclosure stamping and before HTTP success/output.
     /// A failed bridge preserves the original body and Retry-After verbatim.
     pub(crate) fn finish(&self, mut response: Response) -> Response {
@@ -1441,6 +1452,169 @@ mod tests {
         assert!(gateway.dispatcher.dispatched().is_empty());
     }
 
+    #[tokio::test]
+    async fn every_bridged_work_item_carries_the_trigger_of_the_refusal_it_stands_in_for() {
+        for trigger in [
+            FallbackTrigger::Provisioning,
+            FallbackTrigger::ModelLoading,
+            FallbackTrigger::Saturated,
+            FallbackTrigger::Unhealthy,
+        ] {
+            let routing = format!(
+                "\nrouting:\n  policy: fallback\n  fallback_profile: remote\n  triggers: [{}]\n",
+                trigger.as_str()
+            );
+            let generate = format!("{HYBRID_GENERATE_MODEL}{routing}");
+            let extract = format!("{HYBRID_EXTRACT_MODEL}{routing}");
+            let gateway = TestGateway::new(&[&generate, &extract]).await;
+            gateway
+                .add_verified_worker("remote-1", REMOTE_LANE, &[])
+                .await;
+            let loaded = ["acme/chat", "acme/extract"];
+            match trigger {
+                FallbackTrigger::Provisioning => {}
+                FallbackTrigger::ModelLoading => {
+                    gateway
+                        .add_verified_worker("local-1", LOCAL_LANE, &[])
+                        .await;
+                }
+                FallbackTrigger::Saturated => {
+                    gateway
+                        .add_saturated_worker("local-1", LOCAL_LANE, &loaded)
+                        .await;
+                }
+                FallbackTrigger::Unhealthy => {
+                    gateway
+                        .add_verified_worker("local-1", LOCAL_LANE, &loaded)
+                        .await;
+                    gateway
+                        .state
+                        .registry
+                        .mark_unhealthy("http://local-1:8080")
+                        .await;
+                }
+            }
+            let mut responses = Vec::new();
+            for surface in ["native", "chat", "completions", "responses"] {
+                responses.push(buffered_surface(&gateway, surface, json!({})).await);
+            }
+            for (uri, body) in [
+                (
+                    "/v1/generate/acme/chat",
+                    json!({"prompt":"hello", "max_new_tokens":4, "stream":true}),
+                ),
+                (
+                    "/v1/chat/completions",
+                    json!({"model":"acme/chat", "messages":[{"role":"user", "content":"hello"}], "stream":true}),
+                ),
+                (
+                    "/v1/completions",
+                    json!({"model":"acme/chat", "prompt":"hello", "max_tokens":4, "stream":true}),
+                ),
+            ] {
+                let state = State(Arc::clone(&gateway.state));
+                let request = json_request(uri, body);
+                responses.push(match uri {
+                    "/v1/generate/acme/chat" => proxy_request(state, request, "generate").await,
+                    "/v1/chat/completions" => proxy_chat(state, request).await,
+                    _ => proxy_completions(state, request).await,
+                });
+            }
+            responses.push(
+                proxy_request(
+                    State(Arc::clone(&gateway.state)),
+                    extraction_request(false, json!({})),
+                    "extract",
+                )
+                .await,
+            );
+            let bridged = responses.len();
+            for response in responses {
+                assert_eq!(response.status(), StatusCode::OK, "{trigger:?}");
+                assert_eq!(
+                    response.headers()["x-sie-fallback-reason"],
+                    trigger.as_str()
+                );
+                let _ = axum::body::to_bytes(response.into_body(), 16384)
+                    .await
+                    .unwrap();
+            }
+            assert!(gateway
+                .dispatcher
+                .dispatched()
+                .iter()
+                .filter(|work| work.endpoint != "load")
+                .all(|work| work.bundle == REMOTE_LANE.2));
+            assert_eq!(
+                gateway.dispatcher.fallback_reasons(),
+                vec![Some(trigger); bridged],
+                "{trigger:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_remote_attempt_refused_by_its_upstream_restores_the_local_refusal_at_once() {
+        let config = format!(
+            "{HYBRID_EXTRACT_MODEL}\nrouting:\n  policy: fallback\n  fallback_profile: remote\n"
+        );
+        for (refusal, remote_code, retry_after_s) in [
+            ("capped", "QUEUE_FULL", 1),
+            ("breaker_open", "QUEUE_FULL", 60),
+            ("not_ready", "QUEUE_FULL", 5),
+            ("not_ready", "MODEL_LOADING", 5),
+        ] {
+            for local in ["cold", "loading"] {
+                let gateway = TestGateway::new(&[&config]).await;
+                gateway
+                    .add_verified_worker("remote-1", REMOTE_LANE, &[])
+                    .await;
+                if local == "loading" {
+                    gateway
+                        .add_verified_worker("local-1", LOCAL_LANE, &[])
+                        .await;
+                }
+                gateway
+                    .dispatcher
+                    .refuse_remote_work_at_the_upstream(remote_code, retry_after_s);
+                let response = tokio::time::timeout(
+                    Duration::from_secs(5),
+                    proxy_request(
+                        State(Arc::clone(&gateway.state)),
+                        extraction_request(false, json!({})),
+                        "extract",
+                    ),
+                )
+                .await
+                .unwrap_or_else(|_| {
+                    panic!("{refusal}/{remote_code}/{local}: the local refusal waited")
+                });
+                let (trigger, retry_after, code) = if local == "cold" {
+                    ("provisioning", "60", "PROVISIONING")
+                } else {
+                    ("model_loading", "5", "MODEL_LOADING")
+                };
+                assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+                assert_eq!(response.headers()["retry-after"], retry_after);
+                assert_eq!(response.headers()["x-sie-fallback-reason"], trigger);
+                assert!(response.headers().contains_key("x-sie-fallback-error"));
+                assert_eq!(stamped(&response), (Some("local"), None));
+                let body: serde_json::Value = serde_json::from_slice(
+                    &axum::body::to_bytes(response.into_body(), 8192)
+                        .await
+                        .unwrap(),
+                )
+                .unwrap();
+                let detail = body.get("detail").unwrap_or(&body["error"]);
+                assert_eq!(detail["code"], code, "{refusal}/{local}");
+                assert_eq!(
+                    gateway.dispatcher.dispatched().last().unwrap(),
+                    &dispatched("extract", REMOTE_LANE, "acme/extract:remote")
+                );
+            }
+        }
+    }
+
     fn stamped(response: &Response) -> (Option<&str>, Option<&str>) {
         let header = |name: &HeaderName| {
             response
@@ -1766,6 +1940,7 @@ mod tests {
                 && work.model.ends_with(":remote")
                 && work.endpoint != "load"));
         assert_eq!(gateway.dispatcher.execution_authority(), vec![true; 6]);
+        assert_eq!(gateway.dispatcher.fallback_reasons(), vec![None; 6]);
 
         for surface in ["native", "chat", "completions"] {
             let state = State(Arc::clone(&gateway.state));
@@ -1784,6 +1959,7 @@ mod tests {
         }
         assert!(gateway.state.demand_tracker.active_lanes().is_empty());
         assert_eq!(gateway.dispatcher.execution_authority(), vec![true; 9]);
+        assert_eq!(gateway.dispatcher.fallback_reasons(), vec![None; 9]);
 
         // Demand from two gateways reaches one decision, rather than dividing
         // the configured rate independently at each gateway.
@@ -1820,6 +1996,10 @@ mod tests {
                 dispatched("generate", REMOTE_LANE, "acme/chat:remote"),
             ]
         );
+        assert_eq!(
+            gateway.dispatcher.fallback_reasons().last(),
+            Some(&Some(FallbackTrigger::ModelLoading))
+        );
         gateway
             .add_verified_worker("local-1", LOCAL_LANE, &["acme/chat"])
             .await;
@@ -1830,6 +2010,7 @@ mod tests {
             gateway.dispatcher.dispatched().last().unwrap().model,
             "acme/chat"
         );
+        assert_eq!(gateway.dispatcher.fallback_reasons().last(), Some(&None));
     }
     #[tokio::test]
     async fn threshold_authority_preserves_selectors_validation_and_configuration_fences() {
