@@ -34,6 +34,7 @@ _IDENTITY_AGE_S = 30.0
 _REFUSAL_AGE_S = 2.0
 _MAX_CACHE_ENTRIES = 128
 _IDENTITY = re.compile(r"^v1:sha256:[0-9a-f]{64}$")
+_REVISION = re.compile(r"[0-9a-f]{40}")
 
 
 class _MetadataReadError(httpx.HTTPError):
@@ -151,6 +152,14 @@ def _fresh_identity(upstream_name: str, upstream: Upstream, remote_model: str) -
     return value
 
 
+def _shown(value: object, pattern: re.Pattern[str]) -> str:
+    return value if isinstance(value, str) and pattern.fullmatch(value) else "<invalid>"
+
+
+def _shown_identity(revision: object, identity: object) -> str:
+    return f"(hf_revision={_shown(revision, _REVISION)}, identity={_shown(identity, _IDENTITY)})"
+
+
 def sie_identity_refusal(config: ModelConfig, *, device: str, engine_config: EngineConfig | None = None) -> str | None:
     """Admit only fresh matching weights and a known local execution identity."""
     if not remote_serving_enabled():
@@ -191,5 +200,8 @@ def sie_identity_refusal(config: ModelConfig, *, device: str, engine_config: Eng
     if observed is None:
         return "hybrid upstream identity is unavailable or outside its age"
     if observed != (config.hf_revision, identity):
-        return "hybrid upstream weights or execution profile differs from local"
+        return (
+            "hybrid upstream weights or execution profile differs from local: "
+            f"upstream {_shown_identity(*observed)}, local {_shown_identity(config.hf_revision, identity)}"
+        )
     return None
