@@ -720,12 +720,37 @@ export interface ClusterSummary {
   total_qps: number;
 }
 
+/** Process diagnostics at observation time; grants no execution authority. */
+export interface NumericalProcessInventory {
+  observed_at_unix_ms: number;
+  children: NumericalProcessObservation[];
+}
+
+export interface NumericalProcessObservation {
+  child_index: number;
+  status: "observed" | "incomplete" | "unavailable" | "invalid";
+  snapshot: NumericalProfileSnapshot | null;
+}
+
+export interface NumericalProfileSnapshot {
+  runtime_instance_id: string | null;
+  complete: boolean;
+  profiles: NumericalProfileObservation[];
+}
+
+export interface NumericalProfileObservation {
+  model_id: string;
+  model_contract_sha256: string | null;
+  local_identity: string | null;
+}
+
 export interface ClusterWorkerInfo {
   url: string;
   gpu: string;
   healthy: boolean;
   queue_depth: number;
   loaded_models: string[];
+  numerical_process_inventory?: NumericalProcessInventory;
 }
 
 export interface ModelSummary {

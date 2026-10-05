@@ -924,6 +924,31 @@ class ResponseResult(TypedDict, total=False):
     request: RequestMetadata
 
 
+class NumericalProfileObservation(TypedDict):
+    model_id: str
+    model_contract_sha256: str | None
+    local_identity: str | None
+
+
+class NumericalProfileSnapshot(TypedDict):
+    runtime_instance_id: str | None
+    complete: bool
+    profiles: list[NumericalProfileObservation]
+
+
+class NumericalProcessObservation(TypedDict):
+    child_index: int
+    status: Literal["observed", "incomplete", "unavailable", "invalid"]
+    snapshot: NumericalProfileSnapshot | None
+
+
+class NumericalProcessInventory(TypedDict):
+    """Process diagnostics at observation time; grants no execution authority."""
+
+    observed_at_unix_ms: int
+    children: list[NumericalProcessObservation]
+
+
 class WorkerInfo(TypedDict, total=False):
     """Information about a single worker in the cluster.
 
@@ -960,6 +985,7 @@ class WorkerInfo(TypedDict, total=False):
     memory_total_bytes: int
     bundle: NotRequired[str]
     bundle_config_hash: str
+    numerical_process_inventory: NotRequired[NumericalProcessInventory]
 
 
 class CapacityInfo(TypedDict, total=False):
