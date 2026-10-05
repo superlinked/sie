@@ -83,8 +83,8 @@ Message settlement:
   config/readiness barriers and failed result publication retain their existing
   retry behavior; this does not yet provide the full cluster fallback contract.
 - An outcome's optional `retry_after_s` is published on the `WorkResult`
-  unchanged; the gateway uses it as `Retry-After` for a `QUEUE_FULL` or
-  `RESOURCE_EXHAUSTED` answer.
+  unchanged; the gateway uses it as `Retry-After` for a `QUEUE_FULL`,
+  `MODEL_LOADING` or `RESOURCE_EXHAUSTED` answer.
 - Active local model loads are held with JetStream progress ACKs until
   `EnsureModelReady` returns ready; this preserves the delivery budget during
   cold starts. The progress delay is clamped below the pool consumer `ack_wait`

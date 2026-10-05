@@ -177,7 +177,9 @@ Each upstream has a required rate cap and a circuit breaker. The limits are
 shared by that worker process's adapters, not across replicas: adding remote
 worker replicas increases the aggregate permitted traffic. Under
 `remote_only`, unavailable upstreams, open breakers and reached caps return
-retryable `503` responses. Under single-node `fallback`, an upstream failure
+retryable `503` responses with `Retry-After`. In a cluster the remote worker
+answers such a request at once instead of redelivering it, and the gateway
+returns the worker's code and wait. Under single-node `fallback`, an upstream failure
 returns the original local refusal with its retry delay. A client error is
 never retried remotely, and fallback cannot replay work after local acceptance
 or after output reaches the caller.

@@ -139,11 +139,18 @@ pub(crate) struct RecordingDispatcher {
     stream_error: AtomicBool,
     stream_mid_error: AtomicBool,
     stream_terminal_failure: Mutex<Option<&'static str>>,
+    remote_refusal: Mutex<Option<(&'static str, Option<u32>)>>,
     dispatched: Mutex<Vec<Dispatched>>,
     execution_authority: Mutex<Vec<bool>>,
 }
 
 impl RecordingDispatcher {
+    /// Answer remote-lane work as a remote worker does when its upstream cannot
+    /// serve now: a published `code` error with the upstream's wait, if any.
+    pub(crate) fn refuse_remote_work(&self, code: &'static str, retry_after_s: Option<u32>) {
+        *self.remote_refusal.lock().unwrap() = Some((code, retry_after_s));
+    }
+
     pub(crate) fn dispatched(&self) -> Vec<Dispatched> {
         self.dispatched.lock().unwrap().clone()
     }
@@ -195,6 +202,23 @@ fn successful_result(request_id: &str, item_index: u32, payload: serde_json::Val
     .unwrap();
     result.result_msgpack = rmp_serde::to_vec_named(&payload).unwrap();
     result
+}
+
+fn refused_result(
+    request_id: &str,
+    item_index: u32,
+    (code, retry_after_s): (&str, Option<u32>),
+) -> WorkResult {
+    serde_json::from_value(json!({
+        "work_item_id": format!("{request_id}.{item_index}"),
+        "request_id": request_id,
+        "item_index": item_index,
+        "success": false,
+        "error": "The upstream serving the model is busy, please retry",
+        "error_code": code,
+        "retry_after_s": retry_after_s,
+    }))
+    .unwrap()
 }
 
 fn terminal_chunk_collector(
@@ -300,7 +324,14 @@ impl WorkDispatcher for RecordingDispatcher {
             return Err(DispatchError::Other("private upstream failure".into()));
         }
         let request_id = "request-1".to_string();
-        let results = if endpoint == "score" {
+        let remote_refusal = *self.remote_refusal.lock().unwrap();
+        let results = if let Some(refusal) =
+            remote_refusal.filter(|_| target.bundle() == REMOTE_LANE.2)
+        {
+            (0..items.len().max(1) as u32)
+                .map(|index| refused_result(&request_id, index, refusal))
+                .collect()
+        } else if endpoint == "score" {
             vec![successful_result(
                 &request_id,
                 0,

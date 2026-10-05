@@ -1559,6 +1559,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_remote_only_request_its_upstream_cannot_serve_now_answers_503_with_the_wait() {
+        for (code, retry_after_s, retry_after) in [
+            ("QUEUE_FULL", Some(9), "9"),
+            ("MODEL_LOADING", Some(7), "7"),
+            ("QUEUE_FULL", None, "5"),
+            ("MODEL_LOADING", None, "5"),
+        ] {
+            let gateway = TestGateway::new(&[REMOTE_ENCODE_MODEL]).await;
+            gateway.add_worker("remote-1", REMOTE_LANE, &[]).await;
+            gateway.dispatcher.refuse_remote_work(code, retry_after_s);
+            let native = proxy_request(
+                State(Arc::clone(&gateway.state)),
+                json_request(
+                    "/v1/encode/acme/remote",
+                    json!({"items": [{"text": "hello"}]}),
+                ),
+                "encode",
+            )
+            .await;
+            let embeddings = proxy_openai_embeddings(
+                State(Arc::clone(&gateway.state)),
+                json_request(
+                    "/v1/embeddings",
+                    json!({"model": "acme/remote", "input": "hello"}),
+                ),
+            )
+            .await;
+            for response in [&native, &embeddings] {
+                assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "{code}");
+                assert_eq!(response.headers()["retry-after"], retry_after, "{code}");
+                assert_eq!(response.headers()["x-sie-error-code"], code);
+                assert_eq!(stamped(response), (Some("remote"), Some("team-sie")));
+            }
+            let body: serde_json::Value = serde_json::from_slice(
+                &axum::body::to_bytes(native.into_body(), 8192)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(body["error"]["code"], code);
+            assert_eq!(
+                gateway.dispatcher.dispatched(),
+                vec![dispatched("encode", REMOTE_LANE, "acme/remote"); 2]
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn generation_routes_name_the_profile_they_dispatch_to() {
         let gateway = gateway().await;
         let messages = json!([{"role": "user", "content": "hello"}]);

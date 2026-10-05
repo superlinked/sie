@@ -5212,7 +5212,7 @@ fn worker_error_retry_after(
             QUEUE_FULL_ERROR_CODE,
         )),
         MODEL_LOADING_ERROR_CODE => Some((
-            MODEL_LOADING_RETRY_AFTER.to_string(),
+            worker_hint().unwrap_or_else(|| MODEL_LOADING_RETRY_AFTER.to_string()),
             MODEL_LOADING_ERROR_CODE,
         )),
         LORA_LOADING_ERROR_CODE => Some((
@@ -27174,6 +27174,29 @@ mod tests {
         assert!(value["error"]["param"].is_null());
     }
 
+    #[tokio::test]
+    async fn test_model_loading_uses_the_workers_retry_hint() {
+        for (retry_after_s, retry_after) in [(Some(7), "7"), (None, MODEL_LOADING_RETRY_AFTER)] {
+            let err = StreamingDriverErr::WorkerError {
+                code: MODEL_LOADING_ERROR_CODE.to_string(),
+                message: "the upstream is not ready, please retry".to_string(),
+                param: None,
+                retry_after_s,
+                request_id: "req-loading".to_string(),
+                attempt_id: "att-loading".to_string(),
+            };
+
+            let response = build_streaming_error_response(&err);
+
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(response.headers().get("retry-after").unwrap(), retry_after);
+            assert_eq!(
+                response.headers().get("x-sie-error-code").unwrap(),
+                MODEL_LOADING_ERROR_CODE
+            );
+        }
+    }
+
     /// HTTP status mapping unit test — guards against an off-by-one
     /// edit that drops the 429 mapping without touching
     /// ``build_streaming_error_response``.
@@ -27256,9 +27279,13 @@ mod tests {
         );
         assert_eq!(
             worker_error_retry_after(MODEL_LOADING_ERROR_CODE, Some(12)),
+            Some(("12".to_string(), MODEL_LOADING_ERROR_CODE))
+        );
+        assert_eq!(
+            worker_error_retry_after(LORA_LOADING_ERROR_CODE, Some(12)),
             Some((
-                MODEL_LOADING_RETRY_AFTER.to_string(),
-                MODEL_LOADING_ERROR_CODE
+                LORA_LOADING_RETRY_AFTER.to_string(),
+                LORA_LOADING_ERROR_CODE
             )),
             "only the codes that take a worker hint use it"
         );
@@ -27282,6 +27309,13 @@ mod tests {
                 Some((
                     RESOURCE_EXHAUSTED_RETRY_AFTER.to_string(),
                     RESOURCE_EXHAUSTED_ERROR_CODE
+                ))
+            );
+            assert_eq!(
+                worker_error_retry_after(MODEL_LOADING_ERROR_CODE, Some(invalid)),
+                Some((
+                    MODEL_LOADING_RETRY_AFTER.to_string(),
+                    MODEL_LOADING_ERROR_CODE
                 ))
             );
         }
