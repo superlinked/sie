@@ -405,6 +405,29 @@ impl InferenceBackend for BackendRouter {
         .await
     }
 
+    async fn run_batch_with_numerical_admission_v1(
+        &self,
+        req: RunBatchRequest,
+        budget: Option<Duration>,
+    ) -> Result<BatchOutcome, BackendError> {
+        let model_id = req.model_id.clone();
+        let batch_size = req.items.len();
+        self.dispatch(
+            &model_id,
+            "run_batch_numerical_admission_v1",
+            batch_size,
+            move |backend| {
+                let req = req.clone();
+                async move {
+                    backend
+                        .run_batch_with_numerical_admission_v1(req, budget)
+                        .await
+                }
+            },
+        )
+        .await
+    }
+
     async fn drain(&self, deadline_ms: u64) {
         self.drain_all(deadline_ms).await;
     }

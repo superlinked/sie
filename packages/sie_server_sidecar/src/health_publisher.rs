@@ -209,8 +209,12 @@ pub struct HealthPublisherConfig {
     pub numerical_process_inventory: SharedNumericalInventory,
     /// Positive only when every backend child supports the method fence.
     pub execution_authority_v1: Arc<AtomicBool>,
+    /// Positive only when every backend child re-verifies numerical admissions.
+    pub numerical_admission_v1: Arc<AtomicBool>,
     /// The versioned pull consumer must also be running.
     pub authority_consumer_ready: Arc<AtomicBool>,
+    /// The admitted-work pull consumer must also be running.
+    pub admission_consumer_ready: Arc<AtomicBool>,
     /// Runtime pressure/capacity gauges mirrored into the heartbeat payload.
     pub runtime_state: Arc<RuntimeState>,
     /// How often to publish. Defaults to [`DEFAULT_PUBLISH_INTERVAL`].
@@ -243,6 +247,7 @@ struct WorkerStatusPayload<'a> {
     ready: bool,
     terminated: bool,
     supports_execution_authority_v1: bool,
+    supports_numerical_admission_v1: bool,
     gpu_count: i32,
     total_gpu_slots: i32,
     ready_gpu_slots: i32,
@@ -331,15 +336,19 @@ fn encode_payload(
             })
             .map(|(_, value)| value)
     });
+    let supports_execution_authority_v1 = ready
+        && !terminated
+        && !hash.is_empty()
+        && config.execution_authority_v1.load(Ordering::Acquire)
+        && config.authority_consumer_ready.load(Ordering::Acquire);
     let payload = WorkerStatusPayload {
         name: &config.worker_id,
         ready,
         terminated,
-        supports_execution_authority_v1: ready
-            && !terminated
-            && !hash.is_empty()
-            && config.execution_authority_v1.load(Ordering::Acquire)
-            && config.authority_consumer_ready.load(Ordering::Acquire),
+        supports_execution_authority_v1,
+        supports_numerical_admission_v1: supports_execution_authority_v1
+            && config.numerical_admission_v1.load(Ordering::Acquire)
+            && config.admission_consumer_ready.load(Ordering::Acquire),
         gpu_count: config.gpu_count,
         total_gpu_slots,
         ready_gpu_slots,
@@ -542,7 +551,9 @@ mod tests {
             loaded_models: Arc::new(RwLock::new(Vec::new())),
             numerical_process_inventory: Arc::new(RwLock::new(None)),
             execution_authority_v1: Arc::new(AtomicBool::new(false)),
+            numerical_admission_v1: Arc::new(AtomicBool::new(false)),
             authority_consumer_ready: Arc::new(AtomicBool::new(false)),
+            admission_consumer_ready: Arc::new(AtomicBool::new(false)),
             runtime_state: Arc::new(RuntimeState::new()),
             interval: DEFAULT_PUBLISH_INTERVAL,
         }
@@ -733,6 +744,30 @@ mod tests {
     }
 
     #[test]
+    fn numerical_admission_health_requires_authority_the_backend_method_and_its_consumer() {
+        for (authority, backend, consumer) in [
+            (true, true, true),
+            (true, false, true),
+            (false, true, true),
+            (true, true, false),
+        ] {
+            let c = cfg();
+            c.execution_authority_v1.store(authority, Ordering::Release);
+            c.authority_consumer_ready.store(true, Ordering::Release);
+            c.numerical_admission_v1.store(backend, Ordering::Release);
+            c.admission_consumer_ready
+                .store(consumer, Ordering::Release);
+            let payload: serde_json::Value =
+                serde_json::from_slice(&encode_payload(&c, true, false).unwrap()).unwrap();
+            assert_eq!(
+                payload["supports_numerical_admission_v1"],
+                authority && backend && consumer,
+                "{authority} {backend} {consumer}"
+            );
+        }
+    }
+
+    #[test]
     fn payload_roundtrips_to_gateway_shape() {
         // Serialises to the exact field set
         // `WorkerStatusMessage::deserialize` reads — every
@@ -745,6 +780,7 @@ mod tests {
                 ready: true,
                 terminated: false,
                 supports_execution_authority_v1: false,
+                supports_numerical_admission_v1: false,
                 gpu_count: c.gpu_count,
                 total_gpu_slots: 1,
                 ready_gpu_slots: 1,
@@ -793,6 +829,7 @@ mod tests {
                 ready: true,
                 terminated: false,
                 supports_execution_authority_v1: false,
+                supports_numerical_admission_v1: false,
                 gpu_count: c.gpu_count,
                 total_gpu_slots: 1,
                 ready_gpu_slots: 1,

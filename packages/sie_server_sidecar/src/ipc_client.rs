@@ -56,7 +56,8 @@ use crate::ipc_types::{
     METHOD_PROCESS_ENCODE_BATCH, METHOD_PROCESS_EXTRACT_BATCH, METHOD_PROCESS_GENERATE,
     METHOD_PROCESS_GENERATE_WITH_EXECUTION_AUTHORITY_V1, METHOD_PROCESS_SCORE_BATCH,
     METHOD_REPLACE_MODEL_CONFIGS, METHOD_RUN_BATCH, METHOD_RUN_BATCH_WITH_EXECUTION_AUTHORITY_V1,
-    METHOD_SET_PINNED_MODELS, METHOD_SIGNAL_GENERATE_CANCEL, METHOD_WORKER_CAPABILITIES,
+    METHOD_RUN_BATCH_WITH_NUMERICAL_ADMISSION_V1, METHOD_SET_PINNED_MODELS,
+    METHOD_SIGNAL_GENERATE_CANCEL, METHOD_WORKER_CAPABILITIES,
 };
 use crate::log_util::ErrChain;
 use crate::observability::metrics::SidecarTelemetry;
@@ -1118,6 +1119,19 @@ impl IpcClient {
         .await
     }
 
+    pub async fn run_batch_with_numerical_admission_v1(
+        &self,
+        req: RunBatchRequest,
+        budget: Option<Duration>,
+    ) -> Result<BatchOutcome, IpcError> {
+        self.call_with_timeout(
+            METHOD_RUN_BATCH_WITH_NUMERICAL_ADMISSION_V1,
+            req,
+            self.run_batch_timeout(budget),
+        )
+        .await
+    }
+
     fn run_batch_timeout(&self, budget: Option<Duration>) -> Duration {
         budget.map_or(self.request_timeout, |budget| {
             budget.max(self.request_timeout)
@@ -1399,6 +1413,20 @@ mod tests {
             .await;
         assert!(matches!(result, Err(IpcError::Server(_))));
         let result = client
+            .run_batch_with_numerical_admission_v1(
+                RunBatchRequest {
+                    model_id: "m".into(),
+                    batch_id: 2,
+                    lora_key: String::new(),
+                    total_cost: 1,
+                    items: Vec::new(),
+                    accepts_batched_f16_multivectors: true,
+                },
+                None,
+            )
+            .await;
+        assert!(matches!(result, Err(IpcError::Server(_))));
+        let result = client
             .process_generate_with_execution_authority_v1(
                 ProcessGenerateRequest {
                     model_id: "m".into(),
@@ -1412,6 +1440,7 @@ mod tests {
             *calls.lock().unwrap(),
             [
                 METHOD_RUN_BATCH_WITH_EXECUTION_AUTHORITY_V1,
+                METHOD_RUN_BATCH_WITH_NUMERICAL_ADMISSION_V1,
                 METHOD_PROCESS_GENERATE_WITH_EXECUTION_AUTHORITY_V1,
             ]
         );

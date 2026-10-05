@@ -17,6 +17,7 @@ from sie_server.config.model import (
     ProfileConfig,
     Tasks,
 )
+from sie_server.core.inference_output import SparseVector
 from sie_server.core.load_errors import LoadErrorClass, LoadFailure
 from sie_server.core.registry import ModelRegistry
 
@@ -363,6 +364,46 @@ class TestEncodeEndpoint:
         assert item["dense"] is not None
         assert "multivector" not in item
         muvera.transform.assert_called_once()
+
+    def test_routed_smve_profile_returns_sparse_from_multivectors(
+        self, client: TestClient, mock_registry: MagicMock, mock_adapter: MagicMock
+    ) -> None:
+        """An SMVE route asks the adapter for multivectors and returns the postprocessor's sparse vectors."""
+        mock_registry.get_config.return_value = ModelConfig(
+            sie_id="test-model:smve",
+            hf_id="org/test",
+            tasks=Tasks(encode=EncodeTask(multivector=EmbeddingDim(dim=128))),
+            profiles={
+                "default": ProfileConfig(
+                    adapter_path="test:TestAdapter",
+                    max_batch_tokens=8192,
+                    adapter_options=AdapterOptions(runtime={"smve": {}, "output_types": ["sparse"]}),
+                )
+            },
+        )
+        smve = MagicMock()
+
+        def _postprocess(output: Any, *, is_query: bool) -> None:
+            del is_query
+            output.sparse = [
+                SparseVector(indices=np.array([3, 9], dtype=np.int32), values=np.array([0.5, 0.25], dtype=np.float32))
+            ]
+
+        smve.transform.side_effect = _postprocess
+        mock_registry.postprocessor_registry.register("test-model:smve", {"smve": smve})
+
+        response = client.post(
+            "/v1/encode/test-model:smve",
+            json={"items": [{"text": "Hello"}], "params": {"output_types": ["sparse"]}},
+            headers=JSON_HEADERS,
+        )
+
+        assert response.status_code == 200
+        assert mock_adapter.encode.call_args.args[1] == ["multivector"]
+        item = response.json()["items"][0]
+        assert item["sparse"] is not None
+        assert "multivector" not in item
+        smve.transform.assert_called_once()
 
     def test_default_profile_can_enable_dense_via_muvera(
         self,

@@ -601,7 +601,7 @@ pub async fn ensure_worker_stream_and_consumer(
     js: &JsContext,
     config: &WorkerConfig,
 ) -> Result<PullConsumer, NatsSetupError> {
-    ensure_direct_stream_and_consumer(js, config, false).await
+    ensure_direct_stream_and_consumer(js, config, DirectContract::Worker).await
 }
 
 /// Separate, bounded durable authority stream; older worker reconciliation
@@ -610,26 +610,47 @@ pub async fn ensure_authority_stream_and_consumer(
     js: &JsContext,
     config: &WorkerConfig,
 ) -> Result<PullConsumer, NatsSetupError> {
-    ensure_direct_stream_and_consumer(js, config, true).await
+    ensure_direct_stream_and_consumer(js, config, DirectContract::ExecutionAuthorityV1).await
+}
+
+/// Admitted numerical work has its own stream and durable, which only a
+/// sidecar with the admission fence creates. A sidecar without the fence,
+/// including one that consumes the authority stream, never receives it.
+pub async fn ensure_admission_stream_and_consumer(
+    js: &JsContext,
+    config: &WorkerConfig,
+) -> Result<PullConsumer, NatsSetupError> {
+    ensure_direct_stream_and_consumer(js, config, DirectContract::NumericalAdmissionV1).await
+}
+
+#[derive(Clone, Copy)]
+enum DirectContract {
+    Worker,
+    ExecutionAuthorityV1,
+    NumericalAdmissionV1,
 }
 
 async fn ensure_direct_stream_and_consumer(
     js: &JsContext,
     config: &WorkerConfig,
-    authority_v1: bool,
+    contract: DirectContract,
 ) -> Result<PullConsumer, NatsSetupError> {
-    let (stream_name, subject, consumer_name) = if authority_v1 {
-        (
-            config.authority_stream_name(),
-            config.authority_subject_filter(),
-            config.authority_consumer_name(),
-        )
-    } else {
-        (
+    let (stream_name, subject, consumer_name) = match contract {
+        DirectContract::Worker => (
             config.worker_stream_name(),
             config.worker_subject_filter(),
             config.worker_consumer_name(),
-        )
+        ),
+        DirectContract::ExecutionAuthorityV1 => (
+            config.authority_stream_name(),
+            config.authority_subject_filter(),
+            config.authority_consumer_name(),
+        ),
+        DirectContract::NumericalAdmissionV1 => (
+            config.admission_stream_name(),
+            config.admission_subject_filter(),
+            config.admission_consumer_name(),
+        ),
     };
     let desired_max_age = Duration::from_secs(generation_stream_max_age_secs());
 

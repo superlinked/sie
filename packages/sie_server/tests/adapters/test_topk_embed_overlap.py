@@ -41,10 +41,16 @@ class TestTransferDtype:
 
     @pytest.mark.parametrize(
         "options",
-        [{}, {"output_dtype": "float32"}, {"output_dtype": "int8"}, {"output_dtype": "float16", "muvera": {}}],
+        [
+            {},
+            {"output_dtype": "float32"},
+            {"output_dtype": "int8"},
+            {"output_dtype": "float16", "muvera": {}},
+            {"output_dtype": "float16", "smve": {}},
+        ],
     )
     def test_everything_else_stays_float32(self, adapter: TopkEmbedAdapter, options: dict[str, Any]) -> None:
-        # MUVERA reads the multi-vectors after the adapter, so they stay at full precision.
+        # MUVERA and SMVE read the multi-vectors after the adapter, so they stay at full precision.
         output = adapter.encode(TEXTS, ["multivector"], options=options)
         assert output.multivector is not None
         assert all(vector.dtype == np.float32 for vector in output.multivector)

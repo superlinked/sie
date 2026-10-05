@@ -63,9 +63,9 @@ use crate::dispatcher::{Dispatcher, QueuedMessage};
 use crate::latency::{FetchExpiryController, LatencyTracker};
 use crate::log_util::ErrChain;
 use crate::nats_consumer::{
-    connect, ensure_authority_stream_and_consumer, ensure_stream_and_consumer,
-    ensure_worker_stream_and_consumer, reconcile_stream_and_consumer,
-    reconcile_worker_stream_and_consumer, work_cancel_tombstone_ttl, NatsConsumer,
+    connect, ensure_admission_stream_and_consumer, ensure_authority_stream_and_consumer,
+    ensure_stream_and_consumer, ensure_worker_stream_and_consumer, reconcile_stream_and_consumer,
+    reconcile_worker_stream_and_consumer, work_cancel_tombstone_ttl, NatsConsumer, NatsSetupError,
 };
 use crate::payload_store::{create_payload_store, with_telemetry as payload_store_with_telemetry};
 use crate::pool_admission::PoolAdmissionGate;
@@ -572,7 +572,9 @@ pub async fn run(config: WorkerConfig) -> anyhow::Result<()> {
             loaded_models: Arc::clone(&loaded_models),
             numerical_process_inventory,
             execution_authority_v1: worker_pool.execution_authority_v1(),
+            numerical_admission_v1: worker_pool.numerical_admission_v1(),
             authority_consumer_ready: Arc::clone(&generation_direct_dispatch.authority_active),
+            admission_consumer_ready: Arc::clone(&generation_direct_dispatch.admission_active),
             runtime_state: Arc::clone(&runtime_state),
             interval: Duration::from_millis(config.health_publish_interval_ms),
         })
@@ -972,6 +974,7 @@ pub async fn run_local(config: WorkerConfig) -> anyhow::Result<()> {
 struct GenerationDirectHandles {
     pull: Option<JoinHandle<()>>,
     authority_pull: Option<JoinHandle<()>>,
+    admission_pull: Option<JoinHandle<()>>,
     generation_cancel: Option<JoinHandle<()>>,
     batch_cancel: Option<JoinHandle<()>>,
     work_cancel: Option<JoinHandle<()>>,
@@ -994,9 +997,40 @@ struct GenerationDirectDispatch {
     worker_pool: Arc<AdapterWorkerPool>,
     active: Arc<AtomicBool>,
     authority_active: Arc<AtomicBool>,
+    admission_active: Arc<AtomicBool>,
     batch_cancel_state: BatchCancelState,
     request_cancel_state: RequestCancelState,
     handles: Mutex<GenerationDirectHandles>,
+}
+
+#[derive(Clone, Copy)]
+enum VersionedConsumer {
+    ExecutionAuthorityV1,
+    NumericalAdmissionV1,
+}
+
+impl VersionedConsumer {
+    fn label(self) -> &'static str {
+        match self {
+            Self::ExecutionAuthorityV1 => "execution authority",
+            Self::NumericalAdmissionV1 => "numerical admission",
+        }
+    }
+
+    async fn ensure(
+        self,
+        jetstream: &async_nats::jetstream::Context,
+        config: &WorkerConfig,
+    ) -> Result<async_nats::jetstream::consumer::PullConsumer, NatsSetupError> {
+        match self {
+            Self::ExecutionAuthorityV1 => {
+                ensure_authority_stream_and_consumer(jetstream, config).await
+            }
+            Self::NumericalAdmissionV1 => {
+                ensure_admission_stream_and_consumer(jetstream, config).await
+            }
+        }
+    }
 }
 
 impl GenerationDirectDispatch {
@@ -1027,6 +1061,7 @@ impl GenerationDirectDispatch {
             worker_pool,
             active,
             authority_active: Arc::new(AtomicBool::new(false)),
+            admission_active: Arc::new(AtomicBool::new(false)),
             batch_cancel_state,
             request_cancel_state,
             handles: Mutex::new(GenerationDirectHandles::default()),
@@ -1109,54 +1144,69 @@ impl GenerationDirectDispatch {
             Arc::clone(&self.shutdown),
         );
 
-        let authority_dispatcher = Arc::clone(&self.dispatcher);
-        let authority_shutdown = Arc::clone(&self.shutdown);
-        let authority_fetch_ctrl = self.fetch_ctrl.clone();
-        let authority_latency_tracker = Arc::clone(&self.latency_tracker);
-        let authority_pool_admission = self.pool_admission.clone();
-        let authority_active = Arc::clone(&self.authority_active);
-        let authority_jetstream = self.jetstream.clone();
-        let authority_config = self.config.clone();
-        let authority_pull = tokio::spawn(async move {
-            // Authority setup is independent of the ordinary pull loops. Keep
-            // its capability closed and retry boundedly while legacy work runs.
-            let authority_consumer = loop {
-                let result = tokio::select! {
-                    _ = authority_shutdown.wait() => return,
-                    result = ensure_authority_stream_and_consumer(&authority_jetstream, &authority_config) => result,
-                };
-                match result {
-                    Ok(consumer) => break consumer,
-                    Err(error) => {
-                        warn!(%error, "authority consumer setup failed; retrying without blocking ordinary dispatch")
-                    }
-                }
-                tokio::select! {
-                    _ = authority_shutdown.wait() => return,
-                    _ = tokio::time::sleep(Duration::from_secs(5)) => {},
-                }
-            };
-            let _ready = AuthorityConsumerReady(Arc::clone(&authority_active));
-            authority_active.store(true, Ordering::Release);
-            run_pull_loop(
-                &NatsConsumer::new(authority_consumer),
-                authority_dispatcher,
-                authority_shutdown,
-                &authority_fetch_ctrl,
-                authority_latency_tracker,
-                authority_pool_admission,
-            )
-            .await;
-        });
+        let authority_pull = self.spawn_versioned_pull(
+            VersionedConsumer::ExecutionAuthorityV1,
+            Arc::clone(&self.authority_active),
+        );
+        let admission_pull = self.spawn_versioned_pull(
+            VersionedConsumer::NumericalAdmissionV1,
+            Arc::clone(&self.admission_active),
+        );
 
         let mut handles = self.handles.lock().await;
         handles.pull = Some(pull);
         handles.authority_pull = Some(authority_pull);
+        handles.admission_pull = Some(admission_pull);
         handles.generation_cancel = Some(generation_cancel);
         handles.batch_cancel = Some(batch_cancel);
         handles.work_cancel = Some(work_cancel);
         info!(reason, "worker direct-dispatch activated");
         Ok(true)
+    }
+
+    fn spawn_versioned_pull(
+        &self,
+        contract: VersionedConsumer,
+        active: Arc<AtomicBool>,
+    ) -> JoinHandle<()> {
+        let dispatcher = Arc::clone(&self.dispatcher);
+        let shutdown = Arc::clone(&self.shutdown);
+        let fetch_ctrl = self.fetch_ctrl.clone();
+        let latency_tracker = Arc::clone(&self.latency_tracker);
+        let pool_admission = self.pool_admission.clone();
+        let jetstream = self.jetstream.clone();
+        let config = self.config.clone();
+        tokio::spawn(async move {
+            // Versioned setup is independent of the ordinary pull loops. Keep
+            // its capability closed and retry boundedly while legacy work runs.
+            let consumer = loop {
+                let result = tokio::select! {
+                    _ = shutdown.wait() => return,
+                    result = contract.ensure(&jetstream, &config) => result,
+                };
+                match result {
+                    Ok(consumer) => break consumer,
+                    Err(error) => {
+                        warn!(%error, contract = contract.label(), "versioned consumer setup failed; retrying without blocking ordinary dispatch")
+                    }
+                }
+                tokio::select! {
+                    _ = shutdown.wait() => return,
+                    _ = tokio::time::sleep(Duration::from_secs(5)) => {},
+                }
+            };
+            let _ready = AuthorityConsumerReady(Arc::clone(&active));
+            active.store(true, Ordering::Release);
+            run_pull_loop(
+                &NatsConsumer::new(consumer),
+                dispatcher,
+                shutdown,
+                &fetch_ctrl,
+                latency_tracker,
+                pool_admission,
+            )
+            .await;
+        })
     }
 
     async fn abort_and_join(&self) {
@@ -1165,19 +1215,17 @@ impl GenerationDirectDispatch {
             GenerationDirectHandles {
                 pull: guard.pull.take(),
                 authority_pull: guard.authority_pull.take(),
+                admission_pull: guard.admission_pull.take(),
                 generation_cancel: guard.generation_cancel.take(),
                 batch_cancel: guard.batch_cancel.take(),
                 work_cancel: guard.work_cancel.take(),
             }
         };
 
-        if let Some(h) = handles.pull {
-            if !h.is_finished() {
-                h.abort();
-            }
-            let _ = h.await;
-        }
-        if let Some(h) = handles.authority_pull {
+        for h in [handles.pull, handles.authority_pull, handles.admission_pull]
+            .into_iter()
+            .flatten()
+        {
             if !h.is_finished() {
                 h.abort();
             }
@@ -1242,6 +1290,9 @@ fn spawn_nats_consumer_reconciler(
                 }
                 if let Err(e) = ensure_authority_stream_and_consumer(&jetstream, &config).await {
                     warn!(error = %e, "nats-consumer: execution authority stream/durable reconcile failed");
+                }
+                if let Err(e) = ensure_admission_stream_and_consumer(&jetstream, &config).await {
+                    warn!(error = %e, "nats-consumer: numerical admission stream/durable reconcile failed");
                 }
             }
         }

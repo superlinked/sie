@@ -1899,6 +1899,13 @@ def _with_images(units: UnitCounts | None, image_count: int | None) -> UnitCount
     )
 
 
+def _with_input_tokens(units: UnitCounts | None, token_count: int) -> UnitCounts:
+    """Set an authoritative input-token count while preserving other units."""
+    if units is None:
+        return UnitCounts(input_tokens=token_count)
+    return msgspec.structs.replace(units, input_tokens=token_count)
+
+
 def _with_pages(units: UnitCounts | None, page_count: int | None) -> UnitCounts | None:
     """Fold an authoritative page count into an existing ``UnitCounts`` — the §7
     canonical parse/OCR dimension ("$ per 1k pages") — minting one when only
@@ -2194,6 +2201,11 @@ def _extract_success_outcome(
         # Adapter returned no results for a single-item request — surface an
         # error instead of publishing an object the client reads as success.
         return _error_outcome(bi, _INFERENCE_ERROR_CODE, "adapter returned no extraction results")
+    error = extraction_results[0].get("error")
+    if isinstance(error, dict) and error.get("code") == ErrorCode.INPUT_TOO_LONG.value:
+        # Length-rejected items have zero billable input tokens, even when an
+        # adapter reports a count or cannot meter the valid siblings.
+        units = _with_input_tokens(units, 0)
     item_id = server_item.id if server_item.id is not None else f"item-{bi.item_index}"
     result_msgpack = pack_msgpack({**extraction_results[0], "id": item_id}, use_bin_type=True)
 

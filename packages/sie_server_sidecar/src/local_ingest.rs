@@ -1561,6 +1561,14 @@ fn validate_work_items_with_limit(
                     .to_string(),
             );
         }
+        if wi.numerical_admission_sha256.is_some()
+            || (wi.fallback_reason.is_some() && matches!(wi.operation.as_str(), "encode" | "score"))
+        {
+            return Err(
+                "InvalidTransportBinding: numerical admission is not supported on the local-ingest lane"
+                    .to_string(),
+            );
+        }
         if wi.model_id != body.model {
             return Err(format!(
                 "InvalidTransportBinding: model_id {:?} does not match envelope model {:?}",
@@ -1872,6 +1880,7 @@ mod tests {
             timestamp: 0.0,
             deadline: None,
             fallback_reason: None,
+            numerical_admission_sha256: None,
         }
     }
 
@@ -2058,11 +2067,25 @@ mod tests {
             .unwrap_err()
             .contains("engine"));
 
-        let mut wrong_hash = item;
+        let mut wrong_hash = item.clone();
         wrong_hash.bundle_config_hash = "other-hash".into();
         assert!(validate_work_items(&body, &[wrong_hash])
             .unwrap_err()
             .contains("bundle_config_hash"));
+
+        let mut admitted = item.clone();
+        admitted.numerical_admission_sha256 = Some("a".repeat(64));
+        assert_eq!(
+            validate_work_items(&body, &[admitted]).unwrap_err(),
+            "InvalidTransportBinding: numerical admission is not supported on the local-ingest lane"
+        );
+
+        let mut bridged = item;
+        bridged.fallback_reason = Some("provisioning".into());
+        assert_eq!(
+            validate_work_items(&body, &[bridged]).unwrap_err(),
+            "InvalidTransportBinding: numerical admission is not supported on the local-ingest lane"
+        );
     }
 
     #[test]
@@ -2447,6 +2470,7 @@ mod tests {
             timestamp: 0.0,
             deadline: None,
             fallback_reason: None,
+            numerical_admission_sha256: None,
         };
         let items = rmp_serde::to_vec_named(&vec![work_item]).unwrap();
         let request = RequestEnvelope {

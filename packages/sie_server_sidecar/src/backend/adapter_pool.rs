@@ -153,6 +153,7 @@ impl AdapterWorkerChild {
 /// generation cancel fanout.
 pub struct AdapterWorkerPool {
     execution_authority_v1: Arc<AtomicBool>,
+    numerical_admission_v1: Arc<AtomicBool>,
     children: Vec<Arc<AdapterWorkerChild>>,
     placements: Mutex<HashMap<String, usize>>,
     pinned_models: Mutex<HashSet<String>>,
@@ -198,6 +199,7 @@ impl AdapterWorkerPool {
         );
         let pool = Arc::new(Self {
             execution_authority_v1: Arc::new(AtomicBool::new(false)),
+            numerical_admission_v1: Arc::new(AtomicBool::new(false)),
             children,
             placements: Mutex::new(HashMap::new()),
             pinned_models: Mutex::new(HashSet::new()),
@@ -225,6 +227,10 @@ impl AdapterWorkerPool {
         Arc::clone(&self.execution_authority_v1)
     }
 
+    pub fn numerical_admission_v1(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.numerical_admission_v1)
+    }
+
     pub fn pinned_assignment_revision(&self) -> u64 {
         self.pinned_assignment_revision.load(Ordering::Acquire)
     }
@@ -247,23 +253,36 @@ impl AdapterWorkerPool {
             } else {
                 child.ready.store(false, Ordering::Release);
             }
-            let supports_authority = result.as_ref().is_ok_and(|resp| resp.ready)
-                && tokio::time::timeout(Duration::from_secs(2), child.ipc.worker_capabilities())
+            let capabilities = if result.as_ref().is_ok_and(|resp| resp.ready) {
+                tokio::time::timeout(Duration::from_secs(2), child.ipc.worker_capabilities())
                     .await
                     .ok()
                     .and_then(Result::ok)
-                    .is_some_and(|resp| resp.supports_execution_authority_v1);
-            (child.index, result, supports_authority)
+            } else {
+                None
+            };
+            let supports_authority = capabilities
+                .as_ref()
+                .is_some_and(|resp| resp.supports_execution_authority_v1);
+            let supports_admission = supports_authority
+                && capabilities
+                    .as_ref()
+                    .is_some_and(|resp| resp.supports_numerical_admission_v1);
+            (child.index, result, supports_authority, supports_admission)
         }))
         .await;
+        let quarantined = self.config_quarantined.load(Ordering::Acquire);
         self.execution_authority_v1.store(
-            !self.config_quarantined.load(Ordering::Acquire)
-                && results.iter().all(|(_, _, supports)| *supports),
+            !quarantined && results.iter().all(|(_, _, supports, _)| *supports),
+            Ordering::Release,
+        );
+        self.numerical_admission_v1.store(
+            !quarantined && results.iter().all(|(_, _, _, supports)| *supports),
             Ordering::Release,
         );
         let out = results
             .into_iter()
-            .map(|(index, result, _)| (index, result))
+            .map(|(index, result, _, _)| (index, result))
             .collect();
         self.runtime_state
             .worker_gpu_slots_ready
@@ -274,6 +293,7 @@ impl AdapterWorkerPool {
     pub async fn worker_capabilities(&self) -> Result<WorkerCapabilitiesResponse, IpcError> {
         let mut combined = WorkerCapabilitiesResponse {
             supports_execution_authority_v1: true,
+            supports_numerical_admission_v1: true,
             ..Default::default()
         };
         let mut any_success = false;
@@ -283,6 +303,8 @@ impl AdapterWorkerPool {
                 Ok(resp) => {
                     combined.supports_execution_authority_v1 &=
                         resp.supports_execution_authority_v1;
+                    combined.supports_numerical_admission_v1 &=
+                        resp.supports_numerical_admission_v1;
                     any_success = true;
                     self.mark_child_ready_from_health_success(child);
                     combined.has_generation_models |= resp.has_generation_models;
@@ -294,6 +316,7 @@ impl AdapterWorkerPool {
                 }
                 Err(e) => {
                     combined.supports_execution_authority_v1 = false;
+                    combined.supports_numerical_admission_v1 = false;
                     child.ready.store(false, Ordering::Release);
                     last_err = Some(e);
                 }
@@ -1047,6 +1070,20 @@ impl InferenceBackend for AdapterWorkerPool {
         .map_err(map_ipc_error)
     }
 
+    async fn run_batch_with_numerical_admission_v1(
+        &self,
+        req: RunBatchRequest,
+        budget: Option<Duration>,
+    ) -> Result<BatchOutcome, BackendError> {
+        let model_id = req.model_id.clone();
+        let child = self.child_for_model(&model_id);
+        self.run_child_batch(model_id, child, |ipc| async move {
+            ipc.run_batch_with_numerical_admission_v1(req, budget).await
+        })
+        .await
+        .map_err(map_ipc_error)
+    }
+
     async fn drain(&self, deadline_ms: u64) {
         for (index, result) in self.drain_all(deadline_ms).await {
             match result {
@@ -1147,6 +1184,15 @@ mod tests {
         supports: Arc<AtomicBool>,
         gate: Option<Arc<CapabilityProbeGate>>,
     ) -> tokio::task::JoinHandle<()> {
+        spawn_admission_worker(path, supports, Arc::new(AtomicBool::new(false)), gate).await
+    }
+
+    async fn spawn_admission_worker(
+        path: PathBuf,
+        supports: Arc<AtomicBool>,
+        admits: Arc<AtomicBool>,
+        gate: Option<Arc<CapabilityProbeGate>>,
+    ) -> tokio::task::JoinHandle<()> {
         let listener = UnixListener::bind(path).unwrap();
         tokio::spawn(async move {
             loop {
@@ -1154,6 +1200,7 @@ mod tests {
                     return;
                 };
                 let supports = Arc::clone(&supports);
+                let admits = Arc::clone(&admits);
                 let gate = gate.clone();
                 tokio::spawn(async move {
                     loop {
@@ -1176,15 +1223,20 @@ mod tests {
                             }
                         }
                         let capable = supports.load(Ordering::Acquire);
+                        let admitting = admits.load(Ordering::Acquire);
                         let body = match method {
                             "Ping" => Some(
                                 serde_json::json!({"timestamp_ms": 0.0, "worker_id": "child", "ready": true}),
                             ),
-                            "WorkerCapabilities" if capable => {
-                                Some(serde_json::json!({"supports_execution_authority_v1": true}))
-                            }
+                            "WorkerCapabilities" if capable => Some(serde_json::json!({
+                                "supports_execution_authority_v1": true,
+                                "supports_numerical_admission_v1": admitting,
+                            })),
                             "WorkerCapabilities" => Some(serde_json::json!({})),
                             "RunBatchWithExecutionAuthorityV1" if capable => {
+                                Some(serde_json::json!({"outcomes": []}))
+                            }
+                            "RunBatchWithNumericalAdmissionV1" if capable && admitting => {
                                 Some(serde_json::json!({"outcomes": []}))
                             }
                             _ => None,
@@ -1495,6 +1547,75 @@ mod tests {
                 .unwrap()
                 .supports_execution_authority_v1
         );
+        new_server.abort();
+        old_server.abort();
+    }
+
+    #[tokio::test]
+    async fn every_child_must_support_numerical_admission_and_old_replacement_cannot_downgrade() {
+        let dir = tempfile::Builder::new()
+            .prefix("sie-n-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let new_path = dir.path().join("new.sock");
+        let old_path = dir.path().join("old.sock");
+        let old_admits = Arc::new(AtomicBool::new(false));
+        let new_server = spawn_admission_worker(
+            new_path.clone(),
+            Arc::new(AtomicBool::new(true)),
+            Arc::new(AtomicBool::new(true)),
+            None,
+        )
+        .await;
+        let old_server = spawn_admission_worker(
+            old_path.clone(),
+            Arc::new(AtomicBool::new(true)),
+            Arc::clone(&old_admits),
+            None,
+        )
+        .await;
+        let pool = pool_with_paths(&[new_path, old_path]);
+        pool.ping_all(0.0).await;
+        assert!(pool.execution_authority_v1().load(Ordering::Acquire));
+        assert!(!pool.numerical_admission_v1().load(Ordering::Acquire));
+        assert!(
+            !pool
+                .worker_capabilities()
+                .await
+                .unwrap()
+                .supports_numerical_admission_v1
+        );
+        old_admits.store(true, Ordering::Release);
+        pool.ping_all(0.0).await;
+        assert!(pool.numerical_admission_v1().load(Ordering::Acquire));
+        assert!(
+            pool.worker_capabilities()
+                .await
+                .unwrap()
+                .supports_numerical_admission_v1
+        );
+
+        pool.placements.lock().unwrap().insert("m".into(), 1);
+        let request = || RunBatchRequest {
+            model_id: "m".into(),
+            batch_id: 1,
+            lora_key: String::new(),
+            total_cost: 1,
+            items: Vec::new(),
+            accepts_batched_f16_multivectors: true,
+        };
+        assert!(pool
+            .run_batch_with_numerical_admission_v1(request(), None)
+            .await
+            .is_ok());
+        old_admits.store(false, Ordering::Release);
+        let result = pool
+            .run_batch_with_numerical_admission_v1(request(), None)
+            .await;
+        assert!(matches!(result, Err(BackendError::Transient(_))));
+        pool.ping_all(0.0).await;
+        assert!(pool.execution_authority_v1().load(Ordering::Acquire));
+        assert!(!pool.numerical_admission_v1().load(Ordering::Acquire));
         new_server.abort();
         old_server.abort();
     }

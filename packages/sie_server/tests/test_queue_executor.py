@@ -900,6 +900,40 @@ class TestProcessEncodeBatch:
         assert outcome.outcomes[0].result_msgpack is not None
         assert msgpack.unpackb(outcome.outcomes[0].result_msgpack, raw=False) == {"dense": [0.1, 0.2]}
 
+    @pytest.mark.parametrize(
+        ("model_file", "route"),
+        [
+            ("topk-io__Iso-ModernColBERT.yaml", "topk-io/Iso-ModernColBERT:smve"),
+            ("topk-io__topk-embed-v1-small.yaml", "topk-io/topk-embed-v1-small:smve"),
+            ("topk-io__topk-embed-v1-xsmall.yaml", "topk-io/topk-embed-v1-xsmall:smve"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_smve_route_translates_managed_adapter_output(self, model_file: str, route: str) -> None:
+        """SMVE routes authorize sparse while adapters emit multivectors."""
+        config = _load_profile_variant(model_file, route)
+        assert config.synthetic_profile_variant_source is not None
+        reg = _make_registry()
+        reg.get_config.return_value = config
+        ex = QueueExecutor(reg)
+        sparse = {"sparse": {"indices": [3, 9], "values": [0.5, 0.25]}}
+
+        with patch(
+            "sie_server.core.encode_pipeline.EncodePipeline.run_encode",
+            new_callable=AsyncMock,
+            return_value=([sparse], RequestTiming()),
+        ) as mock_encode:
+            outcome = await ex.process_encode_batch(ProcessEncodeBatchRequest(model_id=route, items=[_encode_item()]))
+
+        call = mock_encode.await_args.kwargs
+        assert call["model"] == route
+        assert call["output_types"] == ["multivector"]
+        assert call["response_output_types"] == ["sparse"]
+        assert outcome.outcomes[0].disposition == "publish_and_ack"
+        assert outcome.outcomes[0].result_msgpack is not None
+        # The queue path re-encodes the sparse vector in its wire format.
+        assert set(msgpack.unpackb(outcome.outcomes[0].result_msgpack, raw=False)) == {"sparse"}
+
     @pytest.mark.asyncio
     async def test_request_options_cannot_self_authorize_managed_output(self) -> None:
         """Caller options cannot expand the managed route's output allowlist."""

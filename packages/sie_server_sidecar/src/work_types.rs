@@ -105,6 +105,14 @@ pub struct WorkItem {
     /// are published as refusals and ACKed after successful publication.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback_reason: Option<String>,
+    /// Set by the gateway on an encode or score item it sent to a remote
+    /// profile on the strength of a numerical admission; names that
+    /// admission's digest. Such an item runs only through the numerical
+    /// admission method, whose backend re-verifies the digest first, and a
+    /// NakRetry outcome is published as a refusal like a fallback attempt's,
+    /// because redelivery to the pinned worker cannot restore the admission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub numerical_admission_sha256: Option<String>,
 }
 
 fn deserialize_lenient_seconds<'de, D>(deserializer: D) -> Result<Option<f64>, D::Error>
@@ -292,6 +300,7 @@ mod tests {
             timestamp: 1_700_000_000.0,
             deadline: None,
             fallback_reason: None,
+            numerical_admission_sha256: None,
         }
     }
 

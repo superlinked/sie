@@ -115,6 +115,7 @@ class ColBERTAdapter(BaseAdapter):
         query_expansion: bool = True,
         doc_punctuation_skiplist: bool = True,
         muvera_config: dict[str, Any] | None = None,
+        smve_config: dict[str, Any] | None = None,
         revision: str | None = None,
         code_revision: str | None = None,
         require_standalone_projection: bool = False,
@@ -147,6 +148,8 @@ class ColBERTAdapter(BaseAdapter):
                 not). Default: True.
             muvera_config: MUVERA configuration dict with keys like num_repetitions,
                 num_simhash_projections, normalize. Used for FDE postprocessing.
+            smve_config: SMVE configuration dict with keys like width and k. Used for
+                sparse (SMVE) postprocessing.
             revision: Optional HuggingFace revision/branch/commit SHA to pin when
                 loading the tokenizer, config, model, and Dense-chain/projection
                 artifacts. Forwarded to ``from_pretrained(..., revision=...)``.
@@ -177,6 +180,7 @@ class ColBERTAdapter(BaseAdapter):
         self._query_expansion = query_expansion
         self._doc_punctuation_skiplist = doc_punctuation_skiplist
         self._muvera_config = muvera_config
+        self._smve_config = smve_config
 
         self._model: PreTrainedModel | None = None
         self._tokenizer: PreTrainedTokenizerFast | None = None
@@ -1232,20 +1236,28 @@ class ColBERTAdapter(BaseAdapter):
         return texts
 
     def get_postprocessors(self) -> dict[str, Any] | None:
-        """Return MUVERA postprocessor for converting multivector to dense.
+        """Return the MUVERA (multivector to dense) and SMVE (multivector to sparse) postprocessors.
 
         MUVERA enables using ColBERT embeddings with standard HNSW search
         by converting variable-length per-token embeddings to fixed-dimension
-        dense vectors.
+        dense vectors. SMVE converts them to one sparse vector for an inverted
+        index instead.
 
         Returns:
-            Dict with "muvera" key mapping to MuveraPostprocessor instance.
+            Dict with "muvera" and "smve" keys mapping to the postprocessor instances.
         """
-        from sie_server.core.postprocessor import MuveraConfig, MuveraPostprocessor
+        from sie_server.core.postprocessor import MuveraConfig, MuveraPostprocessor, SmveConfig, SmvePostprocessor
 
         # Build MuveraConfig from loadtime options or use defaults
         if self._muvera_config:
             config = MuveraConfig(**self._muvera_config)
         else:
             config = MuveraConfig()
-        return {"muvera": MuveraPostprocessor(token_dim=self._token_dim, config=config)}
+        smve = SmveConfig(**self._smve_config) if self._smve_config else SmveConfig()
+        return {
+            "muvera": MuveraPostprocessor(token_dim=self._token_dim, config=config),
+            # SMVE's anchors must match the vectors this checkpoint actually emits.
+            "smve": SmvePostprocessor(
+                token_dim=self._actual_token_dim or self._token_dim, config=smve, device=self._device
+            ),
+        }

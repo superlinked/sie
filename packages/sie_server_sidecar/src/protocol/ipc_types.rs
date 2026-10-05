@@ -46,6 +46,8 @@ pub const METHOD_RUN_BATCH: &str = "RunBatch";
 pub const METHOD_RUN_BATCH_WITH_EXECUTION_AUTHORITY_V1: &str = "RunBatchWithExecutionAuthorityV1";
 pub const METHOD_PROCESS_GENERATE_WITH_EXECUTION_AUTHORITY_V1: &str =
     "ProcessGenerateWithExecutionAuthorityV1";
+/// Execution authority plus the numerical admission that every item names.
+pub const METHOD_RUN_BATCH_WITH_NUMERICAL_ADMISSION_V1: &str = "RunBatchWithNumericalAdmissionV1";
 pub const METHOD_APPLY_MODEL_CONFIG: &str = "ApplyModelConfig";
 pub const METHOD_REPLACE_MODEL_CONFIGS: &str = "ReplaceModelConfigs";
 pub const METHOD_SET_PINNED_MODELS: &str = "SetPinnedModels";
@@ -481,6 +483,8 @@ pub struct WorkerCapabilitiesResponse {
     #[serde(default)]
     pub supports_execution_authority_v1: bool,
     #[serde(default)]
+    pub supports_numerical_admission_v1: bool,
+    #[serde(default)]
     pub has_generation_models: bool,
     #[serde(default)]
     pub generation_models: Vec<String>,
@@ -735,6 +739,8 @@ pub struct EncodeBatchItem {
     pub profile_id: Option<String>,
     #[serde(default)]
     pub bundle_config_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub numerical_admission_sha256: Option<String>,
     #[serde(default)]
     pub payload_fetch_ms: f64,
     /// Rust-side pre-tokenised input. `None` when the model has no
@@ -777,6 +783,8 @@ pub struct ScoreBatchItem {
     pub profile_id: Option<String>,
     #[serde(default)]
     pub bundle_config_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub numerical_admission_sha256: Option<String>,
     #[serde(default)]
     pub payload_fetch_ms: f64,
     /// Rust-side pre-tokenised input, ordering `[query, doc_0, doc_1, ...]`.
@@ -1427,6 +1435,7 @@ mod tests {
             options: None,
             profile_id: None,
             bundle_config_hash: None,
+            numerical_admission_sha256: None,
             payload_fetch_ms: 0.0,
             prepared_tokens: None,
         };
@@ -1454,6 +1463,7 @@ mod tests {
             options: None,
             profile_id: None,
             bundle_config_hash: None,
+            numerical_admission_sha256: None,
             payload_fetch_ms: 0.0,
             prepared_tokens: None,
         });

@@ -9,7 +9,7 @@ import logging
 import os
 import struct
 import time
-from collections.abc import AsyncIterator, Iterable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from pathlib import Path
 from types import TracebackType
 from typing import Any, Self, cast
@@ -20,13 +20,14 @@ import msgspec
 from sie_server.adapter_call_loop import handle_run_batch
 from sie_server.adapters._generation_base import GenerationUnsupportedFieldError
 from sie_server.config.equivalence import model_contract_digest, remote_profile_contract_digest
-from sie_server.config.hybrid_admission import remote_admission
+from sie_server.config.hybrid_admission import NumericalAdmission, bridged_item_refusal, remote_admission
 from sie_server.config.model import ModelConfig
 from sie_server.config.upstreams import installed_upstreams
 from sie_server.core.gpu_health import gpu_is_healthy_async
 from sie_server.core.grammar_routing import resolve_grammar_serving_model
 from sie_server.core.profile_identity import local_profile_identity, runtime_instance_id, serving_code_digest
 from sie_server.core.readiness import is_ready
+from sie_server.core.score_cost import SCORE_MEDIA_COST
 from sie_server.ipc_types import (
     IPC_VERSION,
     METHOD_APPLY_MODEL_CONFIG,
@@ -42,11 +43,13 @@ from sie_server.ipc_types import (
     METHOD_REPLACE_MODEL_CONFIGS,
     METHOD_RUN_BATCH,
     METHOD_RUN_BATCH_WITH_EXECUTION_AUTHORITY_V1,
+    METHOD_RUN_BATCH_WITH_NUMERICAL_ADMISSION_V1,
     METHOD_SET_PINNED_MODELS,
     METHOD_SIGNAL_GENERATE_CANCEL,
     METHOD_WORKER_CAPABILITIES,
     ApplyModelConfigRequest,
     ApplyModelConfigResponse,
+    BatchedF16MultivectorOutput,
     BatchOutcome,
     DrainResponse,
     EnsureModelReadyRequest,
@@ -67,6 +70,7 @@ from sie_server.ipc_types import (
     ReplaceModelConfigsRequest,
     ReplaceModelConfigsResponse,
     ResponseEnvelope,
+    RunBatchItem,
     RunBatchRequest,
     SetPinnedModelsRequest,
     SetPinnedModelsResponse,
@@ -78,6 +82,7 @@ from sie_server.ipc_types import (
 from sie_server.processors.admission import resolve_admission_enabled
 from sie_server.processors.generate_params import extract_generate_params
 from sie_server.queue_executor import QueueExecutor
+from sie_server.types.responses import ErrorCode
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +98,10 @@ _MAX_FRAME_BYTES = 32 * 1024 * 1024
 _MAX_NUMERICAL_PROFILES = 1024
 _MAX_ADMITTED_IDENTITIES = 8
 _MAX_NUMERICAL_MODEL_ID_BYTES = 1024
+_NUMERICAL_ADMISSION_RETRY_MS = 1000
+_UNVERIFIED_ADMISSION = "this method does not verify numerical admissions"
+_ADMISSION_CHECK_FAILED = "numerical admission check failed"
+_ADMITTED_ITEM_UNANSWERED = "the backend returned no outcome for this admitted item"
 
 # A negotiated response may exceed one legacy IPC frame, but remains tightly
 # bounded so a malformed or unexpectedly large backend output cannot grow the
@@ -220,6 +229,33 @@ def _observe_remote_profile(observation: NumericalProfileObservation, config: Mo
         outputs=sorted(admission.outputs),
         expires_at_unix_ms=int(admission.expires_at.timestamp() * 1000),
     )
+
+
+def _named_admission(item: Any) -> str | None:
+    """The numerical admission digest that a batch item names, if any."""
+    payloads = (item.encode, item.score) if isinstance(item, RunBatchItem) else (item,)
+    tokens = [getattr(payload, "numerical_admission_sha256", None) for payload in payloads]
+    return next((token for token in tokens if token is not None), None)
+
+
+def _score_side_cost(item: Mapping[str, Any]) -> int:
+    text = item["text"] if "text" in item else item.get("content")
+    images = item.get("images")
+    media = (len(images) if isinstance(images, list) else 0) + sum(
+        item.get(key) is not None for key in ("audio", "video", "document")
+    )
+    return (len(text) if isinstance(text, str) else 0) + media * SCORE_MEDIA_COST
+
+
+def _run_batch_item_cost(item: RunBatchItem) -> int:
+    """The sidecar scheduler's batching cost of an encode or score item."""
+    payload = item.encode if item.encode is not None else item.score
+    if payload is not None and payload.prepared_tokens is not None:
+        return max(1, sum(len(ids) for ids in payload.prepared_tokens.input_ids))
+    if item.score is None:
+        return 1
+    query = _score_side_cost(item.score.query_item)
+    return max(1, sum(query + _score_side_cost(document) for document in item.score.score_items))
 
 
 class IpcServer:
@@ -474,6 +510,7 @@ class IpcServer:
             METHOD_RUN_BATCH,
             METHOD_PROCESS_GENERATE,
             METHOD_RUN_BATCH_WITH_EXECUTION_AUTHORITY_V1,
+            METHOD_RUN_BATCH_WITH_NUMERICAL_ADMISSION_V1,
             METHOD_PROCESS_GENERATE_WITH_EXECUTION_AUTHORITY_V1,
         ):
             if self._drain_event.is_set():
@@ -558,14 +595,19 @@ class IpcServer:
                 resp_body = await self._handle_process_score(msgspec.convert(body, ProcessScoreBatchRequest))
             elif method == METHOD_PROCESS_EXTRACT_BATCH:
                 resp_body = await self._handle_process_extract(msgspec.convert(body, ProcessExtractBatchRequest))
-            elif method in (METHOD_RUN_BATCH, METHOD_RUN_BATCH_WITH_EXECUTION_AUTHORITY_V1):
+            elif method in (
+                METHOD_RUN_BATCH,
+                METHOD_RUN_BATCH_WITH_EXECUTION_AUTHORITY_V1,
+                METHOD_RUN_BATCH_WITH_NUMERICAL_ADMISSION_V1,
+            ):
                 # Rust scheduler drove the batch formation; we just fan
                 # the items into the existing
                 # per-op handlers. See adapter_call_loop.py for the
                 # full fallback matrix.
                 resp_body = await self._handle_run_batch(
                     msgspec.convert(body, RunBatchRequest),
-                    require_authority=method == METHOD_RUN_BATCH_WITH_EXECUTION_AUTHORITY_V1,
+                    require_authority=method != METHOD_RUN_BATCH,
+                    require_admission=method == METHOD_RUN_BATCH_WITH_NUMERICAL_ADMISSION_V1,
                 )
             elif method == METHOD_APPLY_MODEL_CONFIG:
                 resp_body = await self._handle_apply_model_config(msgspec.convert(body, ApplyModelConfigRequest))
@@ -730,13 +772,17 @@ class IpcServer:
         async with self._execution_config(req.model_id, (item.bundle_config_hash for item in req.items)) as valid:
             if not valid:
                 return self._config_retry(req.items)
-            return await self._executor.process_encode_batch(req)
+            return await self._run_unrefused(
+                req, self._unverified_admissions(req.model_id, req.items), self._executor.process_encode_batch
+            )
 
     async def _handle_process_score(self, req: ProcessScoreBatchRequest) -> BatchOutcome:
         async with self._execution_config(req.model_id, (item.bundle_config_hash for item in req.items)) as valid:
             if not valid:
                 return self._config_retry(req.items)
-            return await self._executor.process_score_batch(req)
+            return await self._run_unrefused(
+                req, self._unverified_admissions(req.model_id, req.items), self._executor.process_score_batch
+            )
 
     async def _handle_process_extract(self, req: ProcessExtractBatchRequest) -> BatchOutcome:
         async with self._execution_config(req.model_id, (item.bundle_config_hash for item in req.items)) as valid:
@@ -744,7 +790,9 @@ class IpcServer:
                 return self._config_retry(req.items)
             return await self._executor.process_extract_batch(req)
 
-    async def _handle_run_batch(self, req: RunBatchRequest, *, require_authority: bool = False) -> BatchOutcome:
+    async def _handle_run_batch(
+        self, req: RunBatchRequest, *, require_authority: bool = False, require_admission: bool = False
+    ) -> BatchOutcome:
         payloads = [
             {"encode": item.encode, "score": item.score, "extract": item.extract}.get(item.op) for item in req.items
         ]
@@ -756,7 +804,120 @@ class IpcServer:
         async with self._execution_config(req.model_id, hashes) as valid:
             if not valid:
                 return self._config_retry(req.items)
-            return await handle_run_batch(self._executor, req)
+            refused = (
+                await asyncio.to_thread(self._numerical_admission_refusals, req)
+                if require_admission
+                else self._unverified_admissions(req.model_id, req.items)
+            )
+            return await self._run_unrefused(req, refused, lambda batch: handle_run_batch(self._executor, batch))
+
+    async def _run_unrefused(
+        self,
+        req: RunBatchRequest | ProcessEncodeBatchRequest | ProcessScoreBatchRequest,
+        refused: Mapping[str, str],
+        run: Callable[[Any], Awaitable[BatchOutcome]],
+    ) -> BatchOutcome:
+        """Run the items that are not refused and refuse the others before the upstream sees them.
+
+        An admitted item that the backend leaves unanswered is refused too, so
+        its bridged caller gets its local refusal back at once.
+        """
+        if not refused and all(_named_admission(item) is None for item in req.items):
+            return await run(req)
+        kept = [item for item in req.items if item.work_item_id not in refused]
+        served: dict[str, ItemOutcome] = {}
+        batched: list[BatchedF16MultivectorOutput] = []
+        if kept:
+            subset = msgspec.structs.replace(req, items=kept)
+            if isinstance(subset, RunBatchRequest):
+                subset = msgspec.structs.replace(subset, total_cost=sum(map(_run_batch_item_cost, subset.items)))
+            result = await run(subset)
+            served = {outcome.work_item_id: outcome for outcome in result.outcomes}
+            batched = result.batched_f16_multivectors
+        outcomes: list[ItemOutcome] = []
+        for item in req.items:
+            if item.work_item_id in refused:
+                outcomes.append(self._numerical_admission_refusal(item, refused[item.work_item_id]))
+            elif item.work_item_id in served:
+                outcomes.append(served[item.work_item_id])
+            elif _named_admission(item) is not None:
+                outcomes.append(self._numerical_admission_refusal(item, _ADMITTED_ITEM_UNANSWERED))
+        return BatchOutcome(outcomes=outcomes, batched_f16_multivectors=batched)
+
+    @staticmethod
+    def _unverified_admissions(model_id: str, items: Iterable[Any]) -> dict[str, str]:
+        """Refuse items that name a numerical admission on a method that never verifies one."""
+        refused = {item.work_item_id: _UNVERIFIED_ADMISSION for item in items if _named_admission(item) is not None}
+        if refused:
+            logger.warning("Refused %d items naming a numerical admission for %s", len(refused), model_id)
+        return refused
+
+    def _numerical_admission_refusals(self, req: RunBatchRequest) -> dict[str, str]:
+        """Return the work items that this process's live numerical admission does not cover, with the reason."""
+        try:
+            refused = {
+                item.work_item_id: reason
+                for item, reason in zip(req.items, self._numerical_admission_reasons(req), strict=True)
+                if reason is not None
+            }
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Numerical admission check failed for %s: %s", req.model_id, type(exc).__name__)
+            refused = dict.fromkeys((item.work_item_id for item in req.items), _ADMISSION_CHECK_FAILED)
+        if refused:
+            logger.info(
+                "Numerical admission refused %d of %d items for %s: %s",
+                len(refused),
+                len(req.items),
+                req.model_id,
+                sorted(set(refused.values())),
+            )
+        return refused
+
+    def _numerical_admission_reasons(self, req: RunBatchRequest) -> list[str | None]:
+        base, _, profile = req.model_id.partition(":")
+        try:
+            config = self._executor.registry.get_config(base)
+        except KeyError:
+            return ["model is unknown"] * len(req.items)
+        if config.routing is None or not profile or config.routing.fallback_profile != profile:
+            return ["batch does not target its model's remote profile"] * len(req.items)
+        admission = remote_admission(config, wait=False)
+        if isinstance(admission, str):
+            return [admission] * len(req.items)
+        return [self._bridged_item_reason(config, admission, item) for item in req.items]
+
+    @staticmethod
+    def _bridged_item_reason(config: ModelConfig, admission: NumericalAdmission, item: RunBatchItem) -> str | None:
+        if item.op == "encode" and item.encode is not None:
+            return bridged_item_refusal(
+                config,
+                admission,
+                token=item.encode.numerical_admission_sha256,
+                outputs=item.encode.output_types if item.encode.output_types is not None else ["dense"],
+                request_options=item.encode.options,
+            )
+        if item.op == "score" and item.score is not None:
+            return bridged_item_refusal(
+                config,
+                admission,
+                token=item.score.numerical_admission_sha256,
+                outputs=["score"],
+                request_options=item.score.options,
+            )
+        return "operation has no numerical admission"
+
+    @staticmethod
+    def _numerical_admission_refusal(item: Any, reason: str) -> ItemOutcome:
+        """Refuse an item before the upstream sees it; a bridged caller gets its local refusal back."""
+        return ItemOutcome(
+            work_item_id=item.work_item_id,
+            request_id=item.request_id,
+            item_index=item.item_index,
+            disposition="nak_retry",
+            nak_delay_ms=_NUMERICAL_ADMISSION_RETRY_MS,
+            error=reason,
+            error_code=ErrorCode.INFERENCE_ERROR.value,
+        )
 
     @contextlib.asynccontextmanager
     async def _execution_config(self, model_id: str, hashes: Iterable[str | None]) -> AsyncIterator[bool]:
@@ -775,7 +936,11 @@ class IpcServer:
 
     @staticmethod
     def _config_retry(items: Iterable[Any]) -> BatchOutcome:
-        """Return unsettled work to the sidecar without executing any inputs."""
+        """Return unsettled work to the sidecar without executing any inputs.
+
+        An admitted item is answered at once rather than redelivered, so it
+        names the code of a refused bridge.
+        """
         return BatchOutcome(
             outcomes=[
                 ItemOutcome(
@@ -784,6 +949,7 @@ class IpcServer:
                     item_index=item.item_index,
                     disposition="nak_retry",
                     nak_delay_ms=5000,
+                    error_code=ErrorCode.INFERENCE_ERROR.value if _named_admission(item) is not None else None,
                 )
                 for item in items
             ]
@@ -872,6 +1038,7 @@ class IpcServer:
         generation_models.sort()
         return WorkerCapabilitiesResponse(
             supports_execution_authority_v1=True,
+            supports_numerical_admission_v1=True,
             has_generation_models=bool(generation_models),
             generation_models=generation_models,
             supported_models=supported_models,

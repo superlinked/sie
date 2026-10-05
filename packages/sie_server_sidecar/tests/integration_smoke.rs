@@ -753,6 +753,7 @@ async fn smoke_encode_request_round_trips_through_rust_worker() {
         timestamp: now_s - 0.25,
         deadline: None,
         fallback_reason: None,
+        numerical_admission_sha256: None,
     };
     let payload = rmp_serde::to_vec_named(&work_item).expect("encode WorkItem");
 
@@ -1121,6 +1122,7 @@ async fn work_cancel_is_namespaced_acks_before_ipc_and_excludes_generation() {
         timestamp: now_s,
         deadline: None,
         fallback_reason: None,
+        numerical_admission_sha256: None,
     };
     let payload = rmp_serde::to_vec_named(&generation_work).expect("encode generate WorkItem");
     let _ = publish_jetstream_with_retry(&js, &generation_subject, payload).await;
@@ -1228,6 +1230,7 @@ async fn smoke_generate_direct_dispatch_round_trips_through_rust_worker() {
         timestamp: now_s - 0.25,
         deadline: None,
         fallback_reason: None,
+        numerical_admission_sha256: None,
     };
     let payload = rmp_serde::to_vec_named(&work_item).expect("encode generate WorkItem");
     let js = async_nats::jetstream::new(client.clone());
@@ -1359,6 +1362,7 @@ async fn smoke_generation_direct_dispatch_is_active_before_capability_reconcile(
         timestamp: now_s,
         deadline: None,
         fallback_reason: None,
+        numerical_admission_sha256: None,
     };
     let payload = rmp_serde::to_vec_named(&work_item).expect("encode generate WorkItem");
     let js = async_nats::jetstream::new(client.clone());
@@ -1533,6 +1537,7 @@ async fn smoke_payload_ref_request_round_trips_through_rust_worker() {
         timestamp: now_s,
         deadline: None,
         fallback_reason: None,
+        numerical_admission_sha256: None,
     };
     let payload = rmp_serde::to_vec_named(&work_item).expect("encode WorkItem");
 
@@ -1695,6 +1700,7 @@ async fn smoke_extract_payload_ref_preserves_document_bytes_through_ipc() {
         timestamp: now_s,
         deadline: None,
         fallback_reason: None,
+        numerical_admission_sha256: None,
     };
     let payload = rmp_serde::to_vec_named(&work_item).expect("encode extract WorkItem");
     let js = async_nats::jetstream::new(client.clone());
@@ -1880,6 +1886,26 @@ async fn publish_encode_work_item(
     reply_subject: &str,
     timing: Option<(f64, f64)>,
 ) -> (String, u64) {
+    let work_item = encode_work_item(
+        request_id,
+        model_id,
+        pool,
+        admission_pool,
+        reply_subject,
+        timing,
+    );
+    let payload = rmp_serde::to_vec_named(&work_item).expect("encode WorkItem");
+    publish_jetstream_with_retry(js, subject, payload).await
+}
+
+fn encode_work_item(
+    request_id: &str,
+    model_id: &str,
+    pool: &str,
+    admission_pool: &str,
+    reply_subject: &str,
+    timing: Option<(f64, f64)>,
+) -> WorkItem {
     let now_s = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -1887,7 +1913,7 @@ async fn publish_encode_work_item(
     let (timestamp, deadline) = timing.map_or((now_s, None), |(timestamp, deadline)| {
         (timestamp, Some(deadline))
     });
-    let work_item = WorkItem {
+    WorkItem {
         work_item_id: format!("{request_id}.0"),
         request_id: request_id.into(),
         item_index: 0,
@@ -1922,9 +1948,8 @@ async fn publish_encode_work_item(
         timestamp,
         deadline,
         fallback_reason: None,
-    };
-    let payload = rmp_serde::to_vec_named(&work_item).expect("encode WorkItem");
-    publish_jetstream_with_retry(js, subject, payload).await
+        numerical_admission_sha256: None,
+    }
 }
 
 /// WorkQueue retention removes an item only after its consumer ACKs it, so
@@ -2120,6 +2145,7 @@ async fn expired_or_cancelled_encode_work_is_acked_before_ipc() {
         timestamp,
         deadline: Some(deadline),
         fallback_reason: None,
+        numerical_admission_sha256: None,
     };
     let payload = rmp_serde::to_vec_named(&generation_work).expect("encode generate WorkItem");
     let generation_subject =
@@ -2870,6 +2896,7 @@ async fn smoke_prepared_tokens_round_trip_through_rust_worker() {
         timestamp: now_s - 0.25,
         deadline: None,
         fallback_reason: None,
+        numerical_admission_sha256: None,
     };
     let payload = rmp_serde::to_vec_named(&work_item).expect("encode WorkItem");
     let js = async_nats::jetstream::new(client.clone());
@@ -3023,6 +3050,7 @@ async fn publish_score_work_item(
         timestamp: now_s,
         deadline: None,
         fallback_reason: None,
+        numerical_admission_sha256: None,
     };
     let payload = rmp_serde::to_vec_named(&work_item).expect("encode score WorkItem");
     let _ = publish_jetstream_with_retry(js, subject, payload).await;
@@ -3077,6 +3105,7 @@ async fn publish_extract_work_item(
         timestamp: now_s,
         deadline: None,
         fallback_reason: None,
+        numerical_admission_sha256: None,
     };
     let payload = rmp_serde::to_vec_named(&work_item).expect("encode extract WorkItem");
     let _ = publish_jetstream_with_retry(js, subject, payload).await;
@@ -3286,6 +3315,46 @@ async fn smoke_scheduler_coalesces_concurrent_encodes() {
     sleep(Duration::from_millis(200)).await;
 }
 
+/// A worker config for tests that only exercise the JetStream ensure paths.
+fn jetstream_worker_config(
+    nats_url: &str,
+    pool: &str,
+    worker_id: &str,
+) -> sie_server_sidecar::config::WorkerConfig {
+    sie_server_sidecar::config::WorkerConfig {
+        nats_url: Some(nats_url.to_string()),
+        nats_credentials: None,
+        local_socket_path: None,
+        pool: pool.into(),
+        bundle: "default".into(),
+        ipc_socket_path: PathBuf::from("/tmp/discard-smoke.sock"),
+        ipc_socket_paths: vec![PathBuf::from("/tmp/discard-smoke.sock")],
+        ipc_pool_size: 1,
+        ipc_request_timeout_s: 60,
+        model_ready_timeout_s: 900,
+        payload_store_url: None,
+        gateway_url: None,
+        gateway_api_key: None,
+        pool_admission_enabled: false,
+        pool_admission_check_interval_ms: 5_000,
+        pool_admission_pause_ms: 1_000,
+        pool_admission_stale_after_ms: 30_000,
+        probe_port: 9095,
+        worker_id: worker_id.into(),
+        ping_interval_ms: 2000,
+        ready_stale_mult: 3,
+        machine_profile: "l4".into(),
+        gpu_count: 1,
+        bundle_config_hash: String::new(),
+        config_service_url: None,
+        config_service_token: None,
+        config_poll_interval_ms: 30_000,
+        config_full_export_interval_ms: 300_000,
+        nats_config_trusted_producers: vec!["sie-config".into()],
+        health_publish_interval_ms: 5_000,
+    }
+}
+
 /// Stream discard-policy reconcile (architecture-review finding B3).
 ///
 /// A `WORK_POOL_{pool}` / `WORK_WORKER_{worker_id}` stream created by a
@@ -3311,38 +3380,7 @@ async fn ensure_paths_reconcile_stream_discard_policy_to_new() {
         .await
         .expect("connect JetStream");
 
-    let config = sie_server_sidecar::config::WorkerConfig {
-        nats_url: Some(nats.url.clone()),
-        nats_credentials: None,
-        local_socket_path: None,
-        pool: "discardsmoke".into(),
-        bundle: "default".into(),
-        ipc_socket_path: PathBuf::from("/tmp/discard-smoke.sock"),
-        ipc_socket_paths: vec![PathBuf::from("/tmp/discard-smoke.sock")],
-        ipc_pool_size: 1,
-        ipc_request_timeout_s: 60,
-        model_ready_timeout_s: 900,
-        payload_store_url: None,
-        gateway_url: None,
-        gateway_api_key: None,
-        pool_admission_enabled: false,
-        pool_admission_check_interval_ms: 5_000,
-        pool_admission_pause_ms: 1_000,
-        pool_admission_stale_after_ms: 30_000,
-        probe_port: 9095,
-        worker_id: "discard-worker".into(),
-        ping_interval_ms: 2000,
-        ready_stale_mult: 3,
-        machine_profile: "l4".into(),
-        gpu_count: 1,
-        bundle_config_hash: String::new(),
-        config_service_url: None,
-        config_service_token: None,
-        config_poll_interval_ms: 30_000,
-        config_full_export_interval_ms: 300_000,
-        nats_config_trusted_producers: vec!["sie-config".into()],
-        health_publish_interval_ms: 5_000,
-    };
+    let config = jetstream_worker_config(&nats.url, "discardsmoke", "discard-worker");
 
     // Pre-create both streams exactly as a pre-fix gateway did: no
     // `discard` field, so the async-nats default (`Old`) sticks.
@@ -3466,4 +3504,201 @@ async fn ensure_paths_reconcile_stream_discard_policy_to_new() {
     redelivery.double_ack().await.unwrap();
 
     drop(nats);
+}
+
+/// Admitted numerical work has its own versioned stream and durable, which
+/// only a sidecar with the admission fence creates. A sidecar without the
+/// fence creates and reconciles only its pool, worker and authority streams:
+/// before a fenced sidecar exists admitted work cannot be published at all,
+/// and afterwards none of the older durables can fetch it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn admitted_work_is_invisible_to_a_sidecar_without_the_admission_fence() {
+    if which("nats-server").is_none() {
+        eprintln!("integration_smoke: skipping — missing tools on $PATH: nats-server");
+        return;
+    }
+    let _guard = smoke_test_guard().await;
+
+    let nats = NatsHarness::start().await;
+    let (_client, js) = sie_server_sidecar::nats_consumer::connect(&nats.url, None)
+        .await
+        .expect("connect JetStream");
+    let config = jetstream_worker_config(&nats.url, "admissionsmoke", "admission-worker");
+
+    let older = [
+        sie_server_sidecar::nats_consumer::ensure_stream_and_consumer(&js, &config)
+            .await
+            .expect("pool stream and consumer"),
+        sie_server_sidecar::nats_consumer::ensure_worker_stream_and_consumer(&js, &config)
+            .await
+            .expect("worker stream and consumer"),
+        sie_server_sidecar::nats_consumer::ensure_authority_stream_and_consumer(&js, &config)
+            .await
+            .expect("authority stream and consumer"),
+    ];
+    let subject = config.admission_subject_filter().replace('*', "model");
+    let unrouted = js
+        .publish(subject.clone(), "admitted-work".into())
+        .await
+        .expect("publish")
+        .await;
+    assert!(
+        unrouted.is_err(),
+        "no stream of a sidecar without the fence may capture admitted work"
+    );
+
+    let admission =
+        sie_server_sidecar::nats_consumer::ensure_admission_stream_and_consumer(&js, &config)
+            .await
+            .expect("admission stream and consumer");
+    js.publish(subject.clone(), "admitted-work".into())
+        .await
+        .unwrap()
+        .await
+        .unwrap();
+
+    // Rolling the worker back reconciles only the older streams and durables.
+    sie_server_sidecar::nats_consumer::ensure_stream_and_consumer(&js, &config)
+        .await
+        .unwrap();
+    sie_server_sidecar::nats_consumer::ensure_worker_stream_and_consumer(&js, &config)
+        .await
+        .unwrap();
+    sie_server_sidecar::nats_consumer::ensure_authority_stream_and_consumer(&js, &config)
+        .await
+        .unwrap();
+    for consumer in &older {
+        let mut messages = consumer
+            .batch()
+            .max_messages(1)
+            .expires(Duration::from_millis(300))
+            .messages()
+            .await
+            .expect("fetch from an older durable");
+        assert!(timeout(Duration::from_secs(3), messages.next())
+            .await
+            .expect("the fetch expires")
+            .is_none());
+    }
+    for name in [
+        config.stream_name(),
+        config.worker_stream_name(),
+        config.authority_stream_name(),
+    ] {
+        let mut stream = js.get_stream(&name).await.unwrap();
+        assert_eq!(stream.info().await.unwrap().state.messages, 0, "{name}");
+    }
+    let mut stream = js.get_stream(config.admission_stream_name()).await.unwrap();
+    let info = stream.info().await.unwrap();
+    assert_eq!(info.config.subjects, [config.admission_subject_filter()]);
+    assert_eq!(info.state.messages, 1);
+    let mut messages = admission
+        .batch()
+        .max_messages(1)
+        .expires(Duration::from_secs(1))
+        .messages()
+        .await
+        .unwrap();
+    let delivery = timeout(Duration::from_secs(3), messages.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(delivery.subject.as_str(), subject);
+    delivery.double_ack().await.unwrap();
+
+    drop(nats);
+}
+
+/// Work that breaks the numerical admission contract never runs and is never
+/// handed to another consumer: the worker answers it once with
+/// `INFERENCE_ERROR` and ACKs it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn work_breaking_the_numerical_admission_contract_is_answered_and_acked() {
+    if skip_unless_tools_available() {
+        return;
+    }
+    let _guard = smoke_test_guard().await;
+
+    let nats = NatsHarness::start().await;
+    let sock = ShortSocket::new("ipc.sock");
+    let python = PythonHarness::start(sock.path.clone()).await;
+    let pool = "smoke-admission";
+    let bundle = "default";
+    let probe_port = find_free_tcp_port();
+    let _worker = WorkerHarness::spawn(&nats.url, &sock.path, pool, bundle, probe_port, None);
+    wait_for_tcp(probe_port, Duration::from_secs(30))
+        .await
+        .expect("worker probe port");
+    sleep(Duration::from_millis(500)).await;
+
+    let client = async_nats::connect(&nats.url)
+        .await
+        .expect("client connect");
+    let js = async_nats::jetstream::new(client.clone());
+    let reply_subject = format!("_INBOX.smoke-admission.{}", uuid::Uuid::new_v4());
+    let mut sub = client
+        .subscribe(reply_subject.clone())
+        .await
+        .expect("subscribe reply");
+
+    let model = "BAAI/bge-m3";
+    let pooled = pool_work_subject(pool, pool, bundle, model);
+    let direct = worker_work_subject(pool, pool, bundle, model, "smoke-worker");
+    let token = Some("a".repeat(64));
+    let bridged = Some("provisioning".to_string());
+    for (request_id, subject, admission, fallback_reason) in [
+        ("admitted-on-the-pool", pooled.clone(), token.clone(), None),
+        (
+            "admitted-on-the-worker",
+            direct.clone(),
+            token.clone(),
+            None,
+        ),
+        (
+            "admitted-on-the-authority-subject",
+            format!("{direct}.execution-authority-v1"),
+            token.clone(),
+            None,
+        ),
+        (
+            "unadmitted-on-the-admission-subject",
+            format!("{direct}.numerical-admission-v1"),
+            None,
+            None,
+        ),
+        ("bridge-without-an-admission", pooled, None, bridged),
+    ] {
+        let mut work = encode_work_item(request_id, model, pool, "", &reply_subject, None);
+        work.numerical_admission_sha256 = admission;
+        work.fallback_reason = fallback_reason;
+        let payload = rmp_serde::to_vec_named(&work).expect("encode WorkItem");
+        let (stream_name, sequence) = publish_jetstream_with_retry(&js, &subject, payload).await;
+
+        let reply = timeout(Duration::from_secs(10), sub.next())
+            .await
+            .unwrap_or_else(|_| panic!("{request_id}: no answer"))
+            .expect("reply stream closed");
+        let result: WorkResult = rmp_serde::from_slice(&reply.payload).expect("decode WorkResult");
+        assert_eq!(result.request_id, request_id);
+        assert!(!result.success, "{request_id}");
+        assert_eq!(
+            result.error_code.as_deref(),
+            Some("INFERENCE_ERROR"),
+            "{request_id}"
+        );
+        assert_eq!(result.retry_after_s, Some(1), "{request_id}");
+        let stream = js.get_stream(&stream_name).await.expect("get work stream");
+        let ack_deadline = Instant::now() + Duration::from_secs(2);
+        while stream.get_raw_message(sequence).await.is_ok() {
+            assert!(Instant::now() < ack_deadline, "{request_id} was not ACKed");
+            sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    drop(_worker);
+    drop(python);
+    drop(nats);
+    let _ = sock;
+    sleep(Duration::from_millis(200)).await;
 }
