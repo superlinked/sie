@@ -944,6 +944,7 @@ and health publication, with a
 five-second timeout and a ten-second observation lifetime. Shutdown tombstones
 omit diagnostics. A snapshot describes the process and model configuration at
 its observation time; it is not an atomic fleet proof and does not grant routing
-or execution authority. Consumers must separately verify freshness, membership,
-local identity, request contract and evidence at execution before enabling
-numerical fallback.
+or execution authority. Numerical fallback requires operator-owned numerical
+evidence as a separate prerequisite. Consumers must also verify freshness,
+membership, local identity, request contract and evidence at execution before
+enabling numerical fallback.
