@@ -276,6 +276,66 @@ async def test_generation_retains_config_until_stream_cancellation(monkeypatch: 
     assert server._executor.bundle_config_view("sglang").bundle_config_hash != expected
 
 
+async def test_pinned_generation_settles_an_unavailable_grammar_profile(monkeypatch: pytest.MonkeyPatch) -> None:
+    server, registry, _ = _pinned_execution_server(monkeypatch)
+    raw = registry.get_config("Qwen/Qwen3.6-27B").model_dump(mode="json")
+    raw["tasks"]["generate"]["grammar_profile"] = "missing"
+    raw["profiles"]["missing"] = {**raw["profiles"]["default"]}
+    registry.add_config(ModelConfig.model_validate(raw))
+    registry._configs.pop(raw["sie_id"] + ":missing")
+    expected = server._executor.bundle_config_view("sglang").bundle_config_hash
+    work_item = {
+        "model_id": raw["sie_id"],
+        "request_id": "req",
+        "reply_subject": "reply.req",
+        "bundle_config_hash": expected,
+        "generate": {"prompt": "secret", "grammar": {"kind": "json_schema", "value": {"type": "object"}}},
+    }
+    load = AsyncMock()
+    monkeypatch.setattr(registry, "load_async", load)
+    writer = _CapturingWriter()
+    await server._handle_process_generate(
+        ProcessGenerateRequest(model_id=raw["sie_id"], work_item_msgpack=msgpack.packb(work_item, use_bin_type=True)),
+        request_id="ipc-r",
+        writer=writer,
+        require_authority=True,
+    )
+    events = [frame["body"] for frame in _decode_written_frames(writer)]
+    assert [event["kind"] for event in events] == ["in_progress", "publish", "ack", "done"]
+    terminal = msgpack.unpackb(events[1]["payload"], raw=False)
+    assert terminal["error"]["code"] == "unsupported_field"
+    assert terminal["error"]["param"] == "grammar"
+    load.assert_not_awaited()
+
+
+async def test_exported_routing_validation_keeps_ipc_loop_responsive(monkeypatch: pytest.MonkeyPatch) -> None:
+    server, registry, _ = _pinned_execution_server(monkeypatch)
+    entered = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    def validate(*_args, **_kwargs) -> None:
+        entered.set()
+        release.wait(2)
+        finished.set()
+
+    monkeypatch.setattr("sie_server.queue_executor.validate_model_routing", validate)
+    request = ReplaceModelConfigsRequest(
+        bundle_id="sglang",
+        epoch=1,
+        bundle_config_hash="",
+        models=[ReplaceModelConfigEntry(model_id="Qwen/Qwen3.6-27B", model_config=_qwen_default_only_yaml())],
+    )
+    task = asyncio.create_task(server._executor.replace_model_configs(request))
+    try:
+        assert await asyncio.to_thread(entered.wait, 1)
+        assert not finished.is_set()
+        assert registry.has_model("Qwen/Qwen3.6-27B")
+    finally:
+        release.set()
+        await asyncio.wait_for(task, 1)
+
+
 @pytest.mark.parametrize("shape", ["generate", "options"])
 async def test_an_unchanged_bundle_hash_cannot_reinterpret_a_grammar_target(
     monkeypatch: pytest.MonkeyPatch, shape: str

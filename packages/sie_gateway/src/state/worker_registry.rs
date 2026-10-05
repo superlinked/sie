@@ -825,6 +825,7 @@ impl WorkerRegistry {
                     }
                 }
                 WorkerHealth::Unhealthy => unhealthy = true,
+                _ if worker.last_heartbeat.elapsed() > self.heartbeat_timeout => unhealthy = true,
                 _ => starting = true,
             }
         }
@@ -1212,6 +1213,24 @@ mod tests {
             .get_mut("http://w1")
             .unwrap()
             .last_heartbeat = Instant::now() - reg.heartbeat_timeout - Duration::from_secs(1);
+        assert_eq!(
+            reg.unavailable_lane_trigger(
+                "BAAI/bge-m3",
+                "default",
+                "l4-spot",
+                "default",
+                "abc123",
+                None
+            )
+            .await,
+            Some(FallbackTrigger::Unhealthy)
+        );
+        reg.workers
+            .write()
+            .await
+            .get_mut("http://w1")
+            .unwrap()
+            .health = WorkerHealth::Unknown;
         assert_eq!(
             reg.unavailable_lane_trigger(
                 "BAAI/bge-m3",

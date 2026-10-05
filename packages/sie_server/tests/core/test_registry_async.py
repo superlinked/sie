@@ -1,4 +1,5 @@
 import asyncio
+import threading
 from collections.abc import Callable, Iterator
 from contextlib import ExitStack
 from pathlib import Path
@@ -127,6 +128,49 @@ async def test_cancelled_config_writer_reopens_reader_admission() -> None:
             await writer
         async with asyncio.timeout(1), registry.execution_lease():
             assert registry.has_model("test")
+
+
+async def test_config_writer_timeout_reopens_readers_without_changing_pinned_config() -> None:
+    registry = ModelRegistry(drain_timeout_s=0.01)
+    registry.add_config(_make_config())
+    async with registry.execution_lease():
+        writer = asyncio.create_task(registry.add_config_async(_make_config(dense_dim=384)))
+        with pytest.raises(TimeoutError, match="configuration is in use"):
+            await asyncio.wait_for(writer, 1)
+        async with asyncio.timeout(1), registry.execution_lease():
+            assert registry.get_config("test").tasks.encode.dense.dim == 768
+    await registry.add_config_async(_make_config(dense_dim=384))
+    assert registry.get_config("test").tasks.encode.dense.dim == 384
+
+
+@pytest.mark.parametrize("mutation", ["add", "replace"])
+async def test_async_routing_validation_keeps_lifecycle_loop_responsive(
+    monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    registry = ModelRegistry()
+    registry.add_config(_make_config())
+    entered = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    def validate(*_args, **_kwargs) -> None:
+        entered.set()
+        release.wait(2)
+        finished.set()
+
+    monkeypatch.setattr("sie_server.core.registry.validate_model_routing", validate)
+    changed = _make_config(dense_dim=384)
+    task = asyncio.create_task(
+        registry.add_config_async(changed) if mutation == "add" else registry.replace_configs_async([changed])
+    )
+    try:
+        assert await asyncio.to_thread(entered.wait, 1)
+        assert not finished.is_set()
+        assert registry.get_config("test").tasks.encode.dense.dim == 768
+    finally:
+        release.set()
+        await asyncio.wait_for(task, 1)
+    assert registry.get_config("test").tasks.encode.dense.dim == 384
 
 
 async def test_cancelled_execution_releases_config_writer_and_foreign_sync_writes_refuse() -> None:

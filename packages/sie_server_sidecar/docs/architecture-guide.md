@@ -646,10 +646,18 @@ the lease is held and must run on the registry's lifecycle loop once bound.
 The lease is separate from model-load locks so a pinned request can load its
 model while a configuration writer waits.
 
+Configuration writers wait for existing executions within the registry's drain
+timeout. If a long generation stream exceeds that wait, the update fails with
+a retryable timeout and reopens reader admission; the old configuration remains
+pinned until the stream ends. Identity and evidence validation run off the
+lifecycle event loop during asynchronous configuration updates.
+
 Hashed generation retains the gateway-selected model/profile. If the Python
 grammar resolver would rewrite that target, the receiver NAKs before loading
 or prewarming a model: grammar-routing declarations are not covered by the
-bundle hash. Score IPC items carry the same optional hash as encode and
+bundle hash. An unavailable grammar profile is settled as a terminal
+`unsupported_field` refusal by the streaming processor under the same lease.
+Score IPC items carry the same optional hash as encode and
 extract items, including scheduler batches. Deploy matching updated Python
 workers and sidecars together to obtain this execution authority; legacy
 empty-hash traffic and older IPC producers do not provide the guarantee.

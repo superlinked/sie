@@ -18,6 +18,7 @@ import msgpack
 import msgspec
 
 from sie_server.adapter_call_loop import handle_run_batch
+from sie_server.adapters._generation_base import GenerationUnsupportedFieldError
 from sie_server.config.equivalence import model_contract_digest
 from sie_server.config.model import ModelConfig
 from sie_server.core.gpu_health import gpu_is_healthy_async
@@ -875,7 +876,11 @@ class IpcServer:
                 generate = extract_generate_params(work_item)
                 valid = work_item.get("model_id") == req.model_id
                 if valid and isinstance(generate, dict) and generate.get("grammar") is not None:
-                    valid = resolve_grammar_serving_model(self._executor.registry, req.model_id) == req.model_id
+                    try:
+                        valid = resolve_grammar_serving_model(self._executor.registry, req.model_id) == req.model_id
+                    except GenerationUnsupportedFieldError:
+                        # The processor settles this refusal under the same configuration lease.
+                        pass
             if not valid:
                 sink = _IpcGenerateSink(self, writer, request_id)
                 await sink.send(GenerateEvent(kind="nak", delay_ms=5000))

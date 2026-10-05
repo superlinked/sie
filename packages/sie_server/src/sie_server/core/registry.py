@@ -1293,14 +1293,18 @@ class ModelRegistry:
 
     @contextlib.asynccontextmanager
     async def _config_mutation_lease(self) -> AsyncIterator[None]:
-        """Wait for pinned executions before changing the registry configuration."""
+        """Wait within the drain budget before changing pinned configuration."""
         self._bind_lifecycle_loop()
         async with self._execution_condition:
             self._execution_writers_waiting += 1
             try:
-                await self._execution_condition.wait_for(
-                    lambda: not self._execution_writer and self._execution_readers == 0
-                )
+                try:
+                    async with asyncio.timeout(self._drain_timeout_s):
+                        await self._execution_condition.wait_for(
+                            lambda: not self._execution_writer and self._execution_readers == 0
+                        )
+                except TimeoutError:
+                    raise TimeoutError("configuration is in use; retry the asynchronous config update") from None
                 self._execution_writer = True
             finally:
                 self._execution_writers_waiting -= 1
@@ -2418,7 +2422,7 @@ class ModelRegistry:
         update_lock = self._get_config_update_lock()
         async with self._config_mutation_lease(), update_lock:
             expanded, updated_ids, removed_ids = self._prepare_config_update(config)
-            self._preflight_config_update(expanded, updated_ids, removed_ids)
+            await asyncio.to_thread(self._preflight_config_update, expanded, updated_ids, removed_ids)
             changed_ids = {
                 model_id
                 for model_id, candidate in expanded.items()
@@ -2624,8 +2628,11 @@ class ModelRegistry:
                 # update was refused. Expiring admission must stop the bridge,
                 # not reject unrelated changes in the same snapshot.
                 if name not in retained_names:
-                    validate_model_routing(
-                        config, device=self.profile_execution_device(config.sie_id), engine_config=self._engine_config
+                    await asyncio.to_thread(
+                        validate_model_routing,
+                        config,
+                        device=self.profile_execution_device(config.sie_id),
+                        engine_config=self._engine_config,
                     )
 
             async with self._get_load_admission_lock():
