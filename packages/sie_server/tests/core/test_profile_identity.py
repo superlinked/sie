@@ -1,12 +1,19 @@
+import json
+import subprocess
+import sys
 from copy import deepcopy
+from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 from sie_server.config.engine import EngineConfig
 from sie_server.config.model import ModelConfig
 from sie_server.core import profile_identity
 
 PIN = "a" * 40
+NUMPY_LIBRARY = str(Path(np.__file__).resolve().parent.with_name("numpy.libs") / "libscipy_openblas64_.so")
+OTHER_LIBRARY = str(Path(np.__file__).resolve().parent.with_name("scipy.libs") / "libscipy_openblas.so")
 
 
 def config(**changes: object) -> ModelConfig:
@@ -355,7 +362,7 @@ def test_cuda_observation_failure_does_not_break_model_metadata(
     assert identity(config(), device="cuda:99") is None
 
 
-def test_loaded_blas_kernel_and_threads_change_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_numpy_blas_kernel_and_threads_change_identity(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         profile_identity.np, "show_config", lambda **kwargs: {"Build Dependencies": {"blas": {"name": "openblas"}}}
     )
@@ -366,6 +373,7 @@ def test_loaded_blas_kernel_and_threads_change_identity(monkeypatch: pytest.Monk
         "num_threads": 1,
         "architecture": "Haswell",
         "threading_layer": "pthreads",
+        "filepath": NUMPY_LIBRARY,
     }
     monkeypatch.setattr(profile_identity, "threadpool_info", lambda: [library])
     first = identity(config())
@@ -385,7 +393,7 @@ def test_library_paths_do_not_enter_identity(monkeypatch: pytest.MonkeyPatch) ->
         "user_api": "blas",
         "internal_api": "openblas",
         "version": "0.3.30",
-        "filepath": "/private/env/a/libblas.so",
+        "filepath": NUMPY_LIBRARY,
         "architecture": "Haswell",
         "threading_layer": "pthreads",
         "num_threads": 1,
@@ -393,11 +401,14 @@ def test_library_paths_do_not_enter_identity(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(profile_identity, "threadpool_info", lambda: [library])
     first = identity(config())
     assert first is not None
-    library["filepath"] = "/private/env/b/libblas.so"
+    library["filepath"] = str(Path(NUMPY_LIBRARY).with_name("libscipy_openblas64_-other.so"))
     assert identity(config()) == first
 
 
-@pytest.mark.parametrize("libraries", [[], [{"user_api": "blas", "internal_api": "openblas", "version": None}]])
+@pytest.mark.parametrize(
+    "libraries",
+    [[], [{"user_api": "blas", "internal_api": "openblas", "version": None, "filepath": NUMPY_LIBRARY}]],
+)
 def test_unknown_numerical_libraries_refuse_identity(monkeypatch: pytest.MonkeyPatch, libraries: list[dict]) -> None:
     monkeypatch.setattr(profile_identity, "threadpool_info", lambda: libraries)
     monkeypatch.setattr(profile_identity.platform, "system", lambda: "Linux")
@@ -444,6 +455,7 @@ def test_unobserved_kernel_dispatch_never_claims_identity(monkeypatch: pytest.Mo
         "threading_layer": "pthreads",
         "architecture": "Haswell",
         "current_backend": "OPENBLAS",
+        "filepath": NUMPY_LIBRARY,
     }
     monkeypatch.setattr(profile_identity, "threadpool_info", lambda: [library])
     assert identity(config()) is None
@@ -460,9 +472,71 @@ def test_unrelated_blas_cannot_authorize_numpy_backend(monkeypatch: pytest.Monke
         "num_threads": 1,
         "threading_layer": "pthreads",
         "architecture": "Haswell",
+        "filepath": NUMPY_LIBRARY,
     }
     monkeypatch.setattr(profile_identity, "threadpool_info", lambda: [library])
     monkeypatch.setattr(
         profile_identity.np, "show_config", lambda **kwargs: {"Build Dependencies": {"blas": {"name": build}}}
     )
     assert identity(config()) is None
+
+
+def test_numpy_build_requires_its_own_blas(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        profile_identity.np, "show_config", lambda **kwargs: {"Build Dependencies": {"blas": {"name": "openblas"}}}
+    )
+    library = {
+        "user_api": "blas",
+        "internal_api": "openblas",
+        "version": "0.3.30",
+        "num_threads": 1,
+        "threading_layer": "pthreads",
+        "architecture": "Haswell",
+        "filepath": OTHER_LIBRARY,
+    }
+    monkeypatch.setattr(profile_identity, "threadpool_info", lambda: [library])
+    assert identity(config()) is None
+
+
+def test_libraries_other_packages_load_do_not_change_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        profile_identity.np, "show_config", lambda **kwargs: {"Build Dependencies": {"blas": {"name": "openblas"}}}
+    )
+    numpy_blas = {
+        "user_api": "blas",
+        "internal_api": "openblas",
+        "version": "0.3.30",
+        "num_threads": 1,
+        "threading_layer": "pthreads",
+        "architecture": "Haswell",
+        "filepath": NUMPY_LIBRARY,
+    }
+    loaded = [numpy_blas]
+    monkeypatch.setattr(profile_identity, "threadpool_info", lambda: list(loaded))
+    first = identity(config())
+    assert first is not None
+    loaded.append({**numpy_blas, "architecture": "SkylakeX", "filepath": OTHER_LIBRARY})
+    loaded.append({**numpy_blas, "internal_api": "mkl", "filepath": OTHER_LIBRARY})
+    loaded.append({"user_api": "openmp", "internal_api": "openmp", "num_threads": 8, "filepath": OTHER_LIBRARY})
+    assert identity(config()) == first
+
+
+_LOAD_PROBE = """
+import importlib, json
+from sie_server.config.model import ModelConfig
+from sie_server.core.profile_identity import local_profile_identity
+config = ModelConfig.model_validate_json(%r)
+before = local_profile_identity(config, "default", device="cpu")
+importlib.import_module("transformers.models.xlm_roberta.modeling_xlm_roberta")
+print(json.dumps([before, local_profile_identity(config, "default", device="cpu")]))
+"""
+
+
+def test_identity_is_the_same_before_and_after_the_model_stack_is_imported() -> None:
+    script = _LOAD_PROBE % config().model_dump_json()
+    result = subprocess.run(  # noqa: S603 - executes the fixed local interpreter
+        [sys.executable, "-c", script], capture_output=True, check=True, text=True, timeout=300
+    )
+    before, after = json.loads(result.stdout.strip().splitlines()[-1])
+    assert before is not None
+    assert before == after
