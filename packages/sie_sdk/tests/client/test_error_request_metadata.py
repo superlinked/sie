@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 import httpx
 import pytest
 from sie_sdk.client._shared import get_retry_after, handle_error
-from sie_sdk.client.errors import RequestError, ServerError
+from sie_sdk.client.errors import AccountStateUnavailableError, RequestError, ServerError
 
 
 def _error_response(status_code: int, headers: dict[str, str]) -> MagicMock:
@@ -93,3 +93,18 @@ def test_terminal_server_error_preserves_validated_http_retry_hint(
     assert excinfo.value.status_code == status_code
     assert excinfo.value.code == "QUEUE_FULL"
 
+
+@pytest.mark.parametrize("hint", ["5", "0", "nan", "-1", "not-a-date", None])
+def test_account_state_error_preserves_retry_hint_and_request_metadata(hint: str | None) -> None:
+    response = httpx.Response(
+        503,
+        headers={"x-sie-request-id": "req-account", **({"Retry-After": hint} if hint is not None else {})},
+        json={"error": {"code": "ACCOUNT_STATE_UNAVAILABLE", "message": "account unavailable", "param": "account"}},
+    )
+    with pytest.raises(AccountStateUnavailableError) as excinfo:
+        handle_error(response)
+    assert excinfo.value.retry_after == get_retry_after(response)
+    assert excinfo.value.param == "account"
+    assert excinfo.value.request == {"id": "req-account"}
+    assert excinfo.value.code == "ACCOUNT_STATE_UNAVAILABLE"
+    assert excinfo.value.status_code == 503

@@ -1411,7 +1411,7 @@ def handle_error(response: _HttpResponse) -> NoReturn:
     ):
         raise AccountInactiveError(message, code=code, param=param, request=request)
     if response.status_code == HTTP_SERVICE_UNAVAILABLE and code == ACCOUNT_STATE_UNAVAILABLE_ERROR_CODE:
-        raise AccountStateUnavailableError(message, param=param, request=request)
+        raise AccountStateUnavailableError(message, retry_after=get_retry_after(response), param=param, request=request)
     if response.status_code >= HTTP_SERVER_ERROR:
         raise ServerError(
             message,

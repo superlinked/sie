@@ -406,10 +406,18 @@ class AccountStateUnavailableError(ServerError):
         self,
         message: str,
         *,
+        retry_after: float | None = None,
         param: str | None = None,
         request: RequestMetadata | None = None,
     ) -> None:
-        super().__init__(message, code="ACCOUNT_STATE_UNAVAILABLE", status_code=503, param=param, request=request)
+        super().__init__(
+            message,
+            code="ACCOUNT_STATE_UNAVAILABLE",
+            status_code=503,
+            retry_after=retry_after,
+            param=param,
+            request=request,
+        )
 
 
 class ResourceExhaustedError(ServerError):
