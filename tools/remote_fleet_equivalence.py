@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Collect existing direct-worker proofs; this does not enable fleet routing."""
+"""Bundle records for one remote profile, one per local execution identity.
+
+The bundle is evidence only. It admits nothing until an upstream policy names it.
+"""
 
 from __future__ import annotations
 
@@ -20,12 +23,12 @@ from sie_server.config.fleet_equivalence import (
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--record", type=Path, action="append", required=True, help="direct-worker v2 record; repeat")
-    parser.add_argument("--output", type=Path, required=True, help="new inventory file (never overwritten)")
-    parser.add_argument("--max-age-s", type=int, default=3600, help="freshness window, 1..86400 seconds")
+    parser.add_argument("--record", type=Path, action="append", required=True, help="version 3 record; repeat")
+    parser.add_argument("--output", type=Path, required=True, help="new evidence file (never overwritten)")
+    parser.add_argument("--max-age-s", type=int, default=3600, help="freshness window, 1..604800 seconds")
     args = parser.parse_args(argv)
     if not 1 <= args.max_age_s <= MAX_EVIDENCE_AGE_S or len(args.record) > MAX_FLEET_RECORDS:
-        parser.error("max age must be 1..86400 seconds and at most 256 records are allowed")
+        parser.error("max age must be 1..604800 seconds and at most 256 records are allowed")
     try:
         records = []
         total = 0

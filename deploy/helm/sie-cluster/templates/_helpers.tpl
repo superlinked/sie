@@ -1692,8 +1692,8 @@ Args (dict): url, field, requireTls.
 {{- end -}}
 {{- end -}}
 {{- $age := $policy.max_age_s -}}
-{{- if not (and (or (kindIs "int" $age) (kindIs "int64" $age) (kindIs "float64" $age)) (eq (float64 $age) (floor (float64 $age))) (gt (float64 $age) 0.0) (le (float64 $age) 86400.0)) -}}
-{{- fail (printf "%s.max_age_s must be an integer from 1 to 86400" $path) -}}
+{{- if not (and (or (kindIs "int" $age) (kindIs "int64" $age) (kindIs "float64" $age)) (eq (float64 $age) (floor (float64 $age))) (gt (float64 $age) 0.0) (le (float64 $age) 604800.0)) -}}
+{{- fail (printf "%s.max_age_s must be an integer from 1 to 604800" $path) -}}
 {{- end -}}
 {{- $records := $policy.record_files -}}
 {{- if not (and (kindIs "map" $records) (ge (len $records) 1) (le (len $records) 256)) -}}
