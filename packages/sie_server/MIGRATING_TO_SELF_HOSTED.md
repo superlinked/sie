@@ -36,10 +36,14 @@ and instruction prefixes. For reranking, compare score scale as well as
 ordering. For extraction, compare schemas and extracted results. A shared
 model name or matching vector dimension alone does not prove equivalence.
 
-Automated identity/equivalence admission is still being built under
-[issue #415](https://github.com/superlinked/sie/issues/415). Current SIE refuses
-hybrid embedding and score routing. Do not enable a fallback policy to bypass
-that refusal.
+Single-node hybrid embedding and score routing has narrowly scoped admission:
+revision-pinned native BGE-M3 profiles can use a fresh SIE identity comparison
+or a measured OpenAI equivalence record bound to the same worker process.
+Follow the [admission instructions](REMOTE_BACKENDS.md#admitting-sie-identity-fallback)
+before enabling fallback. Other local engines, including the MiniLM example
+above, remain outside that admission; compare their outputs for a deliberate
+remote-only to local-only cutover. Numerical cluster bridges remain gated under
+[issue #415](https://github.com/superlinked/sie/issues/415).
 
 ## 3. Switch the model's default profile
 
@@ -76,10 +80,14 @@ rollback artifact outside the active models directory. Restoring it returns
 the model to remote-only serving; it does not repair an index built with
 incompatible vectors.
 
-An extraction-only model can use the current single-node fallback after its
-local and remote profiles support the same declared outputs. A bridged request
-starts local warm-up. Cluster fallback, generation fallback and threshold
-routing remain unfinished, so they are not steps in this migration.
+Single-node extraction and generation models can use fallback when their local
+and remote profiles satisfy the [operation-specific contracts](REMOTE_BACKENDS.md#supported-operations-and-policies).
+A bridged request starts local warm-up. Cluster generation and extraction
+fallback use the normal queue path and require workers that support the
+versioned execution fence. Saturation and unhealthy-worker spill require
+explicit triggers. [Experimental cluster threshold routing](REMOTE_BACKENDS.md#experimental-cluster-threshold-routing)
+requires a separate deployment opt-in; single-node threshold routing remains
+refused. None of these modes makes unmeasured embedding outputs interchangeable.
 
 Record performance only from actual runs, including refusals and failures.
 No latency or cost improvement is assumed by this guide.
