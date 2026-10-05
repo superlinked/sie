@@ -206,10 +206,10 @@ async def route_request(
 
 
 def _remote_forbidden(request: Request) -> bool:
-    value = request.headers.get(REMOTE_HEADER)
-    if value is None:
+    values = request.headers.getlist(REMOTE_HEADER)
+    if not values:
         return False
-    if value == _FORBID:
+    if values == [_FORBID]:
         return True
     raise HTTPException(
         status_code=status.HTTP_400_BAD_REQUEST,

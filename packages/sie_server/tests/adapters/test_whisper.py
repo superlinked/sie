@@ -171,6 +171,32 @@ def test_extract_separates_short_and_long_audio_pipeline_batches() -> None:
     assert pipeline.call_args_list[1].kwargs["return_timestamps"] is True
 
 
+def test_extract_runs_long_audio_one_recording_per_pipeline_batch() -> None:
+    adapter, pipeline = _loaded_adapter(None)
+    short_payloads = [_payload(duration_ms=1_000), _payload(duration_ms=2_000)]
+    long_payloads = [_payload(duration_ms=31_000), _payload(duration_ms=45_000)]
+    pipeline.side_effect = [
+        [{"text": "short-1", "chunks": []}, {"text": "short-2", "chunks": []}],
+        [{"text": "long-1", "chunks": []}, {"text": "long-2", "chunks": []}],
+    ]
+    payloads = [short_payloads[0], long_payloads[0], short_payloads[1], long_payloads[1]]
+
+    output = adapter.extract(
+        [Item() for _ in payloads],
+        prepared_items=[
+            PreparedItem(payload=payload, cost=payload.duration_ms, original_index=index)
+            for index, payload in enumerate(payloads)
+        ],
+    )
+
+    assert [result["text"] for result in output.data] == ["short-1", "long-1", "short-2", "long-2"]
+    short_call, long_call = pipeline.call_args_list
+    assert [len(item["raw"]) for item in short_call.args[0]] == [p.sample_count for p in short_payloads]
+    assert short_call.kwargs["batch_size"] == 4
+    assert [len(item["raw"]) for item in long_call.args[0]] == [p.sample_count for p in long_payloads]
+    assert long_call.kwargs["batch_size"] == 1
+
+
 def test_extract_requests_segment_timestamps_for_short_audio() -> None:
     adapter, pipeline = _loaded_adapter(
         {

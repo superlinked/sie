@@ -9,23 +9,30 @@ Tests cover:
 6. Honest capability + typed rejection for adapters whose forward cannot
    honor a LoRA (bert_flash, nomic_flash — LoRA capability audit)
 7. Staging-side target_modules validation (audit §3 negative control)
+8. Refusal of LoRAs that train biases (per-request isolation)
 """
 
 from __future__ import annotations
 
+import asyncio
 from collections import OrderedDict
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
+import torch
+from peft import LoraConfig, PeftModel, get_peft_model
 from sie_server.adapters.base import ModelAdapter, ModelCapabilities, ModelDims
 from sie_server.adapters.bert_flash import BertFlashAdapter
 from sie_server.adapters.nomic_flash import NomicFlashAdapter
 from sie_server.adapters.peft_lora_mixin import PEFTLoRAMixin, validate_lora_target_modules
-from sie_server.core.model_loader import DEFAULT_MAX_LORAS, LoadedLora, LoadedModel
+from sie_server.config.model import AdapterOptions, EmbeddingDim, EncodeTask, ModelConfig, ProfileConfig, Tasks
+from sie_server.core.model_loader import DEFAULT_MAX_LORAS, LoadedLora, LoadedModel, ModelLoader
 from sie_server.core.registry import ModelRegistry
 from sie_server.types.responses import ErrorCode
+from torch import nn
 
 # =============================================================================
 # LoadedLora Tests
@@ -191,6 +198,12 @@ class MockAdapterWithLoRA(PEFTLoRAMixin, ModelAdapter):
         self._model = None
 
 
+def _bias_free_peft() -> MagicMock:
+    peft = MagicMock()
+    peft.PeftConfig.from_pretrained.return_value = SimpleNamespace(bias="none", target_modules=None)
+    return peft
+
+
 class TestPEFTLoRAMixin:
     """Tests for PEFTLoRAMixin."""
 
@@ -214,7 +227,7 @@ class TestPEFTLoRAMixin:
 
     def test_load_lora_first_time(self) -> None:
         """Test first LoRA load creates PeftModel."""
-        with patch.dict("sys.modules", {"peft": MagicMock()}):
+        with patch.dict("sys.modules", {"peft": _bias_free_peft()}):
             adapter = MockAdapterWithLoRA()
             adapter.load("cuda:0")
 
@@ -245,7 +258,7 @@ class TestPEFTLoRAMixin:
 
     def test_load_lora_additional(self) -> None:
         """Test additional LoRA uses load_adapter."""
-        with patch.dict("sys.modules", {"peft": MagicMock()}):
+        with patch.dict("sys.modules", {"peft": _bias_free_peft()}):
             adapter = MockAdapterWithLoRA()
             adapter.load("cuda:0")
 
@@ -272,7 +285,7 @@ class TestPEFTLoRAMixin:
 
     def test_load_lora_aliases_dotted_hf_repo_id_for_peft(self) -> None:
         """Test LoRA ids with dots/slashes are not passed to PEFT as adapter names."""
-        with patch.dict("sys.modules", {"peft": MagicMock()}):
+        with patch.dict("sys.modules", {"peft": _bias_free_peft()}):
             adapter = MockAdapterWithLoRA()
             adapter.load("cuda:0")
 
@@ -726,7 +739,7 @@ class TestMixinTargetModulesValidation:
     @staticmethod
     def _peft_module(target_modules: object) -> MagicMock:
         peft = MagicMock()
-        peft.PeftConfig.from_pretrained.return_value = SimpleNamespace(target_modules=target_modules)
+        peft.PeftConfig.from_pretrained.return_value = SimpleNamespace(bias="none", target_modules=target_modules)
         mock_peft_model = MagicMock()
         mock_peft_model.named_parameters.return_value = []
         peft.PeftModel.from_pretrained.return_value = mock_peft_model
@@ -758,23 +771,23 @@ class TestMixinTargetModulesValidation:
             peft.PeftModel.from_pretrained.assert_called_once()
             assert "org/matching-lora" in adapter._loaded_loras
 
-    def test_config_fetch_failure_skips_check_and_proceeds(self, caplog: pytest.LogCaptureFixture) -> None:
-        """A config-fetch error must not mask the real load error path."""
+    def test_config_fetch_failure_fails_the_load_before_wrapping(self) -> None:
+        """Without the config the bias cannot be checked, so the load fails."""
         peft = self._peft_module(["query"])
         peft.PeftConfig.from_pretrained.side_effect = RuntimeError("offline")
         with patch.dict("sys.modules", {"peft": peft}):
             adapter = MockAdapterWithCalledModules()
             adapter.load("cuda:0")
 
-            with caplog.at_level("WARNING"):
+            with pytest.raises(RuntimeError, match="offline"):
                 adapter.load_lora("org/unfetchable-lora")
 
-            assert "skipping the check" in caplog.text
-            peft.PeftModel.from_pretrained.assert_called_once()
-            assert "org/unfetchable-lora" in adapter._loaded_loras
+            peft.PeftModel.from_pretrained.assert_not_called()
+            assert "org/unfetchable-lora" not in adapter._loaded_loras
+            assert adapter._peft_model is None
 
     def test_default_none_declaration_skips_check(self) -> None:
-        """Standard-forward adapters (no declaration) never consult PeftConfig."""
+        """Standard-forward adapters (no declaration) skip the target_modules check."""
         peft = self._peft_module(["anything"])
         with patch.dict("sys.modules", {"peft": peft}):
             adapter = MockAdapterWithLoRA()
@@ -782,8 +795,215 @@ class TestMixinTargetModulesValidation:
 
             adapter.load_lora("org/any-lora")
 
-            peft.PeftConfig.from_pretrained.assert_not_called()
+            peft.PeftConfig.from_pretrained.assert_called_once_with("org/any-lora", revision=None)
             peft.PeftModel.from_pretrained.assert_called_once()
+            assert "org/any-lora" in adapter._loaded_loras
+
+
+# =============================================================================
+# LoRAs that train biases (per-request isolation)
+# =============================================================================
+
+
+class TestMixinBiasRefusal:
+    """load_lora refuses a LoRA that trains biases before PEFT sees the model."""
+
+    @staticmethod
+    def _peft_module(biases: dict[str, str]) -> MagicMock:
+        peft = MagicMock()
+        peft.PeftConfig.from_pretrained.side_effect = lambda path, revision=None: SimpleNamespace(
+            bias=biases[path], target_modules=None
+        )
+        mock_peft_model = MagicMock()
+        mock_peft_model.named_parameters.return_value = []
+        peft.PeftModel.from_pretrained.return_value = mock_peft_model
+        return peft
+
+    @pytest.mark.parametrize("bias", ["all", "lora_only"])
+    def test_first_lora_refused_before_wrapping(self, bias: str) -> None:
+        revision = "b" * 40
+        peft = self._peft_module({"org/bias-lora": bias})
+        with patch.dict("sys.modules", {"peft": peft}):
+            adapter = MockAdapterWithLoRA()
+            adapter.load("cuda:0")
+            base_model = adapter._model
+
+            with pytest.raises(ValueError, match=f"bias={bias!r}"):
+                adapter.load_lora("org/bias-lora", revision=revision)
+
+            peft.PeftConfig.from_pretrained.assert_called_once_with("org/bias-lora", revision=revision)
+            peft.PeftModel.from_pretrained.assert_not_called()
+            assert adapter._peft_model is None
+            assert adapter._model is base_model
+            assert "org/bias-lora" not in adapter._loaded_loras
+
+    def test_additional_lora_refused_before_load_adapter(self) -> None:
+        peft = self._peft_module({"org/plain-lora": "none", "org/bias-lora": "all"})
+        with patch.dict("sys.modules", {"peft": peft}):
+            adapter = MockAdapterWithLoRA()
+            adapter.load("cuda:0")
+            adapter.load_lora("org/plain-lora")
+
+            with pytest.raises(ValueError, match="bias='all'"):
+                adapter.load_lora("org/bias-lora")
+
+            peft.PeftModel.from_pretrained.return_value.load_adapter.assert_not_called()
+            assert adapter._loaded_loras == {"org/plain-lora"}
+
+
+class _TinyEncoder(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.query = nn.Linear(4, 4)
+        self.out = nn.Linear(4, 2)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.out(torch.relu(self.query(x)))
+
+
+def _tiny_encoder() -> _TinyEncoder:
+    model = _TinyEncoder()
+    generator = torch.Generator().manual_seed(0)
+    with torch.no_grad():
+        for parameter in model.parameters():
+            parameter.copy_(torch.randn(parameter.shape, generator=generator))
+    return model
+
+
+def _probe() -> torch.Tensor:
+    return torch.randn(3, 4, generator=torch.Generator().manual_seed(1))
+
+
+def _save_tiny_lora(path: Path, *, bias: str) -> str:
+    trained = get_peft_model(
+        _tiny_encoder(),
+        LoraConfig(r=2, target_modules=["query"], bias=bias, init_lora_weights=False),
+    )
+    with torch.no_grad():
+        for name, parameter in trained.named_parameters():
+            if parameter.requires_grad and name.endswith(".bias"):
+                parameter.add_(1.0)
+    trained.save_pretrained(str(path))
+    return str(path)
+
+
+def _snapshot(model: nn.Module) -> dict[str, torch.Tensor]:
+    return {name: tensor.detach().clone() for name, tensor in model.state_dict().items()}
+
+
+def _unchanged(model: nn.Module, snapshot: dict[str, torch.Tensor]) -> bool:
+    state = model.state_dict()
+    return state.keys() == snapshot.keys() and all(torch.equal(state[name], snapshot[name]) for name in snapshot)
+
+
+def _tiny_config(lora_paths: list[str] | None = None) -> ModelConfig:
+    loadtime = {"lora_paths": lora_paths} if lora_paths else {}
+    return ModelConfig(
+        sie_id="t/tiny",
+        hf_id="org/tiny",
+        tasks=Tasks(encode=EncodeTask(dense=EmbeddingDim(dim=2))),
+        profiles={
+            "default": ProfileConfig(
+                adapter_path="mod:Cls",
+                max_batch_tokens=8,
+                adapter_options=AdapterOptions(loadtime=loadtime),
+            )
+        },
+    )
+
+
+class TinyLoRAAdapter(MockAdapterWithLoRA):
+    """PEFT mixin adapter over a real two-layer torch model."""
+
+    def load(self, device: str) -> None:
+        self._device = device
+        self._model = _tiny_encoder()
+
+
+class TestBiasLoraIsolation:
+    """Real PEFT: a LoRA that trains biases never reaches the shared base model."""
+
+    @pytest.mark.filterwarnings("ignore:Careful, disabling adapter layers:UserWarning")
+    def test_peft_keeps_trained_biases_when_the_adapter_is_disabled(self, tmp_path: Path) -> None:
+        """The reason for the refusal: disabling such a LoRA does not restore the base outputs."""
+        lora = _save_tiny_lora(tmp_path, bias="all")
+        model = _tiny_encoder()
+        expected = model(_probe())
+
+        peft_model = PeftModel.from_pretrained(model, lora)
+        peft_model.disable_adapter_layers()
+
+        assert not torch.equal(peft_model(_probe()), expected)
+
+    @pytest.mark.parametrize("bias", ["all", "lora_only"])
+    def test_bias_lora_refused_with_the_base_model_unchanged(self, tmp_path: Path, bias: str) -> None:
+        lora = _save_tiny_lora(tmp_path, bias=bias)
+        adapter = TinyLoRAAdapter()
+        adapter.load("cpu")
+        base_model = adapter._model
+        snapshot = _snapshot(base_model)
+
+        with pytest.raises(ValueError, match=f"bias={bias!r}"):
+            adapter.load_lora(lora)
+
+        assert adapter._model is base_model
+        assert adapter._peft_model is None
+        assert lora not in adapter._loaded_loras
+        assert _unchanged(base_model, snapshot)
+
+    def test_bias_free_lora_leaves_base_outputs_unchanged(self, tmp_path: Path) -> None:
+        lora = _save_tiny_lora(tmp_path, bias="none")
+        adapter = TinyLoRAAdapter()
+        adapter.load("cpu")
+        expected = adapter._model(_probe())
+
+        adapter.load_lora(lora)
+        assert torch.equal(adapter._model(_probe()), expected)
+
+        adapter.set_active_lora(lora)
+        assert not torch.equal(adapter._model(_probe()), expected)
+
+        adapter.set_active_lora(None)
+        assert torch.equal(adapter._model(_probe()), expected)
+
+    def test_declared_bias_lora_is_skipped_and_the_model_loads(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        lora = _save_tiny_lora(tmp_path, bias="all")
+        adapter = TinyLoRAAdapter()
+        adapter.load("cpu")
+        snapshot = _snapshot(adapter._model)
+        loader = ModelLoader(
+            preprocessor_registry=MagicMock(),
+            postprocessor_registry=MagicMock(),
+            all_configs={},
+        )
+
+        loaded = loader._finish_load("t/tiny", "cpu", adapter, _tiny_config([lora]))
+
+        assert lora not in loaded.loras
+        assert adapter._peft_model is None
+        assert _unchanged(adapter._model, snapshot)
+        assert "bias='all'" in caplog.text
+
+    async def test_request_time_bias_lora_is_refused(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+        lora = _save_tiny_lora(tmp_path, bias="all")
+        adapter = TinyLoRAAdapter()
+        adapter.load("cpu")
+        snapshot = _snapshot(adapter._model)
+        config = _tiny_config()
+        loaded = LoadedModel(config=config, adapter=adapter, device="cpu")
+        registry = ModelRegistry()
+        registry._configs["t/tiny"] = config
+        registry._loaded["t/tiny"] = loaded
+
+        assert await registry.ensure_lora_loaded_async("t/tiny", lora) == (False, True)
+        await asyncio.gather(*registry._background_tasks)
+
+        assert lora not in loaded.loras
+        assert adapter._peft_model is None
+        assert _unchanged(adapter._model, snapshot)
+        assert "bias='all'" in caplog.text
 
 
 # =============================================================================

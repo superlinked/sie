@@ -163,9 +163,9 @@ is on unless disabled. Start with `--no-remote-serving` or set
 values also disable it.
 
 A caller can narrow that permission with `X-SIE-Remote: forbid`, or
-`SIEClient(..., remote="forbid")`. Other header values are rejected. A
-remote-backed model has no local alternative, so forbidding remote serving
-returns a client error.
+`SIEClient(..., remote="forbid")`. Other header values, and more than one
+`X-SIE-Remote` field, are rejected. A remote-backed model has no local
+alternative, so forbidding remote serving returns a client error.
 
 On the gateway, `forbid` for a model with a `fallback` or `threshold` policy
 selects only a fresh worker that advertises the versioned execution fence for
@@ -317,6 +317,22 @@ input refusals, must come from the same worker process identified by the initial
 metadata. A load balancer mixing workers cannot produce admissible evidence.
 The record names the local execution identity it measured, not the process, so
 it also covers other processes that report the same identity.
+
+In a cluster, add `--cluster` and pass the gateway URL as `--local-url`. The
+probe then takes process provenance from cluster status, so it needs no
+upstream credential and runs no model itself. The local processes are those of
+non-remote workers that list the model in their numerical diagnostics, and they
+must all report one identity and the supplied model contract. A worker that has
+the model loaded but reports no diagnostics refuses the run. The remote
+processes are those of remote workers that report the model's remote contract,
+and they must agree with the supplied files. When the model runs on several
+machine profiles with different identities, measure each one with `--gpu
+<machine profile>`, which pins the local calls to that profile. The probe first
+sends one local and one remote call that wait for capacity, so a cold lane
+starts through ordinary demand before cluster status is read. Cluster status is
+read again after the run, and any change in the processes, identities or
+contracts refuses the result, including a lane that scales up or down during
+the run.
 
 Exit status is `0` for passing evidence, `1` for a measured failure, or `2` when
 valid evidence could not be produced. Records contain input hashes, token

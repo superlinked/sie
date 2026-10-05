@@ -1,0 +1,113 @@
+{
+  "description": "Remote routing of a model that has a local profile and a remote profile: which local states send a request for the model's bare name to the remote profile, what X-SIE-Remote changes, and how the local refusal answers a failed remote attempt. A single server ('single_node') and a gateway ('gateway') each check every vector, mapping the abstract local states and models below to their own topology. A vector that lists 'topologies' applies only to those.",
+  "local_states": {
+    "ready": "The local profile can serve the request now.",
+    "loading": "The local profile is not loaded. A single server is loading it; a gateway has a local worker that has not loaded it.",
+    "no_worker": "No local worker exists. Only a gateway has this state.",
+    "saturated": "The local queue cannot take the request.",
+    "unhealthy": "The local profile cannot serve. On a single server its load failed; on a gateway its worker is unhealthy."
+  },
+  "models": {
+    "bare": "The bare name of a model whose routing policy is fallback, with fallback_profile remote.",
+    "local_profile": "The same model with its local profile named explicitly.",
+    "remote_profile": "The same model with its remote profile named explicitly.",
+    "remote_only": "A model served only by an upstream."
+  },
+  "bridge": [
+    {"local": "ready", "triggers": null, "remote": false},
+    {"local": "loading", "triggers": null, "remote": true, "fallback_reason": "model_loading"},
+    {"local": "loading", "triggers": ["saturated"], "remote": false},
+    {"local": "no_worker", "triggers": null, "remote": true, "fallback_reason": "provisioning", "topologies": ["gateway"]},
+    {"local": "no_worker", "triggers": ["model_loading"], "remote": false, "topologies": ["gateway"]},
+    {"local": "saturated", "triggers": null, "remote": false},
+    {"local": "saturated", "triggers": ["saturated"], "remote": true, "fallback_reason": "saturated"},
+    {"local": "unhealthy", "triggers": null, "remote": false},
+    {"local": "unhealthy", "triggers": ["unhealthy"], "remote": true, "fallback_reason": "unhealthy"}
+  ],
+  "remote_header": {
+    "accepted": [["forbid"]],
+    "refused": [["Forbid"], ["FORBID"], ["allow"], [""], ["forbid,forbid"], ["forbid, forbid"], ["forbid", "forbid"]],
+    "refusal": {"status": 400, "code": "INVALID_INPUT"}
+  },
+  "forbid": [
+    {"model": "bare", "local": "loading", "remote": false},
+    {"model": "remote_profile", "refusal": {"status": 400, "code": "INVALID_INPUT"}},
+    {"model": "remote_only", "refusal": {"status": 400, "code": "INVALID_INPUT"}}
+  ],
+  "named_profile": [
+    {"model": "local_profile", "local": "loading", "remote": false},
+    {"model": "remote_profile", "local": "loading", "remote": true, "fallback_reason": null}
+  ],
+  "fallback_error": [
+    {"status": 400, "code": "INVALID_INPUT", "fallback_error": "INVALID_INPUT"},
+    {"status": 404, "code": "MODEL_NOT_FOUND", "fallback_error": "MODEL_NOT_FOUND"},
+    {"status": 503, "code": "MODEL_NOT_LOADED", "fallback_error": "MODEL_NOT_LOADED"},
+    {"status": 503, "code": "LORA_LOADING", "fallback_error": "LORA_LOADING"},
+    {"status": 503, "code": "MODEL_LOADING", "fallback_error": "MODEL_LOADING"},
+    {"status": 502, "code": "MODEL_LOAD_FAILED", "fallback_error": "MODEL_LOAD_FAILED"},
+    {"status": 500, "code": "INFERENCE_ERROR", "fallback_error": "INFERENCE_ERROR"},
+    {"status": 503, "code": "QUEUE_FULL", "fallback_error": "QUEUE_FULL"},
+    {"status": 500, "code": "INTERNAL_ERROR", "fallback_error": "INTERNAL_ERROR"},
+    {"status": 503, "code": "RESOURCE_EXHAUSTED", "fallback_error": "RESOURCE_EXHAUSTED"},
+    {"status": 400, "code": "INPUT_TOO_LONG", "fallback_error": "INPUT_TOO_LONG"},
+    {"status": 503, "code": "queue_full", "fallback_error": "QUEUE_FULL"},
+    {"status": 500, "code": "inference_error", "fallback_error": "INFERENCE_ERROR"},
+    {"status": 400, "code": "Input_Too_Long", "fallback_error": "INPUT_TOO_LONG"},
+    {"status": 503, "code": "server_overloaded", "fallback_error": "QUEUE_FULL"},
+    {"status": 400, "code": "invalid_request", "fallback_error": "INVALID_INPUT"},
+    {"status": 503, "code": "SERVER_OVERLOADED", "fallback_error": "INFERENCE_ERROR"},
+    {"status": 503, "code": "INVALID_REQUEST", "fallback_error": "INFERENCE_ERROR"},
+    {"status": 504, "code": "first_chunk_timeout", "fallback_error": "INFERENCE_ERROR"},
+    {"status": 504, "code": "overall_timeout", "fallback_error": "INFERENCE_ERROR"},
+    {"status": 504, "code": "GATEWAY_TIMEOUT", "fallback_error": "INFERENCE_ERROR"},
+    {"status": 503, "code": "PROVISIONING", "fallback_error": "INFERENCE_ERROR"},
+    {"status": 503, "code": "transport_failure", "fallback_error": "INFERENCE_ERROR"},
+    {"status": 413, "code": "PAYLOAD_TOO_LARGE", "fallback_error": "INVALID_INPUT"},
+    {"status": 429, "code": "rate_limit_exceeded", "fallback_error": "INVALID_INPUT"},
+    {"status": 502, "code": null, "fallback_error": "INFERENCE_ERROR"},
+    {"status": 500, "code": null, "fallback_error": "INFERENCE_ERROR"},
+    {"status": 422, "code": null, "fallback_error": "INVALID_INPUT"}
+  ],
+  "restored_refusal": [
+    {
+      "local": {"status": 503, "code": "MODEL_LOADING", "retry_after": "5"},
+      "fallback_reason": "model_loading",
+      "attempt": {"status": 503, "code": "RESOURCE_EXHAUSTED"},
+      "fallback_error": "RESOURCE_EXHAUSTED"
+    },
+    {
+      "local": {"status": 503, "code": "QUEUE_FULL", "retry_after": "1"},
+      "fallback_reason": "saturated",
+      "attempt": {"status": 400, "code": "INPUT_TOO_LONG"},
+      "fallback_error": "INPUT_TOO_LONG"
+    },
+    {
+      "local": {"status": 502, "code": "MODEL_LOAD_FAILED", "retry_after": null},
+      "fallback_reason": "unhealthy",
+      "attempt": {"status": 502, "code": null},
+      "fallback_error": "INFERENCE_ERROR"
+    },
+    {
+      "local": {"status": 503, "code": "PROVISIONING", "retry_after": "60"},
+      "fallback_reason": "provisioning",
+      "attempt": {"status": 503, "code": "QUEUE_FULL"},
+      "fallback_error": "QUEUE_FULL",
+      "topologies": ["gateway"]
+    },
+    {
+      "local": {"status": 503, "code": "MODEL_LOADING", "retry_after": "5"},
+      "fallback_reason": "model_loading",
+      "attempt": "unanswered_before_deadline",
+      "fallback_error": "QUEUE_FULL",
+      "topologies": ["gateway"]
+    }
+  ],
+  "notes": {
+    "bridge": "remote true: the request is served by the remote profile and the response names fallback_reason in X-SIE-Fallback-Reason. remote false: the request is served or refused locally and carries no X-SIE-Fallback-* header. triggers null means the policy declares none, which enables provisioning and model_loading.",
+    "remote_header": "Each entry lists the X-SIE-Remote field values of one request. Only exactly one 'forbid' is accepted.",
+    "forbid": "With X-SIE-Remote: forbid. remote false: served or refused locally, never by an upstream, with no X-SIE-Fallback-* header.",
+    "named_profile": "A request that names a profile is served as written: the local profile never goes remote, and the remote profile is served remotely without a fallback reason.",
+    "fallback_error": "X-SIE-Fallback-Error for a failed remote attempt that answered with status and SIE error code (null: no code). An SIE error code passes through in any letter case, server_overloaded and invalid_request (exactly) become QUEUE_FULL and INVALID_INPUT, and otherwise a status from 500 is INFERENCE_ERROR and a lower one INVALID_INPUT.",
+    "restored_refusal": "A failed remote attempt is answered with the local refusal it replaced: the same status, code and Retry-After (null: none), X-SIE-Served-By: local, no X-SIE-Upstream, and X-SIE-Fallback-Reason and X-SIE-Fallback-Error set. unanswered_before_deadline: a gateway deadline passed before the remote attempt answered anything."
+  }
+}

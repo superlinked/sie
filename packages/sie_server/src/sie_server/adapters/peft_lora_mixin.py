@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 if TYPE_CHECKING:
     from collections.abc import Collection
 
-    from peft import PeftModel
+    from peft import PeftConfig, PeftModel
 
 logger = logging.getLogger(__name__)
 
@@ -193,7 +193,8 @@ class PEFTLoRAMixin:
 
         Raises:
             RuntimeError: If model not loaded or PEFT import fails.
-            ValueError: If LoRA is already loaded.
+            ValueError: If the LoRA trains biases, or targets none of the
+                modules the serving forward calls.
         """
         self._ensure_lora_tracking()
 
@@ -209,16 +210,14 @@ class PEFTLoRAMixin:
             raise RuntimeError(msg)
 
         try:
-            from peft import PeftModel
+            from peft import PeftConfig, PeftModel
         except ImportError as e:
             msg = "PEFT is required for LoRA support. Install with: pip install peft"
             raise RuntimeError(msg) from e
 
         logger.info("Loading LoRA adapter: %s", lora_path)
 
-        # Fail loudly on a LoRA the serving forward would silently ignore
-        # (target_modules ∩ called modules = ∅) before any PEFT wrapping.
-        self._validate_lora_target_modules(lora_path, revision)
+        self._check_lora_config(lora_path, PeftConfig.from_pretrained(lora_path, revision=revision))
 
         peft_adapter_name = self._peft_adapter_name(lora_path)
 
@@ -255,36 +254,27 @@ class PEFTLoRAMixin:
 
         return memory_bytes
 
-    def _validate_lora_target_modules(self, lora_path: str, revision: str | None = None) -> None:
-        """Check the LoRA's ``target_modules`` against the called-module set.
+    def _check_lora_config(self, lora_path: str, peft_config: PeftConfig) -> None:
+        """Refuse a LoRA from its ``adapter_config.json`` before any weights load.
 
-        No-op when the adapter does not declare
-        :attr:`lora_called_module_names` (standard-forward adapters). Reads
-        only the LoRA's ``adapter_config.json`` via ``PeftConfig`` — no
-        weights are loaded. A failure to *fetch* the config is logged and
-        skipped (the actual ``PeftModel`` load will surface the real error);
-        a fetched config whose targets miss every called module raises
-        ``ValueError`` (see :func:`validate_lora_target_modules`).
+        A LoRA whose ``bias`` is not ``"none"`` trains biases that live in the
+        base model's own layers, which every request shares; PEFT cannot turn
+        them off with the adapter. A LoRA whose ``target_modules`` miss every
+        module in :attr:`lora_called_module_names` would have no effect (see
+        :func:`validate_lora_target_modules`).
         """
-        called = self.lora_called_module_names
-        if not called:
-            return
-
-        try:
-            from peft import PeftConfig
-
-            peft_config = PeftConfig.from_pretrained(lora_path, revision=revision)
-            target_modules = getattr(peft_config, "target_modules", None)
-        except Exception as e:  # noqa: BLE001 — config fetch is best-effort
-            logger.warning(
-                "Could not read PEFT config for LoRA '%s' to validate target_modules (%s); "
-                "skipping the check — the load itself will surface any real error",
-                lora_path,
-                e,
+        bias = getattr(peft_config, "bias", "none")
+        if bias != "none":
+            msg = (
+                f"LoRA '{lora_path}' sets bias={bias!r}: its trained biases live in the base model's "
+                "shared layers, so loading it would change outputs for requests that do not name it. "
+                "Retrain or export the LoRA with bias='none'."
             )
-            return
+            raise ValueError(msg)
 
-        validate_lora_target_modules(lora_path, target_modules, called)
+        called = self.lora_called_module_names
+        if called:
+            validate_lora_target_modules(lora_path, getattr(peft_config, "target_modules", None), called)
 
     def unload_lora(self, lora_name: str) -> None:
         """Unload a LoRA adapter.
