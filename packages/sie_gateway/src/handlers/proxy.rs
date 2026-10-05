@@ -44,6 +44,7 @@ use crate::middleware::auth::{extract_bearer_token, mask_token};
 
 use super::serving_disclosure::{
     remote_forbidden, DeferredFallbackFinish, FallbackAttempt, ServingDisclosure,
+    UnansweredBeforeDeadline,
 };
 
 const GATEWAY_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -3974,7 +3975,11 @@ async fn queue_mode_proxy(
                     physical_lane,
                     "upstream_result_timeout",
                 );
-                return build_queue_result_timeout_response(model, timeout_secs);
+                let mut response = build_queue_result_timeout_response(model, timeout_secs);
+                if buffered_results.is_none() {
+                    response.extensions_mut().insert(UnansweredBeforeDeadline);
+                }
+                return response;
             }
         }
     };
@@ -4608,8 +4613,9 @@ pub(crate) enum StreamingDriverErr {
     /// reset, gateway shutting down, …). Maps to 504 Gateway Timeout.
     ResultChannelClosed,
     /// One of the three streaming generation timeouts fired. ``kind`` is
-    /// ``"first_chunk"`` | ``"inter_chunk"`` | ``"overall"``.
-    Timeout { kind: &'static str },
+    /// ``"first_chunk"`` | ``"inter_chunk"`` | ``"overall"``; ``answered``
+    /// says whether any output arrived before it.
+    Timeout { kind: &'static str, answered: bool },
     /// Worker emitted a terminal chunk with ``error`` populated. The
     /// caller chooses the wire status/code mapping; message, parameter,
     /// and retry metadata are bounded at the worker trust boundary.
@@ -5110,6 +5116,10 @@ pub(crate) async fn run_streaming_generate(
             // One of the three generation timeouts fired. This is not a
             // client-disconnect cancellation, so defuse the Drop guard and
             // send the worker cancel explicitly.
+            let answered = buffered_outcome.is_some()
+                || work_publisher
+                    .stream_chunk_timing(&request_id)
+                    .is_some_and(|(first_chunk_at, _)| first_chunk_at.is_some());
             cancel_guard.defuse();
             telemetry::record_queue_result_wait(
                 "generate",
@@ -5118,7 +5128,7 @@ pub(crate) async fn run_streaming_generate(
             );
             work_publisher.publish_cancel(&request_id).await;
             work_publisher.drop_pending_stream(&request_id);
-            return Err(StreamingDriverErr::Timeout { kind });
+            return Err(StreamingDriverErr::Timeout { kind, answered });
         }
     };
     let wait_elapsed = wait_start.elapsed();
@@ -5301,7 +5311,7 @@ fn build_streaming_error_response(err: &StreamingDriverErr) -> Response {
             )),
         )
             .into_response(),
-        StreamingDriverErr::Timeout { kind } => {
+        StreamingDriverErr::Timeout { kind, answered } => {
             // Inter-chunk timeout returns 502 (partial response is
             // corrupt; SDK cannot retry); first-chunk and overall
             // return 504 (gateway/upstream timing).
@@ -5315,7 +5325,7 @@ fn build_streaming_error_response(err: &StreamingDriverErr) -> Response {
                 "inter_chunk" => oai_code::INTER_CHUNK_TIMEOUT,
                 _ => oai_code::OVERALL_TIMEOUT,
             };
-            (
+            let mut resp = (
                 status,
                 Json(json_openai_error(
                     format!("Generation aborted: {kind} timeout"),
@@ -5324,7 +5334,11 @@ fn build_streaming_error_response(err: &StreamingDriverErr) -> Response {
                     code,
                 )),
             )
-                .into_response()
+                .into_response();
+            if !answered {
+                resp.extensions_mut().insert(UnansweredBeforeDeadline);
+            }
+            resp
         }
         StreamingDriverErr::WorkerError {
             code,
