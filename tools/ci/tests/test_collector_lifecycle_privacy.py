@@ -10,7 +10,6 @@ from __future__ import annotations
 import gzip
 import queue
 import shutil
-import socket
 import subprocess
 import threading
 import time
@@ -108,6 +107,8 @@ def test_lifecycle_allowlist_in_real_collector(tmp_path):
                 "127.0.0.1::4318",
                 "--publish",
                 "127.0.0.1::4327",
+                "--publish",
+                "127.0.0.1::13133",
                 "otel/opentelemetry-collector-contrib:0.119.0",
                 "--config=/etc/otelcol/config.yaml",
             ],
@@ -116,23 +117,24 @@ def test_lifecycle_allowlist_in_real_collector(tmp_path):
             text=True,
         )
         ports = {}
-        for internal in (4318, 4327):
-            port = int(
+        for internal in (4318, 4327, 13133):
+            ports[internal] = int(
                 subprocess.run(["docker", "port", name, f"{internal}/tcp"], check=True, capture_output=True, text=True)
                 .stdout.strip()
                 .rsplit(":", 1)[1]
             )
-            ports[internal] = port
-            deadline = time.monotonic() + 15
-            while True:
-                try:
-                    with socket.create_connection(("127.0.0.1", port), timeout=0.1):
-                        break
-                except OSError:
-                    assert time.monotonic() < deadline, subprocess.run(
-                        ["docker", "logs", name], capture_output=True, text=True, check=False
-                    ).stderr
-                    time.sleep(0.1)
+        # A published port accepts connections before the collector listens on
+        # it. The health check answers 200 only once every receiver has started.
+        deadline = time.monotonic() + 30
+        while True:
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{ports[13133]}", timeout=1):
+                    break
+            except OSError:
+                assert time.monotonic() < deadline, subprocess.run(
+                    ["docker", "logs", name], capture_output=True, text=True, check=False
+                ).stderr
+                time.sleep(0.1)
 
         def send(service, phase, *, application=False, changes=None, body="inference.lifecycle.completed"):
             exporter = (
