@@ -765,7 +765,7 @@ Enable the remote pool and define the upstreams:
 upstreams:
   team-sie:
     kind: sie
-    base_url: https://sie.example.internal
+    base_url: https://team-sie.example.com
     api_key_secret:
       name: team-sie-upstream
       key: api-key
@@ -783,7 +783,9 @@ Below, `<fullname>` is the chart's full name: `<release>-sie-cluster`, or
 
 - Each `upstreams` entry has the fields of the server's upstreams file:
   `kind` (`sie` or `openai`), `base_url` (https outside loopback, with no
-  credentials, query or fragment), `rate_cap` (required) and an optional
+  credentials, query or fragment, and a certificate from a public CA, because
+  the worker verifies it against its built-in CA bundle and accepts no private
+  CA bundle), `rate_cap` (required) and an optional
   `proxy_url`. An upstream of kind `openai` also declares the `endpoints` it
   offers (`completions`, `chat`, `embeddings`, `rerank`) and may name request
   fields to add to every call (`set_params`) or remove from it

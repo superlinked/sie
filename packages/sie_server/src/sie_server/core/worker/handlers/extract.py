@@ -208,8 +208,8 @@ class ExtractHandler(OperationHandler[ExtractOutput]):
 
         # Reassemble per-item unit counts (see slice_output). All-or-nothing:
         # a partial without a count means the meter cannot attribute the item
-        # exactly, so no counts are surfaced (metering falls back to its
-        # reserve estimate rather than under-counting).
+        # exactly, so no counts are surfaced (they are absent rather than
+        # under-counted).
         assembled_counts: list[int] = []
         for i in range(batch_size):
             partial_counts = partials[i].input_token_counts

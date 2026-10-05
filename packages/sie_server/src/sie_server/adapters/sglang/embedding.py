@@ -241,8 +241,8 @@ class SGLangEmbeddingAdapter(BaseAdapter):
         self._output_file: tempfile._TemporaryFileWrapper | None = None
         # Lazy, weights-free tokenizer used ONLY for exact §7.3 input-token
         # metering (see ``_get_metering_tokenizer`` / ``_stamp_input_token_counts``).
-        # Loaded on first ``encode`` and cached; a load failure degrades to the
-        # meter's reserve estimate rather than failing inference.
+        # Loaded on first ``encode`` and cached; a load failure leaves the
+        # counts absent rather than failing inference.
         self._metering_tokenizer_obj: Any = None
         self._metering_tokenizer_loaded: bool = False
 
@@ -612,12 +612,11 @@ class SGLangEmbeddingAdapter(BaseAdapter):
 
         SGLang runs the model in a subprocess, so this adapter has no
         in-process tokenizer for the base ``count_input_tokens`` seam and
-        ``units.input_tokens`` would otherwise stay 0 (the meter's reserve
-        fallback) for this promoted dense-SMARTEST tier. Loading the served
-        model's own tokenizer is tokenizer-only (no weights) and cheap; it is
-        cached after the first call. Best-effort: a load failure is logged once
-        and degrades metering to the reserve estimate rather than failing
-        inference (mirrors ``_resolve_eos_token``).
+        ``units.input_tokens`` would otherwise be absent for this promoted
+        dense-SMARTEST tier. Loading the served model's own tokenizer is
+        tokenizer-only (no weights) and cheap; it is cached after the first
+        call. Best-effort: a load failure is logged once and leaves the counts
+        absent rather than failing inference (mirrors ``_resolve_eos_token``).
         """
         if self._metering_tokenizer_loaded:
             return self._metering_tokenizer_obj
@@ -628,8 +627,7 @@ class SGLangEmbeddingAdapter(BaseAdapter):
             )
         except Exception:  # noqa: BLE001 — metering must never take the model down
             logger.warning(
-                "metering: could not load tokenizer for %s; units.input_tokens will "
-                "fall back to the meter's reserve estimate",
+                "metering: could not load tokenizer for %s; units.input_tokens will be absent",
                 self._model_name_or_path,
                 exc_info=True,
             )
@@ -646,8 +644,8 @@ class SGLangEmbeddingAdapter(BaseAdapter):
         """Stamp exact per-item input-token counts (§7.3) onto ``output.extra``.
 
         SGLang is server-backed, so the base ``count_input_tokens`` seam has no
-        in-process tokenizer and ``units.input_tokens`` would fall to the
-        meter's reserve estimate — never exact for this promoted dense tier. We
+        in-process tokenizer and ``units.input_tokens`` would be absent for
+        this promoted dense tier. We
         count the EXACT strings POSTed to sglang (``non_empty_texts`` — already
         query/doc-template- and (when enabled) EOS-formatted by
         ``_format_texts``, and truncated at ``max_seq_length`` the same way
@@ -657,8 +655,8 @@ class SGLangEmbeddingAdapter(BaseAdapter):
         ``usage.prompt_tokens`` for the request. Mirrors the ``bert_flash`` /
         ``bge_m3_flash`` seam; ``_token_counts_or_none`` is the shared base
         helper. Best-effort: any tokenizer quirk (or a load failure) leaves
-        ``extra`` unstamped so the meter falls back to its reserve estimate
-        rather than billing an approximation.
+        ``extra`` unstamped, so the counts are absent rather than
+        approximated.
         """
         tokenizer = self._get_metering_tokenizer()
         if tokenizer is None:

@@ -398,7 +398,7 @@ def _validate_profile_lora_pins(profiles: dict) -> None:
                 revision = value.get("revision")
                 if revision is None:
                     continue
-                if not isinstance(revision, str) or not _IMMUTABLE_REVISION_RE.match(revision):
+                if not isinstance(revision, str) or not _IMMUTABLE_REVISION_RE.fullmatch(revision):
                     msg = (
                         f"Profile '{profile_name}' loadtime.lora_paths[{served!r}] pins revision="
                         f"{revision!r}, which is not an immutable 40-char commit SHA — branch/tag "

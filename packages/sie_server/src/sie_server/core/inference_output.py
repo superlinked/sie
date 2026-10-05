@@ -117,8 +117,8 @@ class ScoreOutput:
     # (query, doc) pair the model processed, summed by the queue executor
     # into ``ItemOutcome.units.input_tokens`` for the score work item.
     # ``None`` when the adapter cannot surface a real count (char-proxy
-    # rerankers): metering then falls back to its reserve estimate rather
-    # than billing an estimate as a count. Sliced/assembled positionally
+    # rerankers): the count is then absent rather than an estimate
+    # presented as a count. Sliced/assembled positionally
     # with ``scores`` (see ScoreHandler) so fused cross-request batches
     # keep each pair's count attributed to the right work item.
     input_token_counts: list[int] | None = None
@@ -216,8 +216,8 @@ class ExtractOutput:
     # document as counted by the extractor's own tokenizer, surfaced by
     # the queue executor as ``ItemOutcome.units.input_tokens``. ``None``
     # when the adapter owns tokenization opaquely and cannot cheaply
-    # expose a count: metering then falls back to its reserve estimate
-    # rather than billing an estimate as a count. Sliced/assembled
+    # expose a count: the count is then absent rather than an estimate
+    # presented as a count. Sliced/assembled
     # positionally with ``entities`` (see ExtractHandler).
     input_token_counts: list[int] | None = None
 

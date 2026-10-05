@@ -263,7 +263,7 @@ class BaseAdapter(ModelAdapter):
         pass uses and returns the per-item ``len(input_ids)`` (special tokens
         included) — the identical ground-truth basis the encode preprocessor
         records for pipeline-tokenized adapters (§P3.5). Best-effort: returns
-        ``None`` (reserve fallback, never an estimate billed as a count) when
+        ``None`` (no count, never an estimate presented as a count) when
         there is no in-process tokenizer, any item is non-text, or the tokenizer
         raises. Never raises — metering must not fail inference.
         """

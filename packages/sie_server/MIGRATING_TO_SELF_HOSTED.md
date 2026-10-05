@@ -18,7 +18,10 @@ returned vector dimensions and usage.
 
 Run representative application requests through SIE, including long inputs,
 instructions, refusals and your normal concurrency. Confirm remote serving
-in SDK request metadata and record the outputs and usage. This is your own
+in SDK request metadata and record the outputs and usage. When the upstream
+reports no usage, SIE's native `encode`, `score` and `extract` responses omit
+it rather than estimate it (an OpenAI-compatible upstream serves no `extract`),
+so take those figures from the upstream's own records. This is your own
 migration baseline; it does not establish equivalence between backends.
 
 ## 2. Prepare the local model separately
@@ -40,7 +43,9 @@ Single-node hybrid embedding and score routing has narrowly scoped admission:
 revision-pinned native BGE-M3 profiles can use a fresh SIE identity comparison
 or a measured OpenAI equivalence record bound to the same worker process.
 Follow the [admission instructions](REMOTE_BACKENDS.md#admitting-sie-identity-fallback)
-before enabling fallback. Other local engines, including the MiniLM example
+before enabling fallback. With an SIE upstream the comparison also runs at
+startup, so that single node does not start while the upstream is unreachable
+or reports a different identity. Other local engines, including the MiniLM example
 above, remain outside that admission; compare their outputs for a deliberate
 remote-only to local-only cutover. Numerical cluster bridges remain gated under
 [issue #415](https://github.com/superlinked/sie/issues/415).
@@ -86,8 +91,9 @@ A bridged request starts local warm-up. Cluster generation and extraction
 fallback use the normal queue path and require workers that support the
 versioned execution fence. Saturation and unhealthy-worker spill require
 explicit triggers. [Experimental cluster threshold routing](REMOTE_BACKENDS.md#experimental-cluster-threshold-routing)
-requires a separate deployment opt-in; single-node threshold routing remains
-refused. None of these modes makes unmeasured embedding outputs interchangeable.
+requires a separate deployment opt-in and is available only in a cluster; a
+single node uses `fallback`. None of these modes makes unmeasured embedding
+outputs interchangeable.
 
 Record performance only from actual runs, including refusals and failures.
 No latency or cost improvement is assumed by this guide.

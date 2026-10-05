@@ -1554,7 +1554,7 @@ class QueueExecutor:
         # Adapter for the metering backfill (§7.3). Read via the registry — the
         # same sync accessor the encode seam uses — so a reranker that owns its
         # tokenization can re-derive real per-pair counts. ``None`` (evicted
-        # mid-batch) simply leaves the meter on its reserve estimate.
+        # mid-batch) leaves the counts absent.
         try:
             score_adapter = self._registry.get(model_id)
         except KeyError:
@@ -1866,8 +1866,7 @@ def _encode_units(token_count: int | None, image_count: int | None) -> UnitCount
     Nothing bills less: a zero contributes no credits either way, and the only
     behaviour that changes is a settlement that used to FAULT (billing nothing)
     now releasing that dimension and billing the images. An item with neither
-    dimension yields ``None`` so the metering edge falls back to its reserve
-    estimate.
+    dimension yields ``None``, so its counts are absent.
     """
     images = image_count if (image_count is not None and image_count > 0) else None
     if token_count is not None and token_count > 0:
@@ -1951,8 +1950,8 @@ def _page_total(pages: Any, expected_len: int) -> int | None:
     """Sum an adapter-surfaced per-item page list (``ExtractOutput.pages``) into a
     single billable page count for the work item.
 
-    Returns ``None`` — leaving the pages dimension unset so the meter falls back
-    to its reserve estimate — unless the list is well-formed (aligned 1:1 with
+    Returns ``None`` — leaving the pages dimension unset, with no estimate in its
+    place — unless the list is well-formed (aligned 1:1 with
     the item's outputs and non-negative ints). A valid zero remains authoritative;
     malformed data is dropped rather than mis-attributed.
     """
@@ -1977,8 +1976,8 @@ def _units_from_token_counts(counts: Any, expected_len: int) -> UnitCounts | Non
     """Sum authoritative per-item token counts into a work item's ``UnitCounts``.
 
     Mirrors the encode metering contract (§7.3): billing counts, never
-    estimates. Returns ``None`` — leaving ``ItemOutcome.units`` unset so the
-    metering edge falls back to its reserve estimate — unless the adapter
+    estimates. Returns ``None`` — leaving ``ItemOutcome.units`` unset, with no
+    estimate in its place — unless the adapter
     surfaced a well-formed list aligned 1:1 with the item's outputs. A
     misaligned or malformed list is dropped rather than mis-attributed.
     """
@@ -2025,7 +2024,7 @@ def _backfill_score_units(
     §7.3 basis the in-tree ``cross_encoder`` already surfaces. Pure fallback:
     never overwrites counts an adapter already produced (so bge-m3 / cross_encoder
     keep their exact values), and a ``None`` recovery (server-backed adapters)
-    leaves the meter on its reserve estimate.
+    leaves the counts absent.
     """
     if adapter is None:
         return
