@@ -62,7 +62,7 @@ class TestIsImmutableRevision:
     def test_accepts_40_hex_sha(self, rev: str) -> None:
         assert is_immutable_revision(rev) is True
 
-    @pytest.mark.parametrize("rev", [None, "main", "v1.0", _SHA[:12], _SHA + "aa", _SHA.upper()])
+    @pytest.mark.parametrize("rev", [None, "main", "v1.0", _SHA[:12], _SHA + "aa", _SHA.upper(), _SHA + "\n"])
     def test_rejects_non_immutable(self, rev: str | None) -> None:
         assert is_immutable_revision(rev) is False
 

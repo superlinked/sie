@@ -497,6 +497,18 @@ class TestConfigAPIModels:
             )
             assert resp.status_code == 400, f"{bad!r} should be rejected, got {resp.status_code}"
 
+    def test_model_id_with_a_trailing_newline_is_rejected(self) -> None:
+        resp = self.client.post(
+            "/v1/configs/models",
+            content=(
+                'sie_id: "org-42/foo\\n"\n'
+                "profiles:\n  default:\n    adapter_path: sie_server.adapters.bert_flash:A\n    max_batch_tokens: 1\n"
+            ),
+            headers={"Content-Type": "application/x-yaml"},
+        )
+        assert resp.status_code == 400, resp.text
+        assert not list((self._store / "models").glob("*\n*"))
+
 
 class TestConfigAPIBundles:
     def setup_method(self) -> None:

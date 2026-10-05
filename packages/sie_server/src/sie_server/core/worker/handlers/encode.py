@@ -219,8 +219,8 @@ class EncodeHandler(OperationHandler[EncodeOutput]):
 
         # Reassemble per-item unit counts (see slice_output). All-or-nothing
         # per key: a partial without a count means the meter cannot attribute
-        # the request exactly, so that dimension is not surfaced (metering then
-        # falls back to its reserve estimate rather than under-counting). The
+        # the request exactly, so that dimension is not surfaced (it is absent
+        # rather than under-counted). The
         # keys are independent — a video encode carries image counts with no
         # token counts at all.
         extra: dict[str, Any] = {}
