@@ -189,7 +189,9 @@ class WhisperAdapter(BaseAdapter):
                 timestamp_mode = long_form or "segment" in granularities
             group_outputs = self._pipeline(
                 [pipeline_inputs[index] for index in indices],
-                batch_size=self._pipeline_batch_size,
+                # Long-form features keep each recording's full frame count, and
+                # the pipeline cannot pad different lengths into one batch.
+                batch_size=1 if long_form else self._pipeline_batch_size,
                 return_timestamps=timestamp_mode,
                 return_language=True,
                 generate_kwargs=generation_kwargs,
