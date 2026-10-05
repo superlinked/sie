@@ -33,6 +33,7 @@ impl NatsHealthManager {
         client: &async_nats::Client,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let sub = subscribe_health(client).await?;
+        self.registry.health_subscription_started();
         info!(subject = HEALTH_SUBJECT, "subscribed to NATS health");
 
         let registry = Arc::clone(&self.registry);
@@ -130,6 +131,7 @@ async fn run_subscription_supervised(
             Some(sub) => sub,
             None => match subscribe_health(&client).await {
                 Ok(sub) => {
+                    registry.health_subscription_started();
                     info!(subject = HEALTH_SUBJECT, "resubscribed to NATS health");
                     sub
                 }

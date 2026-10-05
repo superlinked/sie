@@ -8,7 +8,6 @@ use dashmap::DashMap;
 use percent_encoding::{percent_decode_str, utf8_percent_encode, NON_ALPHANUMERIC};
 use rmp_serde;
 use serde_json::{json, Map, Value};
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn, Instrument};
@@ -405,6 +404,9 @@ const LORA_LOADING_RETRY_AFTER: &str = RetryAfter::DEFAULT.lora_loading;
 /// worker's ``retry_after_s`` when it gave one.
 const QUEUE_FULL_ERROR_CODE: &str = "QUEUE_FULL";
 const QUEUE_FULL_RETRY_AFTER: &str = RetryAfter::DEFAULT.queue_full;
+/// The code a remote worker answers when its numerical admission check
+/// refuses an admitted item before calling the upstream.
+const INFERENCE_ERROR_ERROR_CODE: &str = "INFERENCE_ERROR";
 const INVALID_INPUT_ERROR_CODE: &str = "INVALID_INPUT";
 /// Worker-side input exceeds the model's context window (for example a label
 /// set that does not fit). Caller-fixable, so it maps to 400 like
@@ -1869,6 +1871,64 @@ fn native_request_has_profile_selector(body: &[u8], msgpack: bool) -> bool {
 #[derive(Clone)]
 struct RemoteFallbackOverride(crate::state::model_registry::RemoteFallbackPlan);
 
+/// A request's latest numerical admission decision. A threshold route and a
+/// later fallback trigger can both decide for one request, which counts once,
+/// with the decision that applied.
+#[derive(Clone, Default)]
+struct NumericalDecision(Arc<std::sync::Mutex<Option<NumericalDecisionRecord>>>);
+
+struct NumericalDecisionRecord {
+    model: String,
+    operation: String,
+    refusal: Option<crate::state::worker_registry::NumericalRefusal>,
+}
+
+impl NumericalDecision {
+    fn install(req: &mut Request) -> Self {
+        if let Some(existing) = req.extensions().get::<Self>() {
+            return existing.clone();
+        }
+        let decision = Self::default();
+        req.extensions_mut().insert(decision.clone());
+        decision
+    }
+
+    fn note(
+        ext: &axum::http::Extensions,
+        model: &str,
+        operation: &str,
+        refusal: Option<crate::state::worker_registry::NumericalRefusal>,
+    ) {
+        let Some(decision) = ext.get::<Self>() else {
+            crate::observability::metrics::record_numerical_admission(model, operation, refusal);
+            return;
+        };
+        *decision
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(NumericalDecisionRecord {
+            model: model.to_string(),
+            operation: operation.to_string(),
+            refusal,
+        });
+    }
+
+    fn record(&self) {
+        let latest = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(latest) = latest {
+            crate::observability::metrics::record_numerical_admission(
+                &latest.model,
+                &latest.operation,
+                latest.refusal,
+            );
+        }
+    }
+}
+
 /// The trigger a bridged remote attempt carries to its worker. A remote route
 /// with no held local refusal, such as a low-demand threshold route, has none.
 fn bridged_fallback_reason(ext: &axum::http::Extensions) -> Option<FallbackTrigger> {
@@ -2297,6 +2357,7 @@ fn threshold_remote_plan_for_request(
     ext: &axum::http::Extensions,
     model: &str,
     operation: &str,
+    parsed: Option<&(Vec<rmpv::Value>, publisher::WorkParams)>,
     allowed: bool,
     explicit_bundle: &str,
 ) -> Option<crate::state::model_registry::RemoteFallbackPlan> {
@@ -2323,37 +2384,47 @@ fn threshold_remote_plan_for_request(
     {
         return None;
     }
-    admit_numerical(state, plan, operation)
+    admit_numerical(state, plan, operation, parsed, ext)
 }
 
 /// Commit to a numerical plan only when a current admission covers every
-/// live local process; record the decision. Other plans pass unchanged.
+/// local process that could serve the model and the request stays within what
+/// the admission measured; note the decision. Other plans pass unchanged.
 fn admit_numerical(
     state: &AppState,
     mut plan: crate::state::model_registry::RemoteFallbackPlan,
     operation: &str,
+    parsed: Option<&(Vec<rmpv::Value>, publisher::WorkParams)>,
+    ext: &axum::http::Extensions,
 ) -> Option<crate::state::model_registry::RemoteFallbackPlan> {
     let Some(route) = plan.numerical.as_ref() else {
         return Some(plan);
     };
-    let now_unix_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| {
-            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
-        });
-    let decision = state.registry.numerical_admission(
-        &crate::state::worker_registry::NumericalLanes {
-            model: &route.model,
-            local_bundles: &route.local_bundles,
-            local_pool: &route.local_pool,
-            remote_model: &plan.model,
-            remote_bundle: &plan.bundle,
-            remote_pool: &plan.pool,
-            remote_hash: &plan.config_hash,
-        },
-        now_unix_ms,
-    );
-    crate::observability::metrics::record_numerical_admission(
+    let decision = match numerical_request_outputs(operation, parsed) {
+        None => Err(crate::state::worker_registry::NumericalRefusal::UnmeasuredRequest),
+        Some(outputs) => {
+            let now_unix_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| {
+                    u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+                });
+            state.registry.numerical_admission(
+                &crate::state::worker_registry::NumericalLanes {
+                    model: &route.model,
+                    local_bundles: &route.local_bundles,
+                    local_pool: route.local_pool.as_deref(),
+                    remote_model: &plan.model,
+                    remote_bundle: &plan.bundle,
+                    remote_pool: &plan.pool,
+                    remote_hash: &plan.config_hash,
+                    outputs: &outputs,
+                },
+                now_unix_ms,
+            )
+        }
+    };
+    NumericalDecision::note(
+        ext,
         &route.model,
         operation,
         decision.as_ref().err().copied(),
@@ -2365,18 +2436,46 @@ fn admit_numerical(
     Some(plan)
 }
 
-/// The remote workers a bridged numerical plan may run on. A numerical plan
-/// the gateway has not admitted names none.
-fn bridged_numerical_workers(ext: &axum::http::Extensions) -> Option<HashSet<String>> {
+/// The outputs a numerical request asks for, when it sets no runtime option
+/// that a numerical admission could not have measured. The remote process
+/// refuses any option except `is_query` that differs from the measured
+/// defaults, so a request with another option stays local.
+fn numerical_request_outputs(
+    operation: &str,
+    parsed: Option<&(Vec<rmpv::Value>, publisher::WorkParams)>,
+) -> Option<Vec<String>> {
+    let (_, params) = parsed?;
+    let measured = match params.options.as_ref() {
+        None | Some(Value::Null) => true,
+        Some(Value::Object(options)) => options.keys().all(|key| key == "is_query"),
+        Some(_) => false,
+    };
+    if !measured {
+        return None;
+    }
+    match operation {
+        "encode" => Some(
+            params
+                .output_types
+                .clone()
+                .unwrap_or_else(|| vec!["dense".to_string()]),
+        ),
+        "score" => Some(vec!["score".to_string()]),
+        _ => None,
+    }
+}
+
+/// The admitted remote workers a bridged numerical plan pins, for its bare
+/// model. A numerical plan the gateway has not admitted pins none.
+fn bridged_numerical_pin(
+    ext: &axum::http::Extensions,
+) -> Option<(String, Arc<crate::state::worker_registry::AdmittedWorkers>)> {
     let RemoteFallbackOverride(plan) = ext.get::<RemoteFallbackOverride>()?;
     let route = plan.numerical.as_ref()?;
-    Some(
-        route
-            .admitted
-            .as_ref()
-            .map(|workers| workers.keys().cloned().collect())
-            .unwrap_or_default(),
-    )
+    Some((
+        route.model.clone(),
+        route.admitted.clone().unwrap_or_default(),
+    ))
 }
 
 /// The admission digest a bridged numerical item names: the one its pinned
@@ -2387,7 +2486,12 @@ fn bridged_numerical_admission(
 ) -> Option<String> {
     let RemoteFallbackOverride(plan) = ext.get::<RemoteFallbackOverride>()?;
     let admitted = plan.numerical.as_ref()?.admitted.as_ref()?;
-    let publisher::PublishTarget::VerifiedWorker { worker_id, .. } = target? else {
+    let publisher::PublishTarget::VerifiedWorker {
+        worker_id,
+        numerical_admission: true,
+        ..
+    } = target?
+    else {
         return None;
     };
     admitted.get(worker_id).cloned()
@@ -2602,7 +2706,7 @@ fn begin_native_fallback(
     trigger: FallbackTrigger,
 ) -> Result<(), Response> {
     let Some(plan) = native_fallback_plan(state, req, endpoint, model, parsed, body_held, trigger)
-        .and_then(|plan| admit_numerical(state, plan, endpoint))
+        .and_then(|plan| admit_numerical(state, plan, endpoint, parsed, req.extensions()))
     else {
         return Err(refusal);
     };
@@ -2630,6 +2734,7 @@ pub(crate) async fn proxy_request(
     }
     let disclosure = ServingDisclosure::install(&mut req);
     let fallback = FallbackAttempt::install(&mut req);
+    let numerical_decision = NumericalDecision::install(&mut req);
     let defer_fallback = req.extensions().get::<DeferredFallbackFinish>().is_some();
     let provisioning_surface = provisioning_surface_for_endpoint(endpoint);
 
@@ -2685,6 +2790,7 @@ pub(crate) async fn proxy_request(
             inbound_publish_cx,
         )
         .await;
+        numerical_decision.record();
         disclosure.stamp(response.status(), response.headers_mut());
         if defer_fallback {
             response
@@ -2786,9 +2892,10 @@ async fn proxy_request_inner(
         req.extensions_mut().insert(ExplicitProfileSelector);
     }
     ServingDisclosure::record(&state, req.extensions(), &dispatch_model);
-    // A numerical bridge needs the body to detect a caller's profile selector
-    // and to replay the request remotely; other encode and score requests keep
-    // streaming their body straight to the queue path.
+    // A numerical bridge needs the body to detect a caller's profile selector,
+    // to check the request against the admission and to replay it remotely.
+    // The request is validated before either side counts it. Other encode and
+    // score requests keep streaming their body straight to the queue path.
     if prepared_native_body.is_none()
         && matches!(endpoint, "encode" | "score")
         && state.model_registry.has_numerical_bridge(&model_name)
@@ -2816,14 +2923,25 @@ async fn proxy_request_inner(
             }
         };
         req = Request::from_parts(parts, Body::empty());
+        let parsed = match parse_queue_request(&body_bytes, is_msgpack, endpoint) {
+            Ok(parsed) => parsed,
+            Err(error) => return queue_parse_error_response(endpoint, error),
+        };
+        if let Some(response) = queue_items_error(endpoint, &parsed.0) {
+            return response;
+        }
         if native_request_has_profile_selector(&body_bytes, is_msgpack) {
             req.extensions_mut().insert(ExplicitProfileSelector);
         }
         prepared_native_body = Some(body_bytes);
+        prepared_native_parsed = Some(parsed);
     }
     let body_held = prepared_native_body.is_some();
 
-    if let Some((items, params)) = prepared_native_parsed.as_ref() {
+    if let Some((items, params)) = prepared_native_parsed
+        .as_ref()
+        .filter(|_| matches!(endpoint, "generate" | "extract"))
+    {
         let response = if endpoint == "generate" {
             validate_native_generate_pre_admission(
                 &state,
@@ -2949,6 +3067,7 @@ async fn proxy_request_inner(
         req.extensions(),
         &model_name,
         endpoint,
+        prepared_native_parsed.as_ref(),
         native_bridge_eligible(endpoint, prepared_native_parsed.as_ref(), body_held),
         "",
     ) {
@@ -3240,6 +3359,7 @@ async fn proxy_request_inner(
     let batch_target = if endpoint == "generate" {
         None
     } else if require_execution_authority_v1 {
+        let numerical_pin = bridged_numerical_pin(req.extensions());
         match execution_authority_target(
             &state,
             &dispatch_model,
@@ -3248,7 +3368,15 @@ async fn proxy_request_inner(
             &bundle,
             &bundle_config_hash,
             &admission_pool,
-            bridged_numerical_workers(req.extensions()).as_ref(),
+            numerical_pin
+                .as_ref()
+                .map(
+                    |(model, admitted)| crate::state::worker_registry::NumericalPin {
+                        model,
+                        admitted,
+                    },
+                )
+                .as_ref(),
         )
         .await
         {
@@ -3261,7 +3389,11 @@ async fn proxy_request_inner(
                     oai_type::SERVER_ERROR,
                     oai_code::TRANSPORT_FAILURE,
                     None,
-                    "No current worker can verify local execution",
+                    if numerical_pin.is_some() {
+                        "No admitted remote worker can run this numerical bridge"
+                    } else {
+                        "No current worker can verify local execution"
+                    },
                 );
                 response
                     .headers_mut()
@@ -3436,6 +3568,24 @@ fn managed_request_parent(req: &Request) -> opentelemetry::Context {
 /// harvested from the registry snapshot — route resolution filters out
 /// empty pool names and machine profiles). We therefore don't need to
 /// re-query the registry inside this function.
+/// The request-wide item checks of the queue path.
+fn queue_items_error(endpoint: &str, items: &[rmpv::Value]) -> Option<Response> {
+    let message = if items.is_empty() && endpoint != "score" && endpoint != "generate" {
+        "No items found in request body".to_string()
+    } else {
+        publisher::validate_queue_request_item_count(items.len()).err()?
+    };
+    Some(endpoint_error_response(
+        endpoint,
+        StatusCode::BAD_REQUEST,
+        err_code::INVALID_REQUEST,
+        oai_type::INVALID_REQUEST,
+        oai_code::INVALID_REQUEST,
+        None,
+        message,
+    ))
+}
+
 fn queue_parse_error_response(endpoint: &str, error: QueueParseError) -> Response {
     match error {
         QueueParseError::Generic(message) => endpoint_error_response(
@@ -3872,28 +4022,8 @@ async fn queue_mode_proxy(
         params.numerical_admission_sha256 = Some(admission);
     }
 
-    if items.is_empty() && endpoint != "score" && endpoint != "generate" {
-        return endpoint_error_response(
-            endpoint,
-            StatusCode::BAD_REQUEST,
-            err_code::INVALID_REQUEST,
-            oai_type::INVALID_REQUEST,
-            oai_code::INVALID_REQUEST,
-            None,
-            "No items found in request body",
-        );
-    }
-
-    if let Err(message) = publisher::validate_queue_request_item_count(items.len()) {
-        return endpoint_error_response(
-            endpoint,
-            StatusCode::BAD_REQUEST,
-            err_code::INVALID_REQUEST,
-            oai_type::INVALID_REQUEST,
-            oai_code::INVALID_REQUEST,
-            None,
-            message,
-        );
+    if let Some(response) = queue_items_error(endpoint, &items) {
+        return response;
     }
 
     // Generate has its own publish + result-collection path
@@ -4242,6 +4372,28 @@ async fn queue_mode_proxy(
         {
             return build_model_load_failed_response();
         }
+        // An admitted remote attempt refused by its worker's admission check,
+        // which happens when the admission changed after this gateway checked
+        // it. Like an upstream that cannot serve now, it is retryable, and on
+        // a fallback route the held local refusal replaces it.
+        if params.numerical_admission_sha256.is_some()
+            && errors
+                .iter()
+                .all(|r| r.error_code.as_deref() == Some(INFERENCE_ERROR_ERROR_CODE))
+        {
+            let retry_after = longest_worker_retry_after(&errors).map_or_else(
+                || QUEUE_FULL_RETRY_AFTER.to_string(),
+                |seconds| seconds.to_string(),
+            );
+            return service_unavailable_with_code(
+                INFERENCE_ERROR_ERROR_CODE,
+                errors
+                    .first()
+                    .and_then(|r| r.error.as_deref())
+                    .unwrap_or("The remote profile cannot serve this request now"),
+                &retry_after,
+            );
+        }
         // Translate retryable worker error codes into the SDK-expected 503
         // contract. Without this every per-item failure surfaced as 500
         // ``all_items_failed`` and the SDK retry path never engaged. We
@@ -4585,7 +4737,7 @@ pub(crate) async fn execution_authority_target(
     bundle: &str,
     hash: &str,
     admission_pool: &str,
-    numerical_workers: Option<&HashSet<String>>,
+    numerical: Option<&crate::state::worker_registry::NumericalPin<'_>>,
 ) -> Result<publisher::PublishTarget, Box<Response>> {
     if !publisher::PublishTarget::verified_model_is_unambiguous(model)
         || !state
@@ -4607,15 +4759,10 @@ pub(crate) async fn execution_authority_target(
             .insert("retry-after", axum::http::HeaderValue::from_static("5"));
         return Err(Box::new(response));
     }
-    let capped = state
+    let admitted = state
         .pool_manager
         .admitted_worker_names_for_capped_lane(admission_pool, machine_profile, bundle)
         .await;
-    let admitted = match (capped, numerical_workers) {
-        (Some(capped), Some(numerical)) => Some(capped.intersection(numerical).cloned().collect()),
-        (capped, None) => capped,
-        (None, Some(numerical)) => Some(numerical.clone()),
-    };
     if let Some(worker_id) = state.registry.execution_authority_worker(
         model,
         pool,
@@ -4623,6 +4770,7 @@ pub(crate) async fn execution_authority_target(
         bundle,
         hash,
         admitted.as_ref(),
+        numerical,
     ) {
         return Ok(publisher::PublishTarget::VerifiedWorker {
             pool: pool.to_string(),
@@ -4630,6 +4778,7 @@ pub(crate) async fn execution_authority_target(
             bundle: bundle.to_string(),
             model: model.to_string(),
             worker_id,
+            numerical_admission: numerical.is_some(),
         });
     }
     let mut response = endpoint_error_response(
@@ -8170,6 +8319,7 @@ async fn resolve_generation_route(
         ext,
         customer_model,
         "generate",
+        None,
         bridge_allowed,
         explicit_bundle_override,
     ) {
@@ -10804,6 +10954,12 @@ fn build_retryable_error_response(
             );
             MODEL_LOADING_RETRY_AFTER.to_string()
         });
+    service_unavailable_with_code(code, message, &retry_after)
+}
+
+/// A `503` with the worker contract's error envelope, `Retry-After`,
+/// `X-SIE-Error-Code` and version headers.
+fn service_unavailable_with_code(code: &str, message: &str, retry_after: &str) -> Response {
     let mut resp = (
         StatusCode::SERVICE_UNAVAILABLE,
         Json(json!({
@@ -10816,7 +10972,7 @@ fn build_retryable_error_response(
         .into_response();
     resp.headers_mut().insert(
         HeaderName::from_static("retry-after"),
-        HeaderValue::from_str(&retry_after).unwrap_or_else(|_| HeaderValue::from_static("5")),
+        HeaderValue::from_str(retry_after).unwrap_or_else(|_| HeaderValue::from_static("5")),
     );
     resp.headers_mut().insert(
         HeaderName::from_static("x-sie-error-code"),
@@ -21215,6 +21371,74 @@ mod tests {
         let r1 = _err_result(None, "no code");
         let errors: Vec<&publisher::WorkResult> = vec![&r1];
         assert_eq!(unanimous_retryable_error_code(&errors), None);
+    }
+
+    #[test]
+    fn a_request_keeps_only_its_last_numerical_decision() {
+        use crate::state::worker_registry::NumericalRefusal;
+        let decision = NumericalDecision::default();
+        let mut ext = axum::http::Extensions::new();
+        ext.insert(decision.clone());
+        NumericalDecision::note(
+            &ext,
+            "acme/hybrid",
+            "encode",
+            Some(NumericalRefusal::NoAdmission),
+        );
+        NumericalDecision::note(&ext, "acme/hybrid", "encode", None);
+        let latest = decision.0.lock().unwrap().take().unwrap();
+        assert_eq!(
+            (
+                latest.model.as_str(),
+                latest.operation.as_str(),
+                latest.refusal
+            ),
+            ("acme/hybrid", "encode", None)
+        );
+        assert!(decision.0.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn a_numerical_request_is_measured_only_without_other_runtime_options() {
+        let parsed = |params: serde_json::Value| {
+            parse_queue_request(
+                serde_json::to_vec(&json!({"items":[{"text":"x"}], "params": params}))
+                    .unwrap()
+                    .as_slice(),
+                false,
+                "encode",
+            )
+            .unwrap()
+        };
+        let outputs = |operation: &str, params: serde_json::Value| {
+            numerical_request_outputs(operation, Some(&parsed(params)))
+        };
+        assert_eq!(
+            outputs("encode", json!({})),
+            Some(vec!["dense".to_string()])
+        );
+        assert_eq!(
+            outputs(
+                "encode",
+                json!({"output_types":["dense", "sparse"], "is_query": true})
+            ),
+            Some(vec!["dense".to_string(), "sparse".to_string()])
+        );
+        assert_eq!(
+            outputs("encode", json!({"options":{"is_query": true}})),
+            Some(vec!["dense".to_string()])
+        );
+        assert_eq!(outputs("score", json!({})), Some(vec!["score".to_string()]));
+        for params in [
+            json!({"output_dtype": "int8"}),
+            json!({"output_dtype": "float32"}),
+            json!({"options": {"normalize": true}}),
+            json!({"options": {"max_seq_length": 16}}),
+        ] {
+            assert_eq!(outputs("encode", params.clone()), None, "{params}");
+        }
+        assert_eq!(numerical_request_outputs("encode", None), None);
+        assert_eq!(outputs("extract", json!({})), None);
     }
 
     #[test]

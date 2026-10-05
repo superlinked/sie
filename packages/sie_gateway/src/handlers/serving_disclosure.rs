@@ -3411,10 +3411,15 @@ mod tests {
     async fn numerical_work_stays_local_unless_a_current_admission_covers_every_local_process() {
         for case in [
             "uncovered local identity",
+            "uncovered local identity in another pool",
             "local worker without inventory",
             "admission about to expire",
             "remote worker without the fence",
             "profile selected in the body",
+            "health heard for less than a heartbeat timeout",
+            "quantized output",
+            "a runtime option the admission did not measure",
+            "an output the admission did not measure",
         ] {
             let mut gateway = numerical_gateway(NUMERICAL_FALLBACK, false).await;
             gateway.set_request_timeout(1.0);
@@ -3458,8 +3463,32 @@ mod tests {
                         )
                         .await;
                 }
+                "uncovered local identity in another pool" => {
+                    gateway
+                        .add_numerical_worker(
+                            "local-1",
+                            ("other-pool", LOCAL_LANE.1, LOCAL_LANE.2),
+                            &[],
+                            true,
+                            local_identity(UNADMITTED_IDENTITY),
+                        )
+                        .await;
+                }
                 "profile selected in the body" => {
                     body = json!({"items":[{"text":"hello"}], "params":{"options":{"profile":"default"}}});
+                }
+                "health heard for less than a heartbeat timeout" => {
+                    gateway.state.registry.health_subscription_started();
+                }
+                "quantized output" => {
+                    body = json!({"items":[{"text":"hello"}], "params":{"output_dtype":"int8"}});
+                }
+                "a runtime option the admission did not measure" => {
+                    body = json!({"items":[{"text":"hello"}], "params":{"options":{"normalize":false}}});
+                }
+                "an output the admission did not measure" => {
+                    body =
+                        json!({"items":[{"text":"hello"}], "params":{"output_types":["sparse"]}});
                 }
                 _ => unreachable!(),
             }
@@ -3550,10 +3579,53 @@ mod tests {
         let started = std::time::Instant::now();
         let response = encode(&gateway, json!({"items":[{"text":"hello"}]})).await;
         assert!(started.elapsed() < Duration::from_secs(5));
-        assert!(!response.status().is_success());
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers()["retry-after"], "1");
+        assert_eq!(response.headers()["x-sie-error-code"], "INFERENCE_ERROR");
         assert_eq!(
             gateway.dispatcher.numerical_admissions(),
             vec![Some("a".repeat(64))]
         );
+    }
+
+    #[tokio::test]
+    async fn an_admitted_numerical_bridge_accepts_a_query_flag() {
+        let gateway = numerical_gateway(NUMERICAL_FALLBACK, false).await;
+        let response = encode(
+            &gateway,
+            json!({"items":[{"text":"hello"}], "params":{"is_query":true, "options":{"is_query":true}}}),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            gateway.dispatcher.numerical_admissions(),
+            vec![Some("a".repeat(64))]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_invalid_numerical_request_is_refused_before_either_side_counts_it() {
+        for policy in [
+            NUMERICAL_FALLBACK,
+            "\nrouting:\n  policy: threshold\n  fallback_profile: remote\n  wake_above: 1\n  sleep_below: 0.5\n  window_s: 1\n  cooldown_s: 1\n",
+        ] {
+            let gateway = numerical_gateway(policy, policy != NUMERICAL_FALLBACK).await;
+            gateway
+                .add_verified_worker("local-1", LOCAL_LANE, &[])
+                .await;
+            for body in [
+                json!({"items":"not-an-array"}),
+                json!({"items":[]}),
+            ] {
+                let response = encode(&gateway, body.clone()).await;
+                assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{body}");
+                assert!(
+                    !response.headers().contains_key("x-sie-fallback-reason"),
+                    "{body}"
+                );
+            }
+            assert!(gateway.dispatcher.dispatched().is_empty());
+            assert!(gateway.dispatcher.numerical_admissions().is_empty());
+        }
     }
 }

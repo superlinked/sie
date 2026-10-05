@@ -810,6 +810,7 @@ impl TestGateway {
             .registry
             .update_worker(&format!("http://{name}:8080"), status)
             .await;
+        self.state.registry.settle_health_view_for_tests();
     }
 
     async fn add_worker_with_authority(

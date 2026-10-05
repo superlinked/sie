@@ -510,28 +510,51 @@ admission decision described next.
 In a cluster, a bare `encode` or `score` request for a model with a `fallback`
 or `threshold` policy runs on the remote profile only under a current numerical
 admission. `/v1/embeddings` follows the same rule, because it wraps `encode`.
-The gateway decides when it is about to commit to the remote attempt:
+The gateway validates such a request before it counts threshold demand,
+publishes load-only work or makes a decision, so an invalid request gets its
+`400` and nothing else. It decides when it is about to commit to the remote
+attempt:
 
+- The request must set no runtime option other than `is_query`, and every
+  output it asks for must be listed in the admission. Any other option, such as
+  `output_dtype`, keeps the request local, because the remote process would
+  refuse it.
 - A remote-lane worker qualifies when it is fresh, eligible and positively
   supports both execution authority and the numerical admission method, carries
   the remote profile's exact configuration hash, and every adapter child reports
-  the same admission for the model. That admission must expire at least five
-  seconds later.
-- Its admission must cover every live local process that could serve the model.
-  Each child of every worker with a fresh heartbeat on the model's local bundles
-  and pool, starting and degraded workers included, must report an admitted
-  identity and the admission's model contract. A worker without a complete
-  inventory, or a child without an identity or without the model, keeps the
-  request local. With no live local worker the remote admission decides alone.
-- The request is pinned to one admitted remote worker. Its items carry that
-  worker's admission digest, which the worker checks again before calling the
-  upstream.
+  the same admission for the model with the model contract it reports itself.
+  That admission must expire at least five seconds later.
+- Its admission must cover every local process that could serve the model.
+  Each child of every worker on the model's local bundles, in the model's pool
+  or in any pool when the model names none, starting and degraded workers
+  included, must report an admitted identity and the admission's model contract.
+  A worker without a complete inventory, a worker past the heartbeat timeout
+  that has not been evicted, or a child without an identity or without the
+  model keeps the request local. So does every request until the gateway has
+  heard worker health for one heartbeat timeout after its health subscription
+  starts or resumes, or after a longer silence. With no local worker the remote
+  admission decides alone.
+- The request is pinned to one admitted remote worker that still reports the
+  capability and the same admission digest. Its items carry that digest on a
+  subject that only a worker with the numerical admission check consumes, and
+  the worker checks the admission again before calling the upstream.
 
 A request that names a profile, including one in its body options, stays on its
 selected route. Generation and extraction requests of a model with numerical
-outputs never bridge in a cluster. Every decision is counted on
-`sie.gateway.remote.numerical_admissions`. Upgrade workers and gateways before
-applying a hybrid `encode` or `score` configuration.
+outputs never bridge in a cluster. If the remote worker refuses an admitted
+attempt, for example because the admission changed after the gateway checked
+it, a fallback route answers with its local refusal, and a threshold route
+answers `503 INFERENCE_ERROR` with the worker's `Retry-After`. Each request's
+decision is counted once on `sie.gateway.remote.numerical_admissions`.
+
+Upgrade workers and gateways before applying a hybrid `encode` or `score`
+configuration. A remote lane rolled back below the numerical admission subject
+stops numerical bridging: its older sidecar never consumes admitted work, so
+queued attempts time out instead of running unchecked. Configuring a numerical
+bridge also changes local behavior while no admission holds: a trigger that
+would bridge commits to its local refusal, so a cold model answers
+`MODEL_LOADING` instead of waiting for its load, and an opted-in `saturated` or
+`unhealthy` trigger refuses instead of queueing.
 
 
 ## Single-node generation fallback

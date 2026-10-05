@@ -963,34 +963,52 @@ A bare `encode` or `score` request for a local model with numerical outputs
 profile only under a numerical admission. This covers fallback bridges, the
 threshold route and `/v1/embeddings`, which wraps `encode`. Generation and
 extraction surfaces never bridge such a model. For these models alone, the
-gateway reads the request body before routing, so it can refuse a body-level
-`options.profile` selector and replay the body remotely. The bridge decision
-is made when the gateway is about to commit to the remote attempt:
+gateway reads and parses the request body after route resolution and before
+any bridge, threshold or load decision. An invalid body gets its `400` before
+threshold demand is counted or load-only work is published. The parse lets the
+gateway refuse a body-level `options.profile` selector, check the request
+against the admission and replay the body remotely. The bridge decision is made
+when the gateway is about to commit to the remote attempt:
 
+- The request sets no runtime option other than `is_query`, and every output it
+  asks for (`dense` when an encode names none, `score` for score) is listed in
+  the admission. Otherwise the remote process would refuse it, so it stays local
+  with the reason `unmeasured_request`.
 - An eligible remote worker is fresh and eligible for dispatch, reports
   `supports_execution_authority_v1` and `supports_numerical_admission_v1`, has
   the remote profile's exact configuration hash, bundle and pool, and has a
   unique worker name. Every child in its inventory must report the same
-  admission for the bare model, expiring at least five seconds after the
-  decision.
-- Every live local process must be covered. That means each child of every
-  worker with a fresh heartbeat on the model's local bundles and pool, starting
-  and degraded workers included, unless the worker lists the model as
-  unsupported. Each such child must report an identity the admission lists and
-  the admission's model contract. A worker without a complete inventory, or a
-  child without an identity or without the model, closes the bridge. With no
-  live local worker the remote admission decides.
-- The bridge pins one remote worker that both conditions admit, through
-  execution-authority-v1 dispatch, and its work items carry the admission digest
-  that worker advertised as `numerical_admission_sha256`. The remote process
-  derives its admission again before calling the upstream, and the sidecar
-  answers a refused admitted item at once. A bridged caller then receives its
-  local refusal with `X-SIE-Fallback-Error`.
+  admission for the bare model, together with the admission's own model
+  contract, expiring at least five seconds after the decision.
+- Every local process that could serve the model must be covered. That means
+  each child of every worker on the model's local bundles, in the model's pool,
+  or in any pool when the model names none (a pool-less model accepts any
+  `X-SIE-Pool`), starting and degraded workers included, unless the worker lists
+  the model as unsupported. Each such child must report an identity the
+  admission lists and the admission's model contract. A worker without a
+  complete inventory, a worker past the heartbeat timeout that has not been
+  evicted, or a child without an identity or without the model, closes the
+  bridge. The registry also closes it until it has heard worker health for one
+  heartbeat timeout after the health subscription starts or resumes, or after
+  a silence longer than that timeout, because a worker that has not reported
+  yet looks absent. With no local worker the remote admission decides.
+- The bridge pins one remote worker that both conditions admit. Selection checks
+  again that the worker still reports `supports_numerical_admission_v1` and the
+  admitted digest. Its work items carry that digest as
+  `numerical_admission_sha256` on the worker's `numerical-admission-v1` subject,
+  which only a sidecar with the admission fence consumes, and the publisher
+  refuses the digest on any other subject. The remote process derives its
+  admission again before calling the upstream, and the sidecar answers a refused
+  admitted item at once. A bridged caller then receives its local refusal with
+  `X-SIE-Fallback-Error`. A threshold route holds no local refusal, so it
+  answers `503 INFERENCE_ERROR` with the worker's `Retry-After` hint (1 to 60
+  seconds, else 5).
 
 Anything else keeps the request on its local route. A numerical plan that was
 not admitted cannot select a worker, and a numerical bridge whose pinned worker
-has no admitted digest is refused before publication. Each decision is counted
-on `sie.gateway.remote.numerical_admissions` with `admitted` or one of the
-refusal reasons `no_admission`, `local_unobserved` and `uncovered_identity`.
-Configuration load no longer refuses `threshold` routing for numerical models;
-the admission gates each request instead.
+has no admitted digest is refused before publication. Each request's decision
+is counted once, with the decision that applied, on
+`sie.gateway.remote.numerical_admissions` with `admitted` or one of the refusal
+reasons `no_admission`, `local_unobserved`, `uncovered_identity` and
+`unmeasured_request`. Configuration load no longer refuses `threshold` routing
+for numerical models; the admission gates each request instead.

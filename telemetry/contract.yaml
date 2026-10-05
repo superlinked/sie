@@ -424,7 +424,7 @@ cardinality_budgets:
       numerical_admissions:
         metrics: [sie.gateway.remote.numerical_admissions]
         formula: models * operation * admission_outcome * admission_reason
-        limit: 14392
+        limit: 17990
       remote_duration:
         metrics: [sie.gateway.remote.serving.duration]
         formula: exact_models
@@ -834,7 +834,7 @@ enums:
   remote_fallback_reason: [provisioning, model_loading, saturated, unhealthy]
   remote_fallback_outcome: [committed, refused]
   remote_numerical_admission_outcome: [admitted, refused]
-  remote_numerical_admission_reason: [none, no_admission, local_unobserved, uncovered_identity]
+  remote_numerical_admission_reason: [none, no_admission, local_unobserved, uncovered_identity, unmeasured_request]
   gateway_dispatch_path: [i6pn, modal, other]
   dispatcher_path: [modal_remote, modal_stream, modal_spawn, generation_ws, other]
   dispatch_outcome: [success, error, timeout, cancelled, not_found, other]
