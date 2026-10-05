@@ -1,8 +1,9 @@
 """What the caller sees when an SIE upstream cannot serve a request yet.
 
 Every upstream here is a real SIE app on loopback. Its fake model is held in its
-load, fails to load, or is never reached, so the local server answers through
-the real error path on both ingress paths: single-node HTTP and the queue worker.
+load, fails to load, or is never reached, or the local rate cap or circuit
+breaker refuses the call, so the local server answers through the real error
+path on both ingress paths: single-node HTTP and the queue worker.
 """
 
 from __future__ import annotations
@@ -22,7 +23,8 @@ import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 from sie_sdk import SIEClient
-from sie_server.adapters.errors import UpstreamUnavailableError
+from sie_server.adapters.errors import UpstreamRefusedError, UpstreamUnavailableError
+from sie_server.api.helpers import upstream_unavailable_exception
 from sie_server.config.upstreams import Upstream, install_upstreams
 from sie_server.core.registry import ModelRegistry
 from sie_server.ipc_types import EncodeBatchItem, ItemOutcome, ProcessEncodeBatchRequest
@@ -155,10 +157,13 @@ def test_an_upstream_that_cannot_load_the_model_is_a_final_error(
     assert "retry-after" not in response.headers
 
 
+RETRYABLE_CODES = ("QUEUE_FULL", "MODEL_LOADING")
+
+
 async def queue_outcome(
     registry: ModelRegistry, text: str = "cold", *, attempts: int = 1, interval_s: float = 0.0
 ) -> ItemOutcome:
-    """Process one encode work item, again while it is NAKed, up to ``attempts`` times."""
+    """Process one encode work item, again while it is refused as retryable, up to ``attempts`` times."""
     executor = QueueExecutor(registry)
     for attempt in range(attempts):
         batch = await executor.process_encode_batch(
@@ -177,13 +182,15 @@ async def queue_outcome(
             )
         )
         outcome = batch.outcomes[0]
-        if outcome.disposition != "nak_retry":
+        if outcome.error_code not in RETRYABLE_CODES:
             return outcome
         await asyncio.sleep(interval_s)
     return outcome
 
 
-async def queue_worker(tmp_path: Path, upstream_url: str, credential_env: str) -> ModelRegistry:
+async def queue_worker(
+    tmp_path: Path, upstream_url: str, credential_env: str, *, requests_per_minute: int = 600
+) -> ModelRegistry:
     models = tmp_path / "queue-models"
     models.mkdir()
     (models / "remote-fake.yaml").write_text(
@@ -205,7 +212,7 @@ async def queue_worker(tmp_path: Path, upstream_url: str, credential_env: str) -
                     "kind": "sie",
                     "base_url": upstream_url,
                     "api_key_secret": credential_env,
-                    "rate_cap": {"requests_per_minute": 600, "max_concurrency": 8},
+                    "rate_cap": {"requests_per_minute": requests_per_minute, "max_concurrency": 8},
                 }
             )
         }
@@ -215,7 +222,24 @@ async def queue_worker(tmp_path: Path, upstream_url: str, credential_env: str) -
     return registry
 
 
-async def test_the_queue_worker_redelivers_an_item_its_cold_upstream_refused(
+def single_server_answer(error: UpstreamUnavailableError) -> tuple[int, str, str]:
+    """The status, code and ``Retry-After`` the single server answers ``error`` with."""
+    answer = upstream_unavailable_exception(error, REMOTE_MODEL)
+    assert isinstance(answer.detail, dict)
+    assert answer.headers is not None
+    return answer.status_code, answer.detail["code"], answer.headers["Retry-After"]
+
+
+def assert_answered_at_once(outcome: ItemOutcome, error: UpstreamUnavailableError) -> None:
+    """The queue worker publishes the single server's code and wait instead of redelivering."""
+    assert outcome.disposition == "publish_error_and_ack", outcome
+    assert outcome.nak_delay_ms is None
+    assert single_server_answer(error) == (503, outcome.error_code, str(outcome.retry_after_s))
+    assert outcome.error is not None
+    assert error.upstream not in outcome.error
+
+
+async def test_the_queue_worker_answers_an_item_its_cold_upstream_refused_at_once(
     sie_upstream: Callable[..., Any], held_upstream_load: Path, tmp_path: Path, upstream_credential_env: str
 ) -> None:
     with sie_upstream() as upstream:
@@ -227,28 +251,63 @@ async def test_the_queue_worker_redelivers_an_item_its_cold_upstream_refused(
         finally:
             await registry.unload_all_async()
 
-    assert refused.disposition == "nak_retry"
-    assert refused.nak_delay_ms == 5_000
-    assert refused.error is None
-    assert refused.error_code == "QUEUE_FULL"
-    assert refused.retry_after_s == 5
+    assert_answered_at_once(refused, UpstreamUnavailableError("fake-sie", "not_ready", retry_after_s=5, reason=""))
+    assert (refused.error_code, refused.retry_after_s) == ("MODEL_LOADING", 5)
     assert served.disposition == "publish_and_ack", served.error
 
 
-async def test_the_queue_worker_redelivers_an_item_its_unreachable_upstream_never_saw(
-    tmp_path: Path, upstream_credential_env: str, monkeypatch: pytest.MonkeyPatch
+async def test_the_queue_worker_answers_an_item_its_unreachable_upstream_never_saw_at_once(
+    tmp_path: Path, upstream_credential_env: str
 ) -> None:
-    monkeypatch.setenv("SIE_NAK_DELAY_S", "2.0")
     registry = await queue_worker(tmp_path, f"http://127.0.0.1:{closed_port()}", upstream_credential_env)
     try:
         outcome = await queue_outcome(registry)
     finally:
         await registry.unload_all_async()
 
-    assert outcome.disposition == "nak_retry"
-    assert outcome.nak_delay_ms == 5_000, "the upstream's wait, which is longer than the base delay"
-    assert outcome.error_code == "QUEUE_FULL"
-    assert outcome.retry_after_s == 5
+    assert_answered_at_once(outcome, UpstreamUnavailableError("fake-sie", "unavailable", retry_after_s=5, reason=""))
+    assert (outcome.error_code, outcome.retry_after_s) == ("QUEUE_FULL", 5)
+
+
+async def test_the_queue_worker_answers_an_item_over_the_rate_cap_at_once(
+    sie_upstream: Callable[..., Any], tmp_path: Path, upstream_credential_env: str
+) -> None:
+    def warm(url: str) -> None:
+        with SIEClient(url) as direct:
+            direct.encode("sie-fake", {"text": "warm"})
+
+    with sie_upstream() as upstream:
+        await asyncio.to_thread(warm, upstream.url)
+        registry = await queue_worker(tmp_path, upstream.url, upstream_credential_env, requests_per_minute=1)
+        try:
+            served = await queue_outcome(registry, "first")
+            capped = await queue_outcome(registry, "second")
+        finally:
+            await registry.unload_all_async()
+
+    assert served.disposition == "publish_and_ack", served.error
+    assert capped.retry_after_s is not None
+    assert_answered_at_once(capped, UpstreamRefusedError("fake-sie", "rate_cap", retry_after_s=capped.retry_after_s))
+    assert capped.error_code == "QUEUE_FULL"
+    assert 1 <= capped.retry_after_s <= 60
+
+
+async def test_the_queue_worker_answers_an_item_its_open_breaker_refused_at_once(
+    tmp_path: Path, upstream_credential_env: str
+) -> None:
+    registry = await queue_worker(tmp_path, f"http://127.0.0.1:{closed_port()}", upstream_credential_env)
+    try:
+        failures = [await queue_outcome(registry) for _ in range(5)]
+        refused = await queue_outcome(registry)
+    finally:
+        await registry.unload_all_async()
+
+    assert {(outcome.error_code, outcome.retry_after_s) for outcome in failures} == {("QUEUE_FULL", 5)}
+    assert refused.retry_after_s is not None
+    assert_answered_at_once(
+        refused, UpstreamRefusedError("fake-sie", "breaker_open", retry_after_s=refused.retry_after_s)
+    )
+    assert (refused.error_code, refused.retry_after_s) == ("QUEUE_FULL", 60)
 
 
 async def test_the_queue_worker_publishes_a_final_upstream_error(
@@ -273,18 +332,16 @@ def work_item() -> EncodeBatchItem:
     )
 
 
-@pytest.mark.parametrize(
-    ("base_delay", "retry_after_s", "delay_ms"),
-    [("5.0", 1, 5_000), ("5.0", 30, 30_000), ("2.0", 60, 60_000), ("120.0", 5, 60_000)],
-    ids=["base-delay-is-the-floor", "upstream-wait-above-the-floor", "upstream-wait-at-the-cap", "capped-at-60-s"],
-)
-def test_the_redelivery_delay_is_the_upstream_wait_between_the_base_delay_and_a_minute(
-    monkeypatch: pytest.MonkeyPatch, base_delay: str, retry_after_s: int, delay_ms: int
+@pytest.mark.parametrize("base_delay", ["2.0", "5.0", "120.0"])
+@pytest.mark.parametrize("retry_after_s", [1, 30, 60])
+@pytest.mark.parametrize("kind", ["busy", "unavailable", "not_ready"])
+def test_a_refused_item_carries_the_upstreams_own_wait_whatever_the_redelivery_delay(
+    monkeypatch: pytest.MonkeyPatch, base_delay: str, retry_after_s: int, kind: Any
 ) -> None:
     monkeypatch.setenv("SIE_NAK_DELAY_S", base_delay)
-    error = UpstreamUnavailableError("fake-sie", "busy", retry_after_s=retry_after_s, reason="answered 429")
+    error = UpstreamUnavailableError("fake-sie", kind, retry_after_s=retry_after_s, reason="answered 503")
 
     outcome = _inference_exception_outcome(work_item(), error)
 
-    assert outcome.disposition == "nak_retry"
-    assert outcome.nak_delay_ms == delay_ms
+    assert_answered_at_once(outcome, error)
+    assert outcome.retry_after_s == retry_after_s

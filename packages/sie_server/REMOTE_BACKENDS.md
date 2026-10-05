@@ -167,12 +167,15 @@ A caller can narrow that permission with `X-SIE-Remote: forbid`, or
 remote-backed model has no local alternative, so forbidding remote serving
 returns a client error.
 
-On the gateway, `forbid` selects only a fresh worker that advertises the
-versioned execution fence for the current configuration. The request stays on
-that worker's updated-only queue and backend IPC method; it never retries on an
-ordinary pool subject or older backend method. Missing worker support returns
-`503` with `Retry-After: 5`. Custom gateway dispatch transports remain closed
-unless they explicitly implement this contract. Rolling back a worker or backend
+On the gateway, `forbid` for a model with a `fallback` or `threshold` policy
+selects only a fresh worker that advertises the versioned execution fence for
+the current configuration. The request stays on that worker's updated-only
+queue and backend IPC method; it never retries on an ordinary pool subject or
+older backend method. Missing worker support returns `503` with
+`Retry-After: 5`. Custom gateway dispatch transports refuse such a request
+unless they explicitly implement this contract. A local model with no routing
+policy has no remote route, so `forbid` leaves its ordinary dispatch unchanged
+on every transport. Rolling back a worker or backend
 therefore refuses verified work before inference. Explicit remote profiles are
 refused with `400`. Model ids that cannot round-trip through the current queue
 subject encoding (including literal `__` and `_dot_` collisions) are refused for
@@ -189,7 +192,9 @@ Each upstream has a required rate cap and a circuit breaker. The limits are
 shared by that worker process's adapters, not across replicas: adding remote
 worker replicas increases the aggregate permitted traffic. Under
 `remote_only`, unavailable upstreams, open breakers and reached caps return
-retryable `503` responses. Under single-node `fallback`, an upstream failure
+retryable `503` responses with `Retry-After`. In a cluster the remote worker
+answers such a request at once instead of redelivering it, and the gateway
+returns the worker's code and wait. Under single-node `fallback`, an upstream failure
 returns the original local refusal with its retry delay. A client error is
 never retried remotely, and fallback cannot replay work after local acceptance
 or after output reaches the caller.

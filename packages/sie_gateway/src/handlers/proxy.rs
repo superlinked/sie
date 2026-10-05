@@ -3075,11 +3075,12 @@ async fn proxy_request_inner(
         }
     }
 
+    let require_execution_authority_v1 =
+        forbid_requires_execution_authority(&state, req.headers(), &model_name)
+            || req.extensions().get::<RemoteFallbackOverride>().is_some();
     let batch_target = if endpoint == "generate" {
         None
-    } else if remote_forbidden(req.headers()).unwrap_or(false)
-        || req.extensions().get::<RemoteFallbackOverride>().is_some()
-    {
+    } else if require_execution_authority_v1 {
         match execution_authority_target(
             &state,
             &dispatch_model,
@@ -3132,8 +3133,6 @@ async fn proxy_request_inner(
         }
     };
 
-    let require_execution_authority_v1 = remote_forbidden(req.headers()).unwrap_or(false)
-        || req.extensions().get::<RemoteFallbackOverride>().is_some();
     let token_id = extract_bearer_token(req.headers())
         .map(|t| mask_token(&t))
         .unwrap_or_default();
@@ -4453,6 +4452,13 @@ pub(crate) async fn execution_authority_target(
     Err(Box::new(response))
 }
 
+/// `X-SIE-Remote: forbid` needs verified local dispatch only for a model that
+/// routing could send to a remote profile; ordinary dispatch of any other
+/// model is local.
+fn forbid_requires_execution_authority(state: &AppState, headers: &HeaderMap, model: &str) -> bool {
+    remote_forbidden(headers).unwrap_or(false) && state.model_registry.has_remote_route(model)
+}
+
 /// Refuse egress against the same serving snapshot as the pinned work hash.
 fn remote_control_response(
     endpoint: &str,
@@ -5212,7 +5218,7 @@ fn worker_error_retry_after(
             QUEUE_FULL_ERROR_CODE,
         )),
         MODEL_LOADING_ERROR_CODE => Some((
-            MODEL_LOADING_RETRY_AFTER.to_string(),
+            worker_hint().unwrap_or_else(|| MODEL_LOADING_RETRY_AFTER.to_string()),
             MODEL_LOADING_ERROR_CODE,
         )),
         LORA_LOADING_ERROR_CODE => Some((
@@ -8252,7 +8258,11 @@ async fn resolve_generation_route(
 
     Ok(ResolvedRoute {
         dispatch_model: dispatch_model.to_string(),
-        require_execution_authority_v1: remote_forbidden(hdr).unwrap_or(false) || bridge.is_some(),
+        require_execution_authority_v1: forbid_requires_execution_authority(
+            state,
+            hdr,
+            customer_model,
+        ) || bridge.is_some(),
         physical_lane,
         bundle,
         gpu,
@@ -17249,7 +17259,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remote_forbid_generation_surfaces_require_and_preserve_verified_target() {
+    async fn remote_forbid_generation_surfaces_dispatch_a_model_without_a_remote_route_normally() {
         for (surface, stream) in [
             ("generate", false),
             ("generate", true),
@@ -17299,21 +17309,16 @@ mod tests {
                     "completions" => proxy_completions(State(state.clone()), request).await,
                     _ => proxy_responses(State(state.clone()), request).await,
                 };
-                if !capable {
-                    assert_eq!(
-                        response.status(),
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        "{surface}/{stream}"
-                    );
-                    assert_eq!(response.headers().get("retry-after").unwrap(), "5");
-                    assert_eq!(probe.target_count(), 0);
-                    continue;
-                }
-                assert_eq!(response.status(), StatusCode::OK, "{surface}/{stream}");
-                assert!(
-                    matches!(probe.take_target().1, PublishTarget::VerifiedWorker { worker_id, .. } if worker_id == "worker-l4")
+                assert_eq!(
+                    response.status(),
+                    StatusCode::OK,
+                    "{surface}/{stream}/{capable}"
                 );
-                assert!(probe.take_params().require_execution_authority_v1);
+                assert!(!matches!(
+                    probe.take_target().1,
+                    PublishTarget::VerifiedWorker { .. }
+                ));
+                assert!(!probe.take_params().require_execution_authority_v1);
                 let _ = axum::body::to_bytes(response.into_body(), 16384)
                     .await
                     .unwrap();
@@ -17322,25 +17327,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remote_forbid_numeric_surfaces_never_publish_to_legacy_workers_or_pools() {
-        for surface in [
+    async fn remote_forbid_numeric_surfaces_publish_a_routed_model_only_to_verified_workers() {
+        for (surface, routed) in [
             "encode",
             "score",
             "extract",
             "embeddings",
             "rerank",
             "rerank-v2",
-        ] {
+        ]
+        .into_iter()
+        .flat_map(|surface| [(surface, true), (surface, false)])
+        {
             let (mut state, _bundles, _models) = embeddings_dimensions_state();
+            let path = _models.path().join("embedder.yaml");
+            let mut raw = std::fs::read_to_string(&path).unwrap();
             if surface == "extract" {
                 // This transport authority test needs a valid extraction task.
-                let path = _models.path().join("embedder.yaml");
-                let raw = std::fs::read_to_string(&path)
-                    .unwrap()
-                    .replace("tasks:\n", "tasks:\n  extract: {}\n");
-                std::fs::write(path, raw).unwrap();
-                state.model_registry.reload();
+                raw = raw.replace("tasks:\n", "tasks:\n  extract: {}\n");
             }
+            if routed {
+                std::fs::write(
+                    _bundles.path().join("remote.yaml"),
+                    "name: remote\npriority: 1\ndefault: false\nadapters:\n  - sie_server.adapters.remote.sie\n",
+                )
+                .unwrap();
+                raw.push_str(
+                    "  remote:\n    adapter_path: sie_server.adapters.remote.sie:SieUpstreamAdapter\n    adapter_options:\n      loadtime:\n        upstream: team-sie\n        upstream_model: known/embedder\nrouting:\n  policy: fallback\n  fallback_profile: remote\n",
+                );
+            }
+            std::fs::write(path, raw).unwrap();
+            state.model_registry.reload();
+            assert_eq!(
+                state.model_registry.has_remote_route("known/embedder"),
+                routed
+            );
             state.pool_manager.create_default_pool().await;
             let probe = Arc::new(GenerationTargetProbe::default());
             state.work_publisher = Some(probe.clone());
@@ -17395,9 +17416,15 @@ mod tests {
                 assert_eq!(
                     response.status(),
                     StatusCode::SERVICE_UNAVAILABLE,
-                    "{surface}/{capable}"
+                    "{surface}/{routed}/{capable}"
                 );
-                if capable {
+                if !routed {
+                    assert!(!matches!(
+                        probe.take_target().1,
+                        PublishTarget::VerifiedWorker { .. }
+                    ));
+                    assert!(!probe.take_params().require_execution_authority_v1);
+                } else if capable {
                     assert!(
                         matches!(probe.take_target().1, PublishTarget::VerifiedWorker { worker_id, .. } if worker_id == "verified-worker")
                     );
@@ -27179,6 +27206,29 @@ mod tests {
         assert!(value["error"]["param"].is_null());
     }
 
+    #[tokio::test]
+    async fn test_model_loading_uses_the_workers_retry_hint() {
+        for (retry_after_s, retry_after) in [(Some(7), "7"), (None, MODEL_LOADING_RETRY_AFTER)] {
+            let err = StreamingDriverErr::WorkerError {
+                code: MODEL_LOADING_ERROR_CODE.to_string(),
+                message: "the upstream is not ready, please retry".to_string(),
+                param: None,
+                retry_after_s,
+                request_id: "req-loading".to_string(),
+                attempt_id: "att-loading".to_string(),
+            };
+
+            let response = build_streaming_error_response(&err);
+
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(response.headers().get("retry-after").unwrap(), retry_after);
+            assert_eq!(
+                response.headers().get("x-sie-error-code").unwrap(),
+                MODEL_LOADING_ERROR_CODE
+            );
+        }
+    }
+
     /// HTTP status mapping unit test — guards against an off-by-one
     /// edit that drops the 429 mapping without touching
     /// ``build_streaming_error_response``.
@@ -27261,9 +27311,13 @@ mod tests {
         );
         assert_eq!(
             worker_error_retry_after(MODEL_LOADING_ERROR_CODE, Some(12)),
+            Some(("12".to_string(), MODEL_LOADING_ERROR_CODE))
+        );
+        assert_eq!(
+            worker_error_retry_after(LORA_LOADING_ERROR_CODE, Some(12)),
             Some((
-                MODEL_LOADING_RETRY_AFTER.to_string(),
-                MODEL_LOADING_ERROR_CODE
+                LORA_LOADING_RETRY_AFTER.to_string(),
+                LORA_LOADING_ERROR_CODE
             )),
             "only the codes that take a worker hint use it"
         );
@@ -27287,6 +27341,13 @@ mod tests {
                 Some((
                     RESOURCE_EXHAUSTED_RETRY_AFTER.to_string(),
                     RESOURCE_EXHAUSTED_ERROR_CODE
+                ))
+            );
+            assert_eq!(
+                worker_error_retry_after(MODEL_LOADING_ERROR_CODE, Some(invalid)),
+                Some((
+                    MODEL_LOADING_RETRY_AFTER.to_string(),
+                    MODEL_LOADING_ERROR_CODE
                 ))
             );
         }
