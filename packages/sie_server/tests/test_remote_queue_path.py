@@ -277,8 +277,10 @@ async def test_a_remote_lane_worker_generates_a_native_prompt_through_the_queue_
     assert seen_authorization == [f"Bearer {CANARY}"]
 
 
-@pytest.mark.parametrize("kind", ["busy", "unavailable", "not_ready"])
-def test_remote_refusal_preserves_retry_hint_on_the_ipc_wire(kind: Any) -> None:
+@pytest.mark.parametrize(
+    ("kind", "code"), [("busy", "QUEUE_FULL"), ("unavailable", "QUEUE_FULL"), ("not_ready", "MODEL_LOADING")]
+)
+def test_remote_refusal_preserves_retry_hint_on_the_ipc_wire(kind: Any, code: str) -> None:
     item = EncodeBatchItem(
         work_item_id="req.0",
         request_id="req",
@@ -291,9 +293,9 @@ def test_remote_refusal_preserves_retry_hint_on_the_ipc_wire(kind: Any) -> None:
         item, UpstreamUnavailableError("fake-sie", kind, retry_after_s=9, reason="unavailable")
     )
     decoded = msgspec.msgpack.decode(msgspec.msgpack.encode(outcome), type=ItemOutcome)
-    assert decoded.disposition == "nak_retry"
-    assert decoded.error_code == "QUEUE_FULL"
+    assert decoded.disposition == "publish_error_and_ack"
+    assert decoded.error_code == code
     assert decoded.retry_after_s == 9
-    assert decoded.nak_delay_ms is not None
-    assert decoded.nak_delay_ms >= 9_000
-    assert decoded.error is None
+    assert decoded.nak_delay_ms is None
+    assert decoded.error is not None
+    assert "fake-sie" not in decoded.error

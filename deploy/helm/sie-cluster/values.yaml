@@ -451,7 +451,7 @@ machineProfiles:
 # Example:
 #   team-sie:
 #     kind: sie
-#     base_url: https://sie.example.internal
+#     base_url: https://team-sie.example.com
 #     api_key_secret:
 #       name: team-sie-upstream
 #       key: api-key
