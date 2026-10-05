@@ -792,6 +792,7 @@ impl TestGateway {
         let status = WorkerStatusMessage {
             supports_execution_authority_v1: true,
             supports_numerical_admission_v1: numerical,
+            supports_numerical_admission_subject_v1: numerical,
             name: name.to_string(),
             ready: true,
             gpu_count: 1,

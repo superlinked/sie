@@ -36,6 +36,8 @@ pub struct WorkerState {
     pub supports_execution_authority_v1: bool,
     /// Every backend child re-verifies a numerical admission before execution.
     pub supports_numerical_admission_v1: bool,
+    /// The worker also consumes admitted numerical work on its own subject.
+    pub supports_numerical_admission_subject_v1: bool,
     /// Diagnostic observations only; never sufficient for numerical admission.
     pub numerical_process_inventory: Option<Arc<NumericalProcessInventory>>,
     pub models: Vec<String>,
@@ -223,6 +225,8 @@ pub struct WorkerStatusMessage {
     pub supports_execution_authority_v1: bool,
     #[serde(default)]
     pub supports_numerical_admission_v1: bool,
+    #[serde(default)]
+    pub supports_numerical_admission_subject_v1: bool,
     #[serde(default)]
     pub loaded_models: Vec<String>,
     #[serde(default)]
@@ -756,6 +760,7 @@ mod tests {
             bundle_config_hash: String::new(),
             supports_execution_authority_v1: false,
             supports_numerical_admission_v1: false,
+            supports_numerical_admission_subject_v1: false,
             numerical_process_inventory: None,
             models: vec![],
             queue_depth: 0,

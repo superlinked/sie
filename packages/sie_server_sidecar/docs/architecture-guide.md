@@ -423,20 +423,29 @@ matches that subject, including its authority consumer. A rollback therefore
 cannot hand such a sidecar admitted work that is already queued, and until a
 fenced sidecar has created the stream, admitted work cannot be published at
 all. The contract comes from the subject, never from the payload field, which
-an older sidecar would ignore.
+an older sidecar would ignore. Every worker therefore runs a fourth stream,
+durable consumer and pull loop, including lanes that never receive admitted
+work.
 
 Admitted work also runs under execution authority. Before readiness or
 offloaded input retrieval, the sidecar answers an item with `INFERENCE_ERROR`
-and ACKs it when the item and its subject disagree: the field on any other
-subject, an item without the field on the admission subject, an operation other
-than `encode` or `score`, or a payload model other than the subject's. It does
-the same for an `encode` or `score` item that carries `fallback_reason` without
-the field, because every numerical remote attempt that stands in for a local
-refusal is admitted work. Such an item can never become valid, and a NAK could
-hand an item on a pool subject to a worker without the fence. An item that
-arrives before every backend child supports the method is NAKed on the
-worker's own admission stream, like other authority work. The local-ingest
-lane rejects the field, and `fallback_reason` on `encode` or `score`.
+and ACKs it, whether or not the answer could be published, when the item and
+its subject disagree: the field on any other subject, an item without the field
+on the admission subject, an operation other than `encode` or `score`, a
+payload model other than the subject's, or an admitted item without a
+configuration hash. It does the same for an `encode` or `score` item that
+carries `fallback_reason` without the field, because every numerical remote
+attempt that stands in for a local refusal is admitted work. Such an item can
+never become valid, and a NAK could hand an item on a pool subject to a worker
+without the fence. An admitted item whose configuration hash this worker does
+not hold is also answered with `INFERENCE_ERROR` at once, at receipt, at the
+model group's check and at the scheduler's barrier, because its bridged caller
+waits with a local refusal. Only an admitted item that arrives before every
+backend child supports the method is NAKed on the worker's own admission
+stream, like other authority work. An admitted item past its gateway deadline
+is ACK-dropped before the backend call even when `SIE_WORK_DEADLINE_ENFORCE` is
+off, because its caller has stopped waiting. The local-ingest lane rejects the
+field, and `fallback_reason` on `encode` or `score`.
 
 Admitted items keep their own scheduler partition and run only through
 `RunBatchWithNumericalAdmissionV1`, which an older backend rejects. A sidecar
@@ -462,15 +471,19 @@ upstream calls. An SIE upstream's identity comes from a cache that is trusted
 for up to 30 seconds.
 
 The backend capability `supports_numerical_admission_v1` defaults to false. The
-heartbeat reports `supports_numerical_admission_v1` only when it reports
-`supports_execution_authority_v1`, every backend child supports the method and
-the admission pull consumer runs. After a rollback below this version, admitted
-work still queued for that worker never runs and its callers time out. The
-gateway stops selecting the worker once its heartbeat no longer reports the
-capability. The gateway produces these items only for an `encode` or `score`
-bridge or threshold route whose numerical admission it has checked, and only
-toward a worker that reports this capability. The gateway architecture guide's
-"Numerical bridges" section describes that decision.
+heartbeat reports `supports_numerical_admission_v1` when it reports
+`supports_execution_authority_v1` and every backend child supports the method.
+It reports `supports_numerical_admission_subject_v1` only when, in addition,
+the admission pull consumer runs. Builds that predate the admission subject
+never send that field, so the gateway selects on it alone. A sidecar rolled
+back below this version does not run admitted work still queued for that
+worker, and its callers time out. A fenced sidecar that later consumes such an
+item drops it once its deadline has passed. The gateway stops selecting the
+worker once its heartbeat no longer reports the capability. The gateway
+produces these items only for an `encode` or `score` bridge or threshold route
+whose numerical admission it has checked, and only toward a worker that
+reports `supports_numerical_admission_subject_v1`. The gateway architecture
+guide's "Numerical bridges" section describes that decision.
 
 Non-streaming backend responses use one physical frame while the serialized
 response is at most 32 MiB. For a larger response, the sidecar explicitly sets

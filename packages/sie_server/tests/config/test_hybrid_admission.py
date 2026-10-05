@@ -48,7 +48,6 @@ from sie_server.ipc_types import (
     ProcessScoreBatchRequest,
     ReplaceModelConfigEntry,
     ReplaceModelConfigsRequest,
-    RunBatchItem,
     RunBatchRequest,
     WorkerCapabilitiesRequest,
     WorkerCapabilitiesResponse,
@@ -1071,7 +1070,7 @@ async def test_a_failing_admission_check_refuses_every_item_and_logs_only_its_cl
     assert "secret-input" not in caplog.text
 
 
-async def test_the_fence_keeps_shared_outputs_recosts_its_subset_and_names_an_unanswered_item(
+async def test_the_fence_keeps_shared_outputs_and_names_an_unanswered_item(
     admission: tuple, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config, _, path, data = admission
@@ -1100,10 +1099,7 @@ async def test_the_fence_keeps_shared_outputs_recosts_its_subset_and_names_an_un
             config.sie_id + ":remote",
             bundle_hash,
             {"numerical_admission_sha256": "0" * 64},
-            {
-                "numerical_admission_sha256": current.sha256,
-                "prepared_tokens": {"input_ids": [[1, 2, 3], [4, 5]], "tokenizer_id": "t"},
-            },
+            {"numerical_admission_sha256": current.sha256},
             {"numerical_admission_sha256": current.sha256},
         ),
         require_authority=True,
@@ -1111,7 +1107,6 @@ async def test_the_fence_keeps_shared_outputs_recosts_its_subset_and_names_an_un
     )
 
     assert [item.work_item_id for item in seen[0].items] == ["req.1", "req.2"]
-    assert seen[0].total_cost == 6
     assert outcome.batched_f16_multivectors == [shared]
     assert [value.work_item_id for value in outcome.outcomes] == ["req.0", "req.1", "req.2"]
     assert outcome.outcomes[1].disposition == "publish_and_ack"
@@ -1119,21 +1114,3 @@ async def test_the_fence_keeps_shared_outputs_recosts_its_subset_and_names_an_un
     assert outcome.outcomes[0].error == "bridged item names a different numerical admission"
     _assert_refused_before_the_upstream(outcome.outcomes[2])
     assert outcome.outcomes[2].error == "the backend returned no outcome for this admitted item"
-
-
-def test_a_subset_is_costed_as_the_sidecar_scheduler_costs_its_items() -> None:
-    def item(op: str, **payload: Any) -> RunBatchItem:
-        base = {"work_item_id": "w", "request_id": "r", "item_index": 0, "total_items": 1, "timestamp": 1.0}
-        return msgspec.convert({"op": op, op: {**base, **payload}}, type=RunBatchItem)
-
-    tokens = {"input_ids": [[1, 2, 3], [4, 5]], "tokenizer_id": "t"}
-    query = {"text": "query"}
-    documents = [{"text": "doc"}, {"content": "abcd"}, {"text": None, "content": "zz"}, {"images": [b"a", b"b"]}]
-    assert ipc_server._run_batch_item_cost(item("encode", item={"text": "x" * 40})) == 1
-    assert ipc_server._run_batch_item_cost(item("encode", item={"text": "x"}, prepared_tokens=tokens)) == 5
-    empty = {"input_ids": [[]], "tokenizer_id": "t"}
-    assert ipc_server._run_batch_item_cost(item("encode", item={"text": "x"}, prepared_tokens=empty)) == 1
-    assert ipc_server._run_batch_item_cost(item("score", query_item=query, score_items=documents)) == 2075
-    scored = item("score", query_item=query, score_items=documents, prepared_tokens=tokens)
-    assert ipc_server._run_batch_item_cost(scored) == 5
-    assert ipc_server._run_batch_item_cost(item("score", query_item={"text": ""}, score_items=[{"text": ""}])) == 1

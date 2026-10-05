@@ -19343,6 +19343,7 @@ mod tests {
                 crate::types::WorkerStatusMessage {
                     supports_execution_authority_v1: false,
                     supports_numerical_admission_v1: false,
+                    supports_numerical_admission_subject_v1: false,
                     name: "assigned-cold".to_string(),
                     ready: true,
                     gpu_count: 1,
@@ -23565,6 +23566,7 @@ mod tests {
         WorkerStatusMessage {
             supports_execution_authority_v1: false,
             supports_numerical_admission_v1: false,
+            supports_numerical_admission_subject_v1: false,
             name: "worker-1".into(),
             ready: true,
             gpu_count: 1,

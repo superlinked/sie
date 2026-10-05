@@ -3610,9 +3610,9 @@ async fn admitted_work_is_invisible_to_a_sidecar_without_the_admission_fence() {
     drop(nats);
 }
 
-/// Work that breaks the numerical admission contract never runs and is never
-/// handed to another consumer: the worker answers it once with
-/// `INFERENCE_ERROR` and ACKs it.
+/// Work that breaks the numerical admission contract, or admitted work that
+/// names a configuration this worker does not hold, never runs and is never
+/// redelivered: the worker answers it once with `INFERENCE_ERROR` and ACKs it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn work_breaking_the_numerical_admission_contract_is_answered_and_acked() {
     if skip_unless_tools_available() {
@@ -3647,31 +3647,57 @@ async fn work_breaking_the_numerical_admission_contract_is_answered_and_acked() 
     let direct = worker_work_subject(pool, pool, bundle, model, "smoke-worker");
     let token = Some("a".repeat(64));
     let bridged = Some("provisioning".to_string());
-    for (request_id, subject, admission, fallback_reason) in [
-        ("admitted-on-the-pool", pooled.clone(), token.clone(), None),
+    let admitted_subject = format!("{direct}.numerical-admission-v1");
+    let unknown = "f".repeat(64);
+    for (request_id, subject, admission, fallback_reason, hash) in [
+        (
+            "admitted-on-the-pool",
+            pooled.clone(),
+            token.clone(),
+            None,
+            "",
+        ),
         (
             "admitted-on-the-worker",
             direct.clone(),
             token.clone(),
             None,
+            "",
         ),
         (
             "admitted-on-the-authority-subject",
             format!("{direct}.execution-authority-v1"),
             token.clone(),
             None,
+            "",
         ),
         (
             "unadmitted-on-the-admission-subject",
-            format!("{direct}.numerical-admission-v1"),
+            admitted_subject.clone(),
             None,
             None,
+            "",
         ),
-        ("bridge-without-an-admission", pooled, None, bridged),
+        (
+            "admitted-without-a-configuration",
+            admitted_subject.clone(),
+            token.clone(),
+            None,
+            "",
+        ),
+        (
+            "admitted-with-a-configuration-this-worker-lacks",
+            admitted_subject,
+            token.clone(),
+            None,
+            unknown.as_str(),
+        ),
+        ("bridge-without-an-admission", pooled, None, bridged, ""),
     ] {
         let mut work = encode_work_item(request_id, model, pool, "", &reply_subject, None);
         work.numerical_admission_sha256 = admission;
         work.fallback_reason = fallback_reason;
+        work.bundle_config_hash = hash.to_string();
         let payload = rmp_serde::to_vec_named(&work).expect("encode WorkItem");
         let (stream_name, sequence) = publish_jetstream_with_retry(&js, &subject, payload).await;
 

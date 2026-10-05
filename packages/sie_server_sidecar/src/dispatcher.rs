@@ -673,11 +673,15 @@ pub struct Dispatcher {
 }
 
 impl Dispatcher {
-    fn execution_authority_is_available(&self, wi: &WorkItem, needs_scheduler: bool) -> bool {
+    fn execution_hash_is_current(&self, wi: &WorkItem) -> bool {
         !wi.bundle_config_hash.is_empty()
             && self.config_apply_state.is_some()
             && unknown_bundle_config_hash(std::iter::once(wi), self.config_apply_state.as_deref())
                 .is_none()
+    }
+
+    fn execution_authority_is_available(&self, wi: &WorkItem, needs_scheduler: bool) -> bool {
+        self.execution_hash_is_current(wi)
             && self
                 .worker_pool
                 .execution_authority_v1()
@@ -1036,7 +1040,9 @@ impl Dispatcher {
             return false;
         };
         let telemetry = &self.runtime_state.telemetry;
-        if !self.work_deadline.enforce {
+        // A bridged caller never waits past the gateway's deadline, so
+        // admitted work is dropped then whatever the enforcement setting.
+        if !self.work_deadline.enforce && wi.numerical_admission_sha256.is_none() {
             if stage == "before_ipc" {
                 telemetry.work_item_deadline_exceeded(&wi.operation, "executed");
                 if let Some(suppressed) = EXPIRED_EXECUTE_WARNINGS.allow() {
@@ -1298,7 +1304,11 @@ impl Dispatcher {
                     // consumes, and its payload field must agree with that
                     // subject. Refuse before readiness or payload fetch.
                     let admission_violation = numerical_admission_violation(&msg.subject, &wi);
+                    let stale_admission = admission_violation.is_none()
+                        && wi.numerical_admission_sha256.is_some()
+                        && !self.execution_hash_is_current(&wi);
                     if admission_violation.is_none()
+                        && !stale_admission
                         && requires_execution_authority_v1(&msg.subject)
                         && (!execution_authority_model_matches(&msg.subject, &wi.model_id)
                             || !self
@@ -1336,21 +1346,17 @@ impl Dispatcher {
                     }
                     let mut delivery = Delivery::Nats(msg, admission_permit, None);
                     if let Some(violation) = admission_violation {
-                        // Such an item can never become valid, and a NAK
-                        // could hand it to a consumer without the fence.
                         warn!(
                             work_item_id = %wi.work_item_id,
                             model = %wi.model_id,
                             violation,
                             "work breaks the numerical admission contract — answering and ACKing",
                         );
-                        self.refuse_fallback_attempt(
-                            &wi,
-                            &delivery,
-                            INFERENCE_ERROR_CODE,
-                            NUMERICAL_ADMISSION_RETRY_AFTER_S,
-                        )
-                        .await;
+                        self.refuse_violation(&wi, &delivery).await;
+                        continue;
+                    }
+                    if stale_admission {
+                        self.refuse_stale_admission(&wi, &delivery).await;
                         continue;
                     }
                     self.observe_deadline_clock(&wi, &delivery);
@@ -2274,9 +2280,10 @@ impl Dispatcher {
         items: Vec<(WorkItem, Delivery)>,
         ready_deadline: Option<tokio::time::Instant>,
     ) -> Result<(), DispatchError> {
-        let mut items = self
+        let items = self
             .retain_uncancelled(items, "before_model_readiness")
             .await;
+        let mut items = self.answer_stale_admissions(items).await;
         if items.is_empty() {
             return Ok(());
         }
@@ -2604,13 +2611,7 @@ impl Dispatcher {
                 kept.push((wi, delivery));
                 continue;
             }
-            self.refuse_fallback_attempt(
-                &wi,
-                &delivery,
-                INFERENCE_ERROR_CODE,
-                NUMERICAL_ADMISSION_RETRY_AFTER_S,
-            )
-            .await;
+            self.refuse_violation(&wi, &delivery).await;
         }
         kept
     }
@@ -3358,6 +3359,63 @@ impl Dispatcher {
                 nak_one(delivery, delay_ms, &self.runtime_state.telemetry).await;
             }
         }
+    }
+
+    /// Answer an item that breaks the numerical admission contract and ACK it
+    /// whatever the publish result: it can never become valid, and a NAK
+    /// could hand it to a consumer without the fence.
+    async fn refuse_violation(&self, wi: &WorkItem, delivery: &Delivery) {
+        let mut outcome =
+            synthetic_error_outcome(wi, INFERENCE_ERROR_CODE, FALLBACK_REFUSAL_MESSAGE);
+        outcome.retry_after_s = Some(NUMERICAL_ADMISSION_RETRY_AFTER_S);
+        if let Err(e) = self
+            .deliver_result(wi, delivery, &outcome, None, None)
+            .await
+        {
+            warn!(
+                work_item_id = %wi.work_item_id,
+                error = %e,
+                "failed to publish a numerical admission refusal — ACKing anyway"
+            );
+        }
+        if let Err(e) = ack(delivery, &self.runtime_state.telemetry).await {
+            warn!(error = %e, "ack after a numerical admission refusal failed");
+        }
+    }
+
+    /// Answer an admitted item whose configuration hash this worker no longer
+    /// holds. Redelivery to the pinned worker rarely converges, and its
+    /// bridged caller is waiting with a local refusal.
+    async fn refuse_stale_admission(&self, wi: &WorkItem, delivery: &Delivery) {
+        info!(
+            work_item_id = %wi.work_item_id,
+            model = %wi.model_id,
+            "admitted work names a configuration this worker does not hold — answering"
+        );
+        self.refuse_fallback_attempt(
+            wi,
+            delivery,
+            INFERENCE_ERROR_CODE,
+            NUMERICAL_ADMISSION_RETRY_AFTER_S,
+        )
+        .await;
+    }
+
+    /// Answer the admitted items whose configuration hash is no longer
+    /// current, and return the others.
+    async fn answer_stale_admissions(
+        &self,
+        items: Vec<(WorkItem, Delivery)>,
+    ) -> Vec<(WorkItem, Delivery)> {
+        let mut kept = Vec::with_capacity(items.len());
+        for (wi, delivery) in items {
+            if wi.numerical_admission_sha256.is_some() && !self.execution_hash_is_current(&wi) {
+                self.refuse_stale_admission(&wi, &delivery).await;
+            } else {
+                kept.push((wi, delivery));
+            }
+        }
+        kept
     }
 
     /// Answer a work item the gateway sent to a remote profile in place of a
@@ -4924,6 +4982,9 @@ fn numerical_admission_violation(subject: &str, wi: &WorkItem) -> Option<&'stati
         (true, false) => Some("admitted_work_off_the_admission_subject"),
         (false, true) => Some("unadmitted_work_on_the_admission_subject"),
         (true, true) if !numerical => Some("admitted_work_is_not_encode_or_score"),
+        (true, true) if wi.bundle_config_hash.is_empty() => {
+            Some("admitted_work_names_no_configuration")
+        }
         (true, true) if !execution_authority_model_matches(subject, &wi.model_id) => {
             Some("admitted_work_names_another_model")
         }
@@ -5508,6 +5569,7 @@ async fn process_scheduler_contract_batch(
             .into_iter()
             .map(|meta| (meta.wi, meta.delivery))
             .collect();
+        let msgs_only = dispatcher.answer_stale_admissions(msgs_only).await;
         nak_all_at_barrier(
             &msgs_only,
             base_nak_delay_ms(),
@@ -6788,12 +6850,15 @@ mod tests {
     async fn the_scheduler_less_path_answers_admitted_items_without_the_backend() {
         for op in ["encode", "score"] {
             let backend = naking_backend(None, None, Some(2_500));
-            let dispatcher = dispatcher_with_backend(backend.clone());
+            let mut dispatcher = dispatcher_with_backend(backend.clone());
+            Arc::get_mut(&mut dispatcher).unwrap().config_apply_state =
+                Some(Arc::new(ConfigApplyState::new("fresh".into())));
 
             let events = settle_one(
                 &dispatcher,
                 WorkItem {
                     numerical_admission_sha256: Some("a".repeat(64)),
+                    bundle_config_hash: "fresh".into(),
                     ..wi("admitted", 0, "acme/model:remote", op)
                 },
             )
@@ -7212,12 +7277,87 @@ mod tests {
             let mut work = wi("req", 0, model, op);
             work.numerical_admission_sha256 = token.then(|| "a".repeat(64));
             work.fallback_reason = fallback.then(|| "provisioning".to_string());
+            work.bundle_config_hash = "fresh".into();
             assert_eq!(
                 numerical_admission_violation(subject, &work),
                 violation,
                 "{subject} {model} {op} {token} {fallback}"
             );
         }
+        let mut unpinned = wi("req", 0, "model", "encode");
+        unpinned.numerical_admission_sha256 = Some("a".repeat(64));
+        assert_eq!(
+            numerical_admission_violation(admission, &unpinned),
+            Some("admitted_work_names_no_configuration")
+        );
+    }
+
+    #[tokio::test]
+    async fn an_admitted_item_with_a_configuration_this_worker_no_longer_holds_is_answered() {
+        let backend = naking_backend(None, None, Some(2_500));
+        let mut dispatcher = dispatcher_with_backend(backend.clone());
+        Arc::get_mut(&mut dispatcher).unwrap().config_apply_state =
+            Some(Arc::new(ConfigApplyState::new("fresh".into())));
+        let admitted = |hash: &str| WorkItem {
+            numerical_admission_sha256: Some("a".repeat(64)),
+            bundle_config_hash: hash.into(),
+            ..wi("admitted", 0, "acme/model:remote", "encode")
+        };
+
+        let stale = settle_one(&dispatcher, admitted("stale")).await;
+        let [crate::delivery::LocalDeliveryEvent::Result { slot: 0, result }] = stale.as_slice()
+        else {
+            panic!("a stale admitted item must settle with a result: {stale:?}");
+        };
+        assert_eq!(result.error_code.as_deref(), Some(INFERENCE_ERROR_CODE));
+        assert_eq!(result.retry_after_s, Some(1));
+        assert_eq!(backend.encoded.load(Ordering::SeqCst), 0);
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let ordinary = WorkItem {
+            bundle_config_hash: "stale".into(),
+            ..wi("plain", 0, "acme/model:remote", "encode")
+        };
+        let kept = dispatcher
+            .answer_stale_admissions(vec![
+                (
+                    admitted("fresh"),
+                    Delivery::Local(LocalDelivery::new(0, 0, tx.clone())),
+                ),
+                (ordinary, Delivery::Local(LocalDelivery::new(1, 0, tx))),
+            ])
+            .await;
+        assert_eq!(
+            kept.len(),
+            2,
+            "a current admission and ordinary work are kept"
+        );
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn admitted_work_past_its_deadline_is_dropped_whatever_the_enforcement_flag() {
+        let dispatcher = dispatcher_with_backend(naking_backend(None, None, None));
+        assert!(!dispatcher.work_deadline.enforce);
+        let now = unix_now_s();
+        let expired = |token: Option<String>| WorkItem {
+            numerical_admission_sha256: token,
+            timestamp: now - 180.0,
+            deadline: Some(now - 60.0),
+            ..wi("late", 0, "acme/model:remote", "encode")
+        };
+        let delivery = admission_test_delivery().await;
+        assert!(
+            dispatcher
+                .settle_if_expired(&expired(Some("a".repeat(64))), &delivery, "before_ipc")
+                .await
+        );
+        assert!(
+            !dispatcher
+                .settle_if_expired(&expired(None), &delivery, "before_ipc")
+                .await,
+            "ordinary work still runs without enforcement"
+        );
     }
 
     #[tokio::test]

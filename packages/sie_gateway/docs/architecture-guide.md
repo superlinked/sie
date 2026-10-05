@@ -975,7 +975,9 @@ when the gateway is about to commit to the remote attempt:
   the admission. Otherwise the remote process would refuse it, so it stays local
   with the reason `unmeasured_request`.
 - An eligible remote worker is fresh and eligible for dispatch, reports
-  `supports_execution_authority_v1` and `supports_numerical_admission_v1`, has
+  `supports_execution_authority_v1`, `supports_numerical_admission_v1` and
+  `supports_numerical_admission_subject_v1` (which builds that predate the
+  admission subject never send), has
   the remote profile's exact configuration hash, bundle and pool, and has a
   unique worker name. Every child in its inventory must report the same
   admission for the bare model, together with the admission's own model
@@ -993,7 +995,7 @@ when the gateway is about to commit to the remote attempt:
   a silence longer than that timeout, because a worker that has not reported
   yet looks absent. With no local worker the remote admission decides.
 - The bridge pins one remote worker that both conditions admit. Selection checks
-  again that the worker still reports `supports_numerical_admission_v1` and the
+  again that the worker still reports `supports_numerical_admission_subject_v1` and the
   admitted digest. Its work items carry that digest as
   `numerical_admission_sha256` on the worker's `numerical-admission-v1` subject,
   which only a sidecar with the admission fence consumes, and the publisher

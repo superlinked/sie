@@ -520,8 +520,9 @@ attempt:
   `output_dtype`, keeps the request local, because the remote process would
   refuse it.
 - A remote-lane worker qualifies when it is fresh, eligible and positively
-  supports both execution authority and the numerical admission method, carries
-  the remote profile's exact configuration hash, and every adapter child reports
+  supports both execution authority and the numerical admission method,
+  consumes the admission subject, carries the remote profile's exact
+  configuration hash, and every adapter child reports
   the same admission for the model with the model contract it reports itself.
   That admission must expire at least five seconds later.
 - Its admission must cover every local process that could serve the model.
@@ -550,7 +551,8 @@ decision is counted once on `sie.gateway.remote.numerical_admissions`.
 Upgrade workers and gateways before applying a hybrid `encode` or `score`
 configuration. A remote lane rolled back below the numerical admission subject
 stops numerical bridging: its older sidecar never consumes admitted work, so
-queued attempts time out instead of running unchecked. Configuring a numerical
+queued attempts time out instead of running unchecked, and a fenced sidecar
+that later consumes them drops those past their deadline. Configuring a numerical
 bridge also changes local behavior while no admission holds: a trigger that
 would bridge commits to its local refusal, so a cold model answers
 `MODEL_LOADING` instead of waiting for its load, and an opted-in `saturated` or

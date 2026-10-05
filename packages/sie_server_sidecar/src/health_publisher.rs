@@ -248,6 +248,7 @@ struct WorkerStatusPayload<'a> {
     terminated: bool,
     supports_execution_authority_v1: bool,
     supports_numerical_admission_v1: bool,
+    supports_numerical_admission_subject_v1: bool,
     gpu_count: i32,
     total_gpu_slots: i32,
     ready_gpu_slots: i32,
@@ -341,13 +342,15 @@ fn encode_payload(
         && !hash.is_empty()
         && config.execution_authority_v1.load(Ordering::Acquire)
         && config.authority_consumer_ready.load(Ordering::Acquire);
+    let supports_numerical_admission_v1 =
+        supports_execution_authority_v1 && config.numerical_admission_v1.load(Ordering::Acquire);
     let payload = WorkerStatusPayload {
         name: &config.worker_id,
         ready,
         terminated,
         supports_execution_authority_v1,
-        supports_numerical_admission_v1: supports_execution_authority_v1
-            && config.numerical_admission_v1.load(Ordering::Acquire)
+        supports_numerical_admission_v1,
+        supports_numerical_admission_subject_v1: supports_numerical_admission_v1
             && config.admission_consumer_ready.load(Ordering::Acquire),
         gpu_count: config.gpu_count,
         total_gpu_slots,
@@ -761,6 +764,11 @@ mod tests {
                 serde_json::from_slice(&encode_payload(&c, true, false).unwrap()).unwrap();
             assert_eq!(
                 payload["supports_numerical_admission_v1"],
+                authority && backend,
+                "{authority} {backend} {consumer}"
+            );
+            assert_eq!(
+                payload["supports_numerical_admission_subject_v1"],
                 authority && backend && consumer,
                 "{authority} {backend} {consumer}"
             );
@@ -781,6 +789,7 @@ mod tests {
                 terminated: false,
                 supports_execution_authority_v1: false,
                 supports_numerical_admission_v1: false,
+                supports_numerical_admission_subject_v1: false,
                 gpu_count: c.gpu_count,
                 total_gpu_slots: 1,
                 ready_gpu_slots: 1,
@@ -830,6 +839,7 @@ mod tests {
                 terminated: false,
                 supports_execution_authority_v1: false,
                 supports_numerical_admission_v1: false,
+                supports_numerical_admission_subject_v1: false,
                 gpu_count: c.gpu_count,
                 total_gpu_slots: 1,
                 ready_gpu_slots: 1,

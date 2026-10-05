@@ -27,7 +27,6 @@ from sie_server.core.gpu_health import gpu_is_healthy_async
 from sie_server.core.grammar_routing import resolve_grammar_serving_model
 from sie_server.core.profile_identity import local_profile_identity, runtime_instance_id, serving_code_digest
 from sie_server.core.readiness import is_ready
-from sie_server.core.score_cost import SCORE_MEDIA_COST
 from sie_server.ipc_types import (
     IPC_VERSION,
     METHOD_APPLY_MODEL_CONFIG,
@@ -236,26 +235,6 @@ def _named_admission(item: Any) -> str | None:
     payloads = (item.encode, item.score) if isinstance(item, RunBatchItem) else (item,)
     tokens = [getattr(payload, "numerical_admission_sha256", None) for payload in payloads]
     return next((token for token in tokens if token is not None), None)
-
-
-def _score_side_cost(item: Mapping[str, Any]) -> int:
-    text = item["text"] if "text" in item else item.get("content")
-    images = item.get("images")
-    media = (len(images) if isinstance(images, list) else 0) + sum(
-        item.get(key) is not None for key in ("audio", "video", "document")
-    )
-    return (len(text) if isinstance(text, str) else 0) + media * SCORE_MEDIA_COST
-
-
-def _run_batch_item_cost(item: RunBatchItem) -> int:
-    """The sidecar scheduler's batching cost of an encode or score item."""
-    payload = item.encode if item.encode is not None else item.score
-    if payload is not None and payload.prepared_tokens is not None:
-        return max(1, sum(len(ids) for ids in payload.prepared_tokens.input_ids))
-    if item.score is None:
-        return 1
-    query = _score_side_cost(item.score.query_item)
-    return max(1, sum(query + _score_side_cost(document) for document in item.score.score_items))
 
 
 class IpcServer:
@@ -828,10 +807,7 @@ class IpcServer:
         served: dict[str, ItemOutcome] = {}
         batched: list[BatchedF16MultivectorOutput] = []
         if kept:
-            subset = msgspec.structs.replace(req, items=kept)
-            if isinstance(subset, RunBatchRequest):
-                subset = msgspec.structs.replace(subset, total_cost=sum(map(_run_batch_item_cost, subset.items)))
-            result = await run(subset)
+            result = await run(msgspec.structs.replace(req, items=kept))
             served = {outcome.work_item_id: outcome for outcome in result.outcomes}
             batched = result.batched_f16_multivectors
         outcomes: list[ItemOutcome] = []

@@ -370,6 +370,7 @@ impl WorkerRegistry {
                     bundle_config_hash: String::new(),
                     supports_execution_authority_v1: false,
                     supports_numerical_admission_v1: false,
+                    supports_numerical_admission_subject_v1: false,
                     numerical_process_inventory: None,
                     models: Vec::new(),
                     queue_depth: 0,
@@ -403,6 +404,8 @@ impl WorkerRegistry {
             w.supports_execution_authority_v1 = msg.supports_execution_authority_v1;
             w.supports_numerical_admission_v1 =
                 msg.supports_execution_authority_v1 && msg.supports_numerical_admission_v1;
+            w.supports_numerical_admission_subject_v1 =
+                w.supports_numerical_admission_v1 && msg.supports_numerical_admission_subject_v1;
             // Replace on every heartbeat: legacy or invalid observations clear
             // the previous process inventory rather than retaining stale IDs.
             w.numerical_process_inventory = msg
@@ -1099,7 +1102,7 @@ impl WorkerRegistry {
             .filter(|w| {
                 w.eligible_for_dispatch()
                     && w.supports_execution_authority_v1
-                    && w.supports_numerical_admission_v1
+                    && w.supports_numerical_admission_subject_v1
                     && w.last_heartbeat.elapsed() <= self.heartbeat_timeout
                     && !lanes.remote_hash.is_empty()
                     && w.bundle_config_hash == lanes.remote_hash
@@ -1197,7 +1200,7 @@ impl WorkerRegistry {
             .map_or(0, |elapsed| {
                 u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
             });
-        worker.supports_numerical_admission_v1
+        worker.supports_numerical_admission_subject_v1
             && pin.admitted.get(&worker.name).is_some_and(|pinned| {
                 remote_admission(worker, pin.model, now_unix_ms)
                     .is_some_and(|admission| &admission.sha256 == pinned)
@@ -1359,6 +1362,7 @@ mod tests {
         WorkerStatusMessage {
             supports_execution_authority_v1: false,
             supports_numerical_admission_v1: false,
+            supports_numerical_admission_subject_v1: false,
             name: "worker-1".into(),
             ready,
             gpu_count: 1,
@@ -1506,6 +1510,7 @@ mod tests {
         message.bundle_config_hash = format!("{bundle}-hash");
         message.supports_execution_authority_v1 = true;
         message.supports_numerical_admission_v1 = true;
+        message.supports_numerical_admission_subject_v1 = true;
         message.numerical_process_inventory = serde_json::from_value(serde_json::json!({
             "observed_at_unix_ms": 1,
             "children": children,
@@ -1816,7 +1821,7 @@ mod tests {
     #[tokio::test]
     async fn numerical_admission_needs_a_capable_current_and_unanimous_remote_worker() {
         let current = admission('a', NOW_MS + 60_000);
-        let cases: [(&str, WorkerStatusMessage); 7] = [
+        let cases: [(&str, WorkerStatusMessage); 8] = [
             (
                 "expires within the margin",
                 remote_worker("remote-1", 1, &[admission('a', NOW_MS + 4_000)]),
@@ -1832,6 +1837,11 @@ mod tests {
             ("no numerical admission support", {
                 let mut message = remote_worker("remote-1", 1, std::slice::from_ref(&current));
                 message.supports_numerical_admission_v1 = false;
+                message
+            }),
+            ("a build that predates the admission subject", {
+                let mut message = remote_worker("remote-1", 1, std::slice::from_ref(&current));
+                message.supports_numerical_admission_subject_v1 = false;
                 message
             }),
             ("no execution authority", {
@@ -2312,6 +2322,7 @@ mod tests {
         let msg = WorkerStatusMessage {
             supports_execution_authority_v1: false,
             supports_numerical_admission_v1: false,
+            supports_numerical_admission_subject_v1: false,
             name: "w-compact".into(),
             ready: true,
             gpu_count: 1,
@@ -2351,6 +2362,7 @@ mod tests {
         let msg = WorkerStatusMessage {
             supports_execution_authority_v1: false,
             supports_numerical_admission_v1: false,
+            supports_numerical_admission_subject_v1: false,
             name: "w-none".into(),
             ready: true,
             gpu_count: 1,
@@ -3028,6 +3040,7 @@ mod tests {
         WorkerStatusMessage {
             supports_execution_authority_v1: false,
             supports_numerical_admission_v1: false,
+            supports_numerical_admission_subject_v1: false,
             name: "w".into(),
             ready,
             gpu_count: 1,
