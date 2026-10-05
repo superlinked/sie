@@ -964,6 +964,12 @@ class TestProfileLoraPins:
         with pytest.raises(ValueError, match="40-char commit SHA"):
             model_registry._validate_profile_lora_pins(self._profiles({"x": {"id": "acme/l", "revision": "main"}}))
 
+    def test_revision_with_a_trailing_newline_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="40-char commit SHA"):
+            model_registry._validate_profile_lora_pins(
+                self._profiles({"x": {"id": "acme/l", "revision": self.SHA_A + "\n"}})
+            )
+
     def test_unknown_key_is_rejected(self) -> None:
         with pytest.raises(ValueError, match="unknown key"):
             model_registry._validate_profile_lora_pins(self._profiles({"x": {"id": "acme/l", "rev": self.SHA_A}}))

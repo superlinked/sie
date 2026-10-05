@@ -91,7 +91,7 @@ _IMMUTABLE_REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
 
 def is_immutable_revision(revision: str | None) -> bool:
     """Return True when ``revision`` is a full 40-char git commit SHA (immutable)."""
-    return revision is not None and _IMMUTABLE_REVISION_RE.match(revision) is not None
+    return revision is not None and _IMMUTABLE_REVISION_RE.fullmatch(revision) is not None
 
 
 def lora_entry_ref(value: Any) -> tuple[str, str | None]:

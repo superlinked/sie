@@ -1736,6 +1736,19 @@ impl ModelRegistry {
         snap.models.get(&canonical).map(ModelEntry::served_by)
     }
 
+    /// Whether routing can send a request for `model` to a remote profile: the
+    /// route is remote, or the model's policy names a remote profile. A model
+    /// the registry does not hold cannot be ruled out.
+    pub(crate) fn has_remote_route(&self, model: &str) -> bool {
+        let snap = self.snapshot.load();
+        Self::canonical_model_name(&snap, model)
+            .and_then(|canonical| snap.models.get(&canonical))
+            .is_none_or(|entry| {
+                entry.info_extras.routing.is_some()
+                    || matches!(entry.served_by(), ServedBy::Remote { .. })
+            })
+    }
+
     /// Resolve only a bare local model's configured and enabled bridge.
     /// The route, disclosure and exact worker hash share one snapshot; caller
     /// profile selectors and numerical models cannot acquire this authority.

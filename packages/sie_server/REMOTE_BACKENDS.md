@@ -51,9 +51,9 @@ operator-owned equivalence admission described below. SIE hybrid encode and
 score require the fresh identity admission described below. Cluster remote
 profiles use the queue. Cluster generation and extraction fallback are described
 below. Cluster saturation and unhealthy-worker spill require explicit triggers.
-Numeric fleet bridges remain separately gated. Experimental cluster threshold
-routing is opt-in as described below; single-node threshold routing remains
-refused.
+Numeric fleet bridges remain separately gated. Experimental `threshold` routing
+is cluster-only and opt-in, as described below. A single node refuses a
+`threshold` routing block at configuration load; use `fallback` there.
 
 ## Single-node embedding example
 
@@ -64,7 +64,7 @@ Start with another SIE deployment that already serves
 upstreams:
   team-sie:
     kind: sie
-    base_url: https://sie.example.internal
+    base_url: https://team-sie.example.com
     api_key_secret: TEAM_SIE_KEY
     rate_cap:
       requests_per_minute: 600
@@ -121,9 +121,19 @@ with SIEClient(base_url="http://localhost:8080") as client:
     print(result["request"].get("upstream"))   # team-sie
 ```
 
-SIE encode can succeed when upstream usage is absent. In that case the adapter
-omits `input_token_counts` instead of estimating them. Malformed usage fails
-the request. Native generation requires terminal usage for successful output.
+Usage counts come from the upstream. When an upstream reports no usage, a
+native `encode`, `score` or `extract` request still succeeds, and the response
+omits `usage` instead of estimating it. This holds for every operation an
+upstream kind supports, on a single node and in a cluster. Two
+OpenAI-compatible routes differ. `/v1/embeddings` always returns a `usage`
+object, so it reports a character-based estimate instead, which the gateway
+marks with `sie_token_source: character_estimate`. `/v1/rerank` requires usage
+and answers `500` when the score carries none. For an OpenAI-compatible
+upstream, a `usage` object with no count in it counts as no usage. Malformed
+usage fails the request: a value of the wrong type, an invalid count, or an SIE
+upstream's `usage` without `input_tokens`. Generation fails closed: a
+generation, chat or completion response without exact final usage is an
+error, never a success.
 
 ## OpenAI-compatible embeddings and rerank
 
@@ -135,8 +145,10 @@ set `upstream_model` to the provider's model id.
 
 OpenAI-compatible embedding profiles support dense text only. Sparse,
 multivector, image input and extraction are rejected before dispatch. A rerank
-upstream must accept the Cohere-shaped request and report usage. SIE restores
-scores to document order rather than exposing the provider's ranked order.
+upstream must accept the Cohere-shaped request. Without upstream usage,
+`/v1/score` omits `usage` and `/v1/rerank` answers `500`, as described above.
+SIE restores scores to document order rather than exposing the provider's
+ranked order.
 
 The operator may add `set_params` and `strip_params` on the upstream. Reserved
 input and response-shaping fields, including `model`, cannot be overridden or
@@ -155,12 +167,15 @@ A caller can narrow that permission with `X-SIE-Remote: forbid`, or
 remote-backed model has no local alternative, so forbidding remote serving
 returns a client error.
 
-On the gateway, `forbid` selects only a fresh worker that advertises the
-versioned execution fence for the current configuration. The request stays on
-that worker's updated-only queue and backend IPC method; it never retries on an
-ordinary pool subject or older backend method. Missing worker support returns
-`503` with `Retry-After: 5`. Custom gateway dispatch transports remain closed
-unless they explicitly implement this contract. Rolling back a worker or backend
+On the gateway, `forbid` for a model with a `fallback` or `threshold` policy
+selects only a fresh worker that advertises the versioned execution fence for
+the current configuration. The request stays on that worker's updated-only
+queue and backend IPC method; it never retries on an ordinary pool subject or
+older backend method. Missing worker support returns `503` with
+`Retry-After: 5`. Custom gateway dispatch transports refuse such a request
+unless they explicitly implement this contract. A local model with no routing
+policy has no remote route, so `forbid` leaves its ordinary dispatch unchanged
+on every transport. Rolling back a worker or backend
 therefore refuses verified work before inference. Explicit remote profiles are
 refused with `400`. Model ids that cannot round-trip through the current queue
 subject encoding (including literal `__` and `_dot_` collisions) are refused for
@@ -177,7 +192,9 @@ Each upstream has a required rate cap and a circuit breaker. The limits are
 shared by that worker process's adapters, not across replicas: adding remote
 worker replicas increases the aggregate permitted traffic. Under
 `remote_only`, unavailable upstreams, open breakers and reached caps return
-retryable `503` responses. Under single-node `fallback`, an upstream failure
+retryable `503` responses with `Retry-After`. In a cluster the remote worker
+answers such a request at once instead of redelivering it, and the gateway
+returns the worker's code and wait. Under single-node `fallback`, an upstream failure
 returns the original local refusal with its retry delay. A client error is
 never retried remotely, and fallback cannot replay work after local acceptance
 or after output reaches the caller.
@@ -186,6 +203,12 @@ TLS is required outside loopback. URLs containing credentials, a query or a
 fragment are rejected. Redirects are refused, ambient proxy variables are
 ignored, and inbound authorization is not forwarded. An explicit `proxy_url`
 is the supported egress proxy setting.
+
+An upstream's certificate is verified against the public CA bundle that the
+server's HTTP client ships with (certifi). `SSL_CERT_FILE`, `SSL_CERT_DIR` and
+other environment settings are ignored, and no setting adds a private CA
+bundle. An upstream whose certificate is issued by a private CA is therefore
+refused; give it a certificate from a public CA.
 
 ## Cluster deployment
 
@@ -209,10 +232,14 @@ Python sources, installed inference-library versions and current Torch
 precision/determinism settings. Hardware observations include the kernel,
 CPU model/features and selected instruction capability, plus the observed CUDA
 device properties and installed NVIDIA driver revision for CUDA execution.
-Numerical library builds, observed BLAS kernel/thread selection and environment
-settings also participate. Apple Accelerate is bound to the installed OS
-version/build. Observed BLAS kernels are limited to OpenBLAS/BLIS; wrapper
-backends and libraries without kernel facts report `null`, including MKL.
+Numerical library builds, the kernel and thread selection observed for
+NumPy's own BLAS and environment settings also participate. Libraries that
+other packages load later are not observed, so a server reports the same
+identity before and after it loads a model. Apple Accelerate is bound to the
+installed OS version/build. Otherwise NumPy's BLAS must be OpenBLAS or BLIS,
+loaded from NumPy's own installation with observable kernel facts; wrapper
+backends, system libraries and libraries without kernel facts report `null`,
+including MKL.
 Unknown hardware or numerical libraries report `null`;
 configured device labels are insufficient. Alias names and
 inheritance do not change a profile with identical resolved settings.
@@ -232,11 +259,14 @@ need passing numerical evidence; SIE profiles require the fresh comparison below
 An encode/score comparison runs through the Python SDK against one direct SIE worker
 that has both the local default profile and an explicit remote profile. Keep
 hybrid routing disabled while measuring. The server must expose a non-null
-local identity, `profiles.default.runtime_instance_id` and
-`profiles.<remote>.remote_contract_sha256`; the latter binds
+local identity, `profiles.default.runtime_instance_id`,
+`profiles.<remote>.remote_contract_sha256` and
+`profiles.<remote>.remote_execution_sha256`. The remote contract binds
 its installed endpoint, model serving configuration, credential reference and request
-transforms to the operator files supplied to the probe. Credential values are
-never included. Version 1 local identities currently support native BGE-M3 only.
+transforms to the operator files supplied to the probe. The remote execution
+digest identifies the serving code and inference libraries that run the remote
+profile. Credential values are never included. Version 1 local identities
+currently support native BGE-M3 only.
 
 From the locked public workspace, run:
 
@@ -259,8 +289,9 @@ instruction prefixes, default query instructions, empty prefixes, and score scal
 when scoring is declared. All declared encode/score outputs must be measured.
 Generation is outside this numerical probe. The routing policy is excluded from
 the model digest, so evidence can be measured before enabling hybrid routing;
-all local and remote profile settings remain bound. Version 2 records bind the
-local profile's runtime options and float32 output explicitly. Both measured
+all local and remote profile settings remain bound. Version 3 records bind the
+local profile's runtime options, float32 output and remote execution digest
+explicitly. Both measured
 profiles receive those same local runtime options; remote-only runtime defaults
 are refused because a fallback would not apply them. Older records must be remeasured.
 
@@ -272,6 +303,8 @@ numerical equivalence. Endpoint/model contracts and local identity must remain
 unchanged throughout the probe. Every local and remote observation, including
 input refusals, must come from the same worker process identified by the initial
 metadata. A load balancer mixing workers cannot produce admissible evidence.
+The record names the local execution identity it measured, not the process, so
+it also covers other processes that report the same identity.
 
 Exit status is `0` for passing evidence, `1` for a measured failure, or `2` when
 valid evidence could not be produced. Records contain input hashes, token
@@ -298,6 +331,15 @@ A successful observation lasts at most 30 seconds; a failed observation lasts
 2 seconds. The next check after expiry refreshes metadata. A concurrent refresh
 refuses another bridge instead of waiting or starting a second metadata request.
 Changes to the installed upstream discard the previous observation.
+
+Because configuration load runs this comparison, a single-node server whose
+models directory holds a hybrid SIE-identity `encode` or `score` model depends
+on the upstream at startup. When the upstream cannot be reached, or reports a
+different weights revision or identity, the server refuses the model and does
+not start. A hot reload of that model runs the same comparison, reusing a
+matching observation up to 30 seconds old, and a refused reload is logged. A
+refused reload of a loaded model leaves it unloaded. To start while the upstream is down, remove the model's `routing` block, then
+add it back by hot reload once the upstream answers.
 
 Metadata is uncompressed and limited to 64 KiB. Its pool/socket operations share
 a 5-second deadline, including partial headers and chunk framing; OS hostname
@@ -329,17 +371,22 @@ upstreams:
         BAAI/bge-m3: /absolute/path/bge-m3-equivalence.json
 ```
 
-The map keys are local catalog model IDs. The referenced file must contain a
-passing version 2 record for that exact model, local identity, worker process,
-remote profile, endpoint/model contract and all declared numerical outputs.
-The age is a strict integer from 1 to 86400 seconds. Paths and proof authority
+The map keys are local catalog model IDs. The referenced file holds one
+version 3 record, or a bundle of records for several local identities (see
+[Collecting numerical fleet evidence](#collecting-numerical-fleet-evidence)).
+A passing record admits only the exact model, remote profile, endpoint/model
+contract, remote execution digest and declared numerical outputs it measured,
+and only for the local identity it names.
+The age is a strict integer from 1 to 604800 seconds. Paths and proof authority
 come only from startup upstream configuration; model API requests cannot supply
 or install records. SIE upstreams refuse this policy and require their own
 immutable identity comparison instead.
 
-Boot with `routing: {policy: always_local}` and both profiles configured. Run the
-probe against that direct worker, writing to the declared evidence path, then
-change the model YAML to `routing: {policy: fallback, fallback_profile: remote}`.
+Boot with both profiles configured and no `routing` block, so the bare model
+name is served locally. The valid policies are `remote_only`, `fallback` and
+`threshold`; an absent block means local only. Run the probe against that
+direct worker, writing to the declared evidence path, then add
+`routing: {policy: fallback, fallback_profile: remote}` to the model YAML.
 Model-config hot reload admits the change in the same process. All profile
 settings must stay unchanged between measurement and activation. An immutable
 native BGE-M3 local profile is currently required; unidentified engines remain closed.
@@ -351,42 +398,45 @@ with unmeasured runtime overrides or non-float32 output also remain local;
 explicit profiles still serve as requested. Rejection of one exported model
 retains its current local configuration without blocking unrelated updates.
 
-Records are bound to the measured worker process. After a worker restart,
-disable hybrid routing before startup, re-probe and activate through hot reload
-again. Starting directly from a hybrid YAML with an old process-bound record is
-refused. This conservative first admission path requires one record per worker
-process with one configured concrete device (`cuda:0`, rather than `cuda`,
-for a CUDA worker). Multiple devices or a model loaded outside that placement
-cannot report an admission identity or use the proof. It does not enable
-gateway fallback or a fleet-wide evidence rollout.
+A record is bound to the local execution identity it measured, not to the
+measured process. A restarted server, or another server with the same software,
+inference libraries, hardware and settings, reports the same identity and is
+admitted by the same record, also when it starts from a hybrid YAML. A change
+to any of them changes the identity and needs a new measurement. Admission
+requires one configured concrete device (`cuda:0`, rather than `cuda`, for a
+CUDA worker). Multiple devices or a model loaded outside that placement cannot
+report an admission identity or use the proof. This does not enable gateway
+fallback.
 
 ## Collecting numerical fleet evidence
 
-Collect one version 2 proof from every reachable Python worker process, including
-children behind a sidecar and workers eligible for pool fallback. Each proof
-still requires two local runs and one explicit remote run against that process.
-The collector accepts repeated `--record` paths, writes a new `--output` file,
-and checks a `--max-age-s` window from 1 to 86400 seconds (default 3600):
+Servers with different hardware, drivers, inference libraries or settings
+report different local identities, and each identity needs its own
+measurement: two local runs and one explicit remote run on a server with that
+identity. The bundle tool collects one version 3 record per identity into one
+evidence file, which an upstream's `record_files` entry can name in place of a
+single record. It accepts repeated `--record` paths, writes a new `--output`
+file, and checks a `--max-age-s` window from 1 to 604800 seconds (default 3600):
 
 ```bash
 mise exec -- uv run --frozen --project . python tools/remote_fleet_equivalence.py \
-  --record /absolute/path/worker-a.json \
-  --record /absolute/path/worker-b.json \
-  --output /absolute/path/fleet.json --max-age-s 3600
+  --record /absolute/path/identity-a.json \
+  --record /absolute/path/identity-b.json \
+  --output /absolute/path/bundle.json --max-age-s 3600
 ```
 
-The version 1 inventory retains the original measurements, including misses.
+The version 2 bundle retains the original measurements, including misses.
 Exit status 0 means all records passed and are fresh, 1 means valid evidence
 contains a failure or expired/future measurement, and 2 means collection failed.
 Existing output files are never overwritten. Inputs are bounded regular files;
-the inventory contains at most 256 records and occupies at most 8 MiB.
+the bundle contains at most 256 records and occupies at most 8 MiB.
 
-Every member must measure the same model, profiles, endpoint/model contract,
-runtime defaults, outputs and probe inputs. Processes may have different local
-execution identities, each bound to its own measurement. Canonical digests bind
-the entire record, including its process, timestamp and measured errors. Exact
-inventory matching rejects missing, additional or replaced processes, even when
-a replacement reports the same execution identity.
+Every record must measure the same model, profiles, endpoint/model contract,
+remote execution digest, runtime defaults, outputs and probe inputs, and no
+identity may appear twice. Canonical digests bind the entire record, including
+its identity, timestamp and measured errors. A server is admitted only by a
+passing, fresh record for its own identity, so a failed or expired record for
+one identity leaves the other identities admitted.
 
 Sidecars independently poll every adapter child and attach optional
 `numerical_process_inventory` diagnostics to NATS health messages. Cluster
@@ -398,11 +448,10 @@ older than ten seconds do not retain a previous process's inventory. Normal
 health publication does not wait for these probes, and diagnostics use dedicated
 IPC connections so they do not occupy serving or readiness connection slots.
 
-These observations and the proof artifact grant no routing authority. An
-`observed` child can still lack a local identity. Numerical gateway routing remains
-inactive until operator-owned evidence, complete live membership and execution
-fencing are connected. Restarts require new proofs; a collector result cannot
-authorize a new process or establish scale-to-zero equivalence.
+These observations and the evidence file grant no gateway routing authority.
+An `observed` child can still lack a local identity. Numerical gateway routing
+remains inactive until operator-owned evidence, complete live membership and
+execution fencing are connected.
 
 
 ## Single-node generation fallback
@@ -438,10 +487,9 @@ caller receives the local loading refusal. A loaded local model serves locally.
 
 The remote attempt pins a fresh worker with the exact current configuration
 hash and positive versioned execution capability. It cannot retry on the ordinary
-pool subject. Its work item names the trigger in `fallback_reason`, so a remote
-worker whose upstream is rate capped, has its circuit breaker open, is not ready
-or cannot be reached answers at once rather than redelivering the item until the
-gateway's request timeout. Remote failure restores the original local refusal body and
+pool subject. Its work item names the trigger in `fallback_reason`, so the remote
+worker answers it at once whenever it cannot serve it now, rather than
+redelivering it until the gateway's request timeout. Remote failure restores the original local refusal body and
 `Retry-After`, with `X-SIE-Fallback-Reason` and a bounded
 `X-SIE-Fallback-Error`; success discloses the remote profile's upstream. The
 customer model name remains the requested model.
@@ -502,6 +550,14 @@ for bounded-label and replica semantics.
 
 
 ## Experimental cluster threshold routing
+
+Threshold routing is available only in a cluster: the gateways count the
+demand and make the decision. A server admits a `threshold` block only as a
+queue worker behind a threshold-enabled gateway, which requires
+`SIE_THRESHOLD_ROUTING_ENABLED=true` and the `SIE_IPC_SOCKET_PATH` that the
+chart sets for queue workers. A single node runs without that socket path, so
+it refuses the block at configuration load, and its own request path never
+applies `threshold`. Use `fallback` on a single node.
 
 Set `gateway.thresholdRouting.enabled: true` in the `sie-cluster` chart only
 when opting into shared demand routing for generation or extraction. It is off

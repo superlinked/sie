@@ -567,14 +567,15 @@ def test_a_refusal_is_a_retryable_503_with_its_retry_after_and_the_disclosure_he
 
 
 @pytest.mark.parametrize("refusal", ["rate_cap", "concurrency_cap", "breaker_open"])
-def test_the_queue_path_redelivers_a_refused_item_after_the_wait(refusal: str) -> None:
+def test_the_queue_path_answers_a_refused_item_at_once_with_the_wait(refusal: str) -> None:
     item = EncodeBatchItem(
         work_item_id="w.0", request_id="w", item_index=0, total_items=1, timestamp=0.0, item={"text": "a"}
     )
 
     outcome = _inference_exception_outcome(item, UpstreamRefusedError(UPSTREAM, refusal, retry_after_s=40))  # type: ignore[arg-type]
 
-    assert (outcome.disposition, outcome.nak_delay_ms, outcome.error) == ("nak_retry", 40_000, None)
+    assert (outcome.disposition, outcome.nak_delay_ms) == ("publish_error_and_ack", None)
+    assert (outcome.error_code, outcome.retry_after_s) == ("QUEUE_FULL", 40)
 
 
 @pytest.mark.parametrize("reason", ["rate_cap", "concurrency_cap", "breaker_open", "half_open", "probe_active"])

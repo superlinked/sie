@@ -104,7 +104,6 @@ _INFERENCE_ERROR_CODE: Final[str] = "inference_error"
 # which under a systemic failure is also the correct answer, because every one
 # of them was going to fail anyway.
 _MAX_ENCODE_ISOLATION_PASSES: Final[int] = 24
-_UPSTREAM_NAK_MAX_DELAY_S: Final[float] = 60.0
 _CANONICAL_AUDIO_SAMPLE_RATE: Final[int] = 16_000
 _MAX_AUDIO_CHANNELS: Final[int] = 2
 _MIN_AUDIO_SAMPLE_RATE: Final[int] = 8_000
@@ -1554,7 +1553,7 @@ class QueueExecutor:
         # Adapter for the metering backfill (§7.3). Read via the registry — the
         # same sync accessor the encode seam uses — so a reranker that owns its
         # tokenization can re-derive real per-pair counts. ``None`` (evicted
-        # mid-batch) simply leaves the meter on its reserve estimate.
+        # mid-batch) leaves the counts absent.
         try:
             score_adapter = self._registry.get(model_id)
         except KeyError:
@@ -1866,8 +1865,7 @@ def _encode_units(token_count: int | None, image_count: int | None) -> UnitCount
     Nothing bills less: a zero contributes no credits either way, and the only
     behaviour that changes is a settlement that used to FAULT (billing nothing)
     now releasing that dimension and billing the images. An item with neither
-    dimension yields ``None`` so the metering edge falls back to its reserve
-    estimate.
+    dimension yields ``None``, so its counts are absent.
     """
     images = image_count if (image_count is not None and image_count > 0) else None
     if token_count is not None and token_count > 0:
@@ -1951,8 +1949,8 @@ def _page_total(pages: Any, expected_len: int) -> int | None:
     """Sum an adapter-surfaced per-item page list (``ExtractOutput.pages``) into a
     single billable page count for the work item.
 
-    Returns ``None`` — leaving the pages dimension unset so the meter falls back
-    to its reserve estimate — unless the list is well-formed (aligned 1:1 with
+    Returns ``None`` — leaving the pages dimension unset, with no estimate in its
+    place — unless the list is well-formed (aligned 1:1 with
     the item's outputs and non-negative ints). A valid zero remains authoritative;
     malformed data is dropped rather than mis-attributed.
     """
@@ -1977,8 +1975,8 @@ def _units_from_token_counts(counts: Any, expected_len: int) -> UnitCounts | Non
     """Sum authoritative per-item token counts into a work item's ``UnitCounts``.
 
     Mirrors the encode metering contract (§7.3): billing counts, never
-    estimates. Returns ``None`` — leaving ``ItemOutcome.units`` unset so the
-    metering edge falls back to its reserve estimate — unless the adapter
+    estimates. Returns ``None`` — leaving ``ItemOutcome.units`` unset, with no
+    estimate in its place — unless the adapter
     surfaced a well-formed list aligned 1:1 with the item's outputs. A
     misaligned or malformed list is dropped rather than mis-attributed.
     """
@@ -2025,7 +2023,7 @@ def _backfill_score_units(
     §7.3 basis the in-tree ``cross_encoder`` already surfaces. Pure fallback:
     never overwrites counts an adapter already produced (so bge-m3 / cross_encoder
     keep their exact values), and a ``None`` recovery (server-backed adapters)
-    leaves the meter on its reserve estimate.
+    leaves the counts absent.
     """
     if adapter is None:
         return
@@ -2239,19 +2237,27 @@ def _oom_nak_outcome(bi: EncodeBatchItem | ScoreBatchItem | ExtractBatchItem) ->
     )
 
 
-def _upstream_nak_outcome(bi: EncodeBatchItem | ScoreBatchItem | ExtractBatchItem, retry_after_s: int) -> ItemOutcome:
-    # Never shorter than the base delay: a work item has a fixed number of
-    # deliveries, and a one-second hint would spend them long before the
-    # gateway stops waiting for the result.
-    delay_s = min(_UPSTREAM_NAK_MAX_DELAY_S, max(_default_nak_delay_s(), float(retry_after_s)))
+def _upstream_refusal_outcome(
+    bi: EncodeBatchItem | ScoreBatchItem | ExtractBatchItem, error: UpstreamUnavailableError
+) -> ItemOutcome:
+    """A retryable error with the upstream's wait for an item its upstream did not serve.
+
+    The code is the single server's (``api.helpers.upstream_unavailable_exception``):
+    ``MODEL_LOADING`` while the model is not ready upstream, ``QUEUE_FULL``
+    otherwise. The message is fixed text.
+    """
+    if error.kind == "not_ready":
+        code, message = ErrorCode.MODEL_LOADING, "The model is loading on its upstream, please retry"
+    else:
+        code, message = ErrorCode.QUEUE_FULL, f"The upstream serving the model is {error.kind}, please retry"
     return ItemOutcome(
         work_item_id=bi.work_item_id,
         request_id=bi.request_id,
         item_index=bi.item_index,
-        disposition="nak_retry",
-        nak_delay_ms=int(delay_s * 1000),
-        error_code=ErrorCode.QUEUE_FULL.value,
-        retry_after_s=retry_after_s,
+        disposition="publish_error_and_ack",
+        error=message,
+        error_code=code.value,
+        retry_after_s=error.retry_after_s,
     )
 
 
@@ -2270,9 +2276,7 @@ def _inference_exception_outcome(
         # against a future caller that submits through the queueing path.
         return _nak_outcome(bi)
     if isinstance(exc, UpstreamUnavailableError):
-        # A remote profile's upstream did not serve the item, and asking again
-        # later may succeed: redeliver instead of publishing a terminal error.
-        return _upstream_nak_outcome(bi, exc.retry_after_s)
+        return _upstream_refusal_outcome(bi, exc)
     if isinstance(exc, InputTooLongError):
         # The input exceeds the model's window: INPUT_TOO_LONG (HTTP 400), as
         # the HTTP path reports it, not a server-side inference failure.

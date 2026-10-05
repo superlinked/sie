@@ -1040,6 +1040,164 @@ mod tests {
         assert!(gateway.dispatcher.dispatched().is_empty());
     }
 
+    const FORBID_SURFACES: [(&str, bool); 9] = [
+        ("encode", false),
+        ("embeddings", false),
+        ("native", false),
+        ("native", true),
+        ("chat", false),
+        ("chat", true),
+        ("completions", false),
+        ("completions", true),
+        ("responses", false),
+    ];
+
+    async fn forbidden_surface(
+        gateway: &TestGateway,
+        surface: &str,
+        model: &str,
+        stream: bool,
+    ) -> Response {
+        let state = State(Arc::clone(&gateway.state));
+        let messages = json!([{"role":"user", "content":"hello"}]);
+        let mut request = match surface {
+            "encode" => json_request(
+                &format!("/v1/encode/{model}"),
+                json!({"items":[{"text":"hello"}]}),
+            ),
+            "embeddings" => json_request("/v1/embeddings", json!({"model":model, "input":"hello"})),
+            "native" => json_request(
+                &format!("/v1/generate/{model}"),
+                json!({"prompt":"hello", "max_new_tokens":4, "stream":stream}),
+            ),
+            "chat" => json_request(
+                "/v1/chat/completions",
+                json!({"model":model, "messages":messages, "stream":stream}),
+            ),
+            "completions" => json_request(
+                "/v1/completions",
+                json!({"model":model, "prompt":"hello", "max_tokens":4, "stream":stream}),
+            ),
+            "responses" => json_request("/v1/responses", json!({"model":model, "input":"hello"})),
+            _ => unreachable!(),
+        };
+        request
+            .headers_mut()
+            .insert(REMOTE_HEADER, HeaderValue::from_static("forbid"));
+        match surface {
+            "encode" => proxy_request(state, request, "encode").await,
+            "embeddings" => proxy_openai_embeddings(state, request).await,
+            "native" => proxy_request(state, request, "generate").await,
+            "chat" => proxy_chat(state, request).await,
+            "completions" => proxy_completions(state, request).await,
+            _ => proxy_responses(state, request).await,
+        }
+    }
+
+    #[tokio::test]
+    async fn remote_forbid_serves_a_model_without_a_remote_route_through_a_transport_without_the_fence(
+    ) {
+        let gateway = TestGateway::new(&[
+            LOCAL_ENCODE_MODEL,
+            REMOTE_ENCODE_MODEL,
+            HYBRID_GENERATE_MODEL,
+        ])
+        .await;
+        gateway.add_worker("local-1", LOCAL_LANE, &[]).await;
+        gateway.add_worker("remote-1", REMOTE_LANE, &[]).await;
+        gateway.dispatcher.withdraw_execution_authority();
+        for (surface, stream) in FORBID_SURFACES {
+            let model = if matches!(surface, "encode" | "embeddings") {
+                "acme/local"
+            } else {
+                "acme/chat"
+            };
+            let response = forbidden_surface(&gateway, surface, model, stream).await;
+            assert_eq!(response.status(), StatusCode::OK, "{surface}/{stream}");
+            assert_eq!(
+                stamped(&response),
+                (Some("local"), None),
+                "{surface}/{stream}"
+            );
+            let _ = axum::body::to_bytes(response.into_body(), 16384)
+                .await
+                .unwrap();
+        }
+        let dispatched = gateway.dispatcher.dispatched();
+        assert_eq!(dispatched.len(), FORBID_SURFACES.len());
+        assert!(dispatched.iter().all(|work| (
+            work.pool.as_str(),
+            work.machine_profile.as_str(),
+            work.bundle.as_str()
+        ) == LOCAL_LANE));
+        assert_eq!(
+            gateway.dispatcher.execution_authority(),
+            vec![false; FORBID_SURFACES.len()]
+        );
+        for (surface, model) in [("encode", "acme/remote"), ("chat", "acme/chat:remote")] {
+            let response = forbidden_surface(&gateway, surface, model, false).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{model}");
+        }
+        assert_eq!(gateway.dispatcher.dispatched().len(), FORBID_SURFACES.len());
+    }
+
+    #[tokio::test]
+    async fn remote_forbid_fails_closed_for_a_model_with_a_remote_route_unless_execution_is_verified(
+    ) {
+        let routing = "\nrouting:\n  policy: fallback\n  fallback_profile: remote\n";
+        let generate = format!("{HYBRID_GENERATE_MODEL}{routing}");
+        let encode = format!("{HYBRID_ENCODE_MODEL}{routing}");
+        for (transport_fence, verified_worker) in [(false, true), (true, false), (true, true)] {
+            let gateway = TestGateway::new(&[&generate, &encode]).await;
+            let loaded = ["acme/chat", "acme/hybrid-encode"];
+            if verified_worker {
+                gateway
+                    .add_verified_worker("local-1", LOCAL_LANE, &loaded)
+                    .await;
+            } else {
+                gateway.add_worker("local-1", LOCAL_LANE, &loaded).await;
+            }
+            gateway
+                .add_verified_worker("remote-1", REMOTE_LANE, &[])
+                .await;
+            if !transport_fence {
+                gateway.dispatcher.withdraw_execution_authority();
+            }
+            let served = transport_fence && verified_worker;
+            for (surface, stream) in FORBID_SURFACES {
+                let model = if matches!(surface, "encode" | "embeddings") {
+                    "acme/hybrid-encode"
+                } else {
+                    "acme/chat"
+                };
+                let case = format!("{surface}/{stream}/{transport_fence}/{verified_worker}");
+                let response = forbidden_surface(&gateway, surface, model, stream).await;
+                assert!(!response.headers().contains_key("x-sie-fallback-reason"));
+                if served {
+                    assert_eq!(response.status(), StatusCode::OK, "{case}");
+                    assert_eq!(stamped(&response), (Some("local"), None), "{case}");
+                } else {
+                    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "{case}");
+                    assert_eq!(response.headers()["retry-after"], "5", "{case}");
+                }
+                let _ = axum::body::to_bytes(response.into_body(), 16384)
+                    .await
+                    .unwrap();
+            }
+            let dispatched = gateway.dispatcher.dispatched();
+            if served {
+                assert_eq!(dispatched.len(), FORBID_SURFACES.len());
+                assert!(dispatched.iter().all(|work| work.bundle == LOCAL_LANE.2));
+                assert_eq!(
+                    gateway.dispatcher.execution_authority(),
+                    vec![true; FORBID_SURFACES.len()]
+                );
+            } else {
+                assert!(dispatched.is_empty());
+            }
+        }
+    }
+
     #[tokio::test]
     async fn failed_bridge_preserves_original_refusal_body_and_retry_without_echoing_remote_errors()
     {
@@ -1119,8 +1277,8 @@ mod tests {
         proxy_chat, proxy_completions, proxy_openai_embeddings, proxy_request, proxy_responses,
     };
     use crate::handlers::test_support::{
-        Dispatched, TestGateway, HYBRID_EXTRACT_MODEL, HYBRID_GENERATE_MODEL, LOCAL_ENCODE_MODEL,
-        LOCAL_LANE, REMOTE_ENCODE_MODEL, REMOTE_LANE,
+        Dispatched, TestGateway, HYBRID_ENCODE_MODEL, HYBRID_EXTRACT_MODEL, HYBRID_GENERATE_MODEL,
+        LOCAL_ENCODE_MODEL, LOCAL_LANE, REMOTE_ENCODE_MODEL, REMOTE_LANE,
     };
 
     fn json_request(uri: &str, body: serde_json::Value) -> Request {
@@ -1576,7 +1734,7 @@ mod tests {
                 }
                 gateway
                     .dispatcher
-                    .refuse_remote_work_at_the_upstream(remote_code, retry_after_s);
+                    .answer_only_bridged_remote_work(remote_code, retry_after_s);
                 let response = tokio::time::timeout(
                     Duration::from_secs(5),
                     proxy_request(
@@ -1730,6 +1888,54 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(stamped(&response), (Some("remote"), Some("team-sie")));
+    }
+
+    #[tokio::test]
+    async fn a_remote_only_request_its_upstream_cannot_serve_now_answers_503_with_the_wait() {
+        for (code, retry_after_s, retry_after) in [
+            ("QUEUE_FULL", Some(9), "9"),
+            ("MODEL_LOADING", Some(7), "7"),
+            ("QUEUE_FULL", None, "5"),
+            ("MODEL_LOADING", None, "5"),
+        ] {
+            let gateway = TestGateway::new(&[REMOTE_ENCODE_MODEL]).await;
+            gateway.add_worker("remote-1", REMOTE_LANE, &[]).await;
+            gateway.dispatcher.refuse_remote_work(code, retry_after_s);
+            let native = proxy_request(
+                State(Arc::clone(&gateway.state)),
+                json_request(
+                    "/v1/encode/acme/remote",
+                    json!({"items": [{"text": "hello"}]}),
+                ),
+                "encode",
+            )
+            .await;
+            let embeddings = proxy_openai_embeddings(
+                State(Arc::clone(&gateway.state)),
+                json_request(
+                    "/v1/embeddings",
+                    json!({"model": "acme/remote", "input": "hello"}),
+                ),
+            )
+            .await;
+            for response in [&native, &embeddings] {
+                assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "{code}");
+                assert_eq!(response.headers()["retry-after"], retry_after, "{code}");
+                assert_eq!(response.headers()["x-sie-error-code"], code);
+                assert_eq!(stamped(response), (Some("remote"), Some("team-sie")));
+            }
+            let body: serde_json::Value = serde_json::from_slice(
+                &axum::body::to_bytes(native.into_body(), 8192)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(body["error"]["code"], code);
+            assert_eq!(
+                gateway.dispatcher.dispatched(),
+                vec![dispatched("encode", REMOTE_LANE, "acme/remote"); 2]
+            );
+        }
     }
 
     #[tokio::test]

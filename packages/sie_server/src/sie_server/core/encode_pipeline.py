@@ -88,11 +88,11 @@ def _validated_counts(value: Any, expected_len: int, *, non_negative: bool = Fal
     The single gate every metering basis passes through, so the contract lives
     in one place as §7 dimensions are added. A value that is not a list, is
     misaligned with the batch, or holds anything but real ints (``bool`` is an
-    ``int`` subclass and is rejected) yields ``None`` — the meter then falls
-    back to its reserve estimate rather than mis-attributing or approximating a
-    count. ``non_negative`` additionally rejects negatives; every §7 dimension
-    passes it, because a negative unit count is meaningless in all of them and
-    ``api/encode.py`` sums these straight into the reported usage.
+    ``int`` subclass and is rejected) yields ``None`` — the count is then absent
+    rather than mis-attributed or approximated. ``non_negative`` additionally
+    rejects negatives; every §7 dimension passes it, because a negative unit
+    count is meaningless in all of them and ``api/encode.py`` sums these
+    straight into the reported usage.
     """
     if not isinstance(value, list) or len(value) != expected_len:
         return None
@@ -247,7 +247,7 @@ class EncodePipeline:
         # there) expose real per-item counts via ``EncodeOutput.extra``.
         # The preprocessor-recorded counts (authoritative too) win when both
         # exist; malformed/misaligned values are dropped rather than
-        # mis-attributed — metering falls back to its reserve estimate.
+        # mis-attributed, and the counts stay absent.
         if timing.input_token_counts is None:
             timing.input_token_counts = _validated_counts(
                 encode_output.extra.get("input_token_counts"), len(items), non_negative=True
@@ -272,8 +272,8 @@ class EncodePipeline:
         # adapter's own tokenizer (the §P3.5 ground-truth basis). This is a
         # pure fallback: it never runs when the preprocessor or ``extra``
         # already recorded counts, so bge-m3(-flash) keep their exact values.
-        # ``None`` (server-backed / image adapters) leaves the meter on its
-        # reserve estimate rather than billing an approximation.
+        # ``None`` (server-backed / image adapters) leaves the counts absent
+        # rather than approximated.
         if timing.input_token_counts is None:
             try:
                 adapter = registry.get(model)

@@ -67,6 +67,27 @@ profiles:
         upstream_model: acme/remote
 ";
 
+/// An encode model served locally, with a remote profile on `team-sie`.
+pub(crate) const HYBRID_ENCODE_MODEL: &str = "\
+sie_id: acme/hybrid-encode
+hf_id: acme/hybrid-encode
+tasks:
+  encode:
+    dense:
+      dim: 2
+profiles:
+  default:
+    adapter_path: sie_server.adapters.bert_flash:BertFlashAdapter
+    max_batch_tokens: 4096
+  remote:
+    adapter_path: sie_server.adapters.remote.sie:SieUpstreamAdapter
+    max_batch_tokens: 8192
+    adapter_options:
+      loadtime:
+        upstream: team-sie
+        upstream_model: acme/hybrid-encode
+";
+
 /// A generation model served locally, with a remote profile on `team-sie`.
 pub(crate) const HYBRID_GENERATE_MODEL: &str = "\
 sie_id: acme/chat
@@ -132,6 +153,7 @@ impl Dispatched {
 /// A dispatcher that records every publish and answers it at once.
 #[derive(Default)]
 pub(crate) struct RecordingDispatcher {
+    without_execution_authority: AtomicBool,
     local_backpressure: AtomicBool,
     load_refused: AtomicBool,
     generate_refused: AtomicBool,
@@ -140,7 +162,8 @@ pub(crate) struct RecordingDispatcher {
     stream_error: AtomicBool,
     stream_mid_error: AtomicBool,
     stream_terminal_failure: Mutex<Option<&'static str>>,
-    upstream_refusal: Mutex<Option<(&'static str, u32)>>,
+    remote_refusal: Mutex<Option<(&'static str, Option<u32>)>>,
+    bridged_refusal: Mutex<Option<(&'static str, u32)>>,
     redelivered: Mutex<Vec<oneshot::Sender<Vec<WorkResult>>>>,
     dispatched: Mutex<Vec<Dispatched>>,
     execution_authority: Mutex<Vec<bool>>,
@@ -148,6 +171,12 @@ pub(crate) struct RecordingDispatcher {
 }
 
 impl RecordingDispatcher {
+    /// Answer remote-lane work as a remote worker does when its upstream cannot
+    /// serve now: a published `code` error with the upstream's wait, if any.
+    pub(crate) fn refuse_remote_work(&self, code: &'static str, retry_after_s: Option<u32>) {
+        *self.remote_refusal.lock().unwrap() = Some((code, retry_after_s));
+    }
+
     pub(crate) fn dispatched(&self) -> Vec<Dispatched> {
         self.dispatched.lock().unwrap().clone()
     }
@@ -161,16 +190,18 @@ impl RecordingDispatcher {
         self.fallback_reasons.lock().unwrap().clone()
     }
 
-    /// Answer remote-lane work the way a remote worker does when its upstream
-    /// refuses: a remote attempt that carries a fallback reason gets a
+    /// Answer remote-lane work the way a remote worker whose backend asks for
+    /// redelivery does: a remote attempt that carries a fallback reason gets a
     /// retryable `code` result with the upstream's hint at once, while other
     /// work is redelivered, so its result never arrives.
-    pub(crate) fn refuse_remote_work_at_the_upstream(
-        &self,
-        code: &'static str,
-        retry_after_s: u32,
-    ) {
-        *self.upstream_refusal.lock().unwrap() = Some((code, retry_after_s));
+    pub(crate) fn answer_only_bridged_remote_work(&self, code: &'static str, retry_after_s: u32) {
+        *self.bridged_refusal.lock().unwrap() = Some((code, retry_after_s));
+    }
+
+    /// Behave as a transport that cannot keep the execution-authority fence.
+    pub(crate) fn withdraw_execution_authority(&self) {
+        self.without_execution_authority
+            .store(true, Ordering::SeqCst);
     }
 
     pub(crate) fn saturate_local_queue(&self) {
@@ -204,6 +235,18 @@ impl RecordingDispatcher {
     fn record(&self, dispatched: Dispatched) {
         self.dispatched.lock().unwrap().push(dispatched);
     }
+
+    fn record_authority(&self, target: &PublishTarget, params: &WorkParams) {
+        assert!(
+            !params.require_execution_authority_v1
+                || matches!(target, PublishTarget::VerifiedWorker { .. }),
+            "verified execution requires a verified worker target"
+        );
+        self.execution_authority
+            .lock()
+            .unwrap()
+            .push(params.require_execution_authority_v1);
+    }
 }
 
 fn successful_result(request_id: &str, item_index: u32, payload: serde_json::Value) -> WorkResult {
@@ -218,17 +261,17 @@ fn successful_result(request_id: &str, item_index: u32, payload: serde_json::Val
     result
 }
 
-fn upstream_refusal_result(
+fn refused_result(
     request_id: &str,
     item_index: u32,
-    (code, retry_after_s): (&str, u32),
+    (code, retry_after_s): (&str, Option<u32>),
 ) -> WorkResult {
     serde_json::from_value(json!({
         "work_item_id": format!("{request_id}.{item_index}"),
         "request_id": request_id,
         "item_index": item_index,
         "success": false,
-        "error": "The remote profile cannot serve this request now",
+        "error": "The upstream serving the model is busy, please retry",
         "error_code": code,
         "retry_after_s": retry_after_s,
     }))
@@ -284,7 +327,7 @@ fn stream_chunk_collector(
 #[async_trait::async_trait]
 impl WorkDispatcher for RecordingDispatcher {
     fn supports_execution_authority_v1(&self) -> bool {
-        true
+        !self.without_execution_authority.load(Ordering::SeqCst)
     }
 
     fn pre_dispatch_backpressure(&self, lane: &LaneKey) -> Result<(), DispatchBackpressure> {
@@ -329,10 +372,7 @@ impl WorkDispatcher for RecordingDispatcher {
         ),
         DispatchError,
     > {
-        self.execution_authority
-            .lock()
-            .unwrap()
-            .push(params.require_execution_authority_v1);
+        self.record_authority(&target, params);
         self.record(Dispatched::new(endpoint, &target));
         self.fallback_reasons
             .lock()
@@ -342,12 +382,14 @@ impl WorkDispatcher for RecordingDispatcher {
             return Err(DispatchError::Other("private upstream failure".into()));
         }
         let request_id = "request-1".to_string();
-        let upstream_refusal = *self.upstream_refusal.lock().unwrap();
-        if let Some(refusal) = upstream_refusal.filter(|_| target.bundle() == REMOTE_LANE.2) {
+        let bridged_refusal = *self.bridged_refusal.lock().unwrap();
+        if let Some((code, retry_after_s)) =
+            bridged_refusal.filter(|_| target.bundle() == REMOTE_LANE.2)
+        {
             let (tx, rx) = oneshot::channel();
             if params.fallback_reason.is_some() {
                 let refused = (0..items.len().max(1) as u32)
-                    .map(|index| upstream_refusal_result(&request_id, index, refusal))
+                    .map(|index| refused_result(&request_id, index, (code, Some(retry_after_s))))
                     .collect();
                 tx.send(refused).unwrap();
             } else {
@@ -355,7 +397,14 @@ impl WorkDispatcher for RecordingDispatcher {
             }
             return Ok((request_id, rx, DispatchDurability::accepted()));
         }
-        let results = if endpoint == "score" {
+        let remote_refusal = *self.remote_refusal.lock().unwrap();
+        let results = if let Some(refusal) =
+            remote_refusal.filter(|_| target.bundle() == REMOTE_LANE.2)
+        {
+            (0..items.len().max(1) as u32)
+                .map(|index| refused_result(&request_id, index, refusal))
+                .collect()
+        } else if endpoint == "score" {
             vec![successful_result(
                 &request_id,
                 0,
@@ -407,10 +456,7 @@ impl WorkDispatcher for RecordingDispatcher {
         if self.generate_refused.load(Ordering::SeqCst) {
             return Err("private upstream failure".into());
         }
-        self.execution_authority
-            .lock()
-            .unwrap()
-            .push(params.require_execution_authority_v1);
+        self.record_authority(&target, params);
         self.record(Dispatched::new("generate", &target));
         self.fallback_reasons
             .lock()
@@ -442,10 +488,7 @@ impl WorkDispatcher for RecordingDispatcher {
         ),
         String,
     > {
-        self.execution_authority
-            .lock()
-            .unwrap()
-            .push(params.require_execution_authority_v1);
+        self.record_authority(&target, params);
         self.record(Dispatched::new("generate", &target));
         self.fallback_reasons
             .lock()
