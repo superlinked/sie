@@ -1565,8 +1565,9 @@ async def rerank(
     """Cohere/OpenAI-style reranking backed by the in-process score adapter.
 
     Request: ``{model, query, documents: [str], top_n?, return_documents?}``.
-    Response: ``{model, results: [{index, relevance_score, document?}], usage}``
-    sorted by descending relevance.
+    Response: ``{model, results: [{index, relevance_score, document?}], usage?}``
+    sorted by descending relevance. ``usage`` is omitted when the score output
+    carries no counts, as on ``/v1/score``.
 
     Errors are emitted as top-level OpenAI ``{"error": {...}}`` envelopes
     (never FastAPI's ``{"detail": ...}`` wrapper), matching ``/v1/completions``.
@@ -1685,11 +1686,6 @@ async def _rerank(
         # the HTTPException is re-emitted as the OpenAI error envelope by rerank().
         ensure_finite_scores(scores, model)
         usage = score_usage_from_output(score_output)
-        if usage is None:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail={"code": "inference_error", "message": "score response missing authoritative usage"},
-            )
 
     ranked = sorted(enumerate(scores), key=lambda pair: pair[1], reverse=True)
     if top_n is not None:
@@ -1701,11 +1697,7 @@ async def _rerank(
             entry["document"] = {"text": documents[index]}
         results.append(entry)
 
-    return JSONResponse(
-        content={
-            "model": getattr(config, "name", None) or registry_key,
-            "results": results,
-            "usage": usage,
-        },
-        headers=route.headers(),
-    )
+    content: dict[str, Any] = {"model": getattr(config, "name", None) or registry_key, "results": results}
+    if usage is not None:
+        content["usage"] = usage
+    return JSONResponse(content=content, headers=route.headers())
