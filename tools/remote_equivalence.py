@@ -3,8 +3,9 @@
 
 Run from the locked public workspace. Credential arguments name environment
 variables; no credential, request body or vector is written to the evidence.
-The local model must expose a verified profile identity. Hybrid routing remains
-disabled while the explicit remote profile is evaluated.
+The local model must expose a verified profile identity. The record covers
+every process that reports that identity. Hybrid routing remains disabled while
+the explicit remote profile is evaluated.
 """
 
 from __future__ import annotations
@@ -256,6 +257,13 @@ def run_probe(
         or (before.get("profiles") or {}).get(profile, {}).get("remote_contract_sha256") != expected_remote
     ):
         raise ValueError("serving endpoint/model contract differs from the supplied files")
+    remote_execution = (before.get("profiles") or {}).get(profile, {}).get("remote_execution_sha256")
+    if (
+        not isinstance(remote_execution, str)
+        or len(remote_execution) != _HASH_LENGTH
+        or any(char not in "0123456789abcdef" for char in remote_execution)
+    ):
+        raise ValueError("serving remote execution cannot be identified")
     if not isinstance(identity, str) or not identity.startswith("v1:sha256:"):
         raise ValueError("local execution cannot be identified; no equivalence record can authorize it")
     if before.get("revision") != config.hf_revision or before.get("max_sequence_length") != config.max_sequence_length:
@@ -327,6 +335,7 @@ def run_probe(
         (after.get("profiles") or {}).get("default", {}).get("runtime_instance_id") != local_instance
         or (after.get("profiles") or {}).get("default", {}).get("identity") != identity
         or (after.get("profiles") or {}).get(profile, {}).get("remote_contract_sha256") != expected_remote
+        or (after.get("profiles") or {}).get(profile, {}).get("remote_execution_sha256") != remote_execution
     ):
         raise ValueError("local execution changed during the probe")
     return EquivalenceRecord(
@@ -339,10 +348,10 @@ def run_probe(
             {"cli": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(), "library": _execution_code()["sources"]}
         ),
         remote_contract_sha256=expected_remote,
+        remote_execution_sha256=remote_execution,
         local_observation_sha256=canonical_digest({"identity": identity, "revision": before.get("revision")}),
         runtime_options_sha256=canonical_digest(dict(config.resolve_profile("default").runtime)),
         output_dtype="float32",
-        local_instance_id=local_instance,
         local_identity=identity,
         model=config.sie_id,
         remote_profile=profile,

@@ -2440,6 +2440,17 @@
             ],
             "title": "Remote Contract Sha256"
           },
+          "remote_execution_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Remote Execution Sha256"
+          },
           "runtime_instance_id": {
             "anyOf": [
               {

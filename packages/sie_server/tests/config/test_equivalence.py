@@ -28,12 +28,14 @@ from sie_server.config.fleet_equivalence import (
     MAX_FLEET_BYTES,
     FleetEquivalenceRecord,
     equivalence_record_digest,
+    read_equivalence_evidence,
     read_fleet_equivalence_record,
 )
 from sie_server.config.model import ModelConfig
 from sie_server.config.upstreams import load_upstreams
 
 NOW = datetime(2026, 10, 3, tzinfo=UTC)
+OTHER_IDENTITY = "v1:sha256:" + "e" * 64
 _PROBE_PATH = Path(__file__).resolve().parents[4] / "tools" / "remote_equivalence.py"
 _PROBE_SPEC = importlib.util.spec_from_file_location("remote_equivalence_probe", _PROBE_PATH)
 assert _PROBE_SPEC is not None
@@ -84,7 +86,7 @@ def record(*, outputs: frozenset[str] = frozenset({"dense"})) -> EquivalenceReco
     return EquivalenceRecord.model_validate_json(
         json.dumps(
             {
-                "version": 2,
+                "version": 3,
                 "measured_at": NOW.isoformat(),
                 "upstream_name": "upstream",
                 "upstream_model": "vendor/model",
@@ -92,10 +94,10 @@ def record(*, outputs: frozenset[str] = frozenset({"dense"})) -> EquivalenceReco
                 "model_contract_sha256": "c" * 64,
                 "probe_sources_sha256": "d" * 64,
                 "remote_contract_sha256": "d" * 64,
+                "remote_execution_sha256": "9" * 64,
                 "local_observation_sha256": "e" * 64,
                 "runtime_options_sha256": "f" * 64,
                 "output_dtype": "float32",
-                "local_instance_id": "a" * 64,
                 "local_identity": "v1:sha256:" + "f" * 64,
                 "model": "local/model",
                 "remote_profile": "remote",
@@ -208,8 +210,15 @@ class _Tokenizer:
 
 
 @pytest.mark.parametrize(
-    ("remote_offset", "contract_mismatch", "instance_mismatch"),
-    [(0.0, False, None), (0.01, False, None), (0.0, True, None), (0.0, False, "local"), (0.0, False, "remote")],
+    ("remote_offset", "contract_mismatch", "instance_mismatch", "remote_execution"),
+    [
+        (0.0, False, None, "8" * 64),
+        (0.01, False, None, "8" * 64),
+        (0.0, True, None, "8" * 64),
+        (0.0, False, "local", "8" * 64),
+        (0.0, False, "remote", "8" * 64),
+        (0.0, False, None, None),
+    ],
 )
 def test_full_cli_runs_real_sdk_transport_and_only_writes_evidence(
     tmp_path: Path,
@@ -217,6 +226,7 @@ def test_full_cli_runs_real_sdk_transport_and_only_writes_evidence(
     remote_offset: float,
     contract_mismatch: bool,
     instance_mismatch: str | None,
+    remote_execution: str | None,
 ) -> None:
     requests: list[tuple[dict[str, Any], bool]] = []
     remote_contract: str | None = None
@@ -231,7 +241,10 @@ def test_full_cli_runs_real_sdk_transport_and_only_writes_evidence(
                         "max_sequence_length": 32,
                         "profiles": {
                             "default": {"identity": "v1:sha256:" + "f" * 64, "runtime_instance_id": "a" * 64},
-                            "remote": {"remote_contract_sha256": remote_contract},
+                            "remote": {
+                                "remote_contract_sha256": remote_contract,
+                                "remote_execution_sha256": remote_execution,
+                            },
                         },
                     }
                 ).encode(),
@@ -325,7 +338,7 @@ profiles:
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
-    if contract_mismatch:
+    if contract_mismatch or remote_execution is None:
         assert result == 2
         assert not requests
         assert not output.exists()
@@ -338,7 +351,9 @@ profiles:
     assert result == (0 if remote_offset == 0 else 1)
     evidence = EquivalenceRecord.model_validate_json(output.read_bytes())
     assert evidence.passed == (remote_offset == 0)
-    assert evidence.version == 2
+    assert evidence.version == 3
+    assert evidence.remote_execution_sha256 == remote_execution
+    assert "local_instance_id" not in evidence.model_dump()
     assert evidence.runtime_options_sha256 == canonical_digest({"normalize": True})
     assert all(body["params"]["options"]["normalize"] is True for body, _ in requests)
     assert all(body["params"]["output_dtype"] == "float32" for body, _ in requests)
@@ -433,17 +448,12 @@ def _fleet_record(**changes: Any) -> EquivalenceRecord:
     return EquivalenceRecord.model_validate_json(json.dumps(data))
 
 
-def test_fleet_inventory_requires_every_exact_process_including_replacements() -> None:
+def test_bundle_holds_one_record_per_execution_identity() -> None:
     first = _fleet_record()
-    second = _fleet_record(local_instance_id="b" * 64, local_identity="v1:sha256:" + "e" * 64)
+    second = _fleet_record(local_identity=OTHER_IDENTITY)
     fleet = FleetEquivalenceRecord(records=(first, second))
-    roster = {first.local_instance_id: first.local_identity, second.local_instance_id: second.local_identity}
-    assert fleet.matches_inventory(roster)
-    assert not fleet.matches_inventory({})
-    assert not fleet.matches_inventory({first.local_instance_id: first.local_identity})
-    assert not fleet.matches_inventory({**roster, "c" * 64: first.local_identity})
-    assert not fleet.matches_inventory({first.local_instance_id: first.local_identity, "c" * 64: second.local_identity})
-    assert not fleet.matches_inventory({**roster, second.local_instance_id: first.local_identity})
+    assert set(fleet.record_digests) == {first.local_identity, OTHER_IDENTITY}
+    assert fleet.passed
 
 
 @pytest.mark.parametrize("count", [0, 257])
@@ -452,9 +462,12 @@ def test_fleet_inventory_has_bounded_nonempty_membership(count: int) -> None:
         FleetEquivalenceRecord(records=(record(),) * count)
 
 
-def test_fleet_inventory_rejects_duplicate_processes() -> None:
-    with pytest.raises(ValidationError, match="repeat a process"):
+def test_fleet_inventory_rejects_a_repeated_execution_identity() -> None:
+    with pytest.raises(ValidationError, match="repeat an execution identity"):
         FleetEquivalenceRecord(records=(record(), record()))
+    with pytest.raises(ValidationError, match="repeat an execution identity"):
+        remeasured = _fleet_record(measured_at=(NOW + timedelta(seconds=1)).isoformat())
+        FleetEquivalenceRecord(records=(_fleet_record(), remeasured))
 
 
 @pytest.mark.parametrize(
@@ -467,6 +480,7 @@ def test_fleet_inventory_rejects_duplicate_processes() -> None:
         {"upstream_contract_sha256": "0" * 64},
         {"model_contract_sha256": "0" * 64},
         {"remote_contract_sha256": "0" * 64},
+        {"remote_execution_sha256": "0" * 64},
         {"runtime_options_sha256": "0" * 64},
         {"probe_sources_sha256": "0" * 64},
         {"context_length": 513},
@@ -481,7 +495,7 @@ def test_fleet_inventory_rejects_mixed_comparison_contracts(changes: dict[str, A
                 case["token_counts"] = [514]
         changes = {**changes, "cases": cases}
     with pytest.raises(ValidationError, match="same comparison contract"):
-        FleetEquivalenceRecord(records=(_fleet_record(), _fleet_record(local_instance_id="b" * 64, **changes)))
+        FleetEquivalenceRecord(records=(_fleet_record(), _fleet_record(local_identity=OTHER_IDENTITY, **changes)))
 
 
 def test_fleet_inventory_cannot_mix_probe_inputs_or_token_counts() -> None:
@@ -490,7 +504,7 @@ def test_fleet_inventory_cannot_mix_probe_inputs_or_token_counts() -> None:
         cases = first.model_dump(mode="json")["cases"]
         cases[0][field] = value
         with pytest.raises(ValidationError, match="same comparison contract"):
-            FleetEquivalenceRecord(records=(first, _fleet_record(local_instance_id="b" * 64, cases=cases)))
+            FleetEquivalenceRecord(records=(first, _fleet_record(local_identity=OTHER_IDENTITY, cases=cases)))
 
 
 def test_fleet_digests_bind_all_measurements_but_ignore_record_case_and_output_order() -> None:
@@ -500,7 +514,7 @@ def test_fleet_digests_bind_all_measurements_but_ignore_record_case_and_output_o
     data["cases"].reverse()
     reordered = EquivalenceRecord.model_validate_json(json.dumps(data))
     assert equivalence_record_digest(first) == equivalence_record_digest(reordered)
-    second = _fleet_record(local_instance_id="b" * 64)
+    second = _fleet_record(local_identity=OTHER_IDENTITY)
     fleet = FleetEquivalenceRecord(records=(first, second))
     assert fleet.digest == FleetEquivalenceRecord(records=(second, reordered)).digest
     data["cases"][0]["measurements"]["dense"]["remote_error"] = 0.1
@@ -515,15 +529,21 @@ def test_one_expired_or_future_process_invalidates_fleet_freshness(offset: int) 
     fleet = FleetEquivalenceRecord(
         records=(
             _fleet_record(),
-            _fleet_record(local_instance_id="b" * 64, measured_at=(NOW + timedelta(seconds=offset)).isoformat()),
+            _fleet_record(local_identity=OTHER_IDENTITY, measured_at=(NOW + timedelta(seconds=offset)).isoformat()),
         )
     )
     assert not fleet.is_fresh(max_age_s=3600, now=NOW)
 
 
-@pytest.mark.parametrize("age", [True, 0, 86401, 1.5])
+@pytest.mark.parametrize("age", [True, 0, 604801, 1.5])
 def test_fleet_age_is_strict_and_bounded(age: Any) -> None:
     assert not FleetEquivalenceRecord(records=(record(),)).is_fresh(max_age_s=age, now=NOW)
+
+
+def test_fleet_age_accepts_a_seven_day_window() -> None:
+    fleet = FleetEquivalenceRecord(records=(record(),))
+    assert fleet.is_fresh(max_age_s=604800, now=NOW + timedelta(days=7))
+    assert not fleet.is_fresh(max_age_s=604800, now=NOW + timedelta(days=7, seconds=1))
 
 
 def test_fleet_cli_preserves_failed_evidence_and_never_overwrites(tmp_path: Path) -> None:
@@ -536,7 +556,7 @@ def test_fleet_cli_preserves_failed_evidence_and_never_overwrites(tmp_path: Path
     assert fleet_probe.main(args) == 1
     inventory = read_fleet_equivalence_record(output)
     assert not inventory.passed
-    assert inventory.record_digests == {failed.local_instance_id: equivalence_record_digest(failed)}
+    assert inventory.record_digests == {failed.local_identity: equivalence_record_digest(failed)}
     original = output.read_bytes()
     assert fleet_probe.main(args) == 2
     assert output.read_bytes() == original
@@ -577,7 +597,12 @@ def test_fleet_cli_never_replaces_a_symlink(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("reader", "limit"), [(read_equivalence_record, 512 << 10), (read_fleet_equivalence_record, MAX_FLEET_BYTES)]
+    ("reader", "limit"),
+    [
+        (read_equivalence_record, 512 << 10),
+        (read_fleet_equivalence_record, MAX_FLEET_BYTES),
+        (read_equivalence_evidence, MAX_FLEET_BYTES),
+    ],
 )
 def test_evidence_readers_refuse_oversized_files_and_nonblocking_fifos(tmp_path: Path, reader: Any, limit: int) -> None:
     source = tmp_path / "evidence.json"
@@ -588,3 +613,23 @@ def test_evidence_readers_refuse_oversized_files_and_nonblocking_fifos(tmp_path:
     os.mkfifo(source)
     with pytest.raises(ValueError, match="regular file"):
         reader(source)
+
+
+def test_evidence_file_holds_one_record_or_a_bundle(tmp_path: Path) -> None:
+    single, bundle = tmp_path / "record.json", tmp_path / "bundle.json"
+    first, second = _fleet_record(), _fleet_record(local_identity=OTHER_IDENTITY)
+    single.write_text(first.model_dump_json())
+    bundle.write_text(FleetEquivalenceRecord(records=(first, second)).model_dump_json())
+    assert read_equivalence_evidence(single) == (first,)
+    assert read_equivalence_evidence(bundle) == (first, second)
+    for invalid in ({"version": 2, "records": []}, {"version": 1, "records": [first.model_dump(mode="json")]}, {}):
+        single.write_text(json.dumps(invalid))
+        with pytest.raises(ValidationError):
+            read_equivalence_evidence(single)
+
+
+def test_process_bound_records_are_refused() -> None:
+    data = record().model_dump(mode="json")
+    data.update(version=2, local_instance_id="a" * 64)
+    with pytest.raises(ValidationError):
+        EquivalenceRecord.model_validate_json(json.dumps(data))

@@ -50,7 +50,7 @@ _RUNTIME_NONCE = uuid4().hex
 
 
 def runtime_instance_id() -> str:
-    """Opaque process identity; restarts and forks require a fresh local probe."""
+    """Opaque identity of this serving process, used for probe provenance."""
     return hashlib.sha256(f"{os.getpid()}:{_RUNTIME_NONCE}".encode()).hexdigest()
 
 
@@ -217,6 +217,15 @@ def _execution_code() -> dict[str, Any]:
     }
 
 
+def serving_code_digest() -> str | None:
+    """Digest of this process's serving sources and inference libraries, or ``None``."""
+    try:
+        encoded = json.dumps(_execution_code(), sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+    except (OSError, TypeError, ValueError):
+        return None
+    return hashlib.sha256(encoded).hexdigest()
+
+
 @lru_cache(maxsize=256)
 def _adapter_source_available(adapter_path: str) -> bool:
     """Refuse custom/unidentifiable adapters without importing provider code."""
@@ -240,11 +249,30 @@ def _adapter_source_available(adapter_path: str) -> bool:
     return any(isinstance(node, ast.ClassDef) and node.name == class_name for node in tree.body)
 
 
+def _from_numpy_installation(filepath: object) -> bool:
+    if not isinstance(filepath, str) or not filepath:
+        return False
+    package = Path(np.__file__).resolve().parent
+    try:
+        library = Path(filepath).resolve()
+    except (OSError, RuntimeError):
+        return False
+    return any(library.is_relative_to(root) for root in (package, package.with_name(f"{package.name}.libs")))
+
+
 def _numerical_libraries() -> dict[str, Any]:
-    """Observe loaded BLAS kernels and threads without exporting host paths."""
+    """Observe the kernels and threads of NumPy's own BLAS without exporting host paths.
+
+    Only libraries loaded from NumPy's installation are observed. A library that
+    another package loads later must not change the identity: a process reports
+    the same identity before and after it loads a model.
+    """
     keys = ("user_api", "internal_api", "prefix", "version", "num_threads", "threading_layer", "architecture")
-    libraries = [{key: library.get(key) for key in keys} for library in threadpool_info()]
-    blas = [library for library in libraries if library["user_api"] == "blas"]
+    blas = [
+        {key: library.get(key) for key in keys}
+        for library in threadpool_info()
+        if library.get("user_api") == "blas" and _from_numpy_installation(library.get("filepath"))
+    ]
     if any(
         library["internal_api"] not in {"openblas", "blis"}
         or not library["version"]
@@ -255,7 +283,6 @@ def _numerical_libraries() -> dict[str, Any]:
         for library in blas
     ):
         raise ValueError("numerical execution libraries cannot be identified")
-    # NumPy's system BLAS remains relevant even alongside another loaded BLAS.
     build = np.show_config(mode="dicts")
     numpy_blas = build.get("Build Dependencies", {}).get("blas", {}).get("name")
     uses_accelerate = numpy_blas == "accelerate"
@@ -278,7 +305,7 @@ def _numerical_libraries() -> dict[str, Any]:
         if required_api is None or not any(library["internal_api"] == required_api for library in blas):
             raise ValueError("numerical execution libraries cannot be identified")
     return {
-        "loaded": sorted(libraries, key=lambda library: json.dumps(library, sort_keys=True)),
+        "numpy_blas": sorted(blas, key=lambda library: json.dumps(library, sort_keys=True)),
         "accelerate_os_version": accelerate,
     }
 

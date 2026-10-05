@@ -2,6 +2,8 @@
 
 import json
 import os
+import subprocess
+import sys
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -19,11 +21,13 @@ from sie_server.api.encode import router as encode_router
 from sie_server.api.routing import route_request
 from sie_server.config import hybrid_admission
 from sie_server.config.equivalence import (
+    EquivalenceRecord,
     canonical_digest,
     model_contract_digest,
     remote_profile_contract_digest,
     upstream_contract_digest,
 )
+from sie_server.config.fleet_equivalence import FleetEquivalenceRecord, equivalence_record_digest
 from sie_server.config.model import ModelConfig
 from sie_server.config.routing import validate_model_routing
 from sie_server.config.upstreams import EquivalencePolicy, Upstream, install_upstreams
@@ -34,6 +38,7 @@ from sie_server.queue_executor import QueueExecutor
 
 NOW = datetime(2026, 10, 3, tzinfo=UTC)
 IDENTITY = "v1:sha256:" + "a" * 64
+OTHER_IDENTITY = "v1:sha256:" + "e" * 64
 
 
 @pytest.fixture
@@ -75,7 +80,7 @@ def admission(
     monkeypatch.setattr(hybrid_admission, "local_profile_identity", lambda *args, **kwargs: IDENTITY)
     install_upstreams({"vendor": upstream})
     data = {
-        "version": 2,
+        "version": 3,
         "measured_at": NOW.isoformat(),
         "upstream_name": "vendor",
         "upstream_model": "vendor/model",
@@ -83,10 +88,10 @@ def admission(
         "model_contract_sha256": model_contract_digest(config),
         "probe_sources_sha256": "c" * 64,
         "remote_contract_sha256": remote_profile_contract_digest(config, "remote", {"vendor": upstream}),
+        "remote_execution_sha256": hybrid_admission.serving_code_digest(),
         "local_observation_sha256": canonical_digest({"identity": IDENTITY, "revision": config.hf_revision}),
         "runtime_options_sha256": canonical_digest(dict(config.resolve_profile("default").runtime)),
         "output_dtype": "float32",
-        "local_instance_id": hybrid_admission.runtime_instance_id(),
         "local_identity": IDENTITY,
         "model": config.sie_id,
         "remote_profile": "remote",
@@ -141,7 +146,7 @@ def test_matching_passing_evidence_is_admitted(admission: tuple) -> None:
         ("remote_contract_sha256", "f" * 64),
         ("local_observation_sha256", "f" * 64),
         ("runtime_options_sha256", "f" * 64),
-        ("local_instance_id", "f" * 64),
+        ("remote_execution_sha256", "f" * 64),
     ],
 )
 def test_evidence_cannot_authorize_a_different_contract(admission: tuple, field: str, value: Any) -> None:
@@ -200,10 +205,13 @@ def test_nonregular_record_refuses_without_waiting_for_a_writer(admission: tuple
     assert refusal(config) == "hybrid equivalence record cannot be validated"
 
 
-@pytest.mark.parametrize("max_age", [0, -1, True, 86401])
+@pytest.mark.parametrize("max_age", [0, -1, True, 604801])
 def test_age_policy_is_bounded_and_strict(tmp_path: Path, max_age: Any) -> None:
     with pytest.raises(ValidationError):
         EquivalencePolicy(max_age_s=max_age, record_files={"model": str(tmp_path / "record.json")})
+    assert (
+        EquivalencePolicy(max_age_s=604800, record_files={"model": str(tmp_path / "record.json")}).max_age_s == 604800
+    )
 
 
 def test_record_paths_are_absolute_and_bounded() -> None:
@@ -294,13 +302,12 @@ async def test_prebridge_rechecks_freshness_while_preserving_local_warmup(admiss
     registry.load_now.assert_not_awaited()
 
 
-@pytest.mark.parametrize("field", ["runtime_options_sha256", "output_dtype", "local_instance_id"])
+@pytest.mark.parametrize("field", ["runtime_options_sha256", "output_dtype", "remote_execution_sha256"])
 def test_previous_protocol_or_missing_runtime_binding_cannot_admit(admission: tuple, field: str) -> None:
     config, _, path, data = admission
-    data["version"] = 1
-    path.write_text(json.dumps(data))
-    assert refusal(config) is not None
-    data["version"] = 2
+    for version in (1, 2):
+        path.write_text(json.dumps({**data, "version": version, "local_instance_id": "a" * 64}))
+        assert refusal(config) == "hybrid equivalence record cannot be validated"
     data.pop(field)
     path.write_text(json.dumps(data))
     assert refusal(config) is not None
@@ -341,11 +348,150 @@ def test_quantized_output_does_not_inherit_float32_equivalence(admission: tuple,
     assert refusal(config) == "hybrid output dtype differs from the measured float32 contract"
 
 
-def test_worker_restart_or_replacement_requires_new_evidence(admission: tuple, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_different_execution_identity_is_not_covered(admission: tuple, monkeypatch: pytest.MonkeyPatch) -> None:
     config, _, _, _ = admission
     assert refusal(config) is None
-    monkeypatch.setattr(hybrid_admission, "runtime_instance_id", lambda: "f" * 64)
+    monkeypatch.setattr(hybrid_admission, "local_profile_identity", lambda *args, **kwargs: OTHER_IDENTITY)
+    assert refusal(config) == "hybrid equivalence record does not cover this execution identity"
+
+
+def test_a_changed_remote_execution_cannot_reuse_evidence(admission: tuple, monkeypatch: pytest.MonkeyPatch) -> None:
+    config, _, _, _ = admission
+    monkeypatch.setattr(hybrid_admission, "serving_code_digest", lambda: "f" * 64)
     assert refusal(config) == "hybrid equivalence record differs from the current serving contract"
+    monkeypatch.setattr(hybrid_admission, "serving_code_digest", lambda: None)
+    assert refusal(config) == "hybrid remote execution cannot be identified"
+
+
+def _identity_record(data: dict[str, Any], identity: str, config: ModelConfig, **changes: Any) -> dict[str, Any]:
+    local = canonical_digest({"identity": identity, "revision": config.hf_revision})
+    return {**data, "local_identity": identity, "local_observation_sha256": local, **changes}
+
+
+def _bundle(*records: dict[str, Any]) -> str:
+    parsed = tuple(EquivalenceRecord.model_validate_json(json.dumps(record)) for record in records)
+    return FleetEquivalenceRecord(records=parsed).model_dump_json()
+
+
+def test_bundle_admits_each_measured_identity_and_names_them(admission: tuple, monkeypatch: pytest.MonkeyPatch) -> None:
+    config, _, path, data = admission
+    other = _identity_record(data, OTHER_IDENTITY, config, measured_at=(NOW - timedelta(seconds=30)).isoformat())
+    path.write_text(_bundle(data, other))
+    admitted = hybrid_admission.openai_admission(config, now=NOW)
+    assert isinstance(admitted, hybrid_admission.NumericalAdmission)
+    assert admitted.local_identities == {IDENTITY, OTHER_IDENTITY}
+    assert admitted.outputs == {"dense"}
+    assert admitted.model_contract_sha256 == model_contract_digest(config)
+    assert admitted.expires_at == NOW + timedelta(seconds=30)
+    assert refusal(config) is None
+    monkeypatch.setattr(hybrid_admission, "local_profile_identity", lambda *args, **kwargs: OTHER_IDENTITY)
+    assert refusal(config) is None
+
+
+def test_admission_digest_names_exactly_the_admitted_records(admission: tuple) -> None:
+    config, _, path, data = admission
+    other = _identity_record(data, OTHER_IDENTITY, config)
+    path.write_text(_bundle(data))
+    single = hybrid_admission.openai_admission(config, now=NOW)
+    path.write_text(_bundle(data, other))
+    both = hybrid_admission.openai_admission(config, now=NOW)
+    failed_cases = json.loads(json.dumps(other["cases"]))
+    failed_cases[0]["measurements"]["dense"]["remote_error"] = 0.1
+    path.write_text(_bundle(data, {**other, "cases": failed_cases}))
+    with_failure = hybrid_admission.openai_admission(config, now=NOW)
+    assert isinstance(single, hybrid_admission.NumericalAdmission)
+    assert isinstance(both, hybrid_admission.NumericalAdmission)
+    assert isinstance(with_failure, hybrid_admission.NumericalAdmission)
+    assert single.sha256 != both.sha256
+    assert with_failure.sha256 == single.sha256
+    assert with_failure.local_identities == {IDENTITY}
+    record = EquivalenceRecord.model_validate_json(json.dumps(data))
+    assert single.sha256 == canonical_digest(
+        {
+            "version": 1,
+            "kind": "openai",
+            "model": config.sie_id,
+            "remote_profile": "remote",
+            "remote_contract_sha256": data["remote_contract_sha256"],
+            "records": [equivalence_record_digest(record)],
+        }
+    )
+
+
+def test_a_failed_measurement_for_this_identity_is_not_covered_by_another(
+    admission: tuple, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, _, path, data = admission
+    cases = json.loads(json.dumps(data["cases"]))
+    cases[0]["measurements"]["dense"]["remote_error"] = 0.1
+    path.write_text(_bundle({**data, "cases": cases}, _identity_record(data, OTHER_IDENTITY, config)))
+    assert refusal(config) == "hybrid equivalence record does not cover this execution identity"
+    monkeypatch.setattr(hybrid_admission, "local_profile_identity", lambda *args, **kwargs: OTHER_IDENTITY)
+    assert refusal(config) is None
+
+
+_RESTART_PROBE = """
+import importlib, json, sys
+from pathlib import Path
+from sie_server.config.model import ModelConfig
+from sie_server.config.routing import validate_model_routing
+from sie_server.config.upstreams import install_upstreams, load_upstreams
+from sie_server.core.profile_identity import local_profile_identity, runtime_instance_id, serving_code_digest
+config = ModelConfig.model_validate_json(Path(sys.argv[1]).read_text())
+install_upstreams(load_upstreams(sys.argv[2]))
+if sys.argv[3] == "warm":
+    importlib.import_module("transformers.models.xlm_roberta.modeling_xlm_roberta")
+try:
+    validate_model_routing(config, device="cpu")
+    admitted = True
+except ValueError:
+    admitted = False
+print(json.dumps({
+    "identity": local_profile_identity(config, "default", device="cpu"),
+    "code": serving_code_digest(),
+    "instance": runtime_instance_id(),
+    "admitted": admitted,
+}))
+"""
+
+
+def _run_server_process(config_file: Path, upstreams_file: Path, state: str) -> dict[str, Any]:
+    result = subprocess.run(  # noqa: S603 - executes the fixed local interpreter
+        [sys.executable, "-c", _RESTART_PROBE, str(config_file), str(upstreams_file), state],
+        capture_output=True,
+        check=True,
+        text=True,
+        timeout=300,
+    )
+    return json.loads(result.stdout.strip().splitlines()[-1])
+
+
+def test_evidence_measured_in_one_process_admits_a_new_process_with_the_same_identity(
+    admission: tuple, tmp_path: Path
+) -> None:
+    config, upstream, path, data = admission
+    config_file, upstreams_file = tmp_path / "model.json", tmp_path / "upstreams.yaml"
+    config_file.write_text(config.model_dump_json())
+    upstreams_file.write_text(yaml.safe_dump({"upstreams": {"vendor": upstream.model_dump(mode="json")}}))
+    path.unlink()
+    measured = _run_server_process(config_file, upstreams_file, "warm")
+    assert measured["identity"] is not None
+    assert not measured["admitted"]
+    path.write_text(
+        json.dumps(
+            _identity_record(
+                data,
+                measured["identity"],
+                config,
+                measured_at=datetime.now(UTC).isoformat(),
+                remote_execution_sha256=measured["code"],
+            )
+        )
+    )
+    restarted = _run_server_process(config_file, upstreams_file, "cold")
+    assert restarted["instance"] != measured["instance"]
+    assert restarted["identity"] == measured["identity"]
+    assert restarted["admitted"]
 
 
 @pytest.mark.parametrize("expired", [False, True])
