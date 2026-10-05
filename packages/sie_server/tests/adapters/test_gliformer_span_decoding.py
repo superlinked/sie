@@ -616,8 +616,15 @@ def test_bounded_decoding_check_rejects_a_leftover_binding(monkeypatch: pytest.M
         adapter_module._assert_bounded_decoding()
 
 
-def test_replacements_are_verified_against_the_package_at_load() -> None:
-    adapter_module._verify_bounded_decoding(None)
+@pytest.mark.parametrize("default_dtype", [torch.float32, torch.float64])
+def test_replacements_are_verified_against_the_package_at_load(default_dtype: torch.dtype) -> None:
+    previous_dtype = torch.get_default_dtype()
+    try:
+        torch.set_default_dtype(default_dtype)
+        adapter_module._verify_bounded_decoding(None)
+        assert torch.get_default_dtype() == default_dtype
+    finally:
+        torch.set_default_dtype(previous_dtype)
 
 
 @pytest.mark.parametrize("target", ["propose_spans", "pair_spans", "select_spans", "make_structuring_decode"])

@@ -386,9 +386,9 @@ def _verify_bounded_decoding(model: Any) -> None:
     # independent of the checkpoint.
     decoder = span_decoder.SpanDecoder(SimpleNamespace())
     generator = torch.Generator().manual_seed(0)
-    logits = torch.randn(2, 24, 3, 3, generator=generator) * 3
+    logits = torch.randn(2, 24, 3, 3, generator=generator, dtype=torch.float32) * 3
     logits[:, 2:6, 0, :] = 4.0  # a run of saturated, tied scores
-    logits[:, 4, 1, 2] = torch.tensor(0.3).logit()  # inside exactly at the threshold
+    logits[:, 4, 1, 2] = torch.tensor(0.3, dtype=torch.float32).logit()  # inside exactly at the threshold
     logits[1, 18:] = float("-inf")  # padding
 
     def check(name: str, original: Any, replacement: Any, same: Callable[[Any, Any], bool] = operator.eq) -> None:
@@ -433,8 +433,8 @@ def _verify_bounded_decoding(model: Any) -> None:
             lambda a, b: all(torch.equal(x, y) for x, y in zip(a, b, strict=True)),
         )
     records = SimpleNamespace(
-        structuring_logits=torch.randn(1, 4, 6, generator=generator) * 2,
-        structuring_field_logits=torch.randn(1, 6, 3, generator=generator) * 2,
+        structuring_logits=torch.randn(1, 4, 6, generator=generator, dtype=torch.float32) * 2,
+        structuring_field_logits=torch.randn(1, 6, 3, generator=generator, dtype=torch.float32) * 2,
         structuring_span_idx=torch.tensor([[[0, 1], [0, 3], [2, 2], [2, 5], [4, 4], [0, 1]]]),
         structuring_span_mask=torch.tensor([[True, True, True, True, True, False]]),
         structuring_anchor_mask=torch.tensor([[True, True, False, True]]),
@@ -449,7 +449,7 @@ def _verify_bounded_decoding(model: Any) -> None:
         span_logits=None,
         span_idx=None,
         span_mask=None,
-        joint_rel_logits=torch.randn(2, 6, 3, generator=generator) * 2,
+        joint_rel_logits=torch.randn(2, 6, 3, generator=generator, dtype=torch.float32) * 2,
         joint_rel_idx=torch.tensor([[[0, 1], [1, 0], [0, 2], [2, 1], [1, 2], [5, 0]]] * 2),
         joint_rel_mask=torch.tensor([[True, True, True, True, True, False], [True, False, True, True, True, True]]),
         joint_rel_batch_origin=torch.arange(2),
