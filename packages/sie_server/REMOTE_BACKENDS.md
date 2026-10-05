@@ -124,11 +124,11 @@ with SIEClient(base_url="http://localhost:8080") as client:
 Usage counts come from the upstream. When an upstream reports no usage, a
 native `encode`, `score` or `extract` request still succeeds, and the response
 omits `usage` instead of estimating it. This holds for both upstream kinds, on
-a single node and in a cluster. Two OpenAI-compatible routes differ:
-`/v1/rerank` refuses such a request with a `500`, and `/v1/embeddings` reports
-a character-based estimate. Malformed usage fails the request. Generation fails
-closed: a generation, chat or completion response without exact final usage is
-an error, never a success.
+a single node and in a cluster. The OpenAI-compatible `/v1/embeddings` route
+always returns a `usage` object, so it reports a character-based estimate
+instead. The gateway marks that estimate with `sie_token_source: estimate`.
+Malformed usage fails the request. Generation fails closed: a generation, chat
+or completion response without exact final usage is an error, never a success.
 
 ## OpenAI-compatible embeddings and rerank
 
