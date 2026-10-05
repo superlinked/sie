@@ -341,8 +341,9 @@ report the same immutable weights revision and non-null local execution identity
 The remote profile must name an explicit upstream profile, for example
 `upstream_model: BAAI/bge-m3:default`, so the upstream's bare-model routing policy
 cannot change where the request runs. Both deployments must use the same pinned
-BGE-M3 execution contract on the same adapter, including hardware, libraries and
-resolved profile settings. Unknown identities remain refused.
+execution contract on the same identified adapter (see
+[Local profile identity](#local-profile-identity)), including hardware, libraries
+and resolved profile settings. Unknown identities remain refused.
 
 Configuration load and each bridge compare bounded metadata obtained through
 `SIEClient` with the deployment's configured credential, TLS and proxy policy.
