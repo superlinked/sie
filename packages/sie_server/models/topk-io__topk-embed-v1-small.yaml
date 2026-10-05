@@ -39,6 +39,14 @@ profiles:
           num_simhash_projections: 6
           projection_dim: null
           final_projection_dim: 10240
+        # Sparse Multi-Vector Encoding for the smve profile: TopK's width and k
+        # (SMVE runs on the model's GPU). Pages and long documents keep their 8192
+        # largest values, which bounds their size and, on a page benchmark,
+        # surfaced more of the exact MaxSim top 10 than keeping every value.
+        smve_config:
+          width: 65536
+          k: 32
+          max_nonzeros: 8192
       runtime:
         normalize: true
         # The model computes in bf16, so float16 loses nothing and halves the
@@ -54,3 +62,13 @@ profiles:
         output_similarity:
           dense: dot
         muvera: {}
+  smve:
+    extends: default
+    adapter_options:
+      runtime:
+        normalize: true
+        output_types:
+        - sparse
+        output_similarity:
+          sparse: dot
+        smve: {}

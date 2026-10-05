@@ -2,6 +2,7 @@
 
 Postprocessors transform EncodeOutput in-place to add/convert output types:
 - MuveraPostprocessor: multivector -> dense (for ColBERT/ColPali)
+- SmvePostprocessor: multivector -> sparse (Sparse Multi-Vector Encoding)
 - Future: Int8Postprocessor, BinaryPostprocessor for quantization
 
 Design principles:
@@ -19,11 +20,15 @@ from __future__ import annotations
 import logging
 import threading
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 import numpy as np
 
+from sie_server.core.inference_output import SparseVector
+
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from sie_server.core.inference_output import EncodeOutput
 
 logger = logging.getLogger(__name__)
@@ -607,6 +612,225 @@ class MuveraPostprocessor:
             sums[mask] /= counts[mask, np.newaxis]
 
         return sums.ravel()
+
+
+# =============================================================================
+# SMVE: Sparse Multi-Vector Encoding
+# =============================================================================
+
+# Upper bound on one chunk of token projections ([tokens, width] float32) and on
+# one group's accumulators ([items, output_dim] float32, two of them for
+# documents), so long pages and large batches stay within a fixed memory budget.
+_SMVE_PROJECTION_CHUNK_BYTES = 64 * 1024 * 1024
+_SMVE_ACCUMULATOR_BYTES = 256 * 1024 * 1024
+
+
+@dataclass
+class SmveConfig:
+    """Configuration for the SMVE postprocessor.
+
+    SMVE (Sparse Multi-Vector Encoding) turns a multivector into one sparse
+    vector whose dot product with another approximates MaxSim, so a sparse
+    (inverted) index can serve as the first retrieval stage, with MaxSim over
+    the stored token vectors re-ranking the candidates:
+
+    1. Project every token onto ``width`` random unit vectors (anchors).
+    2. Keep each token's ``k`` largest projections.
+    3. Pool the tokens: a query sums them; a document averages the non-zero
+       contributions in each dimension.
+
+    ``num_repetitions`` runs the three steps with independent anchors and
+    concatenates the results. Storage and compute scale with ``k``, not with
+    ``width``: an item of ``n`` tokens has at most ``k * n * num_repetitions``
+    non-zeros. ``max_nonzeros`` optionally keeps only the largest values of
+    each item, which bounds long documents.
+
+    Queries and documents must use the same settings: the anchors come from
+    the seed, so width, seed and repetitions are part of the index.
+
+    Reference: M. Spisak and M. Galovic, "SMVE: Multi-Vector Retrieval That
+    Just Works", TopK blog, March 2026,
+    https://www.topk.io/blog/20260311-smve-multi-vector-retrieval
+
+    Attributes:
+        width: Number of anchors per repetition (dimensions per repetition).
+        k: Projections kept per token.
+        num_repetitions: Independent anchor sets, concatenated.
+        seed: Seed of the first anchor set; repetition ``r`` uses ``seed + r``.
+        max_nonzeros: If set, keep only this many largest values per item.
+    """
+
+    width: int = 65536
+    k: int = 32
+    num_repetitions: int = 1
+    seed: int = 42
+    max_nonzeros: int | None = None
+
+    def __post_init__(self) -> None:
+        """Reject settings that cannot produce a valid encoding."""
+        if self.width < 1:
+            msg = f"SMVE width must be at least 1, got {self.width}"
+            raise ValueError(msg)
+        if not 1 <= self.k <= self.width:
+            msg = f"SMVE k must be in 1..width ({self.width}), got {self.k}"
+            raise ValueError(msg)
+        if self.num_repetitions < 1:
+            msg = f"SMVE num_repetitions must be at least 1, got {self.num_repetitions}"
+            raise ValueError(msg)
+        if self.max_nonzeros is not None and self.max_nonzeros < 1:
+            msg = f"SMVE max_nonzeros must be at least 1 when set, got {self.max_nonzeros}"
+            raise ValueError(msg)
+
+    @property
+    def output_dim(self) -> int:
+        """Dimension of the sparse output: ``width * num_repetitions``."""
+        return self.width * self.num_repetitions
+
+
+class SmvePostprocessor:
+    """SMVE postprocessor: converts multivector to sparse.
+
+    The projection is one large matrix multiply (for 2,048-number tokens and a
+    65,536 width, a 1,230-token page is about 330 GFLOP), so it runs in torch on
+    ``device``, normally the model's own device, with CPU as the fallback.
+    Items of a batch are projected together, in chunks of tokens.
+
+    The anchors are drawn with numpy from the seed and normalized to unit
+    length, so every process and device builds the same ones. Projections on a
+    GPU follow its matmul precision (SIE enables TF32), so values can differ
+    from a CPU encoding in the last bits; that is far below what retrieval
+    resolves.
+    """
+
+    source_field: Literal["dense", "sparse", "multivector"] = "multivector"
+    target_field: Literal["dense", "sparse", "multivector"] = "sparse"
+
+    def __init__(self, token_dim: int, config: SmveConfig | None = None, *, device: str | None = None) -> None:
+        """Initialize the SMVE postprocessor.
+
+        Args:
+            token_dim: Dimension of the per-token embeddings.
+            config: SMVE configuration. Uses defaults if not provided.
+            device: Torch device for the projections (default ``"cpu"``).
+        """
+        if token_dim < 1:
+            msg = f"SMVE token_dim must be at least 1, got {token_dim}"
+            raise ValueError(msg)
+        self.token_dim = token_dim
+        self.config = config or SmveConfig()
+        self.target_dim = self.config.output_dim
+        self.device = device or "cpu"
+        # Built lazily on first use: a 2,048 x 65,536 anchor set is 512 MiB.
+        self._anchors: tuple[Any, ...] | None = None
+        self._anchors_lock = threading.Lock()
+
+    def _get_anchors(self) -> tuple[Any, ...]:
+        """Return the anchor matrices, building them once."""
+        anchors = self._anchors
+        if anchors is None:
+            with self._anchors_lock:
+                anchors = self._anchors
+                if anchors is None:
+                    anchors = tuple(self._build_anchors(rep) for rep in range(self.config.num_repetitions))
+                    self._anchors = anchors
+        return anchors
+
+    def _build_anchors(self, rep: int) -> Any:
+        """One repetition's anchors: ``[token_dim, width]`` unit columns on the device."""
+        import torch
+
+        rng = np.random.default_rng(self.config.seed + rep)
+        anchors = rng.standard_normal((self.token_dim, self.config.width), dtype=np.float32)
+        anchors /= np.linalg.norm(anchors, axis=0, keepdims=True)
+        return torch.from_numpy(anchors).to(self.device)
+
+    def transform(self, output: EncodeOutput, *, is_query: bool = False) -> None:
+        """Add the SMVE encoding of every item as ``output.sparse``.
+
+        Args:
+            output: EncodeOutput with the multivector field populated.
+            is_query: If True, sum the tokens. If False, average them.
+        """
+        if output.multivector is None:
+            msg = "SmvePostprocessor requires multivector field"
+            raise ValueError(msg)
+        output.sparse = self.encode(output.multivector, is_query=is_query)
+
+    def encode(self, multivectors: Sequence[np.ndarray], *, is_query: bool) -> list[SparseVector]:
+        """Encode each item's token vectors as one sparse vector.
+
+        Args:
+            multivectors: Per-item token embeddings, each ``[num_tokens, token_dim]``.
+            is_query: If True, sum the tokens. If False, average them.
+
+        Returns:
+            One sparse vector per item, indices sorted ascending.
+        """
+        for tokens in multivectors:
+            if tokens.ndim != 2 or (tokens.shape[0] and tokens.shape[1] != self.token_dim):
+                msg = f"SMVE expects [num_tokens, {self.token_dim}] token embeddings, got shape {tokens.shape}"
+                raise ValueError(msg)
+        items_per_group = max(1, _SMVE_ACCUMULATOR_BYTES // (8 * self.config.output_dim))
+        encoded: list[SparseVector] = []
+        for start in range(0, len(multivectors), items_per_group):
+            encoded.extend(self._encode_group(multivectors[start : start + items_per_group], is_query=is_query))
+        return encoded
+
+    def _encode_group(self, multivectors: Sequence[np.ndarray], *, is_query: bool) -> list[SparseVector]:
+        """Encode a group of items together: one projection per chunk of their tokens."""
+        import torch
+
+        config = self.config
+        lengths = [int(tokens.shape[0]) for tokens in multivectors]
+        nonempty = [tokens for tokens in multivectors if tokens.shape[0]]
+        if not nonempty:
+            return [_empty_sparse_vector() for _ in multivectors]
+
+        batch, output_dim, width = len(multivectors), config.output_dim, config.width
+        tokens = torch.from_numpy(np.ascontiguousarray(np.concatenate(nonempty), dtype=np.float32)).to(self.device)
+        owners = torch.repeat_interleave(torch.arange(batch), torch.tensor(lengths)).to(self.device)
+
+        # Accumulate per (item, dimension) in one flat buffer.
+        sums = torch.zeros(batch * output_dim, dtype=torch.float32, device=self.device)
+        counts = None if is_query else torch.zeros_like(sums)
+        chunk = max(1, _SMVE_PROJECTION_CHUNK_BYTES // (4 * width))
+        for rep, anchors in enumerate(self._get_anchors()):
+            for start in range(0, tokens.shape[0], chunk):
+                stop = start + chunk
+                values, indices = torch.topk(tokens[start:stop] @ anchors, config.k, dim=1)
+                flat = (owners[start:stop, None] * output_dim + rep * width + indices).reshape(-1)
+                sums.index_add_(0, flat, values.reshape(-1))
+                if counts is not None:
+                    counts.index_add_(0, flat, (values != 0).to(torch.float32).reshape(-1))
+
+        pooled = (sums if counts is None else sums / counts.clamp_min(1.0)).view(batch, output_dim)
+        owner_ids, dims = torch.nonzero(pooled, as_tuple=True)
+        values = pooled[owner_ids, dims]
+        per_item = torch.bincount(owner_ids, minlength=batch).tolist()
+        dims_np = dims.cpu().numpy().astype(np.int32)
+        values_np = values.cpu().numpy().astype(np.float32)
+
+        encoded: list[SparseVector] = []
+        offset = 0
+        for count in per_item:
+            item_dims, item_values = dims_np[offset : offset + count], values_np[offset : offset + count]
+            offset += count
+            encoded.append(self._finish(item_dims, item_values))
+        return encoded
+
+    def _finish(self, dims: np.ndarray, values: np.ndarray) -> SparseVector:
+        """Apply ``max_nonzeros`` and return the item's vector with sorted indices."""
+        limit = self.config.max_nonzeros
+        if limit is not None and dims.size > limit:
+            keep = np.argpartition(-np.abs(values), limit - 1)[:limit]
+            dims, values = dims[keep], values[keep]
+        order = np.argsort(dims, kind="stable")
+        return SparseVector(indices=dims[order], values=values[order])
+
+
+def _empty_sparse_vector() -> SparseVector:
+    """Encoding of an item with no tokens."""
+    return SparseVector(indices=np.zeros(0, dtype=np.int32), values=np.zeros(0, dtype=np.float32))
 
 
 # =============================================================================

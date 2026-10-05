@@ -642,11 +642,12 @@ class ModelLoader:
         """
         resolved = config.resolve_profile("default")
         postprocessors = adapter.get_postprocessors() or {}
-        if resolved.runtime.get("muvera") is not None and "muvera" not in postprocessors:
-            raise ValueError(
-                f"model profile {name!r} requests MUVERA but adapter "
-                f"{type(adapter).__name__!r} did not register a 'muvera' postprocessor"
-            )
+        for option_key, label in (("muvera", "MUVERA"), ("smve", "SMVE")):
+            if resolved.runtime.get(option_key) is not None and option_key not in postprocessors:
+                raise ValueError(
+                    f"model profile {name!r} requests {label} but adapter "
+                    f"{type(adapter).__name__!r} did not register a {option_key!r} postprocessor"
+                )
 
         # Get preprocessor(s) from adapter - all adapters implement get_preprocessor().
         # Most return a single preprocessor; multi-modal adapters (e.g. NemoColEmbed v1,

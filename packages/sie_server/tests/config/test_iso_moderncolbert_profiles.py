@@ -52,3 +52,15 @@ def test_candle_profile_keeps_its_own_options() -> None:
     assert "doc_prefix" not in candle.loadtime
     assert "doc_punctuation_skiplist" not in candle.loadtime
     assert candle.loadtime["max_seq_length"] == 8192
+
+
+def test_smve_profile_uses_topk_published_settings() -> None:
+    """The model card evaluates SMVE at width 65536 and k=32; the smve profile returns that encoding."""
+    config = _config()
+    smve = config.resolve_profile("smve")
+
+    assert smve.loadtime["smve_config"] == {"width": 65536, "k": 32}
+    assert smve.runtime["output_types"] == ["sparse"]
+    assert smve.runtime["output_similarity"] == {"sparse": "dot"}
+    assert smve.runtime["max_seq_length"] == 300
+    assert "smve_config" not in config.resolve_profile("candle").loadtime
