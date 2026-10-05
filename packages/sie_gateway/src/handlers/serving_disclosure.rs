@@ -143,7 +143,8 @@ const SIE_ERROR_CODES: [&str; 11] = [
 
 /// `X-SIE-Fallback-Error` for a failed remote attempt that answered with
 /// `status` and error `code`, as the single server's `_fallback_error`
-/// (`sie_server.api.routing`) derives it.
+/// (`sie_server.api.routing`) derives it. A remote route still provisioning
+/// gave no answer, which is `QUEUE_FULL`.
 fn fallback_error(status: StatusCode, code: Option<&str>) -> &'static str {
     if let Some(code) = code {
         let upper = code.to_uppercase();
@@ -151,7 +152,7 @@ fn fallback_error(status: StatusCode, code: Option<&str>) -> &'static str {
             return known;
         }
         match code {
-            "server_overloaded" => return "QUEUE_FULL",
+            "server_overloaded" | "PROVISIONING" => return "QUEUE_FULL",
             "invalid_request" => return "INVALID_INPUT",
             _ => {}
         }
@@ -1375,7 +1376,8 @@ mod tests {
             (503, Some("server_overloaded"), "QUEUE_FULL"),
             (400, Some("invalid_request"), "INVALID_INPUT"),
             (503, Some("SERVER_OVERLOADED"), "INFERENCE_ERROR"),
-            (503, Some("PROVISIONING"), "INFERENCE_ERROR"),
+            (503, Some("PROVISIONING"), "QUEUE_FULL"),
+            (503, Some("provisioning"), "INFERENCE_ERROR"),
             (504, Some("GATEWAY_TIMEOUT"), "INFERENCE_ERROR"),
             (504, Some("first_chunk_timeout"), "INFERENCE_ERROR"),
             (503, Some("transport_failure"), "INFERENCE_ERROR"),
@@ -4084,5 +4086,129 @@ mod tests {
                 RemoteRouteReason::Fallback(FallbackTrigger::ModelLoading),
             )]
         );
+    }
+
+    /// A gateway whose registry lists a local worker with both hybrid models
+    /// loaded, and a verified remote worker, while the transport reports the
+    /// local lane cold.
+    async fn transport_cold_gateway(policy: Option<Arc<dyn ModelAccessPolicy>>) -> TestGateway {
+        let mut gateway = TestGateway::new(&[
+            &fallback_config(HYBRID_EXTRACT_MODEL),
+            &fallback_config(HYBRID_GENERATE_MODEL),
+        ])
+        .await;
+        if let Some(policy) = policy {
+            gateway.install_policy(policy);
+        }
+        gateway
+            .add_verified_worker("local-1", LOCAL_LANE, &["acme/extract", "acme/chat"])
+            .await;
+        gateway
+            .add_verified_worker("remote-1", REMOTE_LANE, &[])
+            .await;
+        gateway.dispatcher.report_cold_local_lane();
+        gateway
+    }
+
+    #[tokio::test]
+    async fn a_lane_its_transport_reports_cold_is_woken_then_bridged_once() {
+        let gateway = transport_cold_gateway(None).await;
+
+        let response = extract(&gateway, extraction_request(false, json!({}))).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["x-sie-fallback-reason"], "provisioning");
+        let mut expected = vec![
+            dispatched("load", LOCAL_LANE, "acme/extract"),
+            dispatched("extract", REMOTE_LANE, "acme/extract:remote"),
+        ];
+        for surface in ["native", "chat", "completions", "responses"] {
+            let response = buffered_surface(&gateway, surface, json!({})).await;
+            assert_eq!(response.status(), StatusCode::OK, "{surface}");
+            assert_eq!(
+                response.headers()["x-sie-fallback-reason"],
+                "provisioning",
+                "{surface}"
+            );
+            expected.push(dispatched("load", LOCAL_LANE, "acme/chat"));
+            expected.push(dispatched("generate", REMOTE_LANE, "acme/chat:remote"));
+        }
+        assert_eq!(gateway.dispatcher.dispatched(), expected);
+        assert!(gateway
+            .dispatcher
+            .fallback_reasons()
+            .iter()
+            .all(|reason| *reason == Some(FallbackTrigger::Provisioning)));
+    }
+
+    #[tokio::test]
+    async fn a_cold_lane_whose_wake_is_not_accepted_keeps_the_local_provisioning_answer() {
+        let gateway = transport_cold_gateway(None).await;
+        gateway.dispatcher.refuse_model_loads();
+
+        let response = extract(&gateway, extraction_request(false, json!({}))).await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers()["retry-after"], "60");
+        assert!(!response.headers().contains_key("x-sie-fallback-reason"));
+        let response = buffered_surface(&gateway, "chat", json!({})).await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(!response.headers().contains_key("x-sie-fallback-reason"));
+        assert_eq!(
+            gateway.dispatcher.dispatched(),
+            vec![
+                dispatched("load", LOCAL_LANE, "acme/extract"),
+                dispatched("load", LOCAL_LANE, "acme/chat"),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_warm_lane_or_a_refusing_policy_keeps_the_request_local() {
+        let warm = TestGateway::new(&[&fallback_config(HYBRID_EXTRACT_MODEL)]).await;
+        warm.add_verified_worker("local-1", LOCAL_LANE, &["acme/extract"])
+            .await;
+        warm.add_verified_worker("remote-1", REMOTE_LANE, &[]).await;
+        let policy = Arc::new(RoutePolicy::default());
+        let refusing = transport_cold_gateway(Some(policy.clone())).await;
+
+        for gateway in [&warm, &refusing] {
+            let response = extract(gateway, extraction_request(false, json!({}))).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert!(!response.headers().contains_key("x-sie-fallback-reason"));
+            assert_eq!(
+                gateway.dispatcher.dispatched(),
+                vec![dispatched("extract", LOCAL_LANE, "acme/extract")]
+            );
+        }
+        let asked = policy.asked();
+        assert_eq!(
+            asked.first(),
+            Some(&(
+                "acme/extract".to_string(),
+                "acme/extract:remote".to_string(),
+                RemoteRouteReason::Fallback(FallbackTrigger::Provisioning),
+            ))
+        );
+        assert!(asked
+            .iter()
+            .all(|(model, remote, _)| model == "acme/extract" && remote == "acme/extract:remote"));
+    }
+
+    #[tokio::test]
+    async fn a_remote_lane_still_starting_restores_the_local_refusal_as_queue_full() {
+        let gateway = transport_cold_gateway(None).await;
+        gateway.dispatcher.report_remote_lane_starting();
+
+        let response = extract(&gateway, extraction_request(false, json!({}))).await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers()["retry-after"], "60");
+        assert_eq!(response.headers()["x-sie-error-code"], "PROVISIONING");
+        assert_eq!(response.headers()["x-sie-fallback-reason"], "provisioning");
+        assert_eq!(response.headers()["x-sie-fallback-error"], "QUEUE_FULL");
+        assert_eq!(stamped(&response), (Some("local"), None));
+
+        let response = buffered_surface(&gateway, "chat", json!({})).await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers()["x-sie-fallback-reason"], "provisioning");
+        assert_eq!(response.headers()["x-sie-fallback-error"], "QUEUE_FULL");
     }
 }

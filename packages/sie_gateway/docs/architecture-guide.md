@@ -1044,3 +1044,23 @@ model, so a caller who can see the remote profile can name it.
 - **Without a policy.** The gateway's own checks decide.
 - **Governed generation.** A policy that governs generation routes keeps
   generation local, because a governed route has no remote route.
+
+### Lanes a transport reports cold
+
+A dispatch transport that manages its own capacity can keep worker rows for a
+lane with no ready capacity. `WorkDispatcher::lane_provisioning` reports such a
+lane. It is `false` by default and is a non-publishing hint.
+
+- **When the gateway reads it.** After the route resolves and before any
+  dispatch.
+- **The bridge.** When the hint is `true` and a `provisioning` bridge is
+  admitted:
+  1. The gateway wakes the lane through `publish_model_load` with the lane's
+     pool target, recording pending demand as for any cold lane.
+  2. It waits up to 2 s for the transport to accept the wake.
+  3. It makes the single remote attempt with `fallback_reason: provisioning`.
+  - A wake that is not accepted leaves the caller with the local
+    `503 PROVISIONING`.
+- **No bridge.** A request that is not bridged dispatches as before.
+- **A remote attempt refused as `PROVISIONING`** received no answer. It
+  restores the local refusal with `X-SIE-Fallback-Error: QUEUE_FULL`.

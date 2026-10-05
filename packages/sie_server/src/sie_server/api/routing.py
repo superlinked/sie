@@ -42,6 +42,8 @@ _OPENAI_ERROR_CODES = {
     "server_overloaded": ErrorCode.QUEUE_FULL.value,
     "invalid_request": ErrorCode.INVALID_INPUT.value,
 }
+# A remote route whose capacity is still starting gave no answer.
+_UNANSWERED_ERROR_CODES = {"PROVISIONING": ErrorCode.QUEUE_FULL.value}
 _TRIGGER_BY_REFUSAL: dict[str, FallbackTrigger] = {
     ErrorCode.MODEL_LOADING.value: "model_loading",
     ErrorCode.MODEL_NOT_LOADED.value: "model_loading",
@@ -96,6 +98,8 @@ def _fallback_error(status_code: int, code: object) -> str:
             return code.upper()
         if code in _OPENAI_ERROR_CODES:
             return _OPENAI_ERROR_CODES[code]
+        if code in _UNANSWERED_ERROR_CODES:
+            return _UNANSWERED_ERROR_CODES[code]
     if status_code >= status.HTTP_500_INTERNAL_SERVER_ERROR:
         return ErrorCode.INFERENCE_ERROR.value
     return ErrorCode.INVALID_INPUT.value

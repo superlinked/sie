@@ -193,7 +193,9 @@ upstream kind.
 for example `RESOURCE_EXHAUSTED` from a capped or breaker-open generation
 upstream, or `QUEUE_FULL` and `MODEL_LOADING` from an encode or extraction
 upstream that cannot serve now. The OpenAI codes `server_overloaded` and
-`invalid_request` become `QUEUE_FULL` and `INVALID_INPUT`. Any other failure is
+`invalid_request` become `QUEUE_FULL` and `INVALID_INPUT`. A remote attempt
+refused with `PROVISIONING`, because the remote capacity is still starting,
+received no answer, so it is `QUEUE_FULL`. Any other failure is
 `INFERENCE_ERROR` for a server error and `INVALID_INPUT` for a client error.
 
 Each upstream has a required rate cap and a circuit breaker. The limits are
@@ -600,6 +602,13 @@ Cold capacity retains local pending demand. An available local worker whose
 model is unloaded receives load-only work, and the gateway waits for broker
 acceptance before attempting remote generation. If load acceptance fails, the
 caller receives the local loading refusal. A loaded local model serves locally.
+
+A dispatch transport that manages its own capacity can report a lane with no
+ready capacity while the registry still lists workers for it. The gateway then
+treats the lane as cold: it asks the transport to wake the lane with load-only
+work on the lane's pool and makes the single remote attempt only after the
+transport accepted the wake. Otherwise the caller receives the local
+`503 PROVISIONING`.
 
 The remote attempt pins a fresh worker with the exact current configuration
 hash and positive versioned execution capability. It cannot retry on the ordinary

@@ -157,6 +157,8 @@ impl Dispatched {
 pub(crate) struct RecordingDispatcher {
     without_execution_authority: AtomicBool,
     local_backpressure: AtomicBool,
+    local_lane_cold: AtomicBool,
+    remote_lane_starting: AtomicBool,
     load_refused: AtomicBool,
     generate_refused: AtomicBool,
     work_refused: AtomicBool,
@@ -248,6 +250,17 @@ impl RecordingDispatcher {
 
     pub(crate) fn saturate_local_queue(&self) {
         self.local_backpressure.store(true, Ordering::SeqCst);
+    }
+
+    /// Report the local lane as having no ready capacity, as a transport that
+    /// manages its own capacity does while the registry still lists workers.
+    pub(crate) fn report_cold_local_lane(&self) {
+        self.local_lane_cold.store(true, Ordering::SeqCst);
+    }
+
+    /// Refuse remote-lane work as a transport does while that lane starts.
+    pub(crate) fn report_remote_lane_starting(&self) {
+        self.remote_lane_starting.store(true, Ordering::SeqCst);
     }
 
     pub(crate) fn refuse_model_loads(&self) {
@@ -387,6 +400,11 @@ impl WorkDispatcher for RecordingDispatcher {
         !self.without_execution_authority.load(Ordering::SeqCst)
     }
 
+    fn lane_provisioning(&self, lane: &LaneKey, _model: &str) -> bool {
+        self.local_lane_cold.load(Ordering::SeqCst)
+            && lane == &LaneKey::new(LOCAL_LANE.0, LOCAL_LANE.1, LOCAL_LANE.2)
+    }
+
     fn pre_dispatch_backpressure(&self, lane: &LaneKey) -> Result<(), DispatchBackpressure> {
         if lane.bundle == LOCAL_LANE.2 && self.local_backpressure.load(Ordering::SeqCst) {
             Err("backpressure: local lane is full".into())
@@ -402,7 +420,11 @@ impl WorkDispatcher for RecordingDispatcher {
         hash: &str,
     ) -> Result<(String, DispatchDurability), DispatchError> {
         assert!(!hash.is_empty());
-        assert!(matches!(target, PublishTarget::VerifiedWorker { .. }));
+        if self.local_lane_cold.load(Ordering::SeqCst) {
+            assert!(matches!(target, PublishTarget::Pool { .. }));
+        } else {
+            assert!(matches!(target, PublishTarget::VerifiedWorker { .. }));
+        }
         self.record(Dispatched::new("load", &target));
         if self.load_refused.load(Ordering::SeqCst) {
             return Err(DispatchError::Other("load was not durably accepted".into()));
@@ -441,6 +463,11 @@ impl WorkDispatcher for RecordingDispatcher {
             .push(params.numerical_admission_sha256.clone());
         if self.work_refused.load(Ordering::SeqCst) {
             return Err(DispatchError::Other("private upstream failure".into()));
+        }
+        if self.remote_lane_starting.load(Ordering::SeqCst) && target.bundle() == REMOTE_LANE.2 {
+            return Err(DispatchError::Other(
+                "no consumers ready: the lane is starting".into(),
+            ));
         }
         let request_id = "request-1".to_string();
         let bridged_refusal = *self.bridged_refusal.lock().unwrap();
@@ -520,6 +547,9 @@ impl WorkDispatcher for RecordingDispatcher {
         if self.generate_refused.load(Ordering::SeqCst) {
             return Err("private upstream failure".into());
         }
+        if self.remote_lane_starting.load(Ordering::SeqCst) && target.bundle() == REMOTE_LANE.2 {
+            return Err("no consumers ready: the lane is starting".into());
+        }
         self.record_authority(&target, params);
         self.record(Dispatched::new("generate", &target));
         self.fallback_reasons
@@ -574,6 +604,9 @@ impl WorkDispatcher for RecordingDispatcher {
             .push(params.fallback_reason);
         if self.generate_refused.load(Ordering::SeqCst) {
             return Err("private upstream failure".into());
+        }
+        if self.remote_lane_starting.load(Ordering::SeqCst) && target.bundle() == REMOTE_LANE.2 {
+            return Err("no consumers ready: the lane is starting".into());
         }
         let error = match self.remote_answer(&target) {
             RemoteAnswer::Refused(refusal) => Some(refusal_error(refusal)),

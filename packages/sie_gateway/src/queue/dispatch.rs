@@ -188,6 +188,15 @@ pub trait WorkDispatcher: Send + Sync {
         Ok(())
     }
 
+    /// Non-publishing capacity hint: `true` when this transport observes that
+    /// the lane serving `model` has no capacity ready to accept work, although
+    /// the registry may still list workers for it. The gateway reads it only to
+    /// decide a `provisioning` bridge before dispatch, then wakes the lane
+    /// through [`Self::publish_model_load`] with the lane's pool target.
+    fn lane_provisioning(&self, _lane: &LaneKey, _model: &str) -> bool {
+        false
+    }
+
     /// Request readiness without inference. Only transports whose worker
     /// settlement supports no-result load items may implement this operation.
     #[allow(dead_code)] // Called by the subsequent cluster fallback routing delivery.

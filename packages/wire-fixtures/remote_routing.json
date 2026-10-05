@@ -60,7 +60,7 @@
     {"status": 504, "code": "first_chunk_timeout", "fallback_error": "INFERENCE_ERROR"},
     {"status": 504, "code": "overall_timeout", "fallback_error": "INFERENCE_ERROR"},
     {"status": 504, "code": "GATEWAY_TIMEOUT", "fallback_error": "INFERENCE_ERROR"},
-    {"status": 503, "code": "PROVISIONING", "fallback_error": "INFERENCE_ERROR"},
+    {"status": 503, "code": "PROVISIONING", "fallback_error": "QUEUE_FULL"},
     {"status": 503, "code": "transport_failure", "fallback_error": "INFERENCE_ERROR"},
     {"status": 413, "code": "PAYLOAD_TOO_LARGE", "fallback_error": "INVALID_INPUT"},
     {"status": 429, "code": "rate_limit_exceeded", "fallback_error": "INVALID_INPUT"},
@@ -107,7 +107,7 @@
     "remote_header": "Each entry lists the X-SIE-Remote field values of one request. Only exactly one 'forbid' is accepted.",
     "forbid": "With X-SIE-Remote: forbid. remote false: served or refused locally, never by an upstream, with no X-SIE-Fallback-* header.",
     "named_profile": "A request that names a profile is served as written: the local profile never goes remote, and the remote profile is served remotely without a fallback reason.",
-    "fallback_error": "X-SIE-Fallback-Error for a failed remote attempt that answered with status and SIE error code (null: no code). An SIE error code passes through in any letter case, server_overloaded and invalid_request (exactly) become QUEUE_FULL and INVALID_INPUT, and otherwise a status from 500 is INFERENCE_ERROR and a lower one INVALID_INPUT.",
+    "fallback_error": "X-SIE-Fallback-Error for a failed remote attempt that answered with status and SIE error code (null: no code). An SIE error code passes through in any letter case, server_overloaded and invalid_request (exactly) become QUEUE_FULL and INVALID_INPUT, PROVISIONING (exactly, a remote route whose capacity is still starting) becomes QUEUE_FULL, and otherwise a status from 500 is INFERENCE_ERROR and a lower one INVALID_INPUT.",
     "restored_refusal": "A failed remote attempt is answered with the local refusal it replaced: the same status, code and Retry-After (null: none), X-SIE-Served-By: local, no X-SIE-Upstream, and X-SIE-Fallback-Reason and X-SIE-Fallback-Error set. unanswered_before_deadline: a gateway deadline passed before the remote attempt answered anything."
   }
 }
