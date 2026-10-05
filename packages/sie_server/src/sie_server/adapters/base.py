@@ -394,11 +394,10 @@ class ModelAdapter(ABC):
         ground-truth basis the pipeline records for adapters that tokenize in
         the preprocessor (§P3.5), with no per-adapter code.
 
-        Default: ``None`` — leaving ``ItemOutcome.units`` unset so the metering
-        edge falls back to its reserve estimate rather than billing an
-        approximation. Concrete adapters with an in-process tokenizer override
-        this (see :class:`BaseAdapter`); server-backed / image adapters keep the
-        ``None`` default.
+        Default: ``None`` — leaving ``ItemOutcome.units`` unset, so the count is
+        absent rather than an approximation. Concrete adapters with an
+        in-process tokenizer override this (see :class:`BaseAdapter`);
+        server-backed / image adapters keep the ``None`` default.
         """
         _ = items
         return None
@@ -419,7 +418,7 @@ class ModelAdapter(ABC):
         that own their tokenization (flash cross-encoders) surface real counts
         without per-adapter code.
 
-        Default ``None`` (reserve fallback); overridden by :class:`BaseAdapter`.
+        Default ``None`` (no count); overridden by :class:`BaseAdapter`.
         """
         _ = (query, docs, instruction)
         return None
