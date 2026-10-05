@@ -51,9 +51,9 @@ operator-owned equivalence admission described below. SIE hybrid encode and
 score require the fresh identity admission described below. Cluster remote
 profiles use the queue. Cluster generation and extraction fallback are described
 below. Cluster saturation and unhealthy-worker spill require explicit triggers.
-Numeric fleet bridges remain separately gated. Experimental cluster threshold
-routing is opt-in as described below; single-node threshold routing remains
-refused.
+Numeric fleet bridges remain separately gated. Experimental `threshold` routing
+is cluster-only and opt-in, as described below. A single node refuses a
+`threshold` routing block at configuration load; use `fallback` there.
 
 ## Single-node embedding example
 
@@ -64,7 +64,7 @@ Start with another SIE deployment that already serves
 upstreams:
   team-sie:
     kind: sie
-    base_url: https://sie.example.internal
+    base_url: https://team-sie.example.com
     api_key_secret: TEAM_SIE_KEY
     rate_cap:
       requests_per_minute: 600
@@ -121,9 +121,14 @@ with SIEClient(base_url="http://localhost:8080") as client:
     print(result["request"].get("upstream"))   # team-sie
 ```
 
-SIE encode can succeed when upstream usage is absent. In that case the adapter
-omits `input_token_counts` instead of estimating them. Malformed usage fails
-the request. Native generation requires terminal usage for successful output.
+Usage counts come from the upstream. When an upstream reports no usage, a
+native `encode`, `score` or `extract` request still succeeds, and the response
+omits `usage` instead of estimating it. This holds for both upstream kinds, on
+a single node and in a cluster. Two OpenAI-compatible routes differ:
+`/v1/rerank` refuses such a request with a `500`, and `/v1/embeddings` reports
+a character-based estimate. Malformed usage fails the request. Generation fails
+closed: a generation, chat or completion response without exact final usage is
+an error, never a success.
 
 ## OpenAI-compatible embeddings and rerank
 
@@ -135,8 +140,9 @@ set `upstream_model` to the provider's model id.
 
 OpenAI-compatible embedding profiles support dense text only. Sparse,
 multivector, image input and extraction are rejected before dispatch. A rerank
-upstream must accept the Cohere-shaped request and report usage. SIE restores
-scores to document order rather than exposing the provider's ranked order.
+upstream must accept the Cohere-shaped request; usage follows the rule above.
+SIE restores scores to document order rather than exposing the provider's
+ranked order.
 
 The operator may add `set_params` and `strip_params` on the upstream. Reserved
 input and response-shaping fields, including `model`, cannot be overridden or
@@ -186,6 +192,12 @@ TLS is required outside loopback. URLs containing credentials, a query or a
 fragment are rejected. Redirects are refused, ambient proxy variables are
 ignored, and inbound authorization is not forwarded. An explicit `proxy_url`
 is the supported egress proxy setting.
+
+An upstream's certificate is verified against the public CA bundle that the
+server's HTTP client ships with (certifi). `SSL_CERT_FILE`, `SSL_CERT_DIR` and
+other environment settings are ignored, and no setting adds a private CA
+bundle. An upstream whose certificate is issued by a private CA is therefore
+refused; give it a certificate from a public CA.
 
 ## Cluster deployment
 
@@ -299,6 +311,14 @@ A successful observation lasts at most 30 seconds; a failed observation lasts
 refuses another bridge instead of waiting or starting a second metadata request.
 Changes to the installed upstream discard the previous observation.
 
+Because configuration load runs this comparison, a single-node server whose
+models directory holds a hybrid SIE-identity `encode` or `score` model depends
+on the upstream at startup. When the upstream cannot be reached, or reports a
+different weights revision or identity, the server refuses the model and does
+not start. A hot reload of that model is refused and logged in the same cases.
+To start while the upstream is down, remove the model's `routing` block, then
+add it back by hot reload once the upstream answers.
+
 Metadata is uncompressed and limited to 64 KiB. Its pool/socket operations share
 a 5-second deadline, including partial headers and chunk framing; OS hostname
 resolution follows the platform resolver's timeout. Synchronous primitive
@@ -337,9 +357,11 @@ come only from startup upstream configuration; model API requests cannot supply
 or install records. SIE upstreams refuse this policy and require their own
 immutable identity comparison instead.
 
-Boot with `routing: {policy: always_local}` and both profiles configured. Run the
-probe against that direct worker, writing to the declared evidence path, then
-change the model YAML to `routing: {policy: fallback, fallback_profile: remote}`.
+Boot with both profiles configured and no `routing` block, so the bare model
+name is served locally. The valid policies are `remote_only`, `fallback` and
+`threshold`; an absent block means local only. Run the probe against that
+direct worker, writing to the declared evidence path, then add
+`routing: {policy: fallback, fallback_profile: remote}` to the model YAML.
 Model-config hot reload admits the change in the same process. All profile
 settings must stay unchanged between measurement and activation. An immutable
 native BGE-M3 local profile is currently required; unidentified engines remain closed.
@@ -499,6 +521,11 @@ for bounded-label and replica semantics.
 
 
 ## Experimental cluster threshold routing
+
+Threshold routing is available only in a cluster, because the gateways count
+the demand it acts on. A single node refuses a `threshold` routing block at
+configuration load, even when `SIE_THRESHOLD_ROUTING_ENABLED` is set; use
+`fallback` on a single node.
 
 Set `gateway.thresholdRouting.enabled: true` in the `sie-cluster` chart only
 when opting into shared demand routing for generation or extraction. It is off
