@@ -30,6 +30,7 @@ from threadpoolctl import threadpool_info
 import sie_server
 from sie_server.config.engine import EngineConfig
 from sie_server.config.model import ModelConfig, ResolvedProfile, is_immutable_revision, is_remote_adapter_path
+from sie_server.core.inference import is_flash_attention_available
 
 _INFERENCE_DISTRIBUTIONS = (
     "torch",
@@ -64,6 +65,23 @@ _PINNED_PROCESS_ADAPTERS = frozenset(
     {
         "sie_server.adapters.bge_m3:BGEM3Adapter",
         "sie_server.adapters.bge_m3_flash:BGEM3FlashAdapter",
+        "sie_server.adapters.bert_flash:BertFlashAdapter",
+        "sie_server.adapters.bert_flash_cross_encoder:BertFlashCrossEncoderAdapter",
+        "sie_server.adapters.qwen2_flash_cross_encoder.adapter:Qwen2FlashCrossEncoderAdapter",
+        "sie_server.adapters.nomic_flash:NomicFlashAdapter",
+    }
+)
+
+# These adapters fall back to an adapter that has no identity when flash
+# attention is unavailable, so they are identified only where the flash path is
+# certain. The identity binds the device, its compute capability and the
+# installed flash-attn build that decide that path.
+_FLASH_ONLY_ADAPTERS = frozenset(
+    {
+        "sie_server.adapters.bert_flash:BertFlashAdapter",
+        "sie_server.adapters.bert_flash_cross_encoder:BertFlashCrossEncoderAdapter",
+        "sie_server.adapters.qwen2_flash_cross_encoder.adapter:Qwen2FlashCrossEncoderAdapter",
+        "sie_server.adapters.nomic_flash:NomicFlashAdapter",
     }
 )
 
@@ -413,6 +431,10 @@ def local_profile_identity(
             is_remote_adapter_path(profile.adapter_path)
             or profile.adapter_path not in _PINNED_PROCESS_ADAPTERS
             or not _adapter_source_available(profile.adapter_path)
+        ):
+            return None
+        if profile.adapter_path in _FLASH_ONLY_ADAPTERS and not (
+            device.startswith("cuda") and is_flash_attention_available(device)
         ):
             return None
         if _profile_uses_lora(profile) or (

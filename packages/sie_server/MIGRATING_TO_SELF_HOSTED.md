@@ -40,7 +40,8 @@ ordering. For extraction, compare schemas and extracted results. A shared
 model name or matching vector dimension alone does not prove equivalence.
 
 Single-node hybrid embedding and score routing has narrowly scoped admission:
-revision-pinned BGE-M3 profiles on the native or the flash adapter can use a
+revision-pinned profiles that have a local identity (see
+[Local profile identity](REMOTE_BACKENDS.md#local-profile-identity)) can use a
 fresh SIE identity comparison or a measured OpenAI equivalence record for their
 local execution identity.
 Follow the [admission instructions](REMOTE_BACKENDS.md#admitting-sie-identity-fallback)

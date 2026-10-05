@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import yaml
 from sie_server.config.engine import EngineConfig
 from sie_server.config.model import ModelConfig
 from sie_server.core import profile_identity
@@ -606,3 +607,74 @@ def test_attention_backend_selection_changes_identity(monkeypatch: pytest.Monkey
     enabled = profile_identity.torch.backends.cuda.flash_sdp_enabled()
     monkeypatch.setattr(profile_identity.torch.backends.cuda, "flash_sdp_enabled", lambda: not enabled)
     assert identity(config()) != first
+
+
+_CATALOG = Path(profile_identity.__file__).resolve().parents[3] / "models"
+_FLASH_ONLY_CATALOG = sorted(
+    path.name
+    for path in _CATALOG.glob("*.yaml")
+    if ((yaml.safe_load(path.read_text()).get("profiles") or {}).get("default") or {}).get("adapter_path")
+    in profile_identity._FLASH_ONLY_ADAPTERS
+)
+
+
+def flash_device(monkeypatch: pytest.MonkeyPatch, *, available: bool) -> None:
+    monkeypatch.setattr(profile_identity, "_execution_hardware", lambda device: {"cuda": {"capability": [8, 9]}})
+    monkeypatch.setattr(profile_identity, "is_flash_attention_available", lambda device: available)
+
+
+def test_flash_only_families_cover_catalog_models() -> None:
+    assert len(_FLASH_ONLY_CATALOG) >= 4
+
+
+@pytest.mark.parametrize("name", _FLASH_ONLY_CATALOG)
+def test_catalog_flash_models_are_identified_only_on_the_flash_path(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+    model = ModelConfig.model_validate(yaml.safe_load((_CATALOG / name).read_text()))
+    engine = EngineConfig()
+    flash_device(monkeypatch, available=True)
+    value = profile_identity.local_profile_identity(model, "default", device="cuda:0", engine_config=engine)
+    assert value is not None
+    assert value.startswith("v2:sha256:")
+    flash_device(monkeypatch, available=False)
+    assert profile_identity.local_profile_identity(model, "default", device="cuda:0", engine_config=engine) is None
+    assert profile_identity.local_profile_identity(model, "default", device="cpu", engine_config=engine) is None
+
+
+@pytest.mark.parametrize(
+    "adapter",
+    [
+        "sie_server.adapters.xlm_roberta_flash:XLMRobertaFlashAdapter",
+        "sie_server.adapters.modernbert_flash:ModernBERTFlashAdapter",
+        "sie_server.adapters.splade_flash.adapter:SPLADEFlashAdapter",
+        "sie_server.adapters.qwen2_flash:Qwen2FlashAdapter",
+        "sie_server.adapters.modernbert_flash_cross_encoder:ModernBertFlashCrossEncoderAdapter",
+        "sie_server.adapters.jina_flash_cross_encoder:JinaFlashCrossEncoderAdapter",
+        "sie_server.adapters.colbert_modernbert_flash.adapter:ColBERTModernBERTFlashAdapter",
+        "sie_server.adapters.colbert_rotary_flash:ColBERTRotaryFlashAdapter",
+        "sie_server.adapters.gte_sparse_flash:GTESparseFlashAdapter",
+        "sie_server.adapters.rope_flash:RoPEFlashAdapter",
+    ],
+)
+def test_flash_families_with_unbound_inputs_have_no_identity(monkeypatch: pytest.MonkeyPatch, adapter: str) -> None:
+    flash_device(monkeypatch, available=True)
+    data = config().model_dump()
+    data["profiles"]["default"]["adapter_path"] = adapter
+    assert profile_identity._adapter_source_available(adapter)
+    assert identity(ModelConfig.model_validate(data), device="cuda:0") is None
+
+
+@pytest.mark.parametrize("trust", [True, "true"])
+def test_flash_only_families_still_refuse_remote_code(monkeypatch: pytest.MonkeyPatch, trust: object) -> None:
+    flash_device(monkeypatch, available=True)
+    data = config().model_dump()
+    data["profiles"]["default"]["adapter_path"] = (
+        "sie_server.adapters.bert_flash_cross_encoder:BertFlashCrossEncoderAdapter"
+    )
+    assert identity(ModelConfig.model_validate(data), device="cuda:0") is not None
+    data["profiles"]["default"]["adapter_options"]["loadtime"]["trust_remote_code"] = trust
+    assert identity(ModelConfig.model_validate(data), device="cuda:0") is None
+
+
+def test_an_identified_fallback_needs_no_flash_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    flash_device(monkeypatch, available=False)
+    assert identity(flash_config(), device="cuda:0") is not None
