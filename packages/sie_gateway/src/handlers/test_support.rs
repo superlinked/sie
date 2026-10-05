@@ -66,6 +66,27 @@ profiles:
         upstream_model: acme/remote
 ";
 
+/// An encode model served locally, with a remote profile on `team-sie`.
+pub(crate) const HYBRID_ENCODE_MODEL: &str = "\
+sie_id: acme/hybrid-encode
+hf_id: acme/hybrid-encode
+tasks:
+  encode:
+    dense:
+      dim: 2
+profiles:
+  default:
+    adapter_path: sie_server.adapters.bert_flash:BertFlashAdapter
+    max_batch_tokens: 4096
+  remote:
+    adapter_path: sie_server.adapters.remote.sie:SieUpstreamAdapter
+    max_batch_tokens: 8192
+    adapter_options:
+      loadtime:
+        upstream: team-sie
+        upstream_model: acme/hybrid-encode
+";
+
 /// A generation model served locally, with a remote profile on `team-sie`.
 pub(crate) const HYBRID_GENERATE_MODEL: &str = "\
 sie_id: acme/chat
@@ -131,6 +152,7 @@ impl Dispatched {
 /// A dispatcher that records every publish and answers it at once.
 #[derive(Default)]
 pub(crate) struct RecordingDispatcher {
+    without_execution_authority: AtomicBool,
     local_backpressure: AtomicBool,
     load_refused: AtomicBool,
     generate_refused: AtomicBool,
@@ -150,6 +172,12 @@ impl RecordingDispatcher {
 
     pub(crate) fn execution_authority(&self) -> Vec<bool> {
         self.execution_authority.lock().unwrap().clone()
+    }
+
+    /// Behave as a transport that cannot keep the execution-authority fence.
+    pub(crate) fn withdraw_execution_authority(&self) {
+        self.without_execution_authority
+            .store(true, Ordering::SeqCst);
     }
 
     pub(crate) fn saturate_local_queue(&self) {
@@ -182,6 +210,18 @@ impl RecordingDispatcher {
 
     fn record(&self, dispatched: Dispatched) {
         self.dispatched.lock().unwrap().push(dispatched);
+    }
+
+    fn record_authority(&self, target: &PublishTarget, params: &WorkParams) {
+        assert!(
+            !params.require_execution_authority_v1
+                || matches!(target, PublishTarget::VerifiedWorker { .. }),
+            "verified execution requires a verified worker target"
+        );
+        self.execution_authority
+            .lock()
+            .unwrap()
+            .push(params.require_execution_authority_v1);
     }
 }
 
@@ -246,7 +286,7 @@ fn stream_chunk_collector(
 #[async_trait::async_trait]
 impl WorkDispatcher for RecordingDispatcher {
     fn supports_execution_authority_v1(&self) -> bool {
-        true
+        !self.without_execution_authority.load(Ordering::SeqCst)
     }
 
     fn pre_dispatch_backpressure(&self, lane: &LaneKey) -> Result<(), DispatchBackpressure> {
@@ -291,10 +331,7 @@ impl WorkDispatcher for RecordingDispatcher {
         ),
         DispatchError,
     > {
-        self.execution_authority
-            .lock()
-            .unwrap()
-            .push(params.require_execution_authority_v1);
+        self.record_authority(&target, params);
         self.record(Dispatched::new(endpoint, &target));
         if self.work_refused.load(Ordering::SeqCst) {
             return Err(DispatchError::Other("private upstream failure".into()));
@@ -352,10 +389,7 @@ impl WorkDispatcher for RecordingDispatcher {
         if self.generate_refused.load(Ordering::SeqCst) {
             return Err("private upstream failure".into());
         }
-        self.execution_authority
-            .lock()
-            .unwrap()
-            .push(params.require_execution_authority_v1);
+        self.record_authority(&target, params);
         self.record(Dispatched::new("generate", &target));
         let (rx, _tap) = terminal_chunk_collector(display_model, bundle_config_hash);
         Ok((
@@ -383,10 +417,7 @@ impl WorkDispatcher for RecordingDispatcher {
         ),
         String,
     > {
-        self.execution_authority
-            .lock()
-            .unwrap()
-            .push(params.require_execution_authority_v1);
+        self.record_authority(&target, params);
         self.record(Dispatched::new("generate", &target));
         if self.generate_refused.load(Ordering::SeqCst) {
             return Err("private upstream failure".into());
