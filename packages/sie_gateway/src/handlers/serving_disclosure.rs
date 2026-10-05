@@ -1541,10 +1541,11 @@ mod tests {
         assert_eq!(stamped(&unknown), (None, None));
     }
 
-    /// JetStream-gated: the queue carries a remote-only request to its worker,
-    /// and only that worker calls the upstream, with its own credential.
+    /// JetStream-gated: the gateway knows a remote-only model's upstream by name
+    /// only. It publishes the request without that name and opens no upstream
+    /// connection; a test consumer stands in for the remote worker.
     #[tokio::test]
-    async fn a_remote_only_request_reaches_its_upstream_only_through_the_queue_worker() {
+    async fn the_gateway_publishes_a_remote_only_request_and_never_calls_its_upstream() {
         use futures_util::StreamExt;
         use std::sync::atomic::{AtomicUsize, Ordering};
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1552,7 +1553,6 @@ mod tests {
         use crate::queue::dispatch::WorkResult;
         use crate::queue::publisher::{WorkPublisher, WorkStreamConfig};
 
-        const CREDENTIAL: &str = "sk-upstream-canary-7d41c0e2";
         let Ok(url) = std::env::var("NATS_URL") else {
             assert_ne!(
                 std::env::var("SIE_RUN_NATS_PUBLISHER_TEST").as_deref(),
@@ -1561,15 +1561,16 @@ mod tests {
             );
             return;
         };
+        let pool = format!("egress{}", uuid::Uuid::now_v7().simple());
+        let stream_name = format!("WORK_POOL_{pool}");
         let client = async_nats::connect(url)
             .await
             .expect("test NATS connection");
         let jetstream = async_nats::jetstream::new(client.clone());
-        let _ = jetstream.delete_stream("WORK_POOL_default").await;
         let stream = jetstream
             .create_stream(async_nats::jetstream::stream::Config {
-                name: "WORK_POOL_default".into(),
-                subjects: vec!["sie.work.default.*.*.*".into()],
+                name: stream_name.clone(),
+                subjects: vec![format!("sie.work.{pool}.*.*.*")],
                 retention: async_nats::jetstream::stream::RetentionPolicy::WorkQueue,
                 storage: async_nats::jetstream::stream::StorageType::Memory,
                 max_age: Duration::from_secs(300),
@@ -1581,7 +1582,7 @@ mod tests {
         stream
             .create_consumer(async_nats::jetstream::consumer::pull::Config {
                 durable_name: Some("remote-1".into()),
-                filter_subject: "sie.work.default.cpu.remote.*".into(),
+                filter_subject: format!("sie.work.{pool}.cpu.remote.*"),
                 ..Default::default()
             })
             .await
@@ -1590,19 +1591,12 @@ mod tests {
         let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let upstream_addr = upstream.local_addr().unwrap();
         let connections = Arc::new(AtomicUsize::new(0));
-        let calls = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let upstream_task = tokio::spawn({
             let connections = Arc::clone(&connections);
-            let calls = Arc::clone(&calls);
             async move {
                 while let Ok((mut socket, _)) = upstream.accept().await {
                     connections.fetch_add(1, Ordering::SeqCst);
-                    let mut request = vec![0u8; 1024];
-                    let read = socket.read(&mut request).await.unwrap_or(0);
-                    calls
-                        .lock()
-                        .unwrap()
-                        .push(String::from_utf8_lossy(&request[..read]).into_owned());
+                    let _ = socket.read(&mut [0u8; 1024]).await;
                     let _ = socket
                         .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n")
                         .await;
@@ -1610,8 +1604,15 @@ mod tests {
             }
         });
 
-        let mut gateway = TestGateway::new(&[REMOTE_ENCODE_MODEL]).await;
-        gateway.add_worker("remote-1", REMOTE_LANE, &[]).await;
+        let model = format!("{REMOTE_ENCODE_MODEL}pool: {pool}\n");
+        let mut gateway = TestGateway::with_remote_queue_pool(&[&model], &pool).await;
+        gateway
+            .add_worker(
+                "remote-1",
+                (pool.as_str(), REMOTE_LANE.1, REMOTE_LANE.2),
+                &[],
+            )
+            .await;
         let publisher = Arc::new(WorkPublisher::new(
             jetstream.clone(),
             "egress-gateway".into(),
@@ -1628,11 +1629,11 @@ mod tests {
         Arc::get_mut(&mut gateway.state).unwrap().work_publisher = Some(publisher);
 
         let mut work = client
-            .subscribe("sie.work.default.cpu.remote.>")
+            .subscribe(format!("sie.work.{pool}.cpu.remote.>"))
             .await
             .unwrap();
         client.flush().await.unwrap();
-        let worker = tokio::spawn({
+        let consumer = tokio::spawn({
             let client = client.clone();
             async move {
                 let message = work.next().await.expect("a published work item");
@@ -1647,14 +1648,9 @@ mod tests {
                         .to_string()
                 };
                 let mut call = tokio::net::TcpStream::connect(upstream_addr).await.unwrap();
-                call.write_all(
-                    format!(
-                        "POST /v1/encode/acme/remote HTTP/1.1\r\nauthorization: Bearer {CREDENTIAL}\r\n\r\n"
-                    )
-                    .as_bytes(),
-                )
-                .await
-                .unwrap();
+                call.write_all(b"POST /v1/encode/acme/remote HTTP/1.1\r\n\r\n")
+                    .await
+                    .unwrap();
                 let _ = call.read(&mut [0u8; 64]).await;
                 let mut result: WorkResult = serde_json::from_value(json!({
                     "work_item_id": field("work_item_id"),
@@ -1690,35 +1686,26 @@ mod tests {
         )
         .await;
         if response.is_err() {
-            worker.abort();
+            consumer.abort();
         }
-        let worker = worker.await;
+        let consumer = consumer.await;
         upstream_task.abort();
-        let _ = jetstream.delete_stream("WORK_POOL_default").await;
+        let _ = jetstream.delete_stream(&stream_name).await;
 
         let response = response.expect("served through the queue");
-        let (model_id, published) = worker.expect("the worker answered");
+        let (model_id, published) = consumer.expect("the test consumer answered");
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(stamped(&response), (Some("remote"), Some("team-sie")));
         assert_eq!(model_id, "acme/remote");
         assert_eq!(
             connections.load(Ordering::SeqCst),
             1,
-            "only the worker calls"
+            "the test consumer's call is the only upstream connection"
         );
-        let calls = calls.lock().unwrap();
-        assert_eq!(calls.len(), 1, "the upstream recorded no call");
         assert!(
-            calls[0].contains(CREDENTIAL),
-            "the worker's call carries its credential"
+            !String::from_utf8_lossy(&published).contains("team-sie"),
+            "the work item names the upstream"
         );
-        let published = String::from_utf8_lossy(&published);
-        for private in [CREDENTIAL, "team-sie", &upstream_addr.to_string()] {
-            assert!(
-                !published.contains(private),
-                "the work item carries {private}"
-            );
-        }
     }
 
     #[tokio::test]

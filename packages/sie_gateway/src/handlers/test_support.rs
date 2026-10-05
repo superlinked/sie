@@ -465,6 +465,16 @@ impl TestGateway {
     }
 
     pub(crate) async fn with_threshold_routing(models: &[&str], threshold: bool) -> Self {
+        Self::build(models, threshold, None).await
+    }
+
+    /// A gateway that also has the remote lane in the static queue pool
+    /// `pool`, so a test owns that pool's queue stream.
+    pub(crate) async fn with_remote_queue_pool(models: &[&str], pool: &str) -> Self {
+        Self::build(models, false, Some(pool)).await
+    }
+
+    async fn build(models: &[&str], threshold: bool, remote_pool: Option<&str>) -> Self {
         let bundles_dir = tempfile::TempDir::new().unwrap();
         let models_dir = tempfile::TempDir::new().unwrap();
         std::fs::write(bundles_dir.path().join("default.yaml"), DEFAULT_BUNDLE).unwrap();
@@ -473,13 +483,28 @@ impl TestGateway {
             std::fs::write(models_dir.path().join(format!("model-{index}.yaml")), model).unwrap();
         }
         let profiles = vec![LOCAL_LANE.1.to_string(), REMOTE_LANE.1.to_string()];
+        let mut lane_tuples: Vec<(&str, &str, &str)> = vec![LOCAL_LANE, REMOTE_LANE];
+        if let Some(pool) = remote_pool {
+            lane_tuples.push((pool, REMOTE_LANE.1, REMOTE_LANE.2));
+        }
         let lanes =
-            PhysicalLaneCatalog::try_new([LOCAL_LANE, REMOTE_LANE].into_iter().map(
-                |(pool, profile, bundle)| PhysicalLane::try_new(pool, profile, bundle).unwrap(),
-            ))
+            PhysicalLaneCatalog::try_new(lane_tuples.into_iter().map(|(pool, profile, bundle)| {
+                PhysicalLane::try_new(pool, profile, bundle).unwrap()
+            }))
             .unwrap();
         let pool_manager = Arc::new(PoolManager::new(profiles.clone()));
         pool_manager.create_default_pool().await;
+        if let Some(pool) = remote_pool {
+            let gpus = serde_json::Map::from_iter([(REMOTE_LANE.1.to_string(), json!(1))]);
+            let spec = serde_json::from_value(json!({
+                "name": pool,
+                "queue_pool": pool,
+                "bundle": REMOTE_LANE.2,
+                "gpus": gpus,
+            }))
+            .unwrap();
+            pool_manager.sync_static_pools(&[spec]).await.unwrap();
+        }
         let dispatcher = Arc::new(RecordingDispatcher::default());
         let state = AppState {
             registry: Arc::new(WorkerRegistry::new(Duration::from_secs(30), None)),
