@@ -205,6 +205,10 @@ pub struct WorkParams {
     /// gateway holds that refusal for the caller.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fallback_reason: Option<FallbackTrigger>,
+    /// The numerical admission a remote encode or score attempt runs under.
+    /// The pinned worker re-verifies it before the upstream sees the item.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub numerical_admission_sha256: Option<String>,
 }
 
 /// Discriminated input for a generate work item.
@@ -572,6 +576,10 @@ struct WorkItemRef<'a> {
     /// Older workers ignore the unknown map field.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fallback_reason: Option<FallbackTrigger>,
+    /// Present only on an admitted numerical remote attempt, which is pinned
+    /// to a worker that advertised support for re-verifying it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub numerical_admission_sha256: Option<&'a str>,
     /// Rolling-upgrade negotiation for `result_chunk_v1` specifically. Older
     /// workers ignore this unknown map field; workers must keep publishing the
     /// legacy one-shot ``WorkResult`` unless it is true. A future chunk version
@@ -1988,7 +1996,8 @@ impl PublishTarget {
 
     fn validate_execution_contract(&self, params: &WorkParams, hash: &str) -> Result<(), String> {
         let verified = matches!(self, Self::VerifiedWorker { .. });
-        if (params.require_execution_authority_v1 && !verified)
+        if ((params.require_execution_authority_v1 || params.numerical_admission_sha256.is_some())
+            && !verified)
             || (verified && (hash.is_empty() || !Self::verified_model_is_unambiguous(self.model())))
         {
             return Err(
@@ -3053,6 +3062,7 @@ impl WorkPublisher {
             timestamp,
             deadline: Some(timestamp + self.result_timeout.as_secs_f64()),
             fallback_reason: None,
+            numerical_admission_sha256: None,
             accepts_result_chunks: false,
             traceparent: None,
             tracestate: None,
@@ -3574,6 +3584,7 @@ impl WorkPublisher {
             timestamp: shared.timestamp,
             deadline: shared.deadline,
             fallback_reason: shared.params.fallback_reason,
+            numerical_admission_sha256: shared.params.numerical_admission_sha256.as_deref(),
             accepts_result_chunks: true,
             traceparent: shared.traceparent,
             tracestate: shared.tracestate,
@@ -4205,6 +4216,7 @@ impl WorkPublisher {
             timestamp: shared.timestamp,
             deadline: shared.deadline,
             fallback_reason: shared.params.fallback_reason,
+            numerical_admission_sha256: shared.params.numerical_admission_sha256.as_deref(),
             accepts_result_chunks: true,
             traceparent: shared.traceparent,
             tracestate: shared.tracestate,
@@ -4502,6 +4514,7 @@ impl WorkPublisher {
             timestamp: shared.timestamp,
             deadline: shared.deadline,
             fallback_reason: shared.params.fallback_reason,
+            numerical_admission_sha256: shared.params.numerical_admission_sha256.as_deref(),
             accepts_result_chunks: true,
             traceparent: shared.traceparent,
             tracestate: shared.tracestate,
@@ -6399,6 +6412,8 @@ mod tests {
         pub deadline: Option<f64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub fallback_reason: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub numerical_admission_sha256: Option<String>,
         #[serde(default)]
         pub accepts_result_chunks: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -7746,6 +7761,7 @@ mod tests {
             timestamp: 1700000000.0,
             deadline: None,
             fallback_reason: None,
+            numerical_admission_sha256: None,
             accepts_result_chunks: true,
             traceparent: None,
             tracestate: None,
@@ -7882,6 +7898,7 @@ mod tests {
             timestamp: 1_700_000_000.5,
             deadline: Some(1_700_000_120.5),
             fallback_reason: Some("saturated".to_string()),
+            numerical_admission_sha256: Some("a".repeat(64)),
             accepts_result_chunks: true,
             traceparent: None,
             tracestate: None,
@@ -7926,6 +7943,7 @@ mod tests {
             timestamp: owned.timestamp,
             deadline: owned.deadline,
             fallback_reason: Some(FallbackTrigger::Saturated),
+            numerical_admission_sha256: owned.numerical_admission_sha256.as_deref(),
             accepts_result_chunks: true,
             traceparent: owned.traceparent.as_deref(),
             tracestate: owned.tracestate.as_deref(),
@@ -8109,6 +8127,7 @@ mod tests {
             timestamp: 0.0,
             deadline: None,
             fallback_reason: None,
+            numerical_admission_sha256: None,
             accepts_result_chunks: true,
             traceparent: None,
             tracestate: None,
@@ -8797,6 +8816,7 @@ mod tests {
             timestamp: 1.0,
             deadline: None,
             fallback_reason: None,
+            numerical_admission_sha256: None,
             accepts_result_chunks: true,
             traceparent: None,
             tracestate: None,
@@ -8950,6 +8970,7 @@ mod tests {
             timestamp: 1.0,
             deadline: None,
             fallback_reason: None,
+            numerical_admission_sha256: None,
             accepts_result_chunks: true,
             traceparent: Some(tp.to_string()),
             tracestate: Some(ts.to_string()),
@@ -8998,6 +9019,7 @@ mod tests {
             timestamp: 1.0,
             deadline: None,
             fallback_reason: None,
+            numerical_admission_sha256: None,
             accepts_result_chunks: true,
             traceparent: None,
             tracestate: None,
@@ -9825,6 +9847,7 @@ mod tests {
             routing_key: None,
             prompt_cache_key: None,
             fallback_reason: None,
+            numerical_admission_sha256: None,
         };
         let items = vec![rmpv::Value::Map(vec![(
             rmpv::Value::String("text".into()),
@@ -10107,6 +10130,7 @@ mod tests {
             routing_key: None,
             prompt_cache_key: None,
             fallback_reason: None,
+            numerical_admission_sha256: None,
         };
         let items = vec![rmpv::Value::Map(vec![(
             rmpv::Value::String("image".into()),

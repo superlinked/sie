@@ -1816,6 +1816,45 @@
       ],
       "title": "Remote Serving Duration Since Local Success",
       "type": "timeseries"
+    },
+    {
+      "description": "Gateway decisions on bridging numerical encode and score work: admitted, or refused because no remote worker advertises a current admission, a live local worker reports no complete process inventory, or a live local process is outside the admission.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        }
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 133,
+        "w": 24,
+        "h": 8
+      },
+      "id": 121,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (model, operation, outcome, reason) (rate(sie_gateway_remote_numerical_admissions_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\"}[$__rate_interval]))",
+          "legendFormat": "{{model}} {{operation}} {{outcome}} {{reason}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Remote Numerical Admission Decisions",
+      "type": "timeseries"
     }
   ],
   "refresh": "10s",

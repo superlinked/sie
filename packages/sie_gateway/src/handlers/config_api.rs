@@ -853,6 +853,7 @@ mod tests {
     ) -> crate::types::worker::WorkerStatusMessage {
         crate::types::worker::WorkerStatusMessage {
             supports_execution_authority_v1: false,
+            supports_numerical_admission_v1: false,
             name: name.into(),
             gpu_count: 1,
             total_gpu_slots: None,

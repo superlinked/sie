@@ -173,6 +173,7 @@ pub(crate) struct RecordingDispatcher {
     dispatched: Mutex<Vec<Dispatched>>,
     execution_authority: Mutex<Vec<bool>>,
     fallback_reasons: Mutex<Vec<Option<FallbackTrigger>>>,
+    numerical_admissions: Mutex<Vec<Option<String>>>,
 }
 
 impl RecordingDispatcher {
@@ -225,10 +226,16 @@ impl RecordingDispatcher {
         self.fallback_reasons.lock().unwrap().clone()
     }
 
+    /// The numerical admission each published work request named, in order.
+    pub(crate) fn numerical_admissions(&self) -> Vec<Option<String>> {
+        self.numerical_admissions.lock().unwrap().clone()
+    }
+
     /// Answer remote-lane work the way a remote worker whose backend asks for
-    /// redelivery does: a remote attempt that carries a fallback reason gets a
-    /// retryable `code` result with the upstream's hint at once, while other
-    /// work is redelivered, so its result never arrives.
+    /// redelivery does: a remote attempt that carries a fallback reason or a
+    /// numerical admission gets a retryable `code` result with the upstream's
+    /// hint at once, while other work is redelivered, so its result never
+    /// arrives.
     pub(crate) fn answer_only_bridged_remote_work(&self, code: &'static str, retry_after_s: u32) {
         *self.bridged_refusal.lock().unwrap() = Some((code, retry_after_s));
     }
@@ -273,7 +280,7 @@ impl RecordingDispatcher {
 
     fn record_authority(&self, target: &PublishTarget, params: &WorkParams) {
         assert!(
-            !params.require_execution_authority_v1
+            !(params.require_execution_authority_v1 || params.numerical_admission_sha256.is_some())
                 || matches!(target, PublishTarget::VerifiedWorker { .. }),
             "verified execution requires a verified worker target"
         );
@@ -428,6 +435,10 @@ impl WorkDispatcher for RecordingDispatcher {
             .lock()
             .unwrap()
             .push(params.fallback_reason);
+        self.numerical_admissions
+            .lock()
+            .unwrap()
+            .push(params.numerical_admission_sha256.clone());
         if self.work_refused.load(Ordering::SeqCst) {
             return Err(DispatchError::Other("private upstream failure".into()));
         }
@@ -437,7 +448,7 @@ impl WorkDispatcher for RecordingDispatcher {
             bridged_refusal.filter(|_| target.bundle() == REMOTE_LANE.2)
         {
             let (tx, rx) = oneshot::channel();
-            if params.fallback_reason.is_some() {
+            if params.fallback_reason.is_some() || params.numerical_admission_sha256.is_some() {
                 let refused = (0..items.len().max(1) as u32)
                     .map(|index| refused_result(&request_id, index, (code, Some(retry_after_s))))
                     .collect();
@@ -764,6 +775,40 @@ impl TestGateway {
         loaded: &[&str],
     ) {
         self.add_worker_with_authority(name, lane, loaded, true, true)
+            .await;
+    }
+
+    /// Register a verified worker whose heartbeat also reports `inventory`,
+    /// with `numerical` support for re-verifying a numerical admission.
+    pub(crate) async fn add_numerical_worker(
+        &self,
+        name: &str,
+        lane: (&str, &str, &str),
+        loaded: &[&str],
+        numerical: bool,
+        inventory: serde_json::Value,
+    ) {
+        let (pool, machine_profile, bundle) = lane;
+        let status = WorkerStatusMessage {
+            supports_execution_authority_v1: true,
+            supports_numerical_admission_v1: numerical,
+            name: name.to_string(),
+            ready: true,
+            gpu_count: 1,
+            machine_profile: machine_profile.to_string(),
+            pool_name: pool.to_string(),
+            bundle: bundle.to_string(),
+            bundle_config_hash: self
+                .state
+                .model_registry
+                .compute_bundle_config_hash_for_pool(bundle, pool),
+            loaded_models: loaded.iter().map(|model| model.to_string()).collect(),
+            numerical_process_inventory: Some(serde_json::from_value(inventory).unwrap()),
+            ..Default::default()
+        };
+        self.state
+            .registry
+            .update_worker(&format!("http://{name}:8080"), status)
             .await;
     }
 

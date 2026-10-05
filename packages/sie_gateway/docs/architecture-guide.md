@@ -421,7 +421,7 @@ The `ConfigNotification` JSON payload carries the following fields, verified aga
 
 The hot path is always **msgpack** (`rmp_serde` on the gateway, `msgpack-python` / `msgpack-numpy` on workers). Specifically:
 
-- `WorkItem` (gateway → worker on JetStream): msgpack. `model_id` is the route the work runs on. When routing dispatched the request to another route of the requested model (a profile variant), `display_model` carries the model id the caller asked for, so logs and accounting downstream can report it; it is omitted otherwise. `WorkDispatcher::publish_work` takes the same `display_model`. A remote attempt that stands in for a local refusal the gateway holds carries `fallback_reason`, the trigger of that refusal (`provisioning`, `model_loading`, `saturated` or `unhealthy`), on every fallback bridge and on a threshold bridge while local capacity wakes. The remote worker answers such an item it cannot serve now with a retryable error instead of redelivering it, so the gateway restores the local refusal at once. Other work, including a low-demand threshold route, omits the field.
+- `WorkItem` (gateway → worker on JetStream): msgpack. `model_id` is the route the work runs on. When routing dispatched the request to another route of the requested model (a profile variant), `display_model` carries the model id the caller asked for, so logs and accounting downstream can report it; it is omitted otherwise. `WorkDispatcher::publish_work` takes the same `display_model`. A remote attempt that stands in for a local refusal the gateway holds carries `fallback_reason`, the trigger of that refusal (`provisioning`, `model_loading`, `saturated` or `unhealthy`), on every fallback bridge and on a threshold bridge while local capacity wakes. The remote worker answers such an item it cannot serve now with a retryable error instead of redelivering it, so the gateway restores the local refusal at once. Other work, including a low-demand threshold route, omits the field. An admitted numerical remote attempt also carries `numerical_admission_sha256` (see [Numerical bridges](#numerical-bridges)), and the remote worker answers it at once in the same way, even on a threshold route.
 - `WorkResult` (worker → gateway on the inbox subject): msgpack. Numpy arrays use `msgpack-numpy`'s extension-free encoding (maps with a `nd: true` sentinel + `type`, `shape`, `data`). When the gateway advertises `WorkItem.accepts_result_chunks: true`, a result that does not fit one NATS message may instead arrive as named-msgpack `result_chunk_v1` envelopes. This boolean negotiates v1 only; a future envelope version requires a new capability rather than reinterpreting the existing field. The gateway reassembles v1 transfers within the pending request lifetime, with a SHA-256 digest and fixed item/chunk/request/process memory limits, then decodes the reconstructed bytes as the same `WorkResult`. The gateway transcodes to native JSON arrays only when the client's `Accept` header asks for JSON.
 
 JSON (`serde_json`) is used where payloads are low-frequency or human-oriented:
@@ -953,8 +953,44 @@ Sidecars probe on dedicated IPC connections independently of readiness pings
 and health publication, with a
 five-second timeout and a ten-second observation lifetime. Shutdown tombstones
 omit diagnostics. A snapshot describes the process and model configuration at
-its observation time; it is not an atomic fleet proof and does not grant routing
-or execution authority. Numerical fallback requires operator-owned numerical
-evidence as a separate prerequisite. Consumers must also verify freshness,
-membership, local identity, request contract and evidence at execution before
-enabling numerical fallback.
+its observation time; it is not an atomic fleet proof, and on its own it grants
+no routing or execution authority.
+
+### Numerical bridges
+
+A bare `encode` or `score` request for a local model with numerical outputs
+(`dense`, `sparse`, `multivector` or `score`) bridges to the model's remote
+profile only under a numerical admission. This covers fallback bridges, the
+threshold route and `/v1/embeddings`, which wraps `encode`. Generation and
+extraction surfaces never bridge such a model. For these models alone, the
+gateway reads the request body before routing, so it can refuse a body-level
+`options.profile` selector and replay the body remotely. The bridge decision
+is made when the gateway is about to commit to the remote attempt:
+
+- An eligible remote worker is fresh and eligible for dispatch, reports
+  `supports_execution_authority_v1` and `supports_numerical_admission_v1`, has
+  the remote profile's exact configuration hash, bundle and pool, and has a
+  unique worker name. Every child in its inventory must report the same
+  admission for the bare model, expiring at least five seconds after the
+  decision.
+- Every live local process must be covered. That means each child of every
+  worker with a fresh heartbeat on the model's local bundles and pool, starting
+  and degraded workers included, unless the worker lists the model as
+  unsupported. Each such child must report an identity the admission lists and
+  the admission's model contract. A worker without a complete inventory, or a
+  child without an identity or without the model, closes the bridge. With no
+  live local worker the remote admission decides.
+- The bridge pins one remote worker that both conditions admit, through
+  execution-authority-v1 dispatch, and its work items carry the admission digest
+  that worker advertised as `numerical_admission_sha256`. The remote process
+  derives its admission again before calling the upstream, and the sidecar
+  answers a refused admitted item at once. A bridged caller then receives its
+  local refusal with `X-SIE-Fallback-Error`.
+
+Anything else keeps the request on its local route. A numerical plan that was
+not admitted cannot select a worker, and a numerical bridge whose pinned worker
+has no admitted digest is refused before publication. Each decision is counted
+on `sie.gateway.remote.numerical_admissions` with `admitted` or one of the
+refusal reasons `no_admission`, `local_unobserved` and `uncovered_identity`.
+Configuration load no longer refuses `threshold` routing for numerical models;
+the admission gates each request instead.

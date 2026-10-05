@@ -173,6 +173,7 @@ pub async fn build_sse_response(params: SseParams<'_>) -> Response {
             &bundle,
             &bundle_config_hash,
             &admission_pool,
+            None,
         )
         .await
         {

@@ -34,6 +34,8 @@ pub struct WorkerState {
     pub bundle_config_hash: String,
     /// Positive support for the versioned queue and backend execution fence.
     pub supports_execution_authority_v1: bool,
+    /// Every backend child re-verifies a numerical admission before execution.
+    pub supports_numerical_admission_v1: bool,
     /// Diagnostic observations only; never sufficient for numerical admission.
     pub numerical_process_inventory: Option<Arc<NumericalProcessInventory>>,
     pub models: Vec<String>,
@@ -219,6 +221,8 @@ pub struct WorkerStatusMessage {
     pub bundle_config_hash: String,
     #[serde(default)]
     pub supports_execution_authority_v1: bool,
+    #[serde(default)]
+    pub supports_numerical_admission_v1: bool,
     #[serde(default)]
     pub loaded_models: Vec<String>,
     #[serde(default)]
@@ -751,6 +755,7 @@ mod tests {
             bundle: "default".into(),
             bundle_config_hash: String::new(),
             supports_execution_authority_v1: false,
+            supports_numerical_admission_v1: false,
             numerical_process_inventory: None,
             models: vec![],
             queue_depth: 0,

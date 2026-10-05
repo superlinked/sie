@@ -730,6 +730,16 @@ series. Disabled telemetry constructs no point attributes. The collector
 preserves only the declared attributes, exports through the existing OTLP and
 Prometheus paths, and the queue-routing dashboard displays both instruments.
 
+`sie.gateway.remote.numerical_admissions` counts each decision on a numerical
+`encode` or `score` bridge or threshold route, made when the gateway is about
+to commit to the remote attempt. Its labels are operation, canonical catalog
+model, `admitted` or `refused`, and the reason: `none`, `no_admission` (no
+eligible remote worker advertises a current admission), `local_unobserved` (a
+live local worker reports no complete process inventory) or
+`uncovered_identity` (a live local process reports an identity or model
+contract outside the admission). It keeps its own 256-model bound with the same
+`other` overflow, and the queue-routing dashboard displays it.
+
 `SIERemoteFallbackPersistent` requires recent committed activity from the same
 producer instance and collector generation before comparing its duration with
 `alertRules.remoteFallbackPersistenceSeconds` (600 by default, integer 1–86400).

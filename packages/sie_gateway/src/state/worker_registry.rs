@@ -9,10 +9,87 @@ use tokio::sync::RwLock;
 use crate::routing::hrw::{RingEntry, RingSnapshot};
 use crate::state::pool_manager::normalize_pool_name;
 use crate::types::model::FallbackTrigger;
-use crate::types::worker::MAX_UNSUPPORTED_MODELS;
+use crate::types::worker::{
+    NumericalAdmissionObservation, NumericalSnapshotStatus, MAX_UNSUPPORTED_MODELS,
+};
 use crate::types::{
     ClusterStatus, ModelInfo, WorkerHealth, WorkerInfo, WorkerState, WorkerStatusMessage,
 };
+
+/// An admission must outlive this margin when a bridge relies on it, so the
+/// remote process does not refuse the item for expiry while it is in flight.
+pub(crate) const NUMERICAL_ADMISSION_EXPIRY_MARGIN_MS: u64 = 5_000;
+
+/// The two sides of a numerical bridge for one model.
+pub(crate) struct NumericalLanes<'a> {
+    /// The bare model, as worker inventories name it.
+    pub model: &'a str,
+    pub local_bundles: &'a [String],
+    pub local_pool: &'a str,
+    /// The remote profile's routable id and its exact lane contract.
+    pub remote_model: &'a str,
+    pub remote_bundle: &'a str,
+    pub remote_pool: &'a str,
+    pub remote_hash: &'a str,
+}
+
+/// Why a numerical bridge stays closed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NumericalRefusal {
+    /// No eligible remote worker advertises a current admission.
+    NoAdmission,
+    /// A live local worker has no complete process inventory.
+    LocalUnobserved,
+    /// A live local process reports an identity or model contract the
+    /// admission does not cover.
+    UncoveredIdentity,
+}
+
+impl NumericalRefusal {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::NoAdmission => "no_admission",
+            Self::LocalUnobserved => "local_unobserved",
+            Self::UncoveredIdentity => "uncovered_identity",
+        }
+    }
+}
+
+/// Admitted remote worker names, each with the admission digest it advertises.
+pub(crate) type AdmittedWorkers = HashMap<String, String>;
+
+/// The admission every observed child of a remote worker reports for `model`,
+/// with the earliest expiry, when it outlives the margin.
+fn remote_admission<'a>(
+    worker: &'a WorkerState,
+    model: &str,
+    now_unix_ms: u64,
+) -> Option<&'a NumericalAdmissionObservation> {
+    let inventory = worker.numerical_process_inventory.as_deref()?;
+    let mut agreed: Option<&NumericalAdmissionObservation> = None;
+    let mut expires_at_unix_ms = u64::MAX;
+    for child in &inventory.children {
+        if child.status != NumericalSnapshotStatus::Observed {
+            return None;
+        }
+        let admission = child
+            .snapshot
+            .as_ref()?
+            .profiles
+            .iter()
+            .find(|profile| profile.model_id == model)?
+            .admission
+            .as_ref()?;
+        if agreed.is_some_and(|agreed| agreed.sha256 != admission.sha256) {
+            return None;
+        }
+        agreed = Some(admission);
+        expires_at_unix_ms = expires_at_unix_ms.min(admission.expires_at_unix_ms);
+    }
+    agreed.filter(|_| {
+        expires_at_unix_ms >= now_unix_ms.saturating_add(NUMERICAL_ADMISSION_EXPIRY_MARGIN_MS)
+    })
+}
 
 /// Rate-limit gate for the duplicate-worker-name warning, in whole
 /// seconds since process start. `ring_snapshot_for` runs on the
@@ -96,12 +173,16 @@ struct RegistrySnapshot {
     all_healthy: Vec<WorkerState>,
     /// Healthy workers indexed by lowercase bundle name.
     by_bundle: HashMap<String, Vec<WorkerState>>,
+    /// Every registered worker, whatever its health. Numerical admission must
+    /// see starting and degraded workers that may serve a model next.
+    all: Vec<WorkerState>,
 }
 
 impl RegistrySnapshot {
     fn build(workers: &HashMap<String, WorkerState>) -> Self {
         let mut all_healthy = Vec::new();
         let mut by_bundle: HashMap<String, Vec<WorkerState>> = HashMap::new();
+        let all = workers.values().cloned().collect();
 
         for w in workers.values() {
             if !w.healthy() {
@@ -117,6 +198,7 @@ impl RegistrySnapshot {
         Self {
             all_healthy,
             by_bundle,
+            all,
         }
     }
 }
@@ -208,6 +290,7 @@ impl WorkerRegistry {
                     bundle: "default".to_string(),
                     bundle_config_hash: String::new(),
                     supports_execution_authority_v1: false,
+                    supports_numerical_admission_v1: false,
                     numerical_process_inventory: None,
                     models: Vec::new(),
                     queue_depth: 0,
@@ -239,6 +322,8 @@ impl WorkerRegistry {
             };
             w.bundle_config_hash = msg.bundle_config_hash.clone();
             w.supports_execution_authority_v1 = msg.supports_execution_authority_v1;
+            w.supports_numerical_admission_v1 =
+                msg.supports_execution_authority_v1 && msg.supports_numerical_admission_v1;
             // Replace on every heartbeat: legacy or invalid observations clear
             // the previous process inventory rather than retaining stale IDs.
             w.numerical_process_inventory = msg
@@ -902,6 +987,102 @@ impl WorkerRegistry {
         crate::routing::pick_worker(&ring, &key).map(str::to_owned)
     }
 
+    /// Remote workers that may run a numerical bridge for `lanes.model`.
+    ///
+    /// A remote worker qualifies when it is fresh, eligible, positively
+    /// supports execution authority and numerical admission, carries the
+    /// exact remote hash, and every one of its children reports the same
+    /// current admission. Its admission must then cover every live local
+    /// process that could serve the model: each child of each fresh worker on
+    /// the model's local lanes, starting workers included, must report an
+    /// admitted identity and the admission's model contract. With no live
+    /// local worker the remote admission decides alone.
+    pub(crate) fn numerical_admission(
+        &self,
+        lanes: &NumericalLanes<'_>,
+        now_unix_ms: u64,
+    ) -> Result<AdmittedWorkers, NumericalRefusal> {
+        let snap = self.snapshot.load();
+        let mut name_counts = HashMap::<&str, usize>::with_capacity(snap.all.len());
+        for worker in &snap.all {
+            *name_counts.entry(worker.name.as_str()).or_default() += 1;
+        }
+        let remote: Vec<(&WorkerState, &NumericalAdmissionObservation)> = snap
+            .all
+            .iter()
+            .filter(|w| {
+                w.eligible_for_dispatch()
+                    && w.supports_execution_authority_v1
+                    && w.supports_numerical_admission_v1
+                    && w.last_heartbeat.elapsed() <= self.heartbeat_timeout
+                    && !lanes.remote_hash.is_empty()
+                    && w.bundle_config_hash == lanes.remote_hash
+                    && w.bundle.eq_ignore_ascii_case(lanes.remote_bundle)
+                    && w.pool_name.eq_ignore_ascii_case(lanes.remote_pool)
+                    && w.supports_model(lanes.remote_model)
+                    && !w.name.is_empty()
+                    && w.name
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+                    && name_counts.get(w.name.as_str()) == Some(&1)
+            })
+            .filter_map(|w| Some((w, remote_admission(w, lanes.model, now_unix_ms)?)))
+            .collect();
+        if remote.is_empty() {
+            return Err(NumericalRefusal::NoAdmission);
+        }
+        let mut local = Vec::new();
+        for worker in snap.all.iter().filter(|w| {
+            w.last_heartbeat.elapsed() <= self.heartbeat_timeout
+                && lanes
+                    .local_bundles
+                    .iter()
+                    .any(|bundle| w.bundle.eq_ignore_ascii_case(bundle))
+                && w.pool_name.eq_ignore_ascii_case(lanes.local_pool)
+                && w.supports_model(lanes.model)
+        }) {
+            let Some(inventory) = worker.numerical_process_inventory.as_deref() else {
+                return Err(NumericalRefusal::LocalUnobserved);
+            };
+            for child in &inventory.children {
+                let Some(snapshot) = child
+                    .snapshot
+                    .as_ref()
+                    .filter(|_| child.status == NumericalSnapshotStatus::Observed)
+                else {
+                    return Err(NumericalRefusal::LocalUnobserved);
+                };
+                let profile = snapshot
+                    .profiles
+                    .iter()
+                    .find(|profile| profile.model_id == lanes.model);
+                local.push((
+                    profile.and_then(|profile| profile.local_identity.as_deref()),
+                    profile.and_then(|profile| profile.model_contract_sha256.as_deref()),
+                ));
+            }
+        }
+        let admitted: AdmittedWorkers = remote
+            .into_iter()
+            .filter(|(_, admission)| {
+                local.iter().all(|(identity, contract)| {
+                    identity.is_some_and(|identity| {
+                        admission
+                            .local_identities
+                            .iter()
+                            .any(|admitted| admitted == identity)
+                    }) && *contract == Some(admission.model_contract_sha256.as_str())
+                })
+            })
+            .map(|(worker, admission)| (worker.name.clone(), admission.sha256.clone()))
+            .collect();
+        if admitted.is_empty() {
+            Err(NumericalRefusal::UncoveredIdentity)
+        } else {
+            Ok(admitted)
+        }
+    }
+
     pub async fn get_models(&self) -> HashMap<String, Vec<String>> {
         let snap = self.snapshot.load();
         let mut models: HashMap<String, Vec<String>> = HashMap::new();
@@ -1056,6 +1237,7 @@ mod tests {
     fn make_msg(ready: bool) -> WorkerStatusMessage {
         WorkerStatusMessage {
             supports_execution_authority_v1: false,
+            supports_numerical_admission_v1: false,
             name: "worker-1".into(),
             ready,
             gpu_count: 1,
@@ -1145,6 +1327,308 @@ mod tests {
         let status = reg.get_cluster_status().await;
         assert!(status.workers[0].healthy);
         assert!(status.workers[0].numerical_process_inventory.is_none());
+    }
+
+    const MODEL: &str = "acme/hybrid";
+    const COVERED: &str =
+        "v2:sha256:1111111111111111111111111111111111111111111111111111111111111111";
+    const OTHER: &str =
+        "v2:sha256:2222222222222222222222222222222222222222222222222222222222222222";
+    const CONTRACT: &str = "3333333333333333333333333333333333333333333333333333333333333333";
+    const NOW_MS: u64 = 1_800_000_000_000;
+
+    fn admission(sha256: char, expires_at_unix_ms: u64) -> serde_json::Value {
+        serde_json::json!({
+            "sha256": sha256.to_string().repeat(64),
+            "kind": "openai",
+            "local_identities": [COVERED],
+            "model_contract_sha256": CONTRACT,
+            "outputs": ["dense"],
+            "expires_at_unix_ms": expires_at_unix_ms,
+        })
+    }
+
+    fn child(index: usize, seed: usize, profile: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "child_index": index,
+            "status": "observed",
+            "snapshot": {
+                "runtime_instance_id": format!("{:064x}", seed * 16 + index + 1),
+                "complete": true,
+                "profiles": [profile],
+            },
+        })
+    }
+
+    fn local_profile(identity: Option<&str>, contract: &str) -> serde_json::Value {
+        serde_json::json!({"model_id": MODEL, "model_contract_sha256": contract, "local_identity": identity})
+    }
+
+    fn remote_profile(admission: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "model_id": MODEL,
+            "model_contract_sha256": CONTRACT,
+            "local_identity": null,
+            "admission": admission,
+        })
+    }
+
+    fn numerical_worker(
+        name: &str,
+        bundle: &str,
+        children: Vec<serde_json::Value>,
+    ) -> WorkerStatusMessage {
+        let mut message = make_msg(true);
+        message.name = name.into();
+        message.bundle = bundle.into();
+        message.pool_name = "default".into();
+        message.bundle_config_hash = format!("{bundle}-hash");
+        message.supports_execution_authority_v1 = true;
+        message.supports_numerical_admission_v1 = true;
+        message.numerical_process_inventory = serde_json::from_value(serde_json::json!({
+            "observed_at_unix_ms": 1,
+            "children": children,
+        }))
+        .unwrap();
+        message
+    }
+
+    fn remote_worker(
+        name: &str,
+        seed: usize,
+        admissions: &[serde_json::Value],
+    ) -> WorkerStatusMessage {
+        numerical_worker(
+            name,
+            "remote",
+            admissions
+                .iter()
+                .enumerate()
+                .map(|(index, admission)| child(index, seed, remote_profile(admission.clone())))
+                .collect(),
+        )
+    }
+
+    fn local_worker(
+        name: &str,
+        seed: usize,
+        profiles: &[serde_json::Value],
+    ) -> WorkerStatusMessage {
+        numerical_worker(
+            name,
+            "default",
+            profiles
+                .iter()
+                .enumerate()
+                .map(|(index, profile)| child(index, seed, profile.clone()))
+                .collect(),
+        )
+    }
+
+    fn numerical_decision(reg: &WorkerRegistry) -> Result<AdmittedWorkers, NumericalRefusal> {
+        let local_bundles = ["default".to_string()];
+        reg.numerical_admission(
+            &NumericalLanes {
+                model: MODEL,
+                local_bundles: &local_bundles,
+                local_pool: "default",
+                remote_model: "acme/hybrid:remote",
+                remote_bundle: "remote",
+                remote_pool: "default",
+                remote_hash: "remote-hash",
+            },
+            NOW_MS,
+        )
+    }
+
+    #[tokio::test]
+    async fn numerical_admission_needs_a_current_admission_that_covers_every_live_local_process() {
+        let current = admission('a', NOW_MS + 60_000);
+        let reg = registry();
+        reg.update_worker(
+            "http://r1",
+            remote_worker("remote-1", 1, &[current.clone(), current.clone()]),
+        )
+        .await;
+        assert_eq!(
+            numerical_decision(&reg).unwrap(),
+            HashMap::from([("remote-1".to_string(), "a".repeat(64))]),
+            "with no live local process the remote admission decides"
+        );
+        let covered = local_profile(Some(COVERED), CONTRACT);
+        reg.update_worker(
+            "http://l1",
+            local_worker("local-1", 2, &[covered.clone(), covered.clone()]),
+        )
+        .await;
+        assert!(numerical_decision(&reg).is_ok());
+
+        let cases: [(&str, Option<WorkerStatusMessage>, NumericalRefusal); 5] = [
+            (
+                "uncovered identity",
+                Some(local_worker(
+                    "local-1",
+                    2,
+                    &[covered.clone(), local_profile(Some(OTHER), CONTRACT)],
+                )),
+                NumericalRefusal::UncoveredIdentity,
+            ),
+            (
+                "other model contract",
+                Some(local_worker(
+                    "local-1",
+                    2,
+                    &[local_profile(Some(COVERED), &"4".repeat(64))],
+                )),
+                NumericalRefusal::UncoveredIdentity,
+            ),
+            (
+                "no identity",
+                Some(local_worker("local-1", 2, &[local_profile(None, CONTRACT)])),
+                NumericalRefusal::UncoveredIdentity,
+            ),
+            (
+                "model missing from the process",
+                Some(local_worker(
+                    "local-1",
+                    2,
+                    &[
+                        serde_json::json!({"model_id": "acme/other", "model_contract_sha256": CONTRACT, "local_identity": COVERED}),
+                    ],
+                )),
+                NumericalRefusal::UncoveredIdentity,
+            ),
+            ("no inventory", None, NumericalRefusal::LocalUnobserved),
+        ];
+        for (case, message, refusal) in cases {
+            let message = message.unwrap_or_else(|| {
+                let mut legacy = local_worker("local-1", 2, std::slice::from_ref(&covered));
+                legacy.numerical_process_inventory = None;
+                legacy
+            });
+            reg.update_worker("http://l1", message).await;
+            assert_eq!(numerical_decision(&reg), Err(refusal), "{case}");
+        }
+
+        let mut incomplete = local_worker("local-1", 2, std::slice::from_ref(&covered));
+        let child = &mut incomplete
+            .numerical_process_inventory
+            .as_mut()
+            .unwrap()
+            .children[0];
+        child.status = NumericalSnapshotStatus::Incomplete;
+        child.snapshot.as_mut().unwrap().complete = false;
+        reg.update_worker("http://l1", incomplete).await;
+        assert_eq!(
+            numerical_decision(&reg),
+            Err(NumericalRefusal::LocalUnobserved)
+        );
+        reg.update_worker("http://l1", local_worker("local-1", 2, &[covered]))
+            .await;
+        assert!(numerical_decision(&reg).is_ok());
+    }
+
+    #[tokio::test]
+    async fn numerical_admission_counts_starting_workers_but_not_other_lanes_or_stale_ones() {
+        let reg = registry();
+        reg.update_worker(
+            "http://r1",
+            remote_worker("remote-1", 1, &[admission('a', NOW_MS + 60_000)]),
+        )
+        .await;
+        let uncovered = local_profile(Some(OTHER), CONTRACT);
+        let mut starting = local_worker("local-1", 2, std::slice::from_ref(&uncovered));
+        starting.ready = false;
+        reg.update_worker("http://l1", starting).await;
+        assert_eq!(
+            numerical_decision(&reg),
+            Err(NumericalRefusal::UncoveredIdentity)
+        );
+
+        let mut elsewhere = local_worker("local-1", 2, std::slice::from_ref(&uncovered));
+        elsewhere.pool_name = "other-pool".into();
+        reg.update_worker("http://l1", elsewhere).await;
+        assert!(numerical_decision(&reg).is_ok());
+
+        reg.update_worker("http://l1", local_worker("local-1", 2, &[uncovered]))
+            .await;
+        assert_eq!(
+            numerical_decision(&reg),
+            Err(NumericalRefusal::UncoveredIdentity)
+        );
+        {
+            let mut workers = reg.workers.write().await;
+            workers.get_mut("http://l1").unwrap().last_heartbeat =
+                Instant::now() - Duration::from_secs(60);
+            reg.rebuild_snapshot(&workers);
+        }
+        assert!(numerical_decision(&reg).is_ok());
+    }
+
+    #[tokio::test]
+    async fn numerical_admission_needs_a_capable_current_and_unanimous_remote_worker() {
+        let current = admission('a', NOW_MS + 60_000);
+        let cases: [(&str, WorkerStatusMessage); 6] = [
+            (
+                "expires within the margin",
+                remote_worker("remote-1", 1, &[admission('a', NOW_MS + 4_000)]),
+            ),
+            (
+                "children disagree",
+                remote_worker(
+                    "remote-1",
+                    1,
+                    &[current.clone(), admission('b', NOW_MS + 60_000)],
+                ),
+            ),
+            ("no numerical admission support", {
+                let mut message = remote_worker("remote-1", 1, std::slice::from_ref(&current));
+                message.supports_numerical_admission_v1 = false;
+                message
+            }),
+            ("no execution authority", {
+                let mut message = remote_worker("remote-1", 1, std::slice::from_ref(&current));
+                message.supports_execution_authority_v1 = false;
+                message
+            }),
+            ("another configuration hash", {
+                let mut message = remote_worker("remote-1", 1, std::slice::from_ref(&current));
+                message.bundle_config_hash = "stale".into();
+                message
+            }),
+            ("saturated", {
+                let mut message = remote_worker("remote-1", 1, std::slice::from_ref(&current));
+                message.saturated = true;
+                message
+            }),
+        ];
+        for (case, message) in cases {
+            let reg = registry();
+            reg.update_worker("http://r1", message).await;
+            assert_eq!(
+                numerical_decision(&reg),
+                Err(NumericalRefusal::NoAdmission),
+                "{case}"
+            );
+        }
+
+        let reg = registry();
+        reg.update_worker("http://r1", remote_worker("remote-1", 1, &[current]))
+            .await;
+        let mut narrower = admission('b', NOW_MS + 60_000);
+        narrower["local_identities"] = serde_json::json!([OTHER]);
+        reg.update_worker("http://r2", remote_worker("remote-2", 3, &[narrower]))
+            .await;
+        reg.update_worker(
+            "http://l1",
+            local_worker("local-1", 2, &[local_profile(Some(COVERED), CONTRACT)]),
+        )
+        .await;
+        assert_eq!(
+            numerical_decision(&reg).unwrap(),
+            HashMap::from([("remote-1".to_string(), "a".repeat(64))]),
+            "only a remote worker whose own admission covers the local fleet is admitted"
+        );
     }
 
     #[tokio::test]
@@ -1562,6 +2046,7 @@ mod tests {
         let reg = registry();
         let msg = WorkerStatusMessage {
             supports_execution_authority_v1: false,
+            supports_numerical_admission_v1: false,
             name: "w-compact".into(),
             ready: true,
             gpu_count: 1,
@@ -1600,6 +2085,7 @@ mod tests {
         let reg = registry();
         let msg = WorkerStatusMessage {
             supports_execution_authority_v1: false,
+            supports_numerical_admission_v1: false,
             name: "w-none".into(),
             ready: true,
             gpu_count: 1,
@@ -2273,6 +2759,7 @@ mod tests {
     ) -> WorkerStatusMessage {
         WorkerStatusMessage {
             supports_execution_authority_v1: false,
+            supports_numerical_admission_v1: false,
             name: "w".into(),
             ready,
             gpu_count: 1,

@@ -28,6 +28,9 @@ pub const REMOTE_SERVING_DURATION_METRIC_NAME: &str = "sie.gateway.remote.servin
 pub const REMOTE_FALLBACK_MODEL_LIMIT: usize = 256;
 const REMOTE_SERVING_MAX_IDLE: Duration = Duration::from_secs(300);
 pub const REMOTE_FALLBACK_COUNTER_LIMIT: usize = (REMOTE_FALLBACK_MODEL_LIMIT + 1) * 7 * 4 * 2;
+pub const REMOTE_NUMERICAL_ADMISSIONS_METRIC_NAME: &str = "sie.gateway.remote.numerical_admissions";
+pub const REMOTE_NUMERICAL_ADMISSION_COUNTER_LIMIT: usize =
+    (REMOTE_FALLBACK_MODEL_LIMIT + 1) * 7 * 2 * 4;
 pub const PENDING_DEMAND_METRIC_NAME: &str = "sie.gateway.pending_demand";
 pub const LANE_QUEUE_DEPTH_METRIC_NAME: &str = "sie.gateway.lane.queue.depth";
 pub const LANE_QUEUE_SNAPSHOT_TIMESTAMP_METRIC_NAME: &str =
@@ -851,6 +854,8 @@ struct GatewayTelemetry {
     remote_fallbacks: Counter<u64>,
     remote_serving_duration: Gauge<f64>,
     remote_serving_state: Mutex<RemoteServingState>,
+    remote_numerical_admissions: Counter<u64>,
+    numerical_admission_models: Mutex<HashSet<String>>,
     pending_demand: Gauge<f64>,
     lane_queue_depth: Gauge<f64>,
     lane_queue_snapshot_timestamp: Gauge<f64>,
@@ -954,6 +959,12 @@ impl GatewayTelemetry {
                 .with_unit("s")
                 .build(),
             remote_serving_state: Mutex::new(RemoteServingState::default()),
+            remote_numerical_admissions: meter
+                .u64_counter(REMOTE_NUMERICAL_ADMISSIONS_METRIC_NAME)
+                .with_description("Numerical bridge admission decisions.")
+                .with_unit("{request}")
+                .build(),
+            numerical_admission_models: Mutex::new(HashSet::new()),
             pending_demand: meter
                 .f64_gauge(PENDING_DEMAND_METRIC_NAME)
                 .with_description("Whether a physical worker lane has refreshable unmet demand.")
@@ -1661,6 +1672,57 @@ fn record_remote_fallback_to(
             .remote_serving_duration
             .record(duration, &[KeyValue::new("model", model)]);
     }
+}
+
+/// One numerical bridge admission decision: admitted, or refused for `refusal`.
+pub(crate) fn record_numerical_admission(
+    model: &str,
+    operation: &str,
+    refusal: Option<crate::state::worker_registry::NumericalRefusal>,
+) {
+    record_numerical_admission_to(telemetry(), model, operation, refusal);
+}
+
+fn record_numerical_admission_to(
+    telemetry: Option<&GatewayTelemetry>,
+    model: &str,
+    operation: &str,
+    refusal: Option<crate::state::worker_registry::NumericalRefusal>,
+) {
+    let Some(telemetry) = telemetry else {
+        return;
+    };
+    let model = {
+        let mut models = telemetry
+            .numerical_admission_models
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let model = sanitize_model_label(model);
+        if model != "other"
+            && (models.contains(&model) || models.len() < REMOTE_FALLBACK_MODEL_LIMIT)
+        {
+            models.insert(model.clone());
+            model
+        } else {
+            "other".to_string()
+        }
+    };
+    telemetry.remote_numerical_admissions.add(
+        1,
+        &[
+            KeyValue::new("model", model),
+            KeyValue::new("operation", bounded_operation(operation)),
+            KeyValue::new(
+                "outcome",
+                if refusal.is_some() {
+                    "refused"
+                } else {
+                    "admitted"
+                },
+            ),
+            KeyValue::new("reason", refusal.map_or("none", |refusal| refusal.as_str())),
+        ],
+    );
 }
 
 pub(crate) fn record_local_serving_success(model: &str) {
@@ -2543,6 +2605,76 @@ mod tests {
             .data_points()
             .all(|point| point.attributes().count() == 1));
         assert!(gauge.data_points().all(|point| point.value() == 0.0));
+        provider.shutdown().unwrap();
+    }
+
+    #[test]
+    fn numerical_admission_counter_exports_its_declared_domain_without_sdk_overflow() {
+        use crate::state::worker_registry::NumericalRefusal;
+        let (telemetry, exporter, provider) = metric_points();
+        let decisions = [
+            None,
+            Some(NumericalRefusal::NoAdmission),
+            Some(NumericalRefusal::LocalUnobserved),
+            Some(NumericalRefusal::UncoveredIdentity),
+        ];
+        for model in 0..=REMOTE_FALLBACK_MODEL_LIMIT {
+            for operation in [
+                "encode",
+                "score",
+                "extract",
+                "embeddings",
+                "moderations",
+                "generate",
+                "other",
+            ] {
+                for refusal in decisions {
+                    record_numerical_admission_to(
+                        Some(&telemetry),
+                        &format!("acme/model-{model}"),
+                        operation,
+                        refusal,
+                    );
+                }
+            }
+        }
+        record_numerical_admission_to(Some(&telemetry), "private invalid\nlabel", "encode", None);
+        provider.force_flush().unwrap();
+        let resources = exporter.get_finished_metrics().unwrap();
+        let counter = resources
+            .iter()
+            .flat_map(|resource| resource.scope_metrics())
+            .flat_map(|scope| scope.metrics())
+            .find(|metric| metric.name() == REMOTE_NUMERICAL_ADMISSIONS_METRIC_NAME)
+            .unwrap();
+        assert_eq!(counter.unit(), "{request}");
+        let AggregatedMetrics::U64(MetricData::Sum(counter)) = counter.data() else {
+            panic!("expected numerical admission counter");
+        };
+        assert_eq!(
+            counter.data_points().count(),
+            (REMOTE_FALLBACK_MODEL_LIMIT + 1) * 7 * decisions.len()
+        );
+        for point in counter.data_points() {
+            let attributes: HashMap<_, _> = point
+                .attributes()
+                .map(|attribute| {
+                    (
+                        attribute.key.as_str(),
+                        attribute.value.as_str().into_owned(),
+                    )
+                })
+                .collect();
+            assert!(!attributes.contains_key("otel.metric.overflow"));
+            let mut keys: Vec<_> = attributes.keys().copied().collect();
+            keys.sort_unstable();
+            assert_eq!(keys, ["model", "operation", "outcome", "reason"]);
+            assert_eq!(
+                attributes["outcome"] == "admitted",
+                attributes["reason"] == "none",
+                "{attributes:?}"
+            );
+        }
         provider.shutdown().unwrap();
     }
 

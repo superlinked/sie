@@ -210,7 +210,6 @@ impl ModelRegistryGeneration {
 }
 
 /// The remote profile and worker contract chosen from one registry snapshot.
-/// Numerical hybrid models remain closed until fleet equivalence is admitted.
 #[derive(Clone, Debug)]
 pub(crate) struct RemoteFallbackPlan {
     pub model: String,
@@ -220,6 +219,20 @@ pub(crate) struct RemoteFallbackPlan {
     pub config_hash: String,
     pub revision: Option<String>,
     pub served_by: ServedBy,
+    /// Set for a model with numerical outputs, whose remote attempt also needs
+    /// a current numerical admission that covers the local fleet.
+    pub numerical: Option<NumericalRoute>,
+}
+
+/// The local side of a numerical bridge, and the remote workers whose
+/// admission covers it once the gateway has checked.
+#[derive(Clone, Debug)]
+pub(crate) struct NumericalRoute {
+    /// The bare model, as worker inventories name it.
+    pub model: String,
+    pub local_bundles: Vec<String>,
+    pub local_pool: String,
+    pub admitted: Option<Arc<crate::state::worker_registry::AdmittedWorkers>>,
 }
 
 pub struct ModelRegistry {
@@ -768,18 +781,6 @@ impl ModelRegistry {
         routing.validate()?;
         if matches!(routing.policy, RoutingPolicy::Threshold) && !threshold_enabled {
             return Err("routing policy threshold is not available yet".into());
-        }
-        if routing.policy == RoutingPolicy::Threshold
-            && entry.info_extras.outputs.iter().any(|output| {
-                matches!(
-                    output.as_str(),
-                    "dense" | "sparse" | "multivector" | "score"
-                )
-            })
-        {
-            return Err(
-                "threshold routing requires fleet equivalence for numerical outputs".into(),
-            );
         }
         let profile_kind = |name: &str| {
             entry
@@ -1749,9 +1750,23 @@ impl ModelRegistry {
             })
     }
 
+    /// Whether a bare local model with numerical outputs declares a bridge,
+    /// so its encode and score requests may need a numerical admission.
+    pub(crate) fn has_numerical_bridge(&self, model: &str) -> bool {
+        if model.contains(':') {
+            return false;
+        }
+        let snap = self.snapshot.load();
+        Self::canonical_model_name(&snap, model)
+            .and_then(|canonical| snap.models.get(&canonical))
+            .and_then(|local| Self::remote_plan_from_snapshot(&snap, local))
+            .is_some_and(|plan| plan.numerical.is_some())
+    }
+
     /// Resolve only a bare local model's configured and enabled bridge.
     /// The route, disclosure and exact worker hash share one snapshot; caller
-    /// profile selectors and numerical models cannot acquire this authority.
+    /// profile selectors cannot acquire this authority, and a numerical plan
+    /// still needs the gateway's admission check.
     pub(crate) fn remote_fallback_plan(
         &self,
         model: &str,
@@ -1767,12 +1782,6 @@ impl ModelRegistry {
         if !routing.permits(trigger)
             || local.canonical_profile != "default"
             || !matches!(local.served_by(), ServedBy::Local)
-            || local.info_extras.outputs.iter().any(|output| {
-                matches!(
-                    output.as_str(),
-                    "dense" | "sparse" | "multivector" | "score"
-                )
-            })
         {
             return None;
         }
@@ -1783,15 +1792,7 @@ impl ModelRegistry {
         snap: &RegistrySnapshot,
         local: &ModelEntry,
     ) -> Option<RemoteFallbackPlan> {
-        if local.canonical_profile != "default"
-            || !matches!(local.served_by(), ServedBy::Local)
-            || local.info_extras.outputs.iter().any(|output| {
-                matches!(
-                    output.as_str(),
-                    "dense" | "sparse" | "multivector" | "score"
-                )
-            })
-        {
+        if local.canonical_profile != "default" || !matches!(local.served_by(), ServedBy::Local) {
             return None;
         }
         let routing = local.info_extras.routing.as_ref()?;
@@ -1814,6 +1815,22 @@ impl ModelRegistry {
         if config_hash.is_empty() {
             return None;
         }
+        let numerical = local
+            .info_extras
+            .outputs
+            .iter()
+            .any(|output| {
+                matches!(
+                    output.as_str(),
+                    "dense" | "sparse" | "multivector" | "score"
+                )
+            })
+            .then(|| NumericalRoute {
+                model: local.canonical_base_model.clone(),
+                local_bundles: local.bundles.clone(),
+                local_pool: Self::entry_pool_name(local).to_string(),
+                admitted: None,
+            });
         Some(RemoteFallbackPlan {
             model: remote_name,
             engine: snap.bundles.get(&bundle)?.engine.clone(),
@@ -1822,6 +1839,7 @@ impl ModelRegistry {
             config_hash,
             revision: Self::immutable_model_revision(remote),
             served_by,
+            numerical,
         })
     }
 
@@ -3051,7 +3069,7 @@ mod tests {
     }
 
     #[test]
-    fn threshold_flag_admits_generation_but_keeps_numerical_and_zero_epoch_gates() {
+    fn threshold_flag_admits_generation_and_numerical_models_but_keeps_the_zero_epoch_gate() {
         let (_dir, mut registry, mut config) = remote_routing_fixture();
         registry.threshold_enabled = true;
         config.routing = Some(
@@ -3068,11 +3086,11 @@ mod tests {
         assert_eq!(registry.threshold_targets(1).unwrap().1.len(), 1);
         assert!(registry.threshold_targets(0).is_err());
         config.tasks = Some(serde_yaml::from_str("encode:\n  dense:\n    dim: 2\n").unwrap());
-        assert!(registry
+        registry
             .replace_model_configs_authoritative(vec![config])
-            .unwrap_err()
-            .contains("fleet equivalence"));
+            .unwrap();
         assert_eq!(registry.threshold_targets(1).unwrap().1.len(), 1);
+        assert!(registry.has_numerical_bridge("acme/hybrid"));
     }
 
     #[tokio::test]
@@ -3319,7 +3337,7 @@ mod tests {
     }
 
     #[test]
-    fn fallback_plan_never_treats_numerical_dimensions_as_fleet_equivalence() {
+    fn a_numerical_plan_names_its_local_route_and_is_not_yet_admitted() {
         let (_dir, registry, mut config) = remote_routing_fixture();
         config.routing = Some(
             serde_json::from_value(serde_json::json!({
@@ -3327,10 +3345,20 @@ mod tests {
             }))
             .unwrap(),
         );
+        config.tasks = Some(serde_yaml::from_str("encode:\n  dense:\n    dim: 2\n").unwrap());
         registry.add_model_config(config).unwrap();
-        assert!(registry
+        let plan = registry
             .remote_fallback_plan("acme/hybrid", FallbackTrigger::Provisioning)
-            .is_none());
+            .unwrap();
+        let route = plan
+            .numerical
+            .expect("a numerical model's plan needs admission");
+        assert_eq!(route.model, "acme/hybrid");
+        assert_eq!(route.local_bundles, ["default"]);
+        assert_eq!(route.local_pool, DEFAULT_MODEL_POOL);
+        assert!(route.admitted.is_none());
+        assert!(registry.has_numerical_bridge("acme/hybrid"));
+        assert!(!registry.has_numerical_bridge("acme/hybrid:remote"));
     }
 
     #[test]

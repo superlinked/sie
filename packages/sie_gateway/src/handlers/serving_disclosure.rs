@@ -3248,4 +3248,312 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers()["x-sie-fallback-reason"], "provisioning");
     }
+
+    const ADMITTED_IDENTITY: &str =
+        "v2:sha256:1111111111111111111111111111111111111111111111111111111111111111";
+    const UNADMITTED_IDENTITY: &str =
+        "v2:sha256:2222222222222222222222222222222222222222222222222222222222222222";
+    const MODEL_CONTRACT: &str = "3333333333333333333333333333333333333333333333333333333333333333";
+
+    fn unix_ms_from_now(offset_ms: i64) -> u64 {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        (now + offset_ms) as u64
+    }
+
+    fn inventory(profile: serde_json::Value) -> serde_json::Value {
+        json!({
+            "observed_at_unix_ms": 1,
+            "children": [{
+                "child_index": 0,
+                "status": "observed",
+                "snapshot": {
+                    "runtime_instance_id": "9".repeat(64),
+                    "complete": true,
+                    "profiles": [profile],
+                },
+            }],
+        })
+    }
+
+    fn remote_admission(expires_in_ms: i64) -> serde_json::Value {
+        inventory(json!({
+            "model_id": "acme/hybrid-encode",
+            "model_contract_sha256": MODEL_CONTRACT,
+            "local_identity": null,
+            "admission": {
+                "sha256": "a".repeat(64),
+                "kind": "sie",
+                "local_identities": [ADMITTED_IDENTITY],
+                "model_contract_sha256": MODEL_CONTRACT,
+                "outputs": ["dense"],
+                "expires_at_unix_ms": unix_ms_from_now(expires_in_ms),
+            },
+        }))
+    }
+
+    fn local_identity(identity: &str) -> serde_json::Value {
+        inventory(json!({
+            "model_id": "acme/hybrid-encode",
+            "model_contract_sha256": MODEL_CONTRACT,
+            "local_identity": identity,
+        }))
+    }
+
+    async fn numerical_gateway(policy: &str, threshold: bool) -> TestGateway {
+        let encode = format!("{HYBRID_ENCODE_MODEL}{policy}");
+        let gateway = TestGateway::with_threshold_routing(&[&encode], threshold).await;
+        gateway
+            .add_numerical_worker("remote-1", REMOTE_LANE, &[], true, remote_admission(60_000))
+            .await;
+        gateway
+    }
+
+    const NUMERICAL_FALLBACK: &str = "\nrouting:\n  policy: fallback\n  fallback_profile: remote\n";
+
+    async fn encode(gateway: &TestGateway, body: serde_json::Value) -> Response {
+        proxy_request(
+            State(Arc::clone(&gateway.state)),
+            json_request("/v1/encode/acme/hybrid-encode", body),
+            "encode",
+        )
+        .await
+    }
+
+    fn assert_numerical_work_stayed_local(gateway: &TestGateway, response: &Response, case: &str) {
+        assert!(
+            !response.headers().contains_key("x-sie-fallback-reason"),
+            "{case}"
+        );
+        assert_ne!(stamped(response).0, Some("remote"), "{case}");
+        assert!(
+            gateway
+                .dispatcher
+                .dispatched()
+                .iter()
+                .all(|work| work.bundle != REMOTE_LANE.2),
+            "{case}"
+        );
+        assert!(
+            gateway
+                .dispatcher
+                .numerical_admissions()
+                .iter()
+                .all(Option::is_none),
+            "{case}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_admitted_numerical_bridge_names_the_admission_its_worker_advertised() {
+        for local in ["cold", "loading"] {
+            let gateway = numerical_gateway(NUMERICAL_FALLBACK, false).await;
+            if local == "loading" {
+                gateway
+                    .add_numerical_worker(
+                        "local-1",
+                        LOCAL_LANE,
+                        &[],
+                        true,
+                        local_identity(ADMITTED_IDENTITY),
+                    )
+                    .await;
+            }
+            let response = encode(&gateway, json!({"items":[{"text":"hello"}]})).await;
+            assert_eq!(response.status(), StatusCode::OK, "{local}");
+            assert_eq!(
+                stamped(&response),
+                (Some("remote"), Some("team-sie")),
+                "{local}"
+            );
+            let remote: Vec<_> = gateway
+                .dispatcher
+                .dispatched()
+                .into_iter()
+                .filter(|work| work.endpoint != "load")
+                .zip(gateway.dispatcher.numerical_admissions())
+                .zip(gateway.dispatcher.fallback_reasons())
+                .filter(|((work, _), _)| work.bundle == REMOTE_LANE.2)
+                .collect();
+            assert_eq!(remote.len(), 1, "{local}");
+            let ((work, admission), reason) = &remote[0];
+            assert_eq!(work.model, "acme/hybrid-encode:remote");
+            assert_eq!(
+                admission.as_deref(),
+                Some("a".repeat(64).as_str()),
+                "{local}"
+            );
+            assert!(reason.is_some(), "{local}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_embeddings_route_bridges_numerical_work_under_the_same_admission() {
+        let gateway = numerical_gateway(NUMERICAL_FALLBACK, false).await;
+        let response = proxy_openai_embeddings(
+            State(Arc::clone(&gateway.state)),
+            json_request(
+                "/v1/embeddings",
+                json!({"model":"acme/hybrid-encode", "input":"hello"}),
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            gateway.dispatcher.numerical_admissions(),
+            vec![Some("a".repeat(64))]
+        );
+    }
+
+    #[tokio::test]
+    async fn numerical_work_stays_local_unless_a_current_admission_covers_every_local_process() {
+        for case in [
+            "uncovered local identity",
+            "local worker without inventory",
+            "admission about to expire",
+            "remote worker without the fence",
+            "profile selected in the body",
+        ] {
+            let mut gateway = numerical_gateway(NUMERICAL_FALLBACK, false).await;
+            gateway.set_request_timeout(1.0);
+            let mut body = json!({"items":[{"text":"hello"}]});
+            match case {
+                "uncovered local identity" => {
+                    gateway
+                        .add_numerical_worker(
+                            "local-1",
+                            LOCAL_LANE,
+                            &[],
+                            true,
+                            local_identity(UNADMITTED_IDENTITY),
+                        )
+                        .await;
+                }
+                "local worker without inventory" => {
+                    gateway
+                        .add_verified_worker("local-1", LOCAL_LANE, &[])
+                        .await;
+                }
+                "admission about to expire" => {
+                    gateway
+                        .add_numerical_worker(
+                            "remote-1",
+                            REMOTE_LANE,
+                            &[],
+                            true,
+                            remote_admission(4_000),
+                        )
+                        .await;
+                }
+                "remote worker without the fence" => {
+                    gateway
+                        .add_numerical_worker(
+                            "remote-1",
+                            REMOTE_LANE,
+                            &[],
+                            false,
+                            remote_admission(60_000),
+                        )
+                        .await;
+                }
+                "profile selected in the body" => {
+                    body = json!({"items":[{"text":"hello"}], "params":{"options":{"profile":"default"}}});
+                }
+                _ => unreachable!(),
+            }
+            let response = encode(&gateway, body).await;
+            assert!(!response.status().is_success(), "{case}");
+            assert_numerical_work_stayed_local(&gateway, &response, case);
+        }
+    }
+
+    #[tokio::test]
+    async fn threshold_routes_numerical_work_remote_only_under_a_covering_admission() {
+        use crate::handlers::test_support::ThresholdBroker;
+        use crate::state::threshold_coordinator::{ThresholdDecision, ThresholdSampler};
+        let policy = "\nrouting:\n  policy: threshold\n  fallback_profile: remote\n  wake_above: 1\n  sleep_below: 0.5\n  window_s: 1\n  cooldown_s: 1\n";
+        for covered in [true, false] {
+            let Some(broker) = ThresholdBroker::start().await else {
+                return;
+            };
+            let mut gateway = numerical_gateway(policy, true).await;
+            gateway.set_request_timeout(1.0);
+            gateway
+                .add_numerical_worker(
+                    "local-1",
+                    LOCAL_LANE,
+                    &["acme/hybrid-encode"],
+                    true,
+                    local_identity(if covered {
+                        ADMITTED_IDENTITY
+                    } else {
+                        UNADMITTED_IDENTITY
+                    }),
+                )
+                .await;
+            let binding = broker.bind(&gateway).await;
+            let mut sampler = ThresholdSampler::default();
+            binding.coordinator.sample(&mut sampler).await.unwrap();
+            for _ in 0..2 {
+                tokio::time::sleep(Duration::from_millis(1050)).await;
+                binding.coordinator.sample(&mut sampler).await.unwrap();
+            }
+            assert_eq!(
+                binding.coordinator.decision("acme/hybrid-encode").unwrap(),
+                ThresholdDecision::Remote
+            );
+            let response = encode(&gateway, json!({"items":[{"text":"hello"}]})).await;
+            assert_eq!(response.status(), StatusCode::OK, "covered={covered}");
+            if covered {
+                assert_eq!(stamped(&response), (Some("remote"), Some("team-sie")));
+                assert_eq!(
+                    gateway.dispatcher.numerical_admissions(),
+                    vec![Some("a".repeat(64))]
+                );
+                assert_eq!(gateway.dispatcher.fallback_reasons(), vec![None]);
+            } else {
+                assert_numerical_work_stayed_local(
+                    &gateway,
+                    &response,
+                    "uncovered threshold route",
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refused_admitted_threshold_attempt_is_answered_at_once() {
+        use crate::handlers::test_support::ThresholdBroker;
+        use crate::state::threshold_coordinator::{ThresholdDecision, ThresholdSampler};
+        let Some(broker) = ThresholdBroker::start().await else {
+            return;
+        };
+        let policy = "\nrouting:\n  policy: threshold\n  fallback_profile: remote\n  wake_above: 1\n  sleep_below: 0.5\n  window_s: 1\n  cooldown_s: 1\n";
+        let mut gateway = numerical_gateway(policy, true).await;
+        gateway.set_request_timeout(30.0);
+        let binding = broker.bind(&gateway).await;
+        let mut sampler = ThresholdSampler::default();
+        binding.coordinator.sample(&mut sampler).await.unwrap();
+        for _ in 0..2 {
+            tokio::time::sleep(Duration::from_millis(1050)).await;
+            binding.coordinator.sample(&mut sampler).await.unwrap();
+        }
+        assert_eq!(
+            binding.coordinator.decision("acme/hybrid-encode").unwrap(),
+            ThresholdDecision::Remote
+        );
+        gateway
+            .dispatcher
+            .answer_only_bridged_remote_work("INFERENCE_ERROR", 1);
+        let started = std::time::Instant::now();
+        let response = encode(&gateway, json!({"items":[{"text":"hello"}]})).await;
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(!response.status().is_success());
+        assert_eq!(
+            gateway.dispatcher.numerical_admissions(),
+            vec![Some("a".repeat(64))]
+        );
+    }
 }

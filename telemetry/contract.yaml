@@ -414,10 +414,16 @@ cardinality_budgets:
       operation: operation
       reason: remote_fallback_reason
       outcome: remote_fallback_outcome
+      admission_outcome: remote_numerical_admission_outcome
+      admission_reason: remote_numerical_admission_reason
     instrument_limits:
       fallback_responses:
         metrics: [sie.gateway.remote.fallbacks]
         formula: models * operation * reason * outcome
+        limit: 14392
+      numerical_admissions:
+        metrics: [sie.gateway.remote.numerical_admissions]
+        formula: models * operation * admission_outcome * admission_reason
         limit: 14392
       remote_duration:
         metrics: [sie.gateway.remote.serving.duration]
@@ -434,6 +440,7 @@ cardinality_budgets:
     applies_to:
       - sie.gateway.remote.fallbacks
       - sie.gateway.remote.serving.duration
+      - sie.gateway.remote.numerical_admissions
 
   gateway_lane_admission_domain:
     source: SIE_GATEWAY_CONFIGURED_PHYSICAL_LANES
@@ -826,6 +833,8 @@ enums:
   settlement_confirm_outcome: [success, error, skipped]
   remote_fallback_reason: [provisioning, model_loading, saturated, unhealthy]
   remote_fallback_outcome: [committed, refused]
+  remote_numerical_admission_outcome: [admitted, refused]
+  remote_numerical_admission_reason: [none, no_admission, local_unobserved, uncovered_identity]
   gateway_dispatch_path: [i6pn, modal, other]
   dispatcher_path: [modal_remote, modal_stream, modal_spawn, generation_ws, other]
   dispatch_outcome: [success, error, timeout, cancelled, not_found, other]
@@ -1107,6 +1116,11 @@ attribute_sets:
     outcome: remote_fallback_outcome
   gateway_remote_serving:
     model: model
+  gateway_remote_numerical_admission:
+    operation: operation
+    model: model
+    outcome: remote_numerical_admission_outcome
+    reason: remote_numerical_admission_reason
   gateway_config_operation:
     operation: gateway_config_operation
     outcome: gateway_config_outcome
@@ -1601,6 +1615,14 @@ metrics:
     unit: s
     attributes: gateway_remote_serving
     prometheus_name: sie_gateway_remote_serving_duration_seconds
+    export: [prometheus, otlp]
+  - name: sie.gateway.remote.numerical_admissions
+    owner: gateway
+    facade_event: gateway.remote_numerical_admission_decided
+    type: counter
+    unit: "{request}"
+    attributes: gateway_remote_numerical_admission
+    prometheus_name: sie_gateway_remote_numerical_admissions_total
     export: [prometheus, otlp]
   - name: sie.gateway.config.applied_epoch
     owner: gateway

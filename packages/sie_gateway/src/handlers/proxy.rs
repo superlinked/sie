@@ -8,6 +8,7 @@ use dashmap::DashMap;
 use percent_encoding::{percent_decode_str, utf8_percent_encode, NON_ALPHANUMERIC};
 use rmp_serde;
 use serde_json::{json, Map, Value};
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn, Instrument};
@@ -2229,10 +2230,35 @@ async fn resolve_routing(
     })
 }
 
-/// Shared OSS admission for a bridge. Deployment-governed routes retain
-/// their own authority until they explicitly admit a remote physical route.
+/// Shared OSS admission for a bridge that never carries numerical outputs.
+/// Deployment-governed routes retain their own authority until they
+/// explicitly admit a remote physical route.
 #[allow(clippy::too_many_arguments)]
 fn fallback_plan_for_request(
+    state: &AppState,
+    headers: &HeaderMap,
+    ext: &axum::http::Extensions,
+    model: &str,
+    allowed: bool,
+    explicit_bundle: &str,
+    trigger: FallbackTrigger,
+) -> Option<crate::state::model_registry::RemoteFallbackPlan> {
+    fallback_plan_candidate(
+        state,
+        headers,
+        ext,
+        model,
+        allowed,
+        explicit_bundle,
+        trigger,
+    )
+    .filter(|plan| plan.numerical.is_none())
+}
+
+/// The configured bridge for a request, numerical or not. A numerical plan
+/// must pass [`admit_numerical`] before the gateway commits to it.
+#[allow(clippy::too_many_arguments)]
+fn fallback_plan_candidate(
     state: &AppState,
     headers: &HeaderMap,
     ext: &axum::http::Extensions,
@@ -2270,6 +2296,7 @@ fn threshold_remote_plan_for_request(
     headers: &HeaderMap,
     ext: &axum::http::Extensions,
     model: &str,
+    operation: &str,
     allowed: bool,
     explicit_bundle: &str,
 ) -> Option<crate::state::model_registry::RemoteFallbackPlan> {
@@ -2290,10 +2317,80 @@ fn threshold_remote_plan_for_request(
     }
     let epoch = state.config_epoch.get();
     let plan = state.model_registry.threshold_remote_route(model, epoch)?;
-    if state.config_epoch.get() != epoch || remote_forbidden(headers).unwrap_or(true) {
+    if state.config_epoch.get() != epoch
+        || remote_forbidden(headers).unwrap_or(true)
+        || (plan.numerical.is_some() && !matches!(operation, "encode" | "score"))
+    {
         return None;
     }
+    admit_numerical(state, plan, operation)
+}
+
+/// Commit to a numerical plan only when a current admission covers every
+/// live local process; record the decision. Other plans pass unchanged.
+fn admit_numerical(
+    state: &AppState,
+    mut plan: crate::state::model_registry::RemoteFallbackPlan,
+    operation: &str,
+) -> Option<crate::state::model_registry::RemoteFallbackPlan> {
+    let Some(route) = plan.numerical.as_ref() else {
+        return Some(plan);
+    };
+    let now_unix_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+        });
+    let decision = state.registry.numerical_admission(
+        &crate::state::worker_registry::NumericalLanes {
+            model: &route.model,
+            local_bundles: &route.local_bundles,
+            local_pool: &route.local_pool,
+            remote_model: &plan.model,
+            remote_bundle: &plan.bundle,
+            remote_pool: &plan.pool,
+            remote_hash: &plan.config_hash,
+        },
+        now_unix_ms,
+    );
+    crate::observability::metrics::record_numerical_admission(
+        &route.model,
+        operation,
+        decision.as_ref().err().copied(),
+    );
+    let admitted = Arc::new(decision.ok()?);
+    if let Some(route) = plan.numerical.as_mut() {
+        route.admitted = Some(admitted);
+    }
     Some(plan)
+}
+
+/// The remote workers a bridged numerical plan may run on. A numerical plan
+/// the gateway has not admitted names none.
+fn bridged_numerical_workers(ext: &axum::http::Extensions) -> Option<HashSet<String>> {
+    let RemoteFallbackOverride(plan) = ext.get::<RemoteFallbackOverride>()?;
+    let route = plan.numerical.as_ref()?;
+    Some(
+        route
+            .admitted
+            .as_ref()
+            .map(|workers| workers.keys().cloned().collect())
+            .unwrap_or_default(),
+    )
+}
+
+/// The admission digest a bridged numerical item names: the one its pinned
+/// worker advertised when the gateway admitted the bridge.
+fn bridged_numerical_admission(
+    ext: &axum::http::Extensions,
+    target: Option<&publisher::PublishTarget>,
+) -> Option<String> {
+    let RemoteFallbackOverride(plan) = ext.get::<RemoteFallbackOverride>()?;
+    let admitted = plan.numerical.as_ref()?.admitted.as_ref()?;
+    let publisher::PublishTarget::VerifiedWorker { worker_id, .. } = target? else {
+        return None;
+    };
+    admitted.get(worker_id).cloned()
 }
 
 /// Refusal classification is scoped to the local route and admitted workers.
@@ -2447,7 +2544,11 @@ fn model_loading_refusal(endpoint: &str) -> Response {
 fn native_bridge_eligible(
     endpoint: &str,
     parsed: Option<&(Vec<rmpv::Value>, publisher::WorkParams)>,
+    body_held: bool,
 ) -> bool {
+    if matches!(endpoint, "encode" | "score") {
+        return body_held;
+    }
     parsed.is_some_and(|(items, params)| match endpoint {
         "generate" => params.generate.is_some(),
         "extract" => {
@@ -2463,9 +2564,9 @@ fn native_bridge_eligible(
     })
 }
 
-/// Begin one non-numerical bridge only at a typed pre-dispatch refusal.
-/// Fleet numerical admission remains separately gated; no failure
-/// after a work item was published reaches this helper.
+/// Begin one bridge only at a typed pre-dispatch refusal. A numerical plan
+/// serves only encode and score, and only once admitted; no failure after a
+/// work item was published reaches this helper.
 #[allow(clippy::result_large_err, clippy::too_many_arguments)]
 fn native_fallback_plan(
     state: &AppState,
@@ -2473,10 +2574,11 @@ fn native_fallback_plan(
     endpoint: &str,
     model: &str,
     parsed: Option<&(Vec<rmpv::Value>, publisher::WorkParams)>,
+    body_held: bool,
     trigger: FallbackTrigger,
 ) -> Option<crate::state::model_registry::RemoteFallbackPlan> {
-    let eligible = native_bridge_eligible(endpoint, parsed);
-    fallback_plan_for_request(
+    let eligible = native_bridge_eligible(endpoint, parsed, body_held);
+    fallback_plan_candidate(
         state,
         req.headers(),
         req.extensions(),
@@ -2485,6 +2587,7 @@ fn native_fallback_plan(
         "",
         trigger,
     )
+    .filter(|plan| plan.numerical.is_none() || matches!(endpoint, "encode" | "score"))
 }
 
 #[allow(clippy::result_large_err, clippy::too_many_arguments)]
@@ -2494,10 +2597,13 @@ fn begin_native_fallback(
     endpoint: &str,
     model: &str,
     parsed: Option<&(Vec<rmpv::Value>, publisher::WorkParams)>,
+    body_held: bool,
     refusal: Response,
     trigger: FallbackTrigger,
 ) -> Result<(), Response> {
-    let Some(plan) = native_fallback_plan(state, req, endpoint, model, parsed, trigger) else {
+    let Some(plan) = native_fallback_plan(state, req, endpoint, model, parsed, body_held, trigger)
+        .and_then(|plan| admit_numerical(state, plan, endpoint))
+    else {
         return Err(refusal);
     };
     let attempt = req
@@ -2680,6 +2786,42 @@ async fn proxy_request_inner(
         req.extensions_mut().insert(ExplicitProfileSelector);
     }
     ServingDisclosure::record(&state, req.extensions(), &dispatch_model);
+    // A numerical bridge needs the body to detect a caller's profile selector
+    // and to replay the request remotely; other encode and score requests keep
+    // streaming their body straight to the queue path.
+    if prepared_native_body.is_none()
+        && matches!(endpoint, "encode" | "score")
+        && state.model_registry.has_numerical_bridge(&model_name)
+    {
+        let body_limit = native_request_body_limit(endpoint);
+        let is_msgpack = req
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|content_type| content_type.contains("msgpack"));
+        let (parts, body) = req.into_parts();
+        let body_bytes = match axum::body::to_bytes(body, body_limit).await {
+            Ok(body) => body,
+            Err(error) => {
+                let (status, code, message) = request_body_error(&error, body_limit);
+                return endpoint_error_response(
+                    endpoint,
+                    status,
+                    code,
+                    oai_type::INVALID_REQUEST,
+                    oai_code::INVALID_REQUEST,
+                    None,
+                    message,
+                );
+            }
+        };
+        req = Request::from_parts(parts, Body::empty());
+        if native_request_has_profile_selector(&body_bytes, is_msgpack) {
+            req.extensions_mut().insert(ExplicitProfileSelector);
+        }
+        prepared_native_body = Some(body_bytes);
+    }
+    let body_held = prepared_native_body.is_some();
 
     if let Some((items, params)) = prepared_native_parsed.as_ref() {
         let response = if endpoint == "generate" {
@@ -2806,7 +2948,8 @@ async fn proxy_request_inner(
         req.headers(),
         req.extensions(),
         &model_name,
-        native_bridge_eligible(endpoint, prepared_native_parsed.as_ref()),
+        endpoint,
+        native_bridge_eligible(endpoint, prepared_native_parsed.as_ref(), body_held),
         "",
     ) {
         req.extensions_mut().insert(RemoteFallbackOverride(plan));
@@ -2877,6 +3020,7 @@ async fn proxy_request_inner(
                 endpoint,
                 &model_name,
                 prepared_native_parsed.as_ref(),
+                body_held,
                 refusal,
                 trigger,
             ) {
@@ -2940,6 +3084,7 @@ async fn proxy_request_inner(
         endpoint,
         &model_name,
         prepared_native_parsed.as_ref(),
+        body_held,
         FallbackTrigger::Saturated,
     )
     .is_some()
@@ -2949,6 +3094,7 @@ async fn proxy_request_inner(
             endpoint,
             &model_name,
             prepared_native_parsed.as_ref(),
+            body_held,
             FallbackTrigger::Unhealthy,
         )
         .is_some()
@@ -2970,6 +3116,7 @@ async fn proxy_request_inner(
                 endpoint,
                 &model_name,
                 prepared_native_parsed.as_ref(),
+                body_held,
                 trigger,
             )
             .is_some()
@@ -2982,6 +3129,7 @@ async fn proxy_request_inner(
                     endpoint,
                     &model_name,
                     prepared_native_parsed.as_ref(),
+                    body_held,
                     refusal,
                     trigger,
                 ) {
@@ -3010,6 +3158,7 @@ async fn proxy_request_inner(
         endpoint,
         &model_name,
         prepared_native_parsed.as_ref(),
+        body_held,
         FallbackTrigger::ModelLoading,
     )
     .is_some()
@@ -3039,6 +3188,7 @@ async fn proxy_request_inner(
                 &bundle,
                 &bundle_config_hash,
                 &admission_pool,
+                None,
             )
             .await
             {
@@ -3061,6 +3211,7 @@ async fn proxy_request_inner(
                     endpoint,
                     &model_name,
                     prepared_native_parsed.as_ref(),
+                    body_held,
                     refusal,
                     FallbackTrigger::ModelLoading,
                 ) {
@@ -3097,6 +3248,7 @@ async fn proxy_request_inner(
             &bundle,
             &bundle_config_hash,
             &admission_pool,
+            bridged_numerical_workers(req.extensions()).as_ref(),
         )
         .await
         {
@@ -3695,6 +3847,30 @@ async fn queue_mode_proxy(
 
     params.require_execution_authority_v1 = require_execution_authority_v1;
     params.fallback_reason = bridged_fallback_reason(request_extensions);
+    if request_extensions
+        .get::<RemoteFallbackOverride>()
+        .is_some_and(|RemoteFallbackOverride(plan)| plan.numerical.is_some())
+    {
+        let Some(admission) = matches!(endpoint, "encode" | "score")
+            .then(|| bridged_numerical_admission(request_extensions, batch_target.as_ref()))
+            .flatten()
+        else {
+            let mut response = endpoint_error_response(
+                endpoint,
+                StatusCode::SERVICE_UNAVAILABLE,
+                err_code::QUEUE_UNAVAILABLE,
+                oai_type::SERVER_ERROR,
+                oai_code::TRANSPORT_FAILURE,
+                None,
+                "No current worker can verify the numerical admission",
+            );
+            response
+                .headers_mut()
+                .insert("retry-after", HeaderValue::from_static("5"));
+            return response;
+        };
+        params.numerical_admission_sha256 = Some(admission);
+    }
 
     if items.is_empty() && endpoint != "score" && endpoint != "generate" {
         return endpoint_error_response(
@@ -4409,6 +4585,7 @@ pub(crate) async fn execution_authority_target(
     bundle: &str,
     hash: &str,
     admission_pool: &str,
+    numerical_workers: Option<&HashSet<String>>,
 ) -> Result<publisher::PublishTarget, Box<Response>> {
     if !publisher::PublishTarget::verified_model_is_unambiguous(model)
         || !state
@@ -4430,10 +4607,15 @@ pub(crate) async fn execution_authority_target(
             .insert("retry-after", axum::http::HeaderValue::from_static("5"));
         return Err(Box::new(response));
     }
-    let admitted = state
+    let capped = state
         .pool_manager
         .admitted_worker_names_for_capped_lane(admission_pool, machine_profile, bundle)
         .await;
+    let admitted = match (capped, numerical_workers) {
+        (Some(capped), Some(numerical)) => Some(capped.intersection(numerical).cloned().collect()),
+        (capped, None) => capped,
+        (None, Some(numerical)) => Some(numerical.clone()),
+    };
     if let Some(worker_id) = state.registry.execution_authority_worker(
         model,
         pool,
@@ -4720,6 +4902,7 @@ pub(crate) async fn run_streaming_generate(
             bundle,
             bundle_config_hash,
             admission_pool,
+            None,
         )
         .await
         .map_err(|_| StreamingDriverErr::PublishFailed {
@@ -7986,6 +8169,7 @@ async fn resolve_generation_route(
         hdr,
         ext,
         customer_model,
+        "generate",
         bridge_allowed,
         explicit_bundle_override,
     ) {
@@ -8230,6 +8414,7 @@ async fn resolve_generation_route(
                 &bundle,
                 &bundle_config_hash,
                 &admission_pool,
+                None,
             )
             .await
             {
@@ -12284,6 +12469,7 @@ fn work_params_from_json(
             routing_key: None,
             prompt_cache_key: None,
             fallback_reason: None,
+            numerical_admission_sha256: None,
         });
     }
 
@@ -12339,6 +12525,7 @@ fn work_params_from_json(
         routing_key: None,
         prompt_cache_key: None,
         fallback_reason: None,
+        numerical_admission_sha256: None,
     })
 }
 
@@ -13186,6 +13373,7 @@ fn work_params_from_rmpv(
             routing_key: None,
             prompt_cache_key: None,
             fallback_reason: None,
+            numerical_admission_sha256: None,
         });
     }
 
@@ -13247,6 +13435,7 @@ fn work_params_from_rmpv(
         routing_key: None,
         prompt_cache_key: None,
         fallback_reason: None,
+        numerical_admission_sha256: None,
     })
 }
 
@@ -18997,6 +19186,7 @@ mod tests {
                 "http://assigned-cold:8080",
                 crate::types::WorkerStatusMessage {
                     supports_execution_authority_v1: false,
+                    supports_numerical_admission_v1: false,
                     name: "assigned-cold".to_string(),
                     ready: true,
                     gpu_count: 1,
@@ -23150,6 +23340,7 @@ mod tests {
     fn worker_msg(bundle: &str, gpu: &str, pool: &str) -> WorkerStatusMessage {
         WorkerStatusMessage {
             supports_execution_authority_v1: false,
+            supports_numerical_admission_v1: false,
             name: "worker-1".into(),
             ready: true,
             gpu_count: 1,
