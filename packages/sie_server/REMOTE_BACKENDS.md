@@ -123,13 +123,14 @@ with SIEClient(base_url="http://localhost:8080") as client:
 
 Usage counts come from the upstream. When an upstream reports no usage, a
 native `encode`, `score` or `extract` request still succeeds, and the response
-omits `usage` instead of estimating it. This holds for both upstream kinds, on
-a single node and in a cluster. The OpenAI-compatible `/v1/embeddings` route
-always returns a `usage` object, so it reports a character-based estimate
-instead. The gateway marks that estimate with
-`sie_token_source: character_estimate`.
-Malformed usage fails the request. Generation fails closed: a generation, chat
-or completion response without exact final usage is an error, never a success.
+omits `usage` instead of estimating it. This holds for every operation an
+upstream kind supports, on a single node and in a cluster. Two
+OpenAI-compatible routes differ. `/v1/embeddings` always returns a `usage`
+object, so it reports a character-based estimate instead, which the gateway
+marks with `sie_token_source: character_estimate`. `/v1/rerank` requires usage
+and answers `500` when the score carries none. Malformed usage fails the
+request. Generation fails closed: a generation, chat or completion response
+without exact final usage is an error, never a success.
 
 ## OpenAI-compatible embeddings and rerank
 
@@ -141,7 +142,8 @@ set `upstream_model` to the provider's model id.
 
 OpenAI-compatible embedding profiles support dense text only. Sparse,
 multivector, image input and extraction are rejected before dispatch. A rerank
-upstream must accept the Cohere-shaped request; usage follows the rule above.
+upstream must accept the Cohere-shaped request. Without upstream usage,
+`/v1/score` omits `usage` and `/v1/rerank` answers `500`, as described above.
 SIE restores scores to document order rather than exposing the provider's
 ranked order.
 
@@ -316,8 +318,9 @@ Because configuration load runs this comparison, a single-node server whose
 models directory holds a hybrid SIE-identity `encode` or `score` model depends
 on the upstream at startup. When the upstream cannot be reached, or reports a
 different weights revision or identity, the server refuses the model and does
-not start. A hot reload of that model is refused and logged in the same cases.
-To start while the upstream is down, remove the model's `routing` block, then
+not start. A hot reload of that model runs the same comparison, reusing a
+matching observation up to 30 seconds old, and a refused reload is logged. A
+refused reload of a loaded model leaves it unloaded. To start while the upstream is down, remove the model's `routing` block, then
 add it back by hot reload once the upstream answers.
 
 Metadata is uncompressed and limited to 64 KiB. Its pool/socket operations share

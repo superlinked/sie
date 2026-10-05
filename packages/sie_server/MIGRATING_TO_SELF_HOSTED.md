@@ -19,8 +19,9 @@ returned vector dimensions and usage.
 Run representative application requests through SIE, including long inputs,
 instructions, refusals and your normal concurrency. Confirm remote serving
 in SDK request metadata and record the outputs and usage. When the upstream
-reports no usage, SIE's native responses omit it rather than estimate it, so
-take those figures from the upstream's own records. This is your own
+reports no usage, SIE's native `encode`, `score` and `extract` responses omit
+it rather than estimate it, so take those figures from the upstream's own
+records. This is your own
 migration baseline; it does not establish equivalence between backends.
 
 ## 2. Prepare the local model separately
