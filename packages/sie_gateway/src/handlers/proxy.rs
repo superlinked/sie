@@ -3558,16 +3558,6 @@ fn managed_request_parent(req: &Request) -> opentelemetry::Context {
         })
 }
 
-/// Route request through the queue-only JetStream path.
-///
-/// `pool` is always pre-resolved by the caller via
-/// [`resolve_effective_pool`] and is guaranteed non-empty: the
-/// `PoolResolution::Provisioning` branch returns provisioning before we get
-/// here, and every `PoolResolution::Route(_)` path produces a non-empty
-/// string (either the caller-pinned `X-SIE-Pool`, or a `pool_name`
-/// harvested from the registry snapshot — route resolution filters out
-/// empty pool names and machine profiles). We therefore don't need to
-/// re-query the registry inside this function.
 /// The request-wide item checks of the queue path.
 fn queue_items_error(endpoint: &str, items: &[rmpv::Value]) -> Option<Response> {
     let message = if items.is_empty() && endpoint != "score" && endpoint != "generate" {
@@ -3586,6 +3576,16 @@ fn queue_items_error(endpoint: &str, items: &[rmpv::Value]) -> Option<Response> 
     ))
 }
 
+/// Route request through the queue-only JetStream path.
+///
+/// `pool` is always pre-resolved by the caller via
+/// [`resolve_effective_pool`] and is guaranteed non-empty: the
+/// `PoolResolution::Provisioning` branch returns provisioning before we get
+/// here, and every `PoolResolution::Route(_)` path produces a non-empty
+/// string (either the caller-pinned `X-SIE-Pool`, or a `pool_name`
+/// harvested from the registry snapshot — route resolution filters out
+/// empty pool names and machine profiles). We therefore don't need to
+/// re-query the registry inside this function.
 fn queue_parse_error_response(endpoint: &str, error: QueueParseError) -> Response {
     match error {
         QueueParseError::Generic(message) => endpoint_error_response(
