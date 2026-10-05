@@ -30,6 +30,7 @@ use crate::endpoint::InferenceEndpoint;
 use crate::observability::metrics::{
     self as telemetry, QueueEvent, QueueEventOutcome, QueuePublishObservation, QueuePublishOutcome,
 };
+use crate::types::model::FallbackTrigger;
 
 const PAYLOAD_OFFLOAD_THRESHOLD: usize = 1_024 * 1_024; // 1 MB
 /// Public queue request contract. This is deliberately much larger than the
@@ -199,6 +200,11 @@ pub struct WorkParams {
     /// Prompt-cache hint. Same semantics as
     /// :attr:`routing_key`.
     pub prompt_cache_key: Option<String>,
+    /// The trigger of the local refusal a remote attempt stands in for. The
+    /// worker answers such an item instead of redelivering it, because the
+    /// gateway holds that refusal for the caller.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback_reason: Option<FallbackTrigger>,
 }
 
 /// Discriminated input for a generate work item.
@@ -562,6 +568,10 @@ struct WorkItemRef<'a> {
     /// workers ignore the unknown map field.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deadline: Option<f64>,
+    /// Present only on a remote attempt that stands in for a local refusal.
+    /// Older workers ignore the unknown map field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback_reason: Option<FallbackTrigger>,
     /// Rolling-upgrade negotiation for `result_chunk_v1` specifically. Older
     /// workers ignore this unknown map field; workers must keep publishing the
     /// legacy one-shot ``WorkResult`` unless it is true. A future chunk version
@@ -3042,6 +3052,7 @@ impl WorkPublisher {
             reply_subject: &reply_subject,
             timestamp,
             deadline: Some(timestamp + self.result_timeout.as_secs_f64()),
+            fallback_reason: None,
             accepts_result_chunks: false,
             traceparent: None,
             tracestate: None,
@@ -3562,6 +3573,7 @@ impl WorkPublisher {
             reply_subject: shared.reply_subject,
             timestamp: shared.timestamp,
             deadline: shared.deadline,
+            fallback_reason: shared.params.fallback_reason,
             accepts_result_chunks: true,
             traceparent: shared.traceparent,
             tracestate: shared.tracestate,
@@ -4192,6 +4204,7 @@ impl WorkPublisher {
             reply_subject: shared.reply_subject,
             timestamp: shared.timestamp,
             deadline: shared.deadline,
+            fallback_reason: shared.params.fallback_reason,
             accepts_result_chunks: true,
             traceparent: shared.traceparent,
             tracestate: shared.tracestate,
@@ -4488,6 +4501,7 @@ impl WorkPublisher {
             reply_subject: shared.reply_subject,
             timestamp: shared.timestamp,
             deadline: shared.deadline,
+            fallback_reason: shared.params.fallback_reason,
             accepts_result_chunks: true,
             traceparent: shared.traceparent,
             tracestate: shared.tracestate,
@@ -6383,6 +6397,8 @@ mod tests {
         pub timestamp: f64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub deadline: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub fallback_reason: Option<String>,
         #[serde(default)]
         pub accepts_result_chunks: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -7729,6 +7745,7 @@ mod tests {
             reply_subject: "_INBOX.r1.req-1".to_string(),
             timestamp: 1700000000.0,
             deadline: None,
+            fallback_reason: None,
             accepts_result_chunks: true,
             traceparent: None,
             tracestate: None,
@@ -7737,14 +7754,17 @@ mod tests {
         let encoded = rmp_serde::to_vec_named(&item).unwrap();
         let decoded: WorkItem = rmp_serde::from_slice(&encoded).unwrap();
         let wire: rmpv::Value = rmp_serde::from_slice(&encoded).unwrap();
-        assert!(
-            wire.as_map()
-                .unwrap()
-                .iter()
-                .all(|(key, _)| key.as_str() != Some("deadline")),
-            "an unknown deadline must stay off the wire"
-        );
+        for absent in ["deadline", "fallback_reason"] {
+            assert!(
+                wire.as_map()
+                    .unwrap()
+                    .iter()
+                    .all(|(key, _)| key.as_str() != Some(absent)),
+                "an absent {absent} must stay off the wire"
+            );
+        }
         assert_eq!(decoded.deadline, None);
+        assert_eq!(decoded.fallback_reason, None);
 
         assert_eq!(decoded.work_item_id, "req-1.0");
         assert_eq!(decoded.request_id, "req-1");
@@ -7861,6 +7881,7 @@ mod tests {
             reply_subject: "_INBOX.router-1.req-ref".to_string(),
             timestamp: 1_700_000_000.5,
             deadline: Some(1_700_000_120.5),
+            fallback_reason: Some("saturated".to_string()),
             accepts_result_chunks: true,
             traceparent: None,
             tracestate: None,
@@ -7904,6 +7925,7 @@ mod tests {
             reply_subject: &owned.reply_subject,
             timestamp: owned.timestamp,
             deadline: owned.deadline,
+            fallback_reason: Some(FallbackTrigger::Saturated),
             accepts_result_chunks: true,
             traceparent: owned.traceparent.as_deref(),
             tracestate: owned.tracestate.as_deref(),
@@ -8086,6 +8108,7 @@ mod tests {
             reply_subject: "_INBOX.r1.req-2".to_string(),
             timestamp: 0.0,
             deadline: None,
+            fallback_reason: None,
             accepts_result_chunks: true,
             traceparent: None,
             tracestate: None,
@@ -8773,6 +8796,7 @@ mod tests {
             reply_subject: "_INBOX.r.req-x".to_string(),
             timestamp: 1.0,
             deadline: None,
+            fallback_reason: None,
             accepts_result_chunks: true,
             traceparent: None,
             tracestate: None,
@@ -8925,6 +8949,7 @@ mod tests {
             reply_subject: "_INBOX.r.req-tp".to_string(),
             timestamp: 1.0,
             deadline: None,
+            fallback_reason: None,
             accepts_result_chunks: true,
             traceparent: Some(tp.to_string()),
             tracestate: Some(ts.to_string()),
@@ -8972,6 +8997,7 @@ mod tests {
             reply_subject: "_INBOX.r.req-tp2".to_string(),
             timestamp: 1.0,
             deadline: None,
+            fallback_reason: None,
             accepts_result_chunks: true,
             traceparent: None,
             tracestate: None,
@@ -9548,6 +9574,136 @@ mod tests {
             .await;
     }
 
+    /// NATS-gated: a remote attempt carries the trigger of the refusal it
+    /// stands in for, on the batch and on the generation publish path alike;
+    /// other work carries none.
+    #[tokio::test]
+    async fn remote_attempts_carry_their_fallback_reason_on_the_wire() {
+        use futures_util::StreamExt;
+
+        let Ok(url) = std::env::var("NATS_URL") else {
+            assert_ne!(
+                std::env::var("SIE_RUN_NATS_PUBLISHER_TEST").as_deref(),
+                Ok("1"),
+                "mandatory publisher tests require NATS_URL"
+            );
+            return;
+        };
+        let client = async_nats::connect(url)
+            .await
+            .expect("test NATS connection");
+        let pool = format!("itfallback{}", uuid::Uuid::now_v7().simple());
+        let publisher = Arc::new(WorkPublisher::new(
+            jetstream::new(client.clone()),
+            "it-router".to_string(),
+            Arc::new(crate::queue::payload_store::DisabledPayloadStore),
+            Duration::from_secs(5),
+            1024,
+            WorkStreamConfig {
+                max_age: Duration::from_secs(300),
+                storage: jetstream::stream::StorageType::Memory,
+                num_replicas: 1,
+            },
+        ));
+        let subjects = format!("sie.work.{pool}.>");
+        let stream = jetstream::new(client.clone())
+            .get_or_create_stream(jetstream::stream::Config {
+                name: stream_name(&pool),
+                subjects: vec![subjects.clone()],
+                retention: jetstream::stream::RetentionPolicy::WorkQueue,
+                storage: jetstream::stream::StorageType::Memory,
+                max_age: Duration::from_secs(300),
+                max_messages: 100_000,
+                discard: jetstream::stream::DiscardPolicy::New,
+                ..Default::default()
+            })
+            .await
+            .expect("create work stream");
+        stream
+            .create_consumer(jetstream::consumer::pull::Config {
+                durable_name: Some("itworker".to_string()),
+                filter_subject: subjects.clone(),
+                ..Default::default()
+            })
+            .await
+            .expect("create work consumer");
+        let mut sub = client.subscribe(subjects).await.expect("subscribe");
+        client.flush().await.expect("flush");
+        let target = || PublishTarget::Pool {
+            pool: pool.clone(),
+            machine_profile: "cpu".to_string(),
+            bundle: "remote".to_string(),
+            model: "acme/model:remote".to_string(),
+        };
+        async fn next_reason(sub: &mut async_nats::Subscriber) -> Option<String> {
+            let msg = tokio::time::timeout(Duration::from_secs(5), sub.next())
+                .await
+                .expect("timed out waiting for the published work item")
+                .expect("subscription closed before a message arrived");
+            let work: WorkItem = rmp_serde::from_slice(&msg.payload).expect("decode work item");
+            work.fallback_reason
+        }
+
+        let mut published = Vec::new();
+        let mut expected = Vec::new();
+        for reason in [
+            None,
+            Some(FallbackTrigger::Provisioning),
+            Some(FallbackTrigger::ModelLoading),
+            Some(FallbackTrigger::Saturated),
+            Some(FallbackTrigger::Unhealthy),
+        ] {
+            let items = vec![rmpv::Value::Map(vec![(
+                rmpv::Value::from("text"),
+                rmpv::Value::from("hello"),
+            )])];
+            let extract = WorkParams {
+                fallback_reason: reason,
+                ..WorkParams::default()
+            };
+            let (_request_id, _rx, durability) = publisher
+                .publish_work(
+                    target(),
+                    &pool,
+                    "extract",
+                    "acme/model:remote",
+                    "acme/model",
+                    "pytorch",
+                    "",
+                    items,
+                    &extract,
+                )
+                .await
+                .expect("publish_work");
+            durability.wait().await.expect("durable publish ACK");
+            published.push(next_reason(&mut sub).await);
+            let generate = WorkParams {
+                generate: Some(GenerateParams {
+                    input: GenerateInput::Prompt {
+                        prompt: "hi".to_string(),
+                    },
+                    max_new_tokens: 4,
+                    ..Default::default()
+                }),
+                fallback_reason: reason,
+                ..WorkParams::default()
+            };
+            let (_request_id, _rx, _notify, durability) = publisher
+                .publish_generate_streaming(target(), "acme/model", "pytorch", "", &generate, &pool)
+                .await
+                .expect("publish_generate_streaming");
+            durability.wait().await.expect("durable publish ACK");
+            published.push(next_reason(&mut sub).await);
+            let wire = reason.map(|reason| reason.as_str().to_string());
+            expected.extend([wire.clone(), wire]);
+        }
+
+        assert_eq!(published, expected);
+        let _ = jetstream::new(client.clone())
+            .delete_stream(stream_name(&pool))
+            .await;
+    }
+
     /// Integration test (issue #1500): drive a real `WorkPublisher` encode
     /// publish over a live NATS/JetStream broker, with the inbound trace
     /// context scoped over the publish via `with_context` exactly as
@@ -9668,6 +9824,7 @@ mod tests {
             generate: None,
             routing_key: None,
             prompt_cache_key: None,
+            fallback_reason: None,
         };
         let items = vec![rmpv::Value::Map(vec![(
             rmpv::Value::String("text".into()),
@@ -9949,6 +10106,7 @@ mod tests {
             generate: None,
             routing_key: None,
             prompt_cache_key: None,
+            fallback_reason: None,
         };
         let items = vec![rmpv::Value::Map(vec![(
             rmpv::Value::String("image".into()),
