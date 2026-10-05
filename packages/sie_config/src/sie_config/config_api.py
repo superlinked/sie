@@ -344,7 +344,7 @@ def _emit_audit_log(
 
 def _validate_model_id(model_id: str) -> None:
     """Validate model_id to prevent path traversal and gateway route ambiguity."""
-    if ".." in model_id or "\\" in model_id or not _MODEL_ID_PATTERN.match(model_id):
+    if ".." in model_id or "\\" in model_id or not _MODEL_ID_PATTERN.fullmatch(model_id):
         raise HTTPException(
             status_code=400,
             detail={"error": "invalid_model_id", "message": "Model ID contains invalid characters."},

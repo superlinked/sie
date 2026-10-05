@@ -133,8 +133,8 @@ class ScoreHandler(OperationHandler[ScoreOutput]):
 
         # Reassemble per-pair unit counts (see slice_output). All-or-nothing:
         # a partial without a count means the meter cannot attribute the work
-        # item exactly, so no counts are surfaced (metering then falls back to
-        # its reserve estimate rather than under-counting).
+        # item exactly, so no counts are surfaced (they are absent rather than
+        # under-counted).
         assembled_counts: list[int] = []
         assembled_image_counts: list[int] = []
         assembled_content_counts: list[int] | None = []

@@ -282,8 +282,8 @@ class CrossEncoderAdapter(BaseAdapter):
         (:meth:`_token_counts_or_none`) over the model's own tokenizer
         (:meth:`_metering_tokenizer`) and the same truncation cap ``predict``
         applies (:meth:`_metering_max_length`). Best-effort: any tokenizer quirk
-        returns ``None`` so the meter falls back to its reserve estimate rather
-        than failing the score or billing an approximation as a count.
+        returns ``None``, so the counts are absent rather than failing the
+        score or presenting an approximation as a count.
 
         Runs inline on the inference-executor thread inside :meth:`score_pairs`,
         re-tokenizing the very tokenizer ``CrossEncoder.predict`` just used (and
