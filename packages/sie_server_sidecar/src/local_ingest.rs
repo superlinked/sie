@@ -1561,7 +1561,9 @@ fn validate_work_items_with_limit(
                     .to_string(),
             );
         }
-        if wi.numerical_admission_sha256.is_some() {
+        if wi.numerical_admission_sha256.is_some()
+            || (wi.fallback_reason.is_some() && matches!(wi.operation.as_str(), "encode" | "score"))
+        {
             return Err(
                 "InvalidTransportBinding: numerical admission is not supported on the local-ingest lane"
                     .to_string(),
@@ -2071,10 +2073,17 @@ mod tests {
             .unwrap_err()
             .contains("bundle_config_hash"));
 
-        let mut admitted = item;
+        let mut admitted = item.clone();
         admitted.numerical_admission_sha256 = Some("a".repeat(64));
         assert_eq!(
             validate_work_items(&body, &[admitted]).unwrap_err(),
+            "InvalidTransportBinding: numerical admission is not supported on the local-ingest lane"
+        );
+
+        let mut bridged = item;
+        bridged.fallback_reason = Some("provisioning".into());
+        assert_eq!(
+            validate_work_items(&body, &[bridged]).unwrap_err(),
             "InvalidTransportBinding: numerical admission is not supported on the local-ingest lane"
         );
     }

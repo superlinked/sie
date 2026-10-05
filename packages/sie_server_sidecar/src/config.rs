@@ -386,6 +386,28 @@ impl WorkerConfig {
             crate::subject::EXECUTION_AUTHORITY_V1_TOKEN
         )
     }
+
+    pub fn admission_stream_name(&self) -> String {
+        format!(
+            "WORK_ADMISSION_V1_{}",
+            crate::subject::normalize_model_id(&self.worker_id)
+        )
+    }
+
+    pub fn admission_consumer_name(&self) -> String {
+        format!(
+            "admission-v1-{}",
+            crate::subject::normalize_model_id(&self.worker_id)
+        )
+    }
+
+    pub fn admission_subject_filter(&self) -> String {
+        format!(
+            "{}.{}",
+            self.worker_subject_filter(),
+            crate::subject::NUMERICAL_ADMISSION_V1_TOKEN
+        )
+    }
 }
 
 #[cfg(test)]
@@ -502,6 +524,18 @@ mod tests {
         assert_eq!(
             c.worker_subject_filter(),
             "sie.work.l4.l4.default.*.worker-test"
+        );
+        assert_eq!(c.authority_stream_name(), "WORK_AUTHORITY_V1_worker-test");
+        assert_eq!(c.authority_consumer_name(), "authority-v1-worker-test");
+        assert_eq!(
+            c.authority_subject_filter(),
+            "sie.work.l4.l4.default.*.worker-test.execution-authority-v1"
+        );
+        assert_eq!(c.admission_stream_name(), "WORK_ADMISSION_V1_worker-test");
+        assert_eq!(c.admission_consumer_name(), "admission-v1-worker-test");
+        assert_eq!(
+            c.admission_subject_filter(),
+            "sie.work.l4.l4.default.*.worker-test.numerical-admission-v1"
         );
     }
 

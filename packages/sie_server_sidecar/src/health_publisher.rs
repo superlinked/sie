@@ -213,6 +213,8 @@ pub struct HealthPublisherConfig {
     pub numerical_admission_v1: Arc<AtomicBool>,
     /// The versioned pull consumer must also be running.
     pub authority_consumer_ready: Arc<AtomicBool>,
+    /// The admitted-work pull consumer must also be running.
+    pub admission_consumer_ready: Arc<AtomicBool>,
     /// Runtime pressure/capacity gauges mirrored into the heartbeat payload.
     pub runtime_state: Arc<RuntimeState>,
     /// How often to publish. Defaults to [`DEFAULT_PUBLISH_INTERVAL`].
@@ -345,7 +347,8 @@ fn encode_payload(
         terminated,
         supports_execution_authority_v1,
         supports_numerical_admission_v1: supports_execution_authority_v1
-            && config.numerical_admission_v1.load(Ordering::Acquire),
+            && config.numerical_admission_v1.load(Ordering::Acquire)
+            && config.admission_consumer_ready.load(Ordering::Acquire),
         gpu_count: config.gpu_count,
         total_gpu_slots,
         ready_gpu_slots,
@@ -550,6 +553,7 @@ mod tests {
             execution_authority_v1: Arc::new(AtomicBool::new(false)),
             numerical_admission_v1: Arc::new(AtomicBool::new(false)),
             authority_consumer_ready: Arc::new(AtomicBool::new(false)),
+            admission_consumer_ready: Arc::new(AtomicBool::new(false)),
             runtime_state: Arc::new(RuntimeState::new()),
             interval: DEFAULT_PUBLISH_INTERVAL,
         }
@@ -740,18 +744,25 @@ mod tests {
     }
 
     #[test]
-    fn numerical_admission_health_requires_authority_and_the_backend_method() {
-        for (authority, backend) in [(true, true), (true, false), (false, true)] {
+    fn numerical_admission_health_requires_authority_the_backend_method_and_its_consumer() {
+        for (authority, backend, consumer) in [
+            (true, true, true),
+            (true, false, true),
+            (false, true, true),
+            (true, true, false),
+        ] {
             let c = cfg();
             c.execution_authority_v1.store(authority, Ordering::Release);
             c.authority_consumer_ready.store(true, Ordering::Release);
             c.numerical_admission_v1.store(backend, Ordering::Release);
+            c.admission_consumer_ready
+                .store(consumer, Ordering::Release);
             let payload: serde_json::Value =
                 serde_json::from_slice(&encode_payload(&c, true, false).unwrap()).unwrap();
             assert_eq!(
                 payload["supports_numerical_admission_v1"],
-                authority && backend,
-                "{authority} {backend}"
+                authority && backend && consumer,
+                "{authority} {backend} {consumer}"
             );
         }
     }

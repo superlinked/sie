@@ -2,6 +2,7 @@
 
 import contextlib
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -19,6 +20,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 from opentelemetry import trace
 from pydantic import ValidationError
+from sie_server import ipc_server
 from sie_server.api.encode import router as encode_router
 from sie_server.api.routing import route_request
 from sie_server.config import hybrid_admission
@@ -37,11 +39,16 @@ from sie_server.core.loader import expand_profile_variants
 from sie_server.core.registry import ModelRegistry
 from sie_server.ipc_server import IpcServer
 from sie_server.ipc_types import (
+    BatchedF16MultivectorItem,
+    BatchedF16MultivectorOutput,
     BatchOutcome,
     ItemOutcome,
     NumericalProfileSnapshotRequest,
+    ProcessEncodeBatchRequest,
+    ProcessScoreBatchRequest,
     ReplaceModelConfigEntry,
     ReplaceModelConfigsRequest,
+    RunBatchItem,
     RunBatchRequest,
     WorkerCapabilitiesRequest,
     WorkerCapabilitiesResponse,
@@ -334,11 +341,32 @@ def test_unmeasured_runtime_overrides_cannot_bridge(admission: tuple, options: d
     assert hybrid_admission.hybrid_request_refusal(config, {"is_query": True}) is None
 
 
-def test_remote_only_defaults_are_not_a_measured_fallback_contract(admission: tuple) -> None:
-    config, _, _, _ = admission
-    config.profiles["remote"].adapter_options.runtime["normalize"] = False
+@pytest.mark.parametrize(
+    ("local", "remote", "admitted"),
+    [
+        ({}, {"normalize": False}, False),
+        ({"normalize": True}, {"normalize": False}, False),
+        ({"normalize": True}, {}, False),
+        ({"normalize": True}, {"normalize": True}, True),
+    ],
+)
+def test_a_remote_profile_must_run_with_exactly_the_measured_runtime(
+    admission: tuple, local: dict[str, Any], remote: dict[str, Any], admitted: bool
+) -> None:
+    config, upstream, path, data = admission
+    config.profiles["default"].adapter_options.runtime.update(local)
+    config.profiles["remote"].adapter_options.runtime.update(remote)
     config._resolved_cache.clear()
-    assert refusal(config) == "hybrid remote profile adds unmeasured runtime defaults"
+    rebuilt = {
+        **data,
+        "model_contract_sha256": model_contract_digest(config),
+        "remote_contract_sha256": remote_profile_contract_digest(config, "remote", {"vendor": upstream}),
+        "runtime_options_sha256": canonical_digest(dict(config.resolve_profile("default").runtime)),
+    }
+    path.write_text(json.dumps(rebuilt))
+    assert refusal(config) == (
+        None if admitted else "hybrid remote profile runtime differs from the measured local runtime"
+    )
 
 
 def test_matching_explicit_defaults_are_allowed_but_numerical_type_aliases_are_not(admission: tuple) -> None:
@@ -896,7 +924,7 @@ async def test_fence_requires_execution_authority_first(
     )
 
     inference.assert_not_awaited()
-    assert [(value.disposition, value.error_code) for value in stale.outcomes] == [("nak_retry", None)]
+    assert [(value.disposition, value.error_code) for value in stale.outcomes] == [("nak_retry", "INFERENCE_ERROR")]
 
 
 def test_capability_names_the_numerical_admission_method(admission: tuple, tmp_path: Path) -> None:
@@ -906,3 +934,206 @@ def test_capability_names_the_numerical_admission_method(admission: tuple, tmp_p
     assert server._handle_worker_capabilities(WorkerCapabilitiesRequest()).supports_numerical_admission_v1 is True
     legacy = msgspec.convert({"supports_execution_authority_v1": True}, type=WorkerCapabilitiesResponse)
     assert legacy.supports_numerical_admission_v1 is False
+
+
+def test_evidence_is_parsed_once_per_file_version_and_judged_fresh_on_every_call(
+    admission: tuple, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, _, path, data = admission
+    monkeypatch.setattr(hybrid_admission, "_evidence_cache", {})
+    monkeypatch.setattr(hybrid_admission, "_SETTLED_EVIDENCE_NS", -1)
+    read = hybrid_admission.read_equivalence_evidence
+    reads: list[str] = []
+
+    def counted(target: str) -> Any:
+        reads.append(target)
+        return read(target)
+
+    monkeypatch.setattr(hybrid_admission, "read_equivalence_evidence", counted)
+
+    first = hybrid_admission.openai_admission(config, now=NOW)
+    assert isinstance(first, hybrid_admission.NumericalAdmission)
+    assert hybrid_admission.openai_admission(config, now=NOW) == first
+    expired = "hybrid equivalence record failed or is outside its configured age"
+    assert hybrid_admission.openai_admission(config, now=NOW + timedelta(seconds=61)) == expired
+    assert len(reads) == 1
+
+    failed = {
+        **data,
+        "cases": [
+            {**case, "measurements": {"dense": {"noise_floor": 0.0, "remote_error": 0.5, "values": 1024}}}
+            for case in data["cases"]
+        ],
+    }
+    replacement = path.with_name("replacement.json")
+    replacement.write_text(json.dumps(failed))
+    replacement.replace(path)
+    assert hybrid_admission.openai_admission(config, now=NOW) == expired
+    assert len(reads) == 2
+
+
+def test_a_freshly_written_evidence_file_is_read_again(admission: tuple, monkeypatch: pytest.MonkeyPatch) -> None:
+    config, _, _, _ = admission
+    monkeypatch.setattr(hybrid_admission, "_evidence_cache", {})
+    read = hybrid_admission.read_equivalence_evidence
+    reads: list[str] = []
+
+    def counted(target: str) -> Any:
+        reads.append(target)
+        return read(target)
+
+    monkeypatch.setattr(hybrid_admission, "read_equivalence_evidence", counted)
+    for _ in range(2):
+        assert isinstance(hybrid_admission.openai_admission(config, now=NOW), hybrid_admission.NumericalAdmission)
+    assert len(reads) == 2
+
+
+@pytest.mark.parametrize("require_authority", [False, True])
+async def test_batch_methods_without_the_fence_refuse_items_naming_an_admission(
+    admission: tuple, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, require_authority: bool
+) -> None:
+    config, _, path, data = admission
+    _refresh_record(path, data)
+    server, bundle_hash = _fence_server(config, tmp_path)
+    current = hybrid_admission.openai_admission(config)
+    assert isinstance(current, hybrid_admission.NumericalAdmission)
+    inference = AsyncMock(side_effect=_served)
+    monkeypatch.setattr(server._executor, "process_encode_batch", inference)
+    monkeypatch.setattr(server, "_execution_config", _always_current)
+
+    outcome = await server._handle_run_batch(
+        _bridged_batch(config.sie_id + ":remote", bundle_hash, {"numerical_admission_sha256": current.sha256}, {}),
+        require_authority=require_authority,
+    )
+
+    assert [item.work_item_id for item in inference.await_args.args[0].items] == ["req.1"]
+    _assert_refused_before_the_upstream(outcome.outcomes[0])
+    assert outcome.outcomes[0].error == "this method does not verify numerical admissions"
+    assert outcome.outcomes[1].disposition == "publish_and_ack"
+
+
+@pytest.mark.parametrize("op", ["encode", "score"])
+async def test_op_scoped_methods_refuse_items_naming_an_admission(
+    admission: tuple, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, op: str
+) -> None:
+    config, _, path, data = admission
+    _refresh_record(path, data)
+    server, bundle_hash = _fence_server(config, tmp_path)
+    inference = AsyncMock(side_effect=_served)
+    monkeypatch.setattr(server._executor, f"process_{op}_batch", inference)
+    monkeypatch.setattr(server, "_execution_config", _always_current)
+    batch = _bridged_batch(
+        config.sie_id + ":remote", bundle_hash, {"op": op, "numerical_admission_sha256": "a" * 64}, {"op": op}
+    )
+    items = [getattr(item, op) for item in batch.items]
+
+    if op == "encode":
+        outcome = await server._handle_process_encode(ProcessEncodeBatchRequest(model_id=batch.model_id, items=items))
+    else:
+        outcome = await server._handle_process_score(ProcessScoreBatchRequest(model_id=batch.model_id, items=items))
+
+    assert [item.work_item_id for item in inference.await_args.args[0].items] == ["req.1"]
+    _assert_refused_before_the_upstream(outcome.outcomes[0])
+    assert outcome.outcomes[1].disposition == "publish_and_ack"
+
+
+async def test_a_failing_admission_check_refuses_every_item_and_logs_only_its_class(
+    admission: tuple, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    config, _, path, data = admission
+    _refresh_record(path, data)
+    server, bundle_hash = _fence_server(config, tmp_path)
+    inference = AsyncMock(side_effect=_served)
+    monkeypatch.setattr(server._executor, "process_encode_batch", inference)
+    monkeypatch.setattr(server, "_execution_config", _always_current)
+
+    def failing(_req: RunBatchRequest) -> list[str | None]:
+        raise RuntimeError("secret-input")
+
+    monkeypatch.setattr(server, "_numerical_admission_reasons", failing)
+    with caplog.at_level(logging.INFO, logger="sie_server.ipc_server"):
+        outcome = await server._handle_run_batch(
+            _bridged_batch(
+                config.sie_id + ":remote",
+                bundle_hash,
+                {"numerical_admission_sha256": "a" * 64},
+                {"numerical_admission_sha256": "a" * 64},
+            ),
+            require_authority=True,
+            require_admission=True,
+        )
+
+    inference.assert_not_awaited()
+    for value in outcome.outcomes:
+        _assert_refused_before_the_upstream(value)
+        assert value.error == "numerical admission check failed"
+    assert "RuntimeError" in caplog.text
+    assert "secret-input" not in caplog.text
+
+
+async def test_the_fence_keeps_shared_outputs_recosts_its_subset_and_names_an_unanswered_item(
+    admission: tuple, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, _, path, data = admission
+    _refresh_record(path, data)
+    server, bundle_hash = _fence_server(config, tmp_path)
+    current = hybrid_admission.openai_admission(config)
+    assert isinstance(current, hybrid_admission.NumericalAdmission)
+    monkeypatch.setattr(server, "_execution_config", _always_current)
+    shared = BatchedF16MultivectorOutput(
+        values_f16=b"\x00\x00",
+        items=[BatchedF16MultivectorItem(work_item_id="req.1", byte_offset=0, byte_len=2, num_tokens=1, token_dims=1)],
+    )
+    seen: list[RunBatchRequest] = []
+
+    async def answers_one(_executor: Any, batch: RunBatchRequest) -> BatchOutcome:
+        seen.append(batch)
+        return BatchOutcome(
+            outcomes=[ItemOutcome(work_item_id="req.1", request_id="req", item_index=1, disposition="publish_and_ack")],
+            batched_f16_multivectors=[shared],
+        )
+
+    monkeypatch.setattr(ipc_server, "handle_run_batch", answers_one)
+
+    outcome = await server._handle_run_batch(
+        _bridged_batch(
+            config.sie_id + ":remote",
+            bundle_hash,
+            {"numerical_admission_sha256": "0" * 64},
+            {
+                "numerical_admission_sha256": current.sha256,
+                "prepared_tokens": {"input_ids": [[1, 2, 3], [4, 5]], "tokenizer_id": "t"},
+            },
+            {"numerical_admission_sha256": current.sha256},
+        ),
+        require_authority=True,
+        require_admission=True,
+    )
+
+    assert [item.work_item_id for item in seen[0].items] == ["req.1", "req.2"]
+    assert seen[0].total_cost == 6
+    assert outcome.batched_f16_multivectors == [shared]
+    assert [value.work_item_id for value in outcome.outcomes] == ["req.0", "req.1", "req.2"]
+    assert outcome.outcomes[1].disposition == "publish_and_ack"
+    _assert_refused_before_the_upstream(outcome.outcomes[0])
+    assert outcome.outcomes[0].error == "bridged item names a different numerical admission"
+    _assert_refused_before_the_upstream(outcome.outcomes[2])
+    assert outcome.outcomes[2].error == "the backend returned no outcome for this admitted item"
+
+
+def test_a_subset_is_costed_as_the_sidecar_scheduler_costs_its_items() -> None:
+    def item(op: str, **payload: Any) -> RunBatchItem:
+        base = {"work_item_id": "w", "request_id": "r", "item_index": 0, "total_items": 1, "timestamp": 1.0}
+        return msgspec.convert({"op": op, op: {**base, **payload}}, type=RunBatchItem)
+
+    tokens = {"input_ids": [[1, 2, 3], [4, 5]], "tokenizer_id": "t"}
+    query = {"text": "query"}
+    documents = [{"text": "doc"}, {"content": "abcd"}, {"text": None, "content": "zz"}, {"images": [b"a", b"b"]}]
+    assert ipc_server._run_batch_item_cost(item("encode", item={"text": "x" * 40})) == 1
+    assert ipc_server._run_batch_item_cost(item("encode", item={"text": "x"}, prepared_tokens=tokens)) == 5
+    empty = {"input_ids": [[]], "tokenizer_id": "t"}
+    assert ipc_server._run_batch_item_cost(item("encode", item={"text": "x"}, prepared_tokens=empty)) == 1
+    assert ipc_server._run_batch_item_cost(item("score", query_item=query, score_items=documents)) == 2075
+    scored = item("score", query_item=query, score_items=documents, prepared_tokens=tokens)
+    assert ipc_server._run_batch_item_cost(scored) == 5
+    assert ipc_server._run_batch_item_cost(item("score", query_item={"text": ""}, score_items=[{"text": ""}])) == 1

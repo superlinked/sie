@@ -310,9 +310,10 @@ Generation is outside this numerical probe. The routing policy is excluded from
 the model digest, so evidence can be measured before enabling hybrid routing;
 all local and remote profile settings remain bound. Version 3 records bind the
 local profile's runtime options, float32 output and remote execution digest
-explicitly. Both measured
-profiles receive those same local runtime options; remote-only runtime defaults
-are refused because a fallback would not apply them. Older records must be remeasured.
+explicitly. A bridged request runs with the remote profile's own runtime
+options, so those options must equal the local profile's. A remote profile that
+adds, omits or changes an option is refused by the probe and by admission, and
+each measured profile receives its own options. Older records must be remeasured.
 
 A pass requires matching layouts and finite values whose maximum absolute
 error against both local runs does not exceed the difference measured between
@@ -489,11 +490,15 @@ IPC connections so they do not occupy serving or readiness connection slots.
 A remote-lane process also reports, for each model with a hybrid `encode` or
 `score` policy, the local identities its current evidence covers, as an
 `admission` with an expiry and a digest, together with the remote profile's
-contract and serving-code digests. Before such a process sends an admitted
-remote attempt upstream, it derives its admission again and refuses the item
-unless the item names the current digest, requests only admitted outputs and
-keeps the measured runtime options; a bridged caller then receives its local
-refusal with `X-SIE-Fallback-Error: INFERENCE_ERROR`.
+contract and serving-code digests. Admitted remote attempts travel on a worker
+subject of their own that only a sidecar with the admission check consumes.
+Before such a process sends an admitted remote attempt upstream, it derives its
+admission again and refuses the item unless the item names the current digest,
+requests only admitted outputs and keeps the measured runtime options. A bridged
+caller then receives its local refusal with
+`X-SIE-Fallback-Error: INFERENCE_ERROR`. The check covers batches that start
+after a change: a batch that has already passed it completes its upstream calls,
+and an SIE upstream's identity comes from a cache trusted for up to 30 seconds.
 
 These observations and the evidence file grant no gateway routing authority.
 An `observed` child can still lack a local identity. Numerical gateway routing

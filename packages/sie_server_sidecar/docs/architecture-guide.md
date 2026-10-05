@@ -415,30 +415,59 @@ gateway's queue-only ownership and worker-owned inference.
 
 A remote attempt for an `encode` or `score` item may carry
 `numerical_admission_sha256`, the digest of the remote process's `admission`
-that the producer relied on. The sidecar accepts such an item only on the
-`execution-authority-v1` subject and only for `encode` or `score`; anything
-else, or an item that arrives before every backend child supports the method,
-is refused before readiness or offloaded input retrieval, like other
-authority work. The local-ingest lane rejects the field.
+that the producer relied on. Such admitted work uses the worker-direct subject
+with the eighth token `numerical-admission-v1`. Only a sidecar with this fence
+creates `WORK_ADMISSION_V1_<worker>` and `admission-v1-<worker>`, with the same
+bounds as the authority stream. No consumer of a sidecar without the fence
+matches that subject, including its authority consumer. A rollback therefore
+cannot hand such a sidecar admitted work that is already queued, and until a
+fenced sidecar has created the stream, admitted work cannot be published at
+all. The contract comes from the subject, never from the payload field, which
+an older sidecar would ignore.
+
+Admitted work also runs under execution authority. Before readiness or
+offloaded input retrieval, the sidecar answers an item with `INFERENCE_ERROR`
+and ACKs it when the item and its subject disagree: the field on any other
+subject, an item without the field on the admission subject, an operation other
+than `encode` or `score`, or a payload model other than the subject's. It does
+the same for an `encode` or `score` item that carries `fallback_reason` without
+the field, because every numerical remote attempt that stands in for a local
+refusal is admitted work. Such an item can never become valid, and a NAK could
+hand an item on a pool subject to a worker without the fence. An item that
+arrives before every backend child supports the method is NAKed on the
+worker's own admission stream, like other authority work. The local-ingest
+lane rejects the field, and `fallback_reason` on `encode` or `score`.
 
 Admitted items keep their own scheduler partition and run only through
-`RunBatchWithNumericalAdmissionV1`, which an older backend rejects. Under the
-same execution lease as the authority checks, the Python backend derives its
-own current admission for the bare model whose fallback profile the batch
-targets, without contacting an SIE upstream. It runs an item only when the item
-names that digest, requests only admitted outputs and keeps the measured
-runtime options. Any other item gets `nak_retry` with `INFERENCE_ERROR` before
-the upstream is called. Redelivery to the pinned worker cannot restore an
-admission, so the sidecar publishes a `nak_retry` for an admitted item as its
-refusal at once and ACKs it, as it does for a fallback attempt. A bridged caller
-then receives its local refusal with `X-SIE-Fallback-Error: INFERENCE_ERROR`. A
-replaced, expired or removed record therefore stops execution at once, without
-waiting for the next heartbeat.
+`RunBatchWithNumericalAdmissionV1`, which an older backend rejects. A sidecar
+without the scheduler answers them instead of sending them through
+`ProcessEncodeBatch` or `ProcessScoreBatch`, and the Python backend refuses the
+field on every method other than the admission method. Under the same
+execution lease as the authority checks, the Python backend derives its own
+current admission for the bare model whose fallback profile the batch targets,
+without contacting an SIE upstream. It runs an item only when the item names
+that digest, requests only admitted outputs and keeps the measured runtime
+options. Any other item gets `nak_retry` with `INFERENCE_ERROR` before the
+upstream is called, as does every item when the check itself fails or when the
+configuration barrier refuses an admitted batch. Redelivery to the pinned
+worker cannot restore an admission, so the sidecar publishes a `nak_retry` for
+an admitted item as its refusal at once and ACKs it, as it does for a fallback
+attempt. A bridged caller then receives its local refusal with
+`X-SIE-Fallback-Error: INFERENCE_ERROR`.
+
+The check covers batches that start after a change. A replaced, expired or
+removed record refuses every later batch without waiting for the next
+heartbeat, while a batch that has already passed the check completes its
+upstream calls. An SIE upstream's identity comes from a cache that is trusted
+for up to 30 seconds.
 
 The backend capability `supports_numerical_admission_v1` defaults to false. The
 heartbeat reports `supports_numerical_admission_v1` only when it reports
-`supports_execution_authority_v1` and every backend child supports the method.
-No gateway produces these items yet.
+`supports_execution_authority_v1`, every backend child supports the method and
+the admission pull consumer runs. After a rollback below this version, admitted
+work still queued for that worker never runs and its callers time out. The
+gateway stops selecting the worker once its heartbeat no longer reports the
+capability. No gateway produces these items yet.
 
 Non-streaming backend responses use one physical frame while the serialized
 response is at most 32 MiB. For a larger response, the sidecar explicitly sets

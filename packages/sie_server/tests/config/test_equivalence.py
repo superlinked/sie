@@ -11,6 +11,7 @@ from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
@@ -304,7 +305,7 @@ profiles:
     max_batch_tokens: 8192
     adapter_options:
       loadtime: {upstream: upstream, upstream_model: vendor/model}
-      runtime: {normalize: false}
+      runtime: {normalize: true}
 """
     )
     upstream_file = tmp_path / "upstreams.yaml"
@@ -368,6 +369,46 @@ profiles:
     assert "Represent this text" not in serialized
     assert 'values"' in serialized  # Measurement count, never vector contents.
     assert "1.01" not in serialized
+
+
+@pytest.mark.parametrize(
+    ("local", "remote"),
+    [({}, {"normalize": False}), ({"normalize": True}, {"normalize": False}), ({"normalize": True}, {})],
+)
+def test_probe_refuses_a_remote_profile_that_runs_with_other_runtime_options(
+    local: dict[str, Any], remote: dict[str, Any]
+) -> None:
+    config = ModelConfig.model_validate(
+        {
+            "sie_id": "local/model",
+            "hf_id": "weights/model",
+            "hf_revision": "a" * 40,
+            "inputs": {"text": True},
+            "tasks": {"encode": {"dense": {"dim": 2}}},
+            "max_sequence_length": 32,
+            "profiles": {
+                "default": {
+                    "adapter_path": "sie_server.adapters.bge_m3:BGEM3Adapter",
+                    "max_batch_tokens": 8192,
+                    "compute_precision": "float32",
+                    "adapter_options": {"runtime": local},
+                },
+                "remote": {
+                    "adapter_path": "sie_server.adapters.remote.openai:OpenAIUpstreamAdapter",
+                    "max_batch_tokens": 8192,
+                    "adapter_options": {
+                        "loadtime": {"upstream": "upstream", "upstream_model": "vendor/model"},
+                        "runtime": remote,
+                    },
+                },
+            },
+        }
+    )
+    local_client, remote_client = MagicMock(), MagicMock()
+    with pytest.raises(ValueError, match="remote profile runtime differs"):
+        probe.run_probe(config, {}, local_client, remote_client, "remote")
+    assert not local_client.mock_calls
+    assert not remote_client.mock_calls
 
 
 def test_boundary_counts_include_actual_default_and_empty_instructions() -> None:

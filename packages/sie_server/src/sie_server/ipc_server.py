@@ -9,7 +9,7 @@ import logging
 import os
 import struct
 import time
-from collections.abc import AsyncIterator, Iterable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from pathlib import Path
 from types import TracebackType
 from typing import Any, Self, cast
@@ -27,6 +27,7 @@ from sie_server.core.gpu_health import gpu_is_healthy_async
 from sie_server.core.grammar_routing import resolve_grammar_serving_model
 from sie_server.core.profile_identity import local_profile_identity, runtime_instance_id, serving_code_digest
 from sie_server.core.readiness import is_ready
+from sie_server.core.score_cost import SCORE_MEDIA_COST
 from sie_server.ipc_types import (
     IPC_VERSION,
     METHOD_APPLY_MODEL_CONFIG,
@@ -48,6 +49,7 @@ from sie_server.ipc_types import (
     METHOD_WORKER_CAPABILITIES,
     ApplyModelConfigRequest,
     ApplyModelConfigResponse,
+    BatchedF16MultivectorOutput,
     BatchOutcome,
     DrainResponse,
     EnsureModelReadyRequest,
@@ -97,6 +99,9 @@ _MAX_NUMERICAL_PROFILES = 1024
 _MAX_ADMITTED_IDENTITIES = 8
 _MAX_NUMERICAL_MODEL_ID_BYTES = 1024
 _NUMERICAL_ADMISSION_RETRY_MS = 1000
+_UNVERIFIED_ADMISSION = "this method does not verify numerical admissions"
+_ADMISSION_CHECK_FAILED = "numerical admission check failed"
+_ADMITTED_ITEM_UNANSWERED = "the backend returned no outcome for this admitted item"
 
 # A negotiated response may exceed one legacy IPC frame, but remains tightly
 # bounded so a malformed or unexpectedly large backend output cannot grow the
@@ -224,6 +229,33 @@ def _observe_remote_profile(observation: NumericalProfileObservation, config: Mo
         outputs=sorted(admission.outputs),
         expires_at_unix_ms=int(admission.expires_at.timestamp() * 1000),
     )
+
+
+def _named_admission(item: Any) -> str | None:
+    """The numerical admission digest that a batch item names, if any."""
+    payloads = (item.encode, item.score) if isinstance(item, RunBatchItem) else (item,)
+    tokens = [getattr(payload, "numerical_admission_sha256", None) for payload in payloads]
+    return next((token for token in tokens if token is not None), None)
+
+
+def _score_side_cost(item: Mapping[str, Any]) -> int:
+    text = item["text"] if "text" in item else item.get("content")
+    images = item.get("images")
+    media = (len(images) if isinstance(images, list) else 0) + sum(
+        item.get(key) is not None for key in ("audio", "video", "document")
+    )
+    return (len(text) if isinstance(text, str) else 0) + media * SCORE_MEDIA_COST
+
+
+def _run_batch_item_cost(item: RunBatchItem) -> int:
+    """The sidecar scheduler's batching cost of an encode or score item."""
+    payload = item.encode if item.encode is not None else item.score
+    if payload is not None and payload.prepared_tokens is not None:
+        return max(1, sum(len(ids) for ids in payload.prepared_tokens.input_ids))
+    if item.score is None:
+        return 1
+    query = _score_side_cost(item.score.query_item)
+    return max(1, sum(query + _score_side_cost(document) for document in item.score.score_items))
 
 
 class IpcServer:
@@ -740,13 +772,17 @@ class IpcServer:
         async with self._execution_config(req.model_id, (item.bundle_config_hash for item in req.items)) as valid:
             if not valid:
                 return self._config_retry(req.items)
-            return await self._executor.process_encode_batch(req)
+            return await self._run_unrefused(
+                req, self._unverified_admissions(req.model_id, req.items), self._executor.process_encode_batch
+            )
 
     async def _handle_process_score(self, req: ProcessScoreBatchRequest) -> BatchOutcome:
         async with self._execution_config(req.model_id, (item.bundle_config_hash for item in req.items)) as valid:
             if not valid:
                 return self._config_retry(req.items)
-            return await self._executor.process_score_batch(req)
+            return await self._run_unrefused(
+                req, self._unverified_admissions(req.model_id, req.items), self._executor.process_score_batch
+            )
 
     async def _handle_process_extract(self, req: ProcessExtractBatchRequest) -> BatchOutcome:
         async with self._execution_config(req.model_id, (item.bundle_config_hash for item in req.items)) as valid:
@@ -768,30 +804,65 @@ class IpcServer:
         async with self._execution_config(req.model_id, hashes) as valid:
             if not valid:
                 return self._config_retry(req.items)
-            if not require_admission:
-                return await handle_run_batch(self._executor, req)
-            refused = await asyncio.to_thread(self._numerical_admission_refusals, req)
-            admitted = [item for item in req.items if item.work_item_id not in refused]
-            outcomes: dict[str, ItemOutcome] = {}
-            if admitted:
-                result = await handle_run_batch(self._executor, msgspec.structs.replace(req, items=admitted))
-                outcomes = {outcome.work_item_id: outcome for outcome in result.outcomes}
-            return BatchOutcome(
-                outcomes=[
-                    outcomes[item.work_item_id]
-                    if item.work_item_id in outcomes
-                    else self._numerical_admission_refusal(item)
-                    for item in req.items
-                ]
+            refused = (
+                await asyncio.to_thread(self._numerical_admission_refusals, req)
+                if require_admission
+                else self._unverified_admissions(req.model_id, req.items)
             )
+            return await self._run_unrefused(req, refused, lambda batch: handle_run_batch(self._executor, batch))
 
-    def _numerical_admission_refusals(self, req: RunBatchRequest) -> set[str]:
-        """Return the work items that this process's live numerical admission does not cover."""
-        refused = {
-            item.work_item_id: reason
-            for item, reason in zip(req.items, self._numerical_admission_reasons(req), strict=True)
-            if reason is not None
-        }
+    async def _run_unrefused(
+        self,
+        req: RunBatchRequest | ProcessEncodeBatchRequest | ProcessScoreBatchRequest,
+        refused: Mapping[str, str],
+        run: Callable[[Any], Awaitable[BatchOutcome]],
+    ) -> BatchOutcome:
+        """Run the items that are not refused and refuse the others before the upstream sees them.
+
+        An admitted item that the backend leaves unanswered is refused too, so
+        its bridged caller gets its local refusal back at once.
+        """
+        if not refused and all(_named_admission(item) is None for item in req.items):
+            return await run(req)
+        kept = [item for item in req.items if item.work_item_id not in refused]
+        served: dict[str, ItemOutcome] = {}
+        batched: list[BatchedF16MultivectorOutput] = []
+        if kept:
+            subset = msgspec.structs.replace(req, items=kept)
+            if isinstance(subset, RunBatchRequest):
+                subset = msgspec.structs.replace(subset, total_cost=sum(map(_run_batch_item_cost, subset.items)))
+            result = await run(subset)
+            served = {outcome.work_item_id: outcome for outcome in result.outcomes}
+            batched = result.batched_f16_multivectors
+        outcomes: list[ItemOutcome] = []
+        for item in req.items:
+            if item.work_item_id in refused:
+                outcomes.append(self._numerical_admission_refusal(item, refused[item.work_item_id]))
+            elif item.work_item_id in served:
+                outcomes.append(served[item.work_item_id])
+            elif _named_admission(item) is not None:
+                outcomes.append(self._numerical_admission_refusal(item, _ADMITTED_ITEM_UNANSWERED))
+        return BatchOutcome(outcomes=outcomes, batched_f16_multivectors=batched)
+
+    @staticmethod
+    def _unverified_admissions(model_id: str, items: Iterable[Any]) -> dict[str, str]:
+        """Refuse items that name a numerical admission on a method that never verifies one."""
+        refused = {item.work_item_id: _UNVERIFIED_ADMISSION for item in items if _named_admission(item) is not None}
+        if refused:
+            logger.warning("Refused %d items naming a numerical admission for %s", len(refused), model_id)
+        return refused
+
+    def _numerical_admission_refusals(self, req: RunBatchRequest) -> dict[str, str]:
+        """Return the work items that this process's live numerical admission does not cover, with the reason."""
+        try:
+            refused = {
+                item.work_item_id: reason
+                for item, reason in zip(req.items, self._numerical_admission_reasons(req), strict=True)
+                if reason is not None
+            }
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Numerical admission check failed for %s: %s", req.model_id, type(exc).__name__)
+            refused = dict.fromkeys((item.work_item_id for item in req.items), _ADMISSION_CHECK_FAILED)
         if refused:
             logger.info(
                 "Numerical admission refused %d of %d items for %s: %s",
@@ -800,7 +871,7 @@ class IpcServer:
                 req.model_id,
                 sorted(set(refused.values())),
             )
-        return set(refused)
+        return refused
 
     def _numerical_admission_reasons(self, req: RunBatchRequest) -> list[str | None]:
         base, _, profile = req.model_id.partition(":")
@@ -836,7 +907,7 @@ class IpcServer:
         return "operation has no numerical admission"
 
     @staticmethod
-    def _numerical_admission_refusal(item: RunBatchItem) -> ItemOutcome:
+    def _numerical_admission_refusal(item: Any, reason: str) -> ItemOutcome:
         """Refuse an item before the upstream sees it; a bridged caller gets its local refusal back."""
         return ItemOutcome(
             work_item_id=item.work_item_id,
@@ -844,7 +915,7 @@ class IpcServer:
             item_index=item.item_index,
             disposition="nak_retry",
             nak_delay_ms=_NUMERICAL_ADMISSION_RETRY_MS,
-            error="numerical admission does not cover this item",
+            error=reason,
             error_code=ErrorCode.INFERENCE_ERROR.value,
         )
 
@@ -865,7 +936,11 @@ class IpcServer:
 
     @staticmethod
     def _config_retry(items: Iterable[Any]) -> BatchOutcome:
-        """Return unsettled work to the sidecar without executing any inputs."""
+        """Return unsettled work to the sidecar without executing any inputs.
+
+        An admitted item is answered at once rather than redelivered, so it
+        names the code of a refused bridge.
+        """
         return BatchOutcome(
             outcomes=[
                 ItemOutcome(
@@ -874,6 +949,7 @@ class IpcServer:
                     item_index=item.item_index,
                     disposition="nak_retry",
                     nak_delay_ms=5000,
+                    error_code=ErrorCode.INFERENCE_ERROR.value if _named_admission(item) is not None else None,
                 )
                 for item in items
             ]

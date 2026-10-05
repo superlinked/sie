@@ -55,7 +55,7 @@ use crate::scheduler::{
 use crate::shutdown::Shutdown;
 use crate::subject::{
     execution_authority_model_matches, extract_model_id, is_worker_direct_work_subject,
-    requires_execution_authority_v1,
+    requires_execution_authority_v1, requires_numerical_admission_v1,
 };
 use crate::tokenize::TokenizerRegistry;
 use crate::work_deadline::{
@@ -80,6 +80,10 @@ const INVALID_INPUT_ERROR_CODE: &str = "INVALID_INPUT";
 /// A remote profile's upstream cannot serve now; retryable, like the single
 /// server's `QUEUE_FULL` for a busy or unreachable upstream.
 const QUEUE_FULL_ERROR_CODE: &str = "QUEUE_FULL";
+/// The code of a numerical admission refusal, as the backend's fence and the
+/// single server's bridge refusal report it.
+const INFERENCE_ERROR_CODE: &str = "INFERENCE_ERROR";
+const NUMERICAL_ADMISSION_RETRY_AFTER_S: u32 = 1;
 const FALLBACK_REFUSAL_MESSAGE: &str = "The remote profile cannot serve this request now";
 /// Operation of a work item that only asks the worker to load its model.
 const LOAD_OPERATION: &str = "load";
@@ -1288,16 +1292,17 @@ impl Dispatcher {
             };
             match rmp_serde::from_slice::<WorkItem>(&msg.payload) {
                 Ok(mut wi) => {
-                    // This contract is derived from the consumer's versioned
-                    // subject, never an additive payload field an old worker
-                    // could ignore. Refuse before readiness or payload fetch.
-                    if !numerical_admission_contract_holds(&msg.subject, &wi)
-                        || (requires_execution_authority_v1(&msg.subject)
-                            && (!execution_authority_model_matches(&msg.subject, &wi.model_id)
-                                || !self.execution_authority_is_available(
-                                    &wi,
-                                    wi.operation != "generate",
-                                )))
+                    // These contracts are derived from the consumer's
+                    // versioned subject. Admitted work travels only on a
+                    // subject no sidecar without the admission fence
+                    // consumes, and its payload field must agree with that
+                    // subject. Refuse before readiness or payload fetch.
+                    let admission_violation = numerical_admission_violation(&msg.subject, &wi);
+                    if admission_violation.is_none()
+                        && requires_execution_authority_v1(&msg.subject)
+                        && (!execution_authority_model_matches(&msg.subject, &wi.model_id)
+                            || !self
+                                .execution_authority_is_available(&wi, wi.operation != "generate"))
                     {
                         nak_one_with_reason(
                             &Delivery::Nats(msg, admission_permit, None),
@@ -1330,6 +1335,24 @@ impl Dispatcher {
                         continue;
                     }
                     let mut delivery = Delivery::Nats(msg, admission_permit, None);
+                    if let Some(violation) = admission_violation {
+                        // Such an item can never become valid, and a NAK
+                        // could hand it to a consumer without the fence.
+                        warn!(
+                            work_item_id = %wi.work_item_id,
+                            model = %wi.model_id,
+                            violation,
+                            "work breaks the numerical admission contract — answering and ACKing",
+                        );
+                        self.refuse_fallback_attempt(
+                            &wi,
+                            &delivery,
+                            INFERENCE_ERROR_CODE,
+                            NUMERICAL_ADMISSION_RETRY_AFTER_S,
+                        )
+                        .await;
+                        continue;
+                    }
                     self.observe_deadline_clock(&wi, &delivery);
                     if self.settle_if_cancelled(&wi, &delivery, "intake").await {
                         continue;
@@ -2569,6 +2592,29 @@ impl Dispatcher {
         Ok(())
     }
 
+    /// Answer admitted items instead of sending them through a method that
+    /// never re-verifies a numerical admission.
+    async fn refuse_admitted_items(
+        &self,
+        items: Vec<(WorkItem, Delivery)>,
+    ) -> Vec<(WorkItem, Delivery)> {
+        let mut kept = Vec::with_capacity(items.len());
+        for (wi, delivery) in items {
+            if wi.numerical_admission_sha256.is_none() {
+                kept.push((wi, delivery));
+                continue;
+            }
+            self.refuse_fallback_attempt(
+                &wi,
+                &delivery,
+                INFERENCE_ERROR_CODE,
+                NUMERICAL_ADMISSION_RETRY_AFTER_S,
+            )
+            .await;
+        }
+        kept
+    }
+
     // -- encode -----------------------------------------------------------
 
     async fn handle_encode(
@@ -2576,6 +2622,7 @@ impl Dispatcher {
         model_id: &str,
         items: Vec<(WorkItem, Delivery)>,
     ) -> Result<(), DispatchError> {
+        let items = self.refuse_admitted_items(items).await;
         let mut resolved: Vec<(WorkItem, Delivery, MsgValue, f64, Option<String>)> =
             Vec::with_capacity(items.len());
         for (wi, delivery) in items {
@@ -2698,7 +2745,7 @@ impl Dispatcher {
                     options: wi.options.clone(),
                     profile_id: opt_non_empty(&wi.profile_id),
                     bundle_config_hash: opt_non_empty(&wi.bundle_config_hash),
-                    numerical_admission_sha256: wi.numerical_admission_sha256.clone(),
+                    numerical_admission_sha256: None,
                     payload_fetch_ms: *fm,
                     prepared_tokens,
                 }
@@ -2751,6 +2798,7 @@ impl Dispatcher {
         model_id: &str,
         items: Vec<(WorkItem, Delivery)>,
     ) -> Result<(), DispatchError> {
+        let items = self.refuse_admitted_items(items).await;
         let mut prepared: Vec<(WorkItem, Delivery, MsgValue, Vec<MsgValue>, f64)> =
             Vec::with_capacity(items.len());
         for (wi, delivery) in items {
@@ -2873,7 +2921,7 @@ impl Dispatcher {
                 options: wi.options.clone(),
                 profile_id: opt_non_empty(&wi.profile_id),
                 bundle_config_hash: opt_non_empty(&wi.bundle_config_hash),
-                numerical_admission_sha256: wi.numerical_admission_sha256.clone(),
+                numerical_admission_sha256: None,
                 payload_fetch_ms: *fm,
                 prepared_tokens: None,
             })
@@ -4862,13 +4910,28 @@ async fn nak_one(
     nak_one_with_reason(delivery, delay_ms, telemetry, "retry").await;
 }
 
-/// An item that names a numerical admission arrives only on a verified
-/// worker-direct subject and only as encode or score, the operations whose
-/// backend method re-verifies the admission before execution.
-fn numerical_admission_contract_holds(subject: &str, wi: &WorkItem) -> bool {
-    wi.numerical_admission_sha256.is_none()
-        || (requires_execution_authority_v1(subject)
-            && matches!(wi.operation.as_str(), "encode" | "score"))
+/// Why an item breaks the numerical admission contract, if it does. Admitted
+/// work names a numerical admission, travels only on the admission subject
+/// for its own model, and is encode or score: the operations whose backend
+/// method re-verifies the admission before execution. A numerical remote
+/// attempt that stands in for a local refusal is always admitted work.
+fn numerical_admission_violation(subject: &str, wi: &WorkItem) -> Option<&'static str> {
+    let numerical = matches!(wi.operation.as_str(), "encode" | "score");
+    match (
+        wi.numerical_admission_sha256.is_some(),
+        requires_numerical_admission_v1(subject),
+    ) {
+        (true, false) => Some("admitted_work_off_the_admission_subject"),
+        (false, true) => Some("unadmitted_work_on_the_admission_subject"),
+        (true, true) if !numerical => Some("admitted_work_is_not_encode_or_score"),
+        (true, true) if !execution_authority_model_matches(subject, &wi.model_id) => {
+            Some("admitted_work_names_another_model")
+        }
+        (false, false) if numerical && wi.fallback_reason.is_some() => {
+            Some("numerical_fallback_without_admission")
+        }
+        _ => None,
+    }
 }
 
 async fn nak_one_with_reason(
@@ -6690,25 +6753,66 @@ mod tests {
 
     #[tokio::test]
     async fn an_admitted_item_is_answered_at_once_even_without_a_held_refusal() {
-        let dispatcher =
-            dispatcher_with_backend(naking_backend(Some("INFERENCE_ERROR"), None, Some(1_000)));
+        let dispatcher = dispatcher_with_backend(naking_backend(None, None, None));
+        let admitted = WorkItem {
+            numerical_admission_sha256: Some("a".repeat(64)),
+            ..wi("admitted", 0, "acme/model:remote", "encode")
+        };
+        let refusal = ItemOutcome {
+            nak_delay_ms: Some(1_000),
+            error_code: Some(INFERENCE_ERROR_CODE.to_string()),
+            ..outcome("admitted", 0, Disposition::NakRetry, None, None)
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
-        let admitted = settle_one(
-            &dispatcher,
-            WorkItem {
-                numerical_admission_sha256: Some("a".repeat(64)),
-                ..wi("admitted", 0, "acme/model:remote", "encode")
-            },
-        )
-        .await;
+        dispatcher
+            .apply_outcome(
+                &admitted,
+                &Delivery::Local(LocalDelivery::new(0, 0, tx)),
+                &refusal,
+                0.0,
+                None,
+            )
+            .await;
 
-        let [crate::delivery::LocalDeliveryEvent::Result { slot: 0, result }] = admitted.as_slice()
+        let Ok(crate::delivery::LocalDeliveryEvent::Result { slot: 0, result }) = rx.try_recv()
         else {
-            panic!("an admitted item must settle with a result: {admitted:?}");
+            panic!("an admitted item must settle with a result");
         };
         assert!(!result.success);
-        assert_eq!(result.error_code.as_deref(), Some("INFERENCE_ERROR"));
+        assert_eq!(result.error_code.as_deref(), Some(INFERENCE_ERROR_CODE));
         assert_eq!(result.retry_after_s, Some(1));
+    }
+
+    #[tokio::test]
+    async fn the_scheduler_less_path_answers_admitted_items_without_the_backend() {
+        for op in ["encode", "score"] {
+            let backend = naking_backend(None, None, Some(2_500));
+            let dispatcher = dispatcher_with_backend(backend.clone());
+
+            let events = settle_one(
+                &dispatcher,
+                WorkItem {
+                    numerical_admission_sha256: Some("a".repeat(64)),
+                    ..wi("admitted", 0, "acme/model:remote", op)
+                },
+            )
+            .await;
+
+            let [crate::delivery::LocalDeliveryEvent::Result { slot: 0, result }] =
+                events.as_slice()
+            else {
+                panic!("{op}: an admitted item must settle with a result: {events:?}");
+            };
+            assert!(!result.success, "{op}");
+            assert_eq!(
+                result.error_code.as_deref(),
+                Some(INFERENCE_ERROR_CODE),
+                "{op}"
+            );
+            assert_eq!(result.retry_after_s, Some(1), "{op}");
+            assert_eq!(backend.encoded.load(Ordering::SeqCst), 0, "{op}");
+        }
     }
 
     #[tokio::test]
@@ -6989,6 +7093,15 @@ mod tests {
         delivery
     }
 
+    async fn admission_test_delivery() -> Delivery {
+        let mut delivery = unacknowledgeable_nats_delivery().await;
+        if let Delivery::Nats(message, ..) = &mut delivery {
+            message.message.subject =
+                "sie.work.test.machine.bundle.cold.worker.numerical-admission-v1".into();
+        }
+        delivery
+    }
+
     #[tokio::test]
     async fn stale_authority_generation_refuses_before_readiness_or_payload_fetch() {
         let backend = LoadingModelBackend::new("cold");
@@ -7063,45 +7176,89 @@ mod tests {
     }
 
     #[test]
-    fn an_admitted_item_must_be_verified_encode_or_score_work() {
-        let verified = "sie.work.p.m.b.model.worker.execution-authority-v1";
+    fn the_admission_subject_carries_exactly_the_admitted_numerical_work() {
+        let admission = "sie.work.p.m.b.model.worker.numerical-admission-v1";
+        let authority = "sie.work.p.m.b.model.worker.execution-authority-v1";
+        let direct = "sie.work.p.m.b.model.worker";
         let pooled = "sie.work.p.m.b.model";
-        for (subject, op, token, holds) in [
-            (verified, "encode", true, true),
-            (verified, "score", true, true),
-            (verified, "extract", true, false),
-            (verified, "generate", true, false),
-            (pooled, "encode", true, false),
-            (pooled, "encode", false, true),
-            (verified, "generate", false, true),
+        let off = Some("admitted_work_off_the_admission_subject");
+        let unadmitted = Some("unadmitted_work_on_the_admission_subject");
+        let not_numerical = Some("admitted_work_is_not_encode_or_score");
+        let bridge = Some("numerical_fallback_without_admission");
+        for (subject, model, op, token, fallback, violation) in [
+            (admission, "model", "encode", true, true, None),
+            (admission, "model", "score", true, false, None),
+            (admission, "model", "extract", true, false, not_numerical),
+            (admission, "model", "generate", true, true, not_numerical),
+            (
+                admission,
+                "other",
+                "encode",
+                true,
+                false,
+                Some("admitted_work_names_another_model"),
+            ),
+            (admission, "model", "encode", false, false, unadmitted),
+            (admission, "model", "generate", false, false, unadmitted),
+            (authority, "model", "encode", true, true, off),
+            (direct, "model", "score", true, false, off),
+            (pooled, "model", "encode", true, false, off),
+            (pooled, "model", "encode", false, true, bridge),
+            (authority, "model", "score", false, true, bridge),
+            (pooled, "model", "generate", false, true, None),
+            (authority, "model", "encode", false, false, None),
+            (pooled, "model", "extract", false, true, None),
         ] {
-            let mut work = wi("req", 0, "model", op);
+            let mut work = wi("req", 0, model, op);
             work.numerical_admission_sha256 = token.then(|| "a".repeat(64));
+            work.fallback_reason = fallback.then(|| "provisioning".to_string());
             assert_eq!(
-                numerical_admission_contract_holds(subject, &work),
-                holds,
-                "{subject} {op} {token}"
+                numerical_admission_violation(subject, &work),
+                violation,
+                "{subject} {model} {op} {token} {fallback}"
             );
         }
     }
 
     #[tokio::test]
-    async fn admitted_work_on_a_pool_subject_is_refused_at_receipt() {
-        let backend = LoadingModelBackend::new("cold");
-        let dispatcher = dispatcher_with_backend(backend.clone());
-        let mut work = wi("pooled", 0, "cold", "encode");
-        work.numerical_admission_sha256 = Some("a".repeat(64));
-        let Delivery::Nats(mut message, permit, _) = unacknowledgeable_nats_delivery().await else {
-            unreachable!()
-        };
-        message.message.subject = "sie.work.pool.machine.bundle.cold".into();
-        message.message.payload = rmp_serde::to_vec_named(&work).unwrap().into();
-        dispatcher
-            .handle_batch(vec![QueuedMessage::new(message, permit)])
-            .await;
-        dispatcher.join_parked_groups(Duration::from_secs(1)).await;
-        assert_eq!(backend.probes.load(Ordering::SeqCst), 0);
-        assert!(backend.encoded_models().is_empty());
+    async fn work_breaking_the_admission_contract_never_reaches_the_backend() {
+        let admitted = Some("a".repeat(64));
+        for (subject, token, fallback_reason) in [
+            ("sie.work.pool.machine.bundle.cold", admitted.clone(), None),
+            (
+                "sie.work.pool.machine.bundle.cold.worker.execution-authority-v1",
+                admitted.clone(),
+                None,
+            ),
+            (
+                "sie.work.pool.machine.bundle.cold.worker.numerical-admission-v1",
+                None,
+                None,
+            ),
+            (
+                "sie.work.pool.machine.bundle.cold",
+                None,
+                Some("provisioning".to_string()),
+            ),
+        ] {
+            let backend = LoadingModelBackend::new("cold");
+            let dispatcher = dispatcher_with_backend(backend.clone());
+            let mut work = wi("refused", 0, "cold", "encode");
+            work.numerical_admission_sha256 = token;
+            work.fallback_reason = fallback_reason;
+            let Delivery::Nats(mut message, permit, _) = unacknowledgeable_nats_delivery().await
+            else {
+                unreachable!()
+            };
+            message.message.subject = subject.into();
+            message.message.payload = rmp_serde::to_vec_named(&work).unwrap().into();
+            dispatcher
+                .handle_batch(vec![QueuedMessage::new(message, permit)])
+                .await;
+            dispatcher.join_parked_groups(Duration::from_secs(1)).await;
+            assert_eq!(backend.probes.load(Ordering::SeqCst), 0, "{subject}");
+            assert!(backend.encoded_models().is_empty(), "{subject}");
+        }
     }
 
     #[tokio::test]
@@ -7124,7 +7281,7 @@ mod tests {
         assert!(!dispatcher.execution_authority_is_available(&work, true));
         dispatcher
             .dispatch_decoded(
-                vec![(work.clone(), authority_test_delivery().await)],
+                vec![(work.clone(), admission_test_delivery().await)],
                 1,
                 Instant::now(),
             )
@@ -7151,7 +7308,7 @@ mod tests {
                 legacy,
                 Delivery::Local(LocalDelivery::new(0, 0, tx.clone())),
             ),
-            (admitted, authority_test_delivery().await),
+            (admitted, admission_test_delivery().await),
             (verified, authority_test_delivery().await),
         ];
         let mut batch = crate::scheduler::FormattedBatch {

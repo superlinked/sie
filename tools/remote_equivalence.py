@@ -255,7 +255,7 @@ def _wake_lanes(
     items: list[Item] = [{"id": "probe-wake", "text": "wake"}]
     for client, selected in ((local, "default"), (remote, profile)):
         common: dict[str, Any] = {
-            "options": {**config.resolve_profile("default").runtime, "profile": selected},
+            "options": {**config.resolve_profile(selected).runtime, "profile": selected},
             "wait_for_capacity": True,
             "max_oom_retries": 0,
         }
@@ -345,7 +345,7 @@ def _request(
     machine_profile: str | None = None,
 ) -> tuple[str, Any]:
     common: dict[str, Any] = {
-        "options": {**config.resolve_profile("default").runtime, "profile": profile},
+        "options": {**config.resolve_profile(profile).runtime, "profile": profile},
         "instruction": case.instruction,
         "wait_for_capacity": local_instance is None,
         "provision_timeout_s": None if local_instance is None else 60.0,
@@ -408,8 +408,8 @@ def run_probe(
     resolved = config.resolve_profile(profile)
     if profile == "default" or not is_remote_adapter_path(resolved.adapter_path):
         raise ValueError("probe requires an explicit remote profile")
-    if resolved.runtime.keys() - config.resolve_profile("default").runtime.keys():
-        raise ValueError("remote profile adds runtime defaults absent from the fallback contract")
+    if canonical_digest(dict(resolved.runtime)) != canonical_digest(dict(config.resolve_profile("default").runtime)):
+        raise ValueError("remote profile runtime differs from the local runtime it is measured against")
     default_runtime = config.resolve_profile("default").runtime
     if default_runtime.get("output_dtype", DEFAULT_OUTPUT_DTYPE) != DEFAULT_OUTPUT_DTYPE:
         raise ValueError("probe requires the default float32 output dtype")

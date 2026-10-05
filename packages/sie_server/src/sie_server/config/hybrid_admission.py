@@ -8,15 +8,19 @@ admission alive.
 
 from __future__ import annotations
 
+import threading
+import time
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from pydantic import ValidationError
 from sie_sdk.types import DEFAULT_OUTPUT_DTYPE
 
 from sie_server.config.engine import EngineConfig
 from sie_server.config.equivalence import (
+    EquivalenceRecord,
     canonical_digest,
     model_contract_digest,
     remote_profile_contract_digest,
@@ -29,6 +33,10 @@ from sie_server.config.upstreams import UpstreamKind, installed_upstreams
 from sie_server.core.profile_identity import local_profile_identity, serving_code_digest
 
 _NUMERICAL_OUTPUTS = frozenset({"dense", "sparse", "multivector", "score"})
+_MAX_CACHED_EVIDENCE_FILES = 64
+_SETTLED_EVIDENCE_NS = 2_000_000_000
+_evidence_lock = threading.Lock()
+_evidence_cache: dict[str, tuple[tuple[int, ...], tuple[tuple[EquivalenceRecord, str], ...]]] = {}
 
 
 @dataclass(frozen=True)
@@ -41,6 +49,29 @@ class NumericalAdmission:
     model_contract_sha256: str
     outputs: frozenset[str]
     expires_at: datetime
+
+
+def _evidence_version(path: str) -> tuple[int, ...]:
+    status = Path(path).stat()
+    return (status.st_dev, status.st_ino, status.st_size, status.st_mtime_ns, status.st_ctime_ns)
+
+
+def _digested_evidence(path: str) -> tuple[tuple[EquivalenceRecord, str], ...]:
+    """Each record of an evidence file with its digest, parsed once per version of the file."""
+    version = _evidence_version(path)
+    with _evidence_lock:
+        cached = _evidence_cache.get(path)
+    if cached is not None and cached[0] == version:
+        return cached[1]
+    evidence = tuple((record, equivalence_record_digest(record)) for record in read_equivalence_evidence(path))
+    # A file rewritten within the filesystem's timestamp granularity can keep
+    # its version, so only a version older than that is reused.
+    if _evidence_version(path) == version and time.time_ns() - max(version[-2:]) > _SETTLED_EVIDENCE_NS:
+        with _evidence_lock:
+            if path not in _evidence_cache and len(_evidence_cache) >= _MAX_CACHED_EVIDENCE_FILES:
+                _evidence_cache.pop(next(iter(_evidence_cache)))
+            _evidence_cache[path] = (version, evidence)
+    return evidence
 
 
 def openai_admission(config: ModelConfig, *, now: datetime | None = None) -> NumericalAdmission | str:
@@ -65,15 +96,18 @@ def openai_admission(config: ModelConfig, *, now: datetime | None = None) -> Num
     if policy is None or config.sie_id not in policy.record_files:
         return "hybrid profile has no operator-owned equivalence record"
     default_runtime = config.resolve_profile("default").runtime
-    if profile.runtime.keys() - default_runtime.keys():
-        return "hybrid remote profile adds unmeasured runtime defaults"
     if default_runtime.get("output_dtype", DEFAULT_OUTPUT_DTYPE) != DEFAULT_OUTPUT_DTYPE:
         return "hybrid output dtype differs from the measured float32 contract"
+    try:
+        if canonical_digest(dict(profile.runtime)) != canonical_digest(dict(default_runtime)):
+            return "hybrid remote profile runtime differs from the measured local runtime"
+    except (TypeError, ValueError, RecursionError):
+        return "hybrid runtime defaults cannot be identified"
     remote_execution = serving_code_digest()
     if remote_execution is None:
         return "hybrid remote execution cannot be identified"
     try:
-        records = read_equivalence_evidence(policy.record_files[config.sie_id])
+        evidence = _digested_evidence(policy.record_files[config.sie_id])
     except (OSError, ValueError, ValidationError, RecursionError):
         return "hybrid equivalence record cannot be validated"
     remote_contract = remote_profile_contract_digest(config, profile_name, upstreams)
@@ -92,8 +126,8 @@ def openai_admission(config: ModelConfig, *, now: datetime | None = None) -> Num
         "remote_execution_sha256": remote_execution,
     }
     matching = [
-        record
-        for record in records
+        (record, digest)
+        for record, digest in evidence
         if all(getattr(record, field) == value for field, value in contract.items())
         and record.local_observation_sha256
         == canonical_digest({"identity": record.local_identity, "revision": config.hf_revision})
@@ -102,7 +136,9 @@ def openai_admission(config: ModelConfig, *, now: datetime | None = None) -> Num
         return "hybrid equivalence record differs from the current serving contract"
     observed = now or datetime.now(UTC)
     admitted = [
-        record for record in matching if record.passed and record.is_fresh(max_age_s=policy.max_age_s, now=observed)
+        (record, digest)
+        for record, digest in matching
+        if record.passed and record.is_fresh(max_age_s=policy.max_age_s, now=observed)
     ]
     if not admitted:
         return "hybrid equivalence record failed or is outside its configured age"
@@ -114,14 +150,14 @@ def openai_admission(config: ModelConfig, *, now: datetime | None = None) -> Num
                 "model": config.sie_id,
                 "remote_profile": profile_name,
                 "remote_contract_sha256": remote_contract,
-                "records": sorted(equivalence_record_digest(record) for record in admitted),
+                "records": sorted(digest for _, digest in admitted),
             }
         ),
         kind=UpstreamKind.OPENAI.value,
-        local_identities=frozenset(record.local_identity for record in admitted),
+        local_identities=frozenset(record.local_identity for record, _ in admitted),
         model_contract_sha256=contract["model_contract_sha256"],
         outputs=contract["outputs"],
-        expires_at=min(record.measured_at for record in admitted) + timedelta(seconds=policy.max_age_s),
+        expires_at=min(record.measured_at for record, _ in admitted) + timedelta(seconds=policy.max_age_s),
     )
 
 
