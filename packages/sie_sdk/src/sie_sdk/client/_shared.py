@@ -1413,7 +1413,14 @@ def handle_error(response: _HttpResponse) -> NoReturn:
     if response.status_code == HTTP_SERVICE_UNAVAILABLE and code == ACCOUNT_STATE_UNAVAILABLE_ERROR_CODE:
         raise AccountStateUnavailableError(message, param=param, request=request)
     if response.status_code >= HTTP_SERVER_ERROR:
-        raise ServerError(message, code=code, status_code=response.status_code, param=param, request=request)
+        raise ServerError(
+            message,
+            code=code,
+            status_code=response.status_code,
+            param=param,
+            request=request,
+            retry_after=get_retry_after(response),
+        )
     raise RequestError(message, code=code, status_code=response.status_code, param=param, request=request)
 
 
@@ -1609,6 +1616,7 @@ def next_stream_retry_delay(
             status_code=status,
             param=get_error_param(response),
             request=parse_request_metadata(response.headers),
+            retry_after=get_retry_after(response),
         )
 
     if 300 <= status < HTTP_CLIENT_ERROR:
@@ -1631,6 +1639,7 @@ def next_stream_retry_delay(
         status_code=status,
         param=get_error_param(response),
         request=parse_request_metadata(response.headers),
+        retry_after=get_retry_after(response),
     )
 
 

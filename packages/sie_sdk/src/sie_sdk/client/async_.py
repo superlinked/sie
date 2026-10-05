@@ -2379,6 +2379,7 @@ class SIEAsyncClient:
                     status_code=response.status_code,
                     param=get_error_param(response),
                     request=parse_request_metadata(response.headers),
+                    retry_after=get_retry_after(response),
                 )
 
             if response.status_code >= HTTP_CLIENT_ERROR:

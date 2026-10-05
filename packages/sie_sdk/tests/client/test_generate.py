@@ -601,6 +601,7 @@ class TestSyncGenerate:
             # No backoff sleep happened for the 504.
             mock_sleep.assert_not_called()
             assert excinfo.value.status_code == 504
+            assert excinfo.value.retry_after == 0.01
             assert excinfo.value.param == "model"
             assert excinfo.value.request == {
                 "id": "req-generate-timeout",
@@ -953,6 +954,7 @@ class TestAsyncGenerate:
         assert client._post.call_count == 1
         mock_sleep.assert_not_called()
         assert excinfo.value.status_code == 504
+        assert excinfo.value.retry_after == 0.01
         assert excinfo.value.code == "GATEWAY_TIMEOUT"
         assert excinfo.value.param is None
         assert excinfo.value.request == {

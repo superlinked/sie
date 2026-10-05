@@ -107,9 +107,11 @@ def test_streaming_resource_exhausted_preserves_param() -> None:
 
 
 def test_streaming_gateway_timeout_preserves_param() -> None:
+    response = _response(504, "GATEWAY_TIMEOUT", param="model")
+    response.headers["Retry-After"] = "5"
     with pytest.raises(ServerError) as exc_info:
         next_stream_retry_delay(
-            _response(504, "GATEWAY_TIMEOUT", param="model"),
+            response,
             model="m",
             gpu=None,
             wait_for_capacity=True,
@@ -120,6 +122,7 @@ def test_streaming_gateway_timeout_preserves_param() -> None:
         )
 
     assert exc_info.value.param == "model"
+    assert exc_info.value.retry_after == 5
 
 
 @pytest.mark.parametrize(
