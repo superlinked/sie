@@ -590,7 +590,9 @@ can bridge `provisioning` and `model_loading` refusals on native generation,
 chat, completions and supported buffered Responses. Native generation, chat
 and completions also support streaming bridges. Explicit profiles, bundle
 pins, machine or pool overrides, and `X-SIE-Remote: forbid` retain their selected
-route. Deployment-governed routes require separate admission.
+route. A gateway with a model access policy routes remotely only when the
+policy admits the route, and keeps generation local while the policy governs
+generation routes.
 
 Cold capacity retains local pending demand. An available local worker whose
 model is unloaded receives load-only work, and the gateway waits for broker

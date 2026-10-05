@@ -212,6 +212,8 @@ impl ModelRegistryGeneration {
 /// The remote profile and worker contract chosen from one registry snapshot.
 #[derive(Clone, Debug)]
 pub(crate) struct RemoteFallbackPlan {
+    /// The canonical bare model the route stands in for.
+    pub local_model: String,
     pub model: String,
     pub bundle: String,
     pub pool: String,
@@ -1834,6 +1836,7 @@ impl ModelRegistry {
                 admitted: None,
             });
         Some(RemoteFallbackPlan {
+            local_model: local.canonical_base_model.clone(),
             model: remote_name,
             engine: snap.bundles.get(&bundle)?.engine.clone(),
             bundle,

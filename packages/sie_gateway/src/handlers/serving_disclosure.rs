@@ -3678,4 +3678,262 @@ mod tests {
             assert!(gateway.dispatcher.numerical_admissions().is_empty());
         }
     }
+
+    use crate::server::{
+        GenerationRequestIntent, GenerationRoutePolicy, GovernedGenerationRoute, ModelAccessPolicy,
+        RemoteRouteReason,
+    };
+
+    /// A deployment policy that records every remote route the gateway asks
+    /// about and answers `admit`.
+    #[derive(Default)]
+    struct RoutePolicy {
+        admit: bool,
+        hide_remote: bool,
+        govern_generation: bool,
+        asked: std::sync::Mutex<Vec<(String, String, RemoteRouteReason)>>,
+    }
+
+    impl RoutePolicy {
+        fn asked(&self) -> Vec<(String, String, RemoteRouteReason)> {
+            self.asked.lock().unwrap().clone()
+        }
+    }
+
+    impl ModelAccessPolicy for RoutePolicy {
+        fn visible(&self, resolved_model: &str, _ext: &axum::http::Extensions) -> bool {
+            !(self.hide_remote && resolved_model.ends_with(":remote"))
+        }
+
+        fn generation_route_policy(&self) -> Option<&dyn GenerationRoutePolicy> {
+            self.govern_generation
+                .then_some(self as &dyn GenerationRoutePolicy)
+        }
+
+        fn remote_route_admitted(
+            &self,
+            model: &str,
+            remote_model: &str,
+            reason: RemoteRouteReason,
+            _ext: &axum::http::Extensions,
+        ) -> bool {
+            self.asked
+                .lock()
+                .unwrap()
+                .push((model.to_string(), remote_model.to_string(), reason));
+            self.admit
+        }
+    }
+
+    impl GenerationRoutePolicy for RoutePolicy {
+        fn resolve(
+            &self,
+            customer_model: &str,
+            intent: GenerationRequestIntent,
+        ) -> Option<GovernedGenerationRoute> {
+            (intent == GenerationRequestIntent::Default).then(|| GovernedGenerationRoute {
+                model: customer_model.to_string(),
+                bundle: LOCAL_LANE.2.to_string(),
+                pool: LOCAL_LANE.0.to_string(),
+                machine_profile: LOCAL_LANE.1.to_string(),
+            })
+        }
+    }
+
+    /// A policy that only decides visibility, so remote routes take the
+    /// trait's default answer.
+    struct VisibilityOnlyPolicy;
+
+    impl ModelAccessPolicy for VisibilityOnlyPolicy {
+        fn visible(&self, _resolved_model: &str, _ext: &axum::http::Extensions) -> bool {
+            true
+        }
+    }
+
+    fn fallback_config(model: &str) -> String {
+        format!("{model}\nrouting:\n  policy: fallback\n  fallback_profile: remote\n")
+    }
+
+    /// A gateway with no local worker and one verified remote worker.
+    async fn cold_gateway(models: &[&str], policy: Arc<dyn ModelAccessPolicy>) -> TestGateway {
+        let mut gateway = TestGateway::new(models).await;
+        gateway.install_policy(policy);
+        gateway
+            .add_verified_worker("remote-1", REMOTE_LANE, &[])
+            .await;
+        gateway
+    }
+
+    async fn extract(gateway: &TestGateway, request: Request) -> Response {
+        proxy_request(State(Arc::clone(&gateway.state)), request, "extract").await
+    }
+
+    fn assert_local_provisioning(response: &Response, gateway: &TestGateway) {
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers()["retry-after"], "60");
+        assert!(!response.headers().contains_key("x-sie-fallback-reason"));
+        assert!(gateway.dispatcher.dispatched().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_policy_that_does_not_admit_remote_routes_keeps_the_local_answer() {
+        let config = fallback_config(HYBRID_EXTRACT_MODEL);
+        let gateway = cold_gateway(&[&config], Arc::new(VisibilityOnlyPolicy)).await;
+
+        let response = extract(&gateway, extraction_request(false, json!({}))).await;
+
+        assert_local_provisioning(&response, &gateway);
+    }
+
+    #[tokio::test]
+    async fn an_admitting_policy_is_asked_once_with_canonical_ids_and_the_trigger() {
+        let config = fallback_config(HYBRID_EXTRACT_MODEL);
+        for msgpack in [false, true] {
+            let policy = Arc::new(RoutePolicy {
+                admit: true,
+                ..Default::default()
+            });
+            let gateway = cold_gateway(&[&config], policy.clone()).await;
+
+            let response = extract(&gateway, extraction_request(msgpack, json!({}))).await;
+
+            assert_eq!(response.status(), StatusCode::OK, "msgpack={msgpack}");
+            assert_eq!(response.headers()["x-sie-fallback-reason"], "provisioning");
+            assert_eq!(
+                gateway.dispatcher.dispatched(),
+                vec![dispatched("extract", REMOTE_LANE, "acme/extract:remote")]
+            );
+            assert_eq!(
+                policy.asked(),
+                vec![(
+                    "acme/extract".to_string(),
+                    "acme/extract:remote".to_string(),
+                    RemoteRouteReason::Fallback(FallbackTrigger::Provisioning),
+                )]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_remote_profile_hidden_from_the_caller_is_never_asked_about_or_routed_to() {
+        let config = fallback_config(HYBRID_EXTRACT_MODEL);
+        let policy = Arc::new(RoutePolicy {
+            admit: true,
+            hide_remote: true,
+            ..Default::default()
+        });
+        let gateway = cold_gateway(&[&config], policy.clone()).await;
+
+        let response = extract(&gateway, extraction_request(false, json!({}))).await;
+
+        assert_local_provisioning(&response, &gateway);
+        assert!(policy.asked().is_empty());
+    }
+
+    #[tokio::test]
+    async fn remote_forbid_never_asks_the_policy() {
+        let config = fallback_config(HYBRID_EXTRACT_MODEL);
+        let policy = Arc::new(RoutePolicy {
+            admit: true,
+            ..Default::default()
+        });
+        let gateway = cold_gateway(&[&config], policy.clone()).await;
+        let mut request = extraction_request(false, json!({}));
+        request
+            .headers_mut()
+            .insert(REMOTE_HEADER, HeaderValue::from_static("forbid"));
+
+        let response = extract(&gateway, request).await;
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(gateway.dispatcher.dispatched().is_empty());
+        assert!(policy.asked().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_governed_generation_policy_keeps_generation_local_and_still_bridges_extraction() {
+        let generate = fallback_config(HYBRID_GENERATE_MODEL);
+        let extraction = fallback_config(HYBRID_EXTRACT_MODEL);
+        let policy = Arc::new(RoutePolicy {
+            admit: true,
+            govern_generation: true,
+            ..Default::default()
+        });
+        let gateway = cold_gateway(&[&generate, &extraction], policy.clone()).await;
+
+        for surface in ["native", "chat", "completions", "responses"] {
+            let response = buffered_surface(&gateway, surface, json!({})).await;
+            assert_eq!(
+                response.status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "{surface}"
+            );
+            assert!(
+                !response.headers().contains_key("x-sie-fallback-reason"),
+                "{surface}"
+            );
+        }
+        assert!(gateway.dispatcher.dispatched().is_empty());
+        assert!(policy.asked().is_empty());
+
+        let response = extract(&gateway, extraction_request(false, json!({}))).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            gateway.dispatcher.dispatched(),
+            vec![dispatched("extract", REMOTE_LANE, "acme/extract:remote")]
+        );
+        assert_eq!(policy.asked().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_threshold_route_asks_the_policy_before_routing_remotely() {
+        use crate::handlers::test_support::ThresholdBroker;
+        use crate::state::threshold_coordinator::ThresholdSampler;
+        let config = format!("{HYBRID_EXTRACT_MODEL}\nrouting:\n  policy: threshold\n  fallback_profile: remote\n  wake_above: 1\n  sleep_below: 0.5\n  window_s: 1\n  cooldown_s: 1\n");
+        for admit in [true, false] {
+            let Some(broker) = ThresholdBroker::start().await else {
+                return;
+            };
+            let policy = Arc::new(RoutePolicy {
+                admit,
+                ..Default::default()
+            });
+            let mut gateway = TestGateway::with_threshold_routing(&[&config], true).await;
+            gateway.install_policy(policy.clone());
+            gateway
+                .add_verified_worker("remote-1", REMOTE_LANE, &[])
+                .await;
+            let binding = broker.bind(&gateway).await;
+            let mut sampler = ThresholdSampler::default();
+            binding.coordinator.sample(&mut sampler).await.unwrap();
+            for _ in 0..2 {
+                tokio::time::sleep(Duration::from_millis(1050)).await;
+                binding.coordinator.sample(&mut sampler).await.unwrap();
+            }
+
+            let response = extract(&gateway, extraction_request(false, json!({}))).await;
+
+            let asked = policy.asked();
+            assert_eq!(
+                asked.first(),
+                Some(&(
+                    "acme/extract".to_string(),
+                    "acme/extract:remote".to_string(),
+                    RemoteRouteReason::Threshold,
+                )),
+                "admit={admit}"
+            );
+            if admit {
+                assert_eq!(response.status(), StatusCode::OK);
+                assert_eq!(response.headers()["x-sie-served-by"], "remote");
+                assert_eq!(
+                    gateway.dispatcher.dispatched(),
+                    vec![dispatched("extract", REMOTE_LANE, "acme/extract:remote")]
+                );
+            } else {
+                assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+                assert!(gateway.dispatcher.dispatched().is_empty());
+            }
+        }
+    }
 }

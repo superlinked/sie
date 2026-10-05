@@ -1016,3 +1016,25 @@ is counted once, with the decision that applied, on
 reasons `no_admission`, `local_unobserved`, `uncovered_identity` and
 `unmeasured_request`. Configuration load no longer refuses `threshold` routing
 for numerical models; the admission gates each request instead.
+
+### Remote routes under a model access policy
+
+A deployment that installs a `ModelAccessPolicy` decides every remote route
+under it, whether a fallback trigger or a `threshold` decision would take the
+route.
+
+- **When the gateway asks.** Only about a route it admits on its own: a bare
+  model whose routing names the remote profile and permits the reason, no
+  caller profile, bundle, pool or engine selector, no `X-SIE-Remote: forbid`,
+  a transport with execution authority v1, and no bridge already active.
+- **Visibility first.** The gateway requires `ModelAccessPolicy::visible` for
+  the remote profile. A profile hidden from the caller is never asked about and
+  never routed to.
+- **The question.** `ModelAccessPolicy::remote_route_admitted` receives the
+  canonical model, the remote profile and a `RemoteRouteReason`:
+  `Fallback(trigger)` or `Threshold`.
+- **The answer.** `false`, the default, keeps the local route. The caller
+  receives the answer it would have received without a remote route.
+- **Without a policy.** The gateway's own checks decide.
+- **Governed generation.** A policy that governs generation routes keeps
+  generation local, because a governed route has no remote route.

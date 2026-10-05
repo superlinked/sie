@@ -32,6 +32,7 @@ use crate::queue::streaming::{
 
 use crate::server::{
     AppState, GenerationRequestIntent, GovernedGenerationRoute, ModelAccessPolicy,
+    RemoteRouteReason,
 };
 use crate::state::demand_tracker::PhysicalLane;
 use crate::state::model_registry::{ModelRegistry, ResolveError};
@@ -2334,7 +2335,6 @@ fn fallback_plan_candidate(
         || ext.get::<RemoteFallbackOverride>().is_some()
         || ext.get::<ExplicitProfileSelector>().is_some()
         || remote_forbidden(headers).unwrap_or(true)
-        || state.model_access_policy.is_some()
         || ["x-sie-machine-profile", "x-sie-pool", "x-sie-engine"]
             .iter()
             .any(|name| headers.contains_key(*name))
@@ -2345,7 +2345,35 @@ fn fallback_plan_candidate(
     {
         return None;
     }
-    state.model_registry.remote_fallback_plan(model, trigger)
+    state
+        .model_registry
+        .remote_fallback_plan(model, trigger)
+        .filter(|plan| {
+            remote_route_admitted(state, ext, plan, RemoteRouteReason::Fallback(trigger))
+        })
+}
+
+/// A deployment policy decides every remote route under it, and is asked only
+/// about a remote profile the caller may see.
+fn remote_route_admitted(
+    state: &AppState,
+    ext: &axum::http::Extensions,
+    plan: &crate::state::model_registry::RemoteFallbackPlan,
+    reason: RemoteRouteReason,
+) -> bool {
+    state.model_access_policy.as_deref().is_none_or(|policy| {
+        policy.visible(&plan.model, ext)
+            && policy.remote_route_admitted(&plan.local_model, &plan.model, reason, ext)
+    })
+}
+
+/// A deployment-governed generation route has no remote route.
+fn generation_bridge_allowed(state: &AppState) -> bool {
+    state
+        .model_access_policy
+        .as_deref()
+        .and_then(ModelAccessPolicy::generation_route_policy)
+        .is_none()
 }
 
 /// Threshold decisions are counted only after caller validation and before
@@ -2365,7 +2393,6 @@ fn threshold_remote_plan_for_request(
         || !explicit_bundle.is_empty()
         || ext.get::<RemoteFallbackOverride>().is_some()
         || ext.get::<ExplicitProfileSelector>().is_some()
-        || state.model_access_policy.is_some()
         || ["x-sie-machine-profile", "x-sie-pool", "x-sie-engine"]
             .iter()
             .any(|name| headers.contains_key(*name))
@@ -2381,6 +2408,7 @@ fn threshold_remote_plan_for_request(
     if state.config_epoch.get() != epoch
         || remote_forbidden(headers).unwrap_or(true)
         || (plan.numerical.is_some() && !matches!(operation, "encode" | "score"))
+        || !remote_route_admitted(state, ext, &plan, RemoteRouteReason::Threshold)
     {
         return None;
     }
@@ -2681,7 +2709,8 @@ fn native_fallback_plan(
     body_held: bool,
     trigger: FallbackTrigger,
 ) -> Option<crate::state::model_registry::RemoteFallbackPlan> {
-    let eligible = native_bridge_eligible(endpoint, parsed, body_held);
+    let eligible = native_bridge_eligible(endpoint, parsed, body_held)
+        && (endpoint != "generate" || generation_bridge_allowed(state));
     fallback_plan_candidate(
         state,
         req.headers(),
@@ -3070,7 +3099,8 @@ async fn proxy_request_inner(
         &model_name,
         endpoint,
         prepared_native_parsed.as_ref(),
-        native_bridge_eligible(endpoint, prepared_native_parsed.as_ref(), body_held),
+        native_bridge_eligible(endpoint, prepared_native_parsed.as_ref(), body_held)
+            && (endpoint != "generate" || generation_bridge_allowed(&state)),
         "",
     ) {
         req.extensions_mut().insert(RemoteFallbackOverride(plan));
@@ -8112,6 +8142,7 @@ async fn resolve_generation_route(
     token_limit: (u32, &'static str),
     metric_labels_slot: Option<&telemetry::MetricLabelsSlot>,
 ) -> Result<ResolvedRoute, Response> {
+    let bridge_allowed = bridge_allowed && generation_bridge_allowed(state);
     let bridge = ext.get::<RemoteFallbackOverride>();
     let dispatch_model = bridge.map_or(dispatch_model, |RemoteFallbackOverride(plan)| {
         plan.model.as_str()

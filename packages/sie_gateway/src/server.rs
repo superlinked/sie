@@ -109,6 +109,42 @@ pub trait ModelAccessPolicy: Send + Sync {
     fn generation_route_policy(&self) -> Option<&dyn GenerationRoutePolicy> {
         None
     }
+
+    /// Whether the request for `model` may be served through its remote
+    /// profile `remote_model` for `reason`, for the caller in `ext`.
+    ///
+    /// The gateway asks only about a route it admits on its own: a bare model
+    /// whose routing names `remote_model` and permits `reason`, no caller
+    /// profile, bundle, pool or engine selector, no `X-SIE-Remote: forbid`, and
+    /// a transport with execution authority v1. [`Self::visible`] and
+    /// [`Self::serving_refusal`] have passed for `model`, and [`Self::visible`]
+    /// has passed for `remote_model`. Both ids are canonical and come from the
+    /// registry snapshot that holds the route's worker hash. The gateway may ask
+    /// more than once for one request, so an implementation has no side
+    /// effects.
+    ///
+    /// `false` keeps the local route: the caller receives the answer it would
+    /// have received without a remote route. The default is `false`, so a
+    /// deployment that installs a policy routes remotely only through it.
+    fn remote_route_admitted(
+        &self,
+        _model: &str,
+        _remote_model: &str,
+        _reason: RemoteRouteReason,
+        _ext: &axum::http::Extensions,
+    ) -> bool {
+        false
+    }
+}
+
+/// Why the gateway would serve a bare-model request through the model's
+/// remote profile.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RemoteRouteReason {
+    /// The local route refused before accepting the work, for this trigger.
+    Fallback(crate::types::model::FallbackTrigger),
+    /// A `threshold` decision routes the request remotely.
+    Threshold,
 }
 
 /// Customer-visible generation intent selected from a validated request.

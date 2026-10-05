@@ -744,6 +744,13 @@ impl TestGateway {
         }
     }
 
+    /// Install a deployment's model access policy.
+    pub(crate) fn install_policy(&mut self, policy: Arc<dyn crate::server::ModelAccessPolicy>) {
+        Arc::get_mut(&mut self.state)
+            .expect("the gateway state is not shared yet")
+            .model_access_policy = Some(policy);
+    }
+
     /// Wait at most `seconds` for queued results.
     pub(crate) fn set_request_timeout(&mut self, seconds: f64) {
         let state = Arc::get_mut(&mut self.state).expect("the gateway state is not shared yet");
