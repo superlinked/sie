@@ -238,6 +238,19 @@ pub trait InferenceBackend: Send + Sync {
         )))
     }
 
+    /// Admitted numerical work must never fall back to a method that skips
+    /// the backend's admission check.
+    async fn run_batch_with_numerical_admission_v1(
+        &self,
+        _req: RunBatchRequest,
+        _budget: Option<Duration>,
+    ) -> Result<BatchOutcome, BackendError> {
+        Err(BackendError::UnsupportedModel(format!(
+            "numerical admission unsupported on {}",
+            self.name()
+        )))
+    }
+
     /// Graceful shutdown. Called once when the worker has stopped
     /// pulling from NATS. Backends should:
     ///

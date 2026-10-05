@@ -489,7 +489,11 @@ IPC connections so they do not occupy serving or readiness connection slots.
 A remote-lane process also reports, for each model with a hybrid `encode` or
 `score` policy, the local identities its current evidence covers, as an
 `admission` with an expiry and a digest, together with the remote profile's
-contract and serving-code digests.
+contract and serving-code digests. Before such a process sends an admitted
+remote attempt upstream, it derives its admission again and refuses the item
+unless the item names the current digest, requests only admitted outputs and
+keeps the measured runtime options; a bridged caller then receives its local
+refusal with `X-SIE-Fallback-Error: INFERENCE_ERROR`.
 
 These observations and the evidence file grant no gateway routing authority.
 An `observed` child can still lack a local identity. Numerical gateway routing

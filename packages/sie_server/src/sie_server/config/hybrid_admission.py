@@ -8,7 +8,7 @@ admission alive.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -214,3 +214,19 @@ def hybrid_request_refusal(config: ModelConfig, request_options: Mapping[str, ob
     if differs:
         return "hybrid request differs from the measured runtime options"
     return None
+
+
+def bridged_item_refusal(
+    config: ModelConfig,
+    admission: NumericalAdmission,
+    *,
+    token: str | None,
+    outputs: Collection[str],
+    request_options: Mapping[str, object] | None,
+) -> str | None:
+    """Refuse a bridged item unless it names the current admission and stays within it."""
+    if token != admission.sha256:
+        return "bridged item names a different numerical admission"
+    if not outputs or not set(outputs) <= admission.outputs:
+        return "bridged item requests outputs outside its numerical admission"
+    return hybrid_request_refusal(config, request_options)

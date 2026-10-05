@@ -2850,6 +2850,7 @@ class TestGenerationSidecarIpc:
         assert resp["ok"] is True
         assert resp["body"] == {
             "supports_execution_authority_v1": True,
+            "supports_numerical_admission_v1": True,
             "has_generation_models": True,
             "generation_models": ["z-generate/model"],
             "supported_models": ["encode/model", "z-generate/model"],

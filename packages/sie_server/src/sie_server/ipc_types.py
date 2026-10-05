@@ -67,6 +67,8 @@ METHOD_RUN_BATCH = "RunBatch"
 # reject the method before processing inputs, even after a child restart.
 METHOD_RUN_BATCH_WITH_EXECUTION_AUTHORITY_V1 = "RunBatchWithExecutionAuthorityV1"
 METHOD_PROCESS_GENERATE_WITH_EXECUTION_AUTHORITY_V1 = "ProcessGenerateWithExecutionAuthorityV1"
+# Execution authority plus the numerical admission that every item names.
+METHOD_RUN_BATCH_WITH_NUMERICAL_ADMISSION_V1 = "RunBatchWithNumericalAdmissionV1"
 METHOD_APPLY_MODEL_CONFIG = "ApplyModelConfig"
 METHOD_REPLACE_MODEL_CONFIGS = "ReplaceModelConfigs"
 METHOD_SET_PINNED_MODELS = "SetPinnedModels"
@@ -297,6 +299,7 @@ class NumericalProfileSnapshotResponse(msgspec.Struct):
 
 class WorkerCapabilitiesResponse(msgspec.Struct):
     supports_execution_authority_v1: bool = False
+    supports_numerical_admission_v1: bool = False
     has_generation_models: bool = False
     generation_models: list[str] = msgspec.field(default_factory=list)
     supported_models: list[str] = msgspec.field(default_factory=list)
@@ -372,6 +375,7 @@ class EncodeBatchItem(msgspec.Struct):
     options: dict[str, Any] | None = None
     profile_id: str | None = None
     bundle_config_hash: str | None = None
+    numerical_admission_sha256: str | None = None
     payload_fetch_ms: float = 0.0
     # Optional pre-tokenised payload populated by the worker-sidecar
     # (see ``PreparedTokens`` above). When present and the tokenizer
@@ -405,6 +409,7 @@ class ScoreBatchItem(msgspec.Struct):
     options: dict[str, Any] | None = None
     profile_id: str | None = None
     bundle_config_hash: str | None = None
+    numerical_admission_sha256: str | None = None
     payload_fetch_ms: float = 0.0
     # Rust-side fast-path tokenisation. Wire layout matches the Rust
     # dispatcher: ``input_ids[0]`` is the query, ``input_ids[1..]`` are

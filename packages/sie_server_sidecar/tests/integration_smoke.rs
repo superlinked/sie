@@ -753,6 +753,7 @@ async fn smoke_encode_request_round_trips_through_rust_worker() {
         timestamp: now_s - 0.25,
         deadline: None,
         fallback_reason: None,
+        numerical_admission_sha256: None,
     };
     let payload = rmp_serde::to_vec_named(&work_item).expect("encode WorkItem");
 
@@ -1121,6 +1122,7 @@ async fn work_cancel_is_namespaced_acks_before_ipc_and_excludes_generation() {
         timestamp: now_s,
         deadline: None,
         fallback_reason: None,
+        numerical_admission_sha256: None,
     };
     let payload = rmp_serde::to_vec_named(&generation_work).expect("encode generate WorkItem");
     let _ = publish_jetstream_with_retry(&js, &generation_subject, payload).await;
@@ -1228,6 +1230,7 @@ async fn smoke_generate_direct_dispatch_round_trips_through_rust_worker() {
         timestamp: now_s - 0.25,
         deadline: None,
         fallback_reason: None,
+        numerical_admission_sha256: None,
     };
     let payload = rmp_serde::to_vec_named(&work_item).expect("encode generate WorkItem");
     let js = async_nats::jetstream::new(client.clone());
@@ -1359,6 +1362,7 @@ async fn smoke_generation_direct_dispatch_is_active_before_capability_reconcile(
         timestamp: now_s,
         deadline: None,
         fallback_reason: None,
+        numerical_admission_sha256: None,
     };
     let payload = rmp_serde::to_vec_named(&work_item).expect("encode generate WorkItem");
     let js = async_nats::jetstream::new(client.clone());
@@ -1533,6 +1537,7 @@ async fn smoke_payload_ref_request_round_trips_through_rust_worker() {
         timestamp: now_s,
         deadline: None,
         fallback_reason: None,
+        numerical_admission_sha256: None,
     };
     let payload = rmp_serde::to_vec_named(&work_item).expect("encode WorkItem");
 
@@ -1695,6 +1700,7 @@ async fn smoke_extract_payload_ref_preserves_document_bytes_through_ipc() {
         timestamp: now_s,
         deadline: None,
         fallback_reason: None,
+        numerical_admission_sha256: None,
     };
     let payload = rmp_serde::to_vec_named(&work_item).expect("encode extract WorkItem");
     let js = async_nats::jetstream::new(client.clone());
@@ -1922,6 +1928,7 @@ async fn publish_encode_work_item(
         timestamp,
         deadline,
         fallback_reason: None,
+        numerical_admission_sha256: None,
     };
     let payload = rmp_serde::to_vec_named(&work_item).expect("encode WorkItem");
     publish_jetstream_with_retry(js, subject, payload).await
@@ -2120,6 +2127,7 @@ async fn expired_or_cancelled_encode_work_is_acked_before_ipc() {
         timestamp,
         deadline: Some(deadline),
         fallback_reason: None,
+        numerical_admission_sha256: None,
     };
     let payload = rmp_serde::to_vec_named(&generation_work).expect("encode generate WorkItem");
     let generation_subject =
@@ -2870,6 +2878,7 @@ async fn smoke_prepared_tokens_round_trip_through_rust_worker() {
         timestamp: now_s - 0.25,
         deadline: None,
         fallback_reason: None,
+        numerical_admission_sha256: None,
     };
     let payload = rmp_serde::to_vec_named(&work_item).expect("encode WorkItem");
     let js = async_nats::jetstream::new(client.clone());
@@ -3023,6 +3032,7 @@ async fn publish_score_work_item(
         timestamp: now_s,
         deadline: None,
         fallback_reason: None,
+        numerical_admission_sha256: None,
     };
     let payload = rmp_serde::to_vec_named(&work_item).expect("encode score WorkItem");
     let _ = publish_jetstream_with_retry(js, subject, payload).await;
@@ -3077,6 +3087,7 @@ async fn publish_extract_work_item(
         timestamp: now_s,
         deadline: None,
         fallback_reason: None,
+        numerical_admission_sha256: None,
     };
     let payload = rmp_serde::to_vec_named(&work_item).expect("encode extract WorkItem");
     let _ = publish_jetstream_with_retry(js, subject, payload).await;

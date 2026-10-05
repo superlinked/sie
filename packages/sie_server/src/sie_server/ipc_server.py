@@ -20,7 +20,7 @@ import msgspec
 from sie_server.adapter_call_loop import handle_run_batch
 from sie_server.adapters._generation_base import GenerationUnsupportedFieldError
 from sie_server.config.equivalence import model_contract_digest, remote_profile_contract_digest
-from sie_server.config.hybrid_admission import remote_admission
+from sie_server.config.hybrid_admission import NumericalAdmission, bridged_item_refusal, remote_admission
 from sie_server.config.model import ModelConfig
 from sie_server.config.upstreams import installed_upstreams
 from sie_server.core.gpu_health import gpu_is_healthy_async
@@ -42,6 +42,7 @@ from sie_server.ipc_types import (
     METHOD_REPLACE_MODEL_CONFIGS,
     METHOD_RUN_BATCH,
     METHOD_RUN_BATCH_WITH_EXECUTION_AUTHORITY_V1,
+    METHOD_RUN_BATCH_WITH_NUMERICAL_ADMISSION_V1,
     METHOD_SET_PINNED_MODELS,
     METHOD_SIGNAL_GENERATE_CANCEL,
     METHOD_WORKER_CAPABILITIES,
@@ -67,6 +68,7 @@ from sie_server.ipc_types import (
     ReplaceModelConfigsRequest,
     ReplaceModelConfigsResponse,
     ResponseEnvelope,
+    RunBatchItem,
     RunBatchRequest,
     SetPinnedModelsRequest,
     SetPinnedModelsResponse,
@@ -78,6 +80,7 @@ from sie_server.ipc_types import (
 from sie_server.processors.admission import resolve_admission_enabled
 from sie_server.processors.generate_params import extract_generate_params
 from sie_server.queue_executor import QueueExecutor
+from sie_server.types.responses import ErrorCode
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +96,7 @@ _MAX_FRAME_BYTES = 32 * 1024 * 1024
 _MAX_NUMERICAL_PROFILES = 1024
 _MAX_ADMITTED_IDENTITIES = 8
 _MAX_NUMERICAL_MODEL_ID_BYTES = 1024
+_NUMERICAL_ADMISSION_RETRY_MS = 1000
 
 # A negotiated response may exceed one legacy IPC frame, but remains tightly
 # bounded so a malformed or unexpectedly large backend output cannot grow the
@@ -474,6 +478,7 @@ class IpcServer:
             METHOD_RUN_BATCH,
             METHOD_PROCESS_GENERATE,
             METHOD_RUN_BATCH_WITH_EXECUTION_AUTHORITY_V1,
+            METHOD_RUN_BATCH_WITH_NUMERICAL_ADMISSION_V1,
             METHOD_PROCESS_GENERATE_WITH_EXECUTION_AUTHORITY_V1,
         ):
             if self._drain_event.is_set():
@@ -558,14 +563,19 @@ class IpcServer:
                 resp_body = await self._handle_process_score(msgspec.convert(body, ProcessScoreBatchRequest))
             elif method == METHOD_PROCESS_EXTRACT_BATCH:
                 resp_body = await self._handle_process_extract(msgspec.convert(body, ProcessExtractBatchRequest))
-            elif method in (METHOD_RUN_BATCH, METHOD_RUN_BATCH_WITH_EXECUTION_AUTHORITY_V1):
+            elif method in (
+                METHOD_RUN_BATCH,
+                METHOD_RUN_BATCH_WITH_EXECUTION_AUTHORITY_V1,
+                METHOD_RUN_BATCH_WITH_NUMERICAL_ADMISSION_V1,
+            ):
                 # Rust scheduler drove the batch formation; we just fan
                 # the items into the existing
                 # per-op handlers. See adapter_call_loop.py for the
                 # full fallback matrix.
                 resp_body = await self._handle_run_batch(
                     msgspec.convert(body, RunBatchRequest),
-                    require_authority=method == METHOD_RUN_BATCH_WITH_EXECUTION_AUTHORITY_V1,
+                    require_authority=method != METHOD_RUN_BATCH,
+                    require_admission=method == METHOD_RUN_BATCH_WITH_NUMERICAL_ADMISSION_V1,
                 )
             elif method == METHOD_APPLY_MODEL_CONFIG:
                 resp_body = await self._handle_apply_model_config(msgspec.convert(body, ApplyModelConfigRequest))
@@ -744,7 +754,9 @@ class IpcServer:
                 return self._config_retry(req.items)
             return await self._executor.process_extract_batch(req)
 
-    async def _handle_run_batch(self, req: RunBatchRequest, *, require_authority: bool = False) -> BatchOutcome:
+    async def _handle_run_batch(
+        self, req: RunBatchRequest, *, require_authority: bool = False, require_admission: bool = False
+    ) -> BatchOutcome:
         payloads = [
             {"encode": item.encode, "score": item.score, "extract": item.extract}.get(item.op) for item in req.items
         ]
@@ -756,7 +768,85 @@ class IpcServer:
         async with self._execution_config(req.model_id, hashes) as valid:
             if not valid:
                 return self._config_retry(req.items)
-            return await handle_run_batch(self._executor, req)
+            if not require_admission:
+                return await handle_run_batch(self._executor, req)
+            refused = await asyncio.to_thread(self._numerical_admission_refusals, req)
+            admitted = [item for item in req.items if item.work_item_id not in refused]
+            outcomes: dict[str, ItemOutcome] = {}
+            if admitted:
+                result = await handle_run_batch(self._executor, msgspec.structs.replace(req, items=admitted))
+                outcomes = {outcome.work_item_id: outcome for outcome in result.outcomes}
+            return BatchOutcome(
+                outcomes=[
+                    outcomes[item.work_item_id]
+                    if item.work_item_id in outcomes
+                    else self._numerical_admission_refusal(item)
+                    for item in req.items
+                ]
+            )
+
+    def _numerical_admission_refusals(self, req: RunBatchRequest) -> set[str]:
+        """Return the work items that this process's live numerical admission does not cover."""
+        refused = {
+            item.work_item_id: reason
+            for item, reason in zip(req.items, self._numerical_admission_reasons(req), strict=True)
+            if reason is not None
+        }
+        if refused:
+            logger.info(
+                "Numerical admission refused %d of %d items for %s: %s",
+                len(refused),
+                len(req.items),
+                req.model_id,
+                sorted(set(refused.values())),
+            )
+        return set(refused)
+
+    def _numerical_admission_reasons(self, req: RunBatchRequest) -> list[str | None]:
+        base, _, profile = req.model_id.partition(":")
+        try:
+            config = self._executor.registry.get_config(base)
+        except KeyError:
+            return ["model is unknown"] * len(req.items)
+        if config.routing is None or not profile or config.routing.fallback_profile != profile:
+            return ["batch does not target its model's remote profile"] * len(req.items)
+        admission = remote_admission(config, wait=False)
+        if isinstance(admission, str):
+            return [admission] * len(req.items)
+        return [self._bridged_item_reason(config, admission, item) for item in req.items]
+
+    @staticmethod
+    def _bridged_item_reason(config: ModelConfig, admission: NumericalAdmission, item: RunBatchItem) -> str | None:
+        if item.op == "encode" and item.encode is not None:
+            return bridged_item_refusal(
+                config,
+                admission,
+                token=item.encode.numerical_admission_sha256,
+                outputs=item.encode.output_types if item.encode.output_types is not None else ["dense"],
+                request_options=item.encode.options,
+            )
+        if item.op == "score" and item.score is not None:
+            return bridged_item_refusal(
+                config,
+                admission,
+                token=item.score.numerical_admission_sha256,
+                outputs=["score"],
+                request_options=item.score.options,
+            )
+        return "operation has no numerical admission"
+
+    @staticmethod
+    def _numerical_admission_refusal(item: RunBatchItem) -> ItemOutcome:
+        """Refuse an item before the upstream sees it; a bridged caller gets its local refusal back."""
+        return ItemOutcome(
+            work_item_id=item.work_item_id,
+            request_id=item.request_id,
+            item_index=item.item_index,
+            disposition="nak_retry",
+            nak_delay_ms=_NUMERICAL_ADMISSION_RETRY_MS,
+            error="numerical admission does not cover this item",
+            error_code=ErrorCode.INFERENCE_ERROR.value,
+        )
 
     @contextlib.asynccontextmanager
     async def _execution_config(self, model_id: str, hashes: Iterable[str | None]) -> AsyncIterator[bool]:
@@ -872,6 +962,7 @@ class IpcServer:
         generation_models.sort()
         return WorkerCapabilitiesResponse(
             supports_execution_authority_v1=True,
+            supports_numerical_admission_v1=True,
             has_generation_models=bool(generation_models),
             generation_models=generation_models,
             supported_models=supported_models,

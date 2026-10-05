@@ -329,6 +329,7 @@ The Rust and Python protocol copies define the same method names:
 - `SignalGenerateCancel`
 - `RunBatch`
 - `RunBatchWithExecutionAuthorityV1`
+- `RunBatchWithNumericalAdmissionV1`
 - `ProcessGenerateWithExecutionAuthorityV1`
 - `ApplyModelConfig`
 - `ReplaceModelConfigs`
@@ -409,6 +410,35 @@ Every publish and retry must retain both fences, with no legacy pool or IPC
 fallback. A missing, stale, unsupported, or unavailable authority refuses work
 before inputs execute. This extends the queue contract while preserving the
 gateway's queue-only ownership and worker-owned inference.
+
+### Numerical admission fence (#415)
+
+A remote attempt for an `encode` or `score` item may carry
+`numerical_admission_sha256`, the digest of the remote process's `admission`
+that the producer relied on. The sidecar accepts such an item only on the
+`execution-authority-v1` subject and only for `encode` or `score`; anything
+else, or an item that arrives before every backend child supports the method,
+is refused before readiness or offloaded input retrieval, like other
+authority work. The local-ingest lane rejects the field.
+
+Admitted items keep their own scheduler partition and run only through
+`RunBatchWithNumericalAdmissionV1`, which an older backend rejects. Under the
+same execution lease as the authority checks, the Python backend derives its
+own current admission for the bare model whose fallback profile the batch
+targets, without contacting an SIE upstream. It runs an item only when the item
+names that digest, requests only admitted outputs and keeps the measured
+runtime options. Any other item gets `nak_retry` with `INFERENCE_ERROR` before
+the upstream is called. Redelivery to the pinned worker cannot restore an
+admission, so the sidecar publishes a `nak_retry` for an admitted item as its
+refusal at once and ACKs it, as it does for a fallback attempt. A bridged caller
+then receives its local refusal with `X-SIE-Fallback-Error: INFERENCE_ERROR`. A
+replaced, expired or removed record therefore stops execution at once, without
+waiting for the next heartbeat.
+
+The backend capability `supports_numerical_admission_v1` defaults to false. The
+heartbeat reports `supports_numerical_admission_v1` only when it reports
+`supports_execution_authority_v1` and every backend child supports the method.
+No gateway produces these items yet.
 
 Non-streaming backend responses use one physical frame while the serialized
 response is at most 32 MiB. For a larger response, the sidecar explicitly sets

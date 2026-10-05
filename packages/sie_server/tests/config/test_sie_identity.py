@@ -1,5 +1,6 @@
 """SIE hybrid authority is a fresh bounded SDK metadata observation."""
 
+import asyncio
 import json
 import threading
 import time
@@ -8,6 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
+import msgspec
 import pytest
 import yaml
 from fastapi import HTTPException, Request
@@ -21,7 +23,7 @@ from sie_server.config.upstreams import Upstream, install_upstreams
 from sie_server.core.loader import expand_profile_variants
 from sie_server.core.registry import ModelRegistry
 from sie_server.ipc_server import IpcServer
-from sie_server.ipc_types import NumericalProfileSnapshotRequest
+from sie_server.ipc_types import BatchOutcome, ItemOutcome, NumericalProfileSnapshotRequest, RunBatchRequest
 from sie_server.queue_executor import QueueExecutor
 
 IDENTITY = "v1:sha256:" + "b" * 64
@@ -546,3 +548,66 @@ async def test_snapshot_reports_no_admission_for_a_model_without_numerical_outpu
     bare = next(profile for profile in response.profiles if profile.model_id == "local/model")
     assert bare.admission is None
     assert bare.remote_contract_sha256 is not None
+
+
+def _bridged_encode(bundle_hash: str, token: str | None) -> RunBatchRequest:
+    payload = {
+        "work_item_id": "req.0",
+        "request_id": "req",
+        "item_index": 0,
+        "total_items": 1,
+        "timestamp": 1.0,
+        "item": {"text": "secret-input"},
+        "bundle_config_hash": bundle_hash,
+        "numerical_admission_sha256": token,
+    }
+    return msgspec.convert(
+        {
+            "model_id": "local/model:remote",
+            "batch_id": 1,
+            "lora_key": "",
+            "total_cost": 1,
+            "items": [
+                {"op": "encode", "encode": payload, "work_item_id": "req.0", "request_id": "req", "item_index": 0}
+            ],
+        },
+        type=RunBatchRequest,
+    )
+
+
+async def test_fence_admits_the_cached_sie_identity_and_never_waits_for_the_upstream(
+    remote, tmp_path, monkeypatch
+) -> None:
+    _upstream, requests, _constructions, _payload = remote
+    monkeypatch.setenv("SIE_IPC_SOCKET_PATH", str(tmp_path / "ipc.sock"))
+    registry = ModelRegistry(device="cpu", enable_hot_reload=False)
+    registry.add_config(model())
+    executor = QueueExecutor(registry)
+    server = IpcServer(str(tmp_path / "w.sock"), executor, worker_id="w", bundle_id="remote")
+    bundle_hash = executor.bundle_config_view("remote").bundle_config_hash
+    served = BatchOutcome(
+        outcomes=[ItemOutcome(work_item_id="req.0", request_id="req", item_index=0, disposition="publish_and_ack")]
+    )
+    inference = AsyncMock(return_value=served)
+    monkeypatch.setattr(executor, "process_encode_batch", inference)
+    sie_identity._OBSERVATIONS.clear()
+
+    cold = await server._handle_run_batch(
+        _bridged_encode(bundle_hash, "0" * 64), require_authority=True, require_admission=True
+    )
+
+    inference.assert_not_awaited()
+    assert [(value.disposition, value.error_code) for value in cold.outcomes] == [("nak_retry", "INFERENCE_ERROR")]
+    deadline = time.monotonic() + 5
+    while isinstance(admitted := hybrid_admission.sie_admission(model(), wait=False), str):
+        assert time.monotonic() < deadline
+        await asyncio.sleep(0.01)
+    assert len(requests) == 1
+
+    warm = await server._handle_run_batch(
+        _bridged_encode(bundle_hash, admitted.sha256), require_authority=True, require_admission=True
+    )
+
+    inference.assert_awaited_once()
+    assert [value.disposition for value in warm.outcomes] == ["publish_and_ack"]
+    assert len(requests) == 1

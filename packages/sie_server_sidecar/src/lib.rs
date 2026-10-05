@@ -572,6 +572,7 @@ pub async fn run(config: WorkerConfig) -> anyhow::Result<()> {
             loaded_models: Arc::clone(&loaded_models),
             numerical_process_inventory,
             execution_authority_v1: worker_pool.execution_authority_v1(),
+            numerical_admission_v1: worker_pool.numerical_admission_v1(),
             authority_consumer_ready: Arc::clone(&generation_direct_dispatch.authority_active),
             runtime_state: Arc::clone(&runtime_state),
             interval: Duration::from_millis(config.health_publish_interval_ms),

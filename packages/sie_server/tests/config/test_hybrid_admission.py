@@ -1,10 +1,11 @@
 """Only fresh deployment-owned exact contract evidence can admit a bridge."""
 
+import contextlib
 import json
 import os
 import subprocess
 import sys
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -35,7 +36,16 @@ from sie_server.config.upstreams import EquivalencePolicy, Upstream, install_ups
 from sie_server.core.loader import expand_profile_variants
 from sie_server.core.registry import ModelRegistry
 from sie_server.ipc_server import IpcServer
-from sie_server.ipc_types import NumericalProfileSnapshotRequest, ReplaceModelConfigEntry, ReplaceModelConfigsRequest
+from sie_server.ipc_types import (
+    BatchOutcome,
+    ItemOutcome,
+    NumericalProfileSnapshotRequest,
+    ReplaceModelConfigEntry,
+    ReplaceModelConfigsRequest,
+    RunBatchRequest,
+    WorkerCapabilitiesRequest,
+    WorkerCapabilitiesResponse,
+)
 from sie_server.queue_executor import QueueExecutor
 
 NOW = datetime(2026, 10, 3, tzinfo=UTC)
@@ -691,3 +701,208 @@ async def test_process_without_the_upstream_reports_no_remote_contract_or_admiss
         None,
     )
     assert set(msgspec.to_builtins(observation)) <= {"model_id", "local_identity", "model_contract_sha256"}
+
+
+def _fence_server(config: ModelConfig, tmp_path: Path) -> tuple[IpcServer, str]:
+    registry = ModelRegistry(device="cpu", enable_hot_reload=False)
+    registry.add_config(config)
+    executor = QueueExecutor(registry)
+    server = IpcServer(str(tmp_path / "w.sock"), executor, worker_id="w", bundle_id="remote")
+    return server, executor.bundle_config_view("remote").bundle_config_hash
+
+
+def _bridged_batch(model_id: str, bundle_hash: str, *items: dict[str, Any]) -> RunBatchRequest:
+    wrapped = []
+    for index, item in enumerate(items):
+        op = item.pop("op", "encode")
+        payload = {
+            "work_item_id": f"req.{index}",
+            "request_id": "req",
+            "item_index": index,
+            "total_items": len(items),
+            "timestamp": 1.0,
+            "bundle_config_hash": bundle_hash,
+            **(
+                {"query_item": {"text": "query"}, "score_items": [{"text": "doc"}]}
+                if op == "score"
+                else {"item": {"text": "secret-input"}}
+            ),
+            **item,
+        }
+        wrapped.append(
+            {"op": op, op: payload, "work_item_id": f"req.{index}", "request_id": "req", "item_index": index}
+        )
+    return msgspec.convert(
+        {"model_id": model_id, "batch_id": 1, "lora_key": "", "total_cost": len(items), "items": wrapped},
+        type=RunBatchRequest,
+    )
+
+
+def _served(req: Any) -> BatchOutcome:
+    return BatchOutcome(
+        outcomes=[
+            ItemOutcome(
+                work_item_id=item.work_item_id,
+                request_id=item.request_id,
+                item_index=item.item_index,
+                disposition="publish_and_ack",
+            )
+            for item in req.items
+        ]
+    )
+
+
+def _assert_refused_before_the_upstream(outcome: ItemOutcome) -> None:
+    assert outcome.disposition == "nak_retry"
+    assert outcome.error_code == "INFERENCE_ERROR"
+    assert outcome.result_msgpack is None
+    assert outcome.raw_output is None
+    assert outcome.units is None
+
+
+async def test_fence_serves_an_item_naming_the_current_admission(
+    admission: tuple, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, _, path, data = admission
+    _refresh_record(path, data)
+    server, bundle_hash = _fence_server(config, tmp_path)
+    current = hybrid_admission.openai_admission(config)
+    assert isinstance(current, hybrid_admission.NumericalAdmission)
+    inference = AsyncMock(side_effect=_served)
+    monkeypatch.setattr(server._executor, "process_encode_batch", inference)
+
+    outcome = await server._handle_run_batch(
+        _bridged_batch(
+            config.sie_id + ":remote",
+            bundle_hash,
+            {"numerical_admission_sha256": current.sha256, "options": {"output_dtype": "float32"}},
+        ),
+        require_authority=True,
+        require_admission=True,
+    )
+
+    inference.assert_awaited_once()
+    assert [value.disposition for value in outcome.outcomes] == ["publish_and_ack"]
+
+
+def _expire(path: Path, data: dict[str, Any]) -> None:
+    data["measured_at"] = (datetime.now(UTC) - timedelta(minutes=5)).isoformat()
+    path.write_text(json.dumps(data))
+
+
+@pytest.mark.parametrize(
+    ("model_suffix", "item", "change"),
+    [
+        (":remote", {"numerical_admission_sha256": "0" * 64}, None),
+        (":remote", {"numerical_admission_sha256": None}, None),
+        (":remote", {"output_types": ["sparse"]}, None),
+        (":remote", {"output_types": []}, None),
+        (":remote", {"options": {"normalize": False}}, None),
+        (":remote", {"options": {"output_dtype": "int8"}}, None),
+        (":remote", {"op": "score"}, None),
+        (":remote", {"op": "extract"}, None),
+        ("", {}, None),
+        (":other", {}, None),
+        (":remote", {}, "expire"),
+        (":remote", {}, "remove"),
+    ],
+)
+async def test_fence_refuses_before_the_upstream_when_the_admission_does_not_cover_the_item(
+    admission: tuple,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    model_suffix: str,
+    item: dict[str, Any],
+    change: str | None,
+) -> None:
+    config, _, path, data = admission
+    _refresh_record(path, data)
+    server, bundle_hash = _fence_server(config, tmp_path)
+    current = hybrid_admission.openai_admission(config)
+    assert isinstance(current, hybrid_admission.NumericalAdmission)
+    inference = AsyncMock(side_effect=_served)
+    for op in ("encode", "score", "extract"):
+        monkeypatch.setattr(server._executor, f"process_{op}_batch", inference)
+    monkeypatch.setattr(server, "_execution_config", _always_current)
+    if change == "expire":
+        _expire(path, data)
+    elif change == "remove":
+        path.unlink()
+
+    outcome = await server._handle_run_batch(
+        _bridged_batch(
+            config.sie_id + model_suffix, bundle_hash, {"numerical_admission_sha256": current.sha256, **item}
+        ),
+        require_authority=True,
+        require_admission=True,
+    )
+
+    inference.assert_not_awaited()
+    assert len(outcome.outcomes) == 1
+    _assert_refused_before_the_upstream(outcome.outcomes[0])
+
+
+@contextlib.asynccontextmanager
+async def _always_current(_model_id: str, _hashes: Any) -> AsyncIterator[bool]:
+    yield True
+
+
+async def test_fence_serves_the_covered_items_of_a_mixed_batch_and_keeps_their_order(
+    admission: tuple, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, _, path, data = admission
+    _refresh_record(path, data)
+    server, bundle_hash = _fence_server(config, tmp_path)
+    current = hybrid_admission.openai_admission(config)
+    assert isinstance(current, hybrid_admission.NumericalAdmission)
+    inference = AsyncMock(side_effect=_served)
+    monkeypatch.setattr(server._executor, "process_encode_batch", inference)
+
+    outcome = await server._handle_run_batch(
+        _bridged_batch(
+            config.sie_id + ":remote",
+            bundle_hash,
+            {"numerical_admission_sha256": "0" * 64},
+            {"numerical_admission_sha256": current.sha256},
+            {"numerical_admission_sha256": current.sha256, "options": {"normalize": False}},
+        ),
+        require_authority=True,
+        require_admission=True,
+    )
+
+    inference.assert_awaited_once()
+    assert [item.work_item_id for item in inference.await_args.args[0].items] == ["req.1"]
+    assert [value.work_item_id for value in outcome.outcomes] == ["req.0", "req.1", "req.2"]
+    assert outcome.outcomes[1].disposition == "publish_and_ack"
+    _assert_refused_before_the_upstream(outcome.outcomes[0])
+    _assert_refused_before_the_upstream(outcome.outcomes[2])
+
+
+async def test_fence_requires_execution_authority_first(
+    admission: tuple, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, _, path, data = admission
+    _refresh_record(path, data)
+    server, _ = _fence_server(config, tmp_path)
+    current = hybrid_admission.openai_admission(config)
+    assert isinstance(current, hybrid_admission.NumericalAdmission)
+    inference = AsyncMock(side_effect=_served)
+    monkeypatch.setattr(server._executor, "process_encode_batch", inference)
+
+    stale = await server._handle_run_batch(
+        _bridged_batch(config.sie_id + ":remote", "stale", {"numerical_admission_sha256": current.sha256}),
+        require_authority=True,
+        require_admission=True,
+    )
+
+    inference.assert_not_awaited()
+    assert [(value.disposition, value.error_code) for value in stale.outcomes] == [("nak_retry", None)]
+
+
+def test_capability_names_the_numerical_admission_method(admission: tuple, tmp_path: Path) -> None:
+    config, _, path, data = admission
+    _refresh_record(path, data)
+    server, _ = _fence_server(config, tmp_path)
+    assert server._handle_worker_capabilities(WorkerCapabilitiesRequest()).supports_numerical_admission_v1 is True
+    legacy = msgspec.convert({"supports_execution_authority_v1": True}, type=WorkerCapabilitiesResponse)
+    assert legacy.supports_numerical_admission_v1 is False

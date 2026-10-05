@@ -678,6 +678,11 @@ impl Dispatcher {
                 .worker_pool
                 .execution_authority_v1()
                 .load(Ordering::Acquire)
+            && (wi.numerical_admission_sha256.is_none()
+                || self
+                    .worker_pool
+                    .numerical_admission_v1()
+                    .load(Ordering::Acquire))
             && (!needs_scheduler || (self.scheduler_registry.is_some() && self.shutdown.is_some()))
     }
 
@@ -1286,10 +1291,13 @@ impl Dispatcher {
                     // This contract is derived from the consumer's versioned
                     // subject, never an additive payload field an old worker
                     // could ignore. Refuse before readiness or payload fetch.
-                    if requires_execution_authority_v1(&msg.subject)
-                        && (!execution_authority_model_matches(&msg.subject, &wi.model_id)
-                            || !self
-                                .execution_authority_is_available(&wi, wi.operation != "generate"))
+                    if !numerical_admission_contract_holds(&msg.subject, &wi)
+                        || (requires_execution_authority_v1(&msg.subject)
+                            && (!execution_authority_model_matches(&msg.subject, &wi.model_id)
+                                || !self.execution_authority_is_available(
+                                    &wi,
+                                    wi.operation != "generate",
+                                )))
                     {
                         nak_one_with_reason(
                             &Delivery::Nats(msg, admission_permit, None),
@@ -2690,6 +2698,7 @@ impl Dispatcher {
                     options: wi.options.clone(),
                     profile_id: opt_non_empty(&wi.profile_id),
                     bundle_config_hash: opt_non_empty(&wi.bundle_config_hash),
+                    numerical_admission_sha256: wi.numerical_admission_sha256.clone(),
                     payload_fetch_ms: *fm,
                     prepared_tokens,
                 }
@@ -2864,6 +2873,7 @@ impl Dispatcher {
                 options: wi.options.clone(),
                 profile_id: opt_non_empty(&wi.profile_id),
                 bundle_config_hash: opt_non_empty(&wi.bundle_config_hash),
+                numerical_admission_sha256: wi.numerical_admission_sha256.clone(),
                 payload_fetch_ms: *fm,
                 prepared_tokens: None,
             })
@@ -3281,7 +3291,7 @@ impl Dispatcher {
             }
             Disposition::NakRetry => {
                 let delay_ms = outcome.nak_delay_ms.unwrap_or_else(base_nak_delay_ms);
-                if wi.fallback_reason.is_some() {
+                if wi.fallback_reason.is_some() || wi.numerical_admission_sha256.is_some() {
                     let retry_after_s = outcome
                         .retry_after_s
                         .unwrap_or_else(|| delay_ms.div_ceil(1000).try_into().unwrap_or(u32::MAX));
@@ -3728,6 +3738,7 @@ impl Dispatcher {
                 options: wi.options.clone(),
                 profile_id: opt_non_empty(&wi.profile_id),
                 bundle_config_hash: opt_non_empty(&wi.bundle_config_hash),
+                numerical_admission_sha256: wi.numerical_admission_sha256.clone(),
                 payload_fetch_ms: fetch_ms,
                 prepared_tokens,
             };
@@ -3795,6 +3806,7 @@ impl Dispatcher {
                 options: wi.options.clone(),
                 profile_id: opt_non_empty(&wi.profile_id),
                 bundle_config_hash: opt_non_empty(&wi.bundle_config_hash),
+                numerical_admission_sha256: wi.numerical_admission_sha256.clone(),
                 payload_fetch_ms: fetch_ms,
                 prepared_tokens: None,
             };
@@ -4850,6 +4862,15 @@ async fn nak_one(
     nak_one_with_reason(delivery, delay_ms, telemetry, "retry").await;
 }
 
+/// An item that names a numerical admission arrives only on a verified
+/// worker-direct subject and only as encode or score, the operations whose
+/// backend method re-verifies the admission before execution.
+fn numerical_admission_contract_holds(subject: &str, wi: &WorkItem) -> bool {
+    wi.numerical_admission_sha256.is_none()
+        || (requires_execution_authority_v1(subject)
+            && matches!(wi.operation.as_str(), "encode" | "score"))
+}
+
 async fn nak_one_with_reason(
     delivery: &Delivery,
     delay_ms: u64,
@@ -5124,32 +5145,8 @@ async fn process_scheduler_batch(
         batch.metadata.len(),
         "FormattedBatch items and metadata must stay aligned"
     );
-    // Keep the execution contracts separate even when the scheduler coalesces
-    // a verified request with an older producer's empty-hash work. The legacy
-    // sibling must not invalidate or downgrade the verified request's RPC.
-    let flush_reason = batch.flush_reason;
-    let mut partitions = [
-        crate::scheduler::FormattedBatch {
-            items: Vec::new(),
-            metadata: Vec::new(),
-            total_cost: 0,
-            flush_reason,
-        },
-        crate::scheduler::FormattedBatch {
-            items: Vec::new(),
-            metadata: Vec::new(),
-            total_cost: 0,
-            flush_reason,
-        },
-    ];
-    for (item, meta) in batch.items.into_iter().zip(batch.metadata) {
-        let index = usize::from(!meta.delivery.requires_execution_authority_v1());
-        partitions[index].total_cost += item.cost();
-        partitions[index].items.push(item);
-        partitions[index].metadata.push(meta);
-    }
     let mut partition_role = role;
-    for partition in partitions {
+    for partition in split_by_contract(batch) {
         if partition.items.is_empty() {
             continue;
         }
@@ -5163,10 +5160,57 @@ async fn process_scheduler_batch(
             partition_role,
         )
         .await;
-        // Both RPCs retain one wave/pipeline permit. Preserve its Primary/Drain
-        // roles and the configured controller cadence across the two RPCs.
+        // The RPCs retain one wave/pipeline permit. Preserve its Primary/Drain
+        // roles and the configured controller cadence across them.
         partition_role = WaveRole::Drain;
     }
+}
+
+/// The backend method a scheduler batch runs through.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BatchContract {
+    NumericalAdmission = 0,
+    ExecutionAuthority = 1,
+    Legacy = 2,
+}
+
+impl BatchContract {
+    fn of<'a>(metadata: impl IntoIterator<Item = &'a SchedulerMeta>) -> Self {
+        let mut contract = Self::Legacy;
+        for meta in metadata {
+            if meta.wi.numerical_admission_sha256.is_some() {
+                return Self::NumericalAdmission;
+            }
+            if meta.delivery.requires_execution_authority_v1() {
+                contract = Self::ExecutionAuthority;
+            }
+        }
+        contract
+    }
+}
+
+/// Keep the execution contracts separate even when the scheduler coalesces
+/// a verified request with an older producer's empty-hash work: the legacy
+/// sibling must not invalidate or downgrade the verified request's RPC, and
+/// admitted numerical work must not share a method that skips admission.
+fn split_by_contract(
+    batch: crate::scheduler::FormattedBatch<SchedulerItem, SchedulerMeta>,
+) -> [crate::scheduler::FormattedBatch<SchedulerItem, SchedulerMeta>; 3] {
+    let flush_reason = batch.flush_reason;
+    let mut partitions = std::array::from_fn(|_| crate::scheduler::FormattedBatch {
+        items: Vec::new(),
+        metadata: Vec::new(),
+        total_cost: 0,
+        flush_reason,
+    });
+    for (item, meta) in batch.items.into_iter().zip(batch.metadata) {
+        let partition: &mut crate::scheduler::FormattedBatch<SchedulerItem, SchedulerMeta> =
+            &mut partitions[BatchContract::of(std::iter::once(&meta)) as usize];
+        partition.total_cost += item.cost();
+        partition.items.push(item);
+        partition.metadata.push(meta);
+    }
+    partitions
 }
 
 async fn process_scheduler_contract_batch(
@@ -5441,20 +5485,25 @@ async fn process_scheduler_contract_batch(
     // the backend roundtrip.
     let dispatch_started_at = Instant::now();
 
-    let requires_authority = batch
-        .metadata
-        .iter()
-        .any(|meta| meta.delivery.requires_execution_authority_v1());
-    let result = if requires_authority {
-        dispatcher
-            .backend
-            .run_batch_with_execution_authority_v1(req, run_batch_budget)
-            .await
-    } else {
-        dispatcher
-            .backend
-            .run_batch_with_budget(req, run_batch_budget)
-            .await
+    let result = match BatchContract::of(&batch.metadata) {
+        BatchContract::NumericalAdmission => {
+            dispatcher
+                .backend
+                .run_batch_with_numerical_admission_v1(req, run_batch_budget)
+                .await
+        }
+        BatchContract::ExecutionAuthority => {
+            dispatcher
+                .backend
+                .run_batch_with_execution_authority_v1(req, run_batch_budget)
+                .await
+        }
+        BatchContract::Legacy => {
+            dispatcher
+                .backend
+                .run_batch_with_budget(req, run_batch_budget)
+                .await
+        }
     };
     let outcome = match result {
         Ok(o) => o,
@@ -6244,6 +6293,7 @@ mod tests {
             timestamp: 0.0,
             deadline: None,
             fallback_reason: None,
+            numerical_admission_sha256: None,
         }
     }
 
@@ -6261,6 +6311,7 @@ mod tests {
             options: work.options.clone(),
             profile_id: Some(work.profile_id.clone()),
             bundle_config_hash: Some(work.bundle_config_hash.clone()),
+            numerical_admission_sha256: work.numerical_admission_sha256.clone(),
             payload_fetch_ms: 0.0,
             prepared_tokens: None,
         })
@@ -6638,6 +6689,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_admitted_item_is_answered_at_once_even_without_a_held_refusal() {
+        let dispatcher =
+            dispatcher_with_backend(naking_backend(Some("INFERENCE_ERROR"), None, Some(1_000)));
+
+        let admitted = settle_one(
+            &dispatcher,
+            WorkItem {
+                numerical_admission_sha256: Some("a".repeat(64)),
+                ..wi("admitted", 0, "acme/model:remote", "encode")
+            },
+        )
+        .await;
+
+        let [crate::delivery::LocalDeliveryEvent::Result { slot: 0, result }] = admitted.as_slice()
+        else {
+            panic!("an admitted item must settle with a result: {admitted:?}");
+        };
+        assert!(!result.success);
+        assert_eq!(result.error_code.as_deref(), Some("INFERENCE_ERROR"));
+        assert_eq!(result.retry_after_s, Some(1));
+    }
+
+    #[tokio::test]
     async fn a_fallback_refusal_keeps_the_engines_code_and_retry_hint() {
         let dispatcher =
             dispatcher_with_backend(naking_backend(Some("MODEL_LOADING"), Some(7), None));
@@ -6986,6 +7060,146 @@ mod tests {
             .await;
         assert_eq!(backend.probes.load(Ordering::SeqCst), 0);
         assert!(backend.encoded_models().is_empty());
+    }
+
+    #[test]
+    fn an_admitted_item_must_be_verified_encode_or_score_work() {
+        let verified = "sie.work.p.m.b.model.worker.execution-authority-v1";
+        let pooled = "sie.work.p.m.b.model";
+        for (subject, op, token, holds) in [
+            (verified, "encode", true, true),
+            (verified, "score", true, true),
+            (verified, "extract", true, false),
+            (verified, "generate", true, false),
+            (pooled, "encode", true, false),
+            (pooled, "encode", false, true),
+            (verified, "generate", false, true),
+        ] {
+            let mut work = wi("req", 0, "model", op);
+            work.numerical_admission_sha256 = token.then(|| "a".repeat(64));
+            assert_eq!(
+                numerical_admission_contract_holds(subject, &work),
+                holds,
+                "{subject} {op} {token}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn admitted_work_on_a_pool_subject_is_refused_at_receipt() {
+        let backend = LoadingModelBackend::new("cold");
+        let dispatcher = dispatcher_with_backend(backend.clone());
+        let mut work = wi("pooled", 0, "cold", "encode");
+        work.numerical_admission_sha256 = Some("a".repeat(64));
+        let Delivery::Nats(mut message, permit, _) = unacknowledgeable_nats_delivery().await else {
+            unreachable!()
+        };
+        message.message.subject = "sie.work.pool.machine.bundle.cold".into();
+        message.message.payload = rmp_serde::to_vec_named(&work).unwrap().into();
+        dispatcher
+            .handle_batch(vec![QueuedMessage::new(message, permit)])
+            .await;
+        dispatcher.join_parked_groups(Duration::from_secs(1)).await;
+        assert_eq!(backend.probes.load(Ordering::SeqCst), 0);
+        assert!(backend.encoded_models().is_empty());
+    }
+
+    #[tokio::test]
+    async fn admitted_work_never_reaches_a_backend_without_the_admission_method() {
+        let backend = LoadingModelBackend::new("cold");
+        let mut dispatcher = dispatcher_with_backend(backend.clone());
+        let mutable = Arc::get_mut(&mut dispatcher).unwrap();
+        mutable.config_apply_state = Some(Arc::new(ConfigApplyState::new("fresh".into())));
+        mutable.scheduler_registry = Some(Arc::new(ProductionSchedulerRegistry::new(
+            crate::scheduler::BatchConfig::from_env_or_default(),
+        )));
+        mutable.shutdown = Some(Arc::new(Shutdown::new()));
+        dispatcher
+            .worker_pool
+            .execution_authority_v1()
+            .store(true, Ordering::Release);
+        let mut work = wi("admitted", 0, "cold", "encode");
+        work.bundle_config_hash = "fresh".into();
+        work.numerical_admission_sha256 = Some("a".repeat(64));
+        assert!(!dispatcher.execution_authority_is_available(&work, true));
+        dispatcher
+            .dispatch_decoded(
+                vec![(work.clone(), authority_test_delivery().await)],
+                1,
+                Instant::now(),
+            )
+            .await;
+        assert_eq!(backend.probes.load(Ordering::SeqCst), 0);
+        assert!(backend.encoded_models().is_empty());
+
+        dispatcher
+            .worker_pool
+            .numerical_admission_v1()
+            .store(true, Ordering::Release);
+        assert!(dispatcher.execution_authority_is_available(&work, true));
+    }
+
+    #[tokio::test]
+    async fn admitted_verified_and_legacy_work_split_into_separate_methods() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut admitted = wi("admitted", 0, "model", "encode");
+        admitted.numerical_admission_sha256 = Some("a".repeat(64));
+        let verified = wi("verified", 0, "model", "encode");
+        let legacy = wi("legacy", 0, "model", "encode");
+        let entries = [
+            (
+                legacy,
+                Delivery::Local(LocalDelivery::new(0, 0, tx.clone())),
+            ),
+            (admitted, authority_test_delivery().await),
+            (verified, authority_test_delivery().await),
+        ];
+        let mut batch = crate::scheduler::FormattedBatch {
+            items: Vec::new(),
+            metadata: Vec::new(),
+            total_cost: 0,
+            flush_reason: crate::scheduler::FlushReason::CountCap,
+        };
+        for (work, delivery) in entries {
+            let item = encode_scheduler_item(&work);
+            batch.total_cost += item.cost();
+            batch.items.push(item);
+            batch.metadata.push(SchedulerMeta::new_with_worker_direct(
+                work, delivery, 0.0, true,
+            ));
+        }
+        assert_eq!(
+            BatchContract::of(&batch.metadata),
+            BatchContract::NumericalAdmission
+        );
+
+        let partitions = split_by_contract(batch);
+
+        let requests = partitions
+            .iter()
+            .map(|partition| {
+                partition
+                    .metadata
+                    .iter()
+                    .map(|meta| meta.wi.request_id.as_str())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(requests, [["admitted"], ["verified"], ["legacy"]]);
+        assert_eq!(
+            partitions
+                .iter()
+                .map(|partition| BatchContract::of(&partition.metadata))
+                .collect::<Vec<_>>(),
+            [
+                BatchContract::NumericalAdmission,
+                BatchContract::ExecutionAuthority,
+                BatchContract::Legacy,
+            ]
+        );
+        assert!(partitions
+            .iter()
+            .all(|partition| partition.items.len() == partition.metadata.len()));
     }
 
     #[tokio::test(start_paused = true)]
