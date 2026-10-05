@@ -729,7 +729,7 @@ export interface NumericalProcessInventory {
 export interface NumericalProcessObservation {
   child_index: number;
   status: "observed" | "incomplete" | "unavailable" | "invalid";
-  snapshot: NumericalProfileSnapshot | null;
+  snapshot?: NumericalProfileSnapshot | null;
 }
 
 export interface NumericalProfileSnapshot {

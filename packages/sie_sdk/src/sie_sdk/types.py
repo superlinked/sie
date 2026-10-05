@@ -939,7 +939,7 @@ class NumericalProfileSnapshot(TypedDict):
 class NumericalProcessObservation(TypedDict):
     child_index: int
     status: Literal["observed", "incomplete", "unavailable", "invalid"]
-    snapshot: NumericalProfileSnapshot | None
+    snapshot: NotRequired[NumericalProfileSnapshot | None]
 
 
 class NumericalProcessInventory(TypedDict):
