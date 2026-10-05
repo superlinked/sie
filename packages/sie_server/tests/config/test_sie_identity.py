@@ -133,11 +133,10 @@ def test_mismatch_refusal_names_both_identities(remote) -> None:
     )
 
 
-def test_mismatch_refusal_prints_an_admitted_revision_with_a_newline_as_invalid(remote) -> None:
-    remote[3][0] = httpx.Response(200, json=metadata(revision="c" * 40 + "\n"))
+def test_upstream_revision_with_a_trailing_newline_is_not_an_identity(remote) -> None:
+    remote[3][0] = httpx.Response(200, json=metadata(revision=REVISION + "\n"))
     assert sie_identity.sie_identity_refusal(model(), device="cpu") == (
-        "hybrid upstream weights or execution profile differs from local: "
-        f"upstream (hf_revision=<invalid>, identity={IDENTITY}), local (hf_revision={REVISION}, identity={IDENTITY})"
+        "hybrid upstream identity is unavailable or outside its age"
     )
 
 

@@ -798,8 +798,8 @@ class TestProcessorTokenizerMetering:
 # ---------------------------------------------------------------------------
 #
 # SGLang runs the model in a subprocess, so the base ``count_input_tokens``
-# seam has no in-process tokenizer and ``units.input_tokens`` would stay 0 (the
-# meter's reserve fallback) for the promoted dense-SMARTEST tier. The adapter
+# seam has no in-process tokenizer and ``units.input_tokens`` would be absent
+# for the promoted dense-SMARTEST tier. The adapter
 # now stamps exact per-item counts onto ``EncodeOutput.extra`` from a lazy,
 # weights-free metering tokenizer, counting the EXACT (template/EOS-formatted,
 # truncated) strings it POSTs to sglang. These tests inject the deterministic
@@ -878,8 +878,8 @@ class TestSGLangEmbeddingMetering:
         assert out.extra["input_token_counts"] == [4]
 
     def test_no_tokenizer_leaves_counts_unstamped(self) -> None:
-        # A tokenizer load failure degrades to the meter's reserve estimate
-        # (no counts) rather than billing an approximation or raising.
+        # A tokenizer load failure leaves the counts absent rather than
+        # approximating them or raising.
         adapter = self._adapter()
         adapter._metering_tokenizer_obj = None  # simulate load failure
         self._stub_embed(adapter)
@@ -963,7 +963,7 @@ class TestEncodeSeamImages:
     @pytest.mark.asyncio
     async def test_no_units_when_neither_dimension_present(self) -> None:
         # A vision adapter with no tokenizer on a text item (no token count) and
-        # no images leaves units unset -> the meter falls back to the reserve.
+        # no images leaves units unset, so the counts are absent.
         adapter = _FakeVisionEncodeAdapter()
         reg = _encode_registry(adapter)
         ex = QueueExecutor(reg)
@@ -1213,7 +1213,7 @@ class TestBatchedWorkerPathCarriesFrameCounts:
         # means the request cannot be attributed exactly, so the dimension is
         # dropped rather than assembled from a subset. Assembling the partial
         # evidence instead would UNDER-bill (the missing item silently counts
-        # as nothing); dropping it leaves the meter on its reserve estimate.
+        # as nothing); dropping it leaves the counts absent.
         handler = EncodeHandler()
         good = EncodeOutput(
             dense=np.zeros((1, 4), dtype=np.float32),
@@ -1621,8 +1621,7 @@ class TestWhollyImageTowerBatchCounts:
         # THE rail that keeps today's billing intact. A batch with even one
         # text item had text a tokenizer should have counted; zeros here would
         # convert "bill text the model read" into "bill nothing", which is a
-        # pricing decision and not a bug fix. `None` sends the meter back to
-        # its reserve estimate, exactly as before #2538.
+        # pricing decision and not a bug fix. `None` leaves the count absent.
         assert _wholly_skipped_text_tower_zeros([True, False], self._mixed(2)) is None
         assert _wholly_skipped_text_tower_zeros([False, False], self._mixed(2)) is None
 

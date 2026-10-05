@@ -163,7 +163,7 @@ class BGEM3ScoreMixin:
         two per-item encode counts. ``encode()`` already exposes those counts
         via ``EncodeOutput.extra["input_token_counts"]`` (the same authoritative
         seq lengths P3.5 records for /v1/encode). Returns ``None`` — leaving the
-        meter on its reserve estimate — unless BOTH encode outputs carry
+        counts absent — unless BOTH encode outputs carry
         well-formed, aligned counts, so a partial/estimated count can never
         masquerade as an authoritative one.
         """
