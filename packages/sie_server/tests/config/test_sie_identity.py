@@ -121,6 +121,35 @@ def test_missing_or_changed_identity_refuses(remote, payload) -> None:
     assert sie_identity.sie_identity_refusal(model(), device="cpu") is not None
 
 
+def test_mismatch_refusal_names_both_identities(remote) -> None:
+    upstream_identity = "v1:sha256:" + "d" * 64
+    remote[3][0] = httpx.Response(
+        200, json=metadata(revision="c" * 40, profiles={"stable": {"identity": upstream_identity}})
+    )
+    assert sie_identity.sie_identity_refusal(model(), device="cpu") == (
+        "hybrid upstream weights or execution profile differs from local: "
+        f"upstream (hf_revision={'c' * 40}, identity={upstream_identity}), "
+        f"local (hf_revision={REVISION}, identity={IDENTITY})"
+    )
+
+
+def test_mismatch_refusal_prints_an_admitted_revision_with_a_newline_as_invalid(remote) -> None:
+    remote[3][0] = httpx.Response(200, json=metadata(revision="c" * 40 + "\n"))
+    assert sie_identity.sie_identity_refusal(model(), device="cpu") == (
+        "hybrid upstream weights or execution profile differs from local: "
+        f"upstream (hf_revision=<invalid>, identity={IDENTITY}), local (hf_revision={REVISION}, identity={IDENTITY})"
+    )
+
+
+def test_mismatch_refusal_prints_only_revisions_and_digests(remote, monkeypatch) -> None:
+    hostile = "\x1b[2J" + "x" * 100_000 + "\r\n"
+    monkeypatch.setattr(sie_identity, "_fresh_identity", lambda *args: (hostile, hostile))
+    assert sie_identity.sie_identity_refusal(model(), device="cpu") == (
+        "hybrid upstream weights or execution profile differs from local: "
+        f"upstream (hf_revision=<invalid>, identity=<invalid>), local (hf_revision={REVISION}, identity={IDENTITY})"
+    )
+
+
 @pytest.mark.parametrize("status", [301, 302, 307, 400, 404, 429, 500, 503])
 def test_failed_metadata_never_discloses_upstream_detail_or_follows_redirect(remote, status) -> None:
     remote[3][0] = httpx.Response(
