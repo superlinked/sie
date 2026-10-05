@@ -1702,6 +1702,106 @@ def test_changing_an_upstream_restarts_the_remote_lane(tmp_path: Path) -> None:
     assert checksum(before) != checksum(after)
 
 
+EVIDENCE_CONFIG_MAP = "remote-equivalence-evidence"
+
+
+def evidence_values(record_file: str = "/etc/sie/equivalence/local-model.json", **remote: object) -> dict:
+    values = remote_pool_values(l4={"enabled": True})
+    values["upstreams"]["open-host"]["equivalence"]["record_files"] = {"local/model": record_file}
+    values["workers"]["remote"] = {"equivalence": {"configMap": EVIDENCE_CONFIG_MAP}, **remote}
+    return values
+
+
+def evidence_mounts(docs: list[dict]) -> dict[tuple[str, str, str], dict]:
+    mounts = {}
+    for doc, spec in pod_specs(docs):
+        volumes = {
+            volume["name"]
+            for volume in spec.get("volumes", [])
+            if volume.get("configMap", {}).get("name") == EVIDENCE_CONFIG_MAP
+        }
+        for container in [*spec.get("initContainers", []), *spec["containers"]]:
+            for mount in container.get("volumeMounts", []):
+                if mount["name"] in volumes:
+                    mounts[(doc["kind"], doc["metadata"]["name"], container["name"])] = mount
+    return mounts
+
+
+def test_only_the_remote_lane_worker_mounts_equivalence_evidence(tmp_path: Path) -> None:
+    docs = rendered_documents(tmp_path, evidence_values())
+
+    assert evidence_mounts(docs) == {
+        REMOTE_WORKER: {"name": "equivalence", "mountPath": "/etc/sie/equivalence", "readOnly": True}
+    }
+    (secret,) = [doc for doc in docs if doc["kind"] == "Secret" and doc["metadata"]["name"] == UPSTREAMS_SECRET]
+    rendered = yaml.safe_load(secret["stringData"]["upstreams.yaml"])
+    assert rendered["upstreams"]["open-host"]["equivalence"]["record_files"] == {
+        "local/model": "/etc/sie/equivalence/local-model.json"
+    }
+
+
+def test_a_remote_lane_without_remote_serving_mounts_no_evidence(tmp_path: Path) -> None:
+    assert evidence_mounts(rendered_documents(tmp_path, evidence_values(serving=False))) == {}
+
+
+def test_replacing_the_evidence_does_not_restart_the_remote_lane(tmp_path: Path) -> None:
+    def template_annotations(values: dict) -> dict:
+        (statefulset,) = [
+            doc
+            for doc in rendered_documents(tmp_path, values)
+            if doc["kind"] == "StatefulSet" and doc["metadata"]["name"] == REMOTE_WORKER[1]
+        ]
+        return statefulset["spec"]["template"]["metadata"]["annotations"]
+
+    before = evidence_values()
+    after = evidence_values()
+    after["workers"]["remote"]["equivalence"]["configMap"] = "other-evidence"
+
+    assert template_annotations(before) == template_annotations(after)
+
+
+@pytest.mark.parametrize(
+    "record_file",
+    [
+        "/proofs/local-model.json",
+        "/etc/sie/equivalence/",
+        "/etc/sie/equivalence/..",
+        "/etc/sie/equivalence/nested/local-model.json",
+        "/etc/sie/equivalence-other/local-model.json",
+    ],
+)
+def test_mounted_evidence_requires_each_record_file_to_be_one_of_its_keys(tmp_path: Path, record_file: str) -> None:
+    error = render_error(tmp_path, evidence_values(record_file))
+
+    assert "record files must be keys of workers.remote.equivalence.configMap" in error
+    assert "/proofs/" not in error
+
+
+@pytest.mark.parametrize(
+    "evidence",
+    [
+        {"configMap": "Upper"},
+        {"configMap": "-leading"},
+        {"configMap": "has_underscore"},
+        {"configMap": "a" * 254},
+        {"configMap": 5},
+        {"configMap": "evidence", "secret": "evidence"},
+        "evidence",
+    ],
+)
+def test_the_evidence_setting_names_one_valid_config_map(tmp_path: Path, evidence: object) -> None:
+    values = evidence_values()
+    values["workers"]["remote"]["equivalence"] = evidence
+
+    assert "workers.remote.equivalence" in render_error(tmp_path, values)
+
+
+def test_without_mounted_evidence_record_paths_are_only_checked_for_shape(tmp_path: Path) -> None:
+    docs = rendered_documents(tmp_path, remote_pool_values())
+
+    assert evidence_mounts(docs) == {}
+
+
 def upstream(**overrides: object) -> dict:
     definition: dict = {
         "kind": "sie",
