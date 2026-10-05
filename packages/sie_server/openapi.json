@@ -2400,13 +2400,23 @@
             "type": "integer",
             "title": "Total Tokens",
             "description": "Total tokens (same as prompt_tokens for embeddings)"
+          },
+          "sie_token_source": {
+            "type": "string",
+            "enum": [
+              "worker",
+              "character_estimate"
+            ],
+            "title": "Sie Token Source",
+            "description": "Whether the token count is measured by the worker or estimated from input character length"
           }
         },
         "additionalProperties": false,
         "type": "object",
         "required": [
           "prompt_tokens",
-          "total_tokens"
+          "total_tokens",
+          "sie_token_source"
         ],
         "title": "OpenAIUsage",
         "description": "Token usage information."
