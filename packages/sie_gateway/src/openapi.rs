@@ -3134,7 +3134,9 @@ pub struct Usage {
 pub struct RerankResponse {
     pub model: String,
     pub results: Vec<RerankResult>,
-    pub usage: ScoreUsage,
+    /// Omitted when the serving path could not count, as on `/v1/score`.
+    #[serde(default)]
+    pub usage: Option<ScoreUsage>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]

@@ -123,12 +123,12 @@ with SIEClient(base_url="http://localhost:8080") as client:
 
 Usage counts come from the upstream. When an upstream reports no usage, a
 native `encode`, `score` or `extract` request still succeeds, and the response
-omits `usage` instead of estimating it. This holds for every operation an
-upstream kind supports, on a single node and in a cluster. Two
-OpenAI-compatible routes differ. `/v1/embeddings` always returns a `usage`
-object, so it reports a character-based estimate instead, which the gateway
-marks with `sie_token_source: character_estimate`. `/v1/rerank` requires usage
-and answers `500` when the score carries none. For an OpenAI-compatible
+omits `usage` instead of estimating it. This holds for the `encode`, `score`
+and `extract` operations each upstream kind supports, on a single node and in a
+cluster. The OpenAI-compatible `/v1/rerank` route also omits `usage`. The
+OpenAI-compatible `/v1/embeddings` route always returns a `usage` object, so it
+reports a character-based estimate instead, which the gateway marks with
+`sie_token_source: character_estimate`. For an OpenAI-compatible
 upstream, a `usage` object with no count in it counts as no usage. Malformed
 usage fails the request: a value of the wrong type, an invalid count, or an SIE
 upstream's `usage` without `input_tokens`. Generation fails closed: a
@@ -146,7 +146,7 @@ set `upstream_model` to the provider's model id.
 OpenAI-compatible embedding profiles support dense text only. Sparse,
 multivector, image input and extraction are rejected before dispatch. A rerank
 upstream must accept the Cohere-shaped request. Without upstream usage,
-`/v1/score` omits `usage` and `/v1/rerank` answers `500`, as described above.
+`/v1/score` and `/v1/rerank` both omit `usage`, as described above.
 SIE restores scores to document order rather than exposing the provider's
 ranked order.
 
