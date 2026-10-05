@@ -266,6 +266,7 @@ async def test_a_remote_lane_worker_generates_a_native_prompt_through_the_queue_
     assert applied.applied_models == [GENERATION_MODEL_ID]
     assert "nak" not in kinds
     assert kinds[-2:] == ["ack", "done"], kinds
+    assert chunks, kinds
     assert all(chunk["request_id"] == "req-1" for chunk in chunks)
     assert expected["text"]
     assert "".join(chunk.get("text_delta", "") for chunk in chunks) == expected["text"]

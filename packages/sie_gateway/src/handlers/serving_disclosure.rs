@@ -1565,8 +1565,9 @@ mod tests {
             .await
             .expect("test NATS connection");
         let jetstream = async_nats::jetstream::new(client.clone());
+        let _ = jetstream.delete_stream("WORK_POOL_default").await;
         let stream = jetstream
-            .get_or_create_stream(async_nats::jetstream::stream::Config {
+            .create_stream(async_nats::jetstream::stream::Config {
                 name: "WORK_POOL_default".into(),
                 subjects: vec!["sie.work.default.*.*.*".into()],
                 retention: async_nats::jetstream::stream::RetentionPolicy::WorkQueue,
@@ -1687,12 +1688,16 @@ mod tests {
                 "encode",
             ),
         )
-        .await
-        .expect("served through the queue");
-        let (model_id, published) = worker.await.unwrap();
+        .await;
+        if response.is_err() {
+            worker.abort();
+        }
+        let worker = worker.await;
         upstream_task.abort();
         let _ = jetstream.delete_stream("WORK_POOL_default").await;
 
+        let response = response.expect("served through the queue");
+        let (model_id, published) = worker.expect("the worker answered");
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(stamped(&response), (Some("remote"), Some("team-sie")));
         assert_eq!(model_id, "acme/remote");
@@ -1701,7 +1706,12 @@ mod tests {
             1,
             "only the worker calls"
         );
-        assert!(calls.lock().unwrap()[0].contains(CREDENTIAL));
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "the upstream recorded no call");
+        assert!(
+            calls[0].contains(CREDENTIAL),
+            "the worker's call carries its credential"
+        );
         let published = String::from_utf8_lossy(&published);
         for private in [CREDENTIAL, "team-sie", &upstream_addr.to_string()] {
             assert!(
