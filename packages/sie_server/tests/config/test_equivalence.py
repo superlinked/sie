@@ -255,7 +255,12 @@ def test_a_case_names_the_batch_composition_of_each_local_observation() -> None:
     assert _case(("ok",) * 3, None).passed
     assert _case(("input_too_long",) * 5, compositions).passed
     assert not _case(("ok", "ok", "ok", "ok", "input_too_long"), compositions).passed
-    for outcomes, labels in [(("ok",) * 5, ("alone", "alone")), (("ok",) * 2, None), (("ok",) * 18, None)]:
+    for outcomes, labels in [
+        (("ok",) * 5, ("alone", "alone")),
+        (("ok",) * 5, None),
+        (("ok",) * 2, None),
+        (("ok",) * 18, None),
+    ]:
         with pytest.raises(ValidationError):
             _case(outcomes, labels)
     with pytest.raises(ValidationError):
@@ -265,6 +270,16 @@ def test_a_case_names_the_batch_composition_of_each_local_observation() -> None:
 class _Tokenizer:
     def encode(self, text: str, *, add_special_tokens: bool) -> list[int]:
         return [1] * (len(text.split()) + (2 if add_special_tokens else 0))
+
+
+def test_a_full_batch_holds_sixteen_items_whatever_the_case() -> None:
+    suite = probe._cases(_Tokenizer(), 32)
+    assert any(len(case.texts) > 1 for case in suite)
+    long_text = next(case.texts[0] for case in suite if case.category == "long")
+    for case in suite:
+        assert len(case.texts) + len(probe._companions(suite, case, "full")) == 16, case.category
+        assert probe._companions(suite, case, "companion") == (long_text,)
+        assert probe._companions(suite, case, "alone") == ()
 
 
 @pytest.mark.parametrize(

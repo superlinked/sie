@@ -60,7 +60,7 @@ _SCORE_QUERY = "relevant documents for search"
 _IDENTITY = re.compile(r"v[12]:sha256:[0-9a-f]{64}")
 # Repeated runs alone, beside a longer item and inside a full request batch.
 _LOCAL_COMPOSITIONS = ("alone", "alone", "companion", "full")
-_FULL_BATCH_COMPANIONS = 15
+_FULL_BATCH_ITEMS = 16
 
 
 @dataclass(frozen=True)
@@ -339,13 +339,13 @@ def _cluster_provenance(
     return _Provenance(identity, cast("str", config.hf_revision), cast("str", remote_execution), None, processes)
 
 
-def _companions(suite: list[_Case], composition: str) -> tuple[str, ...]:
+def _companions(suite: list[_Case], case: _Case, composition: str) -> tuple[str, ...]:
     """Items sent beside a case's own inputs to vary the batch a worker forms."""
-    short, long_text = (next(case.texts[0] for case in suite if case.category == name) for name in ("short", "long"))
+    short, long_text = (next(other.texts[0] for other in suite if other.category == name) for name in ("short", "long"))
     if composition == "companion":
         return (long_text,)
     if composition == "full":
-        return tuple(long_text if index % 2 else short for index in range(_FULL_BATCH_COMPANIONS))
+        return tuple(long_text if index % 2 else short for index in range(_FULL_BATCH_ITEMS - len(case.texts)))
     return ()
 
 
@@ -474,7 +474,7 @@ def run_probe(
                     upstream=upstream_name,
                     local_instance=before.local_instance,
                     machine_profile=machine_profile,
-                    companions=_companions(suite, composition),
+                    companions=_companions(suite, case, composition),
                 )
                 for client, selected, composition in (
                     *((local, "default", composition) for composition in _LOCAL_COMPOSITIONS),

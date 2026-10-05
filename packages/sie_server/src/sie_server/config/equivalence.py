@@ -188,7 +188,8 @@ class ProbeCase(BaseModel):
     def coherent(self) -> ProbeCase:
         if any(value < 0 or value > _MAX_TOKENS for value in self.token_counts):
             raise ValueError("probe token count is out of range")
-        if self.local_compositions is not None and len(self.local_compositions) != len(self.outcomes) - 1:
+        local = _MIN_LOCAL_OBSERVATIONS if self.local_compositions is None else len(self.local_compositions)
+        if local != len(self.outcomes) - 1:
             raise ValueError("every local observation needs one batch composition")
         if self.succeeded and not self.measurements:
             raise ValueError("successful runs require measured evidence")
