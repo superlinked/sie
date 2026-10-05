@@ -6,6 +6,10 @@ variables; no credential, request body or vector is written to the evidence.
 The local model must expose a verified profile identity. The record covers
 every process that reports that identity. Hybrid routing remains disabled while
 the explicit remote profile is evaluated.
+
+With --cluster the URL is a cluster gateway. Every observation then comes from
+the processes that cluster status lists for the model, and the probe refuses
+unless they all report one identity and stay the same throughout the run.
 """
 
 from __future__ import annotations
@@ -15,6 +19,7 @@ import hashlib
 import os
 import re
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from http import HTTPStatus
@@ -171,6 +176,124 @@ def _values(
     return arrays
 
 
+@dataclass(frozen=True)
+class _Provenance:
+    identity: str
+    revision: str
+    remote_execution: str
+    local_instance: str | None
+    processes: tuple[tuple[str, ...], ...] = ()
+
+
+def _hex_digest(value: object) -> bool:
+    return isinstance(value, str) and len(value) == _HASH_LENGTH and all(char in "0123456789abcdef" for char in value)
+
+
+def _server_provenance(local: SIEClient, config: ModelConfig, profile: str, expected_remote: str) -> _Provenance:
+    metadata = local.get_model(config.sie_id)
+    profiles = metadata.get("profiles") or {}
+    identity = profiles.get("default", {}).get("identity")
+    local_instance = profiles.get("default", {}).get("runtime_instance_id")
+    if not _hex_digest(local_instance):
+        raise ValueError("probe requires a direct worker runtime instance")
+    if profiles.get(profile, {}).get("remote_contract_sha256") != expected_remote:
+        raise ValueError("serving endpoint/model contract differs from the supplied files")
+    remote_execution = profiles.get(profile, {}).get("remote_execution_sha256")
+    if not _hex_digest(remote_execution):
+        raise ValueError("serving remote execution cannot be identified")
+    if not isinstance(identity, str) or not _IDENTITY.fullmatch(identity):
+        raise ValueError("local execution cannot be identified; no equivalence record can authorize it")
+    if (
+        metadata.get("revision") != config.hf_revision
+        or metadata.get("max_sequence_length") != config.max_sequence_length
+    ):
+        raise ValueError("local model metadata differs from the supplied model contract")
+    return _Provenance(
+        identity, cast("str", config.hf_revision), cast("str", remote_execution), cast("str", local_instance)
+    )
+
+
+def _cluster_workers(client: SIEClient) -> list[Mapping[str, Any]]:
+    for message in client.watch(mode="cluster"):
+        workers = message.get("workers") if isinstance(message, dict) else None
+        if isinstance(workers, list) and all(isinstance(worker, dict) for worker in workers):
+            return cast("list[Mapping[str, Any]]", workers)
+        break
+    raise ValueError("cluster status is unavailable")
+
+
+def _model_observations(worker: Mapping[str, Any], model: str) -> list[tuple[object, object, Mapping[str, Any]]]:
+    inventory = worker.get("numerical_process_inventory") or {}
+    found = []
+    for child in inventory.get("children") or []:
+        snapshot = child.get("snapshot") or {}
+        found.extend(
+            (child.get("status"), snapshot.get("runtime_instance_id"), observation)
+            for observation in snapshot.get("profiles") or []
+            if observation.get("model_id") == model
+        )
+    return found
+
+
+def _cluster_provenance(
+    client: SIEClient, config: ModelConfig, expected_remote: str, machine_profile: str | None
+) -> _Provenance:
+    """Attribute every probe observation to processes listed by cluster status.
+
+    The local processes are those of non-remote workers (of one machine profile
+    when given) that list the model, and they must all report one identity and
+    the supplied model contract. The remote processes are those of remote
+    workers that report the model's remote contract, and they must agree.
+    """
+    model, contract = config.sie_id, model_contract_digest(config)
+    local: dict[str, object] = {}
+    remote: dict[str, tuple[object, object]] = {}
+    for worker in _cluster_workers(client):
+        observations = _model_observations(worker, model)
+        if worker.get("bundle") == "remote":
+            for status, instance, observation in observations:
+                if observation.get("remote_contract_sha256") is None:
+                    continue
+                if status != "observed" or not _hex_digest(instance):
+                    raise ValueError("remote process provenance is incomplete")
+                remote[cast("str", instance)] = (
+                    observation.get("remote_contract_sha256"),
+                    observation.get("remote_execution_sha256"),
+                )
+            continue
+        if machine_profile is not None and worker.get("gpu") != machine_profile:
+            continue
+        if not observations and model in (worker.get("loaded_models") or []):
+            raise ValueError("a worker serving the model reports no process provenance")
+        for status, instance, observation in observations:
+            if (
+                status != "observed"
+                or not _hex_digest(instance)
+                or observation.get("model_contract_sha256") != contract
+            ):
+                raise ValueError("local process provenance is incomplete or differs from the supplied model")
+            local[cast("str", instance)] = observation.get("local_identity")
+    identities = set(local.values())
+    if len(identities) != 1:
+        raise ValueError("local processes do not report exactly one execution identity")
+    (identity,) = identities
+    if not isinstance(identity, str) or not _IDENTITY.fullmatch(identity):
+        raise ValueError("local execution cannot be identified; no equivalence record can authorize it")
+    contracts = set(remote.values())
+    if len(contracts) != 1:
+        raise ValueError("remote processes do not report exactly one remote contract")
+    ((remote_contract, remote_execution),) = contracts
+    if remote_contract != expected_remote:
+        raise ValueError("serving endpoint/model contract differs from the supplied files")
+    if not _hex_digest(remote_execution):
+        raise ValueError("serving remote execution cannot be identified")
+    processes = (
+        *sorted((instance, cast("str", value)) for instance, value in local.items()),
+        *sorted((instance, *cast("tuple[str, str]", value)) for instance, value in remote.items()),
+    )
+    return _Provenance(identity, cast("str", config.hf_revision), cast("str", remote_execution), None, processes)
+
+
 def _request(
     client: SIEClient,
     config: ModelConfig,
@@ -180,15 +303,18 @@ def _request(
     *,
     profile: str,
     upstream: str,
-    local_instance: str,
+    local_instance: str | None,
+    machine_profile: str | None = None,
 ) -> tuple[str, Any]:
     common: dict[str, Any] = {
         "options": {**config.resolve_profile("default").runtime, "profile": profile},
         "instruction": case.instruction,
-        "wait_for_capacity": False,
-        "provision_timeout_s": 60.0,
+        "wait_for_capacity": local_instance is None,
+        "provision_timeout_s": None if local_instance is None else 60.0,
         "max_oom_retries": 0,
     }
+    if machine_profile is not None and profile == "default":
+        common["gpu"] = machine_profile
     try:
         items: list[Item] = [{"id": f"probe-{index}", "text": text} for index, text in enumerate(case.texts)]
         if operation == "score":
@@ -215,11 +341,11 @@ def _request(
             expected = "local" if profile == "default" else "remote"
             if evidence.get("served_by") != expected or (expected == "remote" and evidence.get("upstream") != upstream):
                 raise ValueError("probe serving provenance is missing or differs")
-            if evidence.get("runtime_instance_id") != local_instance:
+            if local_instance is not None and evidence.get("runtime_instance_id") != local_instance:
                 raise ValueError("probe serving runtime instance differs")
         return "ok", result
     except RequestError as error:
-        if (error.request or {}).get("runtime_instance_id") != local_instance:
+        if local_instance is not None and (error.request or {}).get("runtime_instance_id") != local_instance:
             raise ValueError("probe refusal runtime instance differs") from None
         code = (error.code or "").upper()
         if error.status_code == HTTPStatus.BAD_REQUEST and code in ("INVALID_INPUT", "INPUT_TOO_LONG"):
@@ -228,7 +354,14 @@ def _request(
 
 
 def run_probe(
-    config: ModelConfig, upstreams: Any, local: SIEClient, remote: SIEClient, profile: str
+    config: ModelConfig,
+    upstreams: Any,
+    local: SIEClient,
+    remote: SIEClient,
+    profile: str,
+    *,
+    cluster: bool = False,
+    machine_profile: str | None = None,
 ) -> EquivalenceRecord:
     if config.weights_path is not None or not is_immutable_revision(config.hf_revision) or not config.hf_id:
         raise ValueError("probe requires immutable local Hub weights")
@@ -244,32 +377,16 @@ def run_probe(
         raise ValueError("probe requires the default float32 output dtype")
     upstream_name, upstream_model = resolved.loadtime["upstream"], resolved.loadtime["upstream_model"]
     upstream = upstreams[upstream_name]
-    before = local.get_model(config.sie_id)
-    identity = (before.get("profiles") or {}).get("default", {}).get("identity")
-    local_instance = (before.get("profiles") or {}).get("default", {}).get("runtime_instance_id")
-    if (
-        not isinstance(local_instance, str)
-        or len(local_instance) != _HASH_LENGTH
-        or any(char not in "0123456789abcdef" for char in local_instance)
-    ):
-        raise ValueError("probe requires a direct worker runtime instance")
     expected_remote = remote_profile_contract_digest(config, profile, upstreams)
-    if (
-        expected_remote is None
-        or (before.get("profiles") or {}).get(profile, {}).get("remote_contract_sha256") != expected_remote
-    ):
+    if expected_remote is None:
         raise ValueError("serving endpoint/model contract differs from the supplied files")
-    remote_execution = (before.get("profiles") or {}).get(profile, {}).get("remote_execution_sha256")
-    if (
-        not isinstance(remote_execution, str)
-        or len(remote_execution) != _HASH_LENGTH
-        or any(char not in "0123456789abcdef" for char in remote_execution)
-    ):
-        raise ValueError("serving remote execution cannot be identified")
-    if not isinstance(identity, str) or not _IDENTITY.fullmatch(identity):
-        raise ValueError("local execution cannot be identified; no equivalence record can authorize it")
-    if before.get("revision") != config.hf_revision or before.get("max_sequence_length") != config.max_sequence_length:
-        raise ValueError("local model metadata differs from the supplied model contract")
+
+    def provenance() -> _Provenance:
+        if cluster:
+            return _cluster_provenance(local, config, expected_remote, machine_profile)
+        return _server_provenance(local, config, profile, expected_remote)
+
+    before = provenance()
     outputs = set(config.outputs) & {"dense", "sparse", "multivector", "score"}
     if not outputs:
         raise ValueError("probe requires encode or score outputs")
@@ -293,7 +410,8 @@ def run_probe(
                     selected_outputs,
                     profile=selected,
                     upstream=upstream_name,
-                    local_instance=local_instance,
+                    local_instance=before.local_instance,
+                    machine_profile=machine_profile,
                 )
                 for client, selected in ((local, "default"), (local, "default"), (remote, profile))
             ]
@@ -332,13 +450,7 @@ def run_probe(
                     measurements=cast("Any", measurements),
                 )
             )
-    after = local.get_model(config.sie_id)
-    if (
-        (after.get("profiles") or {}).get("default", {}).get("runtime_instance_id") != local_instance
-        or (after.get("profiles") or {}).get("default", {}).get("identity") != identity
-        or (after.get("profiles") or {}).get(profile, {}).get("remote_contract_sha256") != expected_remote
-        or (after.get("profiles") or {}).get(profile, {}).get("remote_execution_sha256") != remote_execution
-    ):
+    if provenance() != before:
         raise ValueError("local execution changed during the probe")
     return EquivalenceRecord(
         measured_at=datetime.now(UTC),
@@ -350,11 +462,11 @@ def run_probe(
             {"cli": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(), "library": _execution_code()["sources"]}
         ),
         remote_contract_sha256=expected_remote,
-        remote_execution_sha256=remote_execution,
-        local_observation_sha256=canonical_digest({"identity": identity, "revision": before.get("revision")}),
+        remote_execution_sha256=before.remote_execution,
+        local_observation_sha256=canonical_digest({"identity": before.identity, "revision": before.revision}),
         runtime_options_sha256=canonical_digest(dict(config.resolve_profile("default").runtime)),
         output_dtype="float32",
-        local_identity=identity,
+        local_identity=before.identity,
         model=config.sie_id,
         remote_profile=profile,
         context_length=config.max_sequence_length,
@@ -371,7 +483,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--api-key-env")
     parser.add_argument("--remote-profile", default="remote")
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--cluster", action="store_true", help="--local-url is a cluster gateway")
+    parser.add_argument("--gpu", help="with --cluster, the machine profile whose processes are measured")
     args = parser.parse_args(argv)
+    if args.gpu is not None and not args.cluster:
+        parser.error("--gpu requires --cluster")
     try:
         if args.output.exists():
             raise ValueError("evidence output already exists")
@@ -386,7 +502,9 @@ def main(argv: list[str] | None = None) -> int:
             SIEClient(base_url, api_key=key, remote="forbid", timeout_s=60) as local,
             SIEClient(base_url, api_key=key, timeout_s=60) as remote,
         ):
-            record = run_probe(config, upstreams, local, remote, args.remote_profile)
+            record = run_probe(
+                config, upstreams, local, remote, args.remote_profile, cluster=args.cluster, machine_profile=args.gpu
+            )
         # Refuse to clobber existing evidence; a scheduled run chooses a new path.
         with args.output.open("x", encoding="utf-8") as output:
             output.write(record.model_dump_json(indent=2) + "\n")

@@ -1,5 +1,7 @@
 """Evidence admits only complete, fresh suites bounded by measured local noise."""
 
+import base64
+import hashlib
 import importlib.util
 import json
 import os
@@ -21,6 +23,7 @@ from sie_server.config.equivalence import (
     ProbeCase,
     canonical_digest,
     measure_values,
+    model_contract_digest,
     read_equivalence_record,
     remote_profile_contract_digest,
 )
@@ -633,3 +636,268 @@ def test_process_bound_records_are_refused() -> None:
     data.update(version=2, local_instance_id="a" * 64)
     with pytest.raises(ValidationError):
         EquivalenceRecord.model_validate_json(json.dumps(data))
+
+
+_CLUSTER_MODEL = """sie_id: local/model
+hf_id: weights/model
+hf_revision: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+inputs: {text: true}
+tasks: {encode: {dense: {dim: 2}}}
+max_sequence_length: 32
+profiles:
+  default:
+    adapter_path: sie_server.adapters.bge_m3:BGEM3Adapter
+    max_batch_tokens: 8192
+    compute_precision: float32
+  remote:
+    adapter_path: sie_server.adapters.remote.openai:OpenAIUpstreamAdapter
+    max_batch_tokens: 8192
+    adapter_options:
+      loadtime: {upstream: upstream, upstream_model: vendor/model}
+"""
+_CLUSTER_UPSTREAMS = """upstreams:
+  upstream:
+    kind: openai
+    base_url: https://vendor.example/v1
+    endpoints: [embeddings]
+    rate_cap: {requests_per_minute: 600, max_concurrency: 32}
+"""
+_IDENTITY_L4 = "v2:sha256:" + "1" * 64
+_IDENTITY_A100 = "v2:sha256:" + "2" * 64
+_REMOTE_EXECUTION = "7" * 64
+
+
+def _websocket_frame(payload: bytes, opcode: int) -> bytes:
+    size = len(payload)
+    if size < 126:
+        header = bytes([0x80 | opcode, size])
+    elif size < 1 << 16:
+        header = bytes([0x80 | opcode, 126]) + size.to_bytes(2, "big")
+    else:
+        header = bytes([0x80 | opcode, 127]) + size.to_bytes(8, "big")
+    return header + payload
+
+
+def _worker(name: str, gpu: str, bundle: str, profiles: list[dict[str, Any]], instance: str) -> dict[str, Any]:
+    return {
+        "name": name,
+        "url": f"http://{name}:8080",
+        "gpu": gpu,
+        "bundle": bundle,
+        "loaded_models": [],
+        "numerical_process_inventory": {
+            "observed_at_unix_ms": 1,
+            "children": [
+                {
+                    "child_index": 0,
+                    "status": "observed",
+                    "snapshot": {"runtime_instance_id": instance, "complete": True, "profiles": profiles},
+                }
+            ],
+        },
+    }
+
+
+def _cluster_fixture(tmp_path: Path) -> tuple[Path, Path, ModelConfig, str, str]:
+    config_file, upstream_file = tmp_path / "model.yaml", tmp_path / "upstreams.yaml"
+    config_file.write_text(_CLUSTER_MODEL)
+    upstream_file.write_text(_CLUSTER_UPSTREAMS)
+    config = ModelConfig.model_validate(yaml.safe_load(_CLUSTER_MODEL))
+    remote_contract = remote_profile_contract_digest(config, "remote", load_upstreams(upstream_file))
+    assert remote_contract is not None
+    return config_file, upstream_file, config, model_contract_digest(config), remote_contract
+
+
+def _fleet(contract: str, remote_contract: str, *, identities: tuple[str, str]) -> list[dict[str, Any]]:
+    def local(identity: str) -> list[dict[str, Any]]:
+        return [{"model_id": "local/model", "model_contract_sha256": contract, "local_identity": identity}]
+
+    return [
+        _worker("l4-0", "l4", "default", local(identities[0]), "a" * 64),
+        _worker("a100-0", "a100-80gb", "default", local(identities[1]), "b" * 64),
+        _worker(
+            "remote-0",
+            "cpu",
+            "remote",
+            [
+                {
+                    "model_id": "local/model",
+                    "model_contract_sha256": contract,
+                    "local_identity": None,
+                    "remote_contract_sha256": remote_contract,
+                    "remote_execution_sha256": _REMOTE_EXECUTION,
+                }
+            ],
+            "c" * 64,
+        ),
+    ]
+
+
+def _run_cluster_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, statuses: list[list[dict[str, Any]]], extra: list[str]
+) -> tuple[int, list[tuple[dict[str, Any], dict[str, str]]], Path]:
+    config_file, upstream_file = tmp_path / "model.yaml", tmp_path / "upstreams.yaml"
+    requests: list[tuple[dict[str, Any], dict[str, str]]] = []
+    connections: list[int] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_GET(self) -> None:
+            if self.path != "/ws/cluster-status" or self.headers.get("Upgrade", "").lower() != "websocket":
+                self.send_error(404)
+                return
+            accept = base64.b64encode(
+                hashlib.sha1(  # noqa: S324 - the WebSocket handshake digest is defined as SHA-1
+                    (self.headers["Sec-WebSocket-Key"] + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()
+                ).digest()
+            ).decode()
+            self.send_response(101)
+            self.send_header("Upgrade", "websocket")
+            self.send_header("Connection", "Upgrade")
+            self.send_header("Sec-WebSocket-Accept", accept)
+            self.end_headers()
+            workers = statuses[min(len(connections), len(statuses) - 1)]
+            connections.append(1)
+            self.wfile.write(_websocket_frame(json.dumps({"timestamp": 1.0, "workers": workers}).encode(), 0x1))
+            self.wfile.write(_websocket_frame(b"\x03\xe8", 0x8))
+            self.wfile.flush()
+            self.close_connection = True
+
+        def do_POST(self) -> None:
+            body = unpackb(self.rfile.read(int(self.headers["Content-Length"])), numeric_arrays=False)
+            headers = {key.lower(): value for key, value in self.headers.items() if key.lower().startswith("x-sie")}
+            requests.append((body, headers))
+            remote = self.headers.get("X-SIE-Remote") != "forbid"
+            rows = [
+                {"id": item["id"], "dense": {"dims": 2, "values": np.asarray([1.0, 2.0], dtype=np.float32)}}
+                for item in body["items"]
+            ]
+            payload = packb({"model": "local/model", "items": rows})
+            self.send_response(200)
+            self.send_header("Content-Type", "application/msgpack")
+            self.send_header("Content-Length", str(len(payload)))
+            self.send_header("X-SIE-Served-By", "remote" if remote else "local")
+            if remote:
+                self.send_header("X-SIE-Upstream", "upstream")
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, format: str, *args: Any) -> None:
+            return None
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, args=(0.01,), daemon=True)
+    thread.start()
+    monkeypatch.setattr(probe, "load_tokenizer", lambda *args, **kwargs: _Tokenizer())
+    monkeypatch.setattr(probe, "_execution_code", lambda: {"sources": "e" * 64})
+    output = tmp_path / "evidence.json"
+    try:
+        result = probe.main(
+            [
+                "--model-file",
+                str(config_file),
+                "--upstreams-file",
+                str(upstream_file),
+                "--local-url",
+                f"http://127.0.0.1:{server.server_port}",
+                "--output",
+                str(output),
+                "--cluster",
+                *extra,
+            ]
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+    return result, requests, output
+
+
+def test_cluster_probe_attributes_observations_to_one_identity_from_cluster_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, _, _, contract, remote_contract = _cluster_fixture(tmp_path)
+    fleet = _fleet(contract, remote_contract, identities=(_IDENTITY_L4, _IDENTITY_L4))
+    result, requests, output = _run_cluster_probe(tmp_path, monkeypatch, [fleet], [])
+    assert result == 0
+    evidence = EquivalenceRecord.model_validate_json(output.read_bytes())
+    assert evidence.local_identity == _IDENTITY_L4
+    assert evidence.remote_execution_sha256 == _REMOTE_EXECUTION
+    assert evidence.remote_contract_sha256 == remote_contract
+    assert evidence.local_observation_sha256 == canonical_digest({"identity": _IDENTITY_L4, "revision": "a" * 40})
+    assert [headers.get("x-sie-remote") for _, headers in requests] == ["forbid", "forbid", None] * 8
+    assert all("x-sie-machine-profile" not in headers for _, headers in requests)
+    assert all(body["params"]["options"]["profile"] in ("default", "remote") for body, _ in requests)
+
+
+def test_cluster_probe_refuses_two_identities_unless_one_machine_profile_is_selected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, _, _, contract, remote_contract = _cluster_fixture(tmp_path)
+    fleet = _fleet(contract, remote_contract, identities=(_IDENTITY_L4, _IDENTITY_A100))
+    result, requests, output = _run_cluster_probe(tmp_path, monkeypatch, [fleet], [])
+    assert (result, requests, output.exists()) == (2, [], False)
+    result, requests, output = _run_cluster_probe(tmp_path, monkeypatch, [fleet], ["--gpu", "a100-80gb"])
+    assert result == 0
+    assert EquivalenceRecord.model_validate_json(output.read_bytes()).local_identity == _IDENTITY_A100
+    local = [headers for body, headers in requests if body["params"]["options"]["profile"] == "default"]
+    remote = [headers for body, headers in requests if body["params"]["options"]["profile"] == "remote"]
+    assert {headers.get("x-sie-machine-profile") for headers in local} == {"a100-80gb"}
+    assert {headers.get("x-sie-machine-profile") for headers in remote} == {None}
+
+
+def test_cluster_probe_refuses_a_fleet_that_changes_during_the_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, _, _, contract, remote_contract = _cluster_fixture(tmp_path)
+    before = _fleet(contract, remote_contract, identities=(_IDENTITY_L4, _IDENTITY_L4))
+    after = json.loads(json.dumps(before))
+    after[0]["numerical_process_inventory"]["children"][0]["snapshot"]["runtime_instance_id"] = "d" * 64
+    result, requests, output = _run_cluster_probe(tmp_path, monkeypatch, [before, after], [])
+    assert result == 2
+    assert len(requests) == 24
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("change", ["remote_contract", "remote_execution", "model_contract", "unattributed", "status"])
+def test_cluster_probe_refuses_incomplete_or_mismatched_provenance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str
+) -> None:
+    _, _, _, contract, remote_contract = _cluster_fixture(tmp_path)
+    fleet = _fleet(contract, remote_contract, identities=(_IDENTITY_L4, _IDENTITY_L4))
+    remote_profile = fleet[2]["numerical_process_inventory"]["children"][0]["snapshot"]["profiles"][0]
+    if change == "remote_contract":
+        remote_profile["remote_contract_sha256"] = "0" * 64
+    elif change == "remote_execution":
+        remote_profile["remote_execution_sha256"] = None
+    elif change == "model_contract":
+        fleet[0]["numerical_process_inventory"]["children"][0]["snapshot"]["profiles"][0]["model_contract_sha256"] = (
+            "0" * 64
+        )
+    elif change == "unattributed":
+        fleet.append({**_worker("legacy-0", "l4", "default", [], "e" * 64), "loaded_models": ["local/model"]})
+        fleet[-1]["numerical_process_inventory"] = None
+    else:
+        fleet[1]["numerical_process_inventory"]["children"][0]["status"] = "incomplete"
+    result, requests, output = _run_cluster_probe(tmp_path, monkeypatch, [fleet], [])
+    assert (result, requests, output.exists()) == (2, [], False)
+
+
+def test_machine_profile_selection_requires_cluster_mode(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit):
+        probe.main(
+            [
+                "--model-file",
+                str(tmp_path / "model.yaml"),
+                "--upstreams-file",
+                str(tmp_path / "upstreams.yaml"),
+                "--local-url",
+                "http://127.0.0.1:9",
+                "--output",
+                str(tmp_path / "evidence.json"),
+                "--gpu",
+                "l4",
+            ]
+        )

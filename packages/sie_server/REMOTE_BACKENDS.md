@@ -311,6 +311,20 @@ metadata. A load balancer mixing workers cannot produce admissible evidence.
 The record names the local execution identity it measured, not the process, so
 it also covers other processes that report the same identity.
 
+In a cluster, add `--cluster` and pass the gateway URL as `--local-url`. The
+probe then takes process provenance from cluster status, so it needs no
+upstream credential and runs no model itself. The local processes are those of
+non-remote workers that list the model in their numerical diagnostics, and they
+must all report one identity and the supplied model contract. A worker that has
+the model loaded but reports no diagnostics refuses the run. The remote
+processes are those of remote workers that report the model's remote contract,
+and they must agree with the supplied files. When the model runs on several
+machine profiles with different identities, measure each one with `--gpu
+<machine profile>`, which pins the local calls to that profile. Cluster status
+is read before and after the run, and any change in the processes, identities
+or contracts refuses the result. Local calls wait for capacity, so a cold lane
+starts through ordinary demand.
+
 Exit status is `0` for passing evidence, `1` for a measured failure, or `2` when
 valid evidence could not be produced. Records contain input hashes, token
 counts, serving identities, contract hashes and measured errors; they contain
