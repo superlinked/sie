@@ -206,7 +206,11 @@ def _observe_remote_profile(observation: NumericalProfileObservation, config: Mo
     if config.tasks.encode is None and config.tasks.score is None:
         return
     admission = remote_admission(config, wait=False)
-    if isinstance(admission, str) or len(admission.local_identities) > _MAX_ADMITTED_IDENTITIES:
+    if (
+        isinstance(admission, str)
+        or not admission.outputs
+        or len(admission.local_identities) > _MAX_ADMITTED_IDENTITIES
+    ):
         return
     observation.admission = NumericalAdmissionObservation(
         sha256=admission.sha256,

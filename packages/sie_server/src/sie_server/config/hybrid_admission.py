@@ -137,6 +137,9 @@ def sie_admission(config: ModelConfig, *, wait: bool = True, now: datetime | Non
     revision, identity, remaining_s = observed
     if revision != config.hf_revision:
         return "hybrid upstream weights differ from local"
+    outputs = frozenset(set(config.outputs) & _NUMERICAL_OUTPUTS)
+    if not outputs:
+        return "hybrid model declares no numerical outputs"
     profile_name = config.routing.fallback_profile if config.routing is not None else None
     if profile_name is None:
         return "model does not declare a hybrid remote profile"
@@ -155,7 +158,7 @@ def sie_admission(config: ModelConfig, *, wait: bool = True, now: datetime | Non
         kind=UpstreamKind.SIE.value,
         local_identities=frozenset({identity}),
         model_contract_sha256=model_contract_digest(config),
-        outputs=frozenset(set(config.outputs) & _NUMERICAL_OUTPUTS),
+        outputs=outputs,
         expires_at=(now or datetime.now(UTC)) + timedelta(seconds=remaining_s),
     )
 

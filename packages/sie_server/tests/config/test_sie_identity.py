@@ -471,3 +471,18 @@ async def test_remote_lane_snapshot_reports_the_sie_admission(remote, tmp_path, 
     assert bare.admission.sha256 == hybrid_admission.sie_admission(model()).sha256
     assert bare.remote_contract_sha256 == remote_profile_contract_digest(model(), "remote", {"team": remote[0]})
     assert observed["local/model:remote"].admission is None
+
+
+async def test_snapshot_reports_no_admission_for_a_model_without_numerical_outputs(remote, tmp_path) -> None:
+    data = model().model_dump(mode="json")
+    data["tasks"] = {"encode": {}}
+    empty = ModelConfig.model_validate(data)
+    assert not set(empty.outputs) & {"dense", "sparse", "multivector", "score"}
+    assert hybrid_admission.sie_admission(empty) == "hybrid model declares no numerical outputs"
+    registry = ModelRegistry(device="cpu", enable_hot_reload=False)
+    registry.add_config(empty)
+    server = IpcServer(str(tmp_path / "w.sock"), QueueExecutor(registry), worker_id="w")
+    response = await server._handle_numerical_profile_snapshot(NumericalProfileSnapshotRequest())
+    bare = next(profile for profile in response.profiles if profile.model_id == "local/model")
+    assert bare.admission is None
+    assert bare.remote_contract_sha256 is not None
