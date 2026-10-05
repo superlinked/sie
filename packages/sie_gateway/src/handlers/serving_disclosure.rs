@@ -1685,16 +1685,18 @@ mod tests {
             ),
         )
         .await;
-        if response.is_err() {
+        if !matches!(&response, Ok(served) if served.status().is_success()) {
             consumer.abort();
         }
-        let consumer = consumer.await;
+        let consumer = tokio::time::timeout(Duration::from_secs(10), consumer).await;
         upstream_task.abort();
         let _ = jetstream.delete_stream(&stream_name).await;
 
         let response = response.expect("served through the queue");
-        let (model_id, published) = consumer.expect("the test consumer answered");
         assert_eq!(response.status(), StatusCode::OK);
+        let (model_id, published) = consumer
+            .expect("the test consumer finished")
+            .expect("the test consumer answered");
         assert_eq!(stamped(&response), (Some("remote"), Some("team-sie")));
         assert_eq!(model_id, "acme/remote");
         assert_eq!(
