@@ -63,13 +63,15 @@ class FakeOpenAI:
     """An OpenAI-compatible upstream that records each call and answers from a queue first.
 
     ``delays`` holds seconds to wait before answering an embeddings input, so
-    concurrent calls can finish out of order.
+    concurrent calls can finish out of order. With ``rerank_usage`` off, rerank
+    answers carry no usage.
     """
 
     url: str = ""
     calls: list[dict[str, Any]] = field(default_factory=list)
     queued: list[Response] = field(default_factory=list)
     delays: dict[str, float] = field(default_factory=dict)
+    rerank_usage: bool = True
 
     def app(self) -> FastAPI:
         app = FastAPI()
@@ -102,8 +104,10 @@ class FakeOpenAI:
                 ({"index": i, "relevance_score": relevance(body["query"], doc)} for i, doc in enumerate(documents)),
                 key=lambda result: -result["relevance_score"],
             )
-            usage = {"total_tokens": word_count(body["query"], *documents)}
-            return JSONResponse({"results": results[: body["top_n"]], "usage": usage})
+            answer: dict[str, Any] = {"results": results[: body["top_n"]]}
+            if self.rerank_usage:
+                answer["usage"] = {"total_tokens": word_count(body["query"], *documents)}
+            return JSONResponse(answer)
 
         return app
 
@@ -341,6 +345,32 @@ def test_the_openai_rerank_route_asks_the_upstream_for_every_score(
     assert best["index"] == 1
     assert best["relevance_score"] == pytest.approx(relevance("red apple", documents[1]), rel=1e-6)
     assert [call["body"]["top_n"] for call in fake_openai.calls] == [3]
+
+
+def test_an_upstream_without_usage_is_served_on_score_and_rerank_without_usage(
+    fake_openai: FakeOpenAI, openai_app: Callable[..., FastAPI]
+) -> None:
+    fake_openai.rerank_usage = False
+    documents = ["a green pear", "a red apple pie", "red wine"]
+    with TestClient(openai_app(fake_openai.url)) as client:
+        scored = post(
+            client,
+            fake_openai,
+            f"/v1/score/{MODEL}",
+            {"query": {"text": "red apple"}, "items": [{"id": str(i), "text": doc} for i, doc in enumerate(documents)]},
+        )
+        reranked = post(
+            client, fake_openai, "/v1/rerank", {"model": MODEL, "query": "red apple", "documents": documents}
+        )
+
+    assert scored.status_code == 200, scored.text
+    assert "usage" not in scored.json()
+    assert reranked.status_code == 200, reranked.text
+    assert [result["index"] for result in reranked.json()["results"]] == sorted(
+        range(len(documents)), key=lambda index: -relevance("red apple", documents[index])
+    )
+    assert "usage" not in reranked.json()
+    assert reranked.headers["x-sie-served-by"] == "remote"
 
 
 def test_an_operation_the_upstream_does_not_declare_is_refused_before_sending(
