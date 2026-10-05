@@ -128,9 +128,12 @@ upstream kind supports, on a single node and in a cluster. Two
 OpenAI-compatible routes differ. `/v1/embeddings` always returns a `usage`
 object, so it reports a character-based estimate instead, which the gateway
 marks with `sie_token_source: character_estimate`. `/v1/rerank` requires usage
-and answers `500` when the score carries none. Malformed usage fails the
-request. Generation fails closed: a generation, chat or completion response
-without exact final usage is an error, never a success.
+and answers `500` when the score carries none. For an OpenAI-compatible
+upstream, a `usage` object with no count in it counts as no usage. Malformed
+usage fails the request: a value of the wrong type, an invalid count, or an SIE
+upstream's `usage` without `input_tokens`. Generation fails closed: a
+generation, chat or completion response without exact final usage is an
+error, never a success.
 
 ## OpenAI-compatible embeddings and rerank
 
