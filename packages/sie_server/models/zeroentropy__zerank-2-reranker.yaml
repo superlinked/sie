@@ -1,0 +1,22 @@
+sie_id: zeroentropy/zerank-2-reranker
+hf_id: zeroentropy/zerank-2-reranker
+hf_revision: 5eae30d5ee3c6b2df2ef6d723bde45172d761c4c
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: {}
+  extract: null
+# Complete native causal row, including the publisher chat template.
+max_sequence_length: 32768
+profiles:
+  default:
+    max_batch_tokens: 32768
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.native_causal_cross_encoder.adapter:NativeCausalCrossEncoderAdapter
+    adapter_options:
+      loadtime: {}
+      runtime: {}

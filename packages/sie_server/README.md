@@ -61,6 +61,24 @@ removes matched stop sequences consistently from returned text, completion-token
 usage, and logprobs. Long completions delay the first visible text; existing
 request timeouts still apply. Other adapters are unaffected.
 
+### Native ZeRank 2 scoring
+
+`zeroentropy/zerank-2-reranker` runs in the default bundle using its saved
+SentenceTransformers CrossEncoder modules and publisher chat template: query
+as SYSTEM, document as USER, followed by the plain assistant prefix. Scores are
+raw logits for the publisher's positive token, 9454; higher values indicate
+greater relevance. They can be negative or greater than one and are not
+probabilities. Put retrieval conditions in the query; a separate `instruction`
+parameter is unsupported.
+
+The profile accepts complete encoded rows of at most 32,768 tokens, including
+the query, document and template. An oversized row returns `INPUT_TOO_LONG`
+before model execution. Runtime `max_seq_length` can lower this limit. The
+adapter keeps the full source and never reports a score for a truncated prefix.
+`usage.input_tokens` counts the complete native row for each pair, excluding
+left padding and including template tokens. Native forward batches use at most
+32,768 padded tokens regardless of the outer scheduling estimate.
+
 ### NLI zero-shot classification usage
 
 The NLI zero-shot classifiers (`MoritzLaurer/deberta-v3-base-zeroshot-v2.0`,

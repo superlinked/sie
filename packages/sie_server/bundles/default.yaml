@@ -19,6 +19,7 @@ adapters:
 - sie_server.adapters.jina_flash_cross_encoder
 - sie_server.adapters.modernbert_flash
 - sie_server.adapters.modernbert_flash_cross_encoder
+- sie_server.adapters.native_causal_cross_encoder.adapter
 - sie_server.adapters.nemo_colembed
 - sie_server.adapters.nomic_flash
 - sie_server.adapters.owlv2.adapter
@@ -59,8 +60,8 @@ deps:
   huggingface-hub: '>=0.20'
   # colbert_rotary_flash, jina_flash_cross_encoder
   einops: '>=0.8'
-  # sentence_transformer
-  sentence-transformers: '>=5.0,<6'
+  # sentence_transformer; native causal CrossEncoder module format requires 5.4.1
+  sentence-transformers: '>=5.4.1,<6'
   # bge_m3_flag
   FlagEmbedding: '>=1.3'
   # grounding_dino. EXACT, not a range. `uv run --with-requirements` resolves the
