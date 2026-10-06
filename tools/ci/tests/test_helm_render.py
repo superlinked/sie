@@ -1744,20 +1744,23 @@ def test_a_remote_lane_without_remote_serving_mounts_no_evidence(tmp_path: Path)
     assert evidence_mounts(rendered_documents(tmp_path, evidence_values(serving=False))) == {}
 
 
-def test_replacing_the_evidence_does_not_restart_the_remote_lane(tmp_path: Path) -> None:
-    def template_annotations(values: dict) -> dict:
+def test_the_evidence_config_map_reaches_the_pod_template_only_as_its_volume(tmp_path: Path) -> None:
+    def template(values: dict) -> dict:
         (statefulset,) = [
             doc
             for doc in rendered_documents(tmp_path, values)
             if doc["kind"] == "StatefulSet" and doc["metadata"]["name"] == REMOTE_WORKER[1]
         ]
-        return statefulset["spec"]["template"]["metadata"]["annotations"]
+        return statefulset["spec"]["template"]
 
-    before = evidence_values()
-    after = evidence_values()
-    after["workers"]["remote"]["equivalence"]["configMap"] = "other-evidence"
+    renamed = evidence_values()
+    renamed["workers"]["remote"]["equivalence"]["configMap"] = "other-evidence"
+    template_after = template(renamed)
+    for volume in template_after["spec"]["volumes"]:
+        if volume.get("configMap", {}).get("name") == "other-evidence":
+            volume["configMap"]["name"] = EVIDENCE_CONFIG_MAP
 
-    assert template_annotations(before) == template_annotations(after)
+    assert template(evidence_values()) == template_after
 
 
 @pytest.mark.parametrize(
