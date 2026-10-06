@@ -1,0 +1,23 @@
+sie_id: fastino/gliner2.5-base-v1
+hf_id: fastino/gliner2.5-base-v1
+hf_revision: ca906247640776a07753514055be9726f9080ead
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: null
+  extract: {}
+# Complete encoded row: entity schema, separator and document subwords.
+max_sequence_length: 4096
+profiles:
+  default:
+    max_batch_tokens: 16384
+    compute_precision: float32
+    adapter_path: sie_server.adapters.gliner2.entities:GLiNER2EntitiesAdapter
+    adapter_options:
+      loadtime:
+        max_prompt_tokens: 2048
+      runtime: {}

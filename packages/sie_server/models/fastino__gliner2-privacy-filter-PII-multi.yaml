@@ -1,0 +1,23 @@
+sie_id: fastino/gliner2-privacy-filter-PII-multi
+hf_id: fastino/gliner2-privacy-filter-PII-multi
+hf_revision: 1cb4166094dc58fa8d836429f060d6c95f62b495
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: null
+  extract: {}
+# Complete encoded row: entity schema, separator and document subwords.
+max_sequence_length: 4096
+profiles:
+  default:
+    max_batch_tokens: 16384
+    compute_precision: float32
+    adapter_path: sie_server.adapters.gliner2.entities:GLiNER2EntitiesAdapter
+    adapter_options:
+      loadtime:
+        max_prompt_tokens: 2048
+      runtime: {}
