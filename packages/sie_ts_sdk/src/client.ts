@@ -68,7 +68,9 @@ import {
 } from "./internal/constants.js";
 import {
   ESTIMATE_PATH,
+  RECOMMEND_PATH,
   buildEstimateEnvelope,
+  buildRecommendBody,
   getErrorCode,
   getErrorParam,
   getRetryAfter,
@@ -137,6 +139,8 @@ import type {
   ModelInfo,
   PoolInfo,
   PoolSpec,
+  RecommendOptions,
+  Recommendation,
   RequestMetadata,
   SIEClientOptions,
   File as SIEFile,
@@ -1264,6 +1268,52 @@ export class SIEClient {
       body,
       options.timeout ?? this.timeout,
       throwIfEstimateUnroutable,
+    );
+  }
+
+  /**
+   * Ask which model to use for a task family (`POST /v1/recommend`).
+   *
+   * Read-only and non-billable: no dispatch, no reservation, no credits. The
+   * managed gateway answers from evidence compiled into the release it is
+   * running, so the recommendation and the `/v1/catalog` entry it names can
+   * never disagree.
+   *
+   * The answer always states its `basis`. `ranked` means two or more of the
+   * family's choices were measured on the same benchmark, so the ordering
+   * rests on a comparison somebody ran. `curated` means evidence exists but no
+   * two choices share a benchmark, so the pick is the catalog's judgement.
+   * `no_evidence` means the family cites nothing. Read it before trusting a
+   * pick.
+   *
+   * @param task - A catalog task family id, e.g. `"rerank"`. A 404 names every
+   *   id this release recommends for.
+   * @param options.targetLanguage - Optional exact locale code of the language
+   *   you want output in, e.g. `"ja_JP"`. When the release compared the
+   *   family's choices for that language, `best` is that language's winner and
+   *   the answer adds `target_language` and `language_evidence_ref`. Any other
+   *   value, including another spelling such as `"ja-JP"`, returns the answer
+   *   you would get without it.
+   * @param options.timeout - Per-call timeout override in milliseconds.
+   * @returns The family's `fast` and/or `best` picks, each with its alias,
+   *   evidence refs, and `evidence_guarded`. Both are optional: a pick names
+   *   only a model this release can serve.
+   * @throws {RequestError} 400 for an empty or malformed `task` or a
+   *   non-string `targetLanguage`; 404 when the task family is unknown to this
+   *   release.
+   *
+   * @example
+   * ```typescript
+   * const pick = await client.recommend("translation", { targetLanguage: "ja_JP" });
+   * console.log(pick.best?.runtime_id, pick.target_language);
+   * ```
+   */
+  async recommend(task: string, options: RecommendOptions = {}): Promise<Recommendation> {
+    return this.jsonRequest<Recommendation>(
+      RECOMMEND_PATH,
+      "POST",
+      buildRecommendBody(task, options.targetLanguage),
+      options.timeout ?? this.timeout,
     );
   }
 

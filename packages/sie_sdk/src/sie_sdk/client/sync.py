@@ -136,6 +136,7 @@ from ._shared import (
     base_url_accepts_origin_credentials,
     build_chat_body,
     build_estimate_envelope,
+    build_recommend_body,
     build_responses_body,
     cached_prompt_tokens_from_usage,
     check_version_skew,
@@ -1756,7 +1757,13 @@ class SIEClient:
 
         return cast("CostEstimate", response.json())
 
-    def recommend(self, task: str, *, timeout: float | None = None) -> Recommendation:
+    def recommend(
+        self,
+        task: str,
+        *,
+        target_language: str | None = None,
+        timeout: float | None = None,
+    ) -> Recommendation:
         """Ask which model to use for a task family (``POST /v1/recommend``).
 
         Read-only and non-billable: no dispatch, no reservation, no credits.
@@ -1775,6 +1782,13 @@ class SIEClient:
         Args:
             task: A catalog task family id, e.g. ``"rerank"``. A 404 names
                 every id this release recommends for.
+            target_language: Optional exact locale code of the language you
+                want output in, e.g. ``"ja_JP"``. When the release compared
+                the family's choices for that language, ``best`` is that
+                language's winner and the answer adds ``target_language`` and
+                ``language_evidence_ref``. Any other value, including another
+                spelling such as ``"ja-JP"``, returns the answer you would get
+                without it. Omit it for the language-independent answer.
             timeout: Per-call timeout override in seconds.
 
         Returns:
@@ -1785,8 +1799,9 @@ class SIEClient:
             200 with its evidence and no picks.
 
         Raises:
-            RequestError: 400 for an empty or malformed ``task``; 404 when the
-                task family is unknown to this release.
+            RequestError: 400 for an empty or malformed ``task`` or a
+                non-string ``target_language``; 404 when the task family is
+                unknown to this release.
             SIEConnectionError: If unable to connect to the server.
             ServerError: For other 5xx responses.
 
@@ -1796,6 +1811,9 @@ class SIEClient:
             'rerank-best'
             >>> pick["basis"]
             'ranked'
+            >>> pick = client.recommend("translation", target_language="ja_JP")
+            >>> pick["target_language"]
+            'ja_JP'
         """
         # Same reason every other public method opens with this: without it the
         # call inherits the previous call's retry/revision state on this thread.
@@ -1803,7 +1821,7 @@ class SIEClient:
         try:
             response = self._client.post(
                 RECOMMEND_PATH,
-                json={"task": task},
+                json=build_recommend_body(task, target_language),
                 headers={
                     "Accept": JSON_CONTENT_TYPE,
                     "Content-Type": JSON_CONTENT_TYPE,

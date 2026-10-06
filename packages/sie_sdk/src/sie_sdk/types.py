@@ -1499,6 +1499,14 @@ class Recommendation(TypedDict, total=False):
     shared_benchmarks: list[str]
     fast: RecommendedChoice
     best: RecommendedChoice
+    target_language: str
+    """The language ``best`` was chosen for.
+
+    Present only when the request's ``target_language`` decided ``best``. When
+    it is absent, ``best`` is the language-independent pick.
+    """
+    language_evidence_ref: str
+    """The per-language comparison behind that choice; present with ``target_language``."""
 
 
 class CostEstimate(TypedDict):

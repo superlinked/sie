@@ -509,6 +509,18 @@ def raise_if_estimate_unroutable(response: _HttpResponse) -> None:
     )
 
 
+def build_recommend_body(task: str, target_language: str | None) -> dict[str, str]:
+    """The ``POST /v1/recommend`` body.
+
+    ``target_language`` is sent only when the caller passes one, so a call
+    without it sends exactly the body it always did and gets the same answer.
+    """
+    body = {"task": task}
+    if target_language is not None:
+        body["target_language"] = target_language
+    return body
+
+
 # Resource-exhausted retry settings (server-side OOM recovery exhausted).
 # Default backoff sequence: 5 -> 10 -> 20 s (capped at 30s). Three attempts
 # is enough to cover the typical eviction + retry window without making

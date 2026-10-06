@@ -239,6 +239,23 @@ export async function throwIfInputTooLong(response: Response, model?: string): P
 /** The one exact path of the cost-estimate dry run (#2435). */
 export const ESTIMATE_PATH = "/v1/estimate";
 
+/** The one exact path of the model recommendation read. */
+export const RECOMMEND_PATH = "/v1/recommend";
+
+/**
+ * The `POST /v1/recommend` body.
+ *
+ * `target_language` is sent only when the caller passes one, so a call without
+ * it carries the task alone and gets the language-independent answer.
+ */
+export function buildRecommendBody(
+  task: string,
+  targetLanguage?: string,
+): { task: string; target_language?: string } {
+  if (targetLanguage == null) return { task };
+  return { task, target_language: targetLanguage };
+}
+
 /**
  * Error codes the gateway answers when it cannot PRICE a request.
  *

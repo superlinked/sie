@@ -127,6 +127,7 @@ from ._shared import (
     base_url_accepts_origin_credentials,
     build_chat_body,
     build_estimate_envelope,
+    build_recommend_body,
     build_responses_body,
     cached_prompt_tokens_from_usage,
     check_version_skew,
@@ -1659,6 +1660,7 @@ class SIEAsyncClient:
         self,
         task: str,
         *,
+        target_language: str | None = None,
         # Same rationale as `estimate`: this is the per-call HTTP budget, not a
         # caller-supplied cancellation budget.
         timeout: float | None = None,  # noqa: ASYNC109
@@ -1668,7 +1670,7 @@ class SIEAsyncClient:
         try:
             response = await self._post(
                 RECOMMEND_PATH,
-                json_data={"task": task},
+                json_data=build_recommend_body(task, target_language),
                 headers={
                     "Accept": JSON_CONTENT_TYPE,
                     "Content-Type": JSON_CONTENT_TYPE,

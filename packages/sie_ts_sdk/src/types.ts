@@ -1666,6 +1666,86 @@ export interface CostEstimate {
   minimum_billed_units?: Record<string, number> | null;
 }
 
+// ---------------------------------------------------------------------------
+// Model recommendation (`POST /v1/recommend`)
+// ---------------------------------------------------------------------------
+
+/** Options for `SIEClient.recommend`. */
+export interface RecommendOptions {
+  /**
+   * Exact locale code of the language you want output in, e.g. `"ja_JP"`.
+   *
+   * When the release compared the family's choices for that language, `best`
+   * is that language's winner and the answer adds `target_language` and
+   * `language_evidence_ref`. Any other value, including another spelling such
+   * as `"ja-JP"`, returns the answer you would get without it. Omit it for the
+   * language-independent answer.
+   */
+  targetLanguage?: string;
+  /** Per-call timeout override in milliseconds. */
+  timeout?: number;
+}
+
+/**
+ * One tier's pick for a task family, with the evidence behind it.
+ *
+ * Wire-shaped (snake_case) like {@link CostEstimate}: the gateway's answer,
+ * returned verbatim.
+ */
+export interface RecommendedChoice {
+  /** `fast`, `smart`, or `single`. */
+  intent: string;
+  model: string;
+  /** The string to send as `model`, including any `:profile` suffix. */
+  runtime_id: string;
+  profile: string;
+  /** The short name to send instead of the runtime id, when one is seeded. */
+  alias?: string | null;
+  available?: boolean;
+  quality_ref?: string | null;
+  performance_ref?: string | null;
+  measurement_status?: string | null;
+  /**
+   * Whether a committed target floor guards the cited number.
+   *
+   * A cited measurement with no floor is a real number that nothing protects
+   * from silently regressing. `false` does not mean unmeasured; it means
+   * unguarded.
+   */
+  evidence_guarded?: boolean;
+}
+
+/** The answer for one task family (`POST /v1/recommend`). */
+export interface Recommendation {
+  task: string;
+  label: string;
+  /**
+   * `ranked` | `curated` | `no_evidence`.
+   *
+   * `ranked` means two or more choices were measured on the same benchmark.
+   * `curated` means evidence exists but no two choices share one, so the order
+   * is the catalog's judgement rather than a measurement. `no_evidence` means
+   * the family cites no measurements at all.
+   */
+  basis: string;
+  shared_benchmarks: string[];
+  /** The lowest-latency pick, when the family has a serveable one. */
+  fast?: RecommendedChoice;
+  /**
+   * The highest-quality pick, or the sole pick of a single-choice family.
+   * Absent when this release can serve neither.
+   */
+  best?: RecommendedChoice;
+  /**
+   * The language `best` was chosen for. Present only when the request's
+   * `targetLanguage` decided `best`; when absent, `best` is the
+   * language-independent pick.
+   */
+  target_language?: string;
+  /** The per-language comparison behind that choice; present with `target_language`. */
+  language_evidence_ref?: string;
+}
+
 /**
  * Helper to convert typed arrays to regular number array.
  * Useful for JSON serialization or working with libraries that expect number[].

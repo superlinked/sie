@@ -69,6 +69,26 @@ NO_EVIDENCE: dict[str, Any] = {
     },
 }
 
+# `best` chosen for one target language: the answer names the language and the
+# per-language comparison behind the pick, next to the usual fields.
+TRANSLATION_JA: dict[str, Any] = {
+    "task": "translation",
+    "label": "Translation",
+    "basis": "curated",
+    "shared_benchmarks": [],
+    "best": {
+        "intent": "fast",
+        "model": "tencent/Hy-MT2-1.8B",
+        "runtime_id": "tencent/Hy-MT2-1.8B",
+        "profile": "default",
+        "alias": None,
+        "available": True,
+        "evidence_guarded": False,
+    },
+    "target_language": "ja_JP",
+    "language_evidence_ref": "quality-evidence/translation-by-language.json",
+}
+
 UNKNOWN_TASK = {
     "detail": {
         "code": "TASK_NOT_FOUND",
@@ -137,6 +157,32 @@ class TestSyncRecommend:
             assert "best" not in answer
             client.close()
 
+    def test_sends_target_language_and_returns_the_language_pick(self) -> None:
+        with patch("sie_sdk.client.sync.httpx.Client") as mock_client:
+            mock_client.return_value.post = MagicMock(return_value=_resp(200, TRANSLATION_JA))
+            client = SIEClient("http://localhost:8080")
+
+            answer = client.recommend("translation", target_language="ja_JP")
+
+            assert answer == TRANSLATION_JA
+            kwargs = mock_client.return_value.post.call_args[1]
+            assert kwargs["json"] == {"task": "translation", "target_language": "ja_JP"}
+            assert answer["target_language"] == "ja_JP"
+            assert answer["language_evidence_ref"] == "quality-evidence/translation-by-language.json"
+            client.close()
+
+    def test_omitted_target_language_is_not_sent(self) -> None:
+        """Without a language the SDK sends the body it sent before the parameter existed."""
+        with patch("sie_sdk.client.sync.httpx.Client") as mock_client:
+            mock_client.return_value.post = MagicMock(return_value=_resp(200, RANKED))
+            client = SIEClient("http://localhost:8080")
+
+            client.recommend("rerank", target_language=None)
+
+            kwargs = mock_client.return_value.post.call_args[1]
+            assert kwargs["json"] == {"task": "rerank"}
+            client.close()
+
     def test_unknown_task_raises_request_error(self) -> None:
         with patch("sie_sdk.client.sync.httpx.Client") as mock_client:
             mock_client.return_value.post = MagicMock(return_value=_resp(404, UNKNOWN_TASK))
@@ -176,6 +222,21 @@ class TestAsyncRecommend:
             assert answer == RANKED
             assert client._post.await_args[0][0] == "/v1/recommend"
             assert client._post.await_args[1]["json_data"] == {"task": "rerank"}
+            await client.close()
+
+    @pytest.mark.asyncio
+    async def test_sends_target_language_like_the_sync_twin(self) -> None:
+        with patch("sie_sdk.client.async_.aiohttp.ClientSession"):
+            client = SIEAsyncClient("http://localhost:8080")
+            client._post = AsyncMock(return_value=_aio(200, TRANSLATION_JA))  # type: ignore[method-assign]
+
+            answer = await client.recommend("translation", target_language="ja_JP")
+
+            assert answer == TRANSLATION_JA
+            assert client._post.await_args[1]["json_data"] == {
+                "task": "translation",
+                "target_language": "ja_JP",
+            }
             await client.close()
 
     @pytest.mark.asyncio

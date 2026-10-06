@@ -162,6 +162,10 @@ export type {
   AppliedRate,
   RateIdentity,
   CostEstimate,
+  // Model recommendation (client.recommend)
+  RecommendOptions,
+  RecommendedChoice,
+  Recommendation,
 } from "./types.js";
 
 // Utility functions
