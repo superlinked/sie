@@ -2353,18 +2353,33 @@ fn fallback_plan_candidate(
         })
 }
 
-/// A deployment policy decides every remote route under it, and is asked only
-/// about a remote profile the caller may see.
+/// A deployment policy decides each implicit remote route of a bare model,
+/// once per request. It is asked only about a remote profile the caller may
+/// see and the deployment serves.
 fn remote_route_admitted(
     state: &AppState,
     ext: &axum::http::Extensions,
     plan: &crate::state::model_registry::RemoteFallbackPlan,
     reason: RemoteRouteReason,
 ) -> bool {
-    state.model_access_policy.as_deref().is_none_or(|policy| {
+    let Some(policy) = state.model_access_policy.as_deref() else {
+        return true;
+    };
+    FallbackAttempt::remote_route_decision(ext, &plan.model, reason, || {
         policy.visible(&plan.model, ext)
+            && policy
+                .serving_refusal(&plan.model, &without_admission_outcome(ext))
+                .is_none()
             && policy.remote_route_admitted(&plan.local_model, &plan.model, reason, ext)
     })
+}
+
+/// The request's extensions for asking about a profile it may not use. A
+/// refusal recorded there must not become the request's own outcome.
+fn without_admission_outcome(ext: &axum::http::Extensions) -> axum::http::Extensions {
+    let mut probe = ext.clone();
+    probe.remove::<crate::observability::metrics::AdmissionOutcomeSlot>();
+    probe
 }
 
 /// A deployment-governed generation route has no remote route.

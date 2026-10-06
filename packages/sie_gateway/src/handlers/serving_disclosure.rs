@@ -14,7 +14,7 @@ use axum::response::Response;
 use futures_util::FutureExt;
 
 use crate::observability::metrics as telemetry;
-use crate::server::AppState;
+use crate::server::{AppState, RemoteRouteReason};
 use crate::types::model::{FallbackTrigger, ServedBy};
 
 pub(crate) const SERVED_BY_HEADER: HeaderName = HeaderName::from_static("x-sie-served-by");
@@ -103,6 +103,7 @@ pub(crate) struct FallbackAttempt(Arc<Mutex<FallbackState>>);
 struct FallbackState {
     original: Option<LocalRefusal>,
     observation: Option<ServingObservation>,
+    route_decisions: Vec<(String, RemoteRouteReason, bool)>,
 }
 
 struct ServingObservation {
@@ -257,6 +258,41 @@ impl FallbackAttempt {
             .unwrap_or_else(PoisonError::into_inner)
             .original
             .is_some()
+    }
+
+    /// A deployment's decision on routing this request to `remote_model` for
+    /// `reason`. It is made once per request, remote profile and reason, and
+    /// every later question gets the same answer.
+    pub(crate) fn remote_route_decision(
+        extensions: &Extensions,
+        remote_model: &str,
+        reason: RemoteRouteReason,
+        decide: impl FnOnce() -> bool,
+    ) -> bool {
+        let Some(attempt) = extensions.get::<Self>() else {
+            return decide();
+        };
+        let known = |state: &FallbackState| {
+            state
+                .route_decisions
+                .iter()
+                .find(|(model, decided_reason, _)| {
+                    model == remote_model && *decided_reason == reason
+                })
+                .map(|(_, _, admitted)| *admitted)
+        };
+        if let Some(admitted) = known(&attempt.0.lock().unwrap_or_else(PoisonError::into_inner)) {
+            return admitted;
+        }
+        let admitted = decide();
+        let mut state = attempt.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(first) = known(&state) {
+            return first;
+        }
+        state
+            .route_decisions
+            .push((remote_model.to_string(), reason, admitted));
+        admitted
     }
 
     /// The trigger of the local refusal this request's remote attempt stands
@@ -3679,9 +3715,9 @@ mod tests {
         }
     }
 
+    use crate::observability::metrics::{AdmissionOutcome, AdmissionOutcomeSlot};
     use crate::server::{
         GenerationRequestIntent, GenerationRoutePolicy, GovernedGenerationRoute, ModelAccessPolicy,
-        RemoteRouteReason,
     };
 
     /// A deployment policy that records every remote route the gateway asks
@@ -3689,7 +3725,9 @@ mod tests {
     #[derive(Default)]
     struct RoutePolicy {
         admit: bool,
+        admit_first_only: bool,
         hide_remote: bool,
+        refuse_remote_serving: bool,
         govern_generation: bool,
         asked: std::sync::Mutex<Vec<(String, String, RemoteRouteReason)>>,
     }
@@ -3705,6 +3743,19 @@ mod tests {
             !(self.hide_remote && resolved_model.ends_with(":remote"))
         }
 
+        fn serving_refusal(
+            &self,
+            resolved_model: &str,
+            ext: &axum::http::Extensions,
+        ) -> Option<Response> {
+            (self.refuse_remote_serving && resolved_model.ends_with(":remote")).then(|| {
+                if let Some(slot) = ext.get::<AdmissionOutcomeSlot>() {
+                    slot.set(AdmissionOutcome::Forbidden);
+                }
+                StatusCode::FORBIDDEN.into_response()
+            })
+        }
+
         fn generation_route_policy(&self) -> Option<&dyn GenerationRoutePolicy> {
             self.govern_generation
                 .then_some(self as &dyn GenerationRoutePolicy)
@@ -3717,10 +3768,11 @@ mod tests {
             reason: RemoteRouteReason,
             _ext: &axum::http::Extensions,
         ) -> bool {
-            self.asked
-                .lock()
-                .unwrap()
-                .push((model.to_string(), remote_model.to_string(), reason));
+            let mut asked = self.asked.lock().unwrap();
+            asked.push((model.to_string(), remote_model.to_string(), reason));
+            if self.admit_first_only {
+                return asked.len() == 1;
+            }
             self.admit
         }
     }
@@ -3935,5 +3987,102 @@ mod tests {
                 assert!(gateway.dispatcher.dispatched().is_empty());
             }
         }
+    }
+
+    #[tokio::test]
+    async fn a_remote_profile_the_deployment_does_not_serve_keeps_the_bare_model_local() {
+        let config = fallback_config(HYBRID_EXTRACT_MODEL);
+        for (refuse_remote_serving, admit, bridged, asked) in [
+            (true, true, false, 0),
+            (false, false, false, 1),
+            (false, true, true, 1),
+        ] {
+            let case = format!("refuse_remote_serving={refuse_remote_serving} admit={admit}");
+            let policy = Arc::new(RoutePolicy {
+                admit,
+                refuse_remote_serving,
+                ..Default::default()
+            });
+            let gateway = cold_gateway(&[&config], policy.clone()).await;
+            let outcome = AdmissionOutcomeSlot::default();
+            let mut request = extraction_request(false, json!({}));
+            request.extensions_mut().insert(outcome.clone());
+
+            let response = extract(&gateway, request).await;
+
+            if bridged {
+                assert_eq!(response.status(), StatusCode::OK, "{case}");
+                assert_eq!(stamped(&response).0, Some("remote"), "{case}");
+            } else {
+                assert_local_provisioning(&response, &gateway);
+            }
+            assert_eq!(policy.asked().len(), asked, "{case}");
+            assert_eq!(outcome.get(), None, "{case}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_named_remote_profile_is_never_asked_and_follows_visible_and_serving_refusal() {
+        let config = fallback_config(HYBRID_EXTRACT_MODEL);
+        for refuse_remote_serving in [false, true] {
+            let policy = Arc::new(RoutePolicy {
+                refuse_remote_serving,
+                ..Default::default()
+            });
+            let gateway = cold_gateway(&[&config], policy.clone()).await;
+            let mut request = extraction_request(false, json!({}));
+            *request.uri_mut() = "/v1/extract/acme/extract:remote".parse().unwrap();
+
+            let response = extract(&gateway, request).await;
+
+            if refuse_remote_serving {
+                assert_eq!(response.status(), StatusCode::FORBIDDEN);
+                assert!(gateway.dispatcher.dispatched().is_empty());
+            } else {
+                assert_eq!(response.status(), StatusCode::OK);
+                assert_eq!(
+                    gateway.dispatcher.dispatched(),
+                    vec![dispatched("extract", REMOTE_LANE, "acme/extract:remote")]
+                );
+            }
+            assert!(policy.asked().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_policy_is_decided_once_per_request_and_reason() {
+        let config = fallback_config(HYBRID_EXTRACT_MODEL);
+        let policy = Arc::new(RoutePolicy {
+            admit_first_only: true,
+            ..Default::default()
+        });
+        let mut gateway = TestGateway::new(&[&config]).await;
+        gateway.install_policy(policy.clone());
+        gateway
+            .add_verified_worker("local-1", LOCAL_LANE, &[])
+            .await;
+        gateway
+            .add_verified_worker("remote-1", REMOTE_LANE, &[])
+            .await;
+
+        let response = extract(&gateway, extraction_request(false, json!({}))).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["x-sie-fallback-reason"], "model_loading");
+        assert_eq!(
+            gateway.dispatcher.dispatched(),
+            vec![
+                dispatched("load", LOCAL_LANE, "acme/extract"),
+                dispatched("extract", REMOTE_LANE, "acme/extract:remote"),
+            ]
+        );
+        assert_eq!(
+            policy.asked(),
+            vec![(
+                "acme/extract".to_string(),
+                "acme/extract:remote".to_string(),
+                RemoteRouteReason::Fallback(FallbackTrigger::ModelLoading),
+            )]
+        );
     }
 }

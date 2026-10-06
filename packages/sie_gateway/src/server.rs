@@ -71,9 +71,12 @@ pub trait ModelAccessPolicy: Send + Sync {
     /// alias expansion, `__`→`/`, and case folding. A gate that decides on the
     /// caller's raw string cannot see through a registry alias, so an alias
     /// pointing at a refused model would dispatch it; deciding here is what
-    /// makes the verdict authoritative for every surface that resolves a model.
-    /// Edge gates upstream may still refuse early, but they are an optimisation,
-    /// not the decision.
+    /// makes the verdict authoritative for the model a request resolves to.
+    /// Before a bridge, the gateway also asks it about the remote profile the
+    /// bridge would serve, with the request extensions minus the
+    /// admission-outcome slot; a refusal there keeps the local route and is
+    /// neither returned nor recorded. Edge gates upstream may still refuse
+    /// early, but they are an optimisation, not the decision.
     ///
     /// `ext` carries the request extensions, so an implementation can record the
     /// refusal on whatever per-request observability slot the deployment
@@ -113,19 +116,23 @@ pub trait ModelAccessPolicy: Send + Sync {
     /// Whether the request for `model` may be served through its remote
     /// profile `remote_model` for `reason`, for the caller in `ext`.
     ///
+    /// It governs only the implicit routes of a bare model: a fallback bridge
+    /// and a `threshold` route. A request that names the remote profile,
+    /// directly or through an alias, is governed by [`Self::visible`] and
+    /// [`Self::serving_refusal`] like any other model, so a caller who can see
+    /// the remote profile can name it.
+    ///
     /// The gateway asks only about a route it admits on its own: a bare model
     /// whose routing names `remote_model` and permits `reason`, no caller
     /// profile, bundle, pool or engine selector, no `X-SIE-Remote: forbid`, and
     /// a transport with execution authority v1. [`Self::visible`] and
-    /// [`Self::serving_refusal`] have passed for `model`, and [`Self::visible`]
-    /// has passed for `remote_model`. Both ids are canonical and come from the
-    /// registry snapshot that holds the route's worker hash. The gateway may ask
-    /// more than once for one request, so an implementation has no side
-    /// effects.
+    /// [`Self::serving_refusal`] have passed for `model` and for `remote_model`.
+    /// Both ids are canonical and come from the registry snapshot that holds
+    /// the route's worker hash. The gateway decides once per request, remote
+    /// profile and reason, and reuses that decision.
     ///
     /// `false` keeps the local route: the caller receives the answer it would
-    /// have received without a remote route. The default is `false`, so a
-    /// deployment that installs a policy routes remotely only through it.
+    /// have received without a remote route. The default is `false`.
     fn remote_route_admitted(
         &self,
         _model: &str,
