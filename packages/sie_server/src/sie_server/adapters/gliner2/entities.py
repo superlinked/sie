@@ -57,14 +57,16 @@ class GLiNER2EntitiesAdapter(BaseAdapter):
     including its appended terminal punctuation. ``data`` also records the
     full encoded-row and prompt counts. Failed items bill zero tokens.
 
-    Entity labels are exact strings, including descriptive names, case and
-    punctuation, except reserved prompt markers, with at most 128 characters
-    per label. Admission also bounds
+    Entity labels are exact names, preserving case and punctuation, except
+    reserved prompt markers, with at most 128 characters per label. Optional
+    ``options.entity_descriptions`` maps existing labels to guidance in the
+    native schema's separate description channel. Admission also bounds
     source preprocessing to 64 characters and four words per row-budget token,
     with at most 4096 characters per word. The prompt allows at most one label
-    and 32 label characters per prompt-budget token. Exceeding any admission
+    and 32 combined label/description characters per prompt-budget token,
+    including labels repeated in description prefixes. Exceeding any admission
     bound rejects the complete item before native collation or inference.
-    Runtime options accept only the native ``threshold`` in [0, 1]. This
+    Runtime options also accept the native ``threshold`` in [0, 1]. This
     adapter does not perform classification, relations, JSON extraction or
     automatic source windowing.
     """
@@ -173,10 +175,20 @@ class GLiNER2EntitiesAdapter(BaseAdapter):
         if output_schema is not None or instruction is not None:
             raise InvalidInputError("GLiNER2 entities accepts labels, without output_schema or instruction")
         opts = options or {}
-        if set(opts) - {"threshold"}:
-            raise InvalidInputError("GLiNER2 entities supports only the threshold runtime option")
+        if set(opts) - {"threshold", "entity_descriptions"}:
+            raise InvalidInputError(
+                "GLiNER2 entities supports only the threshold and entity_descriptions runtime options"
+            )
         threshold = self._validate_threshold(opts.get("threshold", self._threshold))
         effective_labels = self._validate_labels(self._default_labels if labels is None else labels)
+        descriptions = (
+            self._validate_descriptions(opts["entity_descriptions"], effective_labels)
+            if "entity_descriptions" in opts
+            else {}
+        )
+        entity_types = (
+            {label: descriptions.get(label, {}) for label in effective_labels} if descriptions else effective_labels
+        )
 
         entities: list[list[Entity]] = [[] for _ in items]
         data: list[dict[str, Any]] = [{} for _ in items]
@@ -184,8 +196,8 @@ class GLiNER2EntitiesAdapter(BaseAdapter):
         counts = [0] * len(items)
         accepted: list[tuple[int, str, int, int, int]] = []
         with self._tokenizer_guard():
-            prompt_failure = self._prompt_admission_failure(effective_labels)
-            schema = self._model.create_schema().entities(effective_labels).build() if prompt_failure is None else None
+            prompt_failure = self._prompt_admission_failure(effective_labels, descriptions)
+            schema = self._model.create_schema().entities(entity_types).build() if prompt_failure is None else None
             for index, item in enumerate(items):
                 text = item.text
                 if not isinstance(text, str):
@@ -211,7 +223,11 @@ class GLiNER2EntitiesAdapter(BaseAdapter):
                         message=(
                             f"GLiNER2 entities needs {row_tokens} encoded tokens including {prompt_tokens} prompt tokens; "
                             f"limits are {self._max_seq_length} per complete row and {self._max_prompt_tokens} per prompt. "
-                            "Send a shorter source window or fewer or shorter labels."
+                            + (
+                                "Send a shorter source window or fewer or shorter labels or descriptions."
+                                if descriptions
+                                else "Send a shorter source window or fewer or shorter labels."
+                            )
                         ),
                     )
                     continue
@@ -229,7 +245,7 @@ class GLiNER2EntitiesAdapter(BaseAdapter):
                     sources = [accepted[row][1] for row in group]
                     results = self._model.batch_extract_entities(
                         sources,
-                        effective_labels,
+                        entity_types,
                         batch_size=len(sources),
                         threshold=threshold,
                         include_confidence=True,
@@ -293,14 +309,28 @@ class GLiNER2EntitiesAdapter(BaseAdapter):
         """Counts come from request-qualified native rows in ``extract``."""
         _ = items
 
-    def _prompt_admission_failure(self, labels: list[str]) -> str | None:
-        if len(labels) > self._max_prompt_tokens or sum(len(label) for label in labels) > (
-            self._max_prompt_tokens * MAX_PROMPT_CHARS_PER_TOKEN
-        ):
+    def _prompt_admission_failure(self, labels: list[str], descriptions: dict[str, str]) -> str | None:
+        max_chars = self._max_prompt_tokens * MAX_PROMPT_CHARS_PER_TOKEN
+        prompt_chars = sum(len(label) for label in labels)
+        if len(labels) > self._max_prompt_tokens or prompt_chars > max_chars:
             return (
                 f"GLiNER2 entities permits at most {self._max_prompt_tokens} labels and "
-                f"{self._max_prompt_tokens * MAX_PROMPT_CHARS_PER_TOKEN} total label characters. "
+                f"{max_chars} total label characters. "
                 "Send fewer or shorter labels."
+            )
+        if descriptions:
+            if any(len(description) > max_chars for description in descriptions.values()):
+                return (
+                    f"GLiNER2 entities permits at most {max_chars} characters per description. "
+                    "Send shorter descriptions."
+                )
+            # Native description prefixes repeat each described label name.
+            prompt_chars += sum(len(label) + len(description) for label, description in descriptions.items())
+        if prompt_chars > max_chars:
+            return (
+                f"GLiNER2 entities permits at most {self._max_prompt_tokens} labels and "
+                f"{max_chars} total label and description characters, including repeated label names. "
+                "Send fewer or shorter labels or descriptions."
             )
         return None
 
@@ -351,6 +381,24 @@ class GLiNER2EntitiesAdapter(BaseAdapter):
             raise InvalidInputError("GLiNER2 entity labels must be unique")
         check_label_chars("GLiNER2 entities", "labels", labels)
         return labels
+
+    @staticmethod
+    def _validate_descriptions(value: object, labels: list[str]) -> dict[str, str]:
+        if not isinstance(value, dict):
+            raise InvalidInputError("GLiNER2 entity_descriptions must be an object mapping existing labels to strings")
+        label_names = set(labels)
+        descriptions: dict[str, str] = {}
+        for label, description in value.items():
+            if not isinstance(label, str) or label not in label_names:
+                raise InvalidInputError("GLiNER2 entity_descriptions keys must exactly match existing labels")
+            if not isinstance(description, str):
+                raise InvalidInputError("GLiNER2 entity_descriptions values must be strings")
+            if any(marker in description for marker in MARKERS):
+                raise InvalidInputError(
+                    "GLiNER2 entity descriptions may not contain structural tokens of the model's prompt"
+                )
+            descriptions[label] = description
+        return descriptions
 
     @staticmethod
     def _flatten_entities(result: Any, text: str, labels: list[str]) -> list[Entity]:

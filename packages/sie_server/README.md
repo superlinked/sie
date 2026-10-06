@@ -483,27 +483,40 @@ with SIEClient("http://localhost:8080") as client:
         "fastino/gliner2.5-base-v1",
         {"text": "Ada joined Acme in London."},
         labels=["person", "organization", "location"],
-        options={"threshold": 0.5},
+        options={
+            "threshold": 0.5,
+            "entity_descriptions": {
+                "person": "Named human, including surname aliases.",
+                "organization": "Named company or public institution.",
+            },
+        },
     )
-    print(result.entities)
+    print(result["entities"])
 ```
 
 The profiles allow one complete 4,096-token encoder row, including the schema
 prompt. The prompt may take up to 2,048 tokens, and each label at most 128
-characters. Descriptive string labels are preserved exactly, except reserved
-prompt markers such as `[SEP_TEXT]`, which are rejected. Inputs that do
-not fit return per-item `INPUT_TOO_LONG` errors; split long documents into
-deliberate smaller items instead of relying on prefix truncation. Entity
+characters. Labels are literal names and are returned exactly. Optional
+`options.entity_descriptions` maps any subset of those exact names to string
+descriptions in the native schema's separate prompt channel. Unspecified
+labels remain undescribed; omitting the option or using an empty mapping keeps
+the existing label-list behavior. Unknown keys, non-string values and reserved
+prompt markers such as `[SEP_TEXT]` in labels or descriptions are rejected.
+Inputs that do not fit return per-item `INPUT_TOO_LONG` errors; split long
+documents into deliberate smaller items instead of relying on prefix truncation. Entity
 offsets index the original text. Usage counts the native document segment,
-including the processor's sentence-end punctuation; schema labels and markers
-are not billed. Failed items count zero. These new profiles default to
-float32; another precision is an explicit profile setting.
+including the processor's sentence-end punctuation; schema labels, descriptions
+and markers are not billed. Failed items count zero. These new profiles default
+to float32; another precision is an explicit profile setting.
 
 Before native preprocessing, the adapter also bounds each source to 64
 characters and four native words per configured row token, with at most 4,096
 characters per word. The label list may contain at most `max_prompt_tokens`
-entries and 32 times that many characters in total. Inputs beyond these
-admission limits fail explicitly before collation or inference.
+entries. Each description and the combined label/description text are bounded
+to 32 times `max_prompt_tokens` characters, counting label names repeated in
+description prefixes. Inputs beyond these character and word bounds fail
+explicitly before collation or inference. Descriptions also count toward the
+actual 2,048-token prompt and complete 4,096-token row; they are not truncated.
 
 ### Privacy Filter extraction
 
