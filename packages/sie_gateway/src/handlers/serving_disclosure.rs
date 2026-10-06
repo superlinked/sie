@@ -3885,6 +3885,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn models_leave_out_a_remote_profile_hidden_from_the_caller() {
+        async fn json_of(response: Response) -> serde_json::Value {
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            serde_json::from_slice(&body).unwrap()
+        }
+        let config = fallback_config(HYBRID_EXTRACT_MODEL);
+        for hide_remote in [false, true] {
+            let policy = Arc::new(RoutePolicy {
+                hide_remote,
+                ..Default::default()
+            });
+            let gateway = cold_gateway(&[&config], policy).await;
+            let listing = json_of(
+                crate::handlers::models::get_models(
+                    State(Arc::clone(&gateway.state)),
+                    Request::builder()
+                        .uri("/v1/models")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .into_response(),
+            )
+            .await;
+            let models = listing["models"].as_array().unwrap();
+            let listed = models
+                .iter()
+                .find(|model| model["name"] == "acme/extract")
+                .unwrap()
+                .clone();
+            let detail = json_of(
+                crate::handlers::models::get_model(
+                    axum::extract::Path("acme/extract".to_string()),
+                    State(Arc::clone(&gateway.state)),
+                    Request::builder()
+                        .uri("/v1/models/acme/extract")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await,
+            )
+            .await;
+            let routing = if hide_remote {
+                json!({"policy": null, "upstream_kind": null})
+            } else {
+                json!({"policy": "fallback", "upstream_kind": "sie"})
+            };
+            for body in [&listed, &detail] {
+                assert_eq!(body["routing"], routing, "hide_remote={hide_remote}");
+                assert_eq!(
+                    body["profiles"].get("remote").is_some(),
+                    !hide_remote,
+                    "hide_remote={hide_remote}"
+                );
+                assert!(body["profiles"].get("default").is_some());
+            }
+            assert_eq!(
+                models
+                    .iter()
+                    .any(|model| model["name"] == "acme/extract:remote"),
+                !hide_remote
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn remote_forbid_never_asks_the_policy() {
         let config = fallback_config(HYBRID_EXTRACT_MODEL);
         let policy = Arc::new(RoutePolicy {

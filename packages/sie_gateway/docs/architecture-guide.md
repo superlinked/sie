@@ -1044,6 +1044,10 @@ model, so a caller who can see the remote profile can name it.
 - **Without a policy.** The gateway's own checks decide.
 - **Governed generation.** A policy that governs generation routes keeps
   generation local, because a governed route has no remote route.
+- **Model listing.** `/v1/models` and `/v1/models/{model}` show a bare model
+  to a caller who may not see its remote profile without that profile and with
+  the routing of a model that has no remote route, so the listing does not
+  reveal the profile that `visible` hides.
 
 ### Lanes a transport reports cold
 

@@ -727,8 +727,23 @@ impl ModelEntry {
                 "policy": "remote_only",
                 "upstream_kind": remote_adapter_upstream_kind(module),
             }),
-            _ => json!({ "policy": Value::Null, "upstream_kind": Value::Null }),
+            _ => Self::no_routing_value(),
         }
+    }
+
+    /// The routing of a model without a remote route.
+    pub fn no_routing_value() -> Value {
+        json!({ "policy": Value::Null, "upstream_kind": Value::Null })
+    }
+
+    /// The remote profile that this model's routing names, as its registry id
+    /// and its profile name.
+    pub fn routed_remote_profile(&self) -> Option<(String, &str)> {
+        let profile = self.info_extras.routing.as_ref()?.fallback_profile()?;
+        Some((
+            format!("{}:{}", self.canonical_base_model, profile),
+            profile,
+        ))
     }
 
     /// The side that serves this route, by the single server's rule: a route

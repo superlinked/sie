@@ -1799,12 +1799,7 @@ impl ModelRegistry {
         if local.canonical_profile != "default" || !matches!(local.served_by(), ServedBy::Local) {
             return None;
         }
-        let routing = local.info_extras.routing.as_ref()?;
-        let remote_name = format!(
-            "{}:{}",
-            local.canonical_base_model,
-            routing.fallback_profile()?
-        );
+        let (remote_name, _) = local.routed_remote_profile()?;
         let remote = snap.models.get(&remote_name)?;
         let served_by = remote.served_by();
         if !matches!(served_by, ServedBy::Remote { .. }) {

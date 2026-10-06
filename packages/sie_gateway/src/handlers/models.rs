@@ -66,7 +66,7 @@ pub async fn get_models(
             let worker_urls = model_workers.get(name).cloned().unwrap_or_default();
             let loaded = !worker_urls.is_empty();
             let mut body = match state.model_registry.get_model_info(name) {
-                Some(entry) => entry.to_model_info_value(loaded),
+                Some(entry) => model_info_for_caller(state.as_ref(), &entry, loaded, ext),
                 None => worker_only_model_info(name, loaded),
             };
             attach_model_revision(&mut body, state.as_ref(), name);
@@ -95,6 +95,35 @@ pub async fn get_models(
         })),
     )
         .into_response()
+}
+
+/// A model as the caller in `ext` may see it. When the caller may not see the
+/// remote profile that the model's routing names, the model is shown without
+/// that profile and without the routing, like a model that has no remote
+/// route.
+fn model_info_for_caller(
+    state: &AppState,
+    entry: &ModelEntry,
+    loaded: bool,
+    ext: &axum::http::Extensions,
+) -> Value {
+    let mut body = entry.to_model_info_value(loaded);
+    let Some((remote_model, profile)) = entry.routed_remote_profile() else {
+        return body;
+    };
+    let hidden = state
+        .model_access_policy
+        .as_ref()
+        .is_some_and(|policy| !policy.visible(&remote_model, ext));
+    if hidden {
+        body["routing"] = ModelEntry::no_routing_value();
+        for pointer in ["/profiles", "/capabilities/profile_lora_adapters"] {
+            if let Some(map) = body.pointer_mut(pointer).and_then(Value::as_object_mut) {
+                map.remove(profile);
+            }
+        }
+    }
+    body
 }
 
 /// Detail counterpart to `get_models`.
@@ -162,7 +191,7 @@ pub async fn get_model(
 
     let loaded = !worker_urls.is_empty();
     let mut body = match model_entry {
-        Some(entry) => entry.to_model_info_value(loaded),
+        Some(entry) => model_info_for_caller(state.as_ref(), &entry, loaded, req.extensions()),
         None => worker_only_model_info(&model, loaded),
     };
 
