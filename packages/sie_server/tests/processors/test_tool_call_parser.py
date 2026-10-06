@@ -320,6 +320,13 @@ def _deltas(out: list[GenerationChunk]) -> list:
     return [c.tool_call_delta for c in out if c.tool_call_delta is not None]
 
 
+def _tool(name: str, **properties: dict) -> dict:
+    return {
+        "type": "function",
+        "function": {"name": name, "parameters": {"type": "object", "properties": properties}},
+    }
+
+
 def _args_for(out: list[GenerationChunk], index: int = 0) -> str:
     """Concatenate the arguments_delta for a given tool-call index."""
     return "".join(d.arguments_delta for d in _deltas(out) if d.index == index and d.arguments_delta)
@@ -344,6 +351,7 @@ async def test_explicit_qwen_xml_format() -> None:
     out = await _collect(
         "<tool_call><function=f><parameter=a>\n1\n</parameter></function></tool_call>",
         tool_call_format="qwen_xml",
+        tools=[_tool("f", a={"type": "integer"})],
     )
     import json
 
@@ -362,8 +370,8 @@ async def test_explicit_hermes_json_format() -> None:
 
 
 @pytest.mark.asyncio
-async def test_xml_argument_coercion_edge_cases() -> None:
-    """XML parameter values coerce to typed JSON where possible, else string."""
+async def test_xml_argument_values_follow_declared_types() -> None:
+    """XML parameter values convert by declared type; a value that does not convert stays a string."""
     import json
 
     raw = (
@@ -377,7 +385,17 @@ async def test_xml_argument_coercion_edge_cases() -> None:
         "<parameter=multiline>\nline1\nline2\n</parameter>"
         "</function></tool_call>"
     )
-    out = await _collect(raw, tool_call_format="qwen_xml")
+    tool = _tool(
+        "f",
+        num={"type": "integer"},
+        flag={"type": "boolean"},
+        nested={"type": "object"},
+        jsonish={"type": "object"},
+        empty={"type": "string"},
+        unicode={"type": "string"},
+        multiline={"type": "string"},
+    )
+    out = await _collect(raw, tool_call_format="qwen_xml", tools=[tool])
     args = json.loads(_args_for(out))
     assert args["num"] == 5
     assert args["flag"] is True
@@ -460,7 +478,7 @@ async def test_parallel_tool_calls_true_keeps_all_calls() -> None:
 
 def test_xml_param_scan_matches_well_formed_input() -> None:
     """The linear ``str.find`` scan reproduces the old regex behavior for
-    well-formed input — multiple params, typed coercion preserved.
+    well-formed input — multiple params, each converted by its declared type.
     """
     from sie_server.processors.tool_call_parser import _parse_xml_tool_call
 
@@ -471,7 +489,8 @@ def test_xml_param_scan_matches_well_formed_input() -> None:
         '<parameter=c>\n{"k":[1,2]}\n</parameter>'
         "</function>"
     )
-    name, args = _parse_xml_tool_call(raw)
+    schemas = {"f": {"properties": {"a": {"type": "integer"}, "b": {"type": "string"}, "c": {"type": "object"}}}}
+    name, args = _parse_xml_tool_call(raw, schemas)
     assert name == "f"
     assert args == {"a": 1, "b": "hello", "c": {"k": [1, 2]}}
 
@@ -548,7 +567,11 @@ def test_xml_param_scan_garbled_openers_no_close_is_fast() -> None:
 async def test_explicit_glm_xml_format(raw: str) -> None:
     import json
 
-    out = await _collect("Checking. " + raw, tool_call_format="glm_xml")
+    out = await _collect(
+        "Checking. " + raw,
+        tool_call_format="glm_xml",
+        tools=[_tool("get_weather", city={"type": "string"}, days={"type": "integer"})],
+    )
 
     assert out[0].text_delta == "Checking. "
     assert _deltas(out)[0].function_name == "get_weather"
@@ -565,7 +588,7 @@ async def test_glm_xml_call_without_arguments() -> None:
 
 
 @pytest.mark.asyncio
-async def test_glm_xml_argument_values_coerce_like_qwen_xml() -> None:
+async def test_glm_xml_argument_values_follow_declared_types() -> None:
     import json
 
     raw = (
@@ -577,7 +600,15 @@ async def test_glm_xml_argument_values_coerce_like_qwen_xml() -> None:
         "<arg_key>multiline</arg_key><arg_value>line1\nline2</arg_value>"
         "</tool_call>"
     )
-    out = await _collect(raw, tool_call_format="glm_xml")
+    tool = _tool(
+        "f",
+        num={"type": "integer"},
+        flag={"type": "boolean"},
+        nested={"type": "object"},
+        text={"type": "string"},
+        multiline={"type": "string"},
+    )
+    out = await _collect(raw, tool_call_format="glm_xml", tools=[tool])
 
     assert json.loads(_args_for(out)) == {
         "num": 5,
@@ -773,3 +804,187 @@ async def test_parse_tool_call_stream_non_streaming_per_candidate_tool_calls() -
     assert cands[0]["finish_reason"] == "tool_calls"
     assert "tool_calls" not in cands[1] or not cands[1].get("tool_calls")
     assert cands[1]["finish_reason"] == "stop"
+
+
+# ── schema-driven argument values ──────────────────────────────────
+
+
+def _qwen_call(name: str, **values: str) -> str:
+    body = "".join(f"<parameter={key}>\n{value}\n</parameter>\n" for key, value in values.items())
+    return f"<tool_call>\n<function={name}>\n{body}</function>\n</tool_call>"
+
+
+def _glm_call(name: str, **values: str) -> str:
+    body = "".join(f"<arg_key>{key}</arg_key><arg_value>{value}</arg_value>" for key, value in values.items())
+    return f"<tool_call>{name}{body}</tool_call>"
+
+
+_EDIT_TOOL = _tool(
+    "edit_file",
+    path={"type": "string"},
+    old_str={"type": "string"},
+    new_str={"type": "string"},
+    content={"type": "string"},
+    version={"type": "string"},
+    pattern={"type": "string"},
+    query={"type": "string"},
+)
+
+_EXACT_STRINGS = {
+    "old_str": "    return x",
+    "new_str": "        return y",
+    "content": '{"version": "1.10"}',
+    "version": "1.10",
+    "pattern": "true",
+    "query": "null",
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("raw", "tool_call_format"),
+    [
+        (_qwen_call("edit_file", **_EXACT_STRINGS), "qwen_xml"),
+        (_glm_call("edit_file", **_EXACT_STRINGS), "glm_xml"),
+    ],
+)
+async def test_string_parameters_keep_their_exact_text(raw: str, tool_call_format: str) -> None:
+    import json
+
+    out = await _collect(raw, tool_call_format=tool_call_format, tools=[_EDIT_TOOL])
+
+    assert json.loads(_args_for(out)) == _EXACT_STRINGS
+
+
+@pytest.mark.asyncio
+async def test_qwen_xml_removes_only_the_template_newlines() -> None:
+    import json
+
+    raw = "<tool_call><function=edit_file><parameter=content>\nline\n\n</parameter></function></tool_call>"
+    out = await _collect(raw, tool_call_format="qwen_xml", tools=[_EDIT_TOOL])
+
+    assert json.loads(_args_for(out)) == {"content": "line\n"}
+
+
+@pytest.mark.asyncio
+async def test_glm_xml_string_values_are_not_json_unquoted() -> None:
+    import json
+
+    out = await _collect(_glm_call("edit_file", new_str='"hello"'), tool_call_format="glm_xml", tools=[_EDIT_TOOL])
+
+    assert json.loads(_args_for(out)) == {"new_str": '"hello"'}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_call_format", ["qwen_xml", "glm_xml"])
+async def test_undeclared_tool_and_parameter_values_stay_strings(tool_call_format: str) -> None:
+    import json
+
+    values = {"count": "5", "flag": "true", "data": '{"a": 1}'}
+    raw = (_qwen_call if tool_call_format == "qwen_xml" else _glm_call)("unknown_tool", **values)
+    out = await _collect(raw, tool_call_format=tool_call_format, tools=[_EDIT_TOOL])
+    assert _deltas(out)[0].function_name == "unknown_tool"
+    assert json.loads(_args_for(out)) == values
+
+    raw = (_qwen_call if tool_call_format == "qwen_xml" else _glm_call)("edit_file", path="a.py", extra="5")
+    out = await _collect(raw, tool_call_format=tool_call_format, tools=[_EDIT_TOOL])
+    assert json.loads(_args_for(out)) == {"path": "a.py", "extra": "5"}
+
+
+@pytest.mark.asyncio
+async def test_values_without_tools_stay_strings() -> None:
+    import json
+
+    out = await _collect(_qwen_call("f", n="5"), tool_call_format="qwen_xml")
+
+    assert json.loads(_args_for(out)) == {"n": "5"}
+
+
+@pytest.mark.parametrize(
+    ("schema", "text", "expected"),
+    [
+        ({"type": "integer"}, "42", 42),
+        ({"type": "integer"}, "forty", "forty"),
+        ({"type": "integer"}, "null", None),
+        ({"type": "number"}, "1.5", 1.5),
+        ({"type": "number"}, "2", 2),
+        ({"type": "number"}, "nan", "nan"),
+        ({"type": "number"}, "1e400", "1e400"),
+        ({"type": "boolean"}, "False", False),
+        ({"type": "boolean"}, "yes", "yes"),
+        ({"type": "array"}, "[1, 2]", [1, 2]),
+        ({"type": "object"}, "{'a': 1}", {"a": 1}),
+        ({"type": "object"}, "{'a': {1, 2}}", "{'a': {1, 2}}"),
+        ({"type": "object"}, '{"a": NaN}', '{"a": NaN}'),
+        ({"type": "string"}, "null", "null"),
+        ({"type": ["string", "null"]}, "null", None),
+        ({"type": "string", "nullable": True}, "null", None),
+        ({"type": ["integer", "null"]}, "7", 7),
+        ({"anyOf": [{"type": "integer"}, {"type": "null"}]}, "7", 7),
+        ({"anyOf": [{"type": "integer"}, {"type": "string"}]}, "7", "7"),
+        ({"oneOf": [{"type": "integer"}, {"type": "boolean"}]}, "7", 7),
+        ({"enum": [1, 2, 3]}, "2", 2),
+        ({"enum": ["1", "2"]}, "2", "2"),
+        ({"enum": [1, "a"]}, "1", "1"),
+        ({"allOf": [{"type": "integer"}, {"minimum": 0}]}, "3", 3),
+        ({"properties": {"a": {"type": "integer"}}}, '{"a": 1}', {"a": 1}),
+        ({"items": {"type": "integer"}}, "[1]", [1]),
+        ({"$ref": "#/$defs/Count"}, "9", 9),
+        ({"$ref": "#/$defs/Missing"}, "9", "9"),
+        ({"$ref": "https://example.com/schema"}, "9", "9"),
+        ({"description": "no type"}, "9", "9"),
+    ],
+)
+def test_argument_conversion_follows_the_declared_schema(schema: dict, text: str, expected: object) -> None:
+    from sie_server.processors.tool_call_parser import _parse_xml_tool_call
+
+    schemas = {"f": {"$defs": {"Count": {"type": "integer"}}, "properties": {"v": schema}}}
+    _, args = _parse_xml_tool_call(f"<function=f><parameter=v>\n{text}\n</parameter></function>", schemas)
+
+    assert args == {"v": expected}
+    assert type(args["v"]) is type(expected)
+
+
+def test_self_referencing_schema_does_not_loop() -> None:
+    from sie_server.processors.tool_call_parser import _parse_xml_tool_call
+
+    schemas = {"f": {"$defs": {"A": {"$ref": "#/$defs/A"}}, "properties": {"v": {"$ref": "#/$defs/A"}}}}
+
+    assert _parse_xml_tool_call("<function=f><parameter=v>\n1\n</parameter></function>", schemas) == ("f", {"v": "1"})
+
+
+@pytest.mark.asyncio
+async def test_non_streaming_candidates_keep_a_malformed_block_as_text() -> None:
+    import json
+
+    malformed = "<tool_call>{not json</tool_call>"
+    candidates = (
+        {"text": "Calling " + malformed, "finish_reason": "stop", "logprobs": None},
+        {"text": _qwen_call("edit_file", old_str="    a"), "finish_reason": "stop", "logprobs": None},
+    )
+    out = [
+        item
+        async for item in parse_tool_call_stream(
+            _chunks([GenerationChunk(text_delta="", done=True, finish_reason="stop", candidates=candidates)]),
+            tool_call_format="hermes_json",
+            tools=[_EDIT_TOOL],
+        )
+    ]
+    first, second = out[-1].candidates
+
+    assert first["text"] == "Calling " + malformed
+    assert not first.get("tool_calls")
+    assert first["finish_reason"] == "stop"
+    assert second["finish_reason"] == "stop"
+
+    out = [
+        item
+        async for item in parse_tool_call_stream(
+            _chunks([GenerationChunk(text_delta="", done=True, finish_reason="stop", candidates=candidates[1:])]),
+            tool_call_format="qwen_xml",
+            tools=[_EDIT_TOOL],
+        )
+    ]
+    (parsed,) = out[-1].candidates
+    assert json.loads(parsed["tool_calls"][0]["function"]["arguments"]) == {"old_str": "    a"}
+    assert parsed["finish_reason"] == "tool_calls"

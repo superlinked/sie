@@ -40,7 +40,7 @@ class RawAdapter(OpenAIUpstreamAdapter):
             self.closed = True
 
 
-def model() -> ModelConfig:
+def model(tool_call_parser: str = "hermes") -> ModelConfig:
     return ModelConfig.model_validate(
         {
             "sie_id": "local/model",
@@ -58,7 +58,7 @@ def model() -> ModelConfig:
                     "adapter_path": "sie_server.adapters.sglang:SGLangGenerationAdapter",
                     "max_batch_tokens": 8192,
                     "kv_budget_tokens": 8192,
-                    "adapter_options": {"loadtime": {"tool_call_parser": "hermes"}},
+                    "adapter_options": {"loadtime": {"tool_call_parser": tool_call_parser}},
                 }
             },
         }
@@ -171,6 +171,31 @@ async def test_local_tool_parser_and_prior_arguments(template) -> None:
     assert template["messages"][1]["tool_calls"][0]["function"]["arguments"] == {"x": 0}
     assert request["messages"][1]["tool_calls"][0]["function"]["arguments"] == '{"x":0}'
     assert payload["choices"][0]["finish_reason"] == "tool_calls"
+
+
+@pytest.mark.asyncio
+async def test_rendered_chat_tool_arguments_follow_the_request_schema(template) -> None:
+    tool = {
+        "type": "function",
+        "function": {
+            "name": "edit",
+            "parameters": {"type": "object", "properties": {"old": {"type": "string"}, "line": {"type": "integer"}}},
+        },
+    }
+    adapter = RawAdapter(
+        [
+            GenerationChunk(
+                text_delta="</think><tool_call>\n<function=edit>\n<parameter=old>\n    return 1.10\n</parameter>\n"
+                "<parameter=line>\n7\n</parameter>\n</function>\n</tool_call>"
+            ),
+            GenerationChunk(text_delta="", done=True, finish_reason="stop", prompt_tokens=12, completion_tokens=3),
+        ]
+    )
+    events = await prepare(adapter, body(tools=[tool]), config=model("qwen3_coder"))
+    assert events is not None
+    payload = await remote_chat_prompt.collect_rendered_chat(events)
+    call = payload["choices"][0]["message"]["tool_calls"][0]
+    assert json.loads(call["function"]["arguments"]) == {"old": "    return 1.10", "line": 7}
 
 
 @pytest.mark.asyncio

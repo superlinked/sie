@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import re
 import threading
 import time
@@ -2881,6 +2882,100 @@ async def test_streaming_tool_call_is_forced_and_parsed_in_the_configured_format
     tcs = _tool_call_deltas(decoded)
     assert tcs[0]["function"]["name"] == "get_weather"
     assert tcs[1]["function"]["arguments"] == '{"city":"Tokyo"}'
+    assert decoded[-1]["finish_reason"] == "tool_calls"
+
+
+_EDIT_FILE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "edit_file",
+        "parameters": {
+            "type": "object",
+            "$defs": {"Mode": {"type": "string", "enum": ["replace", "append"]}},
+            "properties": {
+                "path": {"type": "string"},
+                "old_str": {"type": "string"},
+                "new_str": {"type": "string"},
+                "content": {"type": "string"},
+                "mode": {"$ref": "#/$defs/Mode"},
+                "line": {"type": "integer"},
+                "dry_run": {"type": "boolean"},
+                "tags": {"type": "array", "items": {"type": "string"}},
+                "options": {"type": "object"},
+                "note": {"type": ["string", "null"]},
+            },
+            "required": ["path"],
+        },
+    },
+}
+
+_EDIT_FILE_ARGUMENTS = {
+    "path": "src/app.py",
+    "old_str": "    return x",
+    "new_str": "        return y\n",
+    "content": '{"version": "1.10", "html": "&lt;b&gt; <i>"}',
+    "mode": "replace",
+    "line": 42,
+    "dry_run": False,
+    "tags": ["a", "b"],
+    "options": {"indent": 4},
+    "note": None,
+}
+
+
+def _template_value(value: object) -> str:
+    return value if isinstance(value, str) else json.dumps(value)
+
+
+def _qwen_xml_call(name: str, arguments: dict[str, object]) -> str:
+    body = "".join(f"<parameter={key}>\n{_template_value(value)}\n</parameter>\n" for key, value in arguments.items())
+    return f"<tool_call>\n<function={name}>\n{body}</function>\n</tool_call>"
+
+
+def _glm_xml_call(name: str, arguments: dict[str, object]) -> str:
+    body = "".join(
+        f"<arg_key>{key}</arg_key><arg_value>{_template_value(value)}</arg_value>" for key, value in arguments.items()
+    )
+    return f"<tool_call>{name}{body}</tool_call>"
+
+
+async def _stream_tool_call(parser: str, text: str, tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    nc = AsyncMock()
+    script = [GenerationChunk(text_delta=text[i : i + 5], is_first=i == 0) for i in range(0, len(text), 5)]
+    script.append(GenerationChunk(text_delta="", done=True, finish_reason="stop", prompt_tokens=5, completion_tokens=9))
+    registry = _make_registry(_FakeGenAdapter(script))
+    resolved = MagicMock()
+    resolved.loadtime = {"tool_call_parser": parser}
+    registry.get_config.return_value.resolve_profile.return_value = resolved
+    proc = StreamingProcessor(nc=nc, registry=registry, worker_id="w1")
+    wi = _make_work_item(generate={"prompt": "edit", "max_new_tokens": 512, "tools": tools})
+
+    await proc.process(_make_msg(wi), "test/model")
+
+    return _decode_chunks(nc)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("parser", "render"), [("qwen3_coder", _qwen_xml_call), ("glm47", _glm_xml_call)])
+async def test_streamed_tool_call_arguments_match_what_the_model_wrote(parser: str, render: Any) -> None:
+    decoded = await _stream_tool_call(parser, render("edit_file", _EDIT_FILE_ARGUMENTS), [_EDIT_FILE_TOOL])
+
+    tcs = _tool_call_deltas(decoded)
+    assert tcs[0]["function"]["name"] == "edit_file"
+    assert json.loads(tcs[1]["function"]["arguments"]) == _EDIT_FILE_ARGUMENTS
+    assert decoded[-1]["finish_reason"] == "tool_calls"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("parser", "render"), [("qwen3_coder", _qwen_xml_call), ("glm47", _glm_xml_call)])
+async def test_streamed_call_to_an_undeclared_tool_keeps_string_values(parser: str, render: Any) -> None:
+    arguments = {"count": "5", "flag": "true", "payload": '{"a": 1}'}
+
+    decoded = await _stream_tool_call(parser, render("delete_branch", arguments), [_EDIT_FILE_TOOL])
+
+    tcs = _tool_call_deltas(decoded)
+    assert tcs[0]["function"]["name"] == "delete_branch"
+    assert json.loads(tcs[1]["function"]["arguments"]) == arguments
     assert decoded[-1]["finish_reason"] == "tool_calls"
 
 

@@ -9,6 +9,11 @@ This first implementation emits arguments atomically when the closing tag arrive
 It is intentionally strict: malformed JSON or missing ``name``/``arguments``
 turns into a terminal ``MODEL_OUTPUT_PARSE_ERROR`` chunk.
 
+The XML forms carry every argument value as text. Each value is converted by
+the JSON-schema type its parameter declares in the request's ``tools``: a
+string parameter keeps its exact text, and a value that does not convert, or
+that belongs to an undeclared tool or parameter, stays a string.
+
 For streaming ``n>1`` the parser maintains independent per-candidate state
 keyed by ``chunk.choice_index`` (H5): each candidate's tool-call deltas
 surface tagged with the same ``choice_index`` they came in on, so the
@@ -17,13 +22,15 @@ gateway can fan tool calls out per candidate.
 
 from __future__ import annotations
 
+import ast
 import json
 import logging
+import math
 import re
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 from sie_server.adapters._generation_base import (
     FinishReason,
@@ -71,12 +78,204 @@ _MAX_TEXT_BUFFER_CHARS = 256 * 1024
 # to ``json.dumps`` back out.
 _MAX_TOOL_ARGUMENTS_CHARS = 64 * 1024
 
+ToolSchemas = Mapping[str, Mapping[str, Any]]
+
+_STRING_TYPES = frozenset({"string", "str", "text", "varchar", "char", "enum"})
+_INTEGER_TYPE_PREFIXES = ("int", "uint", "long", "short", "unsigned")
+_NUMBER_TYPE_PREFIXES = ("num", "float")
+_CONTAINER_TYPES = frozenset({"object", "array", "arr"})
+_CONTAINER_TYPE_PREFIXES = ("dict", "list")
+_MAX_SCHEMA_DEPTH = 32
+
+
+def tool_parameter_schemas(tools: Sequence[Mapping[str, Any]] | None) -> dict[str, Mapping[str, Any]]:
+    """Map each declared function name in an OpenAI ``tools`` array to its ``parameters`` schema."""
+    schemas: dict[str, Mapping[str, Any]] = {}
+    for tool in tools or ():
+        if not isinstance(tool, Mapping):
+            continue
+        function = tool.get("function")
+        if not isinstance(function, Mapping):
+            continue
+        name = function.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        parameters = function.get("parameters")
+        schemas[name] = parameters if isinstance(parameters, Mapping) else {}
+    return schemas
+
+
+def _resolve_ref(schema: Any, root: Mapping[str, Any]) -> Any:
+    """Follow local ``#/...`` JSON pointers. An unresolvable reference yields ``None``."""
+    for _ in range(_MAX_SCHEMA_DEPTH):
+        if not isinstance(schema, Mapping):
+            return schema
+        ref = schema.get("$ref")
+        if not isinstance(ref, str):
+            return schema
+        if ref == "#":
+            schema = root
+            continue
+        if not ref.startswith("#/"):
+            return None
+        node: Any = root
+        for part in ref[2:].split("/"):
+            part = part.replace("~1", "/").replace("~0", "~")
+            if not isinstance(node, Mapping) or part not in node:
+                return None
+            node = node[part]
+        schema = node
+    return None
+
+
+def _enum_type(values: list[object]) -> str:
+    kinds: set[str] = set()
+    for value in values:
+        if value is None:
+            kinds.add("null")
+        elif isinstance(value, bool):
+            kinds.add("boolean")
+        elif isinstance(value, int):
+            kinds.add("integer")
+        elif isinstance(value, float):
+            kinds.add("number")
+        elif isinstance(value, str):
+            kinds.add("string")
+        elif isinstance(value, list):
+            kinds.add("array")
+        elif isinstance(value, dict):
+            kinds.add("object")
+    return kinds.pop() if len(kinds) == 1 else "string"
+
+
+def _schema_type(schema: Any, root: Mapping[str, Any], depth: int = 0) -> str | None:
+    """Infer one conversion type from a parameter schema, as SGLang's ``infer_type_from_json_schema`` does."""
+    schema = _resolve_ref(schema, root)
+    if not isinstance(schema, Mapping) or depth > _MAX_SCHEMA_DEPTH:
+        return None
+    declared = schema.get("type")
+    if isinstance(declared, str):
+        return declared.strip().lower()
+    if isinstance(declared, list) and declared:
+        non_null = [str(kind) for kind in declared if kind != "null"]
+        return non_null[0].strip().lower() if non_null else "string"
+    variants = schema.get("anyOf") or schema.get("oneOf")
+    if isinstance(variants, list):
+        kinds = [kind for kind in (_schema_type(variant, root, depth + 1) for variant in variants) if kind]
+        if kinds:
+            distinct = set(kinds)
+            if len(distinct) == 1:
+                return kinds[0]
+            if len(distinct) == 2 and "null" in distinct:  # noqa: PLR2004 - optional type pair
+                return next(kind for kind in kinds if kind != "null")
+            return "string" if "string" in distinct else kinds[0]
+    enum = schema.get("enum")
+    if isinstance(enum, list):
+        return _enum_type(enum) if enum else "string"
+    all_of = schema.get("allOf")
+    if isinstance(all_of, list):
+        for variant in all_of:
+            kind = _schema_type(variant, root, depth + 1)
+            if kind and kind != "string":
+                return kind
+        return "string"
+    if "properties" in schema:
+        return "object"
+    if "items" in schema:
+        return "array"
+    return None
+
+
+def _schema_allows_null(schema: Any, root: Mapping[str, Any], depth: int = 0) -> bool:
+    schema = _resolve_ref(schema, root)
+    if not isinstance(schema, Mapping) or depth > _MAX_SCHEMA_DEPTH:
+        return False
+    declared = schema.get("type")
+    if schema.get("nullable") is True or declared == "null" or (isinstance(declared, list) and "null" in declared):
+        return True
+    enum = schema.get("enum")
+    if isinstance(enum, list) and None in enum:
+        return True
+    return any(
+        isinstance(variants, list) and any(_schema_allows_null(variant, root, depth + 1) for variant in variants)
+        for variants in (schema.get("anyOf"), schema.get("oneOf"))
+    )
+
+
+def _reject_constant(constant: str) -> object:
+    raise ValueError(f"non-finite JSON constant {constant}")
+
+
+def _loads_json(text: str) -> object:
+    return json.loads(text, parse_constant=_reject_constant)
+
+
+def _convert_argument(raw: str, schema: Any, root: Mapping[str, Any]) -> object:
+    """Convert one XML argument value by its declared type.
+
+    ``schema is None`` marks an undeclared tool or parameter, which keeps the raw
+    text. A value that does not convert to its declared type also keeps the raw
+    text, so the client's own validation can report it to the model.
+    """
+    if schema is None:
+        return raw
+    kind = _schema_type(schema, root) or "string"
+    text = raw.strip()
+    if text.lower() == "null" and (kind not in _STRING_TYPES or _schema_allows_null(schema, root)):
+        return None
+    if kind in _STRING_TYPES:
+        return raw
+    if kind.startswith(_INTEGER_TYPE_PREFIXES):
+        try:
+            return int(text)
+        except ValueError:
+            return raw
+    if kind.startswith(_NUMBER_TYPE_PREFIXES):
+        if "." not in text and "e" not in text.lower():
+            try:
+                return int(text)
+            except ValueError:
+                pass
+        try:
+            number = float(text)
+        except ValueError:
+            return raw
+        return number if math.isfinite(number) else raw
+    if kind in ("boolean", "bool", "binary"):
+        lowered = text.lower()
+        return lowered == "true" if lowered in ("true", "false") else raw
+    try:
+        return _loads_json(text)
+    except (ValueError, RecursionError):
+        pass
+    if kind in _CONTAINER_TYPES or kind.startswith(_CONTAINER_TYPE_PREFIXES):
+        try:
+            value = ast.literal_eval(text)
+            if isinstance(value, dict | list):
+                json.dumps(value, allow_nan=False)
+                return value
+        except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+            pass
+    return raw
+
+
+def _parameter_schema(schemas: ToolSchemas, name: str, key: str) -> tuple[Any, Mapping[str, Any]]:
+    """Return ``(parameter schema or None, tool parameters root)`` for one argument."""
+    root = schemas.get(name)
+    if root is None:
+        return None, {}
+    properties = root.get("properties")
+    if not isinstance(properties, Mapping):
+        return None, root
+    return properties.get(key), root
+
 
 async def parse_tool_call_stream(
     chunks: AsyncIterator[GenerationChunk],
     *,
     tool_call_format: ToolCallFormat = "auto",
     parallel_tool_calls: bool = True,
+    tools: Sequence[Mapping[str, Any]] | None = None,
 ) -> AsyncIterator[GenerationChunk]:
     """Tool-call parsing wrapper that guarantees the upstream is closed.
 
@@ -94,6 +293,7 @@ async def parse_tool_call_stream(
             chunks,
             tool_call_format=tool_call_format,
             parallel_tool_calls=parallel_tool_calls,
+            schemas=tool_parameter_schemas(tools),
         ):
             if out.done:
                 terminal_outcome_selected = True
@@ -157,6 +357,7 @@ def _process_text(
     choice_index: int,
     tool_call_format: ToolCallFormat,
     parallel_tool_calls: bool,
+    schemas: ToolSchemas,
 ) -> tuple[list[GenerationChunk], bool]:
     """Run one text delta through the per-choice parser.
 
@@ -193,7 +394,7 @@ def _process_text(
                 continue
             state.tool_buffer += incoming[cursor:close_idx]
             try:
-                deltas = _tool_call_deltas(state.tool_buffer, state.tool_index, tool_call_format)
+                deltas = _tool_call_deltas(state.tool_buffer, state.tool_index, tool_call_format, schemas)
             except ValueError as exc:
                 out.append(_parse_error_chunk(str(exc)))
                 return out, True
@@ -314,6 +515,7 @@ async def _parse_tool_call_stream_impl(
     *,
     tool_call_format: ToolCallFormat = "auto",
     parallel_tool_calls: bool = True,
+    schemas: ToolSchemas | None = None,
 ) -> AsyncIterator[GenerationChunk]:
     """Convert tagged text chunks into OpenAI-compatible tool-call deltas.
 
@@ -342,6 +544,7 @@ async def _parse_tool_call_stream_impl(
     terminal then closes any choices that did not see a per-choice
     closure and surfaces aggregate usage.
     """
+    schemas = schemas or {}
     states: dict[int, _ChoiceState] = {}
 
     def _state(idx: int) -> _ChoiceState:
@@ -375,6 +578,7 @@ async def _parse_tool_call_stream_impl(
                 choice_index=idx,
                 tool_call_format=tool_call_format,
                 parallel_tool_calls=parallel_tool_calls,
+                schemas=schemas,
             )
             for ev in emitted:
                 yield ev
@@ -414,7 +618,7 @@ async def _parse_tool_call_stream_impl(
                 any_tool_call = False
                 for cand in chunk.candidates:
                     cand_text = cand.get("text", "") if isinstance(cand, dict) else ""
-                    parsed_text, parsed_calls = _parse_candidate_text(cand_text, tool_call_format)
+                    parsed_text, parsed_calls = _parse_candidate_text(cand_text, tool_call_format, schemas)
                     new_cand = dict(cand) if isinstance(cand, dict) else {}
                     if parsed_calls:
                         # OpenAI non-streaming shape: message.content=null,
@@ -522,7 +726,11 @@ async def _parse_tool_call_stream_impl(
     yield GenerationChunk(text_delta="", done=True, finish_reason="tool_calls" if any_tool else "stop")
 
 
-def _parse_candidate_text(text: str, tool_call_format: ToolCallFormat) -> tuple[str, list[dict]]:
+def _parse_candidate_text(
+    text: str,
+    tool_call_format: ToolCallFormat,
+    schemas: ToolSchemas | None = None,
+) -> tuple[str, list[dict]]:
     """Parse a single candidate's full text for ``<tool_call>`` blocks.
 
     Returns ``(text_outside_tool_blocks, tool_calls)`` where
@@ -532,11 +740,10 @@ def _parse_candidate_text(text: str, tool_call_format: ToolCallFormat) -> tuple[
     Used by the non-streaming ``n>1`` + tools path: the worker's
     multi-candidate adapter ships one terminal carrying the full text
     of each candidate, and each candidate needs its own tool-call
-    aggregation (H5 non-streaming side). On malformed blocks the
-    candidate's surrounding text is preserved verbatim and the
-    malformed block is skipped — the non-streaming path doesn't have a
-    natural channel for a per-candidate parse error, so we degrade
-    gracefully rather than failing the whole multi-candidate batch.
+    aggregation (H5 non-streaming side). A malformed block stays in the
+    candidate's text verbatim: the non-streaming path has no channel for
+    a per-candidate parse error, and dropping the block would let a
+    candidate whose only call was malformed finish as an ordinary answer.
     """
     if not text or _OPEN not in text:
         return text, []
@@ -559,11 +766,9 @@ def _parse_candidate_text(text: str, tool_call_format: ToolCallFormat) -> tuple[
             break
         body = text[body_start:close_idx]
         try:
-            deltas = _tool_call_deltas(body, tool_index, tool_call_format)
+            deltas = _tool_call_deltas(body, tool_index, tool_call_format, schemas)
         except ValueError:
-            # Malformed tool body — drop it and keep going. The candidate
-            # batch is non-streaming, so partial failure of one block in
-            # one candidate must not poison the rest.
+            out_text_parts.append(text[open_idx : close_idx + len(_CLOSE)])
             cursor = close_idx + len(_CLOSE)
             continue
         # ``_tool_call_deltas`` returns two deltas per call: announcement
@@ -586,7 +791,12 @@ def _parse_candidate_text(text: str, tool_call_format: ToolCallFormat) -> tuple[
     return "".join(out_text_parts), tool_calls
 
 
-def _tool_call_deltas(raw: str, index: int, tool_call_format: ToolCallFormat = "auto") -> list[ToolCallDelta]:
+def _tool_call_deltas(
+    raw: str,
+    index: int,
+    tool_call_format: ToolCallFormat = "auto",
+    schemas: ToolSchemas | None = None,
+) -> list[ToolCallDelta]:
     raw = raw.strip()
     # Two on-the-wire formats appear inside <tool_call>…</tool_call>:
     #   1. Hermes JSON:  {"name": "...", "arguments": {...}}
@@ -595,13 +805,13 @@ def _tool_call_deltas(raw: str, index: int, tool_call_format: ToolCallFormat = "
     # ``tool_call_format`` makes the choice explicit (config-driven);
     # ``"auto"`` falls back to the original "starts-with-<function=" heuristic.
     if tool_call_format == "qwen_xml":
-        name, arguments = _parse_xml_tool_call(raw)
+        name, arguments = _parse_xml_tool_call(raw, schemas)
     elif tool_call_format == "hermes_json":
         name, arguments = _parse_hermes_tool_call(raw)
     elif tool_call_format == "glm_xml":
-        name, arguments = _parse_glm_tool_call(raw)
+        name, arguments = _parse_glm_tool_call(raw, schemas)
     elif raw.startswith("<function="):
-        name, arguments = _parse_xml_tool_call(raw)
+        name, arguments = _parse_xml_tool_call(raw, schemas)
     else:
         name, arguments = _parse_hermes_tool_call(raw)
     if not isinstance(name, str) or not name:
@@ -651,7 +861,7 @@ _XML_PARAM_CLOSE = "</parameter>"
 _MAX_XML_PARAMS = 256
 
 
-def _parse_xml_tool_call(raw: str) -> tuple[str, dict[str, object]]:
+def _parse_xml_tool_call(raw: str, schemas: ToolSchemas | None = None) -> tuple[str, dict[str, object]]:
     """Parse the Qwen3(-Coder) XML tool-call form.
 
     Example::
@@ -662,10 +872,10 @@ def _parse_xml_tool_call(raw: str) -> tuple[str, dict[str, object]]:
         </parameter>
         </function>
 
-    Returns ``(name, arguments)``. Parameter values are coerced from text to
-    JSON scalars where possible (so ``"5"`` → ``5``, ``"true"`` → ``True``),
-    falling back to the trimmed string — which matches how OpenAI clients
-    expect typed function arguments.
+    Returns ``(name, arguments)``. The chat template wraps every value in one
+    newline on each side, so exactly one is removed from each end and the rest
+    of the text is kept. Values are then converted by their declared parameter
+    type in ``schemas``.
     """
     fm = _XML_FUNC_RE.search(raw)
     if not fm:
@@ -686,11 +896,9 @@ def _parse_xml_tool_call(raw: str) -> tuple[str, dict[str, object]]:
         if close_idx == -1:
             # Unterminated parameter — stop; well-formed input always closes.
             break
-        val = raw[val_start:close_idx].strip()
-        try:
-            arguments[key] = json.loads(val)
-        except (json.JSONDecodeError, ValueError):
-            arguments[key] = val
+        val = raw[val_start:close_idx].removeprefix("\n").removesuffix("\n")
+        schema, root = _parameter_schema(schemas or {}, name, key)
+        arguments[key] = _convert_argument(val, schema, root)
         pos = close_idx + len(_XML_PARAM_CLOSE)
         count += 1
     return name, arguments
@@ -708,7 +916,7 @@ def _skip_whitespace(raw: str, pos: int) -> int:
     return pos
 
 
-def _parse_glm_tool_call(raw: str) -> tuple[str, dict[str, object]]:
+def _parse_glm_tool_call(raw: str, schemas: ToolSchemas | None = None) -> tuple[str, dict[str, object]]:
     """Parse the GLM tool-call form.
 
     Example::
@@ -719,9 +927,10 @@ def _parse_glm_tool_call(raw: str) -> tuple[str, dict[str, object]]:
     ``<arg_key>``. Only whitespace may separate the name and the argument
     pairs, and a name or key carrying a tag is rejected, so an unpaired or
     misplaced tag is a parse error rather than part of the call. The chat
-    template writes string values raw and every other value as JSON, so values
-    are coerced as in the Qwen XML form. The scan is linear, and a call with
-    more than ``_MAX_XML_PARAMS`` pairs is rejected rather than truncated.
+    template writes ``<arg_value>{value}</arg_value>`` with nothing around the
+    value, so the text is kept verbatim and converted by its declared parameter
+    type in ``schemas``. The scan is linear, and a call with more than
+    ``_MAX_XML_PARAMS`` pairs is rejected rather than truncated.
     """
     first_key = raw.find(_GLM_KEY_OPEN)
     name = (raw if first_key == -1 else raw[:first_key]).strip()
@@ -745,11 +954,9 @@ def _parse_glm_tool_call(raw: str) -> tuple[str, dict[str, object]]:
         key = raw[pos + len(_GLM_KEY_OPEN) : key_close].strip()
         if "<" in key or ">" in key:
             raise ValueError("malformed GLM tool-call: invalid argument key")
-        value = raw[value_open + len(_GLM_VALUE_OPEN) : value_close].strip()
-        try:
-            arguments[key] = json.loads(value)
-        except (json.JSONDecodeError, ValueError):
-            arguments[key] = value
+        value = raw[value_open + len(_GLM_VALUE_OPEN) : value_close]
+        schema, root = _parameter_schema(schemas or {}, name, key)
+        arguments[key] = _convert_argument(value, schema, root)
         pos = value_close + len(_GLM_VALUE_CLOSE)
         count += 1
     if _skip_whitespace(raw, pos) < len(raw):

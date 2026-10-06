@@ -2336,6 +2336,7 @@ class StreamingProcessor:
                 chunks_iter,
                 tool_call_format=tool_call_format,
                 parallel_tool_calls=parallel_tool_calls,
+                tools=tools,
             )
         chunks_iter = enforce_strict_grammar(chunks_iter, grammar)
 

@@ -143,7 +143,8 @@ def test_glm_xml_regex_accepts_only_complete_argument_pairs() -> None:
         "\n<arg_key>days</arg_key>\n<arg_value>3</arg_value></tool_call>"
     )
     assert pat.fullmatch(two)
-    assert _parse_glm_tool_call(two.removeprefix("<tool_call>").removesuffix("</tool_call>")) == (
+    schemas = {"get_weather": {"properties": {"city": {"type": "string"}, "days": {"type": "integer"}}}}
+    assert _parse_glm_tool_call(two.removeprefix("<tool_call>").removesuffix("</tool_call>"), schemas) == (
         "get_weather",
         {"city": "Tokyo", "days": 3},
     )
