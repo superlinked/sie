@@ -1,5 +1,9 @@
 # Route requests without a generation call on every message
 
+For a single native classification call with your own handler labels, see
+the [direct routing example](./direct). The recorded cascade below uses a
+separate embedding classifier and conditional generation recipe.
+
 Choose a support queue, banking intent, voice-assistant action, or agent route
 with an embedding classifier. Send requests below its fixed confidence
 threshold to Qwen3.8 27B for a constrained answer. Your application uses the

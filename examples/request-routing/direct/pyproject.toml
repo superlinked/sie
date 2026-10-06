@@ -1,0 +1,19 @@
+[project]
+name = "superlinked-sie-direct-routing-example"
+version = "0.1.0"
+description = "Select a supplied request handler from native classification scores"
+requires-python = ">=3.12,<3.13"
+dependencies = ["sie-sdk==0.9.0"]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+sie-sdk = { git = "https://github.com/superlinked/sie", rev = "ab016b13b4417baabf6964c745eedfda3b52ad0f", subdirectory = "packages/sie_sdk" }
+
+[dependency-groups]
+dev = ["ruff>=0.14"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
