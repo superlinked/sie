@@ -1,0 +1,25 @@
+sie_id: nvidia/parakeet-tdt-0.6b-v3
+hf_id: nvidia/parakeet-tdt-0.6b-v3
+hf_revision: 541d1f99c6b0c3cd0b11a95167540bb8edefd82b
+inputs:
+  text: false
+  image: false
+  audio: true
+  video: false
+tasks:
+  encode: null
+  score: null
+  extract: {}
+profiles:
+  default:
+    # Audio milliseconds per extract call: one 12-minute request (the longest
+    # SIE accepts) or several shorter ones. The adapter also caps each forward
+    # pass at 12 minutes of padded audio (max_padded_batch_ms), so no batch
+    # needs more encoder memory than one 12-minute recording, about 6.3 GiB
+    # allocated in bfloat16 on an L4.
+    max_batch_tokens: 720000
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.parakeet.adapter:ParakeetTDTAdapter
+    adapter_options:
+      loadtime: {}
+      runtime: {}

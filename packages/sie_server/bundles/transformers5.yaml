@@ -13,14 +13,19 @@ adapters:
 - sie_server.adapters.st_sparse_vision.adapter
 # TopK-Embed-V1 multi-vector text + page-image models (Qwen3.5 backbone, transformers>=5.2).
 - sie_server.adapters.topk_embed.adapter
+# Parakeet-TDT speech-to-text (ParakeetForTDT).
+- sie_server.adapters.parakeet.adapter
 deps:
   # Transformers 5.x for models requiring newer architecture support
   # (e.g., LightOnOCR-2-1B needs LightOnOcrForConditionalGeneration,
   # GLM-OCR needs GlmOcrForConditionalGeneration). Floor raised to 5.14
-  # for the visual-SPLADE family (custom modeling code built on 5.13+);
-  # installs already resolved to the latest 5.x, so the floor is the
-  # guarantee, not a version change in practice.
-  transformers: '>=5.14,<6'
+  # for the visual-SPLADE family (custom modeling code built on 5.13+),
+  # then to 5.18 for Parakeet-TDT: earlier 5.x mask padded encoder frames
+  # with -inf, which turns a padded batch into NaN under eager attention;
+  # 5.18 masks them with a finite minimum. Installs already resolved to the
+  # latest 5.x, so the floor is the guarantee, not a version change in
+  # practice.
+  transformers: '>=5.18,<6'
   # Multimodal SparseEncoder (image documents) landed on the 5.6 line
   # (st_sparse_vision adapter).
   sentence-transformers: '>=5.6,<6'
@@ -47,6 +52,9 @@ deps:
   opf:
     url: git+https://github.com/openai/privacy-filter@f7f00ca7fb869683eb732c010299d901457f19c3
   tiktoken: '==0.12.0'
+  # Parakeet's feature extractor builds its mel filter bank with librosa and
+  # refuses to load without it. Exact: the version Parakeet-TDT was validated with.
+  librosa: '==1.0.0'
   # TopK-Embed-V1 packed path (adapters/topk_embed/packed.py): the Gated
   # DeltaNet chunked delta rule and causal conv (flash-linear-attention's
   # Triton kernels) and FlashAttention's varlen attention. CUDA only; without
