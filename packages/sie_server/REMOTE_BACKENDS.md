@@ -604,11 +604,13 @@ acceptance before attempting remote generation. If load acceptance fails, the
 caller receives the local loading refusal. A loaded local model serves locally.
 
 A dispatch transport that manages its own capacity can report a lane with no
-ready capacity while the registry still lists workers for it. The gateway then
-treats the lane as cold: it asks the transport to wake the lane with load-only
-work on the lane's pool and makes the single remote attempt only after the
-transport accepted the wake. Otherwise the caller receives the local
-`503 PROVISIONING`.
+ready capacity while the registry still lists workers for it. When a
+`provisioning` bridge is admitted for such a lane, the gateway asks the
+transport to wake the lane with load-only work on the lane's pool, and makes
+the single remote attempt only after the transport accepted the wake. A wake
+that is not accepted leaves the caller with the local `503 PROVISIONING`. When
+the bridge is not admitted, the request takes the ordinary local path and no
+wake is sent.
 
 The remote attempt pins a fresh worker with the exact current configuration
 hash and positive versioned execution capability. It cannot retry on the ordinary
