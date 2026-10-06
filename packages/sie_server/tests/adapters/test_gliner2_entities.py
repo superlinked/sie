@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 from collections.abc import Callable, Iterator
+from copy import deepcopy
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any
@@ -17,6 +18,8 @@ from sie_server.adapters.gliner2.decisions import MARKERS
 from sie_server.adapters.gliner2.entities import GLiNER2EntitiesAdapter
 from sie_server.adapters.gliner2.words import PACKAGE_PATTERN, LinearWordSplitter
 from sie_server.types.inputs import InvalidInputError, Item
+
+EntityTypes = list[str] | dict[str, str | dict[str, Any]]
 
 
 class WhitespaceTokenSplitter:
@@ -44,13 +47,19 @@ class ToyTokenizer:
 class ToySchema:
     def __init__(self) -> None:
         self.labels: list[str] = []
+        self.descriptions: dict[str, str] = {}
 
-    def entities(self, labels: list[str]) -> ToySchema:
+    def entities(self, labels: EntityTypes) -> ToySchema:
         self.labels = list(labels)
+        if isinstance(labels, dict):
+            self.descriptions = {label: value for label, value in labels.items() if isinstance(value, str)}
         return self
 
     def build(self) -> dict[str, Any]:
-        return {"entities": dict.fromkeys(self.labels, "")}
+        schema: dict[str, Any] = {"entities": dict.fromkeys(self.labels, "")}
+        if self.descriptions:
+            schema["entity_descriptions"] = self.descriptions.copy()
+        return schema
 
 
 class ToyProcessor:
@@ -81,6 +90,9 @@ class ToyProcessor:
         for index, label in enumerate(schema["entities"]):
             mappings.append(("schema", index + 1, 0))
             mappings.extend([("schema", index + 1, 0)] * len(self._tokenize_cached(label)))
+        for label, description in schema.get("entity_descriptions", {}).items():
+            mappings.append(("schema", 0, 0))
+            mappings.extend([("schema", 0, 0)] * len(self._tokenize_cached(f"{label}: {description}")))
         mappings.append(("sep", 0, 1))
         for index, (word, _, _) in enumerate(words):
             mappings.extend([("text", index, 1)] * len(self._tokenize_cached(word)))
@@ -100,15 +112,15 @@ class ToyModel:
         self.processor = ToyProcessor()
         self.to = Mock()
         self.eval = Mock()
-        self.calls: list[tuple[list[str], list[str], dict[str, Any]]] = []
+        self.calls: list[tuple[list[str], EntityTypes, dict[str, Any]]] = []
         self.results: dict[str, Any] = {}
         self.batch_result: Any = None
 
     def create_schema(self) -> ToySchema:
         return ToySchema()
 
-    def batch_extract_entities(self, texts: list[str], labels: list[str], **kwargs: Any) -> Any:
-        self.calls.append((texts, list(labels), kwargs))
+    def batch_extract_entities(self, texts: list[str], labels: EntityTypes, **kwargs: Any) -> Any:
+        self.calls.append((texts, deepcopy(labels), kwargs))
         if self.batch_result is not None:
             return self.batch_result
         return [self.results.get(text, {"entities": {}}) for text in texts]
@@ -133,7 +145,7 @@ def loaded(native_loader: tuple[Mock, Mock, ToyModel]) -> tuple[GLiNER2EntitiesA
     return adapter, native_loader[2]
 
 
-def native_counts(model: ToyModel, text: str, labels: list[str]) -> tuple[int, int, int]:
+def native_counts(model: ToyModel, text: str, labels: EntityTypes) -> tuple[int, int, int]:
     batch = model.processor.collate_fn_inference([(text, ToySchema().entities(labels).build())])
     document = sum(mapping[0] == "text" for mapping in batch.mapped_indices[0])
     return batch.original_lengths[0], document, batch.original_lengths[0] - document
@@ -251,6 +263,165 @@ def test_full_source_exact_labels_and_native_api(loaded: tuple[GLiNER2EntitiesAd
     ]
     assert model.config.max_len == 1
     assert document_tokens < row_tokens
+
+
+@pytest.mark.parametrize("options", [None, {"threshold": 0.5}, {"entity_descriptions": {}}])
+def test_absent_or_empty_descriptions_keep_native_list_and_response(loaded, options):
+    adapter, model = loaded
+    text = "Zoë."
+    labels = ["person"]
+    model.results[text] = {"entities": {"person": [span(text, 0, 3)]}}
+    output = adapter.extract([Item(text=text)], labels=labels, options=options)
+    assert model.calls[0][1] == labels
+    assert isinstance(model.calls[0][1], list)
+    assert model.processor.calls[0][1] == {"entities": {"person": ""}}
+    assert output.entities == [[{"text": "Zoë", "label": "person", "score": 0.9, "start": 0, "end": 3}]]
+    assert output.input_token_counts == [4]
+
+
+@pytest.mark.parametrize("architecture", ["span", "boundary"])
+def test_partial_descriptions_preserve_label_order_spans_and_document_billing(loaded, architecture):
+    adapter, model = loaded
+    adapter._architecture = architecture
+    model.architecture = architecture
+    text = "İpek joined Acme."
+    labels = ["person", "organization", "location"]
+    descriptions = {"organization": "Named company or agency.", "person": "Named human, including surname aliases."}
+    options = {"threshold": 0.7, "entity_descriptions": descriptions}
+    original = deepcopy(options)
+    entity_types = {"person": descriptions["person"], "organization": descriptions["organization"], "location": {}}
+    model.results[text] = {"entities": {"person": [span(text, 0, 4, confidence=0.8)]}}
+    plain_row, document, plain_prompt = native_counts(model, text, labels)
+    row, described_document, prompt = native_counts(model, text, entity_types)
+    model.processor.calls.clear()
+
+    output = adapter.extract([Item(text=text)], labels=labels, options=options)
+
+    assert options == original
+    assert described_document == document
+    assert row > plain_row
+    assert prompt > plain_prompt
+    assert output.input_token_counts == [document]
+    assert output.data == [{"encoded_row_token_count": row, "schema_prompt_token_count": prompt}]
+    assert output.entities == [[{"text": "İpek", "label": "person", "score": 0.8, "start": 0, "end": 4}]]
+    assert model.processor.calls[0][1] == {
+        "entities": dict.fromkeys(labels, ""),
+        "entity_descriptions": {"person": descriptions["person"], "organization": descriptions["organization"]},
+    }
+    assert model.calls[0][1] == entity_types
+    assert list(model.calls[0][1]) == labels
+    assert model.calls[0][2] == {
+        "batch_size": 1,
+        "threshold": 0.7,
+        "include_confidence": True,
+        "include_spans": True,
+        "max_len": None,
+    }
+
+
+def test_descriptions_are_request_local_and_do_not_rename_default_labels(loaded):
+    adapter, model = loaded
+    adapter._default_labels = ["Exact Person"]
+    adapter.extract([Item(text="Alice.")], options={"entity_descriptions": {"Exact Person": "Named human."}})
+    adapter.extract([Item(text="Alice.")])
+    assert model.calls[0][1] == {"Exact Person": "Named human."}
+    assert model.calls[1][1] == ["Exact Person"]
+    assert model.processor.calls[1][1] == {"entities": {"Exact Person": ""}}
+    assert adapter._default_labels == ["Exact Person"]
+
+
+@pytest.mark.parametrize(
+    "descriptions",
+    [
+        None,
+        [],
+        "guidance",
+        {"Person": "guidance"},
+        {1: "guidance"},
+        {"person": None},
+        {"person": 1},
+        {"person": True},
+        {"person": []},
+        {"person": {"description": "guidance"}},
+    ],
+)
+def test_malformed_description_mapping_fails_before_schema_or_forward(loaded, descriptions):
+    adapter, model = loaded
+    model.create_schema = Mock(side_effect=AssertionError("malformed descriptions must not reach native code"))
+    with pytest.raises(InvalidInputError, match="entity_descriptions"):
+        adapter.extract([Item(text="Alice.")], labels=["person"], options={"entity_descriptions": descriptions})
+    model.create_schema.assert_not_called()
+    assert model.processor.calls == []
+    assert model.calls == []
+
+
+@pytest.mark.parametrize("marker", MARKERS)
+def test_description_structural_markers_fail_before_schema_or_forward(loaded, marker):
+    adapter, model = loaded
+    model.create_schema = Mock(side_effect=AssertionError("structural descriptions must not reach native code"))
+    with pytest.raises(InvalidInputError, match="structural tokens"):
+        adapter.extract(
+            [Item(text="Alice.")], labels=["person"], options={"entity_descriptions": {"person": f"Name {marker}."}}
+        )
+    model.create_schema.assert_not_called()
+    assert model.processor.calls == []
+    assert model.calls == []
+
+
+@pytest.mark.parametrize(
+    "description", ["", "Named human; aliases, 東京 and accents. [ordinary] {name}: https://example.org — " * 3]
+)
+def test_legitimate_descriptions_are_not_limited_to_label_length_or_vocabulary(loaded, description):
+    adapter, model = loaded
+    output = adapter.extract(
+        [Item(text="Alice.")], labels=["person"], options={"entity_descriptions": {"person": description}}
+    )
+    assert output.errors is None
+    assert model.calls[0][1] == {"person": description}
+
+
+@pytest.mark.parametrize("kind", ["single", "combined", "repeated_label"])
+def test_description_character_budget_rejects_before_collation_with_zero_usage(loaded, kind):
+    adapter, model = loaded
+    adapter._max_prompt_tokens = 2
+    if kind == "single":
+        labels, descriptions = ["x"], {"x": "d" * 65}
+    elif kind == "combined":
+        labels, descriptions = ["x", "y"], {"x": "d" * 31, "y": "d" * 30}
+    else:
+        labels, descriptions = ["x" * 32], {"x" * 32: "d"}
+    model.create_schema = Mock(side_effect=AssertionError("oversize prompt must not reach native code"))
+    output = adapter.extract([Item(text="Alice.")], labels=labels, options={"entity_descriptions": descriptions})
+    assert output.errors[0].code == "INPUT_TOO_LONG"
+    assert output.entities == [[]]
+    assert output.input_token_counts == [0]
+    model.create_schema.assert_not_called()
+    assert model.processor.calls == []
+    assert model.calls == []
+
+
+@pytest.mark.parametrize("budget", ["row", "prompt"])
+def test_actual_encoded_description_overflow_never_runs_or_bills(loaded, budget):
+    adapter, model = loaded
+    labels = ["person"]
+    description = "Named human."
+    row, _, prompt = native_counts(model, "Alice.", {"person": description})
+    if budget == "row":
+        adapter._max_seq_length = row - 1
+    else:
+        adapter._max_prompt_tokens = prompt - 1
+    model.processor.calls.clear()
+    plain = adapter.extract([Item(text="Alice.")], labels=labels)
+    assert plain.errors is None
+    model.calls.clear()
+    output = adapter.extract(
+        [Item(text="Alice.")], labels=labels, options={"entity_descriptions": {"person": description}}
+    )
+    assert output.errors[0].code == "INPUT_TOO_LONG"
+    assert output.entities == [[]]
+    assert output.input_token_counts == [0]
+    assert model.calls == []
+    assert model.config.max_len == 1
 
 
 def test_exact_limit_and_one_subword_overflow(loaded: tuple[GLiNER2EntitiesAdapter, ToyModel]) -> None:
