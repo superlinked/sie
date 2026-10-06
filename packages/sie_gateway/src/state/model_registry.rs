@@ -1903,10 +1903,13 @@ impl ModelRegistry {
         self.threshold_binding.store(None);
     }
 
+    /// `accept`, when given, decides the plan before the request is counted
+    /// as demand.
     pub(crate) fn threshold_remote_route(
         &self,
         model: &str,
         epoch: u64,
+        accept: Option<&dyn Fn(&RemoteFallbackPlan) -> bool>,
     ) -> Option<RemoteFallbackPlan> {
         let binding = self.threshold_binding.load_full()?;
         if binding.epoch != epoch || model.contains(':') {
@@ -1920,6 +1923,14 @@ impl ModelRegistry {
         }
         let snap = &binding.generation.snapshot;
         let canonical = Self::canonical_model_name(snap, model)?;
+        if let Some(accept) = accept {
+            if !accept(&Self::remote_plan_from_snapshot(
+                snap,
+                snap.models.get(&canonical)?,
+            )?) {
+                return None;
+            }
+        }
         binding.coordinator.record_request(&canonical).ok()?;
         if binding.coordinator.decision(&canonical).ok()? != ThresholdDecision::Remote {
             return None;
@@ -3117,7 +3128,7 @@ mod tests {
         assert!(gateway
             .state
             .model_registry
-            .threshold_remote_route("acme/chat", 1)
+            .threshold_remote_route("acme/chat", 1, None)
             .is_some());
 
         let registry = Arc::clone(&gateway.state.model_registry);
@@ -3133,14 +3144,14 @@ mod tests {
         let route = gateway
             .state
             .model_registry
-            .threshold_remote_route("acme/chat", 1);
+            .threshold_remote_route("acme/chat", 1, None);
         release_tx.send(()).unwrap();
         writer.join().unwrap();
         assert!(route.is_none());
         assert!(gateway
             .state
             .model_registry
-            .threshold_remote_route("acme/chat", 1)
+            .threshold_remote_route("acme/chat", 1, None)
             .is_some());
     }
 

@@ -1051,11 +1051,13 @@ model, so a caller who can see the remote profile can name it.
 - **Governed generation.** A policy that governs generation routes keeps
   generation local unless its `GenerationRoutePolicy::resolve_remote` names a
   governed route for the model's remote profile and intent.
+  - The policy is asked once per request, so planning and the bridged
+    dispatch use the same route.
   - A bridge is planned only when that route names the same model, bundle and
-    pool as the registry's remote plan.
+    pool as the registry's remote plan, and its coordinates are ones the
+    gateway can dispatch on. The check runs before the policy's admission
+    hook and before a threshold request is counted as demand.
   - The bridged request dispatches on that route, with its machine profile.
-  - A route that no longer agrees when the bridged request resolves fails
-    closed as a governed route failure.
 - **Model listing.** `/v1/models` and `/v1/models/{model}` show a bare model
   to a caller who may not see its remote profile without that profile and with
   the routing of a model that has no remote route, so the listing does not

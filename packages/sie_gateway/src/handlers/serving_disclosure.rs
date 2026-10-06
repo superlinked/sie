@@ -14,7 +14,9 @@ use axum::response::Response;
 use futures_util::FutureExt;
 
 use crate::observability::metrics as telemetry;
-use crate::server::{AppState, RemoteRouteReason};
+use crate::server::{
+    AppState, GenerationRequestIntent, GovernedGenerationRoute, RemoteRouteReason,
+};
 use crate::types::model::{FallbackTrigger, ServedBy};
 
 pub(crate) const SERVED_BY_HEADER: HeaderName = HeaderName::from_static("x-sie-served-by");
@@ -104,6 +106,11 @@ struct FallbackState {
     original: Option<LocalRefusal>,
     observation: Option<ServingObservation>,
     route_decisions: Vec<(String, RemoteRouteReason, bool)>,
+    governed_remote_routes: Vec<(
+        String,
+        GenerationRequestIntent,
+        Option<GovernedGenerationRoute>,
+    )>,
 }
 
 struct ServingObservation {
@@ -294,6 +301,41 @@ impl FallbackAttempt {
             .route_decisions
             .push((remote_model.to_string(), reason, admitted));
         admitted
+    }
+
+    /// A deployment's governed remote route for a generation request. It is
+    /// decided once per request, model and intent, so planning and the bridged
+    /// dispatch use the same route.
+    pub(crate) fn governed_remote_route(
+        extensions: &Extensions,
+        customer_model: &str,
+        intent: GenerationRequestIntent,
+        decide: impl FnOnce() -> Option<GovernedGenerationRoute>,
+    ) -> Option<GovernedGenerationRoute> {
+        let Some(attempt) = extensions.get::<Self>() else {
+            return decide();
+        };
+        let known = |state: &FallbackState| {
+            state
+                .governed_remote_routes
+                .iter()
+                .find(|(model, decided_intent, _)| {
+                    model == customer_model && *decided_intent == intent
+                })
+                .map(|(_, _, route)| route.clone())
+        };
+        if let Some(route) = known(&attempt.0.lock().unwrap_or_else(PoisonError::into_inner)) {
+            return route;
+        }
+        let route = decide();
+        let mut state = attempt.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(first) = known(&state) {
+            return first;
+        }
+        state
+            .governed_remote_routes
+            .push((customer_model.to_string(), intent, route.clone()));
+        route
     }
 
     /// The trigger of the local refusal this request's remote attempt stands
@@ -3274,12 +3316,12 @@ mod tests {
         assert!(gateway
             .state
             .model_registry
-            .threshold_remote_route("acme/chat", 1)
+            .threshold_remote_route("acme/chat", 1, None)
             .is_none());
         assert!(gateway
             .state
             .model_registry
-            .threshold_remote_route("acme/chat", 2)
+            .threshold_remote_route("acme/chat", 2, None)
             .is_none());
         gateway.state.model_registry.clear_threshold_binding();
         let response = buffered_surface(&gateway, "chat", json!({})).await;
@@ -3854,6 +3896,8 @@ mod tests {
         refuse_remote_serving: bool,
         govern_generation: bool,
         remote_generation: Option<GovernedGenerationRoute>,
+        flip_remote_generation: bool,
+        remote_generation_asks: std::sync::atomic::AtomicUsize,
         asked: std::sync::Mutex<Vec<(String, String, RemoteRouteReason)>>,
     }
 
@@ -3921,6 +3965,12 @@ mod tests {
             _customer_model: &str,
             intent: GenerationRequestIntent,
         ) -> Option<GovernedGenerationRoute> {
+            let asks = self
+                .remote_generation_asks
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.flip_remote_generation && asks > 0 {
+                return None;
+            }
             self.remote_generation
                 .clone()
                 .filter(|_| intent == GenerationRequestIntent::Default)
@@ -4446,12 +4496,16 @@ mod tests {
             .fallback_reasons()
             .iter()
             .all(|reason| *reason == Some(FallbackTrigger::Provisioning)));
-        assert!(policy.asked().iter().all(|asked| *asked
-            == (
-                "acme/chat".to_string(),
-                "acme/chat:remote".to_string(),
-                RemoteRouteReason::Fallback(FallbackTrigger::Provisioning),
-            )));
+        let admitted = (
+            "acme/chat".to_string(),
+            "acme/chat:remote".to_string(),
+            RemoteRouteReason::Fallback(FallbackTrigger::Provisioning),
+        );
+        assert_eq!(
+            policy.asked(),
+            vec![admitted; 4],
+            "one admission per surface"
+        );
     }
 
     #[tokio::test]
@@ -4498,6 +4552,10 @@ mod tests {
                 "another pool",
                 Some(governed("acme/chat:remote", ("other", "cpu", "remote"))),
             ),
+            (
+                "an unconfigured machine profile",
+                Some(governed("acme/chat:remote", ("default", "tpu", "remote"))),
+            ),
         ] {
             let policy = Arc::new(RoutePolicy {
                 admit: true,
@@ -4505,7 +4563,7 @@ mod tests {
                 remote_generation: remote,
                 ..Default::default()
             });
-            let gateway = transport_cold_gateway(Some(policy)).await;
+            let gateway = transport_cold_gateway(Some(policy.clone())).await;
 
             let mut expected = Vec::new();
             for surface in ["native", "chat", "completions", "responses"] {
@@ -4518,6 +4576,109 @@ mod tests {
                 expected.push(dispatched("generate", LOCAL_LANE, "acme/chat"));
             }
             assert_eq!(gateway.dispatcher.dispatched(), expected, "{case}");
+            assert!(
+                policy.asked().is_empty(),
+                "{case}: a route that cannot be used never reaches admission"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_governed_generation_bridge_keeps_the_route_it_planned_with() {
+        for surface in ["native", "chat", "completions", "responses"] {
+            let policy = Arc::new(RoutePolicy {
+                admit: true,
+                govern_generation: true,
+                remote_generation: Some(governed("acme/chat:remote", REMOTE_LANE)),
+                flip_remote_generation: true,
+                ..Default::default()
+            });
+            let gateway = transport_cold_gateway(Some(policy.clone())).await;
+
+            let response = buffered_surface(&gateway, surface, json!({})).await;
+
+            assert_eq!(response.status(), StatusCode::OK, "{surface}");
+            assert_eq!(response.headers()["x-sie-served-by"], "remote", "{surface}");
+            assert_eq!(
+                gateway.dispatcher.dispatched(),
+                vec![
+                    dispatched("load", LOCAL_LANE, "acme/chat"),
+                    dispatched("generate", REMOTE_LANE, "acme/chat:remote"),
+                ],
+                "{surface}"
+            );
+            assert_eq!(
+                policy
+                    .remote_generation_asks
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "{surface}: one answer per request"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_governed_threshold_route_goes_remote_only_on_an_agreeing_route() {
+        use crate::handlers::test_support::ThresholdBroker;
+        use crate::state::threshold_coordinator::ThresholdSampler;
+        let config = format!("{HYBRID_GENERATE_MODEL}\nrouting:\n  policy: threshold\n  fallback_profile: remote\n  wake_above: 1\n  sleep_below: 0.5\n  window_s: 1\n  cooldown_s: 1\n");
+        for (case, remote, served_remotely) in [
+            (
+                "an agreeing route",
+                Some(governed("acme/chat:remote", REMOTE_LANE)),
+                true,
+            ),
+            ("no remote route", None, false),
+            (
+                "another bundle",
+                Some(governed("acme/chat:remote", ("default", "cpu", "default"))),
+                false,
+            ),
+        ] {
+            let Some(broker) = ThresholdBroker::start().await else {
+                return;
+            };
+            let policy = Arc::new(RoutePolicy {
+                admit: true,
+                govern_generation: true,
+                remote_generation: remote,
+                ..Default::default()
+            });
+            let mut gateway = TestGateway::with_threshold_routing(&[&config], true).await;
+            gateway.install_policy(policy.clone());
+            gateway
+                .add_verified_worker("local-1", LOCAL_LANE, &["acme/chat"])
+                .await;
+            gateway
+                .add_verified_worker("remote-1", REMOTE_LANE, &[])
+                .await;
+            let binding = broker.bind(&gateway).await;
+            let mut sampler = ThresholdSampler::default();
+            binding.coordinator.sample(&mut sampler).await.unwrap();
+            for _ in 0..2 {
+                tokio::time::sleep(Duration::from_millis(1050)).await;
+                binding.coordinator.sample(&mut sampler).await.unwrap();
+            }
+
+            let response = buffered_surface(&gateway, "chat", json!({})).await;
+
+            assert_eq!(response.status(), StatusCode::OK, "{case}");
+            if served_remotely {
+                assert_eq!(response.headers()["x-sie-served-by"], "remote", "{case}");
+                assert_eq!(
+                    gateway.dispatcher.dispatched(),
+                    vec![dispatched("generate", REMOTE_LANE, "acme/chat:remote")],
+                    "{case}"
+                );
+            } else {
+                assert_eq!(response.headers()["x-sie-served-by"], "local", "{case}");
+                assert_eq!(
+                    gateway.dispatcher.dispatched(),
+                    vec![dispatched("generate", LOCAL_LANE, "acme/chat")],
+                    "{case}"
+                );
+                assert!(policy.asked().is_empty(), "{case}");
+            }
         }
     }
 

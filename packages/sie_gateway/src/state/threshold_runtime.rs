@@ -209,7 +209,7 @@ mod tests {
         assert!(gateway
             .state
             .model_registry
-            .threshold_remote_route("acme/chat", 7)
+            .threshold_remote_route("acme/chat", 7, None)
             .is_none());
         gateway.state.config_epoch.mark_bootstrapped();
         tokio::time::timeout(Duration::from_secs(4), async {
