@@ -8,6 +8,8 @@ adapters:
 - sie_server.adapters.glm_ocr
 - sie_server.adapters.gliner2.classification
 - sie_server.adapters.gliner2.decide
+- sie_server.adapters.gliner2.entities
+- sie_server.adapters.privacy_filter.adapter
 - sie_server.adapters.st_sparse_vision.adapter
 # TopK-Embed-V1 multi-vector text + page-image models (Qwen3.5 backbone, transformers>=5.2).
 - sie_server.adapters.topk_embed.adapter
@@ -40,6 +42,11 @@ deps:
   # 2.0 declares transformers<5 only for its `local` extra, which is not used;
   # the multilingual and 1B Decide checkpoints were saved with transformers 5.
   gliner2: '==2.0.0'
+  # Privacy Filter's native checkpoint and calibrated decoder use the official
+  # OPF implementation. An unrelated package named opf is not a substitute.
+  opf:
+    url: git+https://github.com/openai/privacy-filter@f7f00ca7fb869683eb732c010299d901457f19c3
+  tiktoken: '==0.12.0'
   # TopK-Embed-V1 packed path (adapters/topk_embed/packed.py): the Gated
   # DeltaNet chunked delta rule and causal conv (flash-linear-attention's
   # Triton kernels) and FlashAttention's varlen attention. CUDA only; without

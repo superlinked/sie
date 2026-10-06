@@ -34,16 +34,23 @@ pip install sie-server
   pip install sie-server "transformers<5"
   ```
 
-- **Transformers 5 bundle** (LightOnOCR, GLM-OCR, GLiGuard, the GLiNER2.5-Decide models, and the TopK-Embed-V1
+- **Transformers 5 bundle** (LightOnOCR, GLM-OCR, GLiGuard, GLiNER2.5 entity and Decide models, Privacy Filter, and the TopK-Embed-V1
   multi-vector models) — requires `transformers` 5.x, and is served with `-b transformers5`. The GLiNER2.5-Decide
-  models also need `gliner2` 2.x. `sie-server` itself asks for `gliner2<2`, which the default bundle's GLiNER2
+  and entity models also need `gliner2` 2.x. `sie-server` itself asks for `gliner2<2`, which the default bundle's GLiNER2
   models need, so pip reports that conflict when the second command below installs 2.x; the transformers5
-  bundle's GLiNER2 models are verified on 2.0.0:
+  bundle's GLiNER2 models are pinned to 2.0.0:
 
   ```bash
   pip install sie-server "transformers>=5,<6"
-  pip install "gliner2==2.0.0"  # only for the GLiNER2.5-Decide models
+  pip install "gliner2==2.0.0"  # for the GLiNER2.5 and GLiNER2 PII models
   sie-server serve -b transformers5
+  ```
+
+  Privacy Filter also requires the official pinned runtime. The bundle installs
+  this dependency; for a native installation, use:
+
+  ```bash
+  pip install "opf @ git+https://github.com/openai/privacy-filter@f7f00ca7fb869683eb732c010299d901457f19c3" "tiktoken==0.12.0"
   ```
 
 ## Quick Start
@@ -441,6 +448,82 @@ read from its newest turn back; a run of more than 4,096 characters without a
 space is read only in its last 4,096 characters, and reading stops there. An item none of whose words fits, or that does
 not fit whole with `options={"overflow_policy": "error"}`, returns a per-item
 `INPUT_TOO_LONG` error while the other items succeed.
+
+### GLiNER2.5 entity extraction
+
+`fastino/gliner2.5-base-v1`, `fastino/gliner2.5-small-v1`, and
+`fastino/gliner2-privacy-filter-PII-multi` use the native `AutoExtractor` API in
+the Transformers 5 bundle. The base and small checkpoints use boundary
+extraction; the PII checkpoint uses span extraction. Existing GLiNER2 v1 and
+Decide routes keep their own adapters.
+
+```python
+from sie_sdk import SIEClient
+
+with SIEClient("http://localhost:8080") as client:
+    result = client.extract(
+        "fastino/gliner2.5-base-v1",
+        {"text": "Ada joined Acme in London."},
+        labels=["person", "organization", "location"],
+        options={"threshold": 0.5},
+    )
+    print(result.entities)
+```
+
+The profiles allow one complete 4,096-token encoder row, including the schema
+prompt. The prompt may take up to 2,048 tokens, and each label at most 128
+characters. Descriptive string labels are preserved exactly, except reserved
+prompt markers such as `[SEP_TEXT]`, which are rejected. Inputs that do
+not fit return per-item `INPUT_TOO_LONG` errors; split long documents into
+deliberate smaller items instead of relying on prefix truncation. Entity
+offsets index the original text. Usage counts the native document segment,
+including the processor's sentence-end punctuation; schema labels and markers
+are not billed. Failed items count zero. These new profiles default to
+float32; another precision is an explicit profile setting.
+
+Before native preprocessing, the adapter also bounds each source to 64
+characters and four native words per configured row token, with at most 4,096
+characters per word. The label list may contain at most `max_prompt_tokens`
+entries and 32 times that many characters in total. Inputs beyond these
+admission limits fail explicitly before collation or inference.
+
+### Privacy Filter extraction
+
+`openai/privacy-filter` uses the official OPF runtime and the pinned
+checkpoint's `original/` artifacts in the Transformers 5 bundle. The model
+extracts `account_number`, `private_address`, `private_email`, `private_person`,
+`private_phone`, `private_url`, `private_date`, and `secret`. Omit `labels` to
+return all categories, or select a subset; this filters detections without
+changing the model's trained policy.
+
+```python
+from sie_sdk import SIEClient
+
+with SIEClient("http://localhost:8080") as client:
+    result = client.extract(
+        "openai/privacy-filter",
+        {"text": "Email Ada at ada@example.com."},
+        labels=["private_person", "private_email"],
+        options={"span_entry_bias": 0.5},
+    )
+    print(result.entities)
+```
+
+The default profile reads one complete input of up to 128,000 native tokens
+with the checkpoint's native BF16 weights and FP32 controls. A shorter
+`max_seq_length` or float32 is an explicit profile setting.
+Oversized items fail before inference, and text that the tokenizer cannot
+preserve is rejected. Spans use original-source character offsets. Usage is
+the exact native token count; failed items count zero.
+
+The official Viterbi decoder starts from the checkpoint's six calibrated
+transition biases. `span_entry_bias` adds a delta in [-10, 10] only to
+`transition_bias_background_to_start`; zero preserves the checkpoint default.
+Positive values favor entering a privacy span, negative values discourage it.
+No confidence threshold, dynamic instruction or schema is supported. The
+native runtime does not produce span confidence scores: response
+`data.confidence_scores_available` is false, and the HTTP API's existing
+`score=1.0` default denotes an unscored detection rather than a probability.
 
 ### ModernBERT CUDA graphs
 

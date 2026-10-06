@@ -1,0 +1,22 @@
+sie_id: openai/privacy-filter
+hf_id: openai/privacy-filter
+hf_revision: 7ffa9a043d54d1be65afb281eddf0ffbe629385b
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: null
+  extract: {}
+# The official OPF runtime uses original/ artifacts and calibrated Viterbi.
+max_sequence_length: 128000
+profiles:
+  default:
+    max_batch_tokens: 128000
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.privacy_filter.adapter:PrivacyFilterAdapter
+    adapter_options:
+      loadtime: {}
+      runtime: {}
