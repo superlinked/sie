@@ -797,9 +797,10 @@ Below, `<fullname>` is the chart's full name: `<release>-sie-cluster`, or
 - An upstream of kind `openai` may also declare `equivalence` (`max_age_s`, at
   most 604800, and `record_files`): the evidence that lets a model serve
   `encode` or `score` from both its local and its remote profile. Put the
-  evidence files in a ConfigMap you create, for example
-  `kubectl create configmap remote-equivalence --from-file=bge-m3.json`, and set
-  `workers.remote.equivalence.configMap` to its name. Remote lanes mount it
+  evidence files in a ConfigMap you create in the release namespace, for
+  example
+  `kubectl create configmap remote-equivalence -n <NAMESPACE> --from-file=bge-m3.json`,
+  and set `workers.remote.equivalence.configMap` to its name. Remote lanes mount it
   read-only at `/etc/sie/equivalence`, and every `record_files` path must then
   be `/etc/sie/equivalence/<key>`. No other lane receives it. Remote lanes read
   the files when they use them, so replacing the ConfigMap's data takes effect
@@ -847,7 +848,7 @@ Below, `<fullname>` is the chart's full name: `<release>-sie-cluster`, or
   at start (`Bundle file not found`) and the lane restarts in a loop.
 - Workers read their environment at start. After rotating an upstream's
   Secret, restart the remote lane:
-  `kubectl rollout restart statefulset/<fullname>-worker-remote-remote`.
+  `kubectl rollout restart statefulset/<fullname>-worker-remote-remote -n <NAMESPACE>`.
   A change to `upstreams` restarts it automatically.
 
 #### Network policy for remote lanes
