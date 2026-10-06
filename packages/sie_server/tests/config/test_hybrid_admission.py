@@ -832,6 +832,7 @@ def _expire(path: Path, data: dict[str, Any]) -> None:
         (":other", {}, None),
         (":remote", {}, "expire"),
         (":remote", {}, "remove"),
+        (":remote", {}, "replace"),
     ],
 )
 async def test_fence_refuses_before_the_upstream_when_the_admission_does_not_cover_the_item(
@@ -855,6 +856,8 @@ async def test_fence_refuses_before_the_upstream_when_the_admission_does_not_cov
         _expire(path, data)
     elif change == "remove":
         path.unlink()
+    elif change == "replace":
+        _refresh_record(path, data)
 
     outcome = await server._handle_run_batch(
         _bridged_batch(

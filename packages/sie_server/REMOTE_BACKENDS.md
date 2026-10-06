@@ -564,8 +564,8 @@ bridge also changes local behavior while no admission holds: a trigger that
 would bridge a request commits to its local refusal, so a cold model answers
 `MODEL_LOADING` instead of waiting for its load, and an opted-in `saturated` or
 `unhealthy` trigger refuses instead of queueing. A request that could never
-bridge, because it sets a runtime option other than `is_query`, keeps its
-ordinary local path.
+bridge, because it sets a runtime option other than `is_query` or asks for an
+output the model does not declare, keeps its ordinary local path.
 
 
 ## Single-node generation fallback

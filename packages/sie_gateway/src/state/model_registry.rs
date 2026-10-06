@@ -236,6 +236,8 @@ pub(crate) struct NumericalRoute {
     /// The model's own pool, `default` when it names none. Workers load only
     /// the models of their own pool.
     pub local_pool: String,
+    /// The numerical outputs the bare model declares.
+    pub outputs: Vec<String>,
     pub admitted: Option<Arc<crate::state::worker_registry::AdmittedWorkers>>,
 }
 
@@ -1819,22 +1821,25 @@ impl ModelRegistry {
         if config_hash.is_empty() {
             return None;
         }
-        let numerical = local
+        let outputs: Vec<String> = local
             .info_extras
             .outputs
             .iter()
-            .any(|output| {
+            .filter(|output| {
                 matches!(
                     output.as_str(),
                     "dense" | "sparse" | "multivector" | "score"
                 )
             })
-            .then(|| NumericalRoute {
-                model: local.canonical_base_model.clone(),
-                local_bundles: local.bundles.clone(),
-                local_pool: Self::normalize_pool_name(Self::entry_pool_name(local)),
-                admitted: None,
-            });
+            .cloned()
+            .collect();
+        let numerical = (!outputs.is_empty()).then(|| NumericalRoute {
+            model: local.canonical_base_model.clone(),
+            local_bundles: local.bundles.clone(),
+            local_pool: Self::normalize_pool_name(Self::entry_pool_name(local)),
+            outputs,
+            admitted: None,
+        });
         Some(RemoteFallbackPlan {
             local_model: local.canonical_base_model.clone(),
             model: remote_name,

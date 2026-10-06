@@ -3640,40 +3640,54 @@ mod tests {
 
     #[tokio::test]
     async fn a_request_that_can_never_bridge_keeps_its_ordinary_local_path() {
-        let gateway = numerical_gateway(NUMERICAL_FALLBACK, false).await;
-        gateway
-            .add_numerical_worker(
-                "local-1",
-                LOCAL_LANE,
-                &[],
-                true,
-                local_identity(ADMITTED_IDENTITY),
+        for params in [
+            json!({"output_dtype": "int8"}),
+            json!({"output_types": ["sparse"]}),
+        ] {
+            let gateway = numerical_gateway(NUMERICAL_FALLBACK, false).await;
+            gateway
+                .add_numerical_worker(
+                    "local-1",
+                    LOCAL_LANE,
+                    &[],
+                    true,
+                    local_identity(ADMITTED_IDENTITY),
+                )
+                .await;
+            let response = encode(
+                &gateway,
+                json!({"items":[{"text":"hello"}], "params": params}),
             )
             .await;
-        let response = encode(
-            &gateway,
-            json!({"items":[{"text":"hello"}], "params":{"output_dtype":"int8"}}),
-        )
-        .await;
-        assert!(
-            !response.headers().contains_key("x-sie-fallback-reason"),
-            "a request outside the admission is not a bridge candidate"
-        );
-        assert!(gateway
-            .dispatcher
-            .dispatched()
-            .iter()
-            .all(|work| work.endpoint != "load" && work.bundle != REMOTE_LANE.2));
-        assert!(gateway
-            .dispatcher
-            .dispatched()
-            .iter()
-            .any(|work| work.bundle == LOCAL_LANE.2));
-        assert!(gateway
-            .dispatcher
-            .numerical_admissions()
-            .iter()
-            .all(Option::is_none));
+            assert!(
+                !response.headers().contains_key("x-sie-fallback-reason"),
+                "{params}: a request outside the admission is not a bridge candidate"
+            );
+            assert!(
+                gateway
+                    .dispatcher
+                    .dispatched()
+                    .iter()
+                    .all(|work| work.endpoint != "load" && work.bundle != REMOTE_LANE.2),
+                "{params}"
+            );
+            assert!(
+                gateway
+                    .dispatcher
+                    .dispatched()
+                    .iter()
+                    .any(|work| work.bundle == LOCAL_LANE.2),
+                "{params}"
+            );
+            assert!(
+                gateway
+                    .dispatcher
+                    .numerical_admissions()
+                    .iter()
+                    .all(Option::is_none),
+                "{params}"
+            );
+        }
     }
 
     #[tokio::test]

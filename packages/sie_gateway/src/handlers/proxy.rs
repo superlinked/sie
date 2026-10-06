@@ -2473,7 +2473,7 @@ fn admit_numerical(
     let Some(route) = plan.numerical.as_ref() else {
         return Some(plan);
     };
-    let decision = match numerical_request_outputs(operation, parsed) {
+    let decision = match numerical_request_outputs(operation, parsed, &route.outputs) {
         None => Err(crate::state::worker_registry::NumericalRefusal::UnmeasuredRequest),
         Some(outputs) => {
             let now_unix_ms = std::time::SystemTime::now()
@@ -2510,12 +2510,15 @@ fn admit_numerical(
 }
 
 /// The outputs a numerical request asks for, when it sets no runtime option
-/// that a numerical admission could not have measured. The remote process
-/// refuses any option except `is_query` that differs from the measured
-/// defaults, so a request with another option stays local.
+/// that a numerical admission could not have measured and asks only for
+/// outputs the model declares. The remote process refuses any option except
+/// `is_query` that differs from the measured defaults, so a request with
+/// another option stays local. A request for an undeclared output is invalid
+/// on either side.
 fn numerical_request_outputs(
     operation: &str,
     parsed: Option<&(Vec<rmpv::Value>, publisher::WorkParams)>,
+    declared: &[String],
 ) -> Option<Vec<String>> {
     let (_, params) = parsed?;
     let measured = match params.options.as_ref() {
@@ -2526,16 +2529,18 @@ fn numerical_request_outputs(
     if !measured {
         return None;
     }
-    match operation {
-        "encode" => Some(
-            params
-                .output_types
-                .clone()
-                .unwrap_or_else(|| vec!["dense".to_string()]),
-        ),
-        "score" => Some(vec!["score".to_string()]),
-        _ => None,
-    }
+    let outputs = match operation {
+        "encode" => params
+            .output_types
+            .clone()
+            .unwrap_or_else(|| vec!["dense".to_string()]),
+        "score" => vec!["score".to_string()],
+        _ => return None,
+    };
+    outputs
+        .iter()
+        .all(|output| declared.contains(output))
+        .then_some(outputs)
 }
 
 /// The admitted remote workers a bridged numerical plan pins, for its bare
@@ -2766,7 +2771,9 @@ fn native_fallback_plan(
         trigger,
     )
     .filter(|plan| {
-        plan.numerical.is_none() || numerical_request_outputs(endpoint, parsed).is_some()
+        plan.numerical.as_ref().is_none_or(|route| {
+            numerical_request_outputs(endpoint, parsed, &route.outputs).is_some()
+        })
     })
 }
 
@@ -21624,8 +21631,9 @@ mod tests {
             )
             .unwrap()
         };
+        let declared = ["dense", "sparse", "score"].map(String::from);
         let outputs = |operation: &str, params: serde_json::Value| {
-            numerical_request_outputs(operation, Some(&parsed(params)))
+            numerical_request_outputs(operation, Some(&parsed(params)), &declared)
         };
         assert_eq!(
             outputs("encode", json!({})),
@@ -21651,8 +21659,18 @@ mod tests {
         ] {
             assert_eq!(outputs("encode", params.clone()), None, "{params}");
         }
-        assert_eq!(numerical_request_outputs("encode", None), None);
+        assert_eq!(numerical_request_outputs("encode", None, &declared), None);
         assert_eq!(outputs("extract", json!({})), None);
+        for params in [
+            json!({"output_types": ["multivector"]}),
+            json!({"output_types": ["dense", "multivector"]}),
+        ] {
+            assert_eq!(outputs("encode", params.clone()), None, "{params}");
+        }
+        assert_eq!(
+            numerical_request_outputs("score", Some(&parsed(json!({}))), &["dense".to_string()]),
+            None
+        );
     }
 
     #[test]

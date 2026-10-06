@@ -973,9 +973,10 @@ when the gateway is about to commit to the remote attempt:
 - The request sets no runtime option other than `is_query`, and every output it
   asks for (`dense` when an encode names none, `score` for score) is listed in
   the admission. Otherwise the remote process would refuse it, so it stays local
-  with the reason `unmeasured_request`. A request with another runtime option is
-  not a bridge candidate at all: a fallback trigger leaves it on its ordinary
-  local path instead of committing to the local refusal.
+  with the reason `unmeasured_request`. A request with another runtime option,
+  or one that asks for an output the model does not declare, is not a bridge
+  candidate at all: a fallback trigger leaves it on its ordinary local path
+  instead of committing to the local refusal, and records no decision.
 - An eligible remote worker is fresh and eligible for dispatch, reports
   `supports_execution_authority_v1`, `supports_numerical_admission_v1` and
   `supports_numerical_admission_subject_v1` (which builds that predate the
