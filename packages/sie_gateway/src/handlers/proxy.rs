@@ -2770,6 +2770,22 @@ fn native_fallback_plan(
     })
 }
 
+/// The bridge a request would take, admitted in full: the deployment's
+/// decision and, for a numerical plan, its admission.
+#[allow(clippy::too_many_arguments)]
+fn native_bridge_plan(
+    state: &AppState,
+    req: &Request,
+    endpoint: &str,
+    model: &str,
+    parsed: Option<&(Vec<rmpv::Value>, publisher::WorkParams)>,
+    body_held: bool,
+    trigger: FallbackTrigger,
+) -> Option<crate::state::model_registry::RemoteFallbackPlan> {
+    native_fallback_plan(state, req, endpoint, model, parsed, body_held, trigger)
+        .and_then(|plan| admit_numerical(state, plan, endpoint, parsed, req.extensions()))
+}
+
 #[allow(clippy::result_large_err, clippy::too_many_arguments)]
 fn begin_native_fallback(
     state: &AppState,
@@ -2781,11 +2797,20 @@ fn begin_native_fallback(
     refusal: Response,
     trigger: FallbackTrigger,
 ) -> Result<(), Response> {
-    let Some(plan) = native_fallback_plan(state, req, endpoint, model, parsed, body_held, trigger)
-        .and_then(|plan| admit_numerical(state, plan, endpoint, parsed, req.extensions()))
+    let Some(plan) = native_bridge_plan(state, req, endpoint, model, parsed, body_held, trigger)
     else {
         return Err(refusal);
     };
+    begin_planned_native_fallback(req, plan, refusal, trigger);
+    Ok(())
+}
+
+fn begin_planned_native_fallback(
+    req: &mut Request,
+    plan: crate::state::model_registry::RemoteFallbackPlan,
+    refusal: Response,
+    trigger: FallbackTrigger,
+) {
     let attempt = req
         .extensions()
         .get::<FallbackAttempt>()
@@ -2795,7 +2820,6 @@ fn begin_native_fallback(
         "request-owned bridge begins once synchronously"
     );
     req.extensions_mut().insert(RemoteFallbackOverride(plan));
-    Ok(())
 }
 
 pub(crate) async fn proxy_request(
@@ -3274,23 +3298,26 @@ async fn proxy_request_inner(
         return resp;
     }
 
-    if transport_lane_provisioning(
+    let provisioning_bridge = if transport_lane_provisioning(
         &state,
         effective_pool,
         effective_machine_profile,
         &bundle,
         &dispatch_model,
-    ) && native_fallback_plan(
-        &state,
-        &req,
-        endpoint,
-        &model_name,
-        prepared_native_parsed.as_ref(),
-        body_held,
-        FallbackTrigger::Provisioning,
-    )
-    .is_some()
-    {
+    ) {
+        native_bridge_plan(
+            &state,
+            &req,
+            endpoint,
+            &model_name,
+            prepared_native_parsed.as_ref(),
+            body_held,
+            FallbackTrigger::Provisioning,
+        )
+    } else {
+        None
+    };
+    if let Some(plan) = provisioning_bridge {
         let refusal = build_provisioning_response_for_surface(&gpu, &bundle, provisioning_surface);
         let target = lane_wake_target(
             effective_pool,
@@ -3310,31 +3337,18 @@ async fn proxy_request_inner(
         {
             return refusal;
         }
-        match begin_native_fallback(
-            &state,
-            &mut req,
-            endpoint,
-            &model_name,
-            prepared_native_parsed.as_ref(),
-            body_held,
-            refusal,
-            FallbackTrigger::Provisioning,
-        ) {
-            Err(refusal) => return refusal,
-            Ok(()) => {
-                if let Some(body) = prepared_native_body {
-                    *req.body_mut() = Body::from(body);
-                }
-                return Box::pin(proxy_request_inner(
-                    state,
-                    req,
-                    endpoint,
-                    provisioning_surface,
-                    inbound_publish_cx,
-                ))
-                .await;
-            }
+        begin_planned_native_fallback(&mut req, plan, refusal, FallbackTrigger::Provisioning);
+        if let Some(body) = prepared_native_body {
+            *req.body_mut() = Body::from(body);
         }
+        return Box::pin(proxy_request_inner(
+            state,
+            req,
+            endpoint,
+            provisioning_surface,
+            inbound_publish_cx,
+        ))
+        .await;
     }
 
     if native_fallback_plan(

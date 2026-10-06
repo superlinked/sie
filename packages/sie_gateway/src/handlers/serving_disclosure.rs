@@ -4211,4 +4211,34 @@ mod tests {
         assert_eq!(response.headers()["x-sie-fallback-reason"], "provisioning");
         assert_eq!(response.headers()["x-sie-fallback-error"], "QUEUE_FULL");
     }
+
+    #[tokio::test]
+    async fn a_cold_lane_bridge_that_admission_refuses_dispatches_locally_without_a_wake() {
+        let config = format!("{HYBRID_ENCODE_MODEL}{NUMERICAL_FALLBACK}");
+        for cold in [true, false] {
+            let gateway = TestGateway::new(&[&config]).await;
+            gateway
+                .add_verified_worker("local-1", LOCAL_LANE, &["acme/hybrid-encode"])
+                .await;
+            gateway
+                .add_verified_worker("remote-1", REMOTE_LANE, &[])
+                .await;
+            if cold {
+                gateway.dispatcher.report_cold_local_lane();
+            }
+
+            let response = encode(&gateway, json!({"items": [{"text": "hello"}]})).await;
+
+            assert_eq!(response.status(), StatusCode::OK, "cold={cold}");
+            assert!(
+                !response.headers().contains_key("x-sie-fallback-reason"),
+                "cold={cold}"
+            );
+            assert_eq!(
+                gateway.dispatcher.dispatched(),
+                vec![dispatched("encode", LOCAL_LANE, "acme/hybrid-encode")],
+                "cold={cold}"
+            );
+        }
+    }
 }

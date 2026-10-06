@@ -192,7 +192,8 @@ pub trait WorkDispatcher: Send + Sync {
     /// the lane serving `model` has no capacity ready to accept work, although
     /// the registry may still list workers for it. The gateway reads it only to
     /// decide a `provisioning` bridge before dispatch, then wakes the lane
-    /// through [`Self::publish_model_load`] with the lane's pool target.
+    /// through [`Self::publish_model_load`] with the lane's pool target. A
+    /// transport that reports cold lanes must accept such a pool-target wake.
     fn lane_provisioning(&self, _lane: &LaneKey, _model: &str) -> bool {
         false
     }
