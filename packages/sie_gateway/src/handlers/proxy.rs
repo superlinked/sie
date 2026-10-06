@@ -31,8 +31,8 @@ use crate::queue::streaming::{
 };
 
 use crate::server::{
-    AppState, GenerationRequestIntent, GovernedGenerationRoute, ModelAccessPolicy,
-    RemoteRouteReason,
+    AppState, GenerationRequestIntent, GenerationRoutePolicy, GovernedGenerationRoute,
+    ModelAccessPolicy, RemoteRouteReason,
 };
 use crate::state::demand_tracker::PhysicalLane;
 use crate::state::model_registry::{ModelRegistry, ResolveError};
@@ -1717,6 +1717,45 @@ fn governed_generation_route(
             "compiled physical model disagrees with registry intent rewrite",
         ));
     }
+    checked_governed_route(state, customer_model, intent, route).map(Some)
+}
+
+/// The governed route a bridged generation request dispatches on: the
+/// deployment's remote route, which must still agree with the admitted plan.
+#[allow(clippy::result_large_err)]
+fn governed_bridge_route(
+    state: &AppState,
+    customer_model: &str,
+    intent: GenerationRequestIntent,
+    plan: &crate::state::model_registry::RemoteFallbackPlan,
+) -> Result<Option<GovernedGenerationRoute>, Response> {
+    let Some(policy) = generation_route_policy(state) else {
+        return Ok(None);
+    };
+    let Some(route) = policy.resolve_remote(customer_model, intent) else {
+        return Err(governed_generation_route_failure(
+            customer_model,
+            intent,
+            "missing remote route for model/intent",
+        ));
+    };
+    if !remote_route_agrees(&route, plan) {
+        return Err(governed_generation_route_failure(
+            customer_model,
+            intent,
+            "remote route disagrees with the admitted bridge",
+        ));
+    }
+    checked_governed_route(state, customer_model, intent, route).map(Some)
+}
+
+#[allow(clippy::result_large_err)]
+fn checked_governed_route(
+    state: &AppState,
+    customer_model: &str,
+    intent: GenerationRequestIntent,
+    route: GovernedGenerationRoute,
+) -> Result<GovernedGenerationRoute, Response> {
     if route.bundle.trim().is_empty()
         || route.pool.trim().is_empty()
         || route.machine_profile.trim().is_empty()
@@ -1739,7 +1778,7 @@ fn governed_generation_route(
             "route machine profile is absent from the configured GPU catalog",
         ));
     }
-    Ok(Some(route))
+    Ok(route)
 }
 
 /// Validate caller overrides against one exact deployment-owned route.
@@ -2066,13 +2105,19 @@ async fn resolve_routing(
         });
     }
     if let Some(RemoteFallbackOverride(plan)) = ext.get::<RemoteFallbackOverride>() {
+        let governed = match generation_intent {
+            Some(intent) => {
+                governed_bridge_route(state, &model_name, intent, plan).map_err(Box::new)?
+            }
+            None => None,
+        };
         return Ok(RoutingResult {
             caller_selected_route,
             model_name,
             dispatch_model: plan.model.clone(),
             bundle: plan.bundle.clone(),
             engine: plan.engine.clone(),
-            gpu: String::new(),
+            gpu: governed.map_or_else(String::new, |route| route.machine_profile),
             pool_name: plan.pool.clone(),
             gpu_configured: true,
         });
@@ -2303,6 +2348,7 @@ fn fallback_plan_for_request(
     allowed: bool,
     explicit_bundle: &str,
     trigger: FallbackTrigger,
+    intent: GenerationRequestIntent,
 ) -> Option<crate::state::model_registry::RemoteFallbackPlan> {
     fallback_plan_candidate(
         state,
@@ -2314,6 +2360,7 @@ fn fallback_plan_for_request(
         trigger,
     )
     .filter(|plan| plan.numerical.is_none())
+    .filter(|plan| governed_generation_plan(state, model, intent, plan))
 }
 
 /// The configured bridge for a request, numerical or not. A numerical plan
@@ -2382,13 +2429,58 @@ fn without_admission_outcome(ext: &axum::http::Extensions) -> axum::http::Extens
     probe
 }
 
-/// A deployment-governed generation route has no remote route.
-fn generation_bridge_allowed(state: &AppState) -> bool {
+fn generation_route_policy(state: &AppState) -> Option<&dyn GenerationRoutePolicy> {
     state
         .model_access_policy
         .as_deref()
         .and_then(ModelAccessPolicy::generation_route_policy)
-        .is_none()
+}
+
+/// A deployment-governed generation request is bridged only to the remote
+/// route the deployment names for its model and intent.
+fn generation_bridge_allowed(
+    state: &AppState,
+    customer_model: &str,
+    intent: GenerationRequestIntent,
+) -> bool {
+    generation_route_policy(state)
+        .is_none_or(|policy| policy.resolve_remote(customer_model, intent).is_some())
+}
+
+/// A governed generation bridge must agree with the deployment's remote
+/// route: the same model, bundle and pool.
+fn governed_generation_plan(
+    state: &AppState,
+    customer_model: &str,
+    intent: GenerationRequestIntent,
+    plan: &crate::state::model_registry::RemoteFallbackPlan,
+) -> bool {
+    generation_route_policy(state).is_none_or(|policy| {
+        policy
+            .resolve_remote(customer_model, intent)
+            .is_some_and(|route| remote_route_agrees(&route, plan))
+    })
+}
+
+fn remote_route_agrees(
+    route: &GovernedGenerationRoute,
+    plan: &crate::state::model_registry::RemoteFallbackPlan,
+) -> bool {
+    route.model == plan.model && route.bundle == plan.bundle && route.pool == plan.pool
+}
+
+/// The generation intent of a native request, as routing derives it.
+fn generation_intent_of(params: &publisher::WorkParams) -> GenerationRequestIntent {
+    if params
+        .generate
+        .as_ref()
+        .and_then(|generate| generate.grammar.as_ref())
+        .is_some()
+    {
+        GenerationRequestIntent::Grammar
+    } else {
+        GenerationRequestIntent::Default
+    }
 }
 
 /// A transport that manages its own capacity can report a cold lane that the
@@ -2760,8 +2852,11 @@ fn native_fallback_plan(
     body_held: bool,
     trigger: FallbackTrigger,
 ) -> Option<crate::state::model_registry::RemoteFallbackPlan> {
+    let intent = parsed.map_or(GenerationRequestIntent::Default, |(_, params)| {
+        generation_intent_of(params)
+    });
     let eligible = native_bridge_eligible(endpoint, parsed, body_held)
-        && (endpoint != "generate" || generation_bridge_allowed(state));
+        && (endpoint != "generate" || generation_bridge_allowed(state, model, intent));
     fallback_plan_candidate(
         state,
         req.headers(),
@@ -2771,6 +2866,7 @@ fn native_fallback_plan(
         "",
         trigger,
     )
+    .filter(|plan| endpoint != "generate" || governed_generation_plan(state, model, intent, plan))
     .filter(|plan| {
         plan.numerical.as_ref().is_none_or(|route| {
             numerical_request_outputs(endpoint, parsed, &route.outputs).is_some()
@@ -2957,16 +3053,7 @@ async fn proxy_request_inner(
         if native_request_has_profile_selector(&body_bytes, is_msgpack) {
             req.extensions_mut().insert(ExplicitProfileSelector);
         }
-        let intent = if params
-            .generate
-            .as_ref()
-            .and_then(|generate| generate.grammar.as_ref())
-            .is_some()
-        {
-            GenerationRequestIntent::Grammar
-        } else {
-            GenerationRequestIntent::Default
-        };
+        let intent = generation_intent_of(&params);
         prepared_native_body = Some(body_bytes);
         prepared_native_parsed = Some((items, params));
         (endpoint == "generate").then_some(intent)
@@ -3169,6 +3256,11 @@ async fn proxy_request_inner(
         );
     }
 
+    let native_intent = prepared_native_parsed
+        .as_ref()
+        .map_or(GenerationRequestIntent::Default, |(_, params)| {
+            generation_intent_of(params)
+        });
     if let Some(plan) = threshold_remote_plan_for_request(
         &state,
         req.headers(),
@@ -3177,9 +3269,13 @@ async fn proxy_request_inner(
         endpoint,
         prepared_native_parsed.as_ref(),
         native_bridge_eligible(endpoint, prepared_native_parsed.as_ref(), body_held)
-            && (endpoint != "generate" || generation_bridge_allowed(&state)),
+            && (endpoint != "generate"
+                || generation_bridge_allowed(&state, &model_name, native_intent)),
         "",
-    ) {
+    )
+    .filter(|plan| {
+        endpoint != "generate" || governed_generation_plan(&state, &model_name, native_intent, plan)
+    }) {
         req.extensions_mut().insert(RemoteFallbackOverride(plan));
         if let Some(body) = prepared_native_body {
             *req.body_mut() = Body::from(body);
@@ -8283,7 +8379,8 @@ async fn resolve_generation_route(
     token_limit: (u32, &'static str),
     metric_labels_slot: Option<&telemetry::MetricLabelsSlot>,
 ) -> Result<ResolvedRoute, Response> {
-    let bridge_allowed = bridge_allowed && generation_bridge_allowed(state);
+    let bridge_allowed =
+        bridge_allowed && generation_bridge_allowed(state, customer_model, request_intent);
     let bridge = ext.get::<RemoteFallbackOverride>();
     let dispatch_model = bridge.map_or(dispatch_model, |RemoteFallbackOverride(plan)| {
         plan.model.as_str()
@@ -8308,10 +8405,14 @@ async fn resolve_generation_route(
         .model_access_policy
         .as_ref()
         .and_then(|p| p.sealed_route(customer_model, ext));
-    let governed = if sealed.is_none() {
-        governed_generation_route(state, customer_model, dispatch_model, request_intent)?
-    } else {
-        None
+    let governed = match (&sealed, bridge) {
+        (Some(_), _) => None,
+        (None, Some(RemoteFallbackOverride(plan))) => {
+            governed_bridge_route(state, customer_model, request_intent, plan)?
+        }
+        (None, None) => {
+            governed_generation_route(state, customer_model, dispatch_model, request_intent)?
+        }
     };
     if let Some(route) = governed.as_ref() {
         if !explicit_bundle_override.is_empty() && explicit_bundle_override != route.bundle {
@@ -8496,7 +8597,9 @@ async fn resolve_generation_route(
         None,
         bridge_allowed,
         explicit_bundle_override,
-    ) {
+    )
+    .filter(|plan| governed_generation_plan(state, customer_model, request_intent, plan))
+    {
         let mut remote_ext = ext.clone();
         remote_ext.insert(RemoteFallbackOverride(plan));
         return Box::pin(resolve_generation_route(
@@ -8565,6 +8668,7 @@ async fn resolve_generation_route(
                 bridge_allowed,
                 explicit_bundle_override,
                 trigger,
+                request_intent,
             );
             let Some(plan) = plan else {
                 return Err(refusal);
@@ -8653,6 +8757,7 @@ async fn resolve_generation_route(
             bridge_allowed,
             explicit_bundle_override,
             FallbackTrigger::Provisioning,
+            request_intent,
         ) {
             let refusal = build_openai_provisioning_response(&gpu, &bundle);
             let target = lane_wake_target(
@@ -8704,6 +8809,7 @@ async fn resolve_generation_route(
         bridge_allowed,
         explicit_bundle_override,
         FallbackTrigger::Saturated,
+        request_intent,
     )
     .is_some()
         || fallback_plan_for_request(
@@ -8714,6 +8820,7 @@ async fn resolve_generation_route(
             bridge_allowed,
             explicit_bundle_override,
             FallbackTrigger::Unhealthy,
+            request_intent,
         )
         .is_some()
     {
@@ -8736,6 +8843,7 @@ async fn resolve_generation_route(
                 bridge_allowed,
                 explicit_bundle_override,
                 trigger,
+                request_intent,
             ) {
                 state.demand_tracker.record(&physical_lane);
                 let attempt = ext
@@ -8770,6 +8878,7 @@ async fn resolve_generation_route(
         bridge_allowed,
         explicit_bundle_override,
         FallbackTrigger::ModelLoading,
+        request_intent,
     ) {
         let admitted = state
             .pool_manager
@@ -29089,5 +29198,105 @@ mod tests {
             !rendered.contains("encoding_format") && !rendered.contains("base64"),
             "the inner encode request carries no encoding hint: {rendered}",
         );
+    }
+}
+
+#[cfg(test)]
+mod governed_bridge_route_tests {
+    use super::*;
+    use crate::handlers::test_support::{TestGateway, HYBRID_GENERATE_MODEL, REMOTE_LANE};
+
+    struct RemoteRoute(Option<GovernedGenerationRoute>);
+
+    impl ModelAccessPolicy for RemoteRoute {
+        fn visible(&self, _resolved_model: &str, _ext: &axum::http::Extensions) -> bool {
+            true
+        }
+
+        fn generation_route_policy(&self) -> Option<&dyn GenerationRoutePolicy> {
+            Some(self)
+        }
+    }
+
+    impl GenerationRoutePolicy for RemoteRoute {
+        fn resolve(
+            &self,
+            _customer_model: &str,
+            _intent: GenerationRequestIntent,
+        ) -> Option<GovernedGenerationRoute> {
+            None
+        }
+
+        fn resolve_remote(
+            &self,
+            _customer_model: &str,
+            _intent: GenerationRequestIntent,
+        ) -> Option<GovernedGenerationRoute> {
+            self.0.clone()
+        }
+    }
+
+    fn route(
+        model: &str,
+        (pool, machine_profile, bundle): (&str, &str, &str),
+    ) -> GovernedGenerationRoute {
+        GovernedGenerationRoute {
+            model: model.to_string(),
+            bundle: bundle.to_string(),
+            pool: pool.to_string(),
+            machine_profile: machine_profile.to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_bridged_generation_request_dispatches_only_on_an_agreeing_remote_route() {
+        let config = format!(
+            "{HYBRID_GENERATE_MODEL}\nrouting:\n  policy: fallback\n  fallback_profile: remote\n"
+        );
+        let mut gateway = TestGateway::new(&[&config]).await;
+        let plan = gateway
+            .state
+            .model_registry
+            .remote_fallback_plan("acme/chat", FallbackTrigger::Provisioning)
+            .expect("remote plan");
+        let intent = GenerationRequestIntent::Default;
+        assert_eq!(
+            governed_bridge_route(&gateway.state, "acme/chat", intent, &plan).ok(),
+            Some(None),
+            "an ungoverned bridge keeps the plan's coordinates"
+        );
+
+        let agreeing = route("acme/chat:remote", REMOTE_LANE);
+        gateway.install_policy(Arc::new(RemoteRoute(Some(agreeing.clone()))));
+        assert_eq!(
+            governed_bridge_route(&gateway.state, "acme/chat", intent, &plan).ok(),
+            Some(Some(agreeing))
+        );
+
+        for (case, remote) in [
+            ("no remote route", None),
+            (
+                "another model",
+                Some(route("acme/other:remote", REMOTE_LANE)),
+            ),
+            (
+                "another bundle",
+                Some(route("acme/chat:remote", ("default", "cpu", "default"))),
+            ),
+            (
+                "another pool",
+                Some(route("acme/chat:remote", ("other", "cpu", "remote"))),
+            ),
+            (
+                "an unconfigured machine profile",
+                Some(route("acme/chat:remote", ("default", "tpu", "remote"))),
+            ),
+        ] {
+            gateway.install_policy(Arc::new(RemoteRoute(remote)));
+            assert!(
+                governed_bridge_route(&gateway.state, "acme/chat", intent, &plan).is_err(),
+                "{case}"
+            );
+        }
     }
 }

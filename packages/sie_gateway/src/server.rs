@@ -195,6 +195,20 @@ pub trait GenerationRoutePolicy: Send + Sync {
         customer_model: &str,
         intent: GenerationRequestIntent,
     ) -> Option<GovernedGenerationRoute>;
+
+    /// The governed route of `customer_model`'s remote profile for `intent`.
+    ///
+    /// `None` means generation for that model and intent is never bridged
+    /// while this policy governs generation. A bridge is planned only when
+    /// this route names the same model, bundle and pool as the registry's
+    /// remote plan, and the bridged request dispatches on this route.
+    fn resolve_remote(
+        &self,
+        _customer_model: &str,
+        _intent: GenerationRequestIntent,
+    ) -> Option<GovernedGenerationRoute> {
+        None
+    }
 }
 
 pub struct AppState {

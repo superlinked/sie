@@ -594,8 +594,10 @@ chat, completions and supported buffered Responses. Native generation, chat
 and completions also support streaming bridges. Explicit profiles, bundle
 pins, machine or pool overrides, and `X-SIE-Remote: forbid` retain their selected
 route. Under a model access policy, a bare model goes to its remote profile
-only when the policy admits that route and serves the remote profile, and
-generation stays local while the policy governs generation routes. A request
+only when the policy admits that route and serves the remote profile. While
+the policy governs generation routes, generation stays local unless the policy
+also names a governed route for the remote profile that agrees with the
+registry's remote plan. A request
 that names the remote profile follows the same visibility and serving rules as
 any other model. A caller who may not see the remote profile gets the bare model
 from `/v1/models` without that profile and with no remote routing.

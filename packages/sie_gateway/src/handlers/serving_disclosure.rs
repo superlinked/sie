@@ -3853,6 +3853,7 @@ mod tests {
         hide_remote: bool,
         refuse_remote_serving: bool,
         govern_generation: bool,
+        remote_generation: Option<GovernedGenerationRoute>,
         asked: std::sync::Mutex<Vec<(String, String, RemoteRouteReason)>>,
     }
 
@@ -3913,6 +3914,28 @@ mod tests {
                 pool: LOCAL_LANE.0.to_string(),
                 machine_profile: LOCAL_LANE.1.to_string(),
             })
+        }
+
+        fn resolve_remote(
+            &self,
+            _customer_model: &str,
+            intent: GenerationRequestIntent,
+        ) -> Option<GovernedGenerationRoute> {
+            self.remote_generation
+                .clone()
+                .filter(|_| intent == GenerationRequestIntent::Default)
+        }
+    }
+
+    fn governed(
+        model: &str,
+        (pool, machine_profile, bundle): (&str, &str, &str),
+    ) -> GovernedGenerationRoute {
+        GovernedGenerationRoute {
+            model: model.to_string(),
+            bundle: bundle.to_string(),
+            pool: pool.to_string(),
+            machine_profile: machine_profile.to_string(),
         }
     }
 
@@ -4393,6 +4416,109 @@ mod tests {
                 dispatched("load", LOCAL_LANE, "acme/chat"),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn a_governed_generation_bridge_dispatches_on_the_remote_route_it_names() {
+        let policy = Arc::new(RoutePolicy {
+            admit: true,
+            govern_generation: true,
+            remote_generation: Some(governed("acme/chat:remote", REMOTE_LANE)),
+            ..Default::default()
+        });
+        let gateway = transport_cold_gateway(Some(policy.clone())).await;
+
+        let mut expected = Vec::new();
+        for surface in ["native", "chat", "completions", "responses"] {
+            let response = buffered_surface(&gateway, surface, json!({})).await;
+            assert_eq!(response.status(), StatusCode::OK, "{surface}");
+            assert_eq!(
+                response.headers()["x-sie-fallback-reason"],
+                "provisioning",
+                "{surface}"
+            );
+            expected.push(dispatched("load", LOCAL_LANE, "acme/chat"));
+            expected.push(dispatched("generate", REMOTE_LANE, "acme/chat:remote"));
+        }
+        assert_eq!(gateway.dispatcher.dispatched(), expected);
+        assert!(gateway
+            .dispatcher
+            .fallback_reasons()
+            .iter()
+            .all(|reason| *reason == Some(FallbackTrigger::Provisioning)));
+        assert!(policy.asked().iter().all(|asked| *asked
+            == (
+                "acme/chat".to_string(),
+                "acme/chat:remote".to_string(),
+                RemoteRouteReason::Fallback(FallbackTrigger::Provisioning),
+            )));
+    }
+
+    #[tokio::test]
+    async fn a_governed_generation_bridge_takes_the_machine_profile_of_its_route() {
+        let policy = Arc::new(RoutePolicy {
+            admit: true,
+            govern_generation: true,
+            remote_generation: Some(governed("acme/chat:remote", ("default", "l4", "remote"))),
+            ..Default::default()
+        });
+        let gateway = transport_cold_gateway(Some(policy)).await;
+
+        let mut expected = Vec::new();
+        for surface in ["native", "chat", "completions", "responses"] {
+            let response = buffered_surface(&gateway, surface, json!({})).await;
+            assert_eq!(
+                response.status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "{surface}: no verified worker serves the governed route's machine profile"
+            );
+            assert_eq!(
+                response.headers()["x-sie-fallback-reason"],
+                "provisioning",
+                "{surface}"
+            );
+            expected.push(dispatched("load", LOCAL_LANE, "acme/chat"));
+        }
+        assert_eq!(gateway.dispatcher.dispatched(), expected);
+    }
+
+    #[tokio::test]
+    async fn governed_generation_without_an_agreeing_remote_route_stays_local() {
+        for (case, remote) in [
+            ("no remote route", None),
+            (
+                "another model",
+                Some(governed("acme/other:remote", REMOTE_LANE)),
+            ),
+            (
+                "another bundle",
+                Some(governed("acme/chat:remote", ("default", "cpu", "default"))),
+            ),
+            (
+                "another pool",
+                Some(governed("acme/chat:remote", ("other", "cpu", "remote"))),
+            ),
+        ] {
+            let policy = Arc::new(RoutePolicy {
+                admit: true,
+                govern_generation: true,
+                remote_generation: remote,
+                ..Default::default()
+            });
+            let gateway = transport_cold_gateway(Some(policy)).await;
+
+            let mut expected = Vec::new();
+            for surface in ["native", "chat", "completions", "responses"] {
+                let response = buffered_surface(&gateway, surface, json!({})).await;
+                assert_eq!(response.status(), StatusCode::OK, "{case}: {surface}");
+                assert!(
+                    !response.headers().contains_key("x-sie-fallback-reason"),
+                    "{case}: {surface}"
+                );
+                expected.push(dispatched("generate", LOCAL_LANE, "acme/chat"));
+            }
+            assert_eq!(gateway.dispatcher.dispatched(), expected, "{case}");
+        }
     }
 
     #[tokio::test]
