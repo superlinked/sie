@@ -3325,7 +3325,7 @@ async fn proxy_request_inner(
     } else {
         None
     };
-    if let Some(plan) = provisioning_bridge {
+    if provisioning_bridge.is_some() {
         let refusal = build_provisioning_response_for_surface(&gpu, &bundle, provisioning_surface);
         let target = lane_wake_target(
             effective_pool,
@@ -3345,6 +3345,17 @@ async fn proxy_request_inner(
         {
             return refusal;
         }
+        let Some(plan) = native_bridge_plan(
+            &state,
+            &req,
+            endpoint,
+            &model_name,
+            prepared_native_parsed.as_ref(),
+            body_held,
+            FallbackTrigger::Provisioning,
+        ) else {
+            return refusal;
+        };
         begin_planned_native_fallback(&mut req, plan, refusal, FallbackTrigger::Provisioning);
         if let Some(body) = prepared_native_body {
             *req.body_mut() = Body::from(body);
@@ -3458,7 +3469,7 @@ async fn proxy_request_inner(
             )
             .await
             {
-                if let Some(plan) = native_bridge_plan(
+                if native_bridge_plan(
                     &state,
                     &req,
                     endpoint,
@@ -3466,7 +3477,9 @@ async fn proxy_request_inner(
                     prepared_native_parsed.as_ref(),
                     body_held,
                     FallbackTrigger::ModelLoading,
-                ) {
+                )
+                .is_some()
+                {
                     let refusal = model_loading_refusal(endpoint);
                     if !warm_local_model(
                         &state,
@@ -3480,6 +3493,17 @@ async fn proxy_request_inner(
                     {
                         return refusal;
                     }
+                    let Some(plan) = native_bridge_plan(
+                        &state,
+                        &req,
+                        endpoint,
+                        &model_name,
+                        prepared_native_parsed.as_ref(),
+                        body_held,
+                        FallbackTrigger::ModelLoading,
+                    ) else {
+                        return refusal;
+                    };
                     begin_planned_native_fallback(
                         &mut req,
                         plan,

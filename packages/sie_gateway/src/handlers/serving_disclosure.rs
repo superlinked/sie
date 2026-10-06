@@ -3766,6 +3766,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_admission_withdrawn_during_the_wake_keeps_the_local_refusal() {
+        for (gate, loaded) in [
+            ("model_loading", &[][..]),
+            ("provisioning", &["acme/hybrid-encode"][..]),
+        ] {
+            let gateway =
+                numerical_gateway_with_local(NUMERICAL_FALLBACK, loaded, ADMITTED_IDENTITY).await;
+            if gate == "provisioning" {
+                gateway.dispatcher.report_cold_local_lane();
+            }
+            let registry = Arc::clone(&gateway.state.registry);
+            gateway
+                .dispatcher
+                .on_model_load(Box::new(move || registry.health_subscription_started()));
+            let response = encode(&gateway, json!({"items":[{"text":"hello"}]})).await;
+            let dispatched = gateway.dispatcher.dispatched();
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "{gate}");
+            assert!(
+                !response.headers().contains_key("x-sie-fallback-reason"),
+                "{gate}"
+            );
+            assert!(
+                dispatched.iter().any(|work| work.endpoint == "load"),
+                "{gate}"
+            );
+            assert!(
+                dispatched.iter().all(|work| work.bundle != REMOTE_LANE.2),
+                "{gate}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn an_admitted_numerical_bridge_accepts_a_query_flag() {
         let gateway = numerical_gateway(NUMERICAL_FALLBACK, false).await;
         let response = encode(

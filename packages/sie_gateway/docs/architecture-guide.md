@@ -1068,9 +1068,12 @@ lane. It is `false` by default and is a non-publishing hint.
   1. The gateway wakes the lane through `publish_model_load` with the lane's
      pool target, recording pending demand as for any cold lane.
   2. It waits up to 2 s for the transport to accept the wake.
-  3. It makes the single remote attempt with `fallback_reason: provisioning`.
-  - A wake that is not accepted leaves the caller with the local
-    `503 PROVISIONING`.
+  3. It admits the bridge again, and makes the single remote attempt with
+     `fallback_reason: provisioning`.
+  - A wake that is not accepted, or a bridge that is no longer admitted after
+    the wake, leaves the caller with the local `503 PROVISIONING`. A
+    `model_loading` bridge admits its plan again after its load-only wake in the
+    same way.
 - **No bridge.** A request that is not bridged dispatches as before.
 - **A remote attempt refused as `PROVISIONING`** received no answer. It
   restores the local refusal with `X-SIE-Fallback-Error: QUEUE_FULL`.

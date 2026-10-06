@@ -176,9 +176,15 @@ pub(crate) struct RecordingDispatcher {
     execution_authority: Mutex<Vec<bool>>,
     fallback_reasons: Mutex<Vec<Option<FallbackTrigger>>>,
     numerical_admissions: Mutex<Vec<Option<String>>>,
+    on_model_load: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl RecordingDispatcher {
+    /// Run `action` once, when the next load-only item is published.
+    pub(crate) fn on_model_load(&self, action: Box<dyn FnOnce() + Send>) {
+        *self.on_model_load.lock().unwrap() = Some(action);
+    }
+
     /// Answer remote-lane work as a remote worker does when its upstream cannot
     /// serve now: a published `code` error with the upstream's wait, if any.
     pub(crate) fn refuse_remote_work(&self, code: &'static str, retry_after_s: Option<u32>) {
@@ -426,6 +432,9 @@ impl WorkDispatcher for RecordingDispatcher {
             assert!(matches!(target, PublishTarget::VerifiedWorker { .. }));
         }
         self.record(Dispatched::new("load", &target));
+        if let Some(action) = self.on_model_load.lock().unwrap().take() {
+            action();
+        }
         if self.load_refused.load(Ordering::SeqCst) {
             return Err(DispatchError::Other("load was not durably accepted".into()));
         }
