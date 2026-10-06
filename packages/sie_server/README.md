@@ -490,7 +490,15 @@ admission limits fail explicitly before collation or inference.
 ### Privacy Filter extraction
 
 `openai/privacy-filter` uses the official OPF runtime and the pinned
-checkpoint's `original/` artifacts in the Transformers 5 bundle. The model
+checkpoint's `original/` artifacts in the Transformers 5 bundle.
+Its `o200k_base` vocabulary uses tiktoken's cache, independently of the
+Hugging Face cache. An empty cache requires HTTPS access to
+`openaipublic.blob.core.windows.net`. For offline use, populate a persistent
+`TIKTOKEN_CACHE_DIR` with `tiktoken.get_encoding("o200k_base")` beforehand and
+make that same directory available when serving; Hugging Face offline settings
+do not populate this cache.
+
+The model
 extracts `account_number`, `private_address`, `private_email`, `private_person`,
 `private_phone`, `private_url`, `private_date`, and `secret`. Omit `labels` to
 return all categories, or select a subset; this filters detections without
