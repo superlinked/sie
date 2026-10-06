@@ -27,7 +27,7 @@ def digest(data: bytes) -> str:
 
 
 def read_json(root: Path, name: str) -> Any:
-    return json.loads((root / name).read_text())
+    return json.loads((root / name).read_text(encoding="utf-8"))
 
 
 def verify(root: Path) -> dict:

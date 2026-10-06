@@ -117,7 +117,7 @@ def main() -> None:
         "settings_scope": "The checkpoint is requested, not independently attested by these returned vectors.",
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(result, indent=2) + "\n")
+    args.output.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     print(json.dumps({"output": str(args.output), "first_result_grade2": result["first_result_grade2"]}))
 
 
