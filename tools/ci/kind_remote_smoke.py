@@ -40,10 +40,12 @@ from __future__ import annotations
 import base64
 import json
 import os
+import queue
 import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -186,7 +188,7 @@ def wait_http(url: str, timeout: float = 180, *, headers: dict[str, str] | None 
     raise RuntimeError(f"{url} never became ready: {last_error}")
 
 
-def port_forward(resource: str, remote_port: int) -> tuple[subprocess.Popen, int]:
+def port_forward(resource: str, remote_port: int, timeout: float = 30) -> tuple[subprocess.Popen, int]:
     process = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
         ["kubectl", "-n", NAMESPACE, "port-forward", resource, f"0:{remote_port}"],  # noqa: S607 - kubectl resolved via PATH
         cwd=ROOT,
@@ -194,7 +196,13 @@ def port_forward(resource: str, remote_port: int) -> tuple[subprocess.Popen, int
         stderr=subprocess.STDOUT,
         text=True,
     )
-    line = process.stdout.readline()
+    first_line: queue.Queue[str] = queue.Queue(maxsize=1)
+    threading.Thread(target=lambda: first_line.put(process.stdout.readline()), daemon=True).start()
+    try:
+        line = first_line.get(timeout=timeout)
+    except queue.Empty:
+        process.terminate()
+        raise RuntimeError(f"kubectl port-forward {resource} produced no output within {timeout}s") from None
     match = re.search(r"127\.0\.0\.1:(\d+)", line)
     if not match:
         process.terminate()
@@ -286,7 +294,11 @@ def encode_through_gateway(gateway_url: str, timeout: float = 120) -> dict:
     with SIEClient(gateway_url, timeout_s=30) as client:
         while time.monotonic() < deadline:
             try:
-                return client.encode(MODEL_ID, [{"text": "a fake upstream smoke probe"}])[0]
+                return client.encode(
+                    MODEL_ID,
+                    [{"text": "a fake upstream smoke probe"}],
+                    provision_timeout_s=max(0.0, deadline - time.monotonic()),
+                )[0]
             except Exception as error:  # noqa: BLE001 - retry until the model is routable
                 last_error = error
                 time.sleep(3)
