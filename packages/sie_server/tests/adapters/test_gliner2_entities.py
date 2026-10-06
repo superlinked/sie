@@ -119,7 +119,7 @@ def native_loader(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[Mock
     model = ToyModel()
     loader = Mock(return_value=model)
     module = ModuleType("gliner2")
-    module.AutoExtractor = SimpleNamespace(from_pretrained=loader)  # type: ignore[attr-defined]
+    module.AutoExtractor = SimpleNamespace(from_pretrained=loader)  # ty: ignore[unresolved-attribute]
     monkeypatch.setitem(sys.modules, "gliner2", module)
     snapshot = Mock(return_value=str(tmp_path))
     monkeypatch.setattr(entities_module, "snapshot_download", snapshot)
@@ -576,10 +576,11 @@ def test_invalid_loadtime_limits_are_rejected(name: str, value: Any) -> None:
 
 
 def test_unknown_loadtime_options_and_precision_are_rejected() -> None:
+    unknown: dict[str, Any] = {"quantize": True}
     with pytest.raises(TypeError, match="unexpected keyword argument"):
-        GLiNER2EntitiesAdapter("publisher/model", quantize=True)  # type: ignore[call-arg]
+        GLiNER2EntitiesAdapter("publisher/model", **unknown)
     with pytest.raises(ValueError, match="compute_precision"):
-        GLiNER2EntitiesAdapter("publisher/model", compute_precision="auto")  # type: ignore[arg-type]
+        GLiNER2EntitiesAdapter("publisher/model", compute_precision="auto")  # ty: ignore[invalid-argument-type]
 
 
 def test_native_processor_may_not_silently_drop_source_words(loaded: tuple[GLiNER2EntitiesAdapter, ToyModel]) -> None:

@@ -646,10 +646,11 @@ def test_invalid_constructor_context_is_rejected(value: Any) -> None:
 
 
 def test_constructor_rejects_imagined_options_and_precision() -> None:
+    unknown: dict[str, Any] = {"truncation": False}
     with pytest.raises(TypeError, match="unexpected keyword argument"):
-        NativeCausalCrossEncoderAdapter("publisher/model", truncation=False)  # type: ignore[call-arg]
+        NativeCausalCrossEncoderAdapter("publisher/model", **unknown)
     with pytest.raises(ValueError, match="compute_precision"):
-        NativeCausalCrossEncoderAdapter("publisher/model", compute_precision="auto")  # type: ignore[arg-type]
+        NativeCausalCrossEncoderAdapter("publisher/model", compute_precision="auto")  # ty: ignore[invalid-argument-type]
 
 
 def test_unload_clears_native_state(loaded: tuple[NativeCausalCrossEncoderAdapter, ToyCrossEncoder]) -> None:
