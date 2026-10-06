@@ -117,13 +117,51 @@ fn model_info_for_caller(
         .is_some_and(|policy| !policy.visible(&remote_model, ext));
     if hidden {
         body["routing"] = ModelEntry::no_routing_value();
-        for pointer in ["/profiles", "/capabilities/profile_lora_adapters"] {
-            if let Some(map) = body.pointer_mut(pointer).and_then(Value::as_object_mut) {
-                map.remove(profile);
-            }
-        }
+        leave_out_profile(&mut body, profile);
     }
     body
+}
+
+/// Leave `profile` out of a model's JSON: its entry in `profiles`, its LoRA
+/// adapters, and every adapter name in the union that no other profile
+/// declares. An emptied map or union becomes `null`, as for a model that
+/// declares none.
+fn leave_out_profile(body: &mut Value, profile: &str) {
+    if let Some(profiles) = body["profiles"].as_object_mut() {
+        profiles.remove(profile);
+    }
+    let capabilities = &mut body["capabilities"];
+    let (retained, emptied) = {
+        let Some(per_profile) = capabilities["profile_lora_adapters"].as_object_mut() else {
+            return;
+        };
+        if per_profile.remove(profile).is_none() {
+            return;
+        }
+        let retained: HashSet<String> = per_profile
+            .values()
+            .filter_map(Value::as_array)
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect();
+        (retained, per_profile.is_empty())
+    };
+    if emptied {
+        capabilities["profile_lora_adapters"] = Value::Null;
+    }
+    let union: Vec<Value> = capabilities["lora_adapters"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|name| name.as_str().is_some_and(|name| retained.contains(name)))
+        .cloned()
+        .collect();
+    capabilities["lora_adapters"] = if union.is_empty() {
+        Value::Null
+    } else {
+        Value::Array(union)
+    };
 }
 
 /// Detail counterpart to `get_models`.

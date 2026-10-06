@@ -3892,13 +3892,27 @@ mod tests {
                 .unwrap();
             serde_json::from_slice(&body).unwrap()
         }
-        let config = fallback_config(HYBRID_EXTRACT_MODEL);
+        let config = fallback_config(
+            &HYBRID_EXTRACT_MODEL
+                .replace(
+                    "    max_batch_tokens: 8192\n  remote:",
+                    "    max_batch_tokens: 8192\n    adapter_options:\n      loadtime:\n        lora_paths:\n          shared: org/shared\n  remote:",
+                )
+                .replace(
+                    "        upstream_model: acme/extract\n",
+                    "        upstream_model: acme/extract\n        lora_paths:\n          shared: org/shared\n          remote-only: org/remote-only\n",
+                ),
+        );
+        let remote_lora_only = fallback_config(&HYBRID_ENCODE_MODEL.replace(
+            "        upstream_model: acme/hybrid-encode\n",
+            "        upstream_model: acme/hybrid-encode\n        lora_paths:\n          remote-only: org/remote-only\n",
+        ));
         for hide_remote in [false, true] {
             let policy = Arc::new(RoutePolicy {
                 hide_remote,
                 ..Default::default()
             });
-            let gateway = cold_gateway(&[&config], policy).await;
+            let gateway = cold_gateway(&[&config, &remote_lora_only], policy).await;
             let listing = json_of(
                 crate::handlers::models::get_models(
                     State(Arc::clone(&gateway.state)),
@@ -3929,13 +3943,29 @@ mod tests {
                 .await,
             )
             .await;
-            let routing = if hide_remote {
-                json!({"policy": null, "upstream_kind": null})
+            let (routing, lora_adapters, profile_lora_adapters) = if hide_remote {
+                (
+                    json!({"policy": null, "upstream_kind": null}),
+                    json!(["shared"]),
+                    json!({"default": ["shared"]}),
+                )
             } else {
-                json!({"policy": "fallback", "upstream_kind": "sie"})
+                (
+                    json!({"policy": "fallback", "upstream_kind": "sie"}),
+                    json!(["shared", "remote-only"]),
+                    json!({"default": ["shared"], "remote": ["shared", "remote-only"]}),
+                )
             };
             for body in [&listed, &detail] {
                 assert_eq!(body["routing"], routing, "hide_remote={hide_remote}");
+                assert_eq!(
+                    body["capabilities"]["lora_adapters"], lora_adapters,
+                    "hide_remote={hide_remote}"
+                );
+                assert_eq!(
+                    body["capabilities"]["profile_lora_adapters"], profile_lora_adapters,
+                    "hide_remote={hide_remote}"
+                );
                 assert_eq!(
                     body["profiles"].get("remote").is_some(),
                     !hide_remote,
@@ -3948,6 +3978,20 @@ mod tests {
                     .iter()
                     .any(|model| model["name"] == "acme/extract:remote"),
                 !hide_remote
+            );
+            let encode = models
+                .iter()
+                .find(|model| model["name"] == "acme/hybrid-encode")
+                .unwrap();
+            let (lora_adapters, profile_lora_adapters) = if hide_remote {
+                (json!(null), json!(null))
+            } else {
+                (json!(["remote-only"]), json!({"remote": ["remote-only"]}))
+            };
+            assert_eq!(encode["capabilities"]["lora_adapters"], lora_adapters);
+            assert_eq!(
+                encode["capabilities"]["profile_lora_adapters"],
+                profile_lora_adapters
             );
         }
     }
