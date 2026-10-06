@@ -29355,4 +29355,103 @@ mod governed_bridge_route_tests {
             );
         }
     }
+
+    /// A deployment policy that reads the registry while it names the remote
+    /// route.
+    struct RegistryReadingRoute {
+        route: GovernedGenerationRoute,
+        registry: Arc<crate::state::model_registry::ModelRegistry>,
+    }
+
+    impl ModelAccessPolicy for RegistryReadingRoute {
+        fn visible(&self, _resolved_model: &str, _ext: &axum::http::Extensions) -> bool {
+            true
+        }
+
+        fn remote_route_admitted(
+            &self,
+            _model: &str,
+            _remote_model: &str,
+            _reason: RemoteRouteReason,
+            _ext: &axum::http::Extensions,
+        ) -> bool {
+            true
+        }
+
+        fn generation_route_policy(&self) -> Option<&dyn GenerationRoutePolicy> {
+            Some(self)
+        }
+    }
+
+    impl GenerationRoutePolicy for RegistryReadingRoute {
+        fn resolve(
+            &self,
+            _customer_model: &str,
+            _intent: GenerationRequestIntent,
+        ) -> Option<GovernedGenerationRoute> {
+            None
+        }
+
+        fn resolve_remote(
+            &self,
+            _customer_model: &str,
+            _intent: GenerationRequestIntent,
+        ) -> Option<GovernedGenerationRoute> {
+            self.registry
+                .with_current_generation(&self.registry.capture_generation(), || self.route.clone())
+        }
+    }
+
+    #[test]
+    fn a_threshold_plan_may_ask_a_policy_that_reads_the_registry() {
+        use crate::handlers::test_support::ThresholdBroker;
+        use crate::state::threshold_coordinator::ThresholdSampler;
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let planned = runtime.block_on(async {
+                let broker = ThresholdBroker::start().await?;
+                let config = format!("{HYBRID_GENERATE_MODEL}\nrouting:\n  policy: threshold\n  fallback_profile: remote\n  wake_above: 1\n  sleep_below: 0.5\n  window_s: 1\n  cooldown_s: 1\n");
+                let mut gateway = TestGateway::with_threshold_routing(&[&config], true).await;
+                let registry = Arc::clone(&gateway.state.model_registry);
+                gateway.install_policy(Arc::new(RegistryReadingRoute {
+                    route: route("acme/chat:remote", REMOTE_LANE),
+                    registry,
+                }));
+                let binding = broker.bind(&gateway).await;
+                let mut sampler = ThresholdSampler::default();
+                binding.coordinator.sample(&mut sampler).await.unwrap();
+                for _ in 0..2 {
+                    tokio::time::sleep(std::time::Duration::from_millis(1050)).await;
+                    binding.coordinator.sample(&mut sampler).await.unwrap();
+                }
+                Some(
+                    threshold_remote_plan_for_request(
+                        &gateway.state,
+                        &HeaderMap::new(),
+                        &axum::http::Extensions::new(),
+                        "acme/chat",
+                        "generate",
+                        None,
+                        true,
+                        "",
+                        Some(GenerationRequestIntent::Default),
+                    )
+                    .map(|plan| plan.model),
+                )
+            });
+            let _ = done_tx.send(planned);
+        });
+
+        // A policy that re-enters a held registry lock blocks its thread forever.
+        let planned = done_rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("planning finished");
+        if let Some(planned) = planned {
+            assert_eq!(planned.as_deref(), Some("acme/chat:remote"));
+        }
+    }
 }
