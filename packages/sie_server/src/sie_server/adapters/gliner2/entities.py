@@ -22,6 +22,7 @@ from sie_server.adapters._prompt_limit import MAX_PROMPT_CHARS_PER_TOKEN, check_
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ComputePrecision
 from sie_server.adapters._word_window import plan_forwards
+from sie_server.adapters.gliner2.decisions import MARKERS
 from sie_server.adapters.gliner2.words import linear_equivalent
 from sie_server.core.inference_output import ExtractItemError, ExtractOutput
 from sie_server.types.inputs import InvalidInputError, Item
@@ -57,7 +58,8 @@ class GLiNER2EntitiesAdapter(BaseAdapter):
     full encoded-row and prompt counts. Failed items bill zero tokens.
 
     Entity labels are exact strings, including descriptive names, case and
-    punctuation, with at most 128 characters per label. Admission also bounds
+    punctuation, except reserved prompt markers, with at most 128 characters
+    per label. Admission also bounds
     source preprocessing to 64 characters and four words per row-budget token,
     with at most 4096 characters per word. The prompt allows at most one label
     and 32 label characters per prompt-budget token. Exceeding any admission
@@ -342,6 +344,8 @@ class GLiNER2EntitiesAdapter(BaseAdapter):
         for label in value:
             if not isinstance(label, str) or not label.strip():
                 raise InvalidInputError("GLiNER2 entity labels must be non-blank strings")
+            if any(marker in label for marker in MARKERS):
+                raise InvalidInputError("GLiNER2 entity labels may not contain structural tokens of the model's prompt")
             labels.append(label)
         if len(set(labels)) != len(labels):
             raise InvalidInputError("GLiNER2 entity labels must be unique")

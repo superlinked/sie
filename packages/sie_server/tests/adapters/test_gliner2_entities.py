@@ -13,6 +13,7 @@ import pytest
 import torch
 import yaml
 from sie_server.adapters.gliner2 import entities as entities_module
+from sie_server.adapters.gliner2.decisions import MARKERS
 from sie_server.adapters.gliner2.entities import GLiNER2EntitiesAdapter
 from sie_server.adapters.gliner2.words import PACKAGE_PATTERN, LinearWordSplitter
 from sie_server.types.inputs import InvalidInputError, Item
@@ -136,6 +137,17 @@ def native_counts(model: ToyModel, text: str, labels: list[str]) -> tuple[int, i
     batch = model.processor.collate_fn_inference([(text, ToySchema().entities(labels).build())])
     document = sum(mapping[0] == "text" for mapping in batch.mapped_indices[0])
     return batch.original_lengths[0], document, batch.original_lengths[0] - document
+
+
+@pytest.mark.parametrize("marker", MARKERS)
+def test_structural_markers_fail_before_native_schema_or_collation(loaded, marker):
+    adapter, model = loaded
+    model.create_schema = Mock(side_effect=AssertionError("the model must not read malformed labels"))
+    with pytest.raises(InvalidInputError, match="structural tokens"):
+        adapter.extract([Item(text="Alice.")], labels=[f"person {marker}", "organization"])
+    model.create_schema.assert_not_called()
+    assert model.processor.calls == []
+    assert model.calls == []
 
 
 def span(text: str, start: int, end: int, *, confidence: Any = 0.9) -> dict[str, Any]:
