@@ -45,7 +45,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler naming
+    def do_POST(self) -> None:
         length = int(self.headers.get("Content-Length", "0"))
         raw = self.rfile.read(length) if length else b"{}"
         if self.path != "/v1/embeddings":
@@ -83,14 +83,14 @@ class Handler(BaseHTTPRequestHandler):
             },
         )
 
-    def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler naming
+    def do_GET(self) -> None:
         if self.path == "/calls":
             with _lock:
                 self._send_json(200, {"count": len(_calls), "calls": list(_calls)})
             return
         self._send_json(404, {"error": {"message": f"no fake route for {self.path}"}})
 
-    def log_message(self, format: str, *args: object) -> None:  # noqa: A002 - matches base signature
+    def log_message(self, format: str, *args: object) -> None:  # matches BaseHTTPRequestHandler's signature
         sys.stderr.write(f"[fake-upstream] {self.address_string()} {format % args}\n")
 
 

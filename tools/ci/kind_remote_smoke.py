@@ -48,7 +48,9 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from http import HTTPStatus
 from pathlib import Path
+from typing import Any
 
 from sie_sdk import SIEClient
 
@@ -83,16 +85,16 @@ profiles:
 """
 
 
-def run(args: list[str], **kwargs) -> subprocess.CompletedProcess:
+def run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess:
     kwargs.setdefault("cwd", ROOT)
     kwargs.setdefault("check", True)
     print(f"+ {' '.join(str(a) for a in args)}", flush=True)
-    return subprocess.run(args, **kwargs)  # noqa: S603 - fixed argv, no shell
+    return subprocess.run(args, **kwargs)  # noqa: S603, PLW1510 - fixed argv, no shell; check set above
 
 
-def capture(args: list[str], **kwargs) -> str:
+def capture(args: list[str], **kwargs: Any) -> str:
     kwargs.setdefault("cwd", ROOT)
-    result = subprocess.run(args, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **kwargs)  # noqa: S603
+    result = subprocess.run(args, check=True, capture_output=True, text=True, **kwargs)  # noqa: S603 - fixed argv, no shell
     return result.stdout.strip()
 
 
@@ -163,9 +165,7 @@ config:
     repository: {repo(images["sie-config"])}
     tag: v{version}
 """
-    handle = tempfile.NamedTemporaryFile(
-        mode="w", suffix=".yaml", prefix="sie-remote-smoke-values-", delete=False
-    )
+    handle = tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", prefix="sie-remote-smoke-values-", delete=False)
     handle.write(content)
     handle.close()
     return Path(handle.name)
@@ -176,9 +176,9 @@ def wait_http(url: str, timeout: float = 180, *, headers: dict[str, str] | None 
     last_error: Exception | None = None
     while time.monotonic() < deadline:
         try:
-            request = urllib.request.Request(url, headers=headers or {})
-            with urllib.request.urlopen(request, timeout=3) as response:  # noqa: S310 - fixed localhost URL
-                if response.status == 200:
+            request = urllib.request.Request(url, headers=headers or {})  # noqa: S310 - caller passes a fixed localhost URL
+            with urllib.request.urlopen(request, timeout=3) as response:  # noqa: S310
+                if response.status == HTTPStatus.OK:
                     return
         except (OSError, urllib.error.URLError) as error:
             last_error = error
@@ -187,8 +187,8 @@ def wait_http(url: str, timeout: float = 180, *, headers: dict[str, str] | None 
 
 
 def port_forward(resource: str, remote_port: int) -> tuple[subprocess.Popen, int]:
-    process = subprocess.Popen(  # noqa: S603
-        ["kubectl", "-n", NAMESPACE, "port-forward", resource, f"0:{remote_port}"],
+    process = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
+        ["kubectl", "-n", NAMESPACE, "port-forward", resource, f"0:{remote_port}"],  # noqa: S607 - kubectl resolved via PATH
         cwd=ROOT,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -203,21 +203,21 @@ def port_forward(resource: str, remote_port: int) -> tuple[subprocess.Popen, int
 
 
 def register_model(config_url: str, admin_token: str) -> None:
-    request = urllib.request.Request(
+    request = urllib.request.Request(  # noqa: S310 - config_url is always this script's own localhost port-forward
         f"{config_url}/v1/configs/models",
         data=MODEL_CONFIG.encode("utf-8"),
         method="POST",
     )
     request.add_header("Authorization", f"Bearer {admin_token}")
     try:
-        with urllib.request.urlopen(request, timeout=10) as response:  # noqa: S310 - fixed localhost URL
+        with urllib.request.urlopen(request, timeout=10) as response:  # noqa: S310
             print(f"[config] registered {MODEL_ID}: HTTP {response.status}")
     except urllib.error.HTTPError as error:
         raise RuntimeError(f"registering {MODEL_ID} failed: HTTP {error.code} {error.read().decode()}") from None
 
 
 def fake_upstream_calls(worker_port: int) -> dict:
-    with urllib.request.urlopen(f"http://127.0.0.1:{worker_port}/calls", timeout=10) as response:  # noqa: S310
+    with urllib.request.urlopen(f"http://127.0.0.1:{worker_port}/calls", timeout=10) as response:
         return json.loads(response.read())
 
 
@@ -268,8 +268,8 @@ def attach_fake_upstream(pod: str, timeout: float = 120) -> None:
         if '"terminated"' in state:
             break
         time.sleep(3)
-    logs = subprocess.run(  # noqa: S603, S607 - fixed argv, diagnostic only
-        ["kubectl", "-n", NAMESPACE, "logs", pod, "-c", "fake-upstream"],
+    logs = subprocess.run(  # noqa: S603 - fixed argv, no shell, diagnostic only
+        ["kubectl", "-n", NAMESPACE, "logs", pod, "-c", "fake-upstream"],  # noqa: S607 - kubectl resolved via PATH
         cwd=ROOT,
         check=False,
         stdout=subprocess.PIPE,
