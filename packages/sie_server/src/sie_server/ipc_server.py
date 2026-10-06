@@ -871,6 +871,7 @@ class IpcServer:
                 token=item.encode.numerical_admission_sha256,
                 outputs=item.encode.output_types if item.encode.output_types is not None else ["dense"],
                 request_options=item.encode.options,
+                instruction=item.encode.instruction,
             )
         if item.op == "score" and item.score is not None:
             return bridged_item_refusal(
@@ -879,6 +880,7 @@ class IpcServer:
                 token=item.score.numerical_admission_sha256,
                 outputs=["score"],
                 request_options=item.score.options,
+                instruction=item.score.instruction,
             )
         return "operation has no numerical admission"
 

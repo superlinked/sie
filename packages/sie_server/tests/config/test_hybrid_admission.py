@@ -274,8 +274,10 @@ def test_validator_without_a_runtime_cannot_admit_operator_proof(admission: tupl
         validate_model_routing(config)
 
 
-@pytest.mark.parametrize("expired", [False, True])
-async def test_prebridge_rechecks_freshness_while_preserving_local_warmup(admission: tuple, expired: bool) -> None:
+@pytest.mark.parametrize(("expired", "instruction"), [(False, None), (True, None), (False, "Represent this sentence:")])
+async def test_prebridge_rechecks_freshness_while_preserving_local_warmup(
+    admission: tuple, expired: bool, instruction: str | None
+) -> None:
     config, _, path, data = admission
     _refresh_record(path, data)
     if expired:
@@ -300,9 +302,9 @@ async def test_prebridge_rechecks_freshness_while_preserving_local_warmup(admiss
             "app": SimpleNamespace(state=SimpleNamespace(registry=registry)),
         }
     )
-    if expired:
+    if expired or instruction is not None:
         with pytest.raises(HTTPException) as refused:
-            await route_request(request, config.sie_id, trace.INVALID_SPAN)
+            await route_request(request, config.sie_id, trace.INVALID_SPAN, instruction=instruction)
         assert refused.value.status_code == 503
         assert refused.value.detail["code"] == "MODEL_LOADING"
         assert refused.value.headers == {
@@ -338,6 +340,13 @@ def test_unmeasured_runtime_overrides_cannot_bridge(admission: tuple, options: d
     config, _, _, _ = admission
     assert hybrid_admission.hybrid_request_refusal(config, options) is not None
     assert hybrid_admission.hybrid_request_refusal(config, {"is_query": True}) is None
+
+
+@pytest.mark.parametrize("instruction", ["Represent this sentence:", ""])
+def test_a_request_instruction_cannot_bridge(admission: tuple, instruction: str) -> None:
+    config, _, _, _ = admission
+    assert hybrid_admission.hybrid_request_refusal(config, None, instruction=instruction) is not None
+    assert hybrid_admission.hybrid_request_refusal(config, {"is_query": True}, instruction=None) is None
 
 
 @pytest.mark.parametrize(
@@ -833,6 +842,8 @@ def _expire(path: Path, data: dict[str, Any]) -> None:
         (":remote", {}, "expire"),
         (":remote", {}, "remove"),
         (":remote", {}, "replace"),
+        (":remote", {"instruction": "Represent this sentence:"}, None),
+        (":remote", {"instruction": ""}, None),
     ],
 )
 async def test_fence_refuses_before_the_upstream_when_the_admission_does_not_cover_the_item(

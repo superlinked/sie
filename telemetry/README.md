@@ -737,14 +737,14 @@ model, `admitted` or `refused`, and the reason: `none`, `no_admission` (no
 eligible remote worker advertises a current admission), `local_unobserved` (a
 live local worker reports no complete process inventory) or
 `uncovered_identity` (a live local process reports an identity or model
-contract outside the admission) or `unmeasured_request` (the request sets a
-runtime option other than `is_query`, or asks for an output, that the admission
-did not measure). A local worker past the heartbeat timeout, and every worker
+contract outside the admission) or `unmeasured_request` (the request sets an
+instruction or a runtime option other than `is_query`, or asks for an output
+that the admission did not measure). A local worker past the heartbeat timeout, and every worker
 until the gateway has heard worker health for one heartbeat timeout, counts as
 `local_unobserved`. A request counts once, with the decision that applied. On a
-fallback route, a request that sets another runtime option or asks for an
-output the model does not declare is not a bridge candidate, so it records no
-decision. On a `threshold` route the same request records
+fallback route, a request that sets an instruction or another runtime option,
+or asks for an output the model does not declare, is not a bridge candidate, so
+it records no decision. On a `threshold` route the same request records
 `unmeasured_request`. It
 keeps its own 256-model bound with the same `other` overflow, and the
 queue-routing dashboard displays it.

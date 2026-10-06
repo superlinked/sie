@@ -970,14 +970,15 @@ gateway refuse a body-level `options.profile` selector, check the request
 against the admission and replay the body remotely. The bridge decision is made
 when the gateway is about to commit to the remote attempt:
 
-- The request sets no runtime option other than `is_query`, and every output it
-  asks for (`dense` when an encode names none, `score` for score) is listed in
-  the admission. Otherwise the remote process would refuse it, so the request
+- The request sets no instruction and no runtime option other than
+  `is_query`, and every output it asks for (`dense` when an encode names none,
+  `score` for score) is listed in the admission. Otherwise the remote process would refuse it, so the request
   stays local:
   - A request for an output that the model declares but the admission does not
     list stays local with the reason `unmeasured_request`.
-  - A request with another runtime option, or one that asks for an output the
-    model does not declare, is not a bridge candidate on a fallback route. The
+  - A request with an instruction or another runtime option, or one that asks
+    for an output the model does not declare, is not a bridge candidate on a
+    fallback route. The
     trigger leaves it on its ordinary local path instead of committing to the
     local refusal, and no decision is recorded. On a `threshold` route it stays
     local with the reason `unmeasured_request`.

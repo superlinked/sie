@@ -253,6 +253,7 @@ async def score(
             profile=request.options.get("profile") if request.options else None,
             queued_items=len(items),
             request_options=request.options,
+            instruction=request.instruction,
         )
 
         # Score using worker with batching

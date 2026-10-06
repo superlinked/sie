@@ -442,7 +442,8 @@ unidentified engines remain closed.
 Every bridge rechecks the record and its age before loading or calling the remote
 profile. Expired, missing, failed or mismatched evidence preserves the original
 local refusal and retry hint while starting local warm-up. Valid local requests
-with unmeasured runtime overrides or non-float32 output also remain local;
+that set an instruction, unmeasured runtime overrides or non-float32 output also
+remain local;
 explicit profiles still serve as requested. Rejection of one exported model
 retains its current local configuration without blocking unrelated updates.
 
@@ -502,7 +503,8 @@ contract and serving-code digests. Admitted remote attempts travel on a worker
 subject of their own that only a sidecar with the admission check consumes.
 Before such a process sends an admitted remote attempt upstream, it derives its
 admission again and refuses the item unless the item names the current digest,
-requests only admitted outputs and keeps the measured runtime options. A bridged
+requests only admitted outputs, sets no instruction and keeps the measured
+runtime options. A bridged
 caller then receives its local refusal with
 `X-SIE-Fallback-Error: INFERENCE_ERROR`. The check covers batches that start
 after a change: a batch that has already passed it completes its upstream calls,
@@ -522,10 +524,10 @@ publishes load-only work or makes a decision, so an invalid request gets its
 `400` and nothing else. It decides when it is about to commit to the remote
 attempt:
 
-- The request must set no runtime option other than `is_query`, and every
-  output it asks for must be listed in the admission. Any other option, such as
-  `output_dtype`, keeps the request local, because the remote process would
-  refuse it.
+- The request must set no instruction and no runtime option other than
+  `is_query`, and every output it asks for must be listed in the admission. An
+  instruction or any other option, such as `output_dtype`, keeps the request
+  local, because the remote process would refuse it.
 - A remote-lane worker qualifies when it is fresh, eligible and positively
   supports both execution authority and the numerical admission method,
   consumes the admission subject, carries the remote profile's exact
@@ -559,13 +561,12 @@ Upgrade workers and gateways before applying a hybrid `encode` or `score`
 configuration. A remote lane rolled back below the numerical admission subject
 stops numerical bridging: its older sidecar never consumes admitted work, so
 queued attempts time out instead of running unchecked, and a fenced sidecar
-that later consumes them drops those past their deadline. Configuring a numerical
-bridge also changes local behavior while no admission holds: a trigger that
-would bridge a request commits to its local refusal, so a cold model answers
-`MODEL_LOADING` instead of waiting for its load, and an opted-in `saturated` or
-`unhealthy` trigger refuses instead of queueing. A request that could never
-bridge, because it sets a runtime option other than `is_query` or asks for an
-output the model does not declare, keeps its ordinary local path.
+that later consumes them drops those past their deadline. While no admission
+holds, a trigger leaves the request on its ordinary local path, as without a
+bridge: a cold model's request waits for its load, and a saturated or unhealthy
+lane answers as it would without a bridge. So does a request that could never
+bridge, because it sets an instruction or a runtime option other than
+`is_query`, or asks for an output the model does not declare.
 
 
 ## Single-node generation fallback

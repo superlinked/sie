@@ -327,6 +327,7 @@ async def encode(
             profile=profile_name,
             queued_items=len(request.items),
             request_options={**(request_options or {}), "output_dtype": output_dtype},
+            instruction=params.instruction if params else None,
         )
 
         # Check if LoRA is specified and ensure it's loaded

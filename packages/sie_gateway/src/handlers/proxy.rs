@@ -2509,23 +2509,24 @@ fn admit_numerical(
     Some(plan)
 }
 
-/// The outputs a numerical request asks for, when it sets no runtime option
-/// that a numerical admission could not have measured and asks only for
-/// outputs the model declares. The remote process refuses any option except
-/// `is_query` that differs from the measured defaults, so a request with
-/// another option stays local. A request for an undeclared output is invalid
-/// on either side.
+/// The outputs a numerical request asks for, when it sets no instruction and
+/// no runtime option that a numerical admission could not have measured, and
+/// asks only for outputs the model declares. The remote process refuses an
+/// instruction and any option except `is_query` that differs from the
+/// measured defaults, so such a request stays local. A request for an
+/// undeclared output is invalid on either side.
 fn numerical_request_outputs(
     operation: &str,
     parsed: Option<&(Vec<rmpv::Value>, publisher::WorkParams)>,
     declared: &[String],
 ) -> Option<Vec<String>> {
     let (_, params) = parsed?;
-    let measured = match params.options.as_ref() {
-        None | Some(Value::Null) => true,
-        Some(Value::Object(options)) => options.keys().all(|key| key == "is_query"),
-        Some(_) => false,
-    };
+    let measured = params.instruction.is_none()
+        && match params.options.as_ref() {
+            None | Some(Value::Null) => true,
+            Some(Value::Object(options)) => options.keys().all(|key| key == "is_query"),
+            Some(_) => false,
+        };
     if !measured {
         return None;
     }
@@ -3390,7 +3391,7 @@ async fn proxy_request_inner(
         )
         .await
         {
-            if native_fallback_plan(
+            if let Some(plan) = native_bridge_plan(
                 &state,
                 &req,
                 endpoint,
@@ -3398,36 +3399,21 @@ async fn proxy_request_inner(
                 prepared_native_parsed.as_ref(),
                 body_held,
                 trigger,
-            )
-            .is_some()
-            {
+            ) {
                 state.demand_tracker.record(&physical_lane);
                 let refusal = local_spill_refusal(endpoint, trigger);
-                match begin_native_fallback(
-                    &state,
-                    &mut req,
-                    endpoint,
-                    &model_name,
-                    prepared_native_parsed.as_ref(),
-                    body_held,
-                    refusal,
-                    trigger,
-                ) {
-                    Err(refusal) => return refusal,
-                    Ok(()) => {
-                        if let Some(body) = prepared_native_body {
-                            *req.body_mut() = Body::from(body);
-                        }
-                        return Box::pin(proxy_request_inner(
-                            state,
-                            req,
-                            endpoint,
-                            provisioning_surface,
-                            inbound_publish_cx,
-                        ))
-                        .await;
-                    }
+                begin_planned_native_fallback(&mut req, plan, refusal, trigger);
+                if let Some(body) = prepared_native_body {
+                    *req.body_mut() = Body::from(body);
                 }
+                return Box::pin(proxy_request_inner(
+                    state,
+                    req,
+                    endpoint,
+                    provisioning_surface,
+                    inbound_publish_cx,
+                ))
+                .await;
             }
         }
     }
@@ -3472,43 +3458,45 @@ async fn proxy_request_inner(
             )
             .await
             {
-                let refusal = model_loading_refusal(endpoint);
-                if !warm_local_model(
+                if let Some(plan) = native_bridge_plan(
                     &state,
-                    work_publisher.as_ref(),
-                    &physical_lane,
-                    target,
-                    &engine,
-                    &bundle_config_hash,
-                )
-                .await
-                {
-                    return refusal;
-                }
-                match begin_native_fallback(
-                    &state,
-                    &mut req,
+                    &req,
                     endpoint,
                     &model_name,
                     prepared_native_parsed.as_ref(),
                     body_held,
-                    refusal,
                     FallbackTrigger::ModelLoading,
                 ) {
-                    Err(refusal) => return refusal,
-                    Ok(()) => {
-                        if let Some(body) = prepared_native_body {
-                            *req.body_mut() = Body::from(body);
-                        }
-                        return Box::pin(proxy_request_inner(
-                            state,
-                            req,
-                            endpoint,
-                            provisioning_surface,
-                            inbound_publish_cx,
-                        ))
-                        .await;
+                    let refusal = model_loading_refusal(endpoint);
+                    if !warm_local_model(
+                        &state,
+                        work_publisher.as_ref(),
+                        &physical_lane,
+                        target,
+                        &engine,
+                        &bundle_config_hash,
+                    )
+                    .await
+                    {
+                        return refusal;
                     }
+                    begin_planned_native_fallback(
+                        &mut req,
+                        plan,
+                        refusal,
+                        FallbackTrigger::ModelLoading,
+                    );
+                    if let Some(body) = prepared_native_body {
+                        *req.body_mut() = Body::from(body);
+                    }
+                    return Box::pin(proxy_request_inner(
+                        state,
+                        req,
+                        endpoint,
+                        provisioning_surface,
+                        inbound_publish_cx,
+                    ))
+                    .await;
                 }
             }
         }
@@ -21656,8 +21644,11 @@ mod tests {
             json!({"output_dtype": "float32"}),
             json!({"options": {"normalize": true}}),
             json!({"options": {"max_seq_length": 16}}),
+            json!({"instruction": "Represent this sentence:"}),
+            json!({"instruction": ""}),
         ] {
             assert_eq!(outputs("encode", params.clone()), None, "{params}");
+            assert_eq!(outputs("score", params.clone()), None, "{params}");
         }
         assert_eq!(numerical_request_outputs("encode", None, &declared), None);
         assert_eq!(outputs("extract", json!({})), None);

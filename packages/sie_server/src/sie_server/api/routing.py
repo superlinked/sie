@@ -160,6 +160,7 @@ async def route_request(
     profile: object = None,
     queued_items: int | None = None,
     request_options: Mapping[str, object] | None = None,
+    instruction: str | None = None,
 ) -> ServingRoute:
     """Choose the registry entry that serves a request for ``model``, and make it ready to serve.
 
@@ -205,7 +206,9 @@ async def route_request(
         trigger = _TRIGGER_BY_REFUSAL.get(error_code(refusal) or "")
         if trigger is None or trigger not in triggers:
             raise
-        return await _bridge(request, registry, model, key, routing, trigger, refusal, span, request_options)
+        return await _bridge(
+            request, registry, model, key, routing, trigger, refusal, span, request_options, instruction
+        )
     return ServingRoute(key=key)
 
 
@@ -265,6 +268,7 @@ async def _bridge(
     refusal: HTTPException,
     span: Span,
     request_options: Mapping[str, object] | None = None,
+    instruction: str | None = None,
 ) -> ServingRoute:
     await registry.start_load_async(key, registry.device)
     remote_key = f"{model}:{routing.fallback_profile}"
@@ -280,7 +284,7 @@ async def _bridge(
     config = registry.get_config(model)
     if config.tasks.encode is not None or config.tasks.score is not None:
         try:
-            if hybrid_request_refusal(config, request_options) is not None:
+            if hybrid_request_refusal(config, request_options, instruction=instruction) is not None:
                 raise ValueError("hybrid request differs from its measured contract")
             reason = await asyncio.to_thread(
                 numerical_evidence_refusal,

@@ -236,8 +236,12 @@ def openai_equivalence_refusal(
     return None
 
 
-def hybrid_request_refusal(config: ModelConfig, request_options: Mapping[str, object] | None) -> str | None:
-    """Keep valid local numerical overrides off a bridge measured at defaults."""
+def hybrid_request_refusal(
+    config: ModelConfig, request_options: Mapping[str, object] | None, *, instruction: str | None = None
+) -> str | None:
+    """Keep valid local numerical overrides and request instructions off a bridge measured at defaults."""
+    if instruction is not None:
+        return "hybrid request sets an instruction"
     defaults = {"output_dtype": DEFAULT_OUTPUT_DTYPE, **config.resolve_profile("default").runtime}
     try:
         differs = any(
@@ -259,10 +263,11 @@ def bridged_item_refusal(
     token: str | None,
     outputs: Collection[str],
     request_options: Mapping[str, object] | None,
+    instruction: str | None = None,
 ) -> str | None:
     """Refuse a bridged item unless it names the current admission and stays within it."""
     if token != admission.sha256:
         return "bridged item names a different numerical admission"
     if not outputs or not set(outputs) <= admission.outputs:
         return "bridged item requests outputs outside its numerical admission"
-    return hybrid_request_refusal(config, request_options)
+    return hybrid_request_refusal(config, request_options, instruction=instruction)
