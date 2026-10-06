@@ -12,7 +12,7 @@ tasks:
   extract: null
   generate:
     context_length: 4096
-    max_output_tokens: 512
+    max_output_tokens: 1024
     capabilities:
       grammar: []
       streaming: true
