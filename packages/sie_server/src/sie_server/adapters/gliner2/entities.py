@@ -18,6 +18,7 @@ import torch
 from huggingface_hub import snapshot_download
 
 from sie_server.adapters._base_adapter import BaseAdapter
+from sie_server.adapters._prompt_limit import MAX_PROMPT_CHARS_PER_TOKEN, check_label_chars
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ComputePrecision
 from sie_server.adapters._word_window import plan_forwards
@@ -31,6 +32,9 @@ _DEFAULT_MAX_PROMPT_TOKENS = 2048
 _DEFAULT_BATCH_SIZE = 8
 _WORD_CACHE_SIZE = 16384
 _CACHED_WORD_CHARS = 32
+_MAX_SOURCE_CHARS_PER_ROW_TOKEN = 64
+_MAX_SOURCE_WORDS_PER_ROW_TOKEN = 4
+_MAX_SOURCE_WORD_CHARS = 4096
 _CHECKPOINT_FILES = (
     "config.json",
     "encoder_config/*",
@@ -53,9 +57,14 @@ class GLiNER2EntitiesAdapter(BaseAdapter):
     full encoded-row and prompt counts. Failed items bill zero tokens.
 
     Entity labels are exact strings, including descriptive names, case and
-    punctuation. Runtime options accept only the native ``threshold`` in
-    [0, 1]. This adapter does not perform classification, relations, JSON
-    extraction or automatic source windowing.
+    punctuation, with at most 128 characters per label. Admission also bounds
+    source preprocessing to 64 characters and four words per row-budget token,
+    with at most 4096 characters per word. The prompt allows at most one label
+    and 32 label characters per prompt-budget token. Exceeding any admission
+    bound rejects the complete item before native collation or inference.
+    Runtime options accept only the native ``threshold`` in [0, 1]. This
+    adapter does not perform classification, relations, JSON extraction or
+    automatic source windowing.
     """
 
     spec: ClassVar[AdapterSpec] = AdapterSpec(
@@ -173,14 +182,25 @@ class GLiNER2EntitiesAdapter(BaseAdapter):
         counts = [0] * len(items)
         accepted: list[tuple[int, str, int, int, int]] = []
         with self._tokenizer_guard():
-            schema = self._model.create_schema().entities(effective_labels).build()
+            prompt_failure = self._prompt_admission_failure(effective_labels)
+            schema = self._model.create_schema().entities(effective_labels).build() if prompt_failure is None else None
             for index, item in enumerate(items):
                 text = item.text
-                if not isinstance(text, str) or not text.strip():
+                if not isinstance(text, str):
                     errors[index] = ExtractItemError(
                         code=ErrorCode.INVALID_INPUT.value, message="GLiNER2 entities requires non-blank text"
                     )
                     continue
+                admission_failure = prompt_failure or self._source_admission_failure(text)
+                if admission_failure is not None:
+                    errors[index] = ExtractItemError(code=ErrorCode.INPUT_TOO_LONG.value, message=admission_failure)
+                    continue
+                if not text.strip():
+                    errors[index] = ExtractItemError(
+                        code=ErrorCode.INVALID_INPUT.value, message="GLiNER2 entities requires non-blank text"
+                    )
+                    continue
+                assert schema is not None
                 row_tokens, document_tokens = self._measure_row(text, schema)
                 prompt_tokens = row_tokens - document_tokens
                 if row_tokens > self._max_seq_length or prompt_tokens > self._max_prompt_tokens:
@@ -271,6 +291,31 @@ class GLiNER2EntitiesAdapter(BaseAdapter):
         """Counts come from request-qualified native rows in ``extract``."""
         _ = items
 
+    def _prompt_admission_failure(self, labels: list[str]) -> str | None:
+        if len(labels) > self._max_prompt_tokens or sum(len(label) for label in labels) > (
+            self._max_prompt_tokens * MAX_PROMPT_CHARS_PER_TOKEN
+        ):
+            return (
+                f"GLiNER2 entities permits at most {self._max_prompt_tokens} labels and "
+                f"{self._max_prompt_tokens * MAX_PROMPT_CHARS_PER_TOKEN} total label characters. "
+                "Send fewer or shorter labels."
+            )
+        return None
+
+    def _source_admission_failure(self, text: str) -> str | None:
+        max_chars = self._max_seq_length * _MAX_SOURCE_CHARS_PER_ROW_TOKEN
+        max_words = self._max_seq_length * _MAX_SOURCE_WORDS_PER_ROW_TOKEN
+        failure = (
+            f"GLiNER2 entities permits at most {max_chars} source characters, {max_words} source words and "
+            f"{_MAX_SOURCE_WORD_CHARS} characters per word. Send a shorter complete source window."
+        )
+        if len(text) > max_chars:
+            return failure
+        for index, (_, start, end) in enumerate(self._word_splitter(text), 1):
+            if index > max_words or end - start > _MAX_SOURCE_WORD_CHARS:
+                return failure
+        return None
+
     @staticmethod
     def _positive_integer(value: object, name: str) -> int:
         if isinstance(value, bool) or not isinstance(value, int) or value < 1:
@@ -281,7 +326,10 @@ class GLiNER2EntitiesAdapter(BaseAdapter):
     def _validate_threshold(value: object) -> float:
         if isinstance(value, bool) or not isinstance(value, Real):
             raise InvalidInputError("GLiNER2 entities threshold must be a finite number between 0 and 1")
-        threshold = float(value)
+        try:
+            threshold = float(value)
+        except (OverflowError, ValueError) as exc:
+            raise InvalidInputError("GLiNER2 entities threshold must be a finite number between 0 and 1") from exc
         if not math.isfinite(threshold) or not 0 <= threshold <= 1:
             raise InvalidInputError("GLiNER2 entities threshold must be a finite number between 0 and 1")
         return threshold
@@ -297,6 +345,7 @@ class GLiNER2EntitiesAdapter(BaseAdapter):
             labels.append(label)
         if len(set(labels)) != len(labels):
             raise InvalidInputError("GLiNER2 entity labels must be unique")
+        check_label_chars("GLiNER2 entities", "labels", labels)
         return labels
 
     @staticmethod
@@ -324,7 +373,10 @@ class GLiNER2EntitiesAdapter(BaseAdapter):
                 confidence = span.get("confidence")
                 if isinstance(confidence, bool) or not isinstance(confidence, Real):
                     raise ValueError("GLiNER2 returned invalid entity confidence")
-                score = float(confidence)
+                try:
+                    score = float(confidence)
+                except (OverflowError, ValueError) as exc:
+                    raise ValueError("GLiNER2 returned invalid entity confidence") from exc
                 if not math.isfinite(score) or not 0 <= score <= 1:
                     raise ValueError("GLiNER2 returned invalid entity confidence")
                 entities.append(Entity(text=surface, label=label, score=score, start=start, end=end))

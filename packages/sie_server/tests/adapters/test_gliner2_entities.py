@@ -290,6 +290,59 @@ def test_long_single_word_is_measured_as_subwords(loaded: tuple[GLiNER2EntitiesA
     assert not model.calls
 
 
+@pytest.mark.parametrize("bound", ["characters", "words", "word_characters"])
+def test_source_admission_bounds_fail_before_collation_or_inference(
+    loaded: tuple[GLiNER2EntitiesAdapter, ToyModel], bound: str
+) -> None:
+    adapter, model = loaded
+    if bound == "characters":
+        adapter._max_seq_length = 24
+        text = "x " * (24 * entities_module._MAX_SOURCE_CHARS_PER_ROW_TOKEN // 2 + 1)
+    elif bound == "words":
+        adapter._max_seq_length = 24
+        text = "." * (24 * entities_module._MAX_SOURCE_WORDS_PER_ROW_TOKEN + 1)
+    else:
+        text = "x" * (entities_module._MAX_SOURCE_WORD_CHARS + 1)
+    output = adapter.extract([Item(text=text), Item(text="Alice.")], labels=["person"])
+    assert output.errors is not None
+    assert output.errors[0] is not None
+    assert output.errors[0].code == "INPUT_TOO_LONG"
+    assert output.errors[1] is None
+    assert output.input_token_counts == [0, 6]
+    assert [call[0] for call in model.processor.calls] == ["Alice."]
+    assert model.calls[0][0] == ["Alice."]
+
+
+@pytest.mark.parametrize("bound", ["characters", "labels"])
+def test_prompt_admission_bounds_fail_before_collation_or_inference(
+    loaded: tuple[GLiNER2EntitiesAdapter, ToyModel], bound: str
+) -> None:
+    adapter, model = loaded
+    adapter._max_prompt_tokens = 1
+    labels = ["x" * 33] if bound == "characters" else ["x", "y"]
+    output = adapter.extract([Item(text="Alice.")], labels=labels)
+    assert output.errors is not None
+    assert output.errors[0] is not None
+    assert output.errors[0].code == "INPUT_TOO_LONG"
+    assert output.input_token_counts == [0]
+    assert not model.processor.calls
+    assert not model.calls
+
+
+def test_exact_label_character_admission_bound(loaded: tuple[GLiNER2EntitiesAdapter, ToyModel]) -> None:
+    adapter, model = loaded
+    labels = ["x" * 128]
+    output = adapter.extract([Item(text="Alice.")], labels=labels)
+    assert output.errors is None
+    assert model.calls[0][1] == labels
+    model.processor.calls.clear()
+    model.calls.clear()
+    with pytest.raises(InvalidInputError, match="128 characters"):
+        adapter.extract([Item(text="Alice.")], labels=["x" * 129])
+    assert not model.processor.calls
+    assert not model.calls
+
+
 def test_mixed_batch_non_text_and_oversized_items_are_isolated(loaded: tuple[GLiNER2EntitiesAdapter, ToyModel]) -> None:
     adapter, model = loaded
     adapter._max_seq_length = 24
@@ -379,7 +432,10 @@ def test_malformed_spans_fail_without_repair_or_billing(
     assert output.input_token_counts == [0, 4]
 
 
-@pytest.mark.parametrize("confidence", [None, True, "0.9", float("nan"), float("inf"), -0.1, 1.1])
+@pytest.mark.parametrize(
+    "confidence",
+    [None, True, "0.9", float("nan"), float("inf"), -0.1, 1.1, pytest.param(10**400, id="overflowing-integer")],
+)
 def test_invalid_native_confidence_is_per_item_failure(
     loaded: tuple[GLiNER2EntitiesAdapter, ToyModel], confidence: Any
 ) -> None:
@@ -427,7 +483,10 @@ def test_wrong_batch_result_size_fails_the_group(
     assert output.input_token_counts == [0]
 
 
-@pytest.mark.parametrize("threshold", [True, "0.5", None, float("nan"), float("inf"), -0.1, 1.1])
+@pytest.mark.parametrize(
+    "threshold",
+    [True, "0.5", None, float("nan"), float("inf"), -0.1, 1.1, pytest.param(10**400, id="overflowing-integer")],
+)
 def test_threshold_requires_a_finite_native_probability(
     loaded: tuple[GLiNER2EntitiesAdapter, ToyModel], threshold: Any
 ) -> None:
