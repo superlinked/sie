@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
 import torch
+import transformers
 from sie_server.adapters.whisper.adapter import WhisperAdapter
 from sie_server.core.prepared import AudioPayload, PreparedItem
 from sie_server.core.preprocessor.audio import AudioPreprocessor
@@ -276,6 +277,73 @@ def test_direct_preprocessor_uses_rust_and_strips_encoded_audio(monkeypatch: pyt
     assert batch.modality == "audio"
     assert batch.total_cost == 2
     assert batch.items[0].payload.duration_ms == 2
+
+
+def _decode_to_sample_counts(monkeypatch: pytest.MonkeyPatch, sample_counts: list[int]) -> None:
+    """Make the Rust decoder return one 16 kHz recording per sample count, in order."""
+    decoded = iter(sample_counts)
+
+    def decode_audio(data: bytes, fmt: str | None) -> dict[str, Any]:
+        sample_count = next(decoded)
+        return {
+            "pcm_s16le": b"",
+            "sample_rate": 16_000,
+            "sample_count": sample_count,
+            "duration_ms": sample_count // 16,
+            "source_sample_rate": 16_000,
+            "source_sample_count": sample_count,
+            "source_channels": 1,
+            "container": "wav",
+        }
+
+    monkeypatch.setattr(
+        "sie_server.core.preprocessor.audio.importlib.import_module",
+        lambda name: SimpleNamespace(decode_audio=decode_audio),
+    )
+
+
+def test_direct_preprocessor_flags_audio_past_the_threshold_to_run_alone(monkeypatch: pytest.MonkeyPatch) -> None:
+    items = [Item(audio={"data": b"encoded", "format": "wav"}) for _ in range(2)]
+
+    _decode_to_sample_counts(monkeypatch, [480_000, 480_001])
+    flagged = AudioPreprocessor(runs_alone_above_samples=480_000).prepare(items, config=MagicMock())
+    _decode_to_sample_counts(monkeypatch, [480_000, 480_001])
+    default = AudioPreprocessor().prepare(items, config=MagicMock())
+
+    assert [item.runs_alone for item in flagged.items] == [False, True]
+    assert [item.runs_alone for item in default.items] == [False, False]
+    # Cost stays the duration either way.
+    assert [item.cost for item in flagged.items] == [30_000, 30_000]
+
+
+def test_load_flags_audio_past_one_feature_window_to_run_alone(monkeypatch: pytest.MonkeyPatch) -> None:
+    processor = MagicMock()
+    processor.feature_extractor.n_samples = 160_000
+    adapter = WhisperAdapter("openai/whisper-large-v3-turbo")
+    # Resolve the lazy attributes first, or the patches below can miss the
+    # `from transformers import ...` inside load() and reach the Hub.
+    for name in ("AutoProcessor", "AutoModelForSpeechSeq2Seq", "pipeline"):
+        getattr(transformers, name)
+
+    with (
+        patch("transformers.AutoProcessor") as auto_processor,
+        patch("transformers.AutoModelForSpeechSeq2Seq") as auto_model,
+        patch("transformers.pipeline") as pipeline,
+    ):
+        auto_processor.from_pretrained.return_value = processor
+        adapter.load("cpu")
+
+    auto_processor.from_pretrained.assert_called_once()
+    auto_model.from_pretrained.assert_called_once()
+    pipeline.assert_called_once()
+    preprocessor = adapter.get_preprocessor()
+    assert preprocessor is not None
+    _decode_to_sample_counts(monkeypatch, [160_000, 160_001])
+    batch = preprocessor.prepare(
+        [Item(audio={"data": b"encoded", "format": "wav"}) for _ in range(2)],
+        config=MagicMock(),
+    )
+    assert [item.runs_alone for item in batch.items] == [False, True]
 
 
 def test_direct_preprocessor_reports_missing_audio_extension(monkeypatch: pytest.MonkeyPatch) -> None:

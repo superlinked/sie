@@ -1,8 +1,11 @@
 import asyncio
+import threading
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
 from sie_server.core.inference_output import ExtractOutput
+from sie_server.core.prepared import AudioPayload, PreparedItem
 from sie_server.core.worker import ModelWorker, WorkerConfig
 from sie_server.types.inputs import Item
 from sie_server.types.responses import Entity
@@ -202,6 +205,76 @@ class TestModelWorkerExtractIsolation:
             assert result.output.entities == [[]]
         finally:
             await worker.stop()
+
+
+def _audio_item(duration_ms: int) -> PreparedItem[AudioPayload]:
+    """Prepared 16 kHz audio, flagged runs_alone past Whisper's 30 s window."""
+    sample_count = duration_ms * 16
+    payload = AudioPayload(
+        pcm_s16le=b"",
+        sample_rate=16_000,
+        sample_count=sample_count,
+        duration_ms=duration_ms,
+        source_sample_rate=16_000,
+        source_sample_count=sample_count,
+        source_channels=1,
+        container="wav",
+    )
+    return PreparedItem(
+        payload=payload,
+        cost=payload.duration_cost_ms,
+        original_index=0,
+        runs_alone=sample_count > 480_000,
+    )
+
+
+class TestModelWorkerExtractRunsAlone:
+    @pytest.mark.asyncio
+    async def test_long_form_audio_and_clips_take_turns_in_separate_calls(self) -> None:
+        """Long-form audio gets its own adapter call, taking turns with clip calls (#585)."""
+        calls: list[list[int]] = []
+        lanes: list[set[bool]] = []
+        call_started = threading.Semaphore(0)
+        call_released = threading.Semaphore(0)
+
+        def extract(items: list[Item], *, prepared_items: list[Any], **kwargs: Any) -> ExtractOutput:
+            calls.append([prepared.payload.duration_ms for prepared in prepared_items])
+            lanes.append({prepared.runs_alone for prepared in prepared_items})
+            call_started.release()
+            call_released.acquire(timeout=10.0)
+            return ExtractOutput(entities=[[] for _ in items])
+
+        adapter = MagicMock()
+        adapter.extract.side_effect = extract
+        # Whisper's audio cap: today's packing would put clips and long-form audio in one call.
+        worker = ModelWorker(adapter, WorkerConfig(max_batch_tokens=720_000, max_batch_wait_ms=20))
+
+        async def submit(duration_ms: int) -> asyncio.Future[Any]:
+            return await worker.submit_extract([_audio_item(duration_ms)], [Item()])
+
+        async def wait_for_next_call() -> None:
+            assert await asyncio.to_thread(call_started.acquire, timeout=5.0)
+
+        await worker.start()
+        try:
+            futures = [await submit(4_000)]
+            await wait_for_next_call()
+            # Two long recordings and a clip land while the first call runs,
+            # then one more clip lands while each later call runs.
+            futures += [await submit(duration_ms) for duration_ms in (240_000, 200_000, 6_000)]
+            for duration_ms in (5_000, 7_000, 3_000):
+                call_released.release()
+                await wait_for_next_call()
+                futures.append(await submit(duration_ms))
+            call_released.release(2)
+            await asyncio.wait_for(asyncio.gather(*futures), timeout=5.0)
+        finally:
+            call_released.release(10)
+            await worker.stop()
+
+        # No call mixes long-form audio with clips, and the two take turns.
+        assert lanes == [{False}, {True}, {False}, {True}, {False}]
+        assert calls == [[4_000], [240_000], [5_000, 6_000], [200_000], [3_000, 7_000]]
 
 
 class TestModelWorkerExtractBackpressure:

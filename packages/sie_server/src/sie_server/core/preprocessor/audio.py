@@ -21,6 +21,16 @@ class _AudioPrepModule(Protocol):
 class AudioPreprocessor:
     """Decode and resample audio through the shared Rust extension."""
 
+    def __init__(self, *, runs_alone_above_samples: int | None = None) -> None:
+        """Initialize the preprocessor.
+
+        Args:
+            runs_alone_above_samples: Prepared items with more samples than
+                this are flagged ``runs_alone``, so the batcher serves each on
+                its own. ``None`` flags nothing.
+        """
+        self._runs_alone_above_samples = runs_alone_above_samples
+
     @property
     def modality(self) -> str:
         return "audio"
@@ -43,6 +53,7 @@ class AudioPreprocessor:
             raise RuntimeError(msg) from exc
         prepared_items: list[PreparedItem[AudioPayload]] = []
         total_cost = 0
+        threshold = self._runs_alone_above_samples
 
         for index, item in enumerate(items):
             if item.audio is None:
@@ -86,6 +97,7 @@ class AudioPreprocessor:
                     payload=payload,
                     cost=payload.duration_cost_ms,
                     original_index=index,
+                    runs_alone=threshold is not None and payload.sample_count > threshold,
                 )
             )
             total_cost += payload.duration_cost_ms

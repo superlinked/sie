@@ -18,11 +18,21 @@ The key optimization is cost-sorted sub-batching:
 - Each sub-batch contains similar-cost items
 - This minimizes padding waste within each sub-batch
 
+Items flagged ``runs_alone`` (long-form audio, #585) never share a batch.
+They are served one per batch in arrival order, and while batchable items are
+pending too the two lanes take turns: a cost-sorted batch of batchable items,
+then the oldest flagged item, and so on. A batchable item never waits inside
+a long item's batch, and waits for at most one flagged item between two
+batches of its lane. A flagged item with k flagged items ahead of it waits
+for at most k + 1 batches of batchable items, however many keep arriving.
+When nothing pending is flagged, batch formation is exactly the cost-sorted
+greedy packing above.
+
 Cost semantics vary by modality (modality-native units):
 - Text: cost = token count
 - Images: cost = 1 per image (fixed dimensions)
 - Vision (tiled): cost = tile count (1-N per image)
-- Audio: cost = sample_count / chunk_size
+- Audio: cost = duration in milliseconds
 
 These units are NOT commensurable across modalities, so ``total_cost`` is only
 meaningful within a single modality (the common case — a model's batch is
@@ -49,7 +59,9 @@ logger = logging.getLogger(__name__)
 class HasCost(Protocol):
     """Protocol for items that have a batching cost.
 
-    PreparedItem and other prepared item types satisfy this protocol.
+    PreparedItem and other prepared item types satisfy this protocol. An item
+    may also expose ``runs_alone``; only ``True`` keeps it out of shared
+    batches (see ``PreparedItem.runs_alone``).
     """
 
     @property
@@ -73,6 +85,7 @@ class PendingRequest[I: HasCost, T]:
     item: I
     metadata: T
     arrival_time: float = field(default_factory=time.monotonic)
+    runs_alone: bool = False
 
 
 @dataclass(slots=True)
@@ -215,6 +228,7 @@ class BatchFormer[I: HasCost, T]:
         self._batch_ready = asyncio.Event()
         self._first_request_time: float | None = None
         self._last_submit_time: float | None = None
+        self._last_batch_alone: bool | None = None
 
     @property
     def config(self) -> BatchConfig:
@@ -308,7 +322,7 @@ class BatchFormer[I: HasCost, T]:
 
     def _append_item(self, item: I, metadata: T) -> None:
         """Append item to pending list (caller must hold lock)."""
-        request = PendingRequest(item=item, metadata=metadata)
+        request = PendingRequest(item=item, metadata=metadata, runs_alone=getattr(item, "runs_alone", False) is True)
         self._pending.append(request)
         self._total_cost += item.cost
 
@@ -403,6 +417,26 @@ class BatchFormer[I: HasCost, T]:
         effective_ms = min(batch_remaining_ms, coalesce_remaining_ms)
         return effective_ms / 1000  # Convert to seconds
 
+    def _order_runs_alone_lane(self) -> None:
+        """Order pending requests when at least one is flagged ``runs_alone``.
+
+        Batchable requests come first, sorted by cost as usual, and flagged
+        requests follow in arrival order. The two lanes take turns (#585): the
+        oldest flagged request moves to the front after a batch of batchable
+        requests, and before the first batch only if it is the oldest pending
+        request.
+        """
+        self._pending.sort(key=lambda r: (r.runs_alone, r.arrival_time if r.runs_alone else r.item.cost))
+        head_index = next(index for index, request in enumerate(self._pending) if request.runs_alone)
+        if head_index == 0:
+            return
+        if self._last_batch_alone is None:
+            alone_turn = min(self._pending, key=lambda r: r.arrival_time).runs_alone
+        else:
+            alone_turn = not self._last_batch_alone
+        if alone_turn:
+            self._pending.insert(0, self._pending.pop(head_index))
+
     def _extract_batch(
         self,
         max_items: int | None = None,
@@ -416,6 +450,9 @@ class BatchFormer[I: HasCost, T]:
         3. Keep remaining requests for next get_batch() call
 
         This minimizes padding waste by grouping similar-cost sequences.
+        When a pending request is flagged ``runs_alone``, the order comes from
+        ``_order_runs_alone_lane`` instead, and a flagged request is always
+        taken on its own.
 
         Args:
             max_items: Optional hard cap on the number of items taken, on top of
@@ -435,8 +472,11 @@ class BatchFormer[I: HasCost, T]:
         pending_before = len(self._pending)
         cost_before = self._total_cost
 
-        # Sort pending by cost (ascending) for optimal batching
-        self._pending.sort(key=lambda r: r.item.cost)
+        if any(request.runs_alone for request in self._pending):
+            self._order_runs_alone_lane()
+        else:
+            # Sort pending by cost (ascending) for optimal batching
+            self._pending.sort(key=lambda r: r.item.cost)
 
         # Greedily take items until we exceed max_batch_cost
         batch_items: list[I] = []
@@ -451,6 +491,10 @@ class BatchFormer[I: HasCost, T]:
             # before anything else, so post-snapshot arrivals stay queued.
             if max_items is not None and take_count >= max_items:
                 break
+            # A runs_alone item never shares a batch: stop in front of one
+            # unless it is the first item taken.
+            if request.runs_alone and take_count > 0:
+                break
             # Would this item push us over the cost limit?
             # Always take at least one item (handles single large requests)
             if batch_cost + request.item.cost > self._config.max_batch_cost:
@@ -464,10 +508,18 @@ class BatchFormer[I: HasCost, T]:
             batch_cost += request.item.cost
             take_count += 1
 
+            if request.runs_alone:
+                break
+
             # Also respect max_batch_requests
             if take_count >= self._config.max_batch_requests:
                 hit_request_limit = True
                 break
+
+        lane = "alone" if take_count > 0 and self._pending[0].runs_alone else "batched"
+        if take_count > 0:
+            # Whose turn is next when both lanes are pending.
+            self._last_batch_alone = lane == "alone"
 
         # Remove taken items from pending
         self._pending = self._pending[take_count:]
@@ -479,8 +531,9 @@ class BatchFormer[I: HasCost, T]:
         )
         limit_hit = "cost_limit" if hit_cost_limit else ("request_limit" if hit_request_limit else "none")
         logger.debug(
-            "Batch formed: trigger=%s, limit_hit=%s, items=%d/%d taken, cost=%d/%d, remaining=%d items",
+            "Batch formed: trigger=%s, lane=%s, limit_hit=%s, items=%d/%d taken, cost=%d/%d, remaining=%d items",
             trigger,
+            lane,
             limit_hit,
             take_count,
             pending_before,

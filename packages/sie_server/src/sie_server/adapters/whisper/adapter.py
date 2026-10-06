@@ -101,7 +101,12 @@ class WhisperAdapter(BaseAdapter):
             torch_dtype=dtype,
             device=device,
         )
-        self._preprocessor = AudioPreprocessor()
+        # Audio past one feature window is transcribed long-form, one recording
+        # per pipeline call (see extract()), so the batcher serves it alone and
+        # short clips never wait inside its batch.
+        self._preprocessor = AudioPreprocessor(
+            runs_alone_above_samples=self._processor.feature_extractor.n_samples,
+        )
 
     def _resolve_dtype(self) -> torch.dtype:
         if not self._device or not self._device.startswith("cuda"):

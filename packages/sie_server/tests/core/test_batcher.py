@@ -1,17 +1,20 @@
 """Tests for batch formation module."""
 
 import asyncio
+import random
 import time
+from dataclasses import dataclass
 
 import pytest
 from sie_server.core.batcher import (
     BatchConfig,
     BatchFormer,
     FormattedBatch,
+    HasCost,
     PendingRequest,
     collate_batch,
 )
-from sie_server.core.prepared import TextPayload, TextPreparedItem, make_text_item
+from sie_server.core.prepared import ExtractPreparedItem, TextPayload, TextPreparedItem, make_text_item
 
 
 class TestPendingRequest:
@@ -1037,3 +1040,237 @@ class TestEffectiveCoalesce:
         # Should fire near effective_coalesce (40ms), well before timeout (200ms)
         assert elapsed_ms < 80, f"Waited too long: {elapsed_ms:.1f}ms"
         assert elapsed_ms >= 30, f"Fired too early: {elapsed_ms:.1f}ms"
+
+
+@dataclass(slots=True)
+class _Audio:
+    """Audio item stub: cost is duration in ms, as ``AudioPreprocessor`` sets it."""
+
+    cost: int
+    original_index: int = 0
+    runs_alone: bool = False
+
+
+def _clip(seconds: float) -> _Audio:
+    return _Audio(cost=round(seconds * 1_000))
+
+
+def _long_form(seconds: float) -> _Audio:
+    return _Audio(cost=round(seconds * 1_000), runs_alone=True)
+
+
+def _arrive(batcher: BatchFormer[_Audio, str], item: _Audio, name: str, *, at: float) -> None:
+    """Queue ``item`` as if it arrived at monotonic time ``at``."""
+    batcher._append_item(item, name)
+    batcher._pending[-1].arrival_time = at
+
+
+def _greedy_reference(pending: list[tuple[int, int]], config: BatchConfig, max_items: int | None) -> list[int]:
+    """Cost-sorted greedy packing as it was before the runs_alone lane.
+
+    ``pending`` holds ``(cost, id)`` in queue order and is updated in place,
+    as ``BatchFormer`` updates its own queue.
+    """
+    pending.sort(key=lambda entry: entry[0])
+    taken: list[int] = []
+    batch_cost = 0
+    for cost, request_id in pending:
+        if max_items is not None and len(taken) >= max_items:
+            break
+        if batch_cost + cost > config.max_batch_cost and taken:
+            break
+        taken.append(request_id)
+        batch_cost += cost
+        if len(taken) >= config.max_batch_requests:
+            break
+    del pending[: len(taken)]
+    return taken
+
+
+class TestRunsAloneLane:
+    """Items flagged ``runs_alone`` (long-form audio, #585) never share a batch."""
+
+    @pytest.mark.parametrize("seed", range(20))
+    def test_unflagged_items_batch_exactly_as_cost_sorted_greedy_packing(self, seed: int) -> None:
+        """Without a flagged item pending, every batch matches the old algorithm."""
+        rng = random.Random(seed)  # noqa: S311 -- reproducible test data
+        config = BatchConfig(max_batch_cost=rng.randint(1, 4_000), max_batch_requests=rng.randint(1, 8))
+        batcher: BatchFormer[HasCost, int] = BatchFormer(config)
+        reference: list[tuple[int, int]] = []
+        next_id = 0
+
+        for _ in range(60):
+            for _ in range(rng.randint(0, 5)):
+                cost = rng.randint(1, 1_500)
+                # Items with runs_alone=False and items without the attribute.
+                item: HasCost = _Audio(cost=cost) if rng.random() < 0.5 else ExtractPreparedItem(cost, 0)
+                batcher._append_item(item, next_id)
+                reference.append((cost, next_id))
+                next_id += 1
+            if not reference:
+                continue
+            max_items = rng.choice([None, None, 1, 2, 5])
+
+            batch = batcher._extract_batch(max_items=max_items)
+
+            assert batch.metadata == _greedy_reference(reference, config, max_items)
+            assert batcher.pending_count == len(reference)
+            assert batcher.pending_cost == sum(cost for cost, _ in reference)
+
+    def test_long_form_runs_alone_after_clips_that_arrived_around_it(self) -> None:
+        """Clips are not held in a long recording's batch (head-of-line wait)."""
+        batcher: BatchFormer[_Audio, str] = BatchFormer(BatchConfig(max_batch_cost=720_000))
+        _arrive(batcher, _clip(5), "clip-5s", at=0.0)
+        _arrive(batcher, _long_form(240), "long-240s", at=1.0)
+        _arrive(batcher, _clip(8), "clip-8s", at=2.0)
+
+        assert batcher._extract_batch().metadata == ["clip-5s", "clip-8s"]
+        assert batcher._extract_batch().metadata == ["long-240s"]
+        assert batcher.pending_count == 0
+
+    def test_long_form_items_run_in_arrival_order(self) -> None:
+        """An older long recording is not starved by a newer, shorter one."""
+        batcher: BatchFormer[_Audio, str] = BatchFormer(BatchConfig(max_batch_cost=720_000))
+        _arrive(batcher, _long_form(250), "long-250s", at=0.0)
+        _arrive(batcher, _long_form(190), "long-190s", at=1.0)
+
+        assert batcher._extract_batch().metadata == ["long-250s"]
+        assert batcher._extract_batch().metadata == ["long-190s"]
+
+    @pytest.mark.parametrize(("long_arrival", "order"), [(0.0, ["long", "clip"]), (2.0, ["clip", "long"])])
+    def test_first_batch_comes_from_the_lane_of_the_oldest_request(self, long_arrival: float, order: list[str]) -> None:
+        batcher: BatchFormer[_Audio, str] = BatchFormer(BatchConfig(max_batch_cost=720_000))
+        _arrive(batcher, _clip(5), "clip", at=1.0)
+        _arrive(batcher, _long_form(240), "long", at=long_arrival)
+
+        first = batcher._extract_batch().metadata
+        second = batcher._extract_batch().metadata
+        assert first + second == order
+
+    def test_lanes_take_turns_while_both_are_pending(self) -> None:
+        """Two long recordings and clips that keep arriving: clips, long, clips, long."""
+        batcher: BatchFormer[_Audio, str] = BatchFormer(BatchConfig(max_batch_cost=720_000))
+        _arrive(batcher, _clip(4), "clip-a", at=0.0)
+        _arrive(batcher, _clip(6), "clip-b", at=1.0)
+        _arrive(batcher, _long_form(240), "long-1", at=2.0)
+        _arrive(batcher, _long_form(200), "long-2", at=3.0)
+
+        served = []
+        for second in range(4, 9):
+            served.append(batcher._extract_batch().metadata)
+            # One clip lands while each batch runs.
+            _arrive(batcher, _clip(5), f"clip@{second}", at=float(second))
+
+        assert served == [
+            ["clip-a", "clip-b"],
+            ["long-1"],
+            ["clip@4", "clip@5"],
+            ["long-2"],
+            ["clip@6", "clip@7"],
+        ]
+        assert batcher.pending_count == 1
+
+    def test_long_form_amid_steady_clips_waits_for_one_clip_batch(self) -> None:
+        """Clip traffic that never lets up delays a flagged item by one clip batch.
+
+        A flagged recording just over 30 s is not held back for as long as
+        short traffic keeps the queue busy.
+        """
+        batcher: BatchFormer[_Audio, str] = BatchFormer(BatchConfig(max_batch_cost=720_000))
+        _arrive(batcher, _long_form(240), "long-240s", at=0.0)
+        assert batcher._extract_batch().metadata == ["long-240s"]
+
+        # A clip and a 31 s recording land while long-240s runs, and one more
+        # clip lands while each later batch runs.
+        _arrive(batcher, _clip(4), "clip@1", at=1.0)
+        _arrive(batcher, _long_form(31), "long-31s", at=2.0)
+        served = []
+        for second in range(3, 7):
+            _arrive(batcher, _clip(4), f"clip@{second}", at=float(second))
+            served.append(batcher._extract_batch().metadata)
+
+        assert served == [["clip@1", "clip@3"], ["long-31s"], ["clip@4", "clip@5"], ["clip@6"]]
+
+    @pytest.mark.asyncio
+    async def test_try_drain_takes_turns_and_keeps_counts_consistent(self) -> None:
+        batcher: BatchFormer[_Audio, str] = BatchFormer(BatchConfig(max_batch_cost=720_000))
+        await batcher.submit_many(
+            [
+                (_clip(5), "clip-5s"),
+                (_long_form(240), "long-240s"),
+                (_clip(8), "clip-8s"),
+                (_long_form(200), "long-200s"),
+                (_clip(3), "clip-3s"),
+            ]
+        )
+
+        expected = [
+            (1, ["clip-3s"], 4, 453_000),
+            (4, ["long-240s"], 3, 213_000),
+            (2, ["clip-5s", "clip-8s"], 1, 200_000),
+            (None, ["long-200s"], 0, 0),
+        ]
+        for max_items, names, pending_count, pending_cost in expected:
+            batch = await batcher.try_drain(max_items=max_items)
+            assert batch is not None
+            assert batch.metadata == names
+            assert batch.total_cost == sum(item.cost for item in batch.items)
+            assert batcher.pending_count == pending_count
+            assert batcher.pending_cost == pending_cost
+        assert await batcher.try_drain() is None
+        assert batcher._first_request_time is None
+        assert batcher._last_submit_time is None
+
+    @pytest.mark.parametrize("max_batch_cost", [180_000, 2_880_000])
+    def test_lanes_never_mix_and_take_turns_at_any_cost_cap(self, max_batch_cost: int) -> None:
+        """Holds at both ends of Whisper's adaptive cost range."""
+        rng = random.Random(max_batch_cost)  # noqa: S311 -- reproducible test data
+        batcher: BatchFormer[_Audio, str] = BatchFormer(BatchConfig(max_batch_cost=max_batch_cost))
+        submitted: set[str] = set()
+        served: list[str] = []
+        last_alone: bool | None = None
+        # Pending flagged item -> [flagged items ahead of it on arrival, clip batches since].
+        flagged_waits: dict[str, list[int]] = {}
+
+        def extract() -> None:
+            nonlocal last_alone
+            pending = list(batcher._pending)
+            batch = batcher._extract_batch(max_items=rng.choice([None, 1, 3]))
+            assert batch.size > 0
+            alone = batch.items[0].runs_alone
+            assert all(item.runs_alone is alone for item in batch.items)
+            if alone:
+                assert batch.size == 1
+            if {request.runs_alone for request in pending} == {True, False}:
+                # The lanes take turns, starting with the lane of the oldest request.
+                oldest_alone = min(pending, key=lambda request: request.arrival_time).runs_alone
+                assert alone is (oldest_alone if last_alone is None else not last_alone)
+            last_alone = alone
+            if alone:
+                ahead, clip_batches = flagged_waits.pop(batch.metadata[0])
+                assert clip_batches <= ahead + 1
+            else:
+                for wait in flagged_waits.values():
+                    wait[1] += 1
+            served.extend(batch.metadata)
+
+        now = 0.0
+        for index in range(300):
+            now += rng.uniform(0.0, 2.0)
+            if rng.random() < 0.6:
+                name = f"item-{index}"
+                if rng.random() < 0.3:
+                    flagged_waits[name] = [len(flagged_waits), 0]
+                    item = _long_form(rng.uniform(30.001, 300.0))
+                else:
+                    item = _clip(rng.uniform(1.0, 30.0))
+                _arrive(batcher, item, name, at=now)
+                submitted.add(name)
+            if batcher.pending_count and rng.random() < 0.5:
+                extract()
+        while batcher.pending_count:
+            extract()
+
+        assert sorted(served) == sorted(submitted)
+        assert not flagged_waits
+        assert batcher.pending_cost == 0
