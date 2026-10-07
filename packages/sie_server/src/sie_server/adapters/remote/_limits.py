@@ -24,13 +24,16 @@ refused before anything is sent. A batch larger than the whole budget is let
 through when the budget is full, and the budget then refills before anything
 else is sent.
 
-Reads of an SIE upstream's identity metadata for hybrid admission go through a
-second limiter per upstream name, never through the first. It has a budget of
-its own: a tenth of ``rate_cap.requests_per_minute``, at least one read a
-minute, with one read in flight. Its circuit breaker, set by the same
-``breaker`` settings, is its own too. Inference calls never draw on it, and its
-refusals and breaker state are not reported to the worker telemetry, whose
-upstream instruments describe inference calls.
+Background refreshes of an SIE upstream's identity metadata for hybrid
+admission go through a second limiter per upstream name, never through the
+first, so they never consume the inference rate cap. It has a budget of its
+own: a tenth of ``rate_cap.requests_per_minute``, at least one read a minute,
+with one read in flight. Its circuit breaker, set by the same ``breaker``
+settings, is its own too. Inference calls never draw on it, and its refusals
+and breaker state are not reported to the worker telemetry, whose upstream
+instruments describe inference calls. An identity read that its caller waits
+for, such as the check at configuration load, goes through the first limiter
+like an inference call.
 """
 
 from __future__ import annotations
@@ -283,7 +286,7 @@ def upstream_limiter(name: str) -> UpstreamLimiter:
 
 
 def identity_limiter(name: str) -> UpstreamLimiter:
-    """The process-wide limiter for identity metadata reads from upstream ``name``.
+    """The process-wide limiter for background identity metadata refreshes from upstream ``name``.
 
     Its configuration is the upstream's, with ``rate_cap`` set to a tenth of
     ``requests_per_minute``, at least one, and a ``max_concurrency`` of one.

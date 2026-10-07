@@ -6,6 +6,7 @@ import re
 import threading
 import time
 from collections import OrderedDict
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -13,7 +14,7 @@ import httpx
 from sie_sdk import RequestError, ServerError, SIEClient, SIEConnectionError
 
 from sie_server.adapters.errors import UpstreamUnavailableError
-from sie_server.adapters.remote._limits import identity_limiter
+from sie_server.adapters.remote._limits import UpstreamLimiter, identity_limiter, upstream_limiter
 from sie_server.config.engine import EngineConfig
 from sie_server.config.equivalence import canonical_digest
 from sie_server.config.model import UPSTREAM_MODEL_PATTERN, ModelConfig, is_immutable_revision
@@ -72,7 +73,9 @@ class _BoundedMetadataTransport(httpx.BaseTransport):
         self._transport.close()
 
 
-def _read_identity(upstream_name: str, upstream: Upstream, remote_model: str) -> tuple[str, str] | None:
+def _read_identity(
+    upstream_name: str, upstream: Upstream, remote_model: str, limiter: Callable[[str], UpstreamLimiter]
+) -> tuple[str, str] | None:
     if not remote_serving_enabled() or installed_upstreams().get(upstream_name) is not upstream:
         return None
     model, separator, profile = remote_model.partition(":")
@@ -82,7 +85,7 @@ def _read_identity(upstream_name: str, upstream: Upstream, remote_model: str) ->
         http_client.headers["Accept-Encoding"] = "identity"
         with (
             SIEClient(upstream.base_url, api_key="", http_client=http_client) as client,
-            identity_limiter(upstream_name).call(),
+            limiter(upstream_name).call(),
         ):
             try:
                 metadata: Any = client.get_model(model)
@@ -132,16 +135,22 @@ _LOCK = threading.Lock()
 _OBSERVATIONS: OrderedDict[tuple[int, str, str], _Observation] = OrderedDict()
 
 
-def _refresh(observation: _Observation, upstream_name: str, upstream: Upstream, remote_model: str) -> None:
-    """Replace the observation with a completed read.
+def _refresh(
+    observation: _Observation,
+    upstream_name: str,
+    upstream: Upstream,
+    remote_model: str,
+    limiter: Callable[[str], UpstreamLimiter],
+) -> None:
+    """Replace the observation with a completed read through ``limiter``.
 
-    A read that fails, or that the upstream's identity limiter refuses before
-    sending it, keeps the previous observation until its own expiry and holds
-    off the next read for the refusal age.
+    A read that fails, or that the limiter refuses before sending it, keeps the
+    previous observation until its own expiry and holds off the next read for
+    the refusal age.
     """
     completed, value = False, None
     try:
-        value = _read_identity(upstream_name, upstream, remote_model)
+        value = _read_identity(upstream_name, upstream, remote_model, limiter)
         completed = True
     except (UpstreamUnavailableError, UpstreamCredentialError, httpx.HTTPError, OSError, ValueError, RecursionError):
         pass
@@ -160,10 +169,12 @@ def _identity_observation(
 ) -> tuple[tuple[str, str] | None, float]:
     """Return the current observation and its age in seconds.
 
-    With ``wait`` an expired observation is refreshed before returning. Without
+    With ``wait`` an expired observation is refreshed before returning, and the
+    read counts against the upstream's rate cap like an inference call. Without
     it the refresh runs in the background, starting before expiry, and the
-    caller never waits on the upstream. A refresh already in flight is never
-    started twice.
+    caller never waits on the upstream. A background refresh draws only on the
+    upstream's identity limiter, so it never consumes the inference rate cap. A
+    refresh already in flight is never started twice.
     """
     key = id(upstream), upstream_name, remote_model
     with _LOCK:
@@ -186,10 +197,10 @@ def _identity_observation(
         observation.loading = True
     if not wait:
         threading.Thread(
-            target=_refresh, args=(observation, upstream_name, upstream, remote_model), daemon=True
+            target=_refresh, args=(observation, upstream_name, upstream, remote_model, identity_limiter), daemon=True
         ).start()
         return current
-    _refresh(observation, upstream_name, upstream, remote_model)
+    _refresh(observation, upstream_name, upstream, remote_model, upstream_limiter)
     with _LOCK:
         return observation.current(time.monotonic())
 

@@ -521,16 +521,22 @@ def test_a_completed_refusal_replaces_the_identity_at_once(remote, monkeypatch) 
     assert len(requests) == 2
 
 
-def _counted_reads(monkeypatch) -> list[tuple]:
-    reads = []
-    read = sie_identity._read_identity
+def _background_refreshes(monkeypatch) -> list[threading.Thread]:
+    started: list[threading.Thread] = []
 
-    def counted(*args):
-        reads.append(args)
-        return read(*args)
+    class Recorded(threading.Thread):
+        def start(self) -> None:
+            started.append(self)
+            super().start()
 
-    monkeypatch.setattr(sie_identity, "_read_identity", counted)
-    return reads
+    monkeypatch.setattr(sie_identity, "threading", SimpleNamespace(Thread=Recorded))
+    return started
+
+
+def _settle(refreshes: list[threading.Thread]) -> None:
+    for refresh in refreshes:
+        refresh.join(5)
+        assert not refresh.is_alive()
 
 
 def _inference_limiter_without_refill(monkeypatch, upstream: Upstream) -> UpstreamLimiter:
@@ -539,74 +545,132 @@ def _inference_limiter_without_refill(monkeypatch, upstream: Upstream) -> Upstre
     return inference
 
 
-def test_identity_refreshes_leave_the_inference_budget_untouched(remote, monkeypatch) -> None:
+def test_background_identity_refreshes_never_consume_the_inference_rate_cap(remote, monkeypatch) -> None:
     upstream, requests, _constructions, _payload = remote
     clock = [1000.0]
     monkeypatch.setattr(sie_identity.time, "monotonic", lambda: clock[0])
     inference = _inference_limiter_without_refill(monkeypatch, upstream)
+    refreshes = _background_refreshes(monkeypatch)
 
     for _ in range(50):
-        assert sie_identity.sie_identity_refusal(model(), device="cpu") is None
-        clock[0] += sie_identity._IDENTITY_AGE_S
+        sie_identity.sie_upstream_identity(model(), wait=False)
+        _settle(refreshes)
+        clock[0] += 25.0
 
-    assert len(requests) == 50
+    assert len(refreshes) == len(requests) == 50
     with inference.batch(upstream.rate_cap.requests_per_minute):
         pass
 
 
-def test_a_refresh_over_the_identity_budget_is_never_sent_and_backs_off_like_a_failed_read(remote, monkeypatch) -> None:
+def test_identity_reads_a_check_waits_for_count_against_the_inference_rate_cap(remote, monkeypatch) -> None:
+    upstream, requests, _constructions, _payload = remote
+    clock = [1000.0]
+    monkeypatch.setattr(sie_identity.time, "monotonic", lambda: clock[0])
+    inference = _inference_limiter_without_refill(monkeypatch, upstream)
+    budget = upstream.rate_cap.requests_per_minute
+
+    with identity_limiter("team").call():
+        for _ in range(3):
+            assert sie_identity.sie_identity_refusal(model(), device="cpu") is None
+            clock[0] += sie_identity._IDENTITY_AGE_S
+
+    assert len(requests) == 3
+    with pytest.raises(UpstreamRefusedError, match="rate cap"), inference.batch(budget - 2):
+        pass
+    with inference.batch(budget - 3):
+        pass
+
+
+def test_a_server_with_more_hybrid_models_on_one_upstream_than_identity_reads_a_minute_starts(remote, tmp_path) -> None:
+    upstream, requests, _constructions, payload = remote
+    one_read_a_minute = RateCap(requests_per_minute=10, max_concurrency=4)
+    install_upstreams({"team": upstream.model_copy(update={"rate_cap": one_read_a_minute})})
+    profiles = [f"stable-{index}" for index in range(3)]
+    payload[0] = httpx.Response(
+        200, json=metadata(profiles={name: {"identity": IDENTITY, "remote_contract_sha256": None} for name in profiles})
+    )
+    models = tmp_path / "models"
+    models.mkdir()
+    for index, profile in enumerate(profiles):
+        data = model(f"operator/model:{profile}").model_dump(mode="json")
+        data["sie_id"] = f"local/model-{index}"
+        (models / f"model-{index}.yaml").write_text(yaml.safe_dump(data))
+
+    registry = ModelRegistry(models_dir=models, device="cpu", enable_hot_reload=False)
+
+    assert all(registry.has_model(f"local/model-{index}") for index in range(len(profiles)))
+    assert len(requests) == len(profiles)
+
+
+def test_a_background_refresh_over_the_identity_budget_is_never_sent_and_backs_off_like_a_failed_read(
+    remote, monkeypatch
+) -> None:
     upstream, requests, _constructions, _payload = remote
     one_read_a_minute = RateCap(requests_per_minute=10, max_concurrency=4)
     install_upstreams({"team": upstream.model_copy(update={"rate_cap": one_read_a_minute})})
     clock = [1000.0]
     monkeypatch.setattr(sie_identity.time, "monotonic", lambda: clock[0])
-    assert sie_identity.sie_upstream_identity(model()) == (REVISION, IDENTITY, 30.0)
-    refreshed = _tracked_refresh(monkeypatch)
-    reads = _counted_reads(monkeypatch)
+    refreshes = _background_refreshes(monkeypatch)
+    sie_identity.sie_upstream_identity(model(), wait=False)
+    _settle(refreshes)
+    assert sie_identity.sie_upstream_identity(model(), wait=False) == (REVISION, IDENTITY, 30.0)
     clock[0] += 25.0
 
     assert sie_identity.sie_upstream_identity(model(), wait=False) == (REVISION, IDENTITY, 5.0)
-    assert refreshed.wait(5)
+    _settle(refreshes)
     clock[0] += sie_identity._REFUSAL_AGE_S - 0.5
     assert sie_identity.sie_upstream_identity(model(), wait=False) == (REVISION, IDENTITY, 3.5)
-    assert len(reads) == 1
+    assert len(refreshes) == 2
 
-    refreshed.clear()
     clock[0] += 0.5
     assert sie_identity.sie_upstream_identity(model(), wait=False) == (REVISION, IDENTITY, 3.0)
-    assert refreshed.wait(5)
-    assert len(reads) == 2
+    _settle(refreshes)
+    assert len(refreshes) == 3
     assert len(requests) == 1
 
 
-def test_a_second_identity_read_while_one_is_in_flight_is_never_sent_and_backs_off(remote, monkeypatch) -> None:
+def test_a_background_refresh_while_another_identity_read_is_in_flight_is_never_sent_and_backs_off(
+    remote, monkeypatch
+) -> None:
     _upstream, requests, _constructions, _payload = remote
     clock = [1000.0]
     monkeypatch.setattr(sie_identity.time, "monotonic", lambda: clock[0])
+    refreshes = _background_refreshes(monkeypatch)
 
     with identity_limiter("team").call():
-        assert sie_identity.sie_upstream_identity(model()) == (
-            "hybrid upstream identity is unavailable or outside its age"
-        )
+        sie_identity.sie_upstream_identity(model(), wait=False)
+        _settle(refreshes)
     clock[0] += sie_identity._REFUSAL_AGE_S - 0.5
-    assert sie_identity.sie_upstream_identity(model()) == "hybrid upstream identity is unavailable or outside its age"
+    assert (
+        sie_identity.sie_upstream_identity(model(), wait=False)
+        == "hybrid upstream identity is unavailable or outside its age"
+    )
+    assert len(refreshes) == 1
     assert requests == []
 
     clock[0] += 0.5
-    assert sie_identity.sie_upstream_identity(model()) == (REVISION, IDENTITY, 30.0)
+    sie_identity.sie_upstream_identity(model(), wait=False)
+    _settle(refreshes)
+    assert sie_identity.sie_upstream_identity(model(), wait=False) == (REVISION, IDENTITY, 30.0)
     assert len(requests) == 1
 
 
 def test_inference_calls_never_spend_the_identity_budget(remote, monkeypatch) -> None:
     upstream, requests, _constructions, _payload = remote
+    clock = [1000.0]
+    monkeypatch.setattr(sie_identity.time, "monotonic", lambda: clock[0])
     inference = _inference_limiter_without_refill(monkeypatch, upstream)
     for _ in range(upstream.rate_cap.requests_per_minute):
         with inference.call():
             pass
     with pytest.raises(UpstreamRefusedError, match="rate cap"), inference.call():
         pass
+    refreshes = _background_refreshes(monkeypatch)
 
-    assert sie_identity.sie_identity_refusal(model(), device="cpu") is None
+    sie_identity.sie_upstream_identity(model(), wait=False)
+    _settle(refreshes)
+
+    assert sie_identity.sie_upstream_identity(model(), wait=False) == (REVISION, IDENTITY, 30.0)
     assert len(requests) == 1
 
 
