@@ -23,6 +23,14 @@ together with :meth:`UpstreamLimiter.batch`, so that a batch is sent whole or
 refused before anything is sent. A batch larger than the whole budget is let
 through when the budget is full, and the budget then refills before anything
 else is sent.
+
+Reads of an SIE upstream's identity metadata for hybrid admission go through a
+second limiter per upstream name, never through the first. It has a budget of
+its own: a tenth of ``rate_cap.requests_per_minute``, at least one read a
+minute, with one read in flight. Its circuit breaker, set by the same
+``breaker`` settings, is its own too. Inference calls never draw on it, and its
+refusals and breaker state are not reported to the worker telemetry, whose
+upstream instruments describe inference calls.
 """
 
 from __future__ import annotations
@@ -42,7 +50,7 @@ from sie_server.adapters.errors import (
     UpstreamRefusedError,
     UpstreamUnavailableError,
 )
-from sie_server.config.upstreams import Upstream, installed_upstreams
+from sie_server.config.upstreams import RateCap, Upstream, installed_upstreams
 from sie_server.observability.worker_telemetry import worker_telemetry
 
 _SLOT_RETRY_AFTER_S = 1
@@ -75,10 +83,17 @@ _BATCH: contextvars.ContextVar[_Reservation | None] = contextvars.ContextVar("si
 
 
 class UpstreamLimiter:
-    """The budget, the concurrency cap and the circuit breaker for one upstream."""
+    """The budget, the concurrency cap and the circuit breaker for one upstream.
 
-    def __init__(self, name: str, upstream: Upstream, *, clock: Callable[[], float] = time.monotonic) -> None:
+    Its refusals and breaker changes are reported to the worker telemetry
+    unless ``telemetry`` is false.
+    """
+
+    def __init__(
+        self, name: str, upstream: Upstream, *, clock: Callable[[], float] = time.monotonic, telemetry: bool = True
+    ) -> None:
         self.name = name
+        self._telemetry = telemetry
         self._clock = clock
         self._lock = threading.Lock()
         self._capacity = float(upstream.rate_cap.requests_per_minute)
@@ -93,7 +108,8 @@ class UpstreamLimiter:
         self._failures: deque[float] = deque()
         self._open_until: float | None = None
         self._probing = False
-        worker_telemetry().upstream_breaker_changed(upstream=name, open=False)
+        if telemetry:
+            worker_telemetry().upstream_breaker_changed(upstream=name, open=False)
 
     @contextmanager
     def batch(self, requests: int, *, concurrency: int | None = None) -> Iterator[None]:
@@ -237,21 +253,24 @@ class UpstreamLimiter:
         was_closed = self._open_until is None
         self._open_until = now + self._cooldown_s
         self._failures.clear()
-        if was_closed:
+        if was_closed and self._telemetry:
             worker_telemetry().upstream_breaker_changed(upstream=self.name, open=True)
 
     def _close(self) -> None:
         self._open_until = None
-        worker_telemetry().upstream_breaker_changed(upstream=self.name, open=False)
+        if self._telemetry:
+            worker_telemetry().upstream_breaker_changed(upstream=self.name, open=False)
 
     def _refusal(self, refusal: UpstreamRefusal, wait_s: float, *, requests: int = 1) -> UpstreamRefusedError:
-        worker_telemetry().upstream_refused(upstream=self.name, refusal=refusal, requests=requests)
+        if self._telemetry:
+            worker_telemetry().upstream_refused(upstream=self.name, refusal=refusal, requests=requests)
         retry_after_s = min(RETRY_AFTER_MAX_S, max(RETRY_AFTER_MIN_S, math.ceil(wait_s)))
         return UpstreamRefusedError(self.name, refusal, retry_after_s=retry_after_s)
 
 
 _REGISTRY_LOCK = threading.Lock()
 _LIMITERS: dict[str, tuple[Upstream, UpstreamLimiter]] = {}
+_IDENTITY_LIMITERS: dict[str, tuple[Upstream, UpstreamLimiter]] = {}
 
 
 def upstream_limiter(name: str) -> UpstreamLimiter:
@@ -260,12 +279,34 @@ def upstream_limiter(name: str) -> UpstreamLimiter:
     Installing the upstreams again, as a restart of the configuration does,
     starts every limiter afresh.
     """
+    return _installed_limiter(_LIMITERS, name, lambda upstream: UpstreamLimiter(name, upstream))
+
+
+def identity_limiter(name: str) -> UpstreamLimiter:
+    """The process-wide limiter for identity metadata reads from upstream ``name``.
+
+    Its configuration is the upstream's, with ``rate_cap`` set to a tenth of
+    ``requests_per_minute``, at least one, and a ``max_concurrency`` of one.
+    Installing the upstreams again starts it afresh, as it does
+    :func:`upstream_limiter`.
+    """
+
+    def build(upstream: Upstream) -> UpstreamLimiter:
+        rate_cap = RateCap(requests_per_minute=max(1, upstream.rate_cap.requests_per_minute // 10), max_concurrency=1)
+        return UpstreamLimiter(name, upstream.model_copy(update={"rate_cap": rate_cap}), telemetry=False)
+
+    return _installed_limiter(_IDENTITY_LIMITERS, name, build)
+
+
+def _installed_limiter(
+    limiters: dict[str, tuple[Upstream, UpstreamLimiter]], name: str, build: Callable[[Upstream], UpstreamLimiter]
+) -> UpstreamLimiter:
     upstream = installed_upstreams().get(name)
     if upstream is None:
         raise RuntimeError(f"upstream {name!r} is not defined in the startup configuration")
     with _REGISTRY_LOCK:
-        entry = _LIMITERS.get(name)
+        entry = limiters.get(name)
         if entry is None or entry[0] is not upstream:
-            entry = (upstream, UpstreamLimiter(name, upstream))
-            _LIMITERS[name] = entry
+            entry = (upstream, build(upstream))
+            limiters[name] = entry
         return entry[1]

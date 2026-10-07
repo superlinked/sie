@@ -14,12 +14,15 @@ import pytest
 import yaml
 from fastapi import HTTPException, Request
 from opentelemetry import trace
+from sie_server.adapters.errors import UpstreamRefusedError
+from sie_server.adapters.remote import _limits
+from sie_server.adapters.remote._limits import UpstreamLimiter, identity_limiter
 from sie_server.api.routing import route_request
 from sie_server.config import hybrid_admission, sie_identity
 from sie_server.config.equivalence import model_contract_digest, remote_profile_contract_digest
 from sie_server.config.model import ModelConfig
 from sie_server.config.routing import validate_model_routing
-from sie_server.config.upstreams import Upstream, install_upstreams
+from sie_server.config.upstreams import RateCap, Upstream, install_upstreams
 from sie_server.core.loader import expand_profile_variants
 from sie_server.core.registry import ModelRegistry
 from sie_server.ipc_server import IpcServer
@@ -516,6 +519,95 @@ def test_a_completed_refusal_replaces_the_identity_at_once(remote, monkeypatch) 
         == "hybrid upstream identity is unavailable or outside its age"
     )
     assert len(requests) == 2
+
+
+def _counted_reads(monkeypatch) -> list[tuple]:
+    reads = []
+    read = sie_identity._read_identity
+
+    def counted(*args):
+        reads.append(args)
+        return read(*args)
+
+    monkeypatch.setattr(sie_identity, "_read_identity", counted)
+    return reads
+
+
+def _inference_limiter_without_refill(monkeypatch, upstream: Upstream) -> UpstreamLimiter:
+    inference = UpstreamLimiter("team", upstream, clock=lambda: 0.0)
+    monkeypatch.setitem(_limits._LIMITERS, "team", (upstream, inference))
+    return inference
+
+
+def test_identity_refreshes_leave_the_inference_budget_untouched(remote, monkeypatch) -> None:
+    upstream, requests, _constructions, _payload = remote
+    clock = [1000.0]
+    monkeypatch.setattr(sie_identity.time, "monotonic", lambda: clock[0])
+    inference = _inference_limiter_without_refill(monkeypatch, upstream)
+
+    for _ in range(50):
+        assert sie_identity.sie_identity_refusal(model(), device="cpu") is None
+        clock[0] += sie_identity._IDENTITY_AGE_S
+
+    assert len(requests) == 50
+    with inference.batch(upstream.rate_cap.requests_per_minute):
+        pass
+
+
+def test_a_refresh_over_the_identity_budget_is_never_sent_and_backs_off_like_a_failed_read(remote, monkeypatch) -> None:
+    upstream, requests, _constructions, _payload = remote
+    one_read_a_minute = RateCap(requests_per_minute=10, max_concurrency=4)
+    install_upstreams({"team": upstream.model_copy(update={"rate_cap": one_read_a_minute})})
+    clock = [1000.0]
+    monkeypatch.setattr(sie_identity.time, "monotonic", lambda: clock[0])
+    assert sie_identity.sie_upstream_identity(model()) == (REVISION, IDENTITY, 30.0)
+    refreshed = _tracked_refresh(monkeypatch)
+    reads = _counted_reads(monkeypatch)
+    clock[0] += 25.0
+
+    assert sie_identity.sie_upstream_identity(model(), wait=False) == (REVISION, IDENTITY, 5.0)
+    assert refreshed.wait(5)
+    clock[0] += sie_identity._REFUSAL_AGE_S - 0.5
+    assert sie_identity.sie_upstream_identity(model(), wait=False) == (REVISION, IDENTITY, 3.5)
+    assert len(reads) == 1
+
+    refreshed.clear()
+    clock[0] += 0.5
+    assert sie_identity.sie_upstream_identity(model(), wait=False) == (REVISION, IDENTITY, 3.0)
+    assert refreshed.wait(5)
+    assert len(reads) == 2
+    assert len(requests) == 1
+
+
+def test_a_second_identity_read_while_one_is_in_flight_is_never_sent_and_backs_off(remote, monkeypatch) -> None:
+    _upstream, requests, _constructions, _payload = remote
+    clock = [1000.0]
+    monkeypatch.setattr(sie_identity.time, "monotonic", lambda: clock[0])
+
+    with identity_limiter("team").call():
+        assert sie_identity.sie_upstream_identity(model()) == (
+            "hybrid upstream identity is unavailable or outside its age"
+        )
+    clock[0] += sie_identity._REFUSAL_AGE_S - 0.5
+    assert sie_identity.sie_upstream_identity(model()) == "hybrid upstream identity is unavailable or outside its age"
+    assert requests == []
+
+    clock[0] += 0.5
+    assert sie_identity.sie_upstream_identity(model()) == (REVISION, IDENTITY, 30.0)
+    assert len(requests) == 1
+
+
+def test_inference_calls_never_spend_the_identity_budget(remote, monkeypatch) -> None:
+    upstream, requests, _constructions, _payload = remote
+    inference = _inference_limiter_without_refill(monkeypatch, upstream)
+    for _ in range(upstream.rate_cap.requests_per_minute):
+        with inference.call():
+            pass
+    with pytest.raises(UpstreamRefusedError, match="rate cap"), inference.call():
+        pass
+
+    assert sie_identity.sie_identity_refusal(model(), device="cpu") is None
+    assert len(requests) == 1
 
 
 async def test_remote_lane_snapshot_reports_the_sie_admission(remote, tmp_path, monkeypatch) -> None:

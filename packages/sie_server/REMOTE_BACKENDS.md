@@ -200,7 +200,9 @@ received no answer, so it is `QUEUE_FULL`. Any other failure is
 
 Each upstream has a required rate cap and a circuit breaker. The limits are
 shared by that worker process's adapters, not across replicas: adding remote
-worker replicas increases the aggregate permitted traffic. Under
+worker replicas increases the aggregate permitted traffic. Identity metadata
+reads for [SIE identity fallback](#admitting-sie-identity-fallback) do not
+count against these limits; they have a smaller budget of their own. Under
 `remote_only`, unavailable upstreams, open breakers and reached caps return
 retryable `503` responses with `Retry-After`. In a cluster the remote worker
 answers such a request at once instead of redelivering it, and the gateway
@@ -379,11 +381,18 @@ refreshes metadata. A concurrent refresh
 refuses another bridge instead of waiting or starting a second metadata request.
 Changes to the installed upstream discard the previous observation.
 
+Metadata reads have limits of their own for each upstream in each worker
+process, apart from its rate cap: a tenth of `rate_cap.requests_per_minute`, at
+least one read a minute, one read at a time, and a circuit breaker with the
+upstream's `breaker` settings. Inference calls never use this budget. A read
+these limits refuse is not sent and counts as a failed read.
+
 Because configuration load runs this comparison, a single-node server whose
 models directory holds a hybrid SIE-identity `encode` or `score` model depends
-on the upstream at startup. When the upstream cannot be reached, or reports a
-different weights revision or identity, the server refuses the model and does
-not start. A hot reload of that model runs the same comparison, reusing a
+on the upstream at startup. When the upstream cannot be reached, the metadata
+limits refuse the read, or the upstream reports a different weights revision or
+identity, the server refuses the model and does not start. A hot reload of that
+model runs the same comparison, reusing a
 matching observation up to 30 seconds old, and a refused reload is logged. A
 refused reload of a loaded model leaves it unloaded. To start while the upstream is down, remove the model's `routing` block, then
 add it back by hot reload once the upstream answers.

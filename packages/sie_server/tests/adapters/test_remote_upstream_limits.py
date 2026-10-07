@@ -21,7 +21,7 @@ from sie_server.adapters.remote import openai as remote_openai
 from sie_server.adapters.remote import sie as remote_sie
 from sie_server.adapters.remote._batching import call_each
 from sie_server.adapters.remote._http import RemoteUpstreamError
-from sie_server.adapters.remote._limits import UpstreamLimiter, upstream_limiter
+from sie_server.adapters.remote._limits import UpstreamLimiter, identity_limiter, upstream_limiter
 from sie_server.config.upstreams import Upstream, UpstreamConfigError, install_upstreams, load_upstreams
 from sie_server.core.upstream_client import upstream_sync_client
 from sie_server.ipc_types import EncodeBatchItem
@@ -330,6 +330,89 @@ def test_every_adapter_shares_one_limiter_per_upstream_until_the_upstreams_are_i
 
     assert first is same
     assert fresh is not first
+
+
+def test_identity_reads_have_one_limiter_per_upstream_apart_from_the_inference_limiter() -> None:
+    try:
+        install_upstreams({UPSTREAM: upstream_config()})
+        first = identity_limiter(UPSTREAM)
+        same = identity_limiter(UPSTREAM)
+        inference = upstream_limiter(UPSTREAM)
+        install_upstreams({UPSTREAM: upstream_config()})
+        fresh = identity_limiter(UPSTREAM)
+
+        with pytest.raises(RuntimeError, match="not defined"):
+            identity_limiter("nobody")
+    finally:
+        install_upstreams({})
+
+    assert first is same
+    assert first is not inference
+    assert fresh is not first
+
+
+@pytest.mark.parametrize(("rpm", "reads"), [(600, 60), (60, 6), (19, 1), (5, 1)])
+def test_identity_reads_have_a_tenth_of_the_rate_cap_and_at_least_one_a_minute_of_their_own(
+    events: Events, rpm: int, reads: int
+) -> None:
+    try:
+        install_upstreams({UPSTREAM: upstream_config(rpm)})
+        identity, inference = identity_limiter(UPSTREAM), upstream_limiter(UPSTREAM)
+        for _ in range(reads):
+            call(identity)
+        refusal = refused(identity, "rate_cap")
+        with inference.batch(rpm):
+            pass
+    finally:
+        install_upstreams({})
+
+    assert refusal.retry_after_s == 60 // reads
+    assert (events.refused, events.breaker) == ([], [(UPSTREAM, False)])
+
+
+def test_inference_calls_never_take_the_identity_budget_or_its_one_slot(events: Events) -> None:
+    try:
+        install_upstreams({UPSTREAM: upstream_config(rpm=20, concurrency=4)})
+        identity, inference = identity_limiter(UPSTREAM), upstream_limiter(UPSTREAM)
+        for _ in range(16):
+            call(inference)
+        with ExitStack() as held:
+            for _ in range(4):
+                held.enter_context(inference.call())
+            refused(inference, "concurrency_cap")
+            with identity.call():
+                refused(identity, "concurrency_cap")
+            call(identity)
+        refused(inference, "rate_cap")
+    finally:
+        install_upstreams({})
+
+    assert events.refused == [(UPSTREAM, "concurrency_cap"), (UPSTREAM, "rate_cap")]
+
+
+@pytest.mark.parametrize("failing", ["identity", "inference"])
+def test_identity_reads_and_inference_calls_have_separate_breakers(failing: str) -> None:
+    try:
+        install_upstreams({UPSTREAM: upstream_config(failures=1)})
+        identity, inference = identity_limiter(UPSTREAM), upstream_limiter(UPSTREAM)
+        broken, working = (identity, inference) if failing == "identity" else (inference, identity)
+        fail(broken)
+        refused(broken, "breaker_open")
+        call(working)
+    finally:
+        install_upstreams({})
+
+
+def test_a_limiter_without_telemetry_reports_no_refusal_or_breaker_change(events: Events, clock: Clock) -> None:
+    quiet = UpstreamLimiter(UPSTREAM, upstream_config(rpm=2, failures=1, cooldown_s=60), clock=clock, telemetry=False)
+    fail(quiet)
+    refused(quiet, "breaker_open")
+    clock.advance(60)
+    call(quiet)
+    call(quiet)
+    refused(quiet, "rate_cap")
+
+    assert (events.refused, events.breaker) == ([], [])
 
 
 def test_a_breaker_defaults_to_five_failures_in_thirty_seconds_and_a_minute_of_cooldown(tmp_path: Path) -> None:

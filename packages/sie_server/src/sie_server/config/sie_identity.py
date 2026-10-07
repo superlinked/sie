@@ -13,7 +13,7 @@ import httpx
 from sie_sdk import RequestError, ServerError, SIEClient, SIEConnectionError
 
 from sie_server.adapters.errors import UpstreamUnavailableError
-from sie_server.adapters.remote._limits import upstream_limiter
+from sie_server.adapters.remote._limits import identity_limiter
 from sie_server.config.engine import EngineConfig
 from sie_server.config.equivalence import canonical_digest
 from sie_server.config.model import UPSTREAM_MODEL_PATTERN, ModelConfig, is_immutable_revision
@@ -82,7 +82,7 @@ def _read_identity(upstream_name: str, upstream: Upstream, remote_model: str) ->
         http_client.headers["Accept-Encoding"] = "identity"
         with (
             SIEClient(upstream.base_url, api_key="", http_client=http_client) as client,
-            upstream_limiter(upstream_name).call(),
+            identity_limiter(upstream_name).call(),
         ):
             try:
                 metadata: Any = client.get_model(model)
@@ -135,8 +135,9 @@ _OBSERVATIONS: OrderedDict[tuple[int, str, str], _Observation] = OrderedDict()
 def _refresh(observation: _Observation, upstream_name: str, upstream: Upstream, remote_model: str) -> None:
     """Replace the observation with a completed read.
 
-    A read that fails keeps the previous observation until its own expiry and
-    holds off the next read for the refusal age.
+    A read that fails, or that the upstream's identity limiter refuses before
+    sending it, keeps the previous observation until its own expiry and holds
+    off the next read for the refusal age.
     """
     completed, value = False, None
     try:
