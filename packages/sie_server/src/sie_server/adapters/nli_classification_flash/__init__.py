@@ -59,8 +59,13 @@ class NLIClassificationFlashAdapter(FlashBaseAdapter):
             model_name_or_path: HuggingFace model ID or local path.
             hypothesis_template: Template for converting labels to hypotheses.
                 Must contain {} placeholder for the label.
-            multi_label: If True, use sigmoid for independent label scores.
-                If False, use softmax for mutually exclusive labels.
+            multi_label: If True, score every label on its own: the probability
+                of entailment against contradiction (or not_entailment) for
+                that label's hypothesis. If False, labels are mutually
+                exclusive: a softmax of the entailment logits across labels.
+                A request with a single label is always scored on its own,
+                since a softmax over one label is 1.0 whatever the text. Both
+                rules are those of transformers' ZeroShotClassificationPipeline.
             max_length: Maximum sequence length for tokenization.
             compute_precision: Precision for inference (float16, bfloat16, float32).
             revision: Optional HuggingFace revision/branch/commit SHA to pin when
@@ -119,9 +124,10 @@ class NLIClassificationFlashAdapter(FlashBaseAdapter):
         self._model.to(device)
         self._model.eval()
 
-        # Detect entailment index from model config
-        # MoritzLaurer models use: {0: 'entailment', 1: 'neutral', 2: 'contradiction'}
-        # Some models use: {0: 'contradiction', 1: 'neutral', 2: 'entailment'}
+        # Detect entailment index from model config. The MoritzLaurer zeroshot-v2.0
+        # models are binary, {0: 'entailment', 1: 'not_entailment'}; MNLI models
+        # such as facebook/bart-large-mnli use {0: 'contradiction', 1: 'neutral',
+        # 2: 'entailment'}.
         id2label = getattr(self._model.config, "id2label", {})
         for idx, label in id2label.items():
             if label.lower() == "entailment":
@@ -266,18 +272,17 @@ class NLIClassificationFlashAdapter(FlashBaseAdapter):
             outputs = self._model(**encodings)
             logits = outputs.logits  # [n_texts * n_labels, num_classes]
 
-            # Extract entailment scores
-            entailment_logits = logits[:, self._entailment_idx]  # [n_texts * n_labels]
-
-            # Reshape to [n_texts, n_labels]
-            entailment_logits = entailment_logits.view(n_texts, n_labels)
-
-            # Normalize scores
-            if effective_multi_label:
-                # Independent scores per label
-                scores = torch.sigmoid(entailment_logits)
+            if effective_multi_label or n_labels == 1:
+                # Each label on its own: entailment against contradiction (the last
+                # class when entailment is the first, else the first), the rule of
+                # transformers' ZeroShotClassificationPipeline. For a binary
+                # entailment/not_entailment head that is the not_entailment logit.
+                contradiction_idx = logits.shape[-1] - 1 if self._entailment_idx == 0 else 0
+                pair = logits[:, [contradiction_idx, self._entailment_idx]].float()
+                scores = F.softmax(pair, dim=-1)[:, 1].view(n_texts, n_labels)
             else:
-                # Mutually exclusive labels
+                # Mutually exclusive labels: a softmax of the entailment logits across labels
+                entailment_logits = logits[:, self._entailment_idx].view(n_texts, n_labels)
                 scores = F.softmax(entailment_logits, dim=-1)
 
             scores = scores.cpu().tolist()
