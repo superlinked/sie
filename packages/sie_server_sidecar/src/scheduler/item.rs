@@ -39,7 +39,11 @@
 //!   character count plus 1024 per media input, summed per
 //!   `(query, document)` pair (so query cost repeats for each document).
 //!   This is batching cost only, never a billable token count.
-//! * **Extract**: unit cost; Python owns extract preparation today.
+//! * **Extract**: duration in milliseconds when the sidecar prepared the
+//!   item's audio (as Python's audio preprocessor sets it), otherwise unit
+//!   cost. Prepared audio longer than
+//!   [`crate::audio_prep::RUNS_ALONE_ABOVE_SAMPLES`] also runs alone: it
+//!   never shares a batch (see [`HasCost::runs_alone`]).
 //!
 //! The adaptive controller auto-calibrates against observed latency,
 //! so being "approximately right" on cost is enough; what matters is
@@ -241,6 +245,15 @@ impl HasCost for SchedulerItem {
                 Some(crate::audio_prep::MAX_AUDIO_BATCH_DURATION_MS)
             }
             _ => None,
+        }
+    }
+
+    fn runs_alone(&self) -> bool {
+        match self {
+            Self::Extract(e) => e.prepared_audio.as_ref().is_some_and(|audio| {
+                audio.sample_count > crate::audio_prep::RUNS_ALONE_ABOVE_SAMPLES
+            }),
+            _ => false,
         }
     }
 
@@ -592,6 +605,80 @@ mod tests {
         });
         assert_eq!(it.cost(), 1_001);
         assert_eq!(it.hard_batch_cost_cap(), Some(720_000));
+    }
+
+    /// Extract item carrying sidecar-prepared 16 kHz audio of `sample_count`
+    /// samples (the PCM bytes themselves are irrelevant to scheduling).
+    fn audio_extract_item(sample_count: u64) -> SchedulerItem {
+        SchedulerItem::Extract(ExtractBatchItem {
+            work_item_id: "r.0".into(),
+            request_id: "r".into(),
+            item_index: 0,
+            total_items: 1,
+            timestamp: 0.0,
+            item: text_item("x"),
+            labels: None,
+            output_schema: None,
+            instruction: None,
+            options: None,
+            profile_id: None,
+            bundle_config_hash: None,
+            payload_fetch_ms: 0.0,
+            prepared_audio: Some(crate::ipc_types::PreparedAudioPcm16 {
+                pcm_s16le: vec![],
+                sample_rate: 16_000,
+                sample_count,
+                duration_ms: sample_count.div_ceil(16),
+                source_sample_rate: 16_000,
+                source_sample_count: sample_count,
+                source_channels: 1,
+                container: "wav".into(),
+            }),
+        })
+    }
+
+    #[test]
+    fn audio_extract_runs_alone_only_past_thirty_seconds() {
+        assert_eq!(crate::audio_prep::RUNS_ALONE_ABOVE_SAMPLES, 480_000);
+        let at_window = audio_extract_item(480_000);
+        let past_window = audio_extract_item(480_001);
+
+        assert!(!at_window.runs_alone(), "exactly 30 s fits one window");
+        assert!(past_window.runs_alone(), "30 s + 1 sample is long-form");
+        assert!(!audio_extract_item(16_000).runs_alone());
+        // Cost stays the duration either way.
+        assert_eq!(at_window.cost(), 30_000);
+        assert_eq!(past_window.cost(), 30_001);
+    }
+
+    #[test]
+    fn only_prepared_audio_runs_alone() {
+        let text_extract = SchedulerItem::Extract(ExtractBatchItem {
+            work_item_id: "r.0".into(),
+            request_id: "r".into(),
+            item_index: 0,
+            total_items: 1,
+            timestamp: 0.0,
+            item: text_item("x"),
+            labels: None,
+            output_schema: None,
+            instruction: None,
+            options: None,
+            profile_id: None,
+            bundle_config_hash: None,
+            payload_fetch_ms: 0.0,
+            prepared_audio: None,
+        });
+        let encode = SchedulerItem::Encode(encode_item(0, Some(pt_with_lens(&[480_001]))));
+        let score = SchedulerItem::score(score_batch_item(
+            text_item(&"q".repeat(480_001)),
+            vec![text_item("d")],
+            None,
+        ));
+
+        assert!(!text_extract.runs_alone());
+        assert!(!encode.runs_alone());
+        assert!(!score.runs_alone());
     }
 
     #[test]

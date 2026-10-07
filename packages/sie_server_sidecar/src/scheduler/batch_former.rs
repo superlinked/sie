@@ -17,6 +17,13 @@
 //! 4. **Timer refresh**: after a partial cost-sorted extract, first/last
 //!    timestamps are re-anchored to the requests that remain; once the queue
 //!    empties both are cleared so the next submit starts a fresh window.
+//! 5. **Runs-alone lane** (long-form audio, #585): items whose
+//!    [`HasCost::runs_alone`] is true never share a batch. They are served
+//!    one per batch in arrival order, and while batchable items are pending
+//!    too the two lanes take turns: a cost-sorted batch of batchable items,
+//!    then the oldest flagged item. Before any batch has been taken, the
+//!    first one comes from the lane holding the oldest pending item. When
+//!    nothing pending is flagged, packing is exactly point 3.
 //!
 //! Python currently retains its original first/last timers after a partial
 //! extract and clears them only when empty. Rust re-anchors them to the actual
@@ -50,6 +57,13 @@ pub trait HasCost {
     /// latency controller raises the model's normal cost target.
     fn hard_batch_cost_cap(&self) -> Option<u64> {
         None
+    }
+
+    /// Whether this item must be served in a batch of its own (long-form
+    /// audio). Mirrors Python's `PreparedItem.runs_alone`; see point 5 of
+    /// the module docs for how such items are ordered.
+    fn runs_alone(&self) -> bool {
+        false
     }
 
     /// Original position within the originating request's item list.
@@ -158,6 +172,10 @@ struct Inner<I: HasCost, T> {
     total_cost: u64,
     first_request_time: Option<Instant>,
     last_submit_time: Option<Instant>,
+    /// Lane of the last batch taken: `Some(true)` when it was a runs-alone
+    /// item, `None` before the first batch. Decides whose turn is next while
+    /// both lanes are pending.
+    last_batch_alone: Option<bool>,
     /// Cached snapshot of the current knobs. Mutations happen via
     /// [`BatchFormer::update_config`] which takes the same lock so
     /// reads of `config` and reads of `pending` stay consistent.
@@ -206,6 +224,7 @@ impl<I: HasCost, T> BatchFormer<I, T> {
                 total_cost: 0,
                 first_request_time: None,
                 last_submit_time: None,
+                last_batch_alone: None,
                 config,
             }),
             ready: Notify::new(),
@@ -527,6 +546,43 @@ fn wait_timeout<I: HasCost, T>(inner: &Inner<I, T>) -> Option<Duration> {
     Some(Duration::try_from_secs_f64(effective_ms.max(0.0) / 1000.0).unwrap_or(Duration::MAX))
 }
 
+/// Order pending requests when at least one runs alone.
+///
+/// Batchable requests come first, sorted by cost as usual, and runs-alone
+/// requests follow in arrival order. The two lanes take turns: the oldest
+/// runs-alone request moves to the front after a batch of batchable requests,
+/// and before the first batch only if it is the oldest pending request.
+/// Mirrors Python's `BatchFormer._order_runs_alone_lane`.
+fn order_runs_alone_lane<I: HasCost, T>(inner: &mut Inner<I, T>) {
+    inner.pending.sort_by(|a, b| {
+        let alone = a.item.runs_alone();
+        alone.cmp(&b.item.runs_alone()).then_with(|| {
+            if alone {
+                a.arrival_time.cmp(&b.arrival_time)
+            } else {
+                a.item.cost().cmp(&b.item.cost())
+            }
+        })
+    });
+    let Some(head) = inner.pending.iter().position(|r| r.item.runs_alone()) else {
+        return;
+    };
+    if head == 0 {
+        return;
+    }
+    let alone_turn = match inner.last_batch_alone {
+        Some(last_alone) => !last_alone,
+        None => inner
+            .pending
+            .iter()
+            .min_by_key(|r| r.arrival_time)
+            .is_some_and(|oldest| oldest.item.runs_alone()),
+    };
+    if alone_turn {
+        inner.pending[..=head].rotate_right(1);
+    }
+}
+
 fn extract_batch<I: HasCost, T>(
     inner: &mut Inner<I, T>,
     flush_reason: FlushReason,
@@ -540,11 +596,15 @@ fn extract_batch_up_to<I: HasCost, T>(
     max_items: usize,
 ) -> FormattedBatch<I, T> {
     debug_assert!(max_items > 0, "zero-item drains are rejected by the caller");
-    // Cost-sort pending before slicing — keeps each sub-batch's
-    // items close in length, minimising padding waste on the adapter
-    // side. Stable sort preserves FIFO order within equal-cost items
-    // (matches Python's stable `list.sort`).
-    inner.pending.sort_by_key(|r| r.item.cost());
+    if inner.pending.iter().any(|r| r.item.runs_alone()) {
+        order_runs_alone_lane(inner);
+    } else {
+        // Cost-sort pending before slicing — keeps each sub-batch's
+        // items close in length, minimising padding waste on the adapter
+        // side. Stable sort preserves FIFO order within equal-cost items
+        // (matches Python's stable `list.sort`).
+        inner.pending.sort_by_key(|r| r.item.cost());
+    }
 
     let max_cost = effective_max_cost(inner);
     let max_requests = inner.config.max_batch_requests;
@@ -555,6 +615,12 @@ fn extract_batch_up_to<I: HasCost, T>(
     let mut take_count: usize = 0;
     for req in &inner.pending {
         if take_count >= max_items {
+            break;
+        }
+        let runs_alone = req.item.runs_alone();
+        // A runs-alone item never shares a batch: stop in front of one
+        // unless it is the first item taken.
+        if runs_alone && take_count > 0 {
             break;
         }
         let c = req.item.cost();
@@ -568,9 +634,13 @@ fn extract_batch_up_to<I: HasCost, T>(
         }
         batch_cost += c;
         take_count += 1;
-        if take_count >= max_requests {
+        if runs_alone || take_count >= max_requests {
             break;
         }
+    }
+    if take_count > 0 {
+        // Whose turn is next when both lanes are pending.
+        inner.last_batch_alone = Some(inner.pending[0].item.runs_alone());
     }
 
     // Drain the taken prefix into parallel vecs.
@@ -1023,6 +1093,7 @@ mod tests {
             total_cost: 1,
             first_request_time: Some(now - Duration::from_millis(5)),
             last_submit_time: Some(now),
+            last_batch_alone: None,
             config: cfg,
         };
         let t = wait_timeout(&inner).expect("pending → Some");
@@ -1048,6 +1119,7 @@ mod tests {
             total_cost: 1,
             first_request_time: Some(now),
             last_submit_time: Some(now),
+            last_batch_alone: None,
             config: cfg,
         };
         assert_eq!(wait_timeout(&inner), Some(Duration::MAX));
@@ -1061,6 +1133,7 @@ mod tests {
             total_cost: 0,
             first_request_time: None,
             last_submit_time: None,
+            last_batch_alone: None,
             config: cfg,
         };
         assert!(wait_timeout(&inner).is_none());
@@ -1076,5 +1149,469 @@ mod tests {
             ..BatchConfig::default()
         };
         assert!((cfg.effective_coalesce_ms() - 2.0).abs() < f64::EPSILON);
+    }
+
+    // ---- Runs-alone lane (long-form audio, #585) ----
+
+    /// Audio stub: cost is duration in ms and the hard cap is the audio batch
+    /// cap, as `SchedulerItem` sets them for prepared audio. `alone` marks
+    /// long-form audio.
+    #[derive(Debug, Clone, Copy)]
+    struct LaneItem {
+        cost: u64,
+        alone: bool,
+        hard_cap: Option<u64>,
+    }
+
+    impl HasCost for LaneItem {
+        fn cost(&self) -> u64 {
+            self.cost
+        }
+        fn hard_batch_cost_cap(&self) -> Option<u64> {
+            self.hard_cap
+        }
+        fn runs_alone(&self) -> bool {
+            self.alone
+        }
+        fn original_index(&self) -> usize {
+            0
+        }
+    }
+
+    fn clip_ms(cost: u64) -> LaneItem {
+        LaneItem {
+            cost,
+            alone: false,
+            hard_cap: Some(crate::audio_prep::MAX_AUDIO_BATCH_DURATION_MS),
+        }
+    }
+
+    fn long_form_ms(cost: u64) -> LaneItem {
+        LaneItem {
+            alone: true,
+            ..clip_ms(cost)
+        }
+    }
+
+    fn clip(seconds: u64) -> LaneItem {
+        clip_ms(seconds * 1_000)
+    }
+
+    fn long_form(seconds: u64) -> LaneItem {
+        long_form_ms(seconds * 1_000)
+    }
+
+    /// A batcher queue driven with explicit arrival times, in ms after `epoch`.
+    struct Lanes {
+        inner: Inner<LaneItem, String>,
+        epoch: Instant,
+    }
+
+    impl Lanes {
+        fn new(max_batch_cost: u64) -> Self {
+            Self {
+                inner: Inner {
+                    pending: Vec::new(),
+                    total_cost: 0,
+                    first_request_time: None,
+                    last_submit_time: None,
+                    last_batch_alone: None,
+                    config: BatchConfig {
+                        max_batch_cost,
+                        ..BatchConfig::default()
+                    },
+                },
+                epoch: Instant::now(),
+            }
+        }
+
+        /// Queue `item` as if it arrived `at_ms` after the epoch.
+        fn arrive(&mut self, item: LaneItem, name: &str, at_ms: u64) {
+            append_item(&mut self.inner, item, name.to_string());
+            let request = self.inner.pending.last_mut().expect("just appended");
+            request.arrival_time = self.epoch + Duration::from_millis(at_ms);
+        }
+
+        fn take_up_to(&mut self, max_items: usize) -> FormattedBatch<LaneItem, String> {
+            extract_batch_up_to(&mut self.inner, FlushReason::Drain, max_items)
+        }
+
+        fn take(&mut self) -> Vec<String> {
+            self.take_up_to(usize::MAX).metadata
+        }
+
+        fn pending_names(&self) -> Vec<String> {
+            self.inner
+                .pending
+                .iter()
+                .map(|request| request.metadata.clone())
+                .collect()
+        }
+    }
+
+    /// SplitMix64: reproducible test data without a `rand` dependency.
+    struct TestRng(u64);
+
+    impl TestRng {
+        fn next_u64(&mut self) -> u64 {
+            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        }
+
+        /// Uniform in `low..=high`.
+        fn range(&mut self, low: u64, high: u64) -> u64 {
+            low + self.next_u64() % (high - low + 1)
+        }
+
+        fn chance(&mut self, percent: u64) -> bool {
+            self.range(0, 99) < percent
+        }
+
+        fn pick<T: Copy>(&mut self, choices: &[T]) -> T {
+            choices[self.range(0, choices.len() as u64 - 1) as usize]
+        }
+    }
+
+    /// Cost-sorted greedy packing exactly as `extract_batch_up_to` did before
+    /// the runs-alone lane. `pending` holds `(cost, hard_cap, name)` in queue
+    /// order and is updated in place, as the batcher updates its own queue.
+    fn previous_packing(
+        pending: &mut Vec<(u64, Option<u64>, String)>,
+        config: &BatchConfig,
+        max_items: usize,
+    ) -> (Vec<String>, u64) {
+        pending.sort_by_key(|(cost, _, _)| *cost);
+        let max_cost = pending
+            .iter()
+            .filter_map(|(_, cap, _)| *cap)
+            .fold(config.max_batch_cost, u64::min);
+        let mut batch_cost = 0;
+        let mut take_count = 0;
+        for (cost, _, _) in pending.iter() {
+            if take_count >= max_items {
+                break;
+            }
+            if batch_cost + cost > max_cost && take_count > 0 {
+                break;
+            }
+            batch_cost += cost;
+            take_count += 1;
+            if take_count >= config.max_batch_requests {
+                break;
+            }
+        }
+        let taken = pending.drain(..take_count).map(|(_, _, name)| name);
+        (taken.collect(), batch_cost)
+    }
+
+    #[test]
+    fn unflagged_batches_match_previous_cost_sorted_packing() {
+        for seed in 0..20 {
+            let mut rng = TestRng(seed);
+            let mut lanes = Lanes::new(rng.range(1, 4_000));
+            lanes.inner.config.max_batch_requests = rng.range(1, 8) as usize;
+            let config = lanes.inner.config;
+            let mut reference: Vec<(u64, Option<u64>, String)> = Vec::new();
+            let mut now_ms = 0;
+            let mut next_id = 0;
+
+            for _ in 0..60 {
+                for _ in 0..rng.range(0, 5) {
+                    now_ms += rng.range(0, 3);
+                    let cost = rng.range(1, 1_500);
+                    let hard_cap = rng.chance(20).then(|| rng.range(500, 4_000));
+                    let name = format!("item-{next_id}");
+                    next_id += 1;
+                    let item = LaneItem {
+                        cost,
+                        alone: false,
+                        hard_cap,
+                    };
+                    lanes.arrive(item, &name, now_ms);
+                    reference.push((cost, hard_cap, name));
+                }
+                if reference.is_empty() {
+                    continue;
+                }
+                let max_items = rng.pick(&[usize::MAX, usize::MAX, 1, 2, 5]);
+
+                let batch = lanes.take_up_to(max_items);
+
+                let (expected, expected_cost) =
+                    previous_packing(&mut reference, &config, max_items);
+                assert_eq!(batch.metadata, expected, "seed {seed}");
+                assert_eq!(batch.total_cost, expected_cost, "seed {seed}");
+                let remaining: Vec<&String> = reference.iter().map(|(_, _, name)| name).collect();
+                assert_eq!(
+                    lanes.pending_names().iter().collect::<Vec<_>>(),
+                    remaining,
+                    "seed {seed}"
+                );
+                let remaining_cost: u64 = reference.iter().map(|(cost, _, _)| cost).sum();
+                assert_eq!(lanes.inner.total_cost, remaining_cost, "seed {seed}");
+            }
+        }
+    }
+
+    #[test]
+    fn long_form_runs_alone_after_clips_that_arrived_around_it() {
+        // Clips are not held in a long recording's batch (head-of-line wait).
+        let mut lanes = Lanes::new(720_000);
+        lanes.arrive(clip(5), "clip-5s", 0);
+        lanes.arrive(long_form(240), "long-240s", 1_000);
+        lanes.arrive(clip(8), "clip-8s", 2_000);
+
+        assert_eq!(lanes.take(), ["clip-5s", "clip-8s"]);
+        assert_eq!(lanes.take(), ["long-240s"]);
+        assert!(lanes.inner.pending.is_empty());
+        assert_eq!(lanes.inner.total_cost, 0);
+    }
+
+    #[test]
+    fn long_form_items_run_in_arrival_order() {
+        // An older long recording is not starved by a newer, shorter one.
+        let mut lanes = Lanes::new(720_000);
+        lanes.arrive(long_form(250), "long-250s", 0);
+        lanes.arrive(long_form(190), "long-190s", 1_000);
+
+        assert_eq!(lanes.take(), ["long-250s"]);
+        assert_eq!(lanes.take(), ["long-190s"]);
+    }
+
+    #[test]
+    fn first_batch_comes_from_the_lane_of_the_oldest_request() {
+        for (long_arrival_ms, order) in [(0, ["long", "clip"]), (2_000, ["clip", "long"])] {
+            let mut lanes = Lanes::new(720_000);
+            lanes.arrive(clip(5), "clip", 1_000);
+            lanes.arrive(long_form(240), "long", long_arrival_ms);
+
+            let first = lanes.take();
+            let second = lanes.take();
+            assert_eq!([first, second].concat(), order);
+        }
+    }
+
+    #[test]
+    fn lanes_take_turns_while_both_are_pending() {
+        // Two long recordings and clips that keep arriving: clips, long, clips, long.
+        let mut lanes = Lanes::new(720_000);
+        lanes.arrive(clip(4), "clip-a", 0);
+        lanes.arrive(clip(6), "clip-b", 1_000);
+        lanes.arrive(long_form(240), "long-1", 2_000);
+        lanes.arrive(long_form(200), "long-2", 3_000);
+
+        let mut served = Vec::new();
+        for second in 4..9 {
+            served.push(lanes.take());
+            // One clip lands while each batch runs.
+            lanes.arrive(clip(5), &format!("clip@{second}"), second * 1_000);
+        }
+
+        assert_eq!(
+            served,
+            [
+                vec!["clip-a", "clip-b"],
+                vec!["long-1"],
+                vec!["clip@4", "clip@5"],
+                vec!["long-2"],
+                vec!["clip@6", "clip@7"],
+            ]
+        );
+        assert_eq!(lanes.pending_names(), ["clip@8"]);
+    }
+
+    #[test]
+    fn long_form_amid_steady_clips_waits_for_one_clip_batch() {
+        // Clip traffic that never lets up delays a flagged recording just
+        // over 30 s by one clip batch, not for as long as clips keep coming.
+        let mut lanes = Lanes::new(720_000);
+        lanes.arrive(long_form(240), "long-240s", 0);
+        assert_eq!(lanes.take(), ["long-240s"]);
+
+        // A clip and a 31 s recording land while long-240s runs, and one more
+        // clip lands while each later batch runs.
+        lanes.arrive(clip(4), "clip@1", 1_000);
+        lanes.arrive(long_form(31), "long-31s", 2_000);
+        let mut served = Vec::new();
+        for second in 3..7 {
+            lanes.arrive(clip(4), &format!("clip@{second}"), second * 1_000);
+            served.push(lanes.take());
+        }
+
+        assert_eq!(
+            served,
+            [
+                vec!["clip@1", "clip@3"],
+                vec!["long-31s"],
+                vec!["clip@4", "clip@5"],
+                vec!["clip@6"],
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn try_drain_takes_turns_and_keeps_counts_consistent() {
+        let b = BatchFormer::<LaneItem, &str>::new(BatchConfig {
+            max_batch_cost: 720_000,
+            ..BatchConfig::default()
+        });
+        b.submit_many(vec![
+            (clip(5), "clip-5s"),
+            (long_form(240), "long-240s"),
+            (clip(8), "clip-8s"),
+            (long_form(200), "long-200s"),
+            (clip(3), "clip-3s"),
+        ])
+        .await;
+
+        let expected: [(usize, &[&str], usize, u64); 4] = [
+            (1, &["clip-3s"], 4, 453_000),
+            (4, &["long-240s"], 3, 213_000),
+            (2, &["clip-5s", "clip-8s"], 1, 200_000),
+            (usize::MAX, &["long-200s"], 0, 0),
+        ];
+        for (max_items, names, pending_count, pending_cost) in expected {
+            let batch = b.try_drain_up_to(max_items).await.expect("work is pending");
+            assert_eq!(batch.metadata, names);
+            assert_eq!(
+                batch.total_cost,
+                batch.items.iter().map(|item| item.cost).sum::<u64>()
+            );
+            assert_eq!(b.pending_count().await, pending_count);
+            assert_eq!(b.pending_cost().await, pending_cost);
+        }
+        assert!(b.try_drain().await.is_none());
+        assert!(b.first_request_time().await.is_none());
+        assert_eq!(b.fcfs_head_ns(), 0);
+    }
+
+    #[tokio::test]
+    async fn runs_alone_batch_keeps_flush_reason_and_reanchors_timers() {
+        let b = BatchFormer::<LaneItem, &str>::new(BatchConfig {
+            max_batch_cost: 16_384,
+            max_batch_wait_ms: 10_000.0,
+            coalesce_ms: 10_000.0,
+            coalesce_ratio: 1.0,
+            ..BatchConfig::default()
+        });
+        b.submit(long_form(240), "long").await;
+        // Keep the two arrivals distinct so the long recording is the oldest.
+        tsleep(TDuration::from_millis(2)).await;
+        b.submit(clip(5), "clip").await;
+        let clip_arrival = b.inner.lock().await.pending[1].arrival_time;
+
+        // 245 s pending reaches the cost cap; the oldest request's lane goes first.
+        let batch = b.try_get_batch().await.expect("cost cap should trigger");
+        assert_eq!(batch.metadata, ["long"]);
+        assert_eq!(batch.flush_reason, FlushReason::CostCap);
+        {
+            let guard = b.inner.lock().await;
+            assert_eq!(guard.first_request_time, Some(clip_arrival));
+            assert_eq!(guard.last_submit_time, Some(clip_arrival));
+        }
+        assert_ne!(b.fcfs_head_ns(), 0, "the clip stays visible to FCFS");
+        assert!(
+            b.try_get_batch().await.is_none(),
+            "the clip waits for its own window"
+        );
+    }
+
+    /// Checks one extract against the lane rules while a randomized load runs.
+    #[derive(Default)]
+    struct LaneAudit {
+        served: Vec<String>,
+        last_alone: Option<bool>,
+        /// Pending flagged item -> (flagged items ahead of it on arrival,
+        /// batches of clips served since it arrived).
+        flagged_waits: std::collections::HashMap<String, (usize, usize)>,
+    }
+
+    impl LaneAudit {
+        fn extract(&mut self, lanes: &mut Lanes, max_items: usize) {
+            let pending: Vec<(bool, Instant)> = lanes
+                .inner
+                .pending
+                .iter()
+                .map(|request| (request.item.alone, request.arrival_time))
+                .collect();
+            let batch = lanes.take_up_to(max_items);
+            assert!(batch.size() > 0);
+            let alone = batch.items[0].alone;
+            assert!(
+                batch.items.iter().all(|item| item.alone == alone),
+                "lanes never share a batch"
+            );
+            if alone {
+                assert_eq!(batch.size(), 1, "a flagged item runs alone");
+            }
+            let both_pending = pending.iter().any(|&(a, _)| a) && pending.iter().any(|&(a, _)| !a);
+            if both_pending {
+                // The lanes take turns, starting with the lane of the oldest request.
+                let (oldest_alone, _) = *pending.iter().min_by_key(|&&(_, at)| at).unwrap();
+                assert_eq!(alone, self.last_alone.map_or(oldest_alone, |last| !last));
+            }
+            self.last_alone = Some(alone);
+            if alone {
+                let (ahead, clip_batches) = self
+                    .flagged_waits
+                    .remove(&batch.metadata[0])
+                    .expect("flagged item was pending");
+                assert!(
+                    clip_batches <= ahead + 1,
+                    "{clip_batches} clip batches with {ahead} ahead"
+                );
+            } else {
+                for wait in self.flagged_waits.values_mut() {
+                    wait.1 += 1;
+                }
+            }
+            self.served.extend(batch.metadata);
+        }
+    }
+
+    #[test]
+    fn lanes_never_mix_and_take_turns_at_any_cost_cap() {
+        // The adaptive cost range (4096-65536 ms), its 16384 ms starting
+        // point, and the hard audio cap.
+        for max_batch_cost in [4_096, 16_384, 65_536, 720_000] {
+            let mut rng = TestRng(max_batch_cost);
+            let mut lanes = Lanes::new(max_batch_cost);
+            let mut audit = LaneAudit::default();
+            let mut submitted = Vec::new();
+            let mut now_ms = 0;
+
+            for index in 0..300 {
+                now_ms += rng.range(1, 2_000);
+                if rng.chance(60) {
+                    let name = format!("item-{index}");
+                    let item = if rng.chance(30) {
+                        let ahead = audit.flagged_waits.len();
+                        audit.flagged_waits.insert(name.clone(), (ahead, 0));
+                        long_form_ms(rng.range(30_001, 300_000))
+                    } else {
+                        clip_ms(rng.range(1_000, 30_000))
+                    };
+                    lanes.arrive(item, &name, now_ms);
+                    submitted.push(name);
+                }
+                if !lanes.inner.pending.is_empty() && rng.chance(50) {
+                    let max_items = rng.pick(&[usize::MAX, 1, 3]);
+                    audit.extract(&mut lanes, max_items);
+                }
+            }
+            while !lanes.inner.pending.is_empty() {
+                let max_items = rng.pick(&[usize::MAX, 1, 3]);
+                audit.extract(&mut lanes, max_items);
+            }
+
+            audit.served.sort();
+            submitted.sort();
+            assert_eq!(audit.served, submitted, "cap {max_batch_cost}");
+            assert!(audit.flagged_waits.is_empty());
+            assert_eq!(lanes.inner.total_cost, 0);
+        }
     }
 }

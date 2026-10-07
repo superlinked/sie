@@ -542,7 +542,14 @@ backend-owned, so its scheduler wrapper caches the same model-independent proxy
 as Python: Unicode character count plus 1024 per media input, summed once per
 query/document pair. The cached score estimate never enters the IPC schema,
 never mutates or truncates inputs, and is not an authoritative token or billing
-count. Extract currently uses unit cost.
+count. Extract uses the prepared audio duration in milliseconds when the
+sidecar decoded the item's audio, and unit cost otherwise.
+
+Prepared audio longer than 30 s (Whisper's feature window) never shares a
+batch, whatever the model. Such recordings are served one per batch in arrival
+order, and while other items are pending too the two kinds take turns: a
+cost-sorted batch of the other items, then the oldest long recording. When no
+long recording is pending, batch formation is unchanged.
 
 A model whose descriptor reports `max_concurrent_dispatch` above 1 fronts an
 engine that batches continuously, such as SGLang serving an OCR model. A shared
