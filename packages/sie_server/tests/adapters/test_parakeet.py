@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import dataclasses
+import logging
 import re
 import sys
+from itertools import pairwise
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -20,6 +22,7 @@ from sie_server.adapters.parakeet.adapter import (
     SUPPORTED_LANGUAGES,
     ParakeetTDTAdapter,
     _length_chunks,
+    _pause_windows,
     _segments_from_words,
     _Transcript,
     _words_from_tokens,
@@ -38,6 +41,10 @@ MODEL_ID = "nvidia/parakeet-tdt-0.6b-v3"
 BLANK = 9
 VOCAB = 10
 DURATIONS = (0, 1, 2, 3, 4)
+SAMPLE_RATE = 16_000
+# 100 ms cut-search frame and 30 s longest piece, in samples.
+FRAME = 1_600
+PIECE = 30 * SAMPLE_RATE
 
 
 # ---------------------------------------------------------------------------
@@ -236,6 +243,13 @@ def _payload(*, duration_ms: int = 1_000) -> AudioPayload:
         source_sample_count=sample_count,
         source_channels=1,
         container="wav",
+    )
+
+
+def _samples_payload(samples: np.ndarray) -> AudioPayload:
+    return dataclasses.replace(
+        _payload(duration_ms=samples.shape[0] // 16),
+        pcm_s16le=samples.astype("<i2").tobytes(),
     )
 
 
@@ -624,6 +638,229 @@ def test_segments_split_at_sentence_ends_and_after_thirty_seconds() -> None:
         {"id": 4, "start": 32.5, "end": 33.0, "text": "tail"},
     ]
     assert _segments_from_words([]) == []
+
+
+# ---------------------------------------------------------------------------
+# Long audio: pieces cut at pauses
+# ---------------------------------------------------------------------------
+
+
+def _with_frames(seconds: float, level: float, frames: dict[int, float]) -> np.ndarray:
+    """``seconds`` of constant ``level`` with each listed 100 ms frame set to its own level."""
+    waveform = np.full(round(seconds * SAMPLE_RATE), level, dtype=np.float32)
+    for frame, frame_level in frames.items():
+        waveform[frame * FRAME : (frame + 1) * FRAME] = frame_level
+    return waveform
+
+
+def _cut(frame: int) -> int:
+    return frame * FRAME + FRAME // 2
+
+
+@pytest.mark.parametrize("length", [0, 1, SAMPLE_RATE, PIECE - 1, PIECE])
+def test_pause_windows_keep_audio_of_at_most_thirty_seconds_whole(length: int) -> None:
+    waveform = np.ones(length, dtype=np.float32)
+    waveform[25 * SAMPLE_RATE : 26 * SAMPLE_RATE] = 0.0
+
+    assert _pause_windows(waveform, SAMPLE_RATE) == [(0, length)]
+
+
+def test_pause_windows_split_audio_one_sample_over_thirty_seconds() -> None:
+    waveform = np.ones(PIECE + 1, dtype=np.float32)
+    waveform[250 * FRAME : 251 * FRAME] = 0.0
+
+    assert _pause_windows(waveform, SAMPLE_RATE) == [(0, _cut(250)), (_cut(250), PIECE + 1)]
+
+
+@pytest.mark.parametrize("quiet_frame", [220, 263, 299])
+def test_pause_windows_cut_at_the_quietest_frame_in_the_last_eight_seconds(quiet_frame: int) -> None:
+    # Frames 220-299 (22.0-30.0 s) are searched; the silent frames just outside
+    # them are not. The quietest frame holds one click (RMS 0.0125); frame 240,
+    # a steady hum (RMS 0.05), has the lower peak but is louder by RMS.
+    waveform = _with_frames(40, 1.0, {219: 0.0, 300: 0.0, quiet_frame: 0.0, 240: 0.05})
+    waveform[quiet_frame * FRAME + 10] = 0.5
+
+    assert _pause_windows(waveform, SAMPLE_RATE) == [(0, _cut(quiet_frame)), (_cut(quiet_frame), waveform.shape[0])]
+
+
+def test_pause_windows_take_the_first_of_equally_quiet_frames() -> None:
+    waveform = _with_frames(40, 1.0, {230: 0.0, 270: 0.0})
+
+    assert _pause_windows(waveform, SAMPLE_RATE)[0] == (0, _cut(230))
+
+
+def test_pause_windows_search_from_each_cut() -> None:
+    # After a cut at 25.05 s the next search is 47.05-55.05 s (frames 470-549),
+    # the last 8 s of 30 s from that cut, so the silent frame at 56 s is not in
+    # it as it would be in the last 8 s before the 60 s mark.
+    waveform = _with_frames(70, 1.0, {250: 0.0, 500: 0.1, 560: 0.0})
+
+    assert _pause_windows(waveform, SAMPLE_RATE) == [
+        (0, _cut(250)),
+        (_cut(250), _cut(500)),
+        (_cut(500), 70 * SAMPLE_RATE),
+    ]
+
+
+@pytest.mark.parametrize("seconds", [30.001, 61.0, 95.55, 720.0])
+def test_pause_windows_cover_the_recording_with_contiguous_pieces_of_at_most_thirty_seconds(seconds: float) -> None:
+    rng = np.random.default_rng(7)
+    length = round(seconds * SAMPLE_RATE)
+    loudness = np.repeat(rng.random(length // FRAME + 1), FRAME)[:length]
+    waveform = (rng.normal(0.0, 0.1, length) * loudness).astype(np.float32)
+
+    windows = _pause_windows(waveform, SAMPLE_RATE)
+
+    assert len(windows) > 1
+    assert windows[0][0] == 0
+    assert windows[-1][1] == length
+    assert all(end == next_start for (_, end), (next_start, _) in pairwise(windows))
+    assert all(0 < end - start <= PIECE for start, end in windows)
+    # Every cut falls in the last 8 s before its piece's 30 s mark.
+    assert all(start + PIECE - 8 * SAMPLE_RATE <= end < start + PIECE for start, end in windows[:-1])
+
+
+def _recording_decoder(texts: dict[tuple[int, float], _Transcript]) -> tuple[Any, list[tuple[list[int], float]]]:
+    """A ``_decode`` stand-in returning ``texts[(row length, offset_s)]`` or an empty transcript."""
+    calls: list[tuple[list[int], float]] = []
+
+    def fake_decode(waveforms: list[np.ndarray], *, offset_s: float = 0.0) -> list[_Transcript]:
+        calls.append(([waveform.shape[0] for waveform in waveforms], offset_s))
+        return [
+            dataclasses.replace(texts.get((waveform.shape[0], offset_s), _Transcript()), offset_s=offset_s)
+            for waveform in waveforms
+        ]
+
+    return fake_decode, calls
+
+
+def _hypothesis(step_id: int) -> TdtHypothesis:
+    return TdtHypothesis(token_ids=[step_id], step_ids=[step_id], step_durations=[1])
+
+
+def test_requests_of_at_most_thirty_seconds_are_decoded_whole() -> None:
+    adapter = _loaded_adapter()
+    # Exactly 30 s, with a pause where longer audio would be cut.
+    samples = np.full(PIECE, 1_000, dtype="<i2")
+    samples[250 * FRAME : 251 * FRAME] = 0
+    adapter._decode, calls = _recording_decoder({(PIECE, 0.0): _Transcript(text="Whole.", hypothesis=_hypothesis(1))})
+    adapter._processor.decode.return_value = (["Whole."], [[_timed("Whole", 29.5, 29.9), _timed(".", 29.9, 30.4)]])
+
+    output = adapter.extract(
+        [Item()],
+        options={"timestamp_granularities": ["word"]},
+        prepared_items=_prepared(_samples_payload(samples)),
+    )
+
+    assert calls == [([PIECE], 0.0)]
+    assert output.data == [
+        {
+            "text": "Whole.",
+            "language": None,
+            "duration_ms": 30_000,
+            "words": [{"word": "Whole.", "start": 29.5, "end": 30.0}],
+        }
+    ]
+
+
+def _long_samples() -> np.ndarray:
+    """70 s whose quietest frames cut it into 25.05, 27.0 and 17.95 s pieces."""
+    samples = np.full(70 * SAMPLE_RATE, 1_000, dtype="<i2")
+    for frame in (250, 520):
+        samples[frame * FRAME : (frame + 1) * FRAME] = 0
+    return samples
+
+
+def test_long_request_is_decoded_as_pieces_and_joins_their_texts(caplog: pytest.LogCaptureFixture) -> None:
+    adapter = _loaded_adapter()
+    first, middle, last = _cut(250), _cut(520) - _cut(250), 70 * SAMPLE_RATE - _cut(520)
+    adapter._decode, calls = _recording_decoder(
+        {
+            (first, 0.0): _Transcript(text="First piece."),
+            (last, 0.0): _Transcript(text="Last piece."),
+            (SAMPLE_RATE, 0.0): _Transcript(text="Short."),
+        }
+    )
+
+    with caplog.at_level(logging.DEBUG, logger=parakeet_adapter.__name__):
+        output = adapter.extract(
+            [Item(), Item()],
+            prepared_items=_prepared(_samples_payload(_long_samples()), _payload(duration_ms=1_000)),
+        )
+
+    assert (first, middle, last) == (400_800, 432_000, 287_200)
+    assert calls == [
+        # Every piece of every request is a row of the same length-grouped pass.
+        ([middle, first, last, SAMPLE_RATE], 0.0),
+        # The empty middle piece is re-decoded with padding, and stays empty.
+        ([middle + 4_000], 0.0),
+        ([middle + 8_000], 0.25),
+    ]
+    assert output.batch_size == 2
+    assert output.data == [
+        {"text": "First piece. Last piece.", "language": None, "duration_ms": 70_000},
+        {"text": "Short.", "language": None, "duration_ms": 1_000},
+    ]
+    assert "Decoding 70.0 s of audio as 3 Parakeet pieces cut at pauses" in caplog.text
+
+
+def test_long_request_timestamps_are_shifted_to_each_piece_and_never_span_two() -> None:
+    adapter = _loaded_adapter()
+    first, middle, last = _cut(250), _cut(520) - _cut(250), 70 * SAMPLE_RATE - _cut(520)
+    adapter._decode, calls = _recording_decoder(
+        {
+            (first, 0.0): _Transcript(text="Good morning,", hypothesis=_hypothesis(1)),
+            # The middle piece decodes empty, then recovers with 0.25 s on both sides.
+            (middle + 8_000, 0.25): _Transcript(text="everyone. So", hypothesis=_hypothesis(2)),
+            (last, 0.0): _Transcript(text="far so good. Bye", hypothesis=_hypothesis(3)),
+        }
+    )
+    # Token times relative to each decoded row; the first token of a piece has no leading space.
+    row_tokens = {
+        1: [_timed("Good", 23.0, 23.4), _timed(" morning", 24.4, 25.3), _timed(",", 25.3, 25.4)],
+        2: [_timed("every", 0.1, 0.65), _timed("one", 0.65, 0.81), _timed(".", 0.81, 0.81), _timed(" So", 26.0, 26.5)],
+        3: [
+            _timed("far", 0.0, 0.3),
+            _timed(" so", 0.4, 0.6),
+            _timed(" good", 0.7, 1.0),
+            _timed(".", 1.0, 1.0),
+            _timed(" Bye", 17.9, 18.1),
+        ],
+    }
+    adapter._processor.decode.side_effect = lambda ids, **_: (["text"], [row_tokens[int(ids[0, 0])]])
+
+    output = adapter.extract(
+        [Item()],
+        options={"timestamp_granularities": ["word", "segment"]},
+        prepared_items=_prepared(_samples_payload(_long_samples())),
+    )
+
+    assert calls == [([middle, first, last], 0.0), ([middle + 4_000], 0.0), ([middle + 8_000], 0.25)]
+    (data,) = output.data or []
+    assert data["text"] == "Good morning, everyone. So far so good. Bye"
+    assert data["duration_ms"] == 70_000
+    # Pieces span 0-25.05, 25.05-52.05 and 52.05-70.0 s. Each token is shifted by
+    # its piece's start (less the retry's 0.25 s leading pad) and kept within the
+    # piece, so "morning," ends at the first cut and "every" starts there.
+    words = data["words"]
+    assert words == [
+        {"word": "Good", "start": 23.0, "end": 23.4},
+        {"word": "morning,", "start": 24.4, "end": 25.05},
+        {"word": "everyone.", "start": 25.05, "end": 25.61},
+        {"word": "So", "start": 50.8, "end": 51.3},
+        {"word": "far", "start": 52.05, "end": 52.35},
+        {"word": "so", "start": 52.45, "end": 52.65},
+        {"word": "good.", "start": 52.75, "end": 53.05},
+        {"word": "Bye", "start": 69.95, "end": 70.0},
+    ]
+    assert all(word["start"] <= word["end"] for word in words)
+    assert all(word["end"] <= after["start"] for word, after in pairwise(words))
+    # A sentence that crosses a cut makes one segment.
+    assert data["segments"] == [
+        {"id": 0, "start": 23.0, "end": 25.61, "text": "Good morning, everyone."},
+        {"id": 1, "start": 50.8, "end": 53.05, "text": "So far so good."},
+        {"id": 2, "start": 69.95, "end": 70.0, "text": "Bye"},
+    ]
 
 
 def _fake_transformers(
