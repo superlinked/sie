@@ -5,6 +5,7 @@ default: false
 # Do NOT copy all default adapters — they may break with the newer version.
 adapters:
 - sie_server.adapters.lighton_ocr.adapter
+- sie_server.adapters.qwen3_asr.adapter
 - sie_server.adapters.glm_ocr
 - sie_server.adapters.gliner2.classification
 - sie_server.adapters.gliner2.decide
