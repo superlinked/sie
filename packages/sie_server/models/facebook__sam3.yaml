@@ -1,0 +1,50 @@
+# SAM 3 (Meta): open-vocabulary detection with one concept prompt per caller
+# label. Returns the standard objects list (label, score, [x, y, w, h] pixel
+# box). SAM 3 also predicts an instance mask per detection; masks are not
+# returned.
+#
+# LICENSE: SAM License (Meta, last updated 2025-11-19). This is not an OSI
+# license. It allows use, reproduction, distribution and derivative works under
+# its terms, and any redistribution of the materials must include a copy of the
+# agreement. Read https://huggingface.co/facebook/sam3/blob/main/LICENSE before
+# serving this model.
+#
+# GATED: facebook/sam3 is a gated Hugging Face repo, and Meta approves access
+# requests manually. The server needs an HF_TOKEN from an approved account.
+# Without one the registry records a terminal GATED failure and the API returns
+# MODEL_LOAD_FAILED.
+#
+# Needs Sam3Model / Sam3Processor from Transformers 5, so the adapter is
+# served from the transformers5 bundle only.
+#
+# score_threshold 0.3 is the default threshold of
+# Sam3Processor.post_process_object_detection in Transformers 5.14 to 5.19.
+# Scores are sigmoid(instance logit) x sigmoid(presence logit), and a detection
+# is kept when its score is strictly above the threshold. The model card's
+# examples pass threshold=0.5 explicitly, and Meta's reference sam3 package
+# defaults to 0.5. Callers can pass score_threshold per request.
+#
+# compute_precision bfloat16 matches Meta's reference example notebook, which
+# runs under bfloat16 autocast. Scores are computed in float32.
+sie_id: facebook/sam3
+hf_id: facebook/sam3
+hf_revision: 3c879f39826c281e95690f02c7821c4de09afae7
+inputs:
+  text: false
+  image: true
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: null
+  extract: {}
+profiles:
+  default:
+    max_batch_tokens: 16384
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.sam3.adapter:Sam3Adapter
+    adapter_options:
+      loadtime:
+        score_threshold: 0.3
+      runtime:
+        score_threshold: 0.3
