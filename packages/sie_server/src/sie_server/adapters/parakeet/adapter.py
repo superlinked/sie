@@ -23,11 +23,14 @@ that budget no batch needs more memory than a single recording of the budget's
 length.
 
 The model occasionally returns nothing for a short, tightly cut clip that
-contains speech. Each empty row of at most ``_EMPTY_RETRY_MAX_S`` (30 s) is
-decoded again on its own, first with 0.25 s of silence appended and then, if
-still empty, with 0.25 s on both sides. Padding is never added to the batched
-pass, where it lowers accuracy. Every piece is within that limit, so audio
-that decodes to nothing (silence, music) runs through the encoder three times.
+contains speech. When a request's last piece (the whole request, for audio of
+at most 30 s) decodes to nothing, it is decoded again on its own, first with
+0.25 s of silence appended and then, if still empty, with 0.25 s on both
+sides. Padding is never added to the batched pass, where it lowers accuracy.
+Earlier pieces are not re-decoded: they are 22-30 s long and end at a pause,
+every empty row the padding recovered in testing was under 12 s, and a long
+recording that decodes to nothing (silence, music) would otherwise run through
+the encoder three times.
 """
 
 from __future__ import annotations
@@ -51,7 +54,7 @@ from sie_server.core.prepared import AudioPayload
 from sie_server.core.preprocessor.audio import AudioPreprocessor
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Container, Sequence
 
     from sie_server.types.inputs import Item
 
@@ -104,8 +107,6 @@ _CUT_SEARCH_S = 8.0
 _CUT_FRAME_S = 0.1
 # Seconds of silence (leading, trailing) for the re-decodes of an empty row, in order.
 _EMPTY_RETRY_PADDING_S = ((0.0, 0.25), (0.25, 0.25))
-# Longest empty row, in seconds, that is re-decoded with padding.
-_EMPTY_RETRY_MAX_S = 30.0
 # A segment ends at a word ending in sentence-final punctuation (. ! ? or an
 # ellipsis, optionally followed by closing quotes or brackets), or once it spans
 # this many seconds.
@@ -267,6 +268,7 @@ class ParakeetTDTAdapter(BaseAdapter):
         waveforms = [_waveform(payload) for payload in payloads]
         windows = [_pause_windows(waveform, self._sample_rate) for waveform in waveforms]
         rows: list[np.ndarray] = []
+        last_rows: set[int] = set()
         for waveform, spans in zip(waveforms, windows, strict=True):
             if len(spans) > 1:
                 logger.debug(
@@ -275,7 +277,8 @@ class ParakeetTDTAdapter(BaseAdapter):
                     len(spans),
                 )
             rows.extend(waveform[start:end] for start, end in spans)
-        transcripts = self._transcribe(rows)
+            last_rows.add(len(rows) - 1)
+        transcripts = self._transcribe(rows, retry_rows=last_rows)
         data: list[dict[str, Any]] = []
         first = 0
         for spans, payload in zip(windows, payloads, strict=True):
@@ -287,7 +290,8 @@ class ParakeetTDTAdapter(BaseAdapter):
             batch_size=len(data),
         )
 
-    def _transcribe(self, waveforms: list[np.ndarray]) -> list[_Transcript]:
+    def _transcribe(self, waveforms: list[np.ndarray], *, retry_rows: Container[int]) -> list[_Transcript]:
+        """Decode rows in length-grouped passes; an empty row in ``retry_rows`` is re-decoded with padding."""
         transcripts = [_Transcript() for _ in waveforms]
         # A clip too short to normalize holds no speech; it is returned empty.
         decodable = [index for index, waveform in enumerate(waveforms) if waveform.shape[0] >= self._min_samples]
@@ -297,10 +301,9 @@ class ParakeetTDTAdapter(BaseAdapter):
             for row, transcript in zip(rows, self._decode([waveforms[row] for row in rows]), strict=True):
                 transcripts[row] = transcript
 
-        retry_max_samples = round(_EMPTY_RETRY_MAX_S * self._sample_rate)
         retried = 0
         for row in decodable:
-            if transcripts[row].text or waveforms[row].shape[0] > retry_max_samples:
+            if transcripts[row].text or row not in retry_rows:
                 continue
             retried += 1
             for leading_s, trailing_s in _EMPTY_RETRY_PADDING_S:
@@ -487,7 +490,12 @@ def _pause_windows(waveform: np.ndarray, sample_rate: int) -> list[tuple[int, in
     hop = round(_CUT_FRAME_S * sample_rate)
     search = round(_CUT_SEARCH_S * sample_rate)
     frames = total // hop
-    rms = np.sqrt(np.mean(np.square(waveform[: frames * hop].reshape(frames, hop)), axis=1) + 1e-9)
+    # RMS is taken at int16 scale, which is exact for a waveform of int16 / 32768.
+    # There the 1e-9 floor is far below one int16 step squared; on the [-1, 1)
+    # scale it is about one step squared and rounds near-equal quiet frames
+    # into ties.
+    scaled = waveform[: frames * hop].reshape(frames, hop) * np.float32(32_768.0)
+    rms = np.sqrt(np.mean(np.square(scaled), axis=1) + 1e-9)
     windows: list[tuple[int, int]] = []
     start = 0
     while total - start > piece:

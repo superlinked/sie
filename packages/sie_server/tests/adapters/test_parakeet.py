@@ -18,13 +18,13 @@ from packaging.specifiers import SpecifierSet
 from sie_sdk.bundle_utils import match_bundle_models
 from sie_server.adapters.parakeet import adapter as parakeet_adapter
 from sie_server.adapters.parakeet.adapter import (
-    _EMPTY_RETRY_MAX_S,
     SUPPORTED_LANGUAGES,
     ParakeetTDTAdapter,
     _length_chunks,
     _pause_windows,
     _segments_from_words,
     _Transcript,
+    _waveform,
     _words_from_tokens,
 )
 from sie_server.adapters.parakeet.decoding import TdtHypothesis, greedy_tdt_decode
@@ -398,7 +398,7 @@ def test_transcribe_groups_rows_by_padded_length_budget() -> None:
 
     adapter._decode = fake_decode
     lengths = [4_800, 9_600, 24_000, 3_200, 8_000]  # 0.3, 0.6, 1.5, 0.2, 0.5 s
-    transcripts = adapter._transcribe([np.ones(length, dtype=np.float32) for length in lengths])
+    transcripts = adapter._transcribe([np.ones(length, dtype=np.float32) for length in lengths], retry_rows=())
 
     # Longest first; a chunk holds rows * longest <= 1 s; an over-budget row runs alone.
     assert calls == [[24_000], [9_600], [8_000, 4_800], [3_200]]
@@ -433,7 +433,7 @@ def test_empty_rows_are_redecoded_alone_with_end_then_both_sides_padding() -> No
         return results
 
     adapter._decode = fake_decode
-    transcripts = adapter._transcribe(originals)
+    transcripts = adapter._transcribe(originals, retry_rows=range(len(originals)))
 
     assert calls == [
         ([16_000, 8_000, 6_400, 4_800], 0.0),  # one batched pass; the 100-sample clip is too short to decode
@@ -447,7 +447,7 @@ def test_empty_rows_are_redecoded_alone_with_end_then_both_sides_padding() -> No
     assert [transcript.offset_s for transcript in transcripts] == [0.0, 0.0, 0.25, 0.0, 0.0]
 
 
-def test_empty_rows_longer_than_thirty_seconds_are_not_redecoded() -> None:
+def test_only_empty_rows_listed_for_retry_are_redecoded() -> None:
     adapter = _loaded_adapter()
     calls: list[list[int]] = []
 
@@ -456,13 +456,14 @@ def test_empty_rows_longer_than_thirty_seconds_are_not_redecoded() -> None:
         return [_transcript("", offset_s) for _ in waveforms]
 
     adapter._decode = fake_decode
-    limit = round(_EMPTY_RETRY_MAX_S * 16_000)
-    transcripts = adapter._transcribe([np.ones(limit + 1, dtype=np.float32), np.ones(limit, dtype=np.float32)])
+    transcripts = adapter._transcribe(
+        [np.ones(PIECE + 1, dtype=np.float32), np.ones(PIECE, dtype=np.float32), np.ones(8_000, dtype=np.float32)],
+        retry_rows={1},
+    )
 
-    assert _EMPTY_RETRY_MAX_S == 30.0
-    # The row just over 30 s gets only the batched pass; the 30 s row is retried twice.
-    assert calls == [[limit + 1, limit], [limit + 4_000], [limit + 8_000]]
-    assert [transcript.text for transcript in transcripts] == ["", ""]
+    # Every row gets the batched pass; only row 1 is retried, twice.
+    assert calls == [[PIECE + 1, PIECE, 8_000], [PIECE + 4_000], [PIECE + 8_000]]
+    assert [transcript.text for transcript in transcripts] == ["", "", ""]
 
 
 def test_decode_runs_encoder_then_greedy_loop_and_processor_text(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -689,17 +690,46 @@ def test_pause_windows_take_the_first_of_equally_quiet_frames() -> None:
     assert _pause_windows(waveform, SAMPLE_RATE)[0] == (0, _cut(230))
 
 
-def test_pause_windows_search_from_each_cut() -> None:
-    # After a cut at 25.05 s the next search is 47.05-55.05 s (frames 470-549),
-    # the last 8 s of 30 s from that cut, so the silent frame at 56 s is not in
-    # it as it would be in the last 8 s before the 60 s mark.
-    waveform = _with_frames(70, 1.0, {250: 0.0, 500: 0.1, 560: 0.0})
+@pytest.mark.parametrize("quiet_frame", [470, 549])
+def test_pause_windows_search_from_each_cut(quiet_frame: int) -> None:
+    # After the cut at 25.05 s the next search is frames 470-549 (47.0-55.0 s),
+    # whose middles 47.05-54.95 s fall in the last 8 s before 55.05 s, 30 s from
+    # that cut. The silent frames just outside them are not searched; frame 550
+    # would be if the search were the last 8 s before the 60 s mark.
+    waveform = _with_frames(70, 1.0, {250: 0.0, 469: 0.0, quiet_frame: 0.1, 550: 0.0})
 
     assert _pause_windows(waveform, SAMPLE_RATE) == [
         (0, _cut(250)),
-        (_cut(250), _cut(500)),
-        (_cut(500), 70 * SAMPLE_RATE),
+        (_cut(250), _cut(quiet_frame)),
+        (_cut(quiet_frame), 70 * SAMPLE_RATE),
     ]
+
+
+@pytest.mark.parametrize(("extra", "cuts"), [(0, [_cut(250)]), (1, [_cut(250), _cut(520)])])
+def test_pause_windows_cut_again_only_if_more_than_thirty_seconds_remain(extra: int, cuts: list[int]) -> None:
+    # With exactly 30 s after the cut at 25.05 s, that is the last piece; with
+    # one more sample, silent frame 520 is cut too.
+    waveform = np.ones(_cut(250) + PIECE + extra, dtype=np.float32)
+    for frame in (250, 520):
+        waveform[frame * FRAME : (frame + 1) * FRAME] = 0.0
+
+    assert _pause_windows(waveform, SAMPLE_RATE) == list(pairwise([0, *cuts, waveform.shape[0]]))
+
+
+def test_pause_windows_rank_frames_by_rms_at_int16_scale() -> None:
+    # Frame 260 is quieter than frame 230 by one unit of int16 sum of squares
+    # (6,551,882 against 6,551,883). With the RMS floor added on the [-1, 1)
+    # scale the two would tie and the cut would fall in frame 230.
+    samples = np.full(31 * SAMPLE_RATE, 3_000, dtype="<i2")
+    for frame, head in ((230, [63] * 4 + [65] * 3 + [50]), (260, [63] * 2 + [65] * 4 + [46])):
+        samples[frame * FRAME : (frame + 1) * FRAME] = 64
+        samples[frame * FRAME : frame * FRAME + len(head)] = head
+    sums = [int(np.sum(np.square(samples[f * FRAME : (f + 1) * FRAME].astype(np.int64)))) for f in (230, 260)]
+    assert sums == [6_551_883, 6_551_882]
+
+    waveform = _waveform(_samples_payload(samples))
+
+    assert _pause_windows(waveform, SAMPLE_RATE) == [(0, _cut(260)), (_cut(260), samples.shape[0])]
 
 
 @pytest.mark.parametrize("seconds", [30.001, 61.0, 95.55, 720.0])
@@ -763,9 +793,11 @@ def test_requests_of_at_most_thirty_seconds_are_decoded_whole() -> None:
     ]
 
 
-def _long_samples() -> np.ndarray:
-    """70 s whose quietest frames cut it into 25.05, 27.0 and 17.95 s pieces."""
-    samples = np.full(70 * SAMPLE_RATE, 1_000, dtype="<i2")
+def _long_samples(levels: tuple[int, int, int] = (1_000, 2_000, 3_000)) -> np.ndarray:
+    """70 s whose silent frames cut it into 25.05, 27.0 and 17.95 s pieces of the given levels."""
+    samples = np.empty(70 * SAMPLE_RATE, dtype="<i2")
+    for (start, end), level in zip(pairwise([0, _cut(250), _cut(520), samples.shape[0]]), levels, strict=True):
+        samples[start:end] = level
     for frame in (250, 520):
         samples[frame * FRAME : (frame + 1) * FRAME] = 0
     return samples
@@ -789,13 +821,10 @@ def test_long_request_is_decoded_as_pieces_and_joins_their_texts(caplog: pytest.
         )
 
     assert (first, middle, last) == (400_800, 432_000, 287_200)
-    assert calls == [
-        # Every piece of every request is a row of the same length-grouped pass.
-        ([middle, first, last, SAMPLE_RATE], 0.0),
-        # The empty middle piece is re-decoded with padding, and stays empty.
-        ([middle + 4_000], 0.0),
-        ([middle + 8_000], 0.25),
-    ]
+    # Every piece of every request is a row of the same length-grouped pass. The
+    # empty middle piece is not re-decoded with padding: only a request's last
+    # piece is.
+    assert calls == [([middle, first, last, SAMPLE_RATE], 0.0)]
     assert output.batch_size == 2
     assert output.data == [
         {"text": "First piece. Last piece.", "language": None, "duration_ms": 70_000},
@@ -810,21 +839,21 @@ def test_long_request_timestamps_are_shifted_to_each_piece_and_never_span_two() 
     adapter._decode, calls = _recording_decoder(
         {
             (first, 0.0): _Transcript(text="Good morning,", hypothesis=_hypothesis(1)),
-            # The middle piece decodes empty, then recovers with 0.25 s on both sides.
-            (middle + 8_000, 0.25): _Transcript(text="everyone. So", hypothesis=_hypothesis(2)),
-            (last, 0.0): _Transcript(text="far so good. Bye", hypothesis=_hypothesis(3)),
+            (middle, 0.0): _Transcript(text="everyone. So", hypothesis=_hypothesis(2)),
+            # The last piece decodes empty, then recovers with 0.25 s on both sides.
+            (last + 8_000, 0.25): _Transcript(text="far so good. Bye", hypothesis=_hypothesis(3)),
         }
     )
     # Token times relative to each decoded row; the first token of a piece has no leading space.
     row_tokens = {
         1: [_timed("Good", 23.0, 23.4), _timed(" morning", 24.4, 25.3), _timed(",", 25.3, 25.4)],
-        2: [_timed("every", 0.1, 0.65), _timed("one", 0.65, 0.81), _timed(".", 0.81, 0.81), _timed(" So", 26.0, 26.5)],
+        2: [_timed("every", 0.0, 0.4), _timed("one", 0.4, 0.56), _timed(".", 0.56, 0.56), _timed(" So", 25.75, 26.25)],
         3: [
-            _timed("far", 0.0, 0.3),
-            _timed(" so", 0.4, 0.6),
-            _timed(" good", 0.7, 1.0),
-            _timed(".", 1.0, 1.0),
-            _timed(" Bye", 17.9, 18.1),
+            _timed("far", 0.1, 0.55),
+            _timed(" so", 0.65, 0.85),
+            _timed(" good", 0.95, 1.25),
+            _timed(".", 1.25, 1.25),
+            _timed(" Bye", 18.15, 18.4),
         ],
     }
     adapter._processor.decode.side_effect = lambda ids, **_: (["text"], [row_tokens[int(ids[0, 0])]])
@@ -835,13 +864,14 @@ def test_long_request_timestamps_are_shifted_to_each_piece_and_never_span_two() 
         prepared_items=_prepared(_samples_payload(_long_samples())),
     )
 
-    assert calls == [([middle, first, last], 0.0), ([middle + 4_000], 0.0), ([middle + 8_000], 0.25)]
+    assert calls == [([middle, first, last], 0.0), ([last + 4_000], 0.0), ([last + 8_000], 0.25)]
     (data,) = output.data or []
     assert data["text"] == "Good morning, everyone. So far so good. Bye"
     assert data["duration_ms"] == 70_000
     # Pieces span 0-25.05, 25.05-52.05 and 52.05-70.0 s. Each token is shifted by
-    # its piece's start (less the retry's 0.25 s leading pad) and kept within the
-    # piece, so "morning," ends at the first cut and "every" starts there.
+    # its piece's start (less the retry's 0.25 s leading pad, in the last piece)
+    # and kept within the piece, so "morning," ends at the first cut and "far"
+    # starts at the second.
     words = data["words"]
     assert words == [
         {"word": "Good", "start": 23.0, "end": 23.4},
@@ -861,6 +891,44 @@ def test_long_request_timestamps_are_shifted_to_each_piece_and_never_span_two() 
         {"id": 1, "start": 50.8, "end": 53.05, "text": "So far so good."},
         {"id": 2, "start": 69.95, "end": 70.0, "text": "Bye"},
     ]
+
+
+def test_long_silent_request_re_decodes_only_its_last_piece() -> None:
+    adapter = _loaded_adapter()
+    adapter._decode, calls = _recording_decoder({})
+
+    output = adapter.extract([Item()], prepared_items=_prepared(_payload(duration_ms=70_000)))
+
+    # Silence ties every frame, so each cut is at the first frame searched:
+    # pieces of 22.05, 22.0 and 25.95 s. Only the last is re-decoded.
+    assert calls == [([415_200, 352_800, 352_000], 0.0), ([419_200], 0.0), ([423_200], 0.25)]
+    assert output.data == [{"text": "", "language": None, "duration_ms": 70_000}]
+
+
+def _levels_decode(waveforms: list[np.ndarray], *, offset_s: float = 0.0) -> list[_Transcript]:
+    """A ``_decode`` stand-in whose text for a row lists the non-zero int16 levels in it."""
+    return [
+        _Transcript(text="+".join(str(level) for level in np.unique(np.rint(row * 32_768).astype(int)) if level))
+        for row in waveforms
+    ]
+
+
+def test_each_request_gets_the_texts_of_its_own_pieces_in_order() -> None:
+    adapter = _loaded_adapter()
+    adapter._decode = _levels_decode
+
+    output = adapter.extract(
+        [Item(), Item(), Item()],
+        prepared_items=_prepared(
+            _samples_payload(_long_samples((1_000, 2_000, 3_000))),
+            _samples_payload(_long_samples((4_000, 5_000, 6_000))),
+            _samples_payload(np.full(SAMPLE_RATE, 7_000, dtype="<i2")),
+        ),
+    )
+
+    # Each row is the recording between its cuts, and each request takes its
+    # own rows from the shared pass.
+    assert [data["text"] for data in output.data or []] == ["1000 2000 3000", "4000 5000 6000", "7000"]
 
 
 def _fake_transformers(
