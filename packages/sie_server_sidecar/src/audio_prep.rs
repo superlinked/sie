@@ -13,6 +13,16 @@ pub use sie_audio_prep::msgpack::{AudioPreparation, PrepareAudioError};
 
 pub const MAX_AUDIO_BATCH_DURATION_MS: u64 = sie_audio_prep::DEFAULT_MAX_DURATION_MS;
 
+/// Prepared audio with more samples than this is long-form: the scheduler
+/// serves it in a batch of its own (see `HasCost::runs_alone`, #585).
+///
+/// The value is 30 s at the target sample rate, Whisper's feature window
+/// (`WhisperFeatureExtractor.n_samples`). The Python server's Whisper adapter
+/// flags audio past the same window `runs_alone` through
+/// `AudioPreprocessor(runs_alone_above_samples=feature_extractor.n_samples)`;
+/// the sidecar applies the threshold to prepared audio for every model.
+pub const RUNS_ALONE_ABOVE_SAMPLES: u64 = 30 * sie_audio_prep::TARGET_SAMPLE_RATE as u64;
+
 /// Classify cheap pass-through inputs before the dispatcher acquires the
 /// bounded decode permit. Duplicate top-level audio fields are still rejected.
 pub fn classify_item(item: WireValue) -> Result<AudioPreparation, PrepareAudioError> {
