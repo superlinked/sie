@@ -64,7 +64,9 @@ GLiClass models (`knowledgator/gliclass-*` and the `knowledgator/opir-*`
 guardrail models) score text against labels passed with each request. Every
 label comes back in `classifications`, sorted by score. By default the scores
 form one distribution that sums to 1; `options={"classification_type":
-"multi-label"}` scores each label independently instead.
+"multi-label"}` scores each label independently instead. A request with a
+single label is always scored independently: its score is the probability that
+the label applies, not a distribution of one.
 
 ```python
 ticket = Item(text="I was charged twice and support has not replied in three days.")

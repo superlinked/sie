@@ -167,6 +167,22 @@ def test_labels_requests_score_bit_for_bit_like_the_pipeline(
     assert _scores(output) == rig.pipeline_scores(_TEXTS, _LABELS, classification_type, **context)
 
 
+def test_one_label_is_scored_on_its_own_in_single_label_mode(rig: _Rig) -> None:
+    # The pipeline's single-label softmax over one label is 1.0 whatever the text.
+    # The adapter scores a lone label as multi-label does: its own sigmoid.
+    label: list[str] = [_LABELS[0]]
+    items = [Item(text=text) for text in _TEXTS]
+
+    default = rig.adapter.extract(items, labels=label)
+    single = rig.adapter.extract(items, labels=label, options={"classification_type": "single-label"})
+    multi = rig.adapter.extract(items, labels=label, options={"classification_type": "multi-label"})
+
+    assert rig.pipeline_scores(_TEXTS, label, "single-label") == [{label[0]: 1.0}] * len(_TEXTS)
+    assert _scores(multi) == rig.pipeline_scores(_TEXTS, label, "multi-label")
+    assert _scores(default) == _scores(single) == _scores(multi)
+    assert all(0.0 < row[label[0]] < 1.0 for row in _scores(single))
+
+
 @pytest.mark.parametrize("classification_type", ["single-label", "multi-label"])
 def test_separate_groups_score_like_one_labels_request_per_group(rig: _Rig, classification_type: str) -> None:
     items = [Item(text=text) for text in _TEXTS[:4]]
