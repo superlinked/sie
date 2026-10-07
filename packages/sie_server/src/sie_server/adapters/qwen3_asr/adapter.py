@@ -62,7 +62,13 @@ class Qwen3ASRAdapter(BaseAdapter):
         self._context_limit: int | None = None
 
     def load(self, device: str) -> None:
-        from transformers import AutoModelForMultimodalLM, AutoProcessor
+        import transformers
+        from transformers import AutoProcessor
+
+        model_class = getattr(transformers, "AutoModelForMultimodalLM", None)
+        if model_class is None:
+            msg = "Qwen3-ASR requires the Transformers5 bundle"
+            raise RuntimeError(msg)
 
         dtype = (
             torch.float32
@@ -80,7 +86,7 @@ class Qwen3ASRAdapter(BaseAdapter):
         if self._processor.feature_extractor.sampling_rate != 16_000:
             msg = "Qwen3-ASR requires the 16kHz processor used by prepared audio"
             raise ValueError(msg)
-        self._model = AutoModelForMultimodalLM.from_pretrained(
+        self._model = model_class.from_pretrained(
             self._model_name_or_path,
             dtype=dtype,
             use_safetensors=True,

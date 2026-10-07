@@ -124,6 +124,18 @@ def test_load_uses_native_auto_api_revision_and_dtype(monkeypatch, device, preci
     assert adapter._context_limit == 65536
 
 
+def test_missing_optional_model_api_fails_before_asset_load(monkeypatch) -> None:
+    processor_loader = MagicMock()
+    monkeypatch.setitem(
+        sys.modules,
+        "transformers",
+        SimpleNamespace(AutoProcessor=SimpleNamespace(from_pretrained=processor_loader)),
+    )
+    with pytest.raises(RuntimeError, match="Transformers5 bundle"):
+        Qwen3ASRAdapter(MODEL, revision=REVISION).load("cpu")
+    processor_loader.assert_not_called()
+
+
 def test_full_mixed_duration_waveforms_context_language_and_batch_order() -> None:
     adapter = _loaded(batch_size=2)
     payloads = [_payload(500), _payload(31001), _payload(750)]
