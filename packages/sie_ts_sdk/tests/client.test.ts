@@ -20,7 +20,7 @@ import {
   ServerError,
 } from "../src/errors.js";
 import { packMessage, unpackMessage } from "../src/msgpack.js";
-import type { SIEClientOptions } from "../src/types.js";
+import type { EncodeOptions, SIEClientOptions } from "../src/types.js";
 
 // Mock fetch globally
 const mockFetch = vi.fn();
@@ -604,23 +604,94 @@ describe("SIEClient.encode() - encode options", () => {
     expect(parsed.params?.instruction).toBe("Retrieve passages");
   });
 
-  it("should pass isQuery as is_query in params", async () => {
-    mockFetch.mockResolvedValueOnce(
-      createMsgpackResponse({
-        items: [{ dense: { values: new Float32Array([0.1]) } }],
-      }),
+  describe("query role", () => {
+    const roles = [
+      {
+        role: "true",
+        options: { isQuery: true },
+        wireParams: { options: { is_query: true } },
+      },
+      {
+        role: "false",
+        options: { isQuery: false },
+        wireParams: { options: { is_query: false } },
+      },
+      { role: "omitted", options: {}, wireParams: undefined },
+      { role: "explicit undefined", options: { isQuery: undefined }, wireParams: undefined },
+    ];
+
+    it.each(roles)("serializes $role for a single item", async ({ options, wireParams }) => {
+      const item = { id: "query-1", text: "What is ML?" };
+      mockFetch.mockResolvedValueOnce(
+        createMsgpackResponse({
+          items: [{ id: "query-1", dense: { values: new Float32Array([0.25]) } }],
+        }),
+      );
+
+      const result = await client.encode("BAAI/bge-m3", item, options);
+
+      expect(mockFetch).toHaveBeenCalledOnce();
+      const [url, init] = mockFetch.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe("http://localhost:8080/v1/encode/BAAI%2Fbge-m3");
+      expect(init.method).toBe("POST");
+      expect(init.headers).toMatchObject({
+        "Content-Type": "application/msgpack",
+        Accept: "application/msgpack",
+      });
+      expect(init.body).toBeInstanceOf(Uint8Array);
+      expect(unpackMessage(init.body as Uint8Array)).toStrictEqual(
+        wireParams === undefined ? { items: [item] } : { items: [item], params: wireParams },
+      );
+      expect(result.id).toBe("query-1");
+      expect(result.dense).toEqual(new Float32Array([0.25]));
+    });
+
+    it.each(roles)(
+      "serializes $role alongside other parameters for a batch",
+      async ({ options, wireParams }) => {
+        const items = [
+          { id: "doc-1", text: "First document" },
+          { id: "doc-2", text: "Second document" },
+        ];
+        const siblings: EncodeOptions = {
+          outputTypes: ["dense", "sparse"],
+          instruction: "Retrieve passages",
+          outputDtype: "float16",
+        };
+        mockFetch.mockResolvedValueOnce(
+          createMsgpackResponse({
+            items: [
+              { id: "doc-1", dense: { values: new Float32Array([0.25]) } },
+              { id: "doc-2", dense: { values: new Float32Array([0.5]) } },
+            ],
+          }),
+        );
+
+        const results = await client.encode("BAAI/bge-m3", items, { ...siblings, ...options });
+
+        expect(mockFetch).toHaveBeenCalledOnce();
+        const init = mockFetch.mock.calls[0]?.[1] as RequestInit;
+        expect(init.body).toBeInstanceOf(Uint8Array);
+        expect(unpackMessage(init.body as Uint8Array)).toStrictEqual({
+          items,
+          params: {
+            output_types: ["dense", "sparse"],
+            instruction: "Retrieve passages",
+            output_dtype: "float16",
+            ...wireParams,
+          },
+        });
+        expect(results).toHaveLength(2);
+        expect(results.map((result) => result.id)).toEqual(["doc-1", "doc-2"]);
+        expect(results.map((result) => result.dense)).toEqual([
+          new Float32Array([0.25]),
+          new Float32Array([0.5]),
+        ]);
+      },
     );
-
-    await client.encode("bge-m3", { text: "query" }, { isQuery: true });
-
-    const fetchCall = mockFetch.mock.calls[0];
-    const body = fetchCall?.[1]?.body as Uint8Array;
-    const parsed = unpackMessage<{ params?: { is_query?: boolean } }>(body);
-
-    expect(parsed.params?.is_query).toBe(true);
   });
 
-  it("should allow per-request GPU override", async () => {
+  it("should allow per-request GPU override with query role", async () => {
     const clientWithDefaultGpu = new SIEClient("http://localhost:8080", { gpu: "l4" });
 
     mockFetch.mockResolvedValueOnce(
@@ -629,14 +700,24 @@ describe("SIEClient.encode() - encode options", () => {
       }),
     );
 
-    // Override default GPU with a100
-    await clientWithDefaultGpu.encode("bge-m3", { text: "test" }, { gpu: "a100-80gb" });
+    try {
+      await clientWithDefaultGpu.encode(
+        "bge-m3",
+        { text: "test" },
+        { gpu: "a100-80gb", isQuery: true },
+      );
 
-    const fetchCall = mockFetch.mock.calls[0];
-    const headers = fetchCall?.[1]?.headers as Record<string, string>;
-    expect(headers["X-SIE-MACHINE-PROFILE"]).toBe("a100-80gb");
-
-    await clientWithDefaultGpu.close();
+      expect(mockFetch).toHaveBeenCalledOnce();
+      const init = mockFetch.mock.calls[0]?.[1] as RequestInit;
+      expect(init.headers).toMatchObject({ "X-SIE-MACHINE-PROFILE": "a100-80gb" });
+      expect(init.body).toBeInstanceOf(Uint8Array);
+      expect(unpackMessage(init.body as Uint8Array)).toStrictEqual({
+        items: [{ text: "test" }],
+        params: { options: { is_query: true } },
+      });
+    } finally {
+      await clientWithDefaultGpu.close();
+    }
   });
 });
 

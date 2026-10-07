@@ -1165,7 +1165,7 @@ export class SIEClient {
       params.instruction = options.instruction;
     }
     if (options.isQuery !== undefined) {
-      params.is_query = options.isQuery;
+      params.options = { is_query: options.isQuery };
     }
     if (options.outputDtype !== undefined) {
       params.output_dtype = options.outputDtype;
