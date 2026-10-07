@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
 import torch
+from packaging.version import Version
 
 from sie_server.adapters._base_adapter import BaseAdapter
 from sie_server.adapters._spec import AdapterSpec
@@ -82,6 +83,12 @@ SUPPORTED_LANGUAGES = frozenset(
     }
 )
 _ERR_ENCODE_NOT_SUPPORTED = "ParakeetTDTAdapter does not support encode(). Use extract() instead."
+# transformers releases before 5.18 mask padded encoder frames with -inf. Under
+# eager attention a fully padded query then softmaxes to NaN, which the next
+# layer spreads to every frame of its row (huggingface/transformers#49070).
+# The default SDPA attention avoids this only on backends that zero fully
+# masked rows, and PyTorch picks the backend per device, so 5.18 is required.
+_MIN_TRANSFORMERS_VERSION = Version("5.18")
 _RUNTIME_OPTIONS = frozenset({"language", "temperature", "timestamp_granularities"})
 _TIMESTAMP_GRANULARITIES = frozenset({"segment", "word"})
 # Seconds of silence (leading, trailing) for the re-decodes of an empty row, in order.
@@ -147,10 +154,18 @@ class ParakeetTDTAdapter(BaseAdapter):
         self._durations: tuple[int, ...] = ()
 
     def load(self, device: str) -> None:
+        import transformers
         from transformers import (
             AutoModelForTDT,  # ty: ignore[unresolved-import]
             AutoProcessor,
         )
+
+        if Version(transformers.__version__) < _MIN_TRANSFORMERS_VERSION:
+            msg = (
+                f"Parakeet-TDT requires transformers>={_MIN_TRANSFORMERS_VERSION}, found {transformers.__version__}: "
+                "earlier releases mask padded encoder frames with -inf, which can turn padded rows of a batch into NaN"
+            )
+            raise RuntimeError(msg)
 
         self._device = device
         self._dtype = self._resolve_dtype()

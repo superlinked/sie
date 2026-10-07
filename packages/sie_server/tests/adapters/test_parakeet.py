@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import re
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,6 +12,7 @@ import numpy as np
 import pytest
 import torch
 import yaml
+from packaging.specifiers import SpecifierSet
 from sie_sdk.bundle_utils import match_bundle_models
 from sie_server.adapters.parakeet import adapter as parakeet_adapter
 from sie_server.adapters.parakeet.adapter import (
@@ -625,7 +627,7 @@ def test_segments_split_at_sentence_ends_and_after_thirty_seconds() -> None:
 
 
 def _fake_transformers(
-    monkeypatch: pytest.MonkeyPatch, *, decoder_type: str | None = None
+    monkeypatch: pytest.MonkeyPatch, *, decoder_type: str | None = None, version: str = "5.18.0"
 ) -> tuple[MagicMock, MagicMock, MagicMock]:
     processor = MagicMock()
     processor.feature_extractor.sampling_rate = 16_000
@@ -641,7 +643,7 @@ def _fake_transformers(
     monkeypatch.setitem(
         sys.modules,
         "transformers",
-        SimpleNamespace(AutoProcessor=auto_processor, AutoModelForTDT=auto_model),
+        SimpleNamespace(__version__=version, AutoProcessor=auto_processor, AutoModelForTDT=auto_model),
     )
     return auto_processor, auto_model, model
 
@@ -683,6 +685,32 @@ def test_load_keeps_a_decoder_type_the_processor_declares(monkeypatch: pytest.Mo
     assert auto_processor.from_pretrained.return_value.decoder_type == "rnnt"
 
 
+@pytest.mark.parametrize("version", ["5.14.1", "5.17.0", "5.18.0.dev0"])
+def test_load_refuses_transformers_that_mask_padding_with_negative_infinity(
+    monkeypatch: pytest.MonkeyPatch, version: str
+) -> None:
+    auto_processor, auto_model, _ = _fake_transformers(monkeypatch, version=version)
+    adapter = ParakeetTDTAdapter(MODEL_ID)
+
+    with pytest.raises(RuntimeError, match=rf"requires transformers>=5\.18, found {re.escape(version)}"):
+        adapter.load("cpu")
+
+    auto_processor.from_pretrained.assert_not_called()
+    auto_model.from_pretrained.assert_not_called()
+    assert adapter._model is None
+
+
+@pytest.mark.parametrize("version", ["5.18.0", "5.19.0"])
+def test_load_accepts_transformers_with_finite_padding_mask(monkeypatch: pytest.MonkeyPatch, version: str) -> None:
+    _, auto_model, model = _fake_transformers(monkeypatch, version=version)
+    adapter = ParakeetTDTAdapter(MODEL_ID)
+
+    adapter.load("cpu")
+
+    auto_model.from_pretrained.assert_called_once()
+    assert adapter._model is model
+
+
 # ---------------------------------------------------------------------------
 # Catalog and bundle
 # ---------------------------------------------------------------------------
@@ -715,5 +743,6 @@ def test_transformers5_bundle_carries_the_parakeet_runtime() -> None:
     requirements = resolve_bundle_requirements(bundle["deps"])
 
     assert "sie_server.adapters.parakeet.adapter" in bundle["adapters"]
-    assert "transformers>=5.18,<6" in requirements
+    # The bundle's range admits a transformers release the adapter loads on.
+    assert parakeet_adapter._MIN_TRANSFORMERS_VERSION in SpecifierSet(bundle["deps"]["transformers"])
     assert "librosa==1.0.0" in requirements

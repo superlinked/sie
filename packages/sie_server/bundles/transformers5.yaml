@@ -19,13 +19,10 @@ deps:
   # Transformers 5.x for models requiring newer architecture support
   # (e.g., LightOnOCR-2-1B needs LightOnOcrForConditionalGeneration,
   # GLM-OCR needs GlmOcrForConditionalGeneration). Floor raised to 5.14
-  # for the visual-SPLADE family (custom modeling code built on 5.13+),
-  # then to 5.18 for Parakeet-TDT: earlier 5.x mask padded encoder frames
-  # with -inf, which turns a padded batch into NaN under eager attention;
-  # 5.18 masks them with a finite minimum. Installs already resolved to the
-  # latest 5.x, so the floor is the guarantee, not a version change in
-  # practice.
-  transformers: '>=5.18,<6'
+  # for the visual-SPLADE family (custom modeling code built on 5.13+);
+  # installs already resolved to the latest 5.x, so the floor is the
+  # guarantee, not a version change in practice.
+  transformers: '>=5.14,<6'
   # Multimodal SparseEncoder (image documents) landed on the 5.6 line
   # (st_sparse_vision adapter).
   sentence-transformers: '>=5.6,<6'
