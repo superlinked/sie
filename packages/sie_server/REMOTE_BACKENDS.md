@@ -136,6 +136,20 @@ upstream's `usage` without `input_tokens`. Generation fails closed: a
 generation, chat or completion response without exact final usage is an
 error, never a success.
 
+Queued generation for a model with local weights, served by an `openai`
+upstream, is counted as if it had run locally. The worker renders the model's
+chat template and counts the prompt with the model's tokenizer. It counts the
+completion from every text the upstream returned, private reasoning included,
+with the same tokenizer. The terminal chunk reports that count without cached
+tokens, and carries the upstream's own counts in `usage.upstream_usage`. The
+gateway decodes that field for consumers of its stream outcome and never
+returns it to a caller. A request whose messages the local template cannot
+render, or whose counted prompt exceeds the context length, fails before it is
+sent. When the local tokenizer does not load, or has no chat template for a
+chat request, the upstream's counts are reported instead. An `sie` upstream
+serves the same model and counts with its tokenizer, so its counts are reported
+as they are. Single-node serving reports the upstream's counts.
+
 ## OpenAI-compatible embeddings and rerank
 
 Define a `kind: openai` upstream with a base URL that includes the provider's

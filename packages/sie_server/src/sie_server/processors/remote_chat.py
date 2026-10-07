@@ -77,8 +77,13 @@ def remote_chat_chunks(
     *,
     requested_model: str,
     context_length: int,
+    keep_reasoning: bool = False,
 ) -> AsyncIterator[GenerationChunk]:
-    """Prepare chat without dispatch; the worker owns iteration and cancellation."""
+    """Prepare chat without dispatch; the worker owns iteration and cancellation.
+
+    With ``keep_reasoning`` the upstream's private reasoning text rides on
+    ``GenerationChunk.reasoning_delta`` chunks, for the caller to count and drop.
+    """
     if body["stream"]:
         # Constructing the adapter iterator checks the declared endpoint before
         # queue admission, but does not send the upstream request.
@@ -86,9 +91,10 @@ def remote_chat_chunks(
             body,
             requested_model=requested_model,
             max_response_bytes=_MAX_RESPONSE_BYTES,
+            keep_reasoning=keep_reasoning,
         )
         return _stream_chunks(iterator, body, context_length)
-    return _buffered_chunks(adapter, body, requested_model, context_length)
+    return _buffered_chunks(adapter, body, requested_model, context_length, keep_reasoning)
 
 
 async def _buffered_chunks(
@@ -96,19 +102,28 @@ async def _buffered_chunks(
     body: dict[str, Any],
     requested_model: str,
     context_length: int,
+    keep_reasoning: bool,
 ) -> AsyncIterator[GenerationChunk]:
     try:
         payload = await adapter.chat_completion(
             body,
             requested_model=requested_model,
             max_response_bytes=_MAX_RESPONSE_BYTES,
+            keep_reasoning=keep_reasoning,
         )
         usage = _usage(payload, body, context_length)
         if usage is None:
             raise RemoteUpstreamError("upstream chat omitted exact usage")
         candidates: list[dict[str, Any]] = []
+        reasoning: list[GenerationChunk] = []
         for choice in sorted(payload["choices"], key=lambda choice: choice["index"]):
             message = choice["message"]
+            if message.get("reasoning_content"):
+                reasoning.append(
+                    GenerationChunk(
+                        text_delta="", choice_index=choice["index"], reasoning_delta=message["reasoning_content"]
+                    )
+                )
             tools = message.get("tool_calls") or []
             _check_tools({index: tool["function"]["name"] for index, tool in enumerate(tools)}, body, finished=True)
             if choice["finish_reason"] == "content_filter" or message.get("refusal"):
@@ -121,6 +136,8 @@ async def _buffered_chunks(
                     "tool_calls": tools or None,
                 }
             )
+        for chunk in reasoning:
+            yield chunk
         if body["n"] > 1:
             yield _terminal(usage, [choice["finish_reason"] for choice in candidates], candidates=tuple(candidates))
             return
@@ -166,6 +183,8 @@ async def _stream_chunks(
                 reason = choice["finish_reason"]
                 if reason == "content_filter" or delta.get("refusal"):
                     raise RemoteUpstreamError("upstream chat refused its output")
+                if delta.get("reasoning_content"):
+                    yield GenerationChunk(text_delta="", choice_index=index, reasoning_delta=delta["reasoning_content"])
                 calls = tools.setdefault(index, {})
                 for tool in delta.get("tool_calls") or []:
                     name = tool.get("function", {}).get("name")

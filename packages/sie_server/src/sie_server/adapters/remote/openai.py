@@ -225,7 +225,12 @@ class OpenAIUpstreamAdapter(BaseAdapter, GenerationAdapter):
         )
 
     async def chat_completion(
-        self, body: dict[str, Any], *, requested_model: str, max_response_bytes: int = 32 << 20
+        self,
+        body: dict[str, Any],
+        *,
+        requested_model: str,
+        max_response_bytes: int = 32 << 20,
+        keep_reasoning: bool = False,
     ) -> dict[str, Any]:
         client, request = self._generation_request(body, chat=True, stream=False)
         return await chat_completion(
@@ -236,10 +241,16 @@ class OpenAIUpstreamAdapter(BaseAdapter, GenerationAdapter):
             choices=1 if body.get("n") is None else body["n"],
             max_response_bytes=max_response_bytes,
             error_body_timeout_s=REQUEST_DEADLINE_S,
+            keep_reasoning=keep_reasoning,
         )
 
     def chat_completion_stream(
-        self, body: dict[str, Any], *, requested_model: str, max_response_bytes: int = 32 << 20
+        self,
+        body: dict[str, Any],
+        *,
+        requested_model: str,
+        max_response_bytes: int = 32 << 20,
+        keep_reasoning: bool = False,
     ) -> AsyncIterator[dict[str, Any]]:
         client, request = self._generation_request(body, chat=True, stream=True)
         return chat_completion_stream(
@@ -250,6 +261,7 @@ class OpenAIUpstreamAdapter(BaseAdapter, GenerationAdapter):
             choices=1 if body.get("n") is None else body["n"],
             max_response_bytes=max_response_bytes,
             error_body_timeout_s=REQUEST_DEADLINE_S,
+            keep_reasoning=keep_reasoning,
         )
 
     def preflight_generate(self, parameters: Mapping[str, Any], *, stream: bool) -> GenerationPreflightResult | None:

@@ -211,6 +211,26 @@ pub struct UsageBlock {
     /// engine does not report prefix-cache hits (and from older workers).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_tokens_details: Option<PromptTokensDetails>,
+    /// The upstream's own counts for a generation it served, when the counts
+    /// above are the worker's count with the model's tokenizer. Never
+    /// serialized, so no response surface shows it.
+    ///
+    /// `dead_code`-allowed because the `sie-gateway` binary compiles this
+    /// module tree independently of the library (see the note in `lib.rs`),
+    /// and only metering consumers of the stream outcome read it.
+    #[allow(dead_code)]
+    #[serde(default, skip_serializing)]
+    pub upstream_usage: Option<UpstreamTokenUsage>,
+}
+
+/// Token counts an upstream reported for a generation it served.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct UpstreamTokenUsage {
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
+    /// Clamped to `prompt_tokens` when decoded.
+    #[serde(default)]
+    pub cached_tokens: Option<u32>,
 }
 
 impl UsageBlock {
@@ -240,6 +260,8 @@ struct WorkerUsageBlock {
     gpu_second: Option<u64>,
     #[serde(default)]
     prompt_tokens_details: Option<PromptTokensDetails>,
+    #[serde(default)]
+    upstream_usage: Option<UpstreamTokenUsage>,
 }
 
 impl From<WorkerUsageBlock> for UsageBlock {
@@ -249,6 +271,12 @@ impl From<WorkerUsageBlock> for UsageBlock {
             .map(|details| PromptTokensDetails {
                 cached_tokens: details.cached_tokens.min(raw.prompt_tokens),
             });
+        let upstream_usage = raw.upstream_usage.map(|upstream| UpstreamTokenUsage {
+            cached_tokens: upstream
+                .cached_tokens
+                .map(|cached| cached.min(upstream.prompt_tokens)),
+            ..upstream
+        });
         Self {
             prompt_tokens: raw.prompt_tokens,
             completion_tokens: raw.completion_tokens,
@@ -256,6 +284,7 @@ impl From<WorkerUsageBlock> for UsageBlock {
             images: raw.images,
             gpu_second: raw.gpu_second,
             prompt_tokens_details,
+            upstream_usage,
         }
     }
 }
@@ -1263,6 +1292,7 @@ mod tests {
             finish_reason: if done { Some("stop".to_string()) } else { None },
             usage: if done {
                 Some(UsageBlock {
+                    upstream_usage: None,
                     gpu_second: None,
                     images: None,
                     prompt_tokens_details: None,
@@ -1395,6 +1425,64 @@ mod tests {
             serde_json::json!(-1),
             serde_json::json!(1.5),
             serde_json::json!(true),
+        ] {
+            assert!(decode(Some(invalid)).is_err());
+        }
+    }
+
+    #[test]
+    fn test_upstream_usage_is_decoded_clamped_and_never_serialized() {
+        let decode = |upstream_usage: Option<serde_json::Value>| {
+            let mut usage = serde_json::json!({
+                "prompt_tokens": 2,
+                "completion_tokens": 5,
+                "total_tokens": 7,
+            });
+            if let Some(value) = upstream_usage {
+                usage["upstream_usage"] = value;
+            }
+            let bytes = rmp_serde::to_vec_named(&usage).expect("encode usage block");
+            rmp_serde::from_slice::<UsageBlock>(&bytes)
+        };
+
+        let counted = decode(Some(serde_json::json!({
+            "prompt_tokens": 37,
+            "completion_tokens": 9,
+            "cached_tokens": 40,
+        })))
+        .expect("upstream usage decodes");
+        assert_eq!(
+            counted.upstream_usage,
+            Some(UpstreamTokenUsage {
+                prompt_tokens: 37,
+                completion_tokens: 9,
+                cached_tokens: Some(37),
+            })
+        );
+        assert_eq!(counted.prompt_tokens, 2);
+        let serialized = serde_json::to_value(&counted).expect("serialize usage");
+        assert!(serialized.get("upstream_usage").is_none());
+        assert!(!serialized.to_string().contains("37"));
+
+        let uncached = decode(Some(serde_json::json!({
+            "prompt_tokens": 11,
+            "completion_tokens": 4,
+        })))
+        .expect("upstream usage without a cache count decodes");
+        assert_eq!(
+            uncached
+                .upstream_usage
+                .and_then(|usage| usage.cached_tokens),
+            None
+        );
+
+        let legacy = decode(None).expect("usage without an upstream figure decodes");
+        assert_eq!(legacy.upstream_usage, None);
+
+        for invalid in [
+            serde_json::json!({"prompt_tokens": -1, "completion_tokens": 1}),
+            serde_json::json!({"prompt_tokens": 1}),
+            serde_json::json!("37"),
         ] {
             assert!(decode(Some(invalid)).is_err());
         }
@@ -1750,6 +1838,7 @@ mod tests {
         collector.last_output_at = Some(first + std::time::Duration::from_millis(400));
         collector.output_event_count = 2;
         collector.final_meta.as_mut().expect("terminal").usage = Some(UsageBlock {
+            upstream_usage: None,
             gpu_second: None,
             images: None,
             prompt_tokens_details: None,

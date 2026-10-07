@@ -649,6 +649,7 @@ async def _parse_tool_call_stream_impl(
                     prompt_tokens=chunk.prompt_tokens,
                     completion_tokens=chunk.completion_tokens,
                     cached_tokens=chunk.cached_tokens,
+                    upstream_usage=chunk.upstream_usage,
                     candidates=tuple(updated_candidates),
                     logprobs=chunk.logprobs,
                     error_code=chunk.error_code,
@@ -698,6 +699,7 @@ async def _parse_tool_call_stream_impl(
                 prompt_tokens=chunk.prompt_tokens,
                 completion_tokens=chunk.completion_tokens,
                 cached_tokens=chunk.cached_tokens,
+                upstream_usage=chunk.upstream_usage,
                 error_code=chunk.error_code,
                 error_message=chunk.error_message,
                 # Preserve ``candidates`` (with any per-candidate

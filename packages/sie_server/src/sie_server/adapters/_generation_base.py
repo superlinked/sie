@@ -412,6 +412,15 @@ class ToolCallDelta:
 
 
 @dataclass(frozen=True, slots=True)
+class UpstreamTokenUsage:
+    """The token counts an upstream reported for a generation it served."""
+
+    prompt_tokens: int
+    completion_tokens: int
+    cached_tokens: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class GenerationChunk:
     """One chunk yielded by a streaming :meth:`GenerationAdapter.generate`.
 
@@ -472,6 +481,13 @@ class GenerationChunk:
     # worker forwards it on the wire chunk; the gateway maps it to
     # ``choices[0].index``.
     choice_index: int = 0
+    # Terminal chunk only: the upstream's own counts when ``prompt_tokens``
+    # and ``completion_tokens`` are this server's count of an upstream
+    # generation. Never published to the caller.
+    upstream_usage: UpstreamTokenUsage | None = None
+    # Private reasoning text an upstream returned beside the answer. It is
+    # counted and then dropped, never published.
+    reasoning_delta: str = ""
 
 
 # Backwards-compatibility alias: walking-skeleton callers (the local-dev
@@ -931,25 +947,39 @@ class GenerationAdapter(ModelAdapter):
     # -- Contract ------------------------------------------------------------
 
     async def chat_completion(
-        self, body: dict[str, Any], *, requested_model: str, max_response_bytes: int = 32 << 20
+        self,
+        body: dict[str, Any],
+        *,
+        requested_model: str,
+        max_response_bytes: int = 32 << 20,
+        keep_reasoning: bool = False,
     ) -> dict[str, Any]:
         """Return a normalized chat answer when this adapter owns chat rendering.
 
         The ingress validates and bounds ``body`` before dispatch. Remote
         adapters pin the upstream model independently from ``requested_model``.
         ``max_response_bytes`` bounds raw upstream bytes, including discarded
-        metadata. Local adapters continue through their existing rendering path.
+        metadata. ``keep_reasoning`` keeps the upstream's private reasoning
+        text in each message as ``reasoning_content``; callers that set it must
+        not publish that field. Local adapters continue through their existing
+        rendering path.
         """
         raise GenerationUnsupportedFieldError("messages", "this generation adapter does not accept chat messages")
 
     def chat_completion_stream(
-        self, body: dict[str, Any], *, requested_model: str, max_response_bytes: int = 32 << 20
+        self,
+        body: dict[str, Any],
+        *,
+        requested_model: str,
+        max_response_bytes: int = 32 << 20,
+        keep_reasoning: bool = False,
     ) -> AsyncIterator[dict[str, Any]]:
         """Stream normalized chat events, including exact final usage.
 
         Closing the iterator cancels upstream work. Clean exhaustion certifies
         every choice, final usage and the upstream's terminal event. The byte
         bound applies to the complete raw stream, including discarded metadata.
+        ``keep_reasoning`` behaves as in :meth:`chat_completion`.
         """
         raise GenerationUnsupportedFieldError("messages", "this generation adapter does not accept chat messages")
 

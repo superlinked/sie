@@ -568,7 +568,7 @@ async def test_onboarded_strict_tools_keep_declared_chat(remote: tuple, monkeypa
     config_data = proc._registry.get_config(MODEL).model_dump()
     config_data.update({"remote_backed": False, "hf_id": "local/model"})
     proc._registry.get_config.return_value = ModelConfig.model_validate(config_data)
-    tokenizer = AsyncMock(side_effect=AssertionError("strict tools must retain chat ownership"))
+    tokenizer = AsyncMock(side_effect=RuntimeError("no local tokenizer"))
     monkeypatch.setattr(proc, "_get_tokenizer", tokenizer)
     tool = {**TOOL, "function": {**TOOL["function"], "strict": True}}
     respond(remote)
@@ -576,7 +576,8 @@ async def test_onboarded_strict_tools_keep_declared_chat(remote: tuple, monkeypa
     assert chunks[-1]["finish_reason"] == "stop"
     assert requests[0].url.path.endswith("/chat/completions")
     assert json.loads(requests[0].content)["tools"][0]["function"]["strict"] is True
-    tokenizer.assert_not_awaited()
+    counts = isinstance(adapter, OpenAIUpstreamAdapter)
+    assert tokenizer.await_count == int(counts), "only an OpenAI upstream consults the tokenizer, to count"
 
 
 @pytest.mark.parametrize("remote", ["sie"], indirect=True)

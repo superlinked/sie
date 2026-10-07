@@ -156,7 +156,7 @@ def _logprobs(value: Any) -> dict[str, Any] | None:
     return clean
 
 
-def _message(value: Any, *, stream: bool) -> dict[str, Any]:
+def _message(value: Any, *, stream: bool, keep_reasoning: bool = False) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise _invalid()
     clean: dict[str, Any] = {}
@@ -170,6 +170,12 @@ def _message(value: Any, *, stream: bool) -> dict[str, Any]:
             clean[field] = None if text is None else _text(text)
     if value.get("tool_calls") is not None:
         clean["tool_calls"] = _tool_calls(value["tool_calls"], stream=stream)
+    if keep_reasoning:
+        reasoning = next(
+            (value[field] for field in ("reasoning_content", "reasoning") if value.get(field) not in (None, "")), None
+        )
+        if reasoning is not None:
+            clean["reasoning_content"] = _text(reasoning)
     if not stream and not any(field in clean for field in ("content", "refusal", "tool_calls")):
         raise _invalid()
     return clean
@@ -178,11 +184,12 @@ def _message(value: Any, *, stream: bool) -> dict[str, Any]:
 class ChatStreamParser:
     """Normalize chat events; require each choice to finish and exact final usage."""
 
-    def __init__(self, model: str, *, choices: int = 1) -> None:
+    def __init__(self, model: str, *, choices: int = 1, keep_reasoning: bool = False) -> None:
         if isinstance(choices, bool) or not isinstance(choices, int) or not 1 <= choices <= _MAX_CHOICES:
             raise ValueError("choices must be between 1 and 128")
         self.model = model
         self.choices = choices
+        self.keep_reasoning = keep_reasoning
         self.done = False
         self._id = f"chatcmpl-{uuid.uuid4().hex}"
         self._created = int(time.time())
@@ -256,7 +263,7 @@ class ChatStreamParser:
                 raise _invalid()
             field = "delta" if stream else "message"
             raw_message = choice.get(field)
-            message = _message(raw_message, stream=stream)
+            message = _message(raw_message, stream=stream, keep_reasoning=self.keep_reasoning)
             tools = message.get("tool_calls", [])
             if stream:
                 self._track_tools(index, tools, finished=reason is not None, require_tools=reason == "tool_calls")

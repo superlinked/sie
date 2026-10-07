@@ -293,3 +293,21 @@ def test_discarded_reasoning_cannot_leak_through_logprobs(stream: bool, reasonin
     assert result is not None
     assert result["choices"][0]["logprobs"] is None
     assert "private reasoning" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("field", ["reasoning_content", "reasoning"])
+def test_reasoning_is_kept_only_on_request(field: str) -> None:
+    kept = ChatStreamParser("model", keep_reasoning=True).completion(wire([choice(**{field: "private"})], usage=USAGE))
+    assert kept["choices"][0]["message"] == {"role": "assistant", "content": "answer", "reasoning_content": "private"}
+    dropped = ChatStreamParser("model").completion(wire([choice(**{field: "private"})], usage=USAGE))
+    assert "private" not in json.dumps(dropped)
+    streamed = ChatStreamParser("model", keep_reasoning=True).parse(
+        wire([choice(stream=True, finish=None, content=None, **{field: "step"})])
+    )
+    assert streamed is not None
+    assert streamed["choices"][0]["delta"]["reasoning_content"] == "step"
+
+
+def test_kept_reasoning_must_be_text() -> None:
+    with pytest.raises(RemoteUpstreamError):
+        ChatStreamParser("model", keep_reasoning=True).completion(wire([choice(reasoning_content=7)], usage=USAGE))

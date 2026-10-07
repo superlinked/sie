@@ -17335,6 +17335,7 @@ mod tests {
                 text: "ok".to_string(),
                 finish_reason: "stop".to_string(),
                 usage: Some(crate::queue::streaming::UsageBlock {
+                    upstream_usage: None,
                     gpu_second: None,
                     images: None,
                     prompt_tokens_details: None,
@@ -21196,6 +21197,7 @@ mod tests {
             text: "Hello world!".to_string(),
             finish_reason: "stop".to_string(),
             usage: Some(crate::queue::streaming::UsageBlock {
+                upstream_usage: None,
                 gpu_second: None,
                 images: None,
                 prompt_tokens_details: None,
@@ -26157,6 +26159,7 @@ mod tests {
             text: String::new(),
             finish_reason: "stop".to_string(),
             usage: Some(UsageBlock {
+                upstream_usage: None,
                 gpu_second: None,
                 images: None,
                 prompt_tokens_details: None,
@@ -26215,6 +26218,7 @@ mod tests {
             text: String::new(),
             finish_reason: "tool_calls".to_string(),
             usage: Some(UsageBlock {
+                upstream_usage: None,
                 gpu_second: None,
                 images: None,
                 prompt_tokens_details: None,
@@ -26285,6 +26289,7 @@ mod tests {
             text: String::new(),
             finish_reason: "stop".to_string(),
             usage: Some(UsageBlock {
+                upstream_usage: None,
                 gpu_second: None,
                 images: None,
                 prompt_tokens_details: None,
@@ -26670,6 +26675,7 @@ mod tests {
             text: "a continuation".to_string(),
             finish_reason: "length".to_string(),
             usage: Some(crate::queue::streaming::UsageBlock {
+                upstream_usage: None,
                 gpu_second: None,
                 images: None,
                 prompt_tokens_details: None,
@@ -27296,6 +27302,7 @@ mod tests {
             text: "a joke".to_string(),
             finish_reason: "stop".to_string(),
             usage: Some(crate::queue::streaming::UsageBlock {
+                upstream_usage: None,
                 gpu_second: None,
                 images: None,
                 prompt_tokens_details: None,
@@ -27331,6 +27338,7 @@ mod tests {
     #[test]
     fn test_responses_usage_reports_cached_input_tokens() {
         let usage = crate::queue::streaming::UsageBlock {
+            upstream_usage: None,
             gpu_second: None,
             images: None,
             prompt_tokens_details: Some(crate::queue::streaming::PromptTokensDetails {
@@ -27380,6 +27388,7 @@ mod tests {
             text: "Hi there!".to_string(),
             finish_reason: "stop".to_string(),
             usage: Some(crate::queue::streaming::UsageBlock {
+                upstream_usage: None,
                 gpu_second: None,
                 images: None,
                 prompt_tokens_details: None,
@@ -27473,6 +27482,7 @@ mod tests {
             text: "Hi".to_string(),
             finish_reason: "stop".to_string(),
             usage: Some(crate::queue::streaming::UsageBlock {
+                upstream_usage: None,
                 gpu_second: None,
                 images: None,
                 prompt_tokens_details: None,
@@ -27513,6 +27523,7 @@ mod tests {
             text: "Hi".to_string(),
             finish_reason: "stop".to_string(),
             usage: Some(crate::queue::streaming::UsageBlock {
+                upstream_usage: None,
                 gpu_second: None,
                 images: None,
                 prompt_tokens_details: None,
@@ -27548,6 +27559,7 @@ mod tests {
             text: String::new(),
             finish_reason: "tool_calls".to_string(),
             usage: Some(crate::queue::streaming::UsageBlock {
+                upstream_usage: None,
                 gpu_second: None,
                 images: None,
                 prompt_tokens_details: None,
@@ -28205,6 +28217,7 @@ mod tests {
             text: "Hi".to_string(),
             finish_reason: "stop".to_string(),
             usage: Some(crate::queue::streaming::UsageBlock {
+                upstream_usage: None,
                 gpu_second: None,
                 images: None,
                 prompt_tokens_details: None,

@@ -1994,6 +1994,7 @@ mod tests {
                 // whose usage is the count-so-far.
                 finish_reason: "cancelled".to_string(),
                 usage: Some(UsageBlock {
+                    upstream_usage: None,
                     gpu_second: None,
                     images: None,
                     prompt_tokens_details: None,
@@ -2304,6 +2305,7 @@ mod tests {
             let mut terminal = _terminal_chunk("error", None);
             terminal.seq = 42;
             terminal.usage = Some(UsageBlock {
+                upstream_usage: None,
                 gpu_second: None,
                 images: None,
                 prompt_tokens_details: None,
@@ -2330,6 +2332,7 @@ mod tests {
             let mut terminal = _terminal_chunk("error", None);
             terminal.seq = 42;
             terminal.usage = Some(UsageBlock {
+                upstream_usage: None,
                 gpu_second: None,
                 images: None,
                 prompt_tokens_details: None,
@@ -3058,6 +3061,7 @@ mod tests {
         let chunk = _terminal_chunk(
             "stop",
             Some(UsageBlock {
+                upstream_usage: None,
                 gpu_second: None,
                 images: None,
                 prompt_tokens_details: None,
@@ -3478,6 +3482,7 @@ mod tests {
         collector.apply(_terminal_chunk(
             "stop",
             Some(UsageBlock {
+                upstream_usage: None,
                 gpu_second: None,
                 images: None,
                 prompt_tokens_details: None,
@@ -3516,6 +3521,7 @@ mod tests {
         let terminal = _terminal_chunk(
             "stop",
             Some(UsageBlock {
+                upstream_usage: None,
                 gpu_second: None,
                 images: None,
                 prompt_tokens_details: None,
@@ -3639,6 +3645,7 @@ mod tests {
         let terminal = _terminal_chunk(
             "stop",
             Some(UsageBlock {
+                upstream_usage: None,
                 gpu_second: None,
                 images: None,
                 prompt_tokens_details: None,
@@ -3687,6 +3694,7 @@ mod tests {
         let terminal = _terminal_chunk(
             "stop",
             Some(UsageBlock {
+                upstream_usage: None,
                 gpu_second: None,
                 images: None,
                 prompt_tokens_details: None,
@@ -3755,6 +3763,7 @@ mod tests {
         let terminal = _terminal_chunk(
             "stop",
             Some(UsageBlock {
+                upstream_usage: None,
                 gpu_second: None,
                 images: None,
                 prompt_tokens_details: None,
@@ -3792,6 +3801,7 @@ mod tests {
         let terminal = _terminal_chunk(
             "stop",
             Some(UsageBlock {
+                upstream_usage: None,
                 gpu_second: None,
                 images: None,
                 prompt_tokens_details: None,
@@ -3927,6 +3937,7 @@ mod tests {
         collector.apply(_terminal_chunk(
             "stop",
             Some(UsageBlock {
+                upstream_usage: None,
                 gpu_second: None,
                 images: None,
                 prompt_tokens_details: None,

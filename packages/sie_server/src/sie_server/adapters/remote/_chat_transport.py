@@ -24,9 +24,10 @@ async def chat_completion(
     choices: int,
     max_response_bytes: int,
     error_body_timeout_s: float,
+    keep_reasoning: bool = False,
 ) -> dict[str, Any]:
     """Return one bounded, normalized chat answer with exact upstream usage."""
-    parser = ChatStreamParser(requested_model, choices=choices)
+    parser = ChatStreamParser(requested_model, choices=choices, keep_reasoning=keep_reasoning)
     async with open_stream(client, request, upstream=upstream, error_body_timeout_s=error_body_timeout_s) as response:
         if response.headers.get("content-type", "").partition(";")[0].strip().lower() != "application/json":
             raise RemoteUpstreamError("upstream did not return a chat answer")
@@ -47,9 +48,10 @@ async def chat_completion_stream(
     choices: int,
     max_response_bytes: int,
     error_body_timeout_s: float,
+    keep_reasoning: bool = False,
 ) -> AsyncIterator[dict[str, Any]]:
     """Yield normalized events; upstream failures after output are final."""
-    parser = ChatStreamParser(requested_model, choices=choices)
+    parser = ChatStreamParser(requested_model, choices=choices, keep_reasoning=keep_reasoning)
     yielded = False
     try:
         async with open_stream(
