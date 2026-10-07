@@ -19,13 +19,11 @@ import msgspec
 
 from sie_server.adapter_call_loop import handle_run_batch
 from sie_server.adapters._generation_base import GenerationUnsupportedFieldError
-from sie_server.config.equivalence import model_contract_digest, remote_profile_contract_digest
 from sie_server.config.hybrid_admission import NumericalAdmission, bridged_item_refusal, remote_admission
 from sie_server.config.model import ModelConfig
-from sie_server.config.upstreams import installed_upstreams
 from sie_server.core.gpu_health import gpu_is_healthy_async
 from sie_server.core.grammar_routing import resolve_grammar_serving_model
-from sie_server.core.profile_identity import local_profile_identity, runtime_instance_id, serving_code_digest
+from sie_server.core.numerical_snapshot import numerical_profile_snapshot
 from sie_server.core.readiness import is_ready
 from sie_server.ipc_types import (
     IPC_VERSION,
@@ -56,8 +54,6 @@ from sie_server.ipc_types import (
     GenerateEvent,
     IpcResponseChunkV1,
     ItemOutcome,
-    NumericalAdmissionObservation,
-    NumericalProfileObservation,
     NumericalProfileSnapshotRequest,
     NumericalProfileSnapshotResponse,
     PingRequest,
@@ -94,9 +90,6 @@ _LEN_BYTES = _LEN_STRUCT.size
 # any decoded WorkItem batch we would send in-band — large payloads arrive
 # via the payload store, not via IPC.
 _MAX_FRAME_BYTES = 32 * 1024 * 1024
-_MAX_NUMERICAL_PROFILES = 1024
-_MAX_ADMITTED_IDENTITIES = 8
-_MAX_NUMERICAL_MODEL_ID_BYTES = 1024
 _NUMERICAL_ADMISSION_RETRY_MS = 1000
 _UNVERIFIED_ADMISSION = "this method does not verify numerical admissions"
 _ADMISSION_CHECK_FAILED = "numerical admission check failed"
@@ -200,34 +193,6 @@ class _IpcGenerateMessage:
 
     async def in_progress(self) -> None:
         await self._sink.send(GenerateEvent(kind="in_progress"))
-
-
-def _observe_remote_profile(observation: NumericalProfileObservation, config: ModelConfig) -> None:
-    """Report this process's contract and admission for a model's remote profile, if it serves one."""
-    routing = config.routing
-    profile = routing.fallback_profile if routing is not None and routing.fallback_profile else "default"
-    remote_contract = remote_profile_contract_digest(config, profile, installed_upstreams())
-    if remote_contract is None:
-        return
-    observation.remote_contract_sha256 = remote_contract
-    observation.remote_execution_sha256 = serving_code_digest()
-    if config.tasks.encode is None and config.tasks.score is None:
-        return
-    admission = remote_admission(config, wait=False)
-    if (
-        isinstance(admission, str)
-        or not admission.outputs
-        or len(admission.local_identities) > _MAX_ADMITTED_IDENTITIES
-    ):
-        return
-    observation.admission = NumericalAdmissionObservation(
-        sha256=admission.sha256,
-        kind=admission.kind,
-        local_identities=sorted(admission.local_identities),
-        model_contract_sha256=admission.model_contract_sha256,
-        outputs=sorted(admission.outputs),
-        expires_at_unix_ms=int(admission.expires_at.timestamp() * 1000),
-    )
 
 
 def _named_admission(item: Any) -> str | None:
@@ -948,47 +913,7 @@ class IpcServer:
     async def _handle_numerical_profile_snapshot(
         self, _req: NumericalProfileSnapshotRequest
     ) -> NumericalProfileSnapshotResponse:
-        try:
-            async with self._executor.registry.execution_lease():
-                return await asyncio.to_thread(self._numerical_profile_snapshot)
-        except Exception as exc:  # noqa: BLE001
-            error_class = (
-                "io"
-                if isinstance(exc, OSError)
-                else "invalid"
-                if isinstance(exc, TypeError | ValueError)
-                else "internal"
-            )
-            logger.debug("Could not collect numerical profile snapshot (error_class=%s)", error_class)
-            return NumericalProfileSnapshotResponse(runtime_instance_id=runtime_instance_id())
-
-    def _numerical_profile_snapshot(self) -> NumericalProfileSnapshotResponse:
-        registry = self._executor.registry
-        configs = registry.get_configs_snapshot()
-        complete = len(configs) <= _MAX_NUMERICAL_PROFILES
-        observations = []
-        for name in sorted(configs)[:_MAX_NUMERICAL_PROFILES]:
-            if not name or len(name.encode()) > _MAX_NUMERICAL_MODEL_ID_BYTES:
-                complete = False
-                continue
-            config = configs[name]
-            identity = None
-            contract = None
-            if isinstance(config, ModelConfig):
-                identity = local_profile_identity(
-                    config,
-                    "default",
-                    device=registry.profile_execution_device(name) or "",
-                    engine_config=registry.engine_config,
-                )
-                contract = model_contract_digest(config)
-            else:
-                complete = False
-            observation = NumericalProfileObservation(name, identity, contract)
-            if isinstance(config, ModelConfig) and config.synthetic_profile_variant_source is None:
-                _observe_remote_profile(observation, config)
-            observations.append(observation)
-        return NumericalProfileSnapshotResponse(runtime_instance_id(), observations, complete)
+        return await numerical_profile_snapshot(self._executor.registry)
 
     def _handle_worker_capabilities(self, _req: WorkerCapabilitiesRequest) -> WorkerCapabilitiesResponse:
         generation_models: list[str] = []

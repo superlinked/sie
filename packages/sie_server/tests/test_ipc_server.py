@@ -19,6 +19,7 @@ import msgspec
 import numpy as np
 import pytest
 import sie_server.api.ws as ws_module
+import sie_server.core.numerical_snapshot as numerical_snapshot_module
 import sie_server.ipc_server as ipc_server_module
 import yaml
 from sie_config.model_registry import ModelRegistry as ConfigModelRegistry
@@ -2748,7 +2749,7 @@ class TestGenerationSidecarIpc:
             observed.append((config.sie_id, profile, kwargs))
             return "v1:sha256:" + "a" * 64
 
-        monkeypatch.setattr(ipc_server_module, "local_profile_identity", identity)
+        monkeypatch.setattr(numerical_snapshot_module, "local_profile_identity", identity)
         config = registry.get_config("Qwen/Qwen3.6-27B")
         response = await server._handle_numerical_profile_snapshot(NumericalProfileSnapshotRequest())
         assert response.runtime_instance_id == runtime_instance_id()
@@ -2773,10 +2774,21 @@ class TestGenerationSidecarIpc:
         assert not registry.loaded_model_names
 
     @pytest.mark.asyncio
+    async def test_numerical_profile_snapshot_is_the_ipc_answer(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        server, registry, _ = _pinned_execution_server(monkeypatch)
+
+        direct = await numerical_snapshot_module.numerical_profile_snapshot(registry)
+        answered = await server._handle_numerical_profile_snapshot(NumericalProfileSnapshotRequest())
+
+        assert msgspec.to_builtins(direct) == msgspec.to_builtins(answered)
+        assert direct.complete
+        assert [profile.model_id for profile in direct.profiles] == ["Qwen/Qwen3.6-27B"]
+
+    @pytest.mark.asyncio
     async def test_numerical_snapshot_failure_is_incomplete_and_exposes_no_exception(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
-        caplog.set_level("DEBUG", logger="sie_server.ipc_server")
+        caplog.set_level("DEBUG", logger="sie_server.core.numerical_snapshot")
         executor, registry = _make_executor()
         registry.get_configs_snapshot.side_effect = RuntimeError("private upstream credential")
         async with IpcServer(_short_sock_path(), executor, worker_id="w") as server:
@@ -2806,7 +2818,7 @@ class TestGenerationSidecarIpc:
             started.set()
             assert finish.wait(2)
 
-        monkeypatch.setattr(ipc_server_module, "local_profile_identity", identity)
+        monkeypatch.setattr(numerical_snapshot_module, "local_profile_identity", identity)
         snapshot = asyncio.create_task(server._handle_numerical_profile_snapshot(NumericalProfileSnapshotRequest()))
         try:
             assert await asyncio.to_thread(started.wait, 1)
@@ -2822,7 +2834,7 @@ class TestGenerationSidecarIpc:
         current = await server._handle_numerical_profile_snapshot(NumericalProfileSnapshotRequest())
         assert current.profiles[0].model_contract_sha256 == model_contract_digest(after)
         assert current.profiles[0].model_contract_sha256 != response.profiles[0].model_contract_sha256
-        monkeypatch.setattr(ipc_server_module, "_MAX_NUMERICAL_PROFILES", 0)
+        monkeypatch.setattr(numerical_snapshot_module, "_MAX_NUMERICAL_PROFILES", 0)
         bounded = await server._handle_numerical_profile_snapshot(NumericalProfileSnapshotRequest())
         assert not bounded.complete
         assert bounded.profiles == []
