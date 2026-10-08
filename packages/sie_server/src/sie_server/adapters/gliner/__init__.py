@@ -83,8 +83,11 @@ _MIN_ADJACENCY_THRESHOLD = 0.5
 # candidate inside the forward pass. Near zero that is nearly every span of the
 # document, so relex requests need at least this entity threshold.
 _MIN_RELEX_THRESHOLD = 0.1
-# Rows gliner's inference (and the meter, which mirrors it) puts in one forward pass.
-_GLINER_BATCH_SIZE = 8
+# Rows gliner's inference (and the meter, which mirrors it) puts in one forward pass. gliner's own default
+# is 8, but a pass costs about the same for 1 row as for 8 (the encoder is bound by kernel launches, not
+# by the GPU), so 32 rows per pass serve a 24-paragraph request in one pass instead of three. Long rows
+# are still split by ``plan_forwards`` within the attention budget.
+_GLINER_BATCH_SIZE = 32
 _ERR_NO_RELATIONS = (
     "This GLiNER model does not extract relations; options.relation_labels needs a joint "
     "entity-relation model such as knowledgator/gliner-relex-large-v1.0"
@@ -129,6 +132,7 @@ class GLiNERAdapter(BaseAdapter):
         max_prompt_tokens: int = DEFAULT_MAX_PROMPT_TOKENS,
         compute_precision: ComputePrecision = "float16",
         revision: str | None = None,
+        batch_size: int = _GLINER_BATCH_SIZE,
         **kwargs: Any,  # Accept extra args from loader (e.g., pooling)
     ) -> None:
         """Initialize the adapter.
@@ -149,6 +153,7 @@ class GLiNERAdapter(BaseAdapter):
             compute_precision: Compute precision for inference.
             revision: Optional HuggingFace revision/branch/commit SHA to pin when
                 loading model artifacts.
+            batch_size: Most rows (document windows) in one forward pass.
             **kwargs: Additional arguments (ignored, for compatibility).
         """
         _ = kwargs  # Unused, but accepted for loader compatibility
@@ -160,6 +165,9 @@ class GLiNERAdapter(BaseAdapter):
         self._relation_threshold = relation_threshold
         self._compute_precision = compute_precision
         self._revision = revision
+        if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
+            raise ValueError("GLiNER batch_size must be a positive integer")
+        self._batch_size = batch_size
 
         self._model: Any = None  # GLiNER model type
         self._device: str | None = None
@@ -468,7 +476,7 @@ class GLiNERAdapter(BaseAdapter):
     ) -> tuple[list[Any], list[Any] | None]:
         """Run gliner inference, in several calls when one forward pass would hold too long a batch.
 
-        gliner pads each pass of up to ``_GLINER_BATCH_SIZE`` rows to its
+        gliner pads each pass of up to ``batch_size`` rows to its
         longest row, and a DeBERTa encoder's attention memory grows with rows
         times the square of that length, so rows are grouped by length within
         ``_word_window.ATTENTION_BUDGET`` (see ``plan_forwards``). A batch that
@@ -477,13 +485,15 @@ class GLiNERAdapter(BaseAdapter):
         """
         groups = None
         if row_tokens is not None and self._quadratic_attention:
-            groups = plan_forwards(row_tokens, rows_per_pass=_GLINER_BATCH_SIZE)
+            groups = plan_forwards(row_tokens, rows_per_pass=self._batch_size)
         if groups is None:
             groups = [list(range(len(texts)))]
         entities: list[Any] = [None] * len(texts)
         relations: list[Any] | None = [None] * len(texts) if returns_relations else None
         for group in groups:
-            prediction = self._model.inference([texts[index] for index in group], labels, **kwargs)
+            prediction = self._model.inference(
+                [texts[index] for index in group], labels, batch_size=self._batch_size, **kwargs
+            )
             group_entities, group_relations = prediction if returns_relations else (prediction, None)
             if len(group_entities) != len(group) or (
                 group_relations is not None and len(group_relations) != len(group)
@@ -552,10 +562,11 @@ class GLiNERAdapter(BaseAdapter):
             counts: list[int] = []
             rows: list[int] = []
             has_document_subwords: list[bool] = []
-            for start in range(0, len(raw_items), 8):
+            size = self._batch_size
+            for start in range(0, len(raw_items), size):
                 if self._extracts_relations:
                     raw_batch = processor.collate_raw_batch(
-                        raw_items[start : start + 8],
+                        raw_items[start : start + size],
                         entity_types=labels,
                         relation_types=relation_labels or [],
                     )
@@ -566,7 +577,7 @@ class GLiNERAdapter(BaseAdapter):
                     )
                 else:
                     raw_batch = processor.collate_raw_batch(
-                        raw_items[start : start + 8],
+                        raw_items[start : start + size],
                         entity_types=labels,
                     )
                     retained_words = raw_batch["tokens"]

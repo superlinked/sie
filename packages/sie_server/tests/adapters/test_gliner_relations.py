@@ -59,7 +59,9 @@ def test_models_without_relations_keep_their_inference_call() -> None:
 
     output = adapter.extract([Item(text=_TEXT)], labels=list(_LABELS))
 
-    _inference(adapter).assert_called_once_with([_TEXT], _LABELS, threshold=0.5, flat_ner=True, multi_label=False)
+    _inference(adapter).assert_called_once_with(
+        [_TEXT], _LABELS, batch_size=32, threshold=0.5, flat_ner=True, multi_label=False
+    )
     assert [entity["text"] for entity in output.entities[0]] == ["Steve Jobs", "Apple", "Cupertino"]
     assert output.relations is None
 
@@ -72,6 +74,7 @@ def test_relex_model_without_relation_labels_returns_entities_only() -> None:
     _inference(adapter).assert_called_once_with(
         [_TEXT],
         _LABELS,
+        batch_size=32,
         threshold=0.5,
         flat_ner=True,
         multi_label=False,
@@ -95,6 +98,7 @@ def test_relation_labels_return_relations_between_found_entities() -> None:
     _inference(adapter).assert_called_once_with(
         [_TEXT],
         _LABELS,
+        batch_size=32,
         threshold=0.4,
         flat_ner=True,
         multi_label=False,

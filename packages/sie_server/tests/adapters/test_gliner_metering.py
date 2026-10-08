@@ -122,12 +122,34 @@ def test_meter_counts_only_processor_retained_document_subwords() -> None:
 def test_meter_batches_like_inference_and_preserves_alignment() -> None:
     processor = FakeProcessor()
     adapter = adapter_with_processor(processor)
-    texts: list[str] = [f"{'x' * (index + 1)} tail" for index in range(10)]
+    texts: list[str] = [f"{'x' * (index + 1)} tail" for index in range(40)]
 
     counts = adapter._doc_input_token_counts(texts, ["entity"])
 
+    assert counts == [index + 1 + 6 for index in range(40)]
+    # 32 rows per forward pass by default, the size the meter mirrors.
+    assert [len(batch) for batch in processor.raw_batches] == [32, 8]
+
+
+def test_batch_size_sets_rows_per_pass_for_inference_and_meter() -> None:
+    processor = FakeProcessor()
+    adapter = adapter_with_processor(processor)
+    adapter._batch_size = 8
+    texts: list[str] = [f"{'x' * (index + 1)} tail" for index in range(10)]
+
+    counts = adapter._doc_input_token_counts(texts, ["entity"])
+    adapter._model.inference.return_value = [[] for _ in texts]
+    adapter.extract([Item(text=text) for text in texts], labels=["entity"])
+
     assert counts == [index + 1 + 6 for index in range(10)]
-    assert [len(batch) for batch in processor.raw_batches] == [8, 2]
+    assert [len(batch) for batch in processor.raw_batches][:2] == [8, 2]
+    assert adapter._model.inference.call_args.kwargs["batch_size"] == 8
+
+
+@pytest.mark.parametrize("value", [0, -1, True, 2.5])
+def test_invalid_batch_size_is_rejected(value: object) -> None:
+    with pytest.raises(ValueError, match="batch_size must be a positive integer"):
+        GLiNERAdapter("test-model", batch_size=value)  # type: ignore[arg-type]
 
 
 def test_extract_rejects_blank_document_before_inference() -> None:
