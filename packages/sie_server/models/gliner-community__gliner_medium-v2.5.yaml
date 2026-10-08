@@ -1,6 +1,8 @@
 sie_id: gliner-community/gliner_medium-v2.5
 hf_id: gliner-community/gliner_medium-v2.5
 hf_revision: 88c3b98b57ad5e7d66fb209ed61c53f4b1fd05da
+hf_tokenizer_dependencies:
+  gliner-community/gliner_medium-v2.5: 88c3b98b57ad5e7d66fb209ed61c53f4b1fd05da
 inputs:
   text: true
   image: false
