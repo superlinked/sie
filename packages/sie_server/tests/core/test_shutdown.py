@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import signal
+import sys
+from collections.abc import Iterator
 
 import pytest
-from sie_server.core.shutdown import ShutdownState
+from sie_server.core.shutdown import ShutdownState, setup_signal_handlers
 
 
 class TestShutdownState:
@@ -194,3 +198,34 @@ class TestSignalHandler:
         shutdown_state = ShutdownState()
         # Should not raise even in test thread
         setup_signal_handlers(shutdown_state)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="SIGTERM handlers are Unix-only")
+class TestSigtermChaining:
+    """SIGTERM marks the server as draining and still reaches the handler it replaced (uvicorn's exit)."""
+
+    @pytest.fixture(autouse=True)
+    def _restore_sigterm(self) -> Iterator[None]:
+        original = signal.getsignal(signal.SIGTERM)
+        yield
+        signal.signal(signal.SIGTERM, original)
+
+    def test_sigterm_starts_shutdown_and_calls_previous_handler(self) -> None:
+        calls: list[int] = []
+        signal.signal(signal.SIGTERM, lambda signum, _frame: calls.append(signum))
+        state = ShutdownState()
+        setup_signal_handlers(state)
+
+        os.kill(os.getpid(), signal.SIGTERM)
+
+        assert state.shutting_down
+        assert calls == [signal.SIGTERM]
+
+    def test_sigterm_without_a_callable_previous_handler_only_starts_shutdown(self) -> None:
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        state = ShutdownState()
+        setup_signal_handlers(state)
+
+        os.kill(os.getpid(), signal.SIGTERM)
+
+        assert state.shutting_down

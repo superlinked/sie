@@ -101,6 +101,13 @@ class ShutdownState:
 def setup_signal_handlers(shutdown_state: ShutdownState) -> None:
     """Install SIGTERM handler for graceful shutdown.
 
+    The handler marks the state as shutting down (new requests get 503) and
+    then calls the handler it replaced. Under uvicorn that is
+    ``Server.handle_exit``, which stops the server: it closes the listening
+    socket, lets in-flight requests finish and runs the lifespan shutdown,
+    which waits for the drain. Without that call nothing ever told uvicorn to
+    exit, so a server that got SIGTERM kept running until it was SIGKILLed.
+
     Args:
         shutdown_state: The shutdown state to update on signal.
 
@@ -108,10 +115,13 @@ def setup_signal_handlers(shutdown_state: ShutdownState) -> None:
         Signal handlers can only be set in the main thread. In test environments
         or when running under certain frameworks, this may silently skip setup.
     """
+    previous = signal.getsignal(signal.SIGTERM) if sys.platform != "win32" else None
 
-    def handle_sigterm(_signum: int, _frame: object) -> None:
+    def handle_sigterm(signum: int, frame: object) -> None:
         logger.info("Received SIGTERM, initiating graceful shutdown")
         shutdown_state.start_shutdown()
+        if callable(previous):
+            previous(signum, frame)
 
     # Only set up signal handlers on Unix (not Windows)
     if sys.platform != "win32":
