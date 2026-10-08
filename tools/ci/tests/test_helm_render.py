@@ -1509,9 +1509,21 @@ def test_only_the_remote_lane_worker_receives_upstreams_and_credentials(tmp_path
         doc for doc in docs if doc["kind"] == "StatefulSet" and doc["metadata"]["name"] == REMOTE_WORKER[1]
     ]
     (worker,) = [c for c in remote_lane["spec"]["template"]["spec"]["containers"] if c["name"] == "worker"]
-    assert worker["image"].endswith("-cpu-default")
+    assert worker["image"].endswith("-cpu-transformers5")
     assert "--bundle=remote" in worker["args"]
     assert "nvidia.com/gpu" not in worker["resources"]["limits"]
+
+
+def test_the_remote_lane_image_provides_every_remote_bundle_dependency() -> None:
+    values = yaml.safe_load((ROOT / helm.CHART_DIR / "values.yaml").read_text(encoding="utf-8"))
+    image_bundle = values["workers"]["pools"]["remote"]["bundles"]["remote"]["imageBundle"]
+    bundles = ROOT / "packages/sie_server/bundles"
+    remote = yaml.safe_load((bundles / "remote.yaml").read_text(encoding="utf-8"))
+    image = yaml.safe_load((bundles / f"{image_bundle}.yaml").read_text(encoding="utf-8"))
+
+    assert image_bundle == "transformers5"
+    assert remote["deps"]
+    assert remote["deps"].items() <= (image.get("deps") or {}).items()
 
 
 def test_every_lane_names_a_bundle_the_server_ships(tmp_path: Path) -> None:
@@ -1921,7 +1933,7 @@ def test_the_mcp_ingress_certificate_cannot_be_sent_upstream(tmp_path: Path) -> 
         ),
         (
             remote_lane(bundles={"remote": {"imageBundle": "remote", "minReplicas": 1, "maxReplicas": 1}}),
-            "no remote worker image is published",
+            "no remote worker image is published; set imageBundle: transformers5",
         ),
         (
             remote_lane(engine="candle"),

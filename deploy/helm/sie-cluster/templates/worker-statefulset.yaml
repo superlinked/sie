@@ -147,7 +147,7 @@ fast at render time.
 {{- fail (printf "workers.pools.%s.bundles.remote: a remote lane holds upstream credentials and runs no model on an accelerator; set workers.pools.%s.gpu.count to 0" $poolName $poolName) }}
 {{- end }}
 {{- if and $remoteLane (eq $imageBundle "remote") }}
-{{- fail (printf "workers.pools.%s.bundles.remote: no remote worker image is published; set imageBundle: default to run the remote adapters on the %s-default image" $poolName $platform) }}
+{{- fail (printf "workers.pools.%s.bundles.remote: no remote worker image is published; set imageBundle: transformers5 to run the remote adapters on the %s-transformers5 image" $poolName $platform) }}
 {{- end }}
 {{- if $remoteLane }}
 {{- range $resourceKind := list "requests" "limits" }}

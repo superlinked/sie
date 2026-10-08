@@ -1226,9 +1226,10 @@ workers:
           maxReplicas: 3
 
     # Remote profiles (CPU, no GPU). The only lane that receives the upstreams
-    # above and their credentials. It runs the cpu-default image, which
-    # contains the remote adapters, with the remote bundle; the server image
-    # must ship the remote bundle. It requests only cpu, memory and
+    # above and their credentials. It runs the cpu-transformers5 image, which
+    # contains the remote adapters and the transformers 5 release the remote
+    # bundle requires, with the remote bundle; the server image must ship the
+    # remote bundle. It requests only cpu, memory and
     # ephemeral-storage, sets no runtimeClassName and does not inherit
     # workers.common.runtimeClassName. It requires workers.networkPolicy or
     # workers.remote.networkPolicy. The former excludes remote lanes when the
@@ -1254,7 +1255,7 @@ workers:
       tolerations: []
       bundles:
         remote:
-          imageBundle: default
+          imageBundle: transformers5
           minReplicas: 1
           maxReplicas: 2
 

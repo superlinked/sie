@@ -150,6 +150,13 @@ chat request, the upstream's counts are reported instead. An `sie` upstream
 serves the same model and counts with its tokenizer, so its counts are reported
 as they are. Single-node serving reports the upstream's counts.
 
+The `remote` bundle installs transformers 5, so the worker can load tokenizer
+configs in the transformers-5 format (`tokenizer_class: TokenizersBackend`),
+such as GLM-5.3-Flash's. In a cluster the chart runs the remote lane on the
+`cpu-transformers5` image, which provides it. A remote lane pinned to another
+image keeps serving, but a model whose tokenizer uses that format reports the
+upstream's counts there.
+
 ## OpenAI-compatible embeddings and rerank
 
 Define a `kind: openai` upstream with a base URL that includes the provider's

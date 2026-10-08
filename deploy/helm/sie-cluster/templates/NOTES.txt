@@ -47,6 +47,8 @@ KEDA:       enabled
 {{- if eq (include "sie-cluster.worker.remoteLaneEnabled" .) "true" }}
 
 Remote backends: the remote lane is the only worker that holds upstream credentials.
+It runs the cpu-transformers5 image by default (it ran cpu-default before), so it can count
+hybrid generation with tokenizers in the transformers-5 format.
 {{- if dig "remote" "networkPolicy" "enabled" true .Values.workers }}
 Its NetworkPolicy admits only the gateway and limits egress by address and port, not by host name.
 It works only with a CNI that enforces NetworkPolicy. See the chart README section "Network policy

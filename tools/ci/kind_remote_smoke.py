@@ -18,13 +18,15 @@ gateway's, has any network path to it: a gateway pod's own loopback is its
 own, separate network namespace. A successful call therefore could only have
 come from a process inside the worker's pod.
 
-Chart note: the remote lane's `imageBundle` is pinned to `default`, and the
-chart refuses `imageBundle: remote` at render time ("no remote worker image
-is published; set imageBundle: default to run the remote adapters on the
-%s-default image", templates/worker-statefulset.yaml). The default bundle
-(packages/sie_server/bundles/default.yaml) lists the same remote adapters as
-the remote bundle, at a higher priority, so a single built image serves both;
-this script therefore builds `--bundle default`, not `--bundle remote`.
+Chart note: the chart runs the remote lane on the transformers5 image by
+default and refuses `imageBundle: remote` at render time ("no remote worker
+image is published", templates/worker-statefulset.yaml). This smoke overrides
+the lane to `imageBundle: default`: it serves only a remote_only model, which
+needs no tokenizer, so it does not have to build the transformers5 image. The
+default bundle (packages/sie_server/bundles/default.yaml) lists the same remote
+adapters as the remote bundle, at a higher priority, so a single built image
+serves both; this script therefore builds `--bundle default`, not
+`--bundle remote`.
 
 Usage:
     mise exec -- uv run --frozen --project . --no-sync python -m tools.ci.kind_remote_smoke
@@ -158,6 +160,10 @@ workers:
   pools:
     remote:
       enabled: true
+      bundles:
+        remote:
+          # A remote_only model needs no tokenizer, so the default image serves it.
+          imageBundle: default
 gateway:
   image:
     repository: {repo(images["sie-gateway"])}

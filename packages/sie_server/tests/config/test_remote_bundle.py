@@ -5,7 +5,8 @@ cluster runs the remote bundle on the only worker lane that holds upstream
 credentials, so every remote adapter must be in that bundle and the bundle
 must outrank any other bundle that lists a remote adapter. A single server
 serves the default bundle when no bundle is named, so the default bundle keeps
-the remote adapters too.
+the remote adapters too. The chart runs the remote bundle on another bundle's
+image; that image's dependencies are checked in tools/ci/tests/test_helm_render.py.
 """
 
 from __future__ import annotations
@@ -32,13 +33,12 @@ def remote_adapters(bundle: dict[str, Any]) -> set[str]:
     return {adapter for adapter in bundle.get("adapters") or [] if adapter.startswith(REMOTE_ADAPTER_PREFIX)}
 
 
-def test_the_remote_bundle_lists_only_existing_remote_adapters_and_no_dependencies() -> None:
+def test_the_remote_bundle_lists_only_existing_remote_adapters() -> None:
     remote = load_bundles()["remote"]
 
     assert remote["adapters"]
     assert remote_adapters(remote) == set(remote["adapters"])
     assert all(importlib.util.find_spec(adapter) is not None for adapter in remote["adapters"])
-    assert not remote.get("deps")
 
 
 def test_every_remote_adapter_in_any_bundle_is_in_the_remote_bundle() -> None:

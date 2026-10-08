@@ -837,15 +837,24 @@ Below, `<fullname>` is the chart's full name: `<release>-sie-cluster`, or
 - `workers.remote.serving: false` keeps remote lanes running but refuses every
   remote profile and sends nothing upstream. The lanes then receive neither
   the upstreams file nor the credentials.
-- A remote lane runs no model on an accelerator. It runs the `cpu-default`
-  worker image (`imageBundle: default`), which contains the remote adapters, and
-  the render fails when its resolved engine is not `pytorch`, its pool sets
+- A remote lane runs no model on an accelerator. It runs the
+  `cpu-transformers5` worker image (`imageBundle: transformers5`), which
+  contains the remote adapters and the transformers 5 release that the `remote`
+  bundle requires to count a hybrid model's generation with tokenizers in the
+  transformers-5 format. The render fails when its resolved engine is not
+  `pytorch`, its pool sets
   `gpu.count` above 0, requests any resource other than `cpu`, `memory` and
   `ephemeral-storage`, or sets a `runtimeClassName`. It does not inherit
   `workers.common.runtimeClassName`.
 - The worker image must ship the `remote` bundle, which server images do from
   the first release that includes #492. With an older image the worker exits
   at start (`Bundle file not found`) and the lane restarts in a loop.
+- Behaviour change: the remote lane's default image moved from `cpu-default`
+  to `cpu-transformers5`. An install that pins
+  `workers.pools.remote.bundles.remote.imageBundle: default` keeps running,
+  but its worker cannot load tokenizer configs in the transformers-5 format, so
+  a hybrid model whose tokenizer uses that format reports the upstream's counts
+  instead of the worker's own.
 - Workers read their environment at start. After rotating an upstream's
   Secret, restart the remote lane:
   `kubectl rollout restart statefulset/<fullname>-worker-remote-remote -n <NAMESPACE>`.

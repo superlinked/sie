@@ -8,4 +8,9 @@ default: false
 adapters:
 - sie_server.adapters.remote.openai
 - sie_server.adapters.remote.sie
-deps: {}
+deps:
+  # The worker counts a hybrid model's upstream generation with the model's
+  # own tokenizer. Tokenizer configs in the transformers-5 format (for example
+  # GLM-5.3-Flash's TokenizersBackend) load only on transformers 5. The chart's
+  # remote lane runs the transformers5 image, which provides this pin.
+  transformers: '>=5.14,<6'
