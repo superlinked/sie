@@ -53,6 +53,7 @@ from sie_server.core.memory import MemoryConfig, MemoryManager
 from sie_server.core.model_loader import DEFAULT_MAX_LORAS, LoadedModel, ModelLoader
 from sie_server.core.oom import is_oom_error
 from sie_server.core.pool_isolation import (
+    counts_toward_pool_isolation,
     validate_no_legacy_scalar_lora_id,
     validate_pool_isolation,
 )
@@ -2362,7 +2363,8 @@ class ModelRegistry:
         """Enforce pool isolation across currently-loaded configs.
 
         Buckets configs by task class (gen vs non-gen) in a single
-        O(n) pass and asserts at most one bucket is non-empty. Raises
+        O(n) pass, skipping configs this worker refuses to load, and
+        asserts at most one bucket is non-empty. Raises
         :class:`PoolIsolationError` naming the first incompatible pair
         when both buckets are non-empty.
 
@@ -2375,6 +2377,8 @@ class ModelRegistry:
         gen_names: list[str] = []
         non_gen_names: list[str] = []
         for name, config in self._configs.items():
+            if not counts_toward_pool_isolation(config):
+                continue
             if config.tasks.generate is not None:
                 gen_names.append(name)
             else:

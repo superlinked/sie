@@ -12,13 +12,18 @@ the simpler invariant — a single pool holds a single task class — is
 what the gateway's routing and the worker's batch-shape assumptions
 already assume. Reject loudly at config load so operators see the
 misconfiguration before it surfaces as silent batch-budget thrash.
+
+Only models the worker can serve take part. With remote serving off
+(``SIE_REMOTE_SERVING``), the worker refuses every remote profile at load,
+so a model served through a remote profile never runs in its pool.
 """
 
 from __future__ import annotations
 
 import logging
 
-from sie_server.config.model import ModelConfig
+from sie_server.config.model import ModelConfig, is_remote_adapter_path
+from sie_server.config.upstreams import remote_serving_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +37,15 @@ def is_generation_model(config: ModelConfig) -> bool:
     (e.g. ``ModelConfig.outputs`` already reads it).
     """
     return config.tasks.generate is not None
+
+
+def counts_toward_pool_isolation(config: ModelConfig) -> bool:
+    """Return ``True`` unless this worker refuses to load ``config``.
+
+    With remote serving off, a model whose served profile is remote is
+    refused at load, so it never shares the pool with another model.
+    """
+    return remote_serving_enabled() or not is_remote_adapter_path(config.resolve_profile("default").adapter_path)
 
 
 class PoolIsolationError(ValueError):
@@ -60,7 +74,13 @@ def validate_pool_isolation(
     a mixed pool is *intended*: the conflict is logged at WARNING and
     allowed instead of raising, because the fair-queue scheduler shares the
     worker's slots between classes with per-class floors.
+
+    A model this worker refuses to load (see
+    :func:`counts_toward_pool_isolation`) neither conflicts nor is
+    conflicted with.
     """
+    if not counts_toward_pool_isolation(candidate_config):
+        return
     candidate_is_gen = is_generation_model(candidate_config)
     # Accumulate every conflicting existing config rather than stopping
     # on the first hit. An operator with 4 misconfigured models would
@@ -71,6 +91,8 @@ def validate_pool_isolation(
     for existing_name, existing_config in existing_configs.items():
         if existing_name == candidate_name:
             # Re-registration of the same model (hot reload) is fine.
+            continue
+        if not counts_toward_pool_isolation(existing_config):
             continue
         existing_is_gen = is_generation_model(existing_config)
         if candidate_is_gen == existing_is_gen:
