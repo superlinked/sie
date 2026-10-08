@@ -14,7 +14,7 @@ from sie_server.adapters._flash_base import FlashBaseAdapter
 from sie_server.adapters._flash_pack import build_position_ids
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_NOT_LOADED, ComputePrecision
-from sie_server.adapters._utils import extract_texts, validate_output_types
+from sie_server.adapters._utils import extract_texts, resolve_query_instruction, validate_output_types
 from sie_server.adapters.base import ModelAdapter
 from sie_server.adapters.peft_lora_mixin import PEFTLoRAMixin
 from sie_server.core.inference_output import EncodeOutput, SparseVector
@@ -230,7 +230,7 @@ class SPLADEFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
 
         texts = extract_texts(
             items,
-            instruction,
+            resolve_query_instruction(instruction, options, is_query=is_query),
             is_query=is_query,
             query_template=query_template,
             doc_template=doc_template,

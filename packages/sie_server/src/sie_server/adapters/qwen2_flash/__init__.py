@@ -12,7 +12,12 @@ from sie_server.adapters._flash_base import FlashBaseAdapter
 from sie_server.adapters._flash_pack import build_position_ids, mean_pool_packed
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_NOT_LOADED, ComputePrecision, PoolingStrategy
-from sie_server.adapters._utils import apply_rotary_pos_emb, extract_texts, validate_output_types
+from sie_server.adapters._utils import (
+    apply_rotary_pos_emb,
+    extract_texts,
+    resolve_query_instruction,
+    validate_output_types,
+)
 from sie_server.adapters.peft_lora_mixin import PEFTLoRAMixin
 from sie_server.core.inference_output import EncodeOutput
 from sie_server.types.inputs import Item
@@ -270,15 +275,10 @@ class Qwen2FlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
         doc_template = opts.get("doc_template", self._doc_template)
         normalize = opts.get("normalize", self._normalize)
         pooling = opts.get("pooling", self._pooling)
-        # The profile's default_instruction is query-only and fills in only
-        # when the request gave no instruction; an explicit "" is kept.
-        effective_instruction = instruction
-        if effective_instruction is None and is_query:
-            effective_instruction = opts.get("default_instruction")
 
         texts = extract_texts(
             items,
-            effective_instruction,
+            resolve_query_instruction(instruction, opts, is_query=is_query),
             is_query=is_query,
             query_template=query_template,
             doc_template=doc_template,

@@ -163,6 +163,24 @@ def resolve_embedding_options(
     )
 
 
+def resolve_query_instruction(
+    instruction: str | None,
+    options: dict[str, Any] | None,
+    *,
+    is_query: bool,
+) -> str | None:
+    """Return the instruction to format into the texts for ``extract_texts``.
+
+    A request instruction always wins, including an explicit ``""``. When the
+    request gives none, queries fall back to the ``default_instruction``
+    runtime option (the profile default, or a request override merged into
+    ``options``). Documents never receive the default.
+    """
+    if instruction is not None or not is_query:
+        return instruction
+    return (options or {}).get("default_instruction")
+
+
 # ---------------------------------------------------------------------------
 # Score-pair grouping (shared by ColBERT-family adapters)
 # ---------------------------------------------------------------------------

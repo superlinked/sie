@@ -12,7 +12,12 @@ from sie_server.adapters._flash_base import FlashBaseAdapter
 from sie_server.adapters._flash_pack import build_position_ids, mean_pool_packed
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_NOT_LOADED, ComputePrecision, PoolingStrategy
-from sie_server.adapters._utils import apply_rotary_pos_emb, extract_texts, validate_output_types
+from sie_server.adapters._utils import (
+    apply_rotary_pos_emb,
+    extract_texts,
+    resolve_query_instruction,
+    validate_output_types,
+)
 from sie_server.core.inference_output import EncodeOutput
 from sie_server.types.inputs import Item
 
@@ -236,7 +241,8 @@ class NomicFlashAdapter(FlashBaseAdapter):
         Args:
             items: List of items to encode.
             output_types: Which outputs to compute (only "dense" supported).
-            instruction: Optional instruction prefix (unused, template-based).
+            instruction: Optional instruction prefix. For queries, ``None``
+                falls back to the ``default_instruction`` runtime option.
             is_query: Whether items are queries (affects template selection).
             prepared_items: Not used by this adapter.
 
@@ -256,7 +262,7 @@ class NomicFlashAdapter(FlashBaseAdapter):
 
         texts = extract_texts(
             items,
-            instruction,
+            resolve_query_instruction(instruction, options, is_query=is_query),
             is_query=is_query,
             query_template=query_template,
             doc_template=doc_template,
