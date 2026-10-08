@@ -306,10 +306,11 @@ pub struct EnsureModelReadyResponse {
     pub descriptor: Option<ModelDescriptor>,
     /// The model's batch cost budget from its profile (`max_batch_tokens`),
     /// in the model's cost units: tokens for text, milliseconds for audio.
-    /// Mirrors `sie_server.ipc_types.EnsureModelReadyResponse.max_batch_tokens`.
-    /// Only populated when `state == Ready`. The scheduler sizes the model's
-    /// cost cap and adaptive cost range from it; backends that do not send it
-    /// leave the scheduler on its default budget.
+    /// Mirrors `sie_server.ipc_types.EnsureModelReadyResponse.max_batch_tokens`;
+    /// the Candle worker sends it too. Only populated when `state == Ready`.
+    /// The scheduler sizes the model's cost cap and adaptive cost range from
+    /// it; backends that do not send it leave the scheduler on its default
+    /// budget.
     #[serde(default)]
     pub max_batch_tokens: Option<u64>,
 }
