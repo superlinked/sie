@@ -11,7 +11,10 @@ import logging
 import signal
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from types import FrameType
+from typing import Any
 
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
@@ -116,12 +119,16 @@ def setup_signal_handlers(shutdown_state: ShutdownState) -> None:
         or when running under certain frameworks, this may silently skip setup.
     """
     previous = signal.getsignal(signal.SIGTERM) if sys.platform != "win32" else None
+    # SIG_DFL and SIG_IGN are ints; anything else that is set is a Python handler.
+    chained: Callable[[int, FrameType | None], Any] | None = (
+        None if previous is None or isinstance(previous, int) else previous
+    )
 
-    def handle_sigterm(signum: int, frame: object) -> None:
+    def handle_sigterm(signum: int, frame: FrameType | None) -> None:
         logger.info("Received SIGTERM, initiating graceful shutdown")
         shutdown_state.start_shutdown()
-        if callable(previous):
-            previous(signum, frame)
+        if chained is not None:
+            chained(signum, frame)
 
     # Only set up signal handlers on Unix (not Windows)
     if sys.platform != "win32":
