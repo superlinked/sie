@@ -472,3 +472,36 @@ profiles:
           - "fp8_e4m3"
           - "--mm-process-config"
           - '{"image":{"max_soft_tokens":1120}}'
+  # ``h100-96k-hires`` with a longer answer budget. The profile-level
+  # ``max_output_tokens`` raises the bare 4,096-token cap to 8,192, because
+  # extracting every row of a dense multi-column page can need more than 4,096
+  # answer tokens. The launch, image budget and answer-only mode are unchanged.
+  # Like ``h100-96k-no-spec``, the grammar sibling extends the speculative
+  # profile and restates the full load-time block (profile chaining is not
+  # allowed).
+  h100-96k-hires-out8k:
+    extends: h100-96k-hires
+    grammar_profile: h100-96k-hires-out8k-no-spec
+    max_output_tokens: 8192
+  h100-96k-hires-out8k-no-spec:
+    extends: h100-96k-hires
+    max_output_tokens: 8192
+    adapter_options:
+      loadtime:
+        max_seq_length: 98304
+        mem_fraction_static: 0.90
+        served_model_name: google/gemma-4-31B-it
+        attention_backend: triton
+        grammar_backend: xgrammar
+        reasoning_parser: gemma4
+        tool_call_parser: gemma4
+        speculative_needs_extra_buffer: false
+        speculative:
+          enabled: false
+        extra_launch_args:
+          - "--quantization"
+          - "fp8"
+          - "--kv-cache-dtype"
+          - "fp8_e4m3"
+          - "--mm-process-config"
+          - '{"image":{"max_soft_tokens":1120}}'

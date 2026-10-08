@@ -72,3 +72,51 @@ def test_hires_grammar_requests_route_to_the_non_speculative_sibling() -> None:
     assert source.loadtime["speculative"] == config.resolve_profile("h100-96k").loadtime["speculative"]
     assert fallback.loadtime["speculative"] == {"enabled": False}
     assert source.loadtime | {"speculative": None} == fallback.loadtime | {"speculative": None}
+
+
+def test_hires_out8k_profiles_only_raise_the_output_cap() -> None:
+    config = load_model_config(MODEL_FILE)
+    for out8k_name, base_name in (
+        ("h100-96k-hires-out8k", "h100-96k-hires"),
+        ("h100-96k-hires-out8k-no-spec", "h100-96k-hires-no-spec"),
+    ):
+        out8k = config.resolve_profile(out8k_name)
+        base = config.resolve_profile(base_name)
+        assert out8k.max_output_tokens == 8192
+        assert base.max_output_tokens is None
+        assert out8k.loadtime == base.loadtime
+        assert out8k.runtime == base.runtime
+        assert out8k.adapter_path == base.adapter_path
+        assert out8k.compute_precision == base.compute_precision
+        assert out8k.max_batch_tokens == base.max_batch_tokens == 98304
+        assert out8k.kv_budget_tokens == base.kv_budget_tokens == 98304
+        assert out8k.chat_template_kwargs == base.chat_template_kwargs
+        assert _mm_process_config(out8k.loadtime["extra_launch_args"]) == {"image": {"max_soft_tokens": 1120}}
+
+
+def test_hires_out8k_profiles_serve_answer_only_with_an_8192_token_cap() -> None:
+    configs = expand_profile_variants([load_model_config(MODEL_FILE)])
+    for suffix in ("h100-96k-hires-out8k", "h100-96k-hires-out8k-no-spec"):
+        config = configs[f"{MODEL_ID}:{suffix}"]
+        generate = config.tasks.generate
+        assert generate is not None
+        assert generate.max_output_tokens == 8192
+        assert generate.context_length == 98304
+        assert config.max_sequence_length == 98304
+        effective_mode = config.resolve_profile("default").chat_template_kwargs or generate.chat_template_kwargs
+        assert effective_mode == {"enable_thinking": False}
+    # The existing hi-res and bare H100 routes keep the conservative 4,096-token cap.
+    for suffix in ("h100-96k-hires", "h100-96k-hires-no-spec", "h100-96k", "h100-96k-no-spec"):
+        assert configs[f"{MODEL_ID}:{suffix}"].tasks.generate.max_output_tokens == 4096
+
+
+def test_hires_out8k_grammar_requests_route_to_the_non_speculative_sibling() -> None:
+    config = load_model_config(MODEL_FILE)
+    source = config.resolve_profile("h100-96k-hires-out8k")
+    fallback = config.resolve_profile("h100-96k-hires-out8k-no-spec")
+    assert source.grammar_profile == "h100-96k-hires-out8k-no-spec"
+    assert fallback.grammar_profile is None
+    assert source.max_output_tokens == fallback.max_output_tokens == 8192
+    assert source.loadtime["speculative"] == config.resolve_profile("h100-96k").loadtime["speculative"]
+    assert fallback.loadtime["speculative"] == {"enabled": False}
+    assert source.loadtime | {"speculative": None} == fallback.loadtime | {"speculative": None}
