@@ -23,6 +23,8 @@
 [![PyPI](https://img.shields.io/pypi/v/sie-sdk?style=flat-square)](https://pypi.org/project/sie-sdk/)
 [![GitHub stars](https://img.shields.io/github/stars/superlinked/sie?style=flat-square)](https://github.com/superlinked/sie/stargazers)
 
+<a href="https://trendshift.io/repositories/21327?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-21327" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/21327" alt="superlinked%2Fsie | Trendshift" width="250" height="55"/></a>
+
 ⭐ _Help us reach more developers and grow the SIE community. Star this repo!_
 
 </div>
