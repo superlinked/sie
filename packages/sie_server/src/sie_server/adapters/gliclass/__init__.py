@@ -12,7 +12,9 @@ Performance note (Dec 2025):
 
 Scoring runs the gliclass model directly with the library's own prompt assembly
 and tokenization, in the pipeline's sub-batches of eight rows, and applies the
-pipeline's softmax or sigmoid. The scores equal the pipeline's. The adapter skips
+pipeline's softmax or sigmoid. The scores equal the pipeline's, except that a
+single-label request with one label gets that label's sigmoid (the multi-label
+score) where the pipeline's softmax returns 1.0 for any text. The adapter skips
 the pipeline's progress bar and its per-label reads from the device, and it
 tokenizes each document once for its length checks and metering.
 
@@ -987,7 +989,9 @@ class GLiClassAdapter(BaseAdapter):
         forward passes of at most ``batch_size``, by default the pipeline's
         sub-batches. A single-label row gets a softmax over the label slots a
         call with only its labels would have; a multi-label row a sigmoid per
-        label. Each forward's scores come back in one device-to-host copy.
+        label. A single-label row with one label gets that label's sigmoid,
+        since a softmax over one label would be 1.0 for any text. Each
+        forward's scores come back in one device-to-host copy.
         ``graphs`` chooses how forwards run on CUDA (see ``cuda_graphs``).
         """
         pipe = self._require_pipe()
@@ -1013,6 +1017,10 @@ class GLiClassAdapter(BaseAdapter):
                         raise InputTooLongError(_ERR_INPUT_TOO_LONG)
                     if probs is not None:
                         rows.append(probs[row, :count])
+                    elif count == 1:
+                        # A softmax over one label is 1.0 whatever the text, so a
+                        # lone label is scored on its own, as multi-label scores it.
+                        rows.append(torch.sigmoid(logits[row, :1]))
                     elif width == logits.shape[-1]:
                         rows.append(torch.softmax(logits[row], dim=-1)[:count])
                     else:
