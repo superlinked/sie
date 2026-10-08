@@ -32,7 +32,7 @@ from sie_server.core.profile_identity import runtime_instance_id
 from sie_server.core.readiness import mark_not_ready, mark_ready, register_liveness_probe
 from sie_server.core.registry import ModelRegistry
 from sie_server.core.timing import RequestTiming
-from sie_server.core.worker.types import WorkerResult
+from sie_server.core.worker.types import WorkerConfig, WorkerResult
 from sie_server.ipc_server import IpcServer, IpcServerError
 from sie_server.ipc_types import (
     IPC_VERSION,
@@ -1159,6 +1159,43 @@ class TestEnsureModelReady:
                 assert resp["ok"] is True
                 assert resp["body"]["state"] == "ready"
                 assert resp["body"]["batch_budget"] == 42
+            finally:
+                await client.close()
+        finally:
+            await srv.stop(drain_timeout_s=1.0)
+
+    @pytest.mark.asyncio
+    async def test_max_batch_tokens_included_on_ready_only(self) -> None:
+        """EnsureModelReady carries the model's batch cost budget so the
+        worker-sidecar sizes the model's scheduler cost cap from it.
+        """
+        reg = MagicMock()
+        reg.model_names = ["test/model"]
+        reg.device = "cpu"
+        reg.is_loaded.return_value = True
+        reg.is_loading.return_value = False
+        reg.loaded_model_names = []
+        worker = MagicMock()
+        worker.config = WorkerConfig(max_batch_tokens=720_000)
+        reg.get_worker.return_value = worker
+        executor = QueueExecutor(reg)
+        sock = _short_sock_path()
+        srv = IpcServer(sock, executor, worker_id="worker-test", stale_after_ms=10_000)
+        await srv.start()
+        try:
+            client = await _Client.connect(sock)
+            try:
+                resp = await client.rpc("EnsureModelReady", {"model_id": "test/model"})
+                assert resp["ok"] is True
+                assert resp["body"]["state"] == "ready"
+                assert resp["body"]["max_batch_tokens"] == 720_000
+
+                # Not ready (unknown model): no budget, even with a worker.
+                reg.has_model.return_value = False
+                resp = await client.rpc("EnsureModelReady", {"model_id": "test/model"})
+                assert resp["ok"] is True
+                assert resp["body"]["state"] == "retry_later"
+                assert resp["body"]["max_batch_tokens"] is None
             finally:
                 await client.close()
         finally:

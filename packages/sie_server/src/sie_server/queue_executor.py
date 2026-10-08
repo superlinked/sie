@@ -1052,6 +1052,26 @@ class QueueExecutor:
             return budget
         return None
 
+    def get_max_batch_tokens(self, model_id: str) -> int | None:
+        """Return the model's batch cost budget, or ``None`` if unknown / not loaded.
+
+        Reads the worker's static ``config.max_batch_tokens`` (the resolved
+        profile value), not ``_batch_config.max_batch_cost``, which the
+        direct-path adaptive controller rewrites as it steps. The
+        worker-sidecar derives the model's batch cost cap and adaptive cost
+        range from it.
+        """
+        try:
+            worker = self._registry.get_worker(model_id)
+        except (KeyError, AttributeError):
+            return None
+        if worker is None:
+            return None
+        budget = getattr(getattr(worker, "config", None), "max_batch_tokens", None)
+        if isinstance(budget, int) and not isinstance(budget, bool) and budget > 0:
+            return budget
+        return None
+
     @staticmethod
     def _options_key(options: dict[str, Any] | None) -> bytes:
         return pack_msgpack(options, use_bin_type=True) if options else b""

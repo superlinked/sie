@@ -15,12 +15,13 @@ from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters.gliner2.adapter import GLiNER2Adapter
 from sie_server.adapters.laya.adapter import LayaAdapter
 from sie_server.config.model import EmbeddingDim, EncodeTask, ModelConfig, ProfileConfig, Tasks
+from sie_server.core.batcher import BatchConfig
 from sie_server.core.extract_cost import MAX_EXTRACT_LABELS
 from sie_server.core.inference_output import ExtractOutput, ScoreOutput
 from sie_server.core.loader import expand_profile_variants, load_model_config
 from sie_server.core.registry import ModelRegistry
 from sie_server.core.timing import RequestTiming
-from sie_server.core.worker.types import WorkerResult
+from sie_server.core.worker.types import WorkerConfig, WorkerResult
 from sie_server.ipc_types import (
     EncodeBatchItem,
     ExtractBatchItem,
@@ -506,6 +507,62 @@ class TestGetBatchBudget:
         reg.get_worker.return_value = worker
         ex = QueueExecutor(reg)
         assert ex.get_batch_budget("test/model") is None
+
+
+class TestGetMaxBatchTokens:
+    """Per-model batch cost budget advertised to the worker-sidecar via
+    EnsureModelReadyResponse.
+    """
+
+    def test_returns_the_profile_budget_from_the_worker_config(self) -> None:
+        reg = _make_registry()
+        worker = MagicMock()
+        worker.config = WorkerConfig(max_batch_tokens=720_000)
+        reg.get_worker.return_value = worker
+        ex = QueueExecutor(reg)
+        assert ex.get_max_batch_tokens("test/model") == 720_000
+
+    def test_ignores_the_adaptive_batch_config_cost(self) -> None:
+        # The direct-path adaptive controller rewrites
+        # ``_batch_config.max_batch_cost`` (aliased as ``max_batch_tokens``) in
+        # place as it steps; the advertised budget must stay the profile value.
+        reg = _make_registry()
+        worker = MagicMock()
+        worker.config = WorkerConfig(max_batch_tokens=720_000)
+        worker._batch_config = BatchConfig(max_batch_tokens=720_000)
+        worker._batch_config.max_batch_cost = 180_000
+        reg.get_worker.return_value = worker
+        ex = QueueExecutor(reg)
+        assert worker._batch_config.max_batch_tokens == 180_000
+        assert ex.get_max_batch_tokens("test/model") == 720_000
+
+    def test_returns_none_when_worker_missing(self) -> None:
+        reg = _make_registry()
+        reg.get_worker.return_value = None
+        ex = QueueExecutor(reg)
+        assert ex.get_max_batch_tokens("test/model") is None
+
+    def test_returns_none_when_worker_has_no_config(self) -> None:
+        reg = _make_registry()
+        reg.get_worker.return_value = object()  # no `config` attribute
+        ex = QueueExecutor(reg)
+        assert ex.get_max_batch_tokens("test/model") is None
+
+    def test_returns_none_when_registry_raises(self) -> None:
+        reg = _make_registry()
+        reg.get_worker.side_effect = KeyError("test/model")
+        ex = QueueExecutor(reg)
+        assert ex.get_max_batch_tokens("test/model") is None
+
+    @pytest.mark.parametrize("budget", ["720000", True, 0, -1, 720_000.0, None])
+    def test_returns_none_for_a_non_positive_or_non_int_budget(self, budget: object) -> None:
+        # Protect the wire: only a positive int reaches the IPC response.
+        reg = _make_registry()
+        worker = MagicMock()
+        worker.config = MagicMock(max_batch_tokens=budget)
+        reg.get_worker.return_value = worker
+        ex = QueueExecutor(reg)
+        assert ex.get_max_batch_tokens("test/model") is None
 
 
 # -----------------------------------------------------------------------------
