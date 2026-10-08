@@ -364,6 +364,13 @@ GlmOcrPreparedItem = PreparedItem[GlmOcrPayload]
 
 
 @dataclass(slots=True)
+class LightOnOCR3Payload(GlmOcrPayload):
+    """Complete Qwen3.5 processor inputs bound to the trained OCR prompt mode."""
+
+    instruction: str | None = None
+
+
+@dataclass(slots=True)
 class DetectionPayload(Payload):
     """Preprocessed detection model input ready for inference.
 

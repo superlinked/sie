@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import gc
 import logging
+import math
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -10,8 +11,9 @@ import torch.nn.functional as F
 
 from sie_server.adapters.base import ModelAdapter, ModelCapabilities, ModelDims
 from sie_server.core.inference_output import EncodeOutput, ExtractOutput
-from sie_server.core.prepared import LightOnOCRPayload, PreparedItem
+from sie_server.core.prepared import LightOnOCR3Payload, LightOnOCRPayload, PreparedItem
 from sie_server.core.preprocessor import LightOnOCRPreprocessor
+from sie_server.core.preprocessor.vision import LightOnOCR3Preprocessor
 from sie_server.types.inputs import InvalidMediaError, decode_image
 from sie_server.types.responses import Entity
 
@@ -517,3 +519,167 @@ class LightOnOCRAdapter(ModelAdapter):
             List with a single Entity containing the Markdown text.
         """
         return [Entity(text=text.strip(), label="markdown", score=1.0)]
+
+
+class LightOnOCR3Adapter(LightOnOCRAdapter):
+    """Native Qwen3.5 extraction for LightOnOCR-3 plain and grounding modes."""
+
+    def __init__(
+        self,
+        model_name_or_path: str | Path,
+        *,
+        compute_precision: ComputePrecision = "bfloat16",
+        max_new_tokens: int = 4096,
+        temperature: float = 0.1,
+        top_p: float = 1.0,
+        attn_implementation: str = "sdpa",
+        revision: str | None = None,
+        **kwargs: Any,
+    ) -> None:
+        if "system_prompt" in kwargs or "user_text" in kwargs:
+            msg = "LightOnOCR-3 uses only its trained image-only or grounding prompt"
+            raise ValueError(msg)
+        if kwargs.pop("num_beams", 1) != 1 or kwargs.pop("do_sample", True) is not True:
+            msg = "LightOnOCR-3 requires sampling with one beam"
+            raise ValueError(msg)
+        if kwargs.pop("enable_thinking", False) is not False:
+            msg = "LightOnOCR-3 requires enable_thinking=False"
+            raise ValueError(msg)
+        if type(max_new_tokens) is not int or max_new_tokens < 1:
+            msg = "max_new_tokens must be a positive integer"
+            raise ValueError(msg)
+        super().__init__(
+            model_name_or_path,
+            compute_precision=compute_precision,
+            max_new_tokens=max_new_tokens,
+            attn_implementation=attn_implementation,
+            revision=revision,
+            **kwargs,
+        )
+        self._temperature = temperature
+        self._top_p = top_p
+        self._generation_options({})
+
+    def load(self, device: str) -> None:
+        from transformers import (
+            AutoProcessor,
+            Qwen3_5ForConditionalGeneration,  # ty: ignore[unresolved-import]
+        )
+
+        dtype = self._resolve_dtype(device)
+        shared_kwargs: dict[str, Any] = {"trust_remote_code": False}
+        if self._revision is not None:
+            shared_kwargs["revision"] = self._revision
+        self._processor = AutoProcessor.from_pretrained(self._model_name_or_path, **shared_kwargs)
+        self._model = Qwen3_5ForConditionalGeneration.from_pretrained(
+            self._model_name_or_path,
+            dtype=dtype,
+            attn_implementation=self._attn_implementation,
+            **shared_kwargs,
+        )
+        self._model.to(device)
+        self._model.eval()
+        self._device = device
+        self._create_preprocessor()
+
+    def _create_preprocessor(self) -> None:
+        self._preprocessor = LightOnOCR3Preprocessor(self._processor, self._model_name_or_path)
+
+    def _generation_options(self, options: dict[str, Any]) -> dict[str, Any]:
+        unknown = options.keys() - {"max_new_tokens", "temperature", "top_p"}
+        if unknown:
+            msg = f"Unsupported LightOnOCR-3 options: {sorted(unknown)}"
+            raise ValueError(msg)
+        max_new_tokens = options.get("max_new_tokens", self._max_new_tokens)
+        if type(max_new_tokens) is not int or not 1 <= max_new_tokens <= self._max_new_tokens:
+            msg = f"max_new_tokens must be an integer between 1 and {self._max_new_tokens}"
+            raise ValueError(msg)
+        temperature = options.get("temperature", self._temperature)
+        top_p = options.get("top_p", self._top_p)
+        for name, value in (("temperature", temperature), ("top_p", top_p)):
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+                msg = f"{name} must be a finite positive number"
+                raise ValueError(msg)
+        if top_p > 1:
+            msg = "top_p must be at most 1"
+            raise ValueError(msg)
+        return {
+            "max_new_tokens": max_new_tokens,
+            "do_sample": True,
+            "num_beams": 1,
+            "temperature": temperature,
+            "top_p": top_p,
+        }
+
+    def extract(
+        self,
+        items: list[Item],
+        *,
+        labels: list[str] | None = None,
+        output_schema: dict[str, Any] | None = None,
+        instruction: str | None = None,
+        options: dict[str, Any] | None = None,
+        prepared_items: list[Any] | None = None,
+    ) -> ExtractOutput:
+        """Return raw Markdown or grounding text; only the exact trained modes are supported."""
+        if self._model is None or self._processor is None or self._preprocessor is None or self._device is None:
+            raise RuntimeError(_ERR_NOT_LOADED)
+        instruction = LightOnOCR3Preprocessor.validate_instruction(instruction)
+        generation_options = self._generation_options(options or {})
+        for item in items:
+            if item.images is None or len(item.images) != 1:
+                msg = "LightOnOCR-3 requires exactly one image per item"
+                raise InvalidMediaError(msg)
+
+        if prepared_items is None:
+            prepared_items = [
+                self._preprocessor._process_single_image(item, i, instruction) for i, item in enumerate(items)
+            ]
+        elif len(prepared_items) != len(items):
+            msg = "prepared_items length must match items length"
+            raise ValueError(msg)
+
+        payloads: list[LightOnOCR3Payload] = []
+        for prepared in prepared_items:
+            payload = prepared.payload if isinstance(prepared, PreparedItem) else prepared
+            if not isinstance(payload, LightOnOCR3Payload) or payload.instruction != instruction:
+                msg = "LightOnOCR-3 prepared payload must match the requested prompt mode"
+                raise ValueError(msg)
+            self._validate_inputs(payload.inputs)
+            payloads.append(payload)
+
+        all_entities: list[list[Entity]] = []
+        for payload in payloads:
+            prepared = PreparedItem(payload=payload, cost=1, original_index=0)
+            inputs = self._preprocessor.collate([prepared], device=self._device, dtype=self._model.dtype)
+            prompt_len = inputs["input_ids"].shape[1]
+            with torch.inference_mode():
+                output_ids = self._model.generate(**inputs, **generation_options)
+            text = self._processor.decode(output_ids[0, prompt_len:], skip_special_tokens=True)
+            all_entities.append([Entity(text=text, label="markdown", score=1.0)])
+        return ExtractOutput(entities=all_entities, pages=[1 for _ in items])
+
+    @staticmethod
+    def _validate_inputs(inputs: dict[str, Any]) -> None:
+        for key in ("input_ids", "attention_mask", "pixel_values", "image_grid_thw"):
+            if not isinstance(inputs.get(key), torch.Tensor):
+                msg = f"LightOnOCR-3 processor output requires tensor {key}"
+                raise ValueError(msg)
+        input_ids = inputs["input_ids"]
+        attention_mask = inputs["attention_mask"]
+        grid = inputs["image_grid_thw"]
+        if (
+            input_ids.ndim != 2
+            or input_ids.shape[0] != 1
+            or input_ids.shape[1] == 0
+            or attention_mask.shape != input_ids.shape
+            or input_ids.dtype != torch.long
+            or attention_mask.dtype != torch.long
+            or inputs["pixel_values"].ndim != 2
+            or not inputs["pixel_values"].is_floating_point()
+            or grid.shape != (1, 3)
+            or grid.dtype != torch.long
+            or not bool(torch.all(grid > 0))
+        ):
+            msg = "LightOnOCR-3 processor output must describe one image and one token row"
+            raise ValueError(msg)

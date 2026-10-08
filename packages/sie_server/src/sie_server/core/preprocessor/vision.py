@@ -19,6 +19,7 @@ from sie_server.core.prepared import (
     DonutPayload,
     Florence2Payload,
     GlmOcrPayload,
+    LightOnOCR3Payload,
     LightOnOCRPayload,
     MinerUVLPayload,
     NemoColEmbedPayload,
@@ -27,7 +28,7 @@ from sie_server.core.prepared import (
     PreparedItem,
 )
 from sie_server.core.preprocessor.base import get_image_executor
-from sie_server.types.inputs import decode_image
+from sie_server.types.inputs import InvalidMediaError, decode_image
 
 if TYPE_CHECKING:
     import torch
@@ -1246,6 +1247,47 @@ class GlmOcrPreprocessor:
             else:
                 out[k] = v
         return out
+
+
+class LightOnOCR3Preprocessor(GlmOcrPreprocessor):
+    """Preserve the full Qwen3.5 processor output for plain or grounded OCR."""
+
+    @staticmethod
+    def validate_instruction(instruction: str | None) -> str | None:
+        if instruction not in (None, "", "grounding"):
+            msg = "LightOnOCR-3 supports only image-only OCR or instruction='grounding'"
+            raise ValueError(msg)
+        return instruction or None
+
+    def _process_single_image(
+        self,
+        item: Item,
+        index: int,
+        instruction: str | None = None,
+    ) -> PreparedItem[GlmOcrPayload]:
+        instruction = self.validate_instruction(instruction)
+        if item.images is None or len(item.images) != 1:
+            msg = "LightOnOCR-3 requires exactly one image per item"
+            raise InvalidMediaError(msg)
+
+        image = _load_rgb(item.images[0], item_index=index)
+        content: list[dict[str, Any]] = [{"type": "image", "image": image}]
+        if instruction is not None:
+            content.append({"type": "text", "text": instruction})
+        inputs = self._processor.apply_chat_template(
+            [{"role": "user", "content": content}],
+            tokenize=True,
+            add_generation_prompt=True,
+            enable_thinking=False,
+            return_dict=True,
+            return_tensors="pt",
+        )
+        payload = LightOnOCR3Payload(
+            inputs=dict(inputs),
+            original_size=(image.width, image.height),
+            instruction=instruction,
+        )
+        return PreparedItem(payload=payload, cost=1, original_index=index)
 
 
 def _shrink_to(image: PILImage.Image, max_side: int | None) -> PILImage.Image:

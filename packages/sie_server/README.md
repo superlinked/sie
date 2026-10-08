@@ -59,6 +59,32 @@ pip install sie-server
 sie-server serve --port 8080 --device cuda:0
 ```
 
+### LightOnOCR-3 extraction
+
+`sie_server.adapters.lighton_ocr.adapter:LightOnOCR3Adapter` supports the
+Qwen3.5-based LightOnOCR-3 4B and 0.8B checkpoints in the `transformers5`
+bundle. Pin the checkpoint revision when configuring the profile; it applies
+to both the processor and model. CUDA execution defaults to BF16 and rejects
+FP16.
+
+Send exactly one image per item to `extract`. Omit `instruction` for plain OCR,
+or set it to exactly `grounding` for text with normalized layout coordinates.
+These are the checkpoint's two trained modes; arbitrary prompts and thinking
+are unsupported. The processor receives the decoded RGB image and keeps its
+complete tensor dictionary, including `image_grid_thw`.
+
+Generation uses sampling with one beam, `temperature=0.1` and `top_p=1.0`,
+following the [project's sampling recommendation](https://github.com/lightonai/LightOnOCR/blob/36755d461be079737860a5f03ae0c803501269e9/README.md).
+Runtime options may set a positive finite temperature, `top_p` in `(0, 1]`,
+and `max_new_tokens` from 1 through the profile's configured cap (4096 by
+default). The returned `markdown` entity preserves raw decoded text, including
+grounding markers and whitespace; margin filtering or Markdown cleanup must
+be applied separately. Each image is metered as one page.
+
+See the [official LightOnOCR-3 model card](https://huggingface.co/lightonai/LightOnOCR-3-4B)
+for the trained input and output formats. The existing `LightOnOCRAdapter`
+continues to serve LightOnOCR-2 with its own processor and generation behavior.
+
 ### TensorRT-LLM generation
 
 TensorRT-LLM buffers completion token IDs and emits the final text together only
