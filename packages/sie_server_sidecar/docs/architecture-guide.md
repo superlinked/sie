@@ -551,7 +551,9 @@ while a text model keeps its token budget. Precedence:
 3. Otherwise, with a backend that does not report one, 16384.
 
 `SIE_ADAPTIVE_BATCH_MIN_COST`, `SIE_ADAPTIVE_BATCH_MAX_COST`, and
-`SIE_ADAPTIVE_BATCH_INITIAL_COST` still override the range for every model.
+`SIE_ADAPTIVE_BATCH_INITIAL_COST` still override the range for every model,
+from its first batch on: the static cost cap starts at the adaptive
+controller's starting cost, which is the budget unless one of them clamps it.
 The request count cap and the hard audio duration cap per batch do not change.
 When a ready model later reports a different budget, for example after the
 backend restarts with a changed profile, its scheduler adopts the new budget
