@@ -39,6 +39,7 @@
 
 use std::collections::HashMap;
 use std::hash::Hash;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -189,6 +190,14 @@ pub struct Scheduler<I: HasCost, T> {
     /// after each controller step. Kept behind an async `RwLock`
     /// because readers are rare (new-batcher creation only).
     config: RwLock<BatchConfig>,
+    /// Caps the scheduler was built with, before any controller step.
+    /// [`Scheduler::adopt_cost_budget`] re-bases from these so a new
+    /// budget starts from the configured wait, not a stepped one.
+    initial_config: BatchConfig,
+    /// The batch cost budget (`max_batch_tokens`) the static cost cap and
+    /// the adaptive cost range currently derive from. Written only while
+    /// the controller lock is held; read lock-free on the hot path.
+    cost_budget: AtomicU64,
     /// Fired on every submit that inserts into a previously empty
     /// batcher. [`Scheduler::consume_next`] uses this to wake its
     /// FCFS scan without polling.
@@ -227,6 +236,49 @@ where
     /// middle of [`Scheduler::record_completion`].
     pub async fn config(&self) -> BatchConfig {
         *self.config.read().await
+    }
+
+    /// The batch cost budget (`max_batch_tokens`) the static cost cap and
+    /// the adaptive cost range currently derive from.
+    pub fn cost_budget(&self) -> u64 {
+        self.cost_budget.load(Ordering::Acquire)
+    }
+
+    /// Re-base the cost cap and the adaptive cost range on a new model
+    /// batch cost budget (`max_batch_tokens`).
+    ///
+    /// A no-op returning `false` when the budget is unchanged, which is
+    /// every call after the first in steady state. Otherwise the static
+    /// cost cap becomes `max_batch_tokens`, the adaptive controller is
+    /// rebuilt from it exactly as [`SchedulerBuilder::build`] builds one
+    /// (Python's production range plus `SIE_ADAPTIVE_BATCH_*` overrides),
+    /// the fill-ratio window restarts, and every live batcher gets the
+    /// new caps. The rebuilt controller re-calibrates its latency target.
+    ///
+    /// This runs when the backend reports a different budget for a model
+    /// whose scheduler already exists, for example after the engine
+    /// restarted with a newer image or applied a changed model config.
+    pub async fn adopt_cost_budget(&self, max_batch_tokens: u64) -> bool {
+        if self.cost_budget() == max_batch_tokens {
+            return false;
+        }
+        // Same lock order as `record_completion` (controller, then config),
+        // so a concurrent controller step cannot publish caps derived from
+        // the old budget after this re-base.
+        let mut controller = self.controller.lock().await;
+        if self.cost_budget() == max_batch_tokens {
+            return false;
+        }
+        let new_cfg = BatchConfig {
+            max_batch_cost: max_batch_tokens,
+            ..self.initial_config
+        };
+        *controller = AdaptiveBatchController::from_batch_config_and_env(&new_cfg);
+        *self.config.write().await = new_cfg;
+        self.efficiency.lock().await.reset();
+        self.cost_budget.store(max_batch_tokens, Ordering::Release);
+        self.propagate_config(new_cfg).await;
+        true
     }
 
     /// Sum of pending items across every (op, lora) batcher.
@@ -429,6 +481,13 @@ where
         batch_cost: u64,
         batch_size: usize,
     ) -> RecordCompletionOutcome {
+        // The whole step runs under the controller lock, taken first, so it
+        // cannot interleave with `adopt_cost_budget`: caps derived from a
+        // replaced budget are never published after the re-base. Lock order
+        // is controller, then config, then the batcher map; no path takes
+        // the controller while holding one of the others.
+        let mut ctrl = self.controller.lock().await;
+
         let current_cap = self.config.read().await.max_batch_cost;
         self.efficiency.lock().await.record(batch_cost, current_cap);
 
@@ -440,19 +499,11 @@ where
         let observed_p50 = self.latency.lock().await.p50();
         let fill = self.efficiency.lock().await.mean_fill_ratio();
 
-        let (new_wait, new_cost, target_p50, starvation_streak, starvation_resets_delta) = {
-            let mut ctrl = self.controller.lock().await;
-            let prev_resets = ctrl.starvation_resets();
-            let (w, c) = ctrl.step(observed_p50, fill, Some(batch_size));
-            let new_resets = ctrl.starvation_resets();
-            (
-                w,
-                c,
-                ctrl.target_p50_ms(),
-                ctrl.starvation_streak(),
-                new_resets.saturating_sub(prev_resets),
-            )
-        };
+        let prev_resets = ctrl.starvation_resets();
+        let (new_wait, new_cost) = ctrl.step(observed_p50, fill, Some(batch_size));
+        let target_p50 = ctrl.target_p50_ms();
+        let starvation_streak = ctrl.starvation_streak();
+        let starvation_resets_delta = ctrl.starvation_resets().saturating_sub(prev_resets);
 
         // Update the shared snapshot. Short critical section under
         // the write lock — we only mutate two fields.
@@ -462,20 +513,8 @@ where
             cfg.max_batch_cost = new_cost;
             *cfg
         };
-
-        // Propagate to every live batcher. We snapshot the Vec of
-        // Arcs under the read lock and drop it before the async
-        // `update_config` calls so a concurrent submit that creates a
-        // new batcher doesn't deadlock. A batcher created *after*
-        // this snapshot sees `new_cfg` via `config.read()` in
-        // `get_or_create`, so we don't lose the update.
-        let entries: Vec<Arc<BatcherEntry<I, T>>> = {
-            let map = self.batchers.read().await;
-            map.values().cloned().collect()
-        };
-        for entry in entries {
-            entry.former.update_config(new_cfg).await;
-        }
+        self.propagate_config(new_cfg).await;
+        drop(ctrl);
 
         RecordCompletionOutcome {
             new_wait_ms: new_wait,
@@ -486,6 +525,24 @@ where
             starvation_streak,
             starvation_resets_delta,
             batch_size,
+        }
+    }
+
+    /// Push `cfg` to every live batcher.
+    ///
+    /// We snapshot the Vec of Arcs under the read lock and drop it
+    /// before the async `update_config` calls so a concurrent submit
+    /// that creates a new batcher doesn't deadlock. A batcher created
+    /// *after* this snapshot sees `cfg` via `config.read()` in
+    /// `get_or_create`, so we don't lose the update. Callers write
+    /// `self.config` before calling this.
+    async fn propagate_config(&self, cfg: BatchConfig) {
+        let entries: Vec<Arc<BatcherEntry<I, T>>> = {
+            let map = self.batchers.read().await;
+            map.values().cloned().collect()
+        };
+        for entry in entries {
+            entry.former.update_config(cfg).await;
         }
     }
 
@@ -624,7 +681,8 @@ where
         // Default controller mirrors Python's
         // `ModelWorker.__init__` *production* wiring against the
         // current `BatchConfig` (model `max_batch_tokens` =
-        // `cfg.max_batch_cost`, initial wait = `cfg.max_batch_wait_ms`,
+        // `cfg.max_batch_cost`, which the registry sets to the model's
+        // own budget; initial wait = `cfg.max_batch_wait_ms`,
         // cost floor / ceiling = `max_batch_tokens // 4` ..
         // `max_batch_tokens * 4`, `cost_gain = gain * 0.5`,
         // `min_wait_ms = 15.0`). The bare `default()` / module-level
@@ -649,6 +707,8 @@ where
             )),
             efficiency: Mutex::new(BatchEfficiencyTracker::new(self.efficiency_window)),
             config: RwLock::new(self.config),
+            initial_config: self.config,
+            cost_budget: AtomicU64::new(self.config.max_batch_cost),
             new_item: Notify::new(),
             epoch: Instant::now(),
         }
@@ -1294,6 +1354,66 @@ mod tests {
         // scheduler — production deploys auto-calibrate target_p50.
         assert!(!snap.calibrated);
         assert!(snap.target_p50_ms.is_none());
+    }
+
+    #[tokio::test]
+    async fn adopt_cost_budget_rebases_every_batcher_and_rebuilds_the_controller() {
+        let s: Scheduler<StubItem, u32> = Scheduler::new(BatchConfig::default());
+        assert_eq!(s.cost_budget(), 16_384);
+        for lora in ["a", "b"] {
+            s.submit(
+                Op::Extract,
+                LoraKey::from_name(lora),
+                StubItem { cost: 1, idx: 0 },
+                0,
+            )
+            .await;
+        }
+        // Mark the controller, then move the caps off their initial values
+        // as controller steps do.
+        for _ in 0..3 {
+            let _ = s.record_completion(1, 1).await;
+        }
+        assert_eq!(s.controller_snapshot().await.starvation_streak, 3);
+        {
+            let mut cfg = s.config.write().await;
+            cfg.max_batch_wait_ms = 42.0;
+            cfg.max_batch_cost = 9_000;
+        }
+
+        assert!(s.adopt_cost_budget(720_000).await);
+
+        let expected = BatchConfig {
+            max_batch_cost: 720_000,
+            ..BatchConfig::default()
+        };
+        assert_eq!(s.config().await, expected, "re-based from the initial caps");
+        assert_eq!(s.cost_budget(), 720_000);
+        for lora in ["a", "b"] {
+            let former = {
+                let map = s.batchers.read().await;
+                Arc::clone(&map[&(Op::Extract, LoraKey::from_name(lora))].former)
+            };
+            assert_eq!(former.config().await, expected, "batcher {lora}");
+        }
+        {
+            let ctrl = s.controller.lock().await;
+            assert_eq!(
+                (
+                    ctrl.min_batch_cost,
+                    ctrl.max_batch_cost,
+                    ctrl.current_batch_cost()
+                ),
+                (180_000, 2_880_000, 720_000)
+            );
+            assert_eq!(ctrl.starvation_streak(), 0, "a fresh controller");
+        }
+        assert_eq!(s.efficiency.lock().await.sample_count(), 0);
+
+        // The same budget again changes nothing.
+        let _ = s.record_completion(1, 1).await;
+        assert!(!s.adopt_cost_budget(720_000).await);
+        assert_eq!(s.controller_snapshot().await.starvation_streak, 1);
     }
 
     // ---- Aggregates ----

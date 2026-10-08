@@ -224,7 +224,7 @@ impl AdaptiveBatchController {
     /// | `SIE_ADAPTIVE_BATCH_CALIBRATION_MULT`     | `calibration_multiplier` | 1.5     | 1.5 |
     /// | `SIE_ADAPTIVE_BATCH_MAX_COST`             | `max_batch_cost`         | 65536   | `max(cost_floor, max_batch_tokens * 4)` |
     /// | `SIE_ADAPTIVE_BATCH_MIN_COST`             | `min_batch_cost`         | 256     | `max(256, max_batch_tokens / 4)` |
-    /// | `SIE_ADAPTIVE_BATCH_INITIAL_COST`         | `initial_batch_cost`     | 16384   | 16384 |
+    /// | `SIE_ADAPTIVE_BATCH_INITIAL_COST`         | `initial_batch_cost`     | 16384   | `max_batch_tokens` |
     ///
     /// The production floor values are intentionally higher than the
     /// dataclass-style defaults used in small unit tests. Lower wait/cost
@@ -340,6 +340,10 @@ impl AdaptiveBatchController {
     /// | `cost_gain`       | `gain * 0.5` — coupled, not free                                  |
     /// | `_current_batch_cost` | `max_batch_tokens` (default **16_384**)                       |
     ///
+    /// `max_batch_tokens` here is `cfg.max_batch_cost`: the model's own
+    /// profile budget as the scheduler registry passes it, so each model
+    /// gets its own cost range exactly as each Python `ModelWorker` does.
+    ///
     /// These production floors matter: deployed Python does not run the
     /// low module-level defaults. If Rust falls back to those bare
     /// values, the PI loop flushes tiny batches too eagerly under
@@ -366,7 +370,9 @@ impl AdaptiveBatchController {
         c.initial_wait_ms = cfg.max_batch_wait_ms;
 
         // Cost-knob floor + ceiling are derived from the model's
-        // `max_batch_tokens` budget (= cfg.max_batch_cost in Rust).
+        // `max_batch_tokens` budget (= cfg.max_batch_cost in Rust, which
+        // the scheduler registry sets per model from the budget the
+        // backend reports, unless `SIE_BATCHER_MAX_BATCH_COST` pins it).
         // Python's expression captured here verbatim.
         let max_batch_tokens = cfg.max_batch_cost;
         let cost_floor = u64::max(256, max_batch_tokens / PRODUCTION_MIN_COST_DIVISOR);
@@ -399,7 +405,7 @@ impl AdaptiveBatchController {
     #[must_use]
     pub fn from_batch_config_and_env(cfg: &BatchConfig) -> Self {
         let mut c = Self::from_batch_config(cfg);
-        Self::apply_env_overrides(&mut c);
+        Self::apply_env_overrides(&mut c, |var| std::env::var(var).ok());
 
         tracing::info!(
             min_wait_ms = c.min_wait_ms,
@@ -419,10 +425,12 @@ impl AdaptiveBatchController {
 
     /// Apply `SIE_ADAPTIVE_BATCH_*` env-var overrides to an already
     /// constructed controller. Bad values log and fall through —
-    /// never crash.
-    fn apply_env_overrides(c: &mut Self) {
-        fn get_f64(var: &str) -> Option<f64> {
-            std::env::var(var).ok().and_then(|s| {
+    /// never crash. `lookup` reads one variable; production passes the
+    /// process environment, tests pass a fixed table so they never
+    /// mutate the environment other tests read.
+    fn apply_env_overrides(c: &mut Self, lookup: impl Fn(&str) -> Option<String>) {
+        let get_f64 = |var: &str| -> Option<f64> {
+            lookup(var).and_then(|s| {
                 s.parse::<f64>().ok().filter(|v| v.is_finite()).or_else(|| {
                     tracing::warn!(
                         var = var,
@@ -432,10 +440,9 @@ impl AdaptiveBatchController {
                     None
                 })
             })
-        }
-        fn get_u64(var: &str) -> Option<u64> {
-            std::env::var(var).ok().and_then(|s| s.parse::<u64>().ok())
-        }
+        };
+        let get_u64 =
+            |var: &str| -> Option<u64> { lookup(var).and_then(|s| s.parse::<u64>().ok()) };
 
         if let Some(v) = get_f64("SIE_ADAPTIVE_BATCH_MAX_WAIT_MS") {
             c.max_wait_ms = v;
@@ -1332,6 +1339,85 @@ mod tests {
         assert_eq!(
             c.max_batch_cost, 512,
             "max_batch_cost = max_batch_tokens * 4 for micro models"
+        );
+    }
+
+    #[test]
+    fn from_batch_config_derives_cost_range_from_each_model_budget() {
+        // Python's `ModelWorker` per model budget `m`:
+        //   floor = min(max(256, m // 4), m), ceiling = max(floor, m * 4),
+        //   start = m.
+        // 720000: audio models (ms). 16384: the default every model used
+        // before per-model budgets. 4096 / 8192: VLM and cross-encoder
+        // profiles. 1: one-document-per-batch extractors.
+        for (budget, floor, ceiling) in [
+            (720_000, 180_000, 2_880_000),
+            (16_384, 4_096, 65_536),
+            (8_192, 2_048, 32_768),
+            (4_096, 1_024, 16_384),
+            (1, 1, 4),
+        ] {
+            let cfg = BatchConfig {
+                max_batch_cost: budget,
+                ..BatchConfig::default()
+            };
+            let c = AdaptiveBatchController::from_batch_config(&cfg);
+            assert_eq!(
+                (c.min_batch_cost, c.max_batch_cost, c.initial_batch_cost),
+                (floor, ceiling, budget),
+                "budget {budget}"
+            );
+            assert_eq!(c.current_batch_cost, budget, "budget {budget}");
+        }
+    }
+
+    #[test]
+    fn adaptive_cost_env_overrides_apply_on_top_of_a_model_budget() {
+        // An operator's `SIE_ADAPTIVE_BATCH_*_COST` keeps winning over the
+        // range a model's budget derives, as it won over the 16384 range.
+        let cfg = BatchConfig {
+            max_batch_cost: 720_000,
+            ..BatchConfig::default()
+        };
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |var: &str| {
+                pairs
+                    .iter()
+                    .find(|(name, _)| *name == var)
+                    .map(|(_, value)| (*value).to_string())
+            }
+        };
+
+        let mut c = AdaptiveBatchController::from_batch_config(&cfg);
+        AdaptiveBatchController::apply_env_overrides(&mut c, env(&[]));
+        assert_eq!(
+            (c.min_batch_cost, c.max_batch_cost, c.current_batch_cost),
+            (180_000, 2_880_000, 720_000)
+        );
+
+        let mut c = AdaptiveBatchController::from_batch_config(&cfg);
+        AdaptiveBatchController::apply_env_overrides(
+            &mut c,
+            env(&[
+                ("SIE_ADAPTIVE_BATCH_MIN_COST", "4096"),
+                ("SIE_ADAPTIVE_BATCH_MAX_COST", "65536"),
+                ("SIE_ADAPTIVE_BATCH_INITIAL_COST", "16384"),
+            ]),
+        );
+        assert_eq!(
+            (c.min_batch_cost, c.max_batch_cost, c.current_batch_cost),
+            (4_096, 65_536, 16_384)
+        );
+
+        // A ceiling override alone still clamps the model's starting cost.
+        let mut c = AdaptiveBatchController::from_batch_config(&cfg);
+        AdaptiveBatchController::apply_env_overrides(
+            &mut c,
+            env(&[("SIE_ADAPTIVE_BATCH_MAX_COST", "100000")]),
+        );
+        assert_eq!(
+            (c.min_batch_cost, c.max_batch_cost, c.current_batch_cost),
+            (100_000, 100_000, 100_000)
         );
     }
 
