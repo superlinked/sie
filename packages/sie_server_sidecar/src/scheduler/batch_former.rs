@@ -604,7 +604,9 @@ fn extract_batch_up_to<I: HasCost, T>(
     max_items: usize,
 ) -> FormattedBatch<I, T> {
     debug_assert!(max_items > 0, "zero-item drains are rejected by the caller");
-    if inner.pending.iter().any(|r| r.item.runs_alone()) {
+    let pending_before = inner.pending.len();
+    let pending_alone = inner.pending.iter().filter(|r| r.item.runs_alone()).count();
+    if pending_alone > 0 {
         order_runs_alone_lane(inner);
     } else {
         // Cost-sort pending before slicing — keeps each sub-batch's
@@ -646,14 +648,25 @@ fn extract_batch_up_to<I: HasCost, T>(
             break;
         }
     }
+    let alone = take_count > 0 && inner.pending[0].item.runs_alone();
     if take_count > 0 {
         // Whose turn is next when both lanes are pending.
-        inner.last_batch_alone = Some(inner.pending[0].item.runs_alone());
+        inner.last_batch_alone = Some(alone);
     }
 
     // Drain the taken prefix into parallel vecs.
     let drained: Vec<PendingRequest<I, T>> = inner.pending.drain(..take_count).collect();
     inner.total_cost -= batch_cost;
+    tracing::debug!(
+        flush_reason = flush_reason.as_label(),
+        lane = if alone { "alone" } else { "batched" },
+        batch_size = take_count,
+        total_cost = batch_cost,
+        pending = pending_before,
+        pending_alone,
+        remaining = inner.pending.len(),
+        "scheduler batch formed",
+    );
 
     let mut items = Vec::with_capacity(drained.len());
     let mut metadata = Vec::with_capacity(drained.len());
