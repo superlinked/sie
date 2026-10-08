@@ -26,6 +26,8 @@ import argparse
 import hashlib
 import io
 import json
+import os
+import tempfile
 import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -76,10 +78,16 @@ def sha256(data: bytes) -> str:
 
 
 def write_atomic(path: Path, data: bytes) -> None:
-    """Write a whole file or nothing, so an interrupted run never leaves a truncated cache entry."""
-    partial = path.with_name(path.name + ".part")
-    partial.write_bytes(data)
-    partial.replace(path)
+    """Write a whole file or nothing, so an interrupted or concurrent run never leaves a truncated cache entry."""
+    handle, name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".part")
+    partial = Path(name)
+    try:
+        with os.fdopen(handle, "wb") as out:
+            out.write(data)
+        partial.replace(path)
+    except BaseException:
+        partial.unlink(missing_ok=True)
+        raise
 
 
 def cached_pinned(url: str, path: Path, size: int, digest: str) -> bytes:
