@@ -547,7 +547,9 @@ Prepared audio longer than 30 s (Whisper's feature window) never shares a
 batch, whatever the model. Such recordings are served one per batch in arrival
 order, and while other items are pending too the two kinds take turns: a
 cost-sorted batch of the other items, then the oldest long recording. When no
-long recording is pending, batch formation is unchanged.
+long recording is pending, batch formation is unchanged. The Python batcher
+applies the same rule, but there only the Whisper adapter flags audio as
+long-form.
 
 Routing remains gateway-owned. The sidecar does not keep a separate local
 active-model routing list.

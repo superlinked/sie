@@ -1,8 +1,8 @@
 //! [`BatchFormer`] — async pending queue + flush loop.
 //!
 //! Ported from `sie_server/core/batcher.py::BatchFormer`. The port preserves
-//! its batching/packing contract, with one intentional Rust queue-path
-//! divergence called out below:
+//! its batching/packing contract, with the intentional Rust differences
+//! called out below:
 //!
 //! 1. **Flush triggers**: cost cap, count cap, `max_batch_wait_ms`
 //!    timeout since the *first* item, or the coalesce window
@@ -29,9 +29,17 @@
 //! extract and clears them only when empty. Rust re-anchors them to the actual
 //! remainder because the sidecar's cross-key FCFS selector reads that state:
 //! retaining a removed request's timestamp can repeatedly prioritize a hot key
-//! and can make a newer tail skip its own coalescing window. Packing, caps, and
-//! flush triggers otherwise follow the Python test contract. The async
-//! primitives differ as expected (`tokio::sync` rather than asyncio).
+//! and can make a newer tail skip its own coalescing window.
+//!
+//! The runs-alone lane (point 5) is the Python batcher's rule too (#601).
+//! What gets flagged differs: Python flags audio only in the Whisper adapter,
+//! at its feature window, while the sidecar flags every prepared audio item
+//! longer than [`crate::audio_prep::RUNS_ALONE_ABOVE_SAMPLES`], whatever the
+//! model, Parakeet included.
+//!
+//! Packing, caps, and flush triggers otherwise follow the Python test
+//! contract. The async primitives differ as expected (`tokio::sync` rather
+//! than asyncio).
 
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicU64, Ordering};
