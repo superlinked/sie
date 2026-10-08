@@ -421,19 +421,21 @@ mod tests {
     }
 
     /// Long recordings and saturating clips on one speech model: the
-    /// lanes alternate, so the number of clips one clip turn takes is
-    /// the clip throughput between two recordings. With the shared
-    /// 16384 ms default it was 1-2 clips; with the model's own 720000 ms
-    /// budget the turn takes every pending clip up to the count cap.
+    /// lanes alternate, so the clips one clip turn takes are the clip
+    /// throughput between two recordings. A turn takes the clips pending
+    /// when it began up to the cost cap. With the shared 16384 ms default
+    /// that was 1-2 clips; with the model's own 720000 ms budget it is
+    /// every pending clip, in batches of at most the request count cap.
     #[tokio::test]
     async fn model_budget_lets_one_clip_turn_take_the_pending_clips() {
-        // 16 clips of 6-15 s: 152 s of audio, far over 16384 ms.
+        // 16 clips of 6-15 s: 152 s of audio, far over 16384 ms, and more
+        // clips than the request count cap (12) takes in one batch.
         let clip_seconds = [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 6, 7, 8, 9, 10, 11];
-        for (budget, clip_turns) in [
-            (None, [vec![6, 6], vec![7, 7]]),
+        for (budget, clip_turn) in [
+            (None, vec![vec![6, 6]]),
             (
                 Some(720_000),
-                [
+                vec![
                     vec![6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11],
                     vec![12, 13, 14, 15],
                 ],
@@ -475,16 +477,20 @@ mod tests {
                     })
                     .collect()
             };
+            let turn_batches = clip_turn.len();
             assert_eq!(served[0], ["long-1"], "budget {budget:?}");
-            assert_eq!(seconds(&served[1]), clip_turns[0], "budget {budget:?}");
-            assert_eq!(served[2], ["long-2"], "budget {budget:?}");
-            assert_eq!(seconds(&served[3]), clip_turns[1], "budget {budget:?}");
+            let turn: Vec<Vec<u64>> = served[1..=turn_batches]
+                .iter()
+                .map(|batch| seconds(batch))
+                .collect();
+            assert_eq!(turn, clip_turn, "budget {budget:?}");
+            assert_eq!(served[turn_batches + 1], ["long-2"], "budget {budget:?}");
             let clips_served: usize = served.iter().map(Vec::len).sum::<usize>() - 2;
             assert_eq!(clips_served, clip_seconds.len(), "budget {budget:?}");
             if budget.is_some() {
-                assert_eq!(served.len(), 4, "two clip turns serve every clip");
+                assert_eq!(served.len(), 4, "one clip turn serves every clip");
             } else {
-                assert!(served.len() > 4, "clips are still pending after two turns");
+                assert!(served.len() > 4, "clips are still pending after one turn");
             }
         }
     }
