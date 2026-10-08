@@ -1,0 +1,25 @@
+sie_id: Qdrant/splade-ecommerce-esci
+hf_id: Qdrant/splade-ecommerce-esci
+hf_revision: 73ccced877077b0fe1967e9c8637c8364792a6a2
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode:
+    dense: null
+    sparse:
+      dim: 30522
+    multivector: null
+  score: null
+  extract: null
+max_sequence_length: 512
+profiles:
+  default:
+    max_batch_tokens: 16384
+    compute_precision: null
+    adapter_path: sie_server.adapters.splade_flash.adapter:SPLADEFlashAdapter
+    adapter_options:
+      loadtime: {}
+      runtime: {}

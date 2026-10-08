@@ -642,6 +642,10 @@ def test_prithivida_splade_pp_en_v2_sparse() -> None:
     )
 
 
+def test_qdrant_splade_ecommerce_esci_sparse() -> None:
+    _assert_sparse("Qdrant/splade-ecommerce-esci", [1010, 1011, 1012], [2.580078125, 1.2587890625, 2.681640625])
+
+
 def test_rasyosef_splade_mini_sparse() -> None:
     _assert_sparse("rasyosef/splade-mini", [1037, 1996, 2773], [1.0810546875, 0.380615234375, 0.59521484375])
 
