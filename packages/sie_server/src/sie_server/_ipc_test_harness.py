@@ -125,10 +125,12 @@ class _StubExecutor:
         per_request_delay_ms: float = 0.0,
         generation_model: str | None = None,
         generation_hidden_polls: int = 0,
+        max_batch_tokens: int | None = None,
     ) -> None:
         self._readiness = readiness
         self._batch_budget = batch_budget
         self._descriptor = descriptor
+        self._max_batch_tokens = max_batch_tokens
         self._per_request_delay_ms = per_request_delay_ms
         self._pinned_models: frozenset[str] = frozenset()
         self.registry = _StubRegistry(generation_model, generation_hidden_polls)
@@ -141,6 +143,9 @@ class _StubExecutor:
 
     def get_model_descriptor(self, model_id: str) -> ModelDescriptor | None:  # noqa: ARG002
         return self._descriptor
+
+    def get_max_batch_tokens(self, model_id: str) -> int | None:  # noqa: ARG002
+        return self._max_batch_tokens
 
     def loaded_model_names(self) -> list[str]:
         return []
