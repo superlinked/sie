@@ -250,7 +250,8 @@ class Qwen2FlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
         Args:
             items: List of items to encode.
             output_types: Which outputs to compute (only "dense" supported).
-            instruction: Optional instruction prefix.
+            instruction: Optional instruction prefix. For queries, ``None``
+                falls back to the ``default_instruction`` runtime option.
             is_query: Whether items are queries (affects template selection).
             prepared_items: Not used by this adapter.
 
@@ -269,10 +270,15 @@ class Qwen2FlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
         doc_template = opts.get("doc_template", self._doc_template)
         normalize = opts.get("normalize", self._normalize)
         pooling = opts.get("pooling", self._pooling)
+        # The profile's default_instruction is query-only and fills in only
+        # when the request gave no instruction; an explicit "" is kept.
+        effective_instruction = instruction
+        if effective_instruction is None and is_query:
+            effective_instruction = opts.get("default_instruction")
 
         texts = extract_texts(
             items,
-            instruction,
+            effective_instruction,
             is_query=is_query,
             query_template=query_template,
             doc_template=doc_template,
