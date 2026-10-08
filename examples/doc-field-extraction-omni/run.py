@@ -390,7 +390,11 @@ def run_document(args: argparse.Namespace) -> None:
         raise SystemExit("The output limit was reached; this is not a complete extraction")
     if row.get("error"):
         raise SystemExit(f"The request failed: {row['error']}")
-    print(json.dumps(json.loads(row["text"]), indent=2, ensure_ascii=False))
+    try:
+        parsed = json.loads(row["text"])
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"The reply is not JSON: {row['text'][:500]!r}") from exc
+    print(json.dumps(parsed, indent=2, ensure_ascii=False))
 
 
 def api_key(args: argparse.Namespace) -> str | None:

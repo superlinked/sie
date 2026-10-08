@@ -36,6 +36,8 @@ HERE = Path(__file__).resolve().parent
 DATA = HERE / "data"
 PINS = json.loads((HERE / "pins.json").read_text(encoding="utf-8"))
 SETS = ("pilot", "confirm")
+# A sanity bound on one page image; the largest pinned source is 4.3 MB, and every file is also hash-checked.
+MAX_IMAGE_BYTES = 16 * 1024 * 1024
 PUBLISHED = {
     "pilot": {
         "replies": "pilot/grader/A1.jsonl",
@@ -73,6 +75,13 @@ def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def write_atomic(path: Path, data: bytes) -> None:
+    """Write a whole file or nothing, so an interrupted run never leaves a truncated cache entry."""
+    partial = path.with_name(path.name + ".part")
+    partial.write_bytes(data)
+    partial.replace(path)
+
+
 def cached_pinned(url: str, path: Path, size: int, digest: str) -> bytes:
     """Return a pinned file, downloading it once into the cache and checking its size and sha256."""
     if path.exists():
@@ -83,7 +92,7 @@ def cached_pinned(url: str, path: Path, size: int, digest: str) -> bytes:
     if len(data) != size or sha256(data) != digest:
         raise SystemExit(f"{url}: size or sha256 does not match the pin")
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(data)
+    write_atomic(path, data)
     return data
 
 
@@ -152,10 +161,10 @@ def prepare_images(set_name: str, cache: Path) -> dict[str, Path]:
         path = folder / name.split("/")[-1]
         data = path.read_bytes() if path.exists() else b""
         if sha256(data) != source_sha:
-            data = http_get(f"{PINS['omni']['base_url']}/{name}")
+            data = http_get(f"{PINS['omni']['base_url']}/{name}", max_bytes=MAX_IMAGE_BYTES)
             if sha256(data) != source_sha:
                 raise SystemExit(f"{doc_id}: downloaded {name} does not match its pinned sha256")
-            path.write_bytes(data)
+            write_atomic(path, data)
         if spec is not None:
             image = derive_image(doc_id, data, spec)
             if sha256(image) != row["image_sha256"]:
@@ -166,7 +175,7 @@ def prepare_images(set_name: str, cache: Path) -> dict[str, Path]:
                 )
             path = cache / "omni" / "derived" / row["image_file"]
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(image)
+            write_atomic(path, image)
         return doc_id, path
 
     with ThreadPoolExecutor(8) as pool:
